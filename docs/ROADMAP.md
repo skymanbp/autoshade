@@ -1,22 +1,24 @@
 # ROADMAP — “一定程度直接取代 Photoshop” 路线（v0.5.0 之后 · UX 阶段）
 
 > 交接文档：每项都附实现要点与 `file:line` 锚点，供新会话不重读全库即可
-> 开工。更新于 2026-07-17（**v0.11.2 已发布**：AI 分析认证修复——
-> `claude` CLI ≥2.1.210 的 `--bare` 设计上永不读已存 OAuth（其 --help
-> 明文 "OAuth and keychain are never read"），验证器改用
-> `--setting-sources "" --strict-mcp-config --disable-slash-commands`
-> 三旗标替代 + 子进程剔除 `ANTHROPIC_API_KEY` + 失败时透出 stdout
-> JSON 信封里的真实错误；见 `src/advisor/claude.rs`。前版 v0.11.1
-> （2026-07-14，中性 cwd 根治信任门报错）；v0.11.0 → `e3a4096`
-> （2026-07-12，perf 批次 #3-B 全清，探针 81→44.7ms/149→34.5ms）。
-> 同日前版 v0.10.0 → `c312a9f`（打开即恢复边车 + XMP 导入 + 快赢）；
-> v0.9.0 → `ca6f73e`（GUI i18n）；v0.8.1 → `ce69f27`（preview lag
-> root-fix）；v0.8.0 → `1c1ea36`（zoned reverse-fit + engine local WB）。
+> 开工。更新于 2026-07-24（**v0.12.0 已发布**：全量 debug + 协同性审计
+> 批次——77 项对抗验证 findings 全修/有据取舍，蒙版行点击=选择恢复、
+> recipe.json 统一持久化契约、未保存保护、指针状态机清残留、引擎位图/
+> feather/roundness 语义钉死、web/CLI 协同；详见下方「当前状态」首条。
+> **下一批（已拍板 2026-07-24，实现中）**：边车磁盘布局改为中央库+路径
+> 键（%LOCALAPPDATA%/autoshop/，按照片绝对路径消歧；./out 只留导出成品
+> 图；打开时自动迁移旧 ./out 边车），解决同名照片边车相撞 + cwd 相对性。
+> 前版 v0.11.2（2026-07-17，AI 分析认证修复：`--bare` 永不读 OAuth →
+> 三旗标替代 + env_remove(ANTHROPIC_API_KEY) + 透出 stdout JSON 真实
+> 错误，src/advisor/claude.rs）；v0.11.1（2026-07-14，中性 cwd 根治
+> 信任门）；v0.11.0 → `e3a4096`（perf #3-B 全清）；v0.10.0 →
+> `c312a9f`（边车恢复+XMP 导入）；v0.9.0 → `ca6f73e`（GUI i18n）；
+> v0.8.1（preview lag root-fix）；v0.8.0 → `1c1ea36`（zoned fit）。
 > 反馈驱动阶段——用户试用 → 报障/提需 → 修复/打磨 → 发布）。
 
 ## 当前状态（已完成，勿重做）
 
-- **全量 debug + 协同性审计批次（2026-07-24，已提交未发布）**——用户令
+- **全量 debug + 协同性审计批次（2026-07-24，已随 v0.12.0 发布）**——用户令
   "全量debug+打磨使用体验，同时检查各个功能之间的协同性"+报"蒙版按钮
   点击变移动"。方法：6 维度并行审计工作流（指针状态机/异步预览/边车
   持久化/蒙版渲染语义/偏好流程/跨面协同）+ 按维度对抗验证 → **77 项
@@ -66,12 +68,15 @@
      值"；README 图像 OAuth 描述纠正；python sidecar 输出改捕获、错误尾
      部随报错透出（lib.rs sidecar_tail）。
   已知取舍/遗留（勿当 bug 重报）：边车按裸 stem 键控在 ./out（同名异
-  目录照片相撞）与 out/settings 的 cwd 相对性=磁盘布局设计题，**待用户
-  拍板**；radial 边缘把手在 straighten 下的手感（引擎正确，显示已用
-  多边形，拖拽轴映射保持原语义）；>24MP 缩略图门排队策略未动；web 预览
-  8-bit 降采样基底与导出的残余差异已在 serve.rs 注释记录；badge 仍为
-  存在性检查（开销权衡，异常态由打开路径 toast 补偿）；pipeline 融合后
-  复验仍 fatal（子代理记录）。
+  目录照片相撞）与 out/settings 的 cwd 相对性=磁盘布局设计题，**用户已
+  拍板（2026-07-24）：中央库+路径键**（%LOCALAPPDATA%/autoshop/，按照片
+  绝对路径消歧，./out 只留导出成品图，打开时自动迁移旧边车），作为
+  v0.12.0 之后的独立批次实现、真机验收后另发；radial 边缘把手在
+  straighten 下的手感（引擎正确，显示已用多边形，拖拽轴映射保持原
+  语义）；>24MP 缩略图门排队策略未动；web 预览 8-bit 降采样基底与导出
+  的残余差异已在 serve.rs 注释记录；badge 仍为存在性检查（开销权衡，
+  异常态由打开路径 toast 补偿）；pipeline 融合后复验仍 fatal（子代理
+  记录）。
 
 - **AI 分析认证修复（2026-07-17，已随 v0.11.2 发布）**——v0.11.1 过了
   信任门后用户再报 "分析失败: claude exited Some(1): "（冒号后空白）。
