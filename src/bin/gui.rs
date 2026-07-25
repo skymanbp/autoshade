@@ -1241,39 +1241,63 @@ enum SavedDevelop {
     Nothing,
 }
 
-/// The photo's saved develop from ./out: the app-internal `<stem>.recipe.json`
-/// first (lossless — bitmap masks, recolour gains, roles all round-trip), else
-/// the Lightroom-compatible `<stem>.xmp` re-imported through the reverse crs
-/// mapping (globals, curves, crop, parametric masks — everything classic XMP
-/// can carry).
+/// The photo's saved develop from the central store (see `autoshop::store`):
+/// the app-internal `recipe.json` first (lossless — bitmap masks, recolour
+/// gains, roles all round-trip), else the Lightroom-compatible `<stem>.xmp`
+/// re-imported through the reverse crs mapping (globals, curves, crop,
+/// parametric masks — everything classic XMP can carry). Pre-store sidecars in
+/// the legacy cwd-relative ./out are migrated in on first touch; a file the
+/// migration could not move keeps being read in place, and the `kind` string
+/// says which file actually answered.
 fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
-    let rj = autoshop::pipeline::default_out(src, "recipe", "json");
+    autoshop::store::migrate_legacy(src);
     let mut any = false;
     let mut parse_err: Option<String> = None;
-    if let Ok(text) = std::fs::read_to_string(&rj) {
+    let mut restored: Option<(EditRecipe, &'static str)> = None;
+    for (rj, kind) in [
+        (autoshop::store::recipe_target(src), "recipe.json"),
+        (autoshop::store::legacy_recipe(src), "recipe.json (legacy ./out)"),
+    ] {
+        let Ok(text) = std::fs::read_to_string(&rj) else { continue };
         any = true;
         match serde_json::from_str::<EditRecipe>(&text) {
             Ok(mut r) => {
                 if !r.is_noop() {
                     r.clamp();
-                    return SavedDevelop::Restored(r, "recipe.json");
+                    // Store recipes reference rasters by bare file name —
+                    // anchor them to the file they were loaded beside.
+                    if let Some(base) = rj.parent() {
+                        autoshop::store::resolve_mask_paths(&mut r, base);
+                    }
+                    restored = Some((r, kind));
                 }
                 // Neutral recipe.json: fall through — an XMP with real edits
                 // may still exist beside it.
             }
             Err(e) => parse_err = Some(e.to_string()),
         }
+        // Whatever the central file said (restored / neutral / damaged) is the
+        // answer — a stale legacy file must never shadow it.
+        break;
+    }
+    if let Some((r, kind)) = restored {
+        return SavedDevelop::Restored(r, kind);
     }
     let mut fallback = None;
-    if let Ok(text) = std::fs::read_to_string(autoshop::pipeline::xmp_target(src)) {
+    for (xp, kind) in [
+        (autoshop::pipeline::xmp_target(src), "XMP"),
+        (autoshop::store::legacy_xmp(src), "XMP (legacy ./out)"),
+    ] {
+        let Ok(text) = std::fs::read_to_string(&xp) else { continue };
         any = true;
         let mut r = autoshop::xmp::xmp_to_recipe(&text);
         // A foreign / neutral sidecar parses to a no-op recipe — "restoring"
         // it would only produce a misleading status line.
         if !r.is_noop() {
             r.clamp();
-            fallback = Some((r, "XMP"));
+            fallback = Some((r, kind));
         }
+        break; // same rule: the file that answered decides
     }
     if let Some(err) = parse_err {
         return SavedDevelop::Unreadable { err, fallback };
@@ -1286,36 +1310,41 @@ fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
 }
 
 /// Before a PROGRAMMATIC writer (AI Analyze, reverse-fit) replaces an existing
-/// saved develop, snapshot it to the next `./out/<stem>.v<N>.recipe.json` so an
-/// explicit Ctrl+S save can never be silently destroyed. Explicit saves
-/// overwrite without backup — the user asked for that one. Returns the version
-/// number when a backup was made; identical content is not backed up.
-fn backup_saved_develop(src: &std::path::Path, incoming: &EditRecipe) -> Option<u32> {
-    let rj = autoshop::pipeline::default_out(src, "recipe", "json");
-    let text = std::fs::read_to_string(&rj).ok()?;
-    if let Ok(existing) = serde_json::from_str::<EditRecipe>(&text)
-        && existing == *incoming
-    {
-        return None; // rewriting the same content needs no snapshot
-    }
-    let prefix = format!("{}.v", autoshop::pipeline::stem(src));
-    let mut maxn = 0u32;
-    if let Ok(dir) = std::fs::read_dir("out") {
-        for e in dir.flatten() {
-            let name = e.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if let Some(rest) = name.strip_prefix(&prefix)
-                && let Some(nums) = rest.strip_suffix(".recipe.json")
-                && let Ok(n) = nums.parse::<u32>()
-            {
-                maxn = maxn.max(n);
-            }
+/// saved develop, snapshot it to the next `v<N>.recipe.json` in the photo's
+/// develop dir so an explicit Ctrl+S save can never be silently destroyed.
+/// Explicit saves overwrite without backup — the user asked for that one.
+///
+/// `Ok(Some(n))` = backed up as v<n>; `Ok(None)` = nothing to back up (no
+/// existing save, or identical content); `Err` = an existing save COULD NOT
+/// be snapshotted — the caller must then leave it untouched, because
+/// overwriting without the promised backup is exactly the silent destruction
+/// this function exists to prevent.
+fn backup_saved_develop(
+    src: &std::path::Path,
+    incoming: &EditRecipe,
+) -> std::io::Result<Option<u32>> {
+    let rj = autoshop::store::recipe_target(src);
+    let text = match std::fs::read_to_string(&rj) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // Unreadable ≠ absent (lock/permissions): refusing beats overwriting
+        // a save we could not even look at.
+        Err(e) => return Err(e),
+    };
+    if let Ok(mut existing) = serde_json::from_str::<EditRecipe>(&text) {
+        // The on-disk copy names rasters by bare file name while `incoming`
+        // carries absolute paths — resolve before comparing, or every
+        // raster-bearing rewrite would look "different" and snapshot itself.
+        if let Some(base) = rj.parent() {
+            autoshop::store::resolve_mask_paths(&mut existing, base);
+        }
+        if existing == *incoming {
+            return Ok(None); // rewriting the same content needs no snapshot
         }
     }
-    let n = maxn + 1;
-    let dst =
-        PathBuf::from("out").join(format!("{}.v{n}.recipe.json", autoshop::pipeline::stem(src)));
-    std::fs::rename(&rj, &dst).ok().map(|_| n)
+    let n = autoshop::store::list_versions(src).last().copied().unwrap_or(0) + 1;
+    std::fs::rename(&rj, autoshop::store::version_target(src, n))?;
+    Ok(Some(n))
 }
 
 impl AutoshopApp {
@@ -1551,11 +1580,12 @@ impl AutoshopApp {
         }
     }
 
-    /// Recipe snapshot path for version `n` — `./out/<stem>.v<n>.recipe.json`
-    /// (gap batch G, ≈ Lightroom virtual copies: cheap parametric versions,
-    /// never touching the library or the working `<stem>.recipe.json`).
+    /// Recipe snapshot path for version `n` — `v<n>.recipe.json` in the photo's
+    /// central develop dir (gap batch G, ≈ Lightroom virtual copies: cheap
+    /// parametric versions, never touching the library or the working
+    /// `recipe.json`).
     fn version_path(src: &std::path::Path, n: u32) -> PathBuf {
-        PathBuf::from("out").join(format!("{}.v{n}.recipe.json", autoshop::pipeline::stem(src)))
+        autoshop::store::version_target(src, n)
     }
 
     /// Re-point every stored mask index (selection, colour-range sampler,
@@ -1569,26 +1599,13 @@ impl AutoshopApp {
         self.placing_mask = self.placing_mask.take().map(|(k, r)| (k, r.and_then(&f)));
     }
 
-    /// Rescan ./out for this photo's version snapshots (cached in
+    /// Rescan the photo's develop dir for version snapshots (cached in
     /// `self.versions`; called on photo open and after saving a version — NOT
-    /// every frame, ./out can hold thousands of artifacts).
+    /// every frame).
     fn refresh_versions(&mut self) {
         self.versions.clear();
         let Some(src) = self.src_path.as_deref() else { return };
-        let prefix = format!("{}.v", autoshop::pipeline::stem(src));
-        if let Ok(dir) = std::fs::read_dir("out") {
-            for entry in dir.flatten() {
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else { continue };
-                if let Some(rest) = name.strip_prefix(&prefix)
-                    && let Some(nums) = rest.strip_suffix(".recipe.json")
-                    && let Ok(n) = nums.parse::<u32>()
-                {
-                    self.versions.push(n);
-                }
-            }
-        }
-        self.versions.sort_unstable();
+        self.versions = autoshop::store::list_versions(src);
     }
 
     /// Save the CURRENT develop as the next numbered version snapshot.
@@ -1624,6 +1641,11 @@ impl AutoshopApp {
         {
             Ok(mut r) => {
                 r.clamp();
+                // Snapshots name their rasters by bare file name, like the
+                // working recipe — re-anchor them to the develop dir.
+                if let Some(base) = p.parent() {
+                    autoshop::store::resolve_mask_paths(&mut r, base);
+                }
                 self.recipe = r;
                 self.resync_recipe_display();
                 self.dirty = true;
@@ -2729,7 +2751,10 @@ impl AutoshopApp {
                         .map_err(|e| anyhow::anyhow!("write segmentation input {}: {e}", tmp.display()))?;
                     // One raster per (photo, target): re-running a segmentation
                     // refreshes the same file, and the existing mask follows it.
-                    let mask = autoshop::pipeline::default_out(&src, &format!("mask-{target}"), "png");
+                    // Lives in the photo's develop dir (path-keyed) so two
+                    // same-named photos can no longer swap rasters; segment_file
+                    // creates the dir itself (pipeline::ensure_parent).
+                    let mask = autoshop::store::raster_target(&src, &format!("mask-{target}"));
                     let run = autoshop::segment::segment_file(&opts, &tmp, &mask);
                     let _ = std::fs::remove_file(&tmp);
                     run?;
@@ -2758,8 +2783,8 @@ impl AutoshopApp {
     }
 
     /// Batch-render every Ctrl+click-selected photo through its own saved
-    /// ./out recipe JSON (falling back to a neutral develop when none exists)
-    /// with the current export options — Lightroom's "export selected".
+    /// recipe.json (central store, else legacy ./out; neutral develop when
+    /// none exists) with the current export options — "export selected".
     /// Sequential on one worker: each full-res develop is already multi-second
     /// and memory-heavy (61 MP frames), so parallelism would thrash, not speed
     /// up. AI denoise is deliberately excluded (minutes per photo via the GPU
@@ -2802,15 +2827,31 @@ impl AutoshopApp {
                     let (mut okn, mut errs) = (0usize, Vec::<String>::new());
                     for p in &targets {
                         let one = (|| -> anyhow::Result<()> {
-                            let rj = autoshop::pipeline::default_out(p, "recipe", "json");
                             let recipe = if let Some(lr) =
                                 live.as_ref().and_then(|(lp, lr)| (lp == p).then_some(lr))
                             {
                                 lr.clone()
-                            } else if rj.exists() {
-                                serde_json::from_str::<EditRecipe>(&std::fs::read_to_string(&rj)?)?
                             } else {
-                                EditRecipe::default()
+                                // Central store first, then a not-yet-migrated
+                                // legacy ./out sidecar; rasters re-anchor to
+                                // whichever dir the recipe was read from.
+                                let mut found = None;
+                                for rj in [
+                                    autoshop::store::recipe_target(p),
+                                    autoshop::store::legacy_recipe(p),
+                                ] {
+                                    if rj.exists() {
+                                        let mut r = serde_json::from_str::<EditRecipe>(
+                                            &std::fs::read_to_string(&rj)?,
+                                        )?;
+                                        if let Some(base) = rj.parent() {
+                                            autoshop::store::resolve_mask_paths(&mut r, base);
+                                        }
+                                        found = Some(r);
+                                        break;
+                                    }
+                                }
+                                found.unwrap_or_default()
                             };
                             let out = autoshop::pipeline::default_out(p, "developed", &ext);
                             autoshop::pipeline::ensure_parent(&out)?;
@@ -2873,9 +2914,10 @@ impl AutoshopApp {
         // Reset-then-save means "clear my edits": writing a neutral pair would
         // only pin a misleading ● badge with no in-app way to remove it —
         // delete the working sidecars instead (version snapshots are kept).
+        // BOTH homes are cleared: the central store AND any legacy ./out file
+        // a pre-store build left behind — a surviving legacy sidecar would
+        // resurrect the "cleared" edits through the read fallbacks.
         if self.recipe.is_noop() {
-            let rj = autoshop::pipeline::default_out(&path, "recipe", "json");
-            let xp = autoshop::pipeline::xmp_target(&path);
             // A file already missing IS the desired end state; any other
             // removal failure (lock, permissions) must not let us claim the
             // edits were cleared — the sidecar would resurrect them on reopen.
@@ -2884,19 +2926,35 @@ impl AutoshopApp {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 Err(e) => Err(e),
             };
-            match (del(&rj), del(&xp)) {
-                (Ok(a), Ok(b)) => {
+            let mut removed = false;
+            let mut first_err: Option<std::io::Error> = None;
+            for p in [
+                autoshop::store::recipe_target(&path),
+                autoshop::pipeline::xmp_target(&path),
+                autoshop::store::legacy_recipe(&path),
+                autoshop::store::legacy_xmp(&path),
+            ] {
+                match del(&p) {
+                    Ok(b) => removed |= b,
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                }
+            }
+            match first_err {
+                None => {
                     self.edited_badge.clear();
                     self.saved_recipe = EditRecipe::default();
                     self.nav_stash.remove(&path);
-                    self.status = if a || b {
+                    self.status = if removed {
                         tr(lang, "neutral recipe — saved edits cleared (sidecars removed)").into()
                     } else {
                         tr(lang, "neutral recipe — nothing to save").into()
                     };
                 }
-                (ra, rb) => {
-                    let e = ra.err().or(rb.err()).expect("one arm failed");
+                Some(e) => {
                     let t = trf(
                         lang,
                         "could not clear the saved edits: {err}",
@@ -2965,10 +3023,11 @@ impl AutoshopApp {
 
     /// Paste the copied recipe onto every Ctrl+click-selected photo on a worker
     /// thread — Lightroom's "sync settings", without rendering anything: a
-    /// ./out recipe JSON per photo plus an XMP sidecar for RAWs. Geometry
-    /// (crop/straighten) is stripped unless `paste_geometry` is on, because
-    /// composition rarely transfers between frames. Library files are never
-    /// touched (write_recipe / write_xmp only ever land in ./out).
+    /// recipe.json per photo (central store) plus an XMP sidecar for RAWs.
+    /// Geometry (crop/straighten) is stripped unless `paste_geometry` is on,
+    /// because composition rarely transfers between frames. Library files are
+    /// never touched (write_recipe / write_xmp land in the store, never beside
+    /// the photo).
     fn start_paste(&mut self) {
         let Some(src) = self.copied.clone() else { return };
         if self.busy {
@@ -3297,40 +3356,53 @@ impl AutoshopApp {
                         // one of them. An existing explicit save is snapshotted
                         // to v<N> first, never destroyed.
                         self.status = match self.src_path.clone() {
-                            Some(p) => {
-                                let backed = backup_saved_develop(&p, &self.recipe);
-                                let write = autoshop::pipeline::write_recipe(&p, &self.recipe, None)
-                                    .and_then(|rp| {
-                                        if autoshop::decode::is_raw(&p) {
-                                            autoshop::pipeline::write_xmp(&p, &self.recipe)
-                                        } else {
-                                            Ok(rp)
-                                        }
-                                    });
-                                match write {
-                                    Ok(_) => {
-                                        self.edited_badge.clear();
-                                        self.saved_recipe = self.recipe.clone();
-                                        self.nav_stash.remove(&p);
-                                        if backed.is_some() {
-                                            self.refresh_versions();
-                                        }
-                                        match backed {
-                                            Some(n) => trf(
-                                                lang,
-                                                "AI develop applied · saved (previous save backed up as v{n})",
-                                                &[("n", &n.to_string())],
-                                            ),
-                                            None => tr(lang, "AI develop applied · saved to recipe.json").into(),
-                                        }
-                                    }
-                                    Err(e) => trf(
+                            // The backup gate comes FIRST: if the existing save
+                            // cannot be snapshotted, it is not overwritten —
+                            // the analyze result stays on the canvas only.
+                            Some(p) => match backup_saved_develop(&p, &self.recipe) {
+                                Err(e) => {
+                                    let t = trf(
                                         lang,
-                                        "AI develop applied — but saving the sidecar failed: {err}",
+                                        "AI develop applied — but NOT saved: backing up your existing save failed ({err}); Ctrl+S overwrites explicitly",
                                         &[("err", &e.to_string())],
-                                    ),
+                                    );
+                                    self.toast(ToastKind::Error, t.clone());
+                                    t
                                 }
-                            }
+                                Ok(backed) => {
+                                    let write = autoshop::pipeline::write_recipe(&p, &self.recipe, None)
+                                        .and_then(|rp| {
+                                            if autoshop::decode::is_raw(&p) {
+                                                autoshop::pipeline::write_xmp(&p, &self.recipe)
+                                            } else {
+                                                Ok(rp)
+                                            }
+                                        });
+                                    match write {
+                                        Ok(_) => {
+                                            self.edited_badge.clear();
+                                            self.saved_recipe = self.recipe.clone();
+                                            self.nav_stash.remove(&p);
+                                            if backed.is_some() {
+                                                self.refresh_versions();
+                                            }
+                                            match backed {
+                                                Some(n) => trf(
+                                                    lang,
+                                                    "AI develop applied · saved (previous save backed up as v{n})",
+                                                    &[("n", &n.to_string())],
+                                                ),
+                                                None => tr(lang, "AI develop applied · saved to recipe.json").into(),
+                                            }
+                                        }
+                                        Err(e) => trf(
+                                            lang,
+                                            "AI develop applied — but saving the sidecar failed: {err}",
+                                            &[("err", &e.to_string())],
+                                        ),
+                                    }
+                                }
+                            },
                             None => tr(lang, "AI develop applied").into(),
                         };
                     }
@@ -3729,8 +3801,9 @@ impl AutoshopApp {
                                     // per second. Dropped whenever this app
                                     // writes a sidecar or the folder changes.
                                     let edited = *edited_badge.entry(i).or_insert_with(|| {
-                                        autoshop::pipeline::default_out(path, "recipe", "json").exists()
-                                            || autoshop::pipeline::xmp_target(path).exists()
+                                        // Central store OR legacy ./out — a
+                                        // pre-migration library keeps its ●.
+                                        autoshop::store::has_develop(path)
                                     });
                                     let baked = !autoshop::decode::is_raw(path);
                                     ui.horizontal(|ui| {
@@ -4373,7 +4446,7 @@ impl AutoshopApp {
             .show(ui, |ui| {
                 if ui
                     .button(tr(lang, "＋ Save as version"))
-                    .on_hover_text(tr(lang, "Save all current develop parameters as a numbered snapshot (./out/<name>.v<N>.recipe.json), reloadable anytime"))
+                    .on_hover_text(tr(lang, "Save all current develop parameters as a numbered snapshot (v<N>.recipe.json in this photo's develop store), reloadable anytime"))
                     .clicked()
                 {
                     self.save_version();
@@ -5708,8 +5781,8 @@ impl AutoshopApp {
                             let cfg = autoshop::config::Config::load();
                             let seg =
                                 autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
-                            let mask =
-                                autoshop::pipeline::default_out(p, "mask-zone-sky", "png");
+                            let mask = autoshop::store::raster_target(p, "mask-zone-sky");
+                            autoshop::pipeline::ensure_parent(&mask)?;
                             autoshop::fit_zoned::fit_recipe_zoned(&base, &target, &seg, &mask)
                         }
                         _ => autoshop::fit::fit_recipe(&base, &target),
@@ -5733,19 +5806,31 @@ impl AutoshopApp {
                         // bitmap zone masks + recolour gains the XMP cannot,
                         // so reopening the photo restores the whole fit. An
                         // existing explicit save is snapshotted to v<N> first —
-                        // the fit must never destroy a Ctrl+S'd develop.
-                        let backed = backup_saved_develop(p, &rep.recipe);
-                        autoshop::pipeline::write_recipe(p, &rep.recipe, None)?;
-                        if autoshop::decode::is_raw(p) {
-                            let x = autoshop::pipeline::write_xmp(p, &rep.recipe)?;
-                            note.push_str(&format!(" · XMP → {}", x.display()));
-                        }
-                        if let Some(n) = backed {
-                            note.push_str(&trf(
-                                lang,
-                                " · previous save backed up as v{n}",
-                                &[("n", &n.to_string())],
-                            ));
+                        // the fit must never destroy a Ctrl+S'd develop, so a
+                        // FAILED snapshot skips the persist entirely (the fit
+                        // still lands on the canvas; Ctrl+S saves explicitly).
+                        match backup_saved_develop(p, &rep.recipe) {
+                            Ok(backed) => {
+                                autoshop::pipeline::write_recipe(p, &rep.recipe, None)?;
+                                if autoshop::decode::is_raw(p) {
+                                    let x = autoshop::pipeline::write_xmp(p, &rep.recipe)?;
+                                    note.push_str(&format!(" · XMP → {}", x.display()));
+                                }
+                                if let Some(n) = backed {
+                                    note.push_str(&trf(
+                                        lang,
+                                        " · previous save backed up as v{n}",
+                                        &[("n", &n.to_string())],
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                note.push_str(&trf(
+                                    lang,
+                                    " · NOT persisted: backing up your existing save failed ({err}) — Ctrl+S to save explicitly",
+                                    &[("err", &e.to_string())],
+                                ));
+                            }
                         }
                     }
                     Ok((rep.recipe, note))
@@ -7043,14 +7128,19 @@ mod tests {
         // sidecar → NoopOnly (never announced as a restore); XMP-only → the
         // reverse crs import; recipe.json present → preferred (lossless); a
         // DAMAGED recipe.json → Unreadable with the XMP fallback attached
-        // (loud degradation, never a silent fall-through). Unique stem so
-        // parallel tests can't race.
+        // (loud degradation, never a silent fall-through); a LEGACY ./out
+        // sidecar → migrated into the central store on first read. Unique stem
+        // so parallel tests can't race; the whole develop dir is scrubbed
+        // before and after (its key is derived from this fake path only).
         let src = std::path::Path::new("D:/library/_sidecar_prio_test.ARW"); // never touched
+        let dev = autoshop::store::develop_dir(src);
+        let _ = std::fs::remove_dir_all(&dev); // a crashed earlier run may have left files
+        std::fs::create_dir_all(&dev).unwrap();
         std::fs::create_dir_all("out").unwrap();
-        let rj = autoshop::pipeline::default_out(src, "recipe", "json");
+        let rj = autoshop::store::recipe_target(src);
         let xp = autoshop::pipeline::xmp_target(src);
-        let _ = std::fs::remove_file(&rj); // a crashed earlier run may have left files
-        let _ = std::fs::remove_file(&xp);
+        let legacy_rj = autoshop::store::legacy_recipe(src);
+        let _ = std::fs::remove_file(&legacy_rj);
 
         assert!(
             matches!(read_saved_develop(src), SavedDevelop::Nothing),
@@ -7087,8 +7177,20 @@ mod tests {
         };
         assert_eq!(fallback.expect("XMP fallback rides along").1, "XMP");
 
-        let _ = std::fs::remove_file(&rj);
-        let _ = std::fs::remove_file(&xp);
+        // A pre-store legacy ./out sidecar is migrated in on first read and
+        // then restores from the CENTRAL copy (kind says recipe.json, not the
+        // legacy fallback — the file physically moved).
+        let _ = std::fs::remove_dir_all(&dev);
+        let legacy = EditRecipe { contrast: -11.0, ..Default::default() };
+        std::fs::write(&legacy_rj, serde_json::to_string(&legacy).unwrap()).unwrap();
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src) else {
+            panic!("a legacy ./out recipe restores");
+        };
+        assert_eq!((r.contrast, kind), (-11.0, "recipe.json"));
+        assert!(!legacy_rj.exists(), "legacy file consumed by the migration");
+        assert!(rj.exists(), "…and now lives in the central store");
+
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]

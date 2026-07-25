@@ -154,8 +154,9 @@ fn api_list(request: &Request, state: &AppState) -> Result<ResponseBox> {
         .skip(offset)
         .take(limit)
         .map(|(id, raw)| {
-            let analyzed = pipeline::default_out(raw, "recipe", "json").exists()
-                || pipeline::xmp_target(raw).exists();
+            // Central store OR legacy ./out, recipe OR XMP — pre-migration
+            // libraries keep their "analyzed" badges.
+            let analyzed = crate::store::has_develop(raw);
             json!({
                 "id": id,
                 "stem": pipeline::stem(raw),
@@ -389,20 +390,28 @@ fn api_image(request: &Request, state: &AppState, max_edge: u32) -> Result<Respo
 
 fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let raw = raw_for(request, state)?;
-    let path = pipeline::default_out(&raw, "recipe", "json");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        // Served verbatim: the file is the authority, and re-serialising would
-        // drop anything a newer schema wrote.
-        return Ok(json_text(text));
+    // One-time, per-photo migration of pre-store ./out sidecars into the
+    // central develop dir (no-op when nothing legacy remains).
+    crate::store::migrate_legacy(&raw);
+    // Central first; then any legacy file a failed migration left behind.
+    for path in [crate::store::recipe_target(&raw), crate::store::legacy_recipe(&raw)] {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            // Served verbatim: the file is the authority, and re-serialising
+            // would drop anything a newer schema wrote. Bare raster names stay
+            // bare — api_develop/api_export re-anchor them before rendering.
+            return Ok(json_text(text));
+        }
     }
     // No recipe.json → fall back to the XMP sidecar, exactly like the GUI's
     // `read_saved_develop`: a foreign / neutral sidecar parses to a no-op recipe,
     // and "restoring" that would only produce a misleading SAVED tag.
-    if let Ok(text) = std::fs::read_to_string(pipeline::xmp_target(&raw)) {
-        let mut r = crate::xmp::xmp_to_recipe(&text);
-        if !r.is_noop() {
-            r.clamp();
-            return Ok(json_text(serde_json::to_string(&r)?));
+    for path in [pipeline::xmp_target(&raw), crate::store::legacy_xmp(&raw)] {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let mut r = crate::xmp::xmp_to_recipe(&text);
+            if !r.is_noop() {
+                r.clamp();
+                return Ok(json_text(serde_json::to_string(&r)?));
+            }
         }
     }
     Ok(status_response(404, "no recipe yet"))
@@ -415,10 +424,18 @@ fn api_style_info(state: &AppState) -> Result<ResponseBox> {
     let abs = |p: &str| {
         std::path::absolute(p).map(|x| x.display().to_string()).unwrap_or_else(|_| p.to_string())
     };
-    // Style reference library status (built? how many edits? scene tags?). The
-    // index doesn't record the folder it was built from, so we don't claim one.
-    let style = match crate::style::StyleIndex::load(Path::new("out/style-index.json")) {
-        Ok(ix) => {
+    // Style reference library status (built? how many edits? scene tags?).
+    // Central store first; a legacy cwd-relative index (built before the store
+    // existed) still counts — and we report whichever file actually answered.
+    let ix_path = crate::store::style_index_path();
+    let loaded = crate::style::StyleIndex::load(&ix_path)
+        .map(|ix| (ix, ix_path.display().to_string()))
+        .or_else(|_| {
+            crate::style::StyleIndex::load(Path::new("out/style-index.json"))
+                .map(|ix| (ix, abs("out/style-index.json")))
+        });
+    let style = match loaded {
+        Ok((ix, index_file)) => {
             let mut tags: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
             for e in &ix.exemplars {
                 *tags.entry(e.tag.clone()).or_default() += 1;
@@ -428,7 +445,7 @@ fn api_style_info(state: &AppState) -> Result<ResponseBox> {
             top.truncate(6);
             let scenes: Vec<_> = top.into_iter().map(|(t, n)| json!({ "tag": t, "n": n })).collect();
             json!({ "built": true, "total": ix.exemplars.len(), "scenes": scenes,
-                    "index_file": abs("out/style-index.json"), "source_dir": ix.source_dir })
+                    "index_file": index_file, "source_dir": ix.source_dir })
         }
         Err(_) => json!({ "built": false }),
     };
@@ -450,8 +467,8 @@ struct StyleBuildReq {
 
 /// Build the style reference index from a folder of the user's RAW+.xmp pairs, so
 /// non-CLI users can point the app at THEIR OWN library from the info panel. Writes
-/// out/style-index.json (same as `autoshop style-index <dir>`). Decodes every RAW,
-/// so it can take minutes on a large library.
+/// the central store's style-index.json (same as `autoshop style-index <dir>`).
+/// Decodes every RAW, so it can take minutes on a large library.
 fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
     let req: StyleBuildReq = read_json(request)?;
     let cleaned = req.dir.trim().trim_matches('"').trim();
@@ -481,7 +498,7 @@ fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
             ),
         ));
     }
-    if let Err(e) = index.save(Path::new("out/style-index.json")) {
+    if let Err(e) = index.save(&crate::store::style_index_path()) {
         return Ok(status_response(500, &format!("save index: {e}")));
     }
     Ok(json_response(
@@ -583,8 +600,11 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 }
 
 fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
-    let req: DevelopReq = read_json(request)?;
+    let mut req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    // Store recipes reference rasters by bare name (api_recipe serves them
+    // verbatim) — anchor them to the photo's develop dir before rendering.
+    crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Same decode source as `api_export` below — see `develop_base`.
     let preview = develop_base(&raw)?;
     let after = render::develop_preview(&preview, &req.recipe);
@@ -606,8 +626,9 @@ fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
 
 /// Export to ./out (the library stays read-only). Returns the written path.
 fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
-    let req: DevelopReq = read_json(request)?;
+    let mut req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     let out = pipeline::default_out(&raw, "developed", fmt_ext(&req));
     pipeline::ensure_parent(&out)?;
     render::render_to_file(&raw, &req.recipe, &out, denoise_opts(&req, &state.config()).as_ref(), None)?;
@@ -617,8 +638,9 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 /// Render and stream the image back as a download (browser "Save As"), without
 /// leaving a copy in ./out. Renders to a temp file, then streams + deletes it.
 fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
-    let req: DevelopReq = read_json(request)?;
+    let mut req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     let ext = fmt_ext(&req);
     let tmp = std::env::temp_dir().join(format!(
         "autoshop_dl_{}_{}.{ext}",

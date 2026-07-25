@@ -17,7 +17,7 @@ use image::GenericImageView;
 use autoshop::{decode, denoise, eval, fit, generative, pipeline, render, retouch, serve};
 use autoshop::advisor::Verdict;
 use autoshop::config::Config;
-use autoshop::pipeline::{default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe, write_xmp, xmp_target};
+use autoshop::pipeline::{default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe, write_xmp};
 use autoshop::recipe::EditRecipe;
 use autoshop::style::StyleIndex;
 
@@ -291,7 +291,9 @@ fn main() -> Result<()> {
 
 fn style_index_cmd(dir: &Path) -> Result<()> {
     let index = StyleIndex::build(dir)?;
-    let out = PathBuf::from("out/style-index.json");
+    // Central per-user location: the index describes the user's whole library,
+    // so it must not depend on which directory the command ran from.
+    let out = autoshop::store::style_index_path();
     index.save(&out)?;
     println!(
         "style index → {} ({} exemplars). The advisor will now reference your edits on similar shots.",
@@ -395,8 +397,14 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
 fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     let text = std::fs::read_to_string(recipe_path)
         .with_context(|| format!("read recipe {}", recipe_path.display()))?;
-    let recipe: EditRecipe =
+    let mut recipe: EditRecipe =
         serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))?;
+    // Store-written recipes reference their rasters by bare file name — anchor
+    // them to the recipe's own directory (legacy cwd-relative refs untouched).
+    if let Some(base) = recipe_path.parent() {
+        autoshop::store::resolve_mask_paths(&mut recipe, base);
+    }
+    let recipe = recipe;
     pipeline::guard_readonly(out, raw)?;
     ensure_parent(out)?;
     println!("rendering {} with {} ...", raw.display(), recipe_path.display());
@@ -486,16 +494,19 @@ fn match_cmd(
     let tgt = decode::load_image(target)?;
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
     let rep = if zoned {
-        // Sky mask lands at the GUI's convention (out/<stem>.mask-zone-sky.png —
-        // deliberately distinct from 「AI select sky」's mask-sky.png, which the
-        // fit's cleanup must never delete); the GUI shows that raster because
-        // the canonical recipe written below REFERENCES this path (masks are
-        // attached by reference, never found by filename), so the two must be
-        // written together.
+        // Sky mask lands at the GUI's convention (the photo's develop dir,
+        // `mask-zone-sky.png` — deliberately distinct from 「AI select sky」's
+        // mask-sky.png, which the fit's cleanup must never delete); the GUI
+        // shows that raster because the canonical recipe written below
+        // REFERENCES this path (masks are attached by reference, never found
+        // by filename), so the two must be written together.
         let cfg = Config::load();
         let seg = autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
-        let mask = default_out(raw, "mask-zone-sky", "png");
+        let mask = autoshop::store::raster_target(raw, "mask-zone-sky");
         pipeline::guard_readonly(&mask, raw)?;
+        // fit_recipe_zoned writes the raster but does not create its folder —
+        // a fresh develop dir must exist before the fit runs.
+        ensure_parent(&mask)?;
         println!("  zoned: segmenting the sky in both images (local python sidecar) …");
         autoshop::fit_zoned::fit_recipe_zoned(&src, &tgt, &seg, &mask)
     } else {
@@ -512,12 +523,12 @@ fn match_cmd(
     pipeline::guard_readonly(&out, raw)?;
     let recipe_path = write_recipe(raw, &rep.recipe, Some(out))?;
     println!("recipe -> {}", recipe_path.display());
-    // ALSO write the canonical sidecar. out/<stem>.recipe.json is the ONLY recipe
-    // name the GUI (read_saved_develop) and the web (/api/recipe) read back, and
-    // the XMP below cannot carry the zoned result at all (raster masks, colour
-    // gains, mask roles are recipe-only) — without this, `match --zoned` produced
-    // a full fit that no surface able to render it could ever load.
-    let canonical = default_out(raw, "recipe", "json");
+    // ALSO write the canonical sidecar. The store's recipe.json is the ONLY
+    // recipe the GUI (read_saved_develop) and the web (/api/recipe) read back,
+    // and the XMP below cannot carry the zoned result at all (raster masks,
+    // colour gains, mask roles are recipe-only) — without this, `match --zoned`
+    // produced a full fit that no surface able to render it could ever load.
+    let canonical = autoshop::store::recipe_target(raw);
     if canonical != recipe_path {
         pipeline::guard_readonly(&canonical, raw)?;
         let p = write_recipe(raw, &rep.recipe, Some(canonical))?;
@@ -592,7 +603,10 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     let raws = find_raws(dir)?;
     println!("found {} RAW(s) under {}", raws.len(), dir.display());
 
-    let pending: Vec<&PathBuf> = raws.iter().filter(|r| !xmp_target(r).exists()).collect();
+    // "Pending" = no saved develop anywhere — central store OR legacy ./out,
+    // recipe OR XMP — so a library analyzed before the store existed is not
+    // silently re-analyzed (and re-billed) after the layout change.
+    let pending: Vec<&PathBuf> = raws.iter().filter(|r| !autoshop::store::has_develop(r)).collect();
     let todo = pending.len();
     let n = todo.min(limit);
     println!("{todo} pending; processing {n} this run (--limit {limit}).");

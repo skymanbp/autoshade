@@ -23,6 +23,7 @@ pub mod render;
 pub mod retouch;
 pub mod segment;
 pub mod serve;
+pub mod store;
 pub mod style;
 pub mod xmp;
 

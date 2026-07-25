@@ -58,8 +58,16 @@ pub fn produce_recipe(
     // (needs `autoshop style-index`). style_strength == 0 disables it entirely;
     // otherwise we inject a soft text reference AND, at higher strength, gently
     // pull the FINAL recipe toward those historical means (the blend below).
+    // Central store first; the legacy cwd-relative file keeps an index built
+    // before the store existed working unchanged.
     let style = (style_strength > 0.0)
-        .then(|| crate::style::StyleIndex::load(std::path::Path::new("out/style-index.json")).ok())
+        .then(|| {
+            crate::style::StyleIndex::load(&crate::store::style_index_path())
+                .or_else(|_| {
+                    crate::style::StyleIndex::load(std::path::Path::new("out/style-index.json"))
+                })
+                .ok()
+        })
         .flatten()
         .map(|ix| {
             let ex = ix.retrieve(&decoded.meta, &decoded.histogram, 4, stem(raw));
@@ -179,10 +187,30 @@ pub fn produce_recipe(
 }
 
 pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Result<PathBuf> {
-    let out = out.unwrap_or_else(|| default_out(raw, "recipe", "json"));
+    let out = out.unwrap_or_else(|| crate::store::recipe_target(raw));
     ensure_parent(&out)?;
-    std::fs::write(&out, serde_json::to_string_pretty(recipe)?)
-        .with_context(|| format!("write recipe {}", out.display()))?;
+    // Rasters living beside the recipe are stored by bare file name so the
+    // develop dir stays relocatable (store::resolve_mask_paths re-anchors them
+    // at load). Serialize a relativized COPY — the caller's in-memory recipe
+    // keeps its absolute paths for rendering.
+    let mut on_disk = recipe.clone();
+    if let Some(parent) = out.parent() {
+        crate::store::relativize_mask_paths(&mut on_disk, parent);
+    }
+    // Publish via tmp+rename rather than truncating the AUTHORITATIVE file in
+    // place: a crash mid-write used to leave a half-written recipe.json (loud
+    // Unreadable, but the develop was gone). Windows rename cannot replace an
+    // existing destination, so the old file is retired first — worst case is a
+    // briefly missing file with the intact .tmp beside it, never corrupt JSON.
+    let tmp = out.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&on_disk)?)
+        .with_context(|| format!("write recipe {}", tmp.display()))?;
+    let _ = std::fs::remove_file(&out);
+    std::fs::rename(&tmp, &out)
+        .with_context(|| format!("publish recipe {}", out.display()))?;
+    if out == crate::store::recipe_target(raw) {
+        crate::store::note_source(raw); // breadcrumb for the hashed store dir
+    }
     Ok(out)
 }
 
@@ -200,23 +228,30 @@ pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Where the .xmp for `raw` goes — always ./out (the photo library is read-only).
+/// Where the .xmp for `raw` goes — the photo's central develop dir (see
+/// `store`; the photo library itself stays read-only). Kept here because every
+/// surface already imports it from pipeline.
 pub fn xmp_target(raw: &Path) -> PathBuf {
-    PathBuf::from("out").join(format!("{}.xmp", stem(raw)))
+    crate::store::xmp_target(raw)
 }
 
 /// Guarantee the read-only library: refuse to write `out` if it lands inside the
-/// source RAW's own folder (or below it). Outputs belong in ./out.
+/// source RAW's own folder (or below it). Outputs belong in ./out (exports) or
+/// the central develop store (sidecars).
 ///
-/// The PROJECT's ./out is always writable, even when the source itself lives
-/// there (e.g. `match` fitting a look onto a previously exported preview) —
-/// the rule protects the photo LIBRARY, not our own output area. A folder that
-/// merely happens to be NAMED "out" inside the library is still refused.
+/// The PROJECT's ./out and the per-user store root are always writable, even
+/// when the source itself lives there (e.g. `match` fitting a look onto a
+/// previously exported preview) — the rule protects the photo LIBRARY, not our
+/// own output areas. A folder that merely happens to be NAMED "out" inside the
+/// library is still refused.
 pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     use std::path::absolute;
     let (Ok(out_abs), Ok(raw_abs)) = (absolute(out), absolute(raw)) else {
         return Ok(());
     };
+    if out_abs.starts_with(crate::store::store_root()) {
+        return Ok(());
+    }
     if let Ok(own_out) = absolute(Path::new("out"))
         && out_abs.starts_with(&own_out) {
             return Ok(());
@@ -371,11 +406,16 @@ mod tests {
     #[test]
     fn outputs_always_default_outside_the_library() {
         let raw = Path::new("D:/Photography/Raw/2024/Trip/DSC0001.ARW");
-        // Every default output + the XMP sidecar land under ./out, never beside
-        // the RAW — the library stays read-only by construction.
+        // Exports (deliverable images) stay in ./out; develop STATE (recipe +
+        // XMP sidecars) lives in the photo's central develop dir, keyed by the
+        // absolute path. Neither ever lands beside the RAW — the library stays
+        // read-only by construction.
         assert!(default_out(raw, "developed", "tif").starts_with("out"));
-        assert!(default_out(raw, "recipe", "json").starts_with("out"));
-        assert!(xmp_target(raw).starts_with("out"));
-        assert_eq!(xmp_target(raw), Path::new("out/DSC0001.xmp")); // stem preserved
+        assert_eq!(xmp_target(raw), crate::store::develop_dir(raw).join("DSC0001.xmp"));
+        assert!(guard_readonly(&xmp_target(raw), raw).is_ok(), "the store is always writable");
+        // Same stem in a DIFFERENT folder → a different develop dir (the
+        // cross-clobber the store exists to prevent).
+        let other = Path::new("D:/Photography/Raw/2025/DSC0001.ARW");
+        assert_ne!(xmp_target(raw), xmp_target(other));
     }
 }

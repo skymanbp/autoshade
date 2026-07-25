@@ -5,9 +5,10 @@
 > 批次——77 项对抗验证 findings 全修/有据取舍，蒙版行点击=选择恢复、
 > recipe.json 统一持久化契约、未保存保护、指针状态机清残留、引擎位图/
 > feather/roundness 语义钉死、web/CLI 协同；详见下方「当前状态」首条。
-> **下一批（已拍板 2026-07-24，实现中）**：边车磁盘布局改为中央库+路径
-> 键（%LOCALAPPDATA%/autoshop/，按照片绝对路径消歧；./out 只留导出成品
-> 图；打开时自动迁移旧 ./out 边车），解决同名照片边车相撞 + cwd 相对性。
+> **下一批（已拍板并实现 2026-07-24，已提交未发布——待真机验收）**：边车
+> 磁盘布局改为中央库+路径键（%LOCALAPPDATA%/autoshop/，按照片绝对路径
+> 消歧；./out 只留导出成品图；打开时自动迁移旧 ./out 边车），解决同名
+> 照片边车相撞 + cwd 相对性。详见「当前状态」首条。
 > 前版 v0.11.2（2026-07-17，AI 分析认证修复：`--bare` 永不读 OAuth →
 > 三旗标替代 + env_remove(ANTHROPIC_API_KEY) + 透出 stdout JSON 真实
 > 错误，src/advisor/claude.rs）；v0.11.1（2026-07-14，中性 cwd 根治
@@ -17,6 +18,51 @@
 > 反馈驱动阶段——用户试用 → 报障/提需 → 修复/打磨 → 发布）。
 
 ## 当前状态（已完成，勿重做）
+
+- **边车中央库批次（2026-07-24，已提交未发布——待用户真机验收）**——
+  用户拍板"中央库+路径键"后实现。显影**状态**（recipe.json / <stem>.xmp /
+  v<N> 快照 / 蒙版栅格）从 cwd 相对 ./out 的裸 stem 键迁至
+  `store::store_root()`（`AUTOSHOP_DATA_DIR` env → `%LOCALAPPDATA%/autoshop`
+  → temp）下 `develops/<stem>-<fnv1a64(绝对路径小写)>/`，同名异目录照片
+  不再互踩、换目录启动也能找到编辑；**导出成品图（developed/retouch/heal/
+  clone/preview/matched/style.txt）留在 ./out**（交付物）。要点：
+  1. 新模块 `src/store.rs`：路径键（FNV-1a 64 手写钉死——DefaultHasher 跨
+     Rust 版本不稳，会孤儿化整库）、`recipe_target/xmp_target/version_target/
+     raster_target/style_index_path/settings_path`、`has_develop`（中央∨
+     legacy 存在性，供 badge/web 列表/CLI batch）、`migrate_legacy`（打开
+     即迁移：解析 recipe 连带栅格搬家并把引用改写成裸名；解析失败原字节
+     搬（Unreadable 契约保持响亮）；跨卷 rename 失败退 copy+delete；央本
+     已存在则不覆盖）、`resolve/relativize_mask_paths`（读时锚定 recipe
+     所在目录/写时收敛裸名——recipe 内栅格引用相对化，显影目录可搬迁）。
+  2. pipeline：`write_recipe` 默认写央本+落盘前 relativize 副本+source.txt
+     面包屑；`xmp_target` 重指向央本（全部调用点自动跟随）；`guard_readonly`
+     放行 store root；风格索引读取央本→legacy 回退。
+  3. GUI：read_saved_develop 顶部 migrate_legacy + 央本→legacy 双读（kind
+     注明 "(legacy ./out)"）+ resolve；backup_saved_develop 比较前先
+     resolve（否则带栅格的重写永远"不同"→假快照）；版本快照/列表走
+     store；中性存档删除**四处**（央本+legacy 的 recipe+xmp，legacy 残留
+     会经回退复活"已清除"的编辑）；批渲染读央本→legacy；badge=
+     has_develop；分割/反推栅格写入显影目录。
+  4. Web/CLI：/api/recipe 迁移+双读；/api/develop|export|download 渲染前
+     resolve（api_recipe 原样透传裸名）；风格索引构建/信息走央本；
+     `match --zoned` 栅格+canonical 走 store（fit_zoned 不建目录，调用点
+     补 ensure_parent）；`apply` 按 recipe 所在目录 resolve；`batch` 的
+     pending 判定=has_develop（旧库不再被重复计费重分析）。settings
+     （autoshop.local.json）移央本+旧 cwd 文件读回退。
+  5. 测试 111 lib（+4：photo_key 消歧/FNV 参考向量/resolve-relativize
+     往返/migrate 全套）+9 gui（sidecar 优先级测试加 legacy 迁移断言）。
+  Codex 只读复审 9 条：**3 条已修**（迁移改"先复制栅格→tmp+rename 发布
+  recipe→成功后才删旧"失败全回滚；backup_saved_develop 改 Result——快照
+  失败则 AI 分析/反推**拒绝覆盖**显式保存并 toast/note 说明；write_recipe
+  改 tmp+rename 发布，崩溃不再留半截真源 JSON）；6 条记录为取舍——并发
+  迁移竞态（同源幂等，见 migrate_legacy doc）、中断迁移（逐文件可续跑）、
+  相对 AUTOSHOP_DATA_DIR（高级用户显式覆盖自担）、路径拼写身份（symlink/
+  UNC 不 canonicalize——其自身失败模式更多，source.txt 供诊断）、64 位
+  FNV 碰撞（需 stem+哈希同撞，个人库量级 ~1e-10）、非 UTF-8 stem lossy
+  （Windows 全 Unicode，风险极低）。其余已知取舍：迁移静默成功（状态一致
+  无需打扰；失败时 kind 带 "(legacy ./out)" 可见）；serve.rs
+  `out/imported` 上传目录留 ./out（属输入暂存）；fit_zoned 单测仍写测试
+  自有的 ./out 文件（测试专用路径，非生产写点）。
 
 - **全量 debug + 协同性审计批次（2026-07-24，已随 v0.12.0 发布）**——用户令
   "全量debug+打磨使用体验，同时检查各个功能之间的协同性"+报"蒙版按钮

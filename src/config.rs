@@ -39,24 +39,32 @@ pub struct LocalSettings {
     pub image_provider: Option<String>,
 }
 
-/// Path to the local settings file (cwd-relative, gitignored).
+/// Path to the local settings file — the per-user store root, so the SAME
+/// settings load no matter which directory the app was launched from (this
+/// used to be a cwd-relative `autoshop.local.json`).
 pub fn local_settings_path() -> PathBuf {
-    PathBuf::from("autoshop.local.json")
+    crate::store::settings_path()
 }
 
 /// Read the local settings file, if present. A missing or malformed file yields
-/// defaults (we never block startup on it).
+/// defaults (we never block startup on it). A pre-store cwd-relative
+/// `autoshop.local.json` is still honoured as a read fallback; the next save
+/// writes the central file, which then wins.
 pub fn load_local_settings() -> LocalSettings {
-    let p = local_settings_path();
-    match std::fs::read_to_string(&p) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => LocalSettings::default(),
+    for p in [local_settings_path(), PathBuf::from("autoshop.local.json")] {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            return serde_json::from_str(&s).unwrap_or_default();
+        }
     }
+    LocalSettings::default()
 }
 
 /// Persist the local settings file (the POST /api/settings target).
 pub fn save_local_settings(s: &LocalSettings) -> std::io::Result<PathBuf> {
     let p = local_settings_path();
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(&p, serde_json::to_string_pretty(s).unwrap_or_default())?;
     Ok(p)
 }
