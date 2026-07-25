@@ -49,7 +49,8 @@ enum Command {
     Analyze {
         /// Path to the RAW file.
         raw: PathBuf,
-        /// Where to write the recipe JSON (default: ./out/<stem>.recipe.json).
+        /// Where to write the recipe JSON (default: this photo's develop-store
+        /// dir, printed as `recipe -> …` on completion).
         #[arg(short, long)]
         out: Option<PathBuf>,
         /// Optional direction for the AI, e.g. "warmer and moodier, lift the
@@ -111,8 +112,9 @@ enum Command {
         #[arg(long)]
         model: Option<String>,
     },
-    /// Batch-process every RAW under a folder (resumes by skipping done .xmp).
-    /// Outputs go to ./out — the photo library stays read-only.
+    /// Batch-process every RAW under a folder (resumes by skipping RAWs that
+    /// already have a saved develop). Renders go to ./out; develop state goes
+    /// to the per-user store — the photo library stays read-only.
     Batch {
         /// Folder to scan recursively for RAW files (.arw/.dng/.nef/.cr2/.cr3/
         /// .raf/.orf/.rw2 — the same set the GUI and web open).
@@ -186,8 +188,9 @@ enum Command {
         #[arg(long)]
         style_prompt: bool,
         /// Named recipe JSON artifact for `apply` (default:
-        /// ./out/<stem>.matched.json). The canonical ./out/<stem>.recipe.json —
-        /// the sidecar the GUI and web restore — is ALWAYS written too.
+        /// ./out/<stem>.matched.json). The canonical recipe.json in this
+        /// photo's develop store — what the GUI and web restore — is ALWAYS
+        /// written too.
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
@@ -383,8 +386,14 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
         };
         println!("xmp    -> {}", xmp_path.display());
         if redirected {
-            println!("  (written beside the -o recipe so the pair stays together; nothing was written to ./out,");
-            println!("   so the GUI/web will NOT restore this develop — copy both files there to make them see it)");
+            // Post-store, ./out is only a legacy read fallback — the place the
+            // GUI/web actually restore from is the photo's develop dir, so the
+            // hint must name THAT path or following it does nothing.
+            println!("  (written beside the -o recipe so the pair stays together; the GUI/web restore from");
+            println!(
+                "   {} — copy both files there to make them see it)",
+                autoshop::store::develop_dir(raw).display()
+            );
         }
         let s = stem(raw);
         println!("  (the library is read-only — copy {s}.xmp next to {s}.ARW to open it in Lightroom)");

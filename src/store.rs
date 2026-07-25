@@ -110,14 +110,53 @@ pub fn settings_path() -> PathBuf {
     store_root().join("autoshop.local.json")
 }
 
-/// Legacy (pre-store) sidecar locations in cwd-relative ./out — still read as
-/// fallbacks and consumed by [`migrate_legacy`].
+/// Candidate legacy ./out roots, most-specific first. Pre-store sidecars were
+/// CWD-relative, so where they sit depends on how the app used to be launched:
+/// a terminal launch put them under the project dir (= today's cwd when
+/// launched the same way), a double-click put them beside the exe. An
+/// `AUTOSHOP_LEGACY_OUT` env override covers any other history. Without the
+/// exe-dir probe, upgrading users who start the exe from a NEW directory would
+/// see every pre-store develop silently vanish.
+fn legacy_out_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(o) = std::env::var_os("AUTOSHOP_LEGACY_OUT") {
+        roots.push(PathBuf::from(o));
+    }
+    roots.push(PathBuf::from("out"));
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let cand = dir.join("out");
+        let dup = roots
+            .iter()
+            .any(|r| std::path::absolute(r).ok() == std::path::absolute(&cand).ok());
+        if !dup {
+            roots.push(cand);
+        }
+    }
+    roots
+}
+
+/// The photo's legacy recipe path: the first candidate root that actually
+/// holds one (else the cwd-relative default, so error messages stay sensible).
 pub fn legacy_recipe(src: &Path) -> PathBuf {
-    PathBuf::from("out").join(format!("{}.recipe.json", crate::pipeline::stem(src)))
+    legacy_file(&format!("{}.recipe.json", crate::pipeline::stem(src)))
 }
 
 pub fn legacy_xmp(src: &Path) -> PathBuf {
-    PathBuf::from("out").join(format!("{}.xmp", crate::pipeline::stem(src)))
+    legacy_file(&format!("{}.xmp", crate::pipeline::stem(src)))
+}
+
+fn legacy_file(name: &str) -> PathBuf {
+    let mut fallback = None;
+    for root in legacy_out_roots() {
+        let p = root.join(name);
+        if p.exists() {
+            return p;
+        }
+        fallback.get_or_insert(p);
+    }
+    fallback.unwrap_or_else(|| PathBuf::from("out").join(name))
 }
 
 /// Does this photo have ANY saved develop — central or legacy, recipe or XMP?
@@ -184,6 +223,149 @@ pub fn relativize_mask_paths(r: &mut EditRecipe, base: &Path) {
     }
 }
 
+/// Before a PROGRAMMATIC writer (AI Analyze, reverse-fit — any surface)
+/// replaces an existing saved develop, snapshot it to the next
+/// `v<N>.recipe.json` so an explicit save can never be silently destroyed.
+/// Explicit user saves overwrite without backup — the user asked for that one.
+///
+/// The snapshot is a COPY (the working recipe.json stays in place), so callers
+/// may take it BEFORE running the operation that will overwrite — required for
+/// the zoned reverse-fit, whose segmentation rewrites `mask-zone-sky.png`
+/// before any recipe write happens. Rasters referenced by the snapshot are
+/// versioned along (`v<N>.<name>.png`) for the same reason: a shared raster
+/// mutated later must not silently change what an old snapshot renders.
+///
+/// `incoming = Some(r)`: skip when the existing save equals `r` (no snapshot
+/// spam on identical rewrites). `incoming = None`: snapshot unconditionally
+/// (callers that run before their result exists, e.g. the fits).
+///
+/// `Ok(Some(n))` = snapshotted as v<n>; `Ok(None)` = nothing to snapshot;
+/// `Err` = an existing save COULD NOT be snapshotted — the caller must then
+/// leave it untouched, because overwriting without the promised backup is
+/// exactly the silent destruction this function exists to prevent.
+pub fn backup_saved_develop(
+    src: &Path,
+    incoming: Option<&EditRecipe>,
+) -> std::io::Result<Option<u32>> {
+    let rj = recipe_target(src);
+    let text = match std::fs::read_to_string(&rj) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // Unreadable ≠ absent (lock/permissions): refusing beats overwriting
+        // a save we could not even look at.
+        Err(e) => return Err(e),
+    };
+    let parsed = serde_json::from_str::<EditRecipe>(&text).ok();
+    if let (Some(existing), Some(inc)) = (&parsed, incoming) {
+        // The on-disk copy names rasters by bare file name while `incoming`
+        // carries absolute paths — resolve before comparing, or every
+        // raster-bearing rewrite would look "different" and snapshot itself.
+        let mut existing = existing.clone();
+        if let Some(base) = rj.parent() {
+            resolve_mask_paths(&mut existing, base);
+        }
+        if existing == *inc {
+            return Ok(None); // rewriting the same content needs no snapshot
+        }
+    }
+    let dev = develop_dir(src);
+    let n = list_versions(src).last().copied().unwrap_or(0) + 1;
+    let dst = version_target(src, n);
+    match parsed {
+        Some(mut r) => {
+            // A raster that cannot be frozen fails the WHOLE backup: returning
+            // Ok would let the caller overwrite that raster believing a
+            // faithful snapshot exists — the exact lie this gate prevents.
+            snapshot_rasters(&mut r, &dev, n)?;
+            let publish = (|| {
+                let json = serde_json::to_string_pretty(&r).map_err(std::io::Error::other)?;
+                let tmp = dst.with_extension("json.tmp");
+                std::fs::write(&tmp, json)?;
+                std::fs::rename(&tmp, &dst)
+            })();
+            if let Err(e) = publish {
+                rollback_frozen_rasters(&dev, n);
+                return Err(e);
+            }
+        }
+        // Unparsable: snapshot the bytes as-is — still recoverable by hand.
+        None => {
+            std::fs::copy(&rj, &dst)?;
+        }
+    }
+    Ok(Some(n))
+}
+
+/// Copy each raster the recipe references INSIDE `dev` to a version-frozen
+/// name (`v<n>.<name>`) and rewrite the reference. `list_versions` only parses
+/// `v<N>.recipe.json`, so the frozen rasters never pollute the version list.
+/// A copy failure rolls back this call's earlier copies and errors — a
+/// snapshot must never silently keep pointing at a mutable live raster.
+pub fn snapshot_rasters(r: &mut EditRecipe, dev: &Path, n: u32) -> std::io::Result<()> {
+    for m in &mut r.masks {
+        if let MaskGeometry::Bitmap { path } = &mut m.mask {
+            let p = Path::new(path.as_str());
+            // Bare name (the store convention) or absolute path inside dev.
+            let name = if p.is_absolute() {
+                (p.parent() == Some(dev)).then(|| p.file_name()).flatten()
+            } else if p.parent().is_none_or(|x| x.as_os_str().is_empty()) {
+                p.file_name()
+            } else {
+                None
+            };
+            let Some(name) = name.and_then(|x| x.to_str()) else { continue };
+            let live = dev.join(name);
+            if !live.exists() {
+                continue; // already-dead reference: nothing to freeze
+            }
+            let frozen_name = format!("v{n}.{name}");
+            let frozen = dev.join(&frozen_name);
+            if !frozen.exists()
+                && let Err(e) = std::fs::copy(&live, &frozen)
+            {
+                rollback_frozen_rasters(dev, n);
+                return Err(e);
+            }
+            *path = frozen_name;
+        }
+    }
+    Ok(())
+}
+
+/// Remove every `v<n>.*` frozen raster (backup rollback — the snapshot recipe
+/// itself is written only after all freezes succeed).
+fn rollback_frozen_rasters(dev: &Path, n: u32) {
+    let prefix = format!("v{n}.");
+    if let Ok(dir) = std::fs::read_dir(dev) {
+        for e in dir.flatten() {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with(&prefix) && !name.ends_with(".recipe.json") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Delete snapshot `n`: its recipe file plus any `v<n>.*` frozen rasters.
+pub fn delete_version(src: &Path, n: u32) -> std::io::Result<()> {
+    std::fs::remove_file(version_target(src, n))?;
+    let prefix = format!("v{n}.");
+    if let Ok(dir) = std::fs::read_dir(develop_dir(src)) {
+        for e in dir.flatten() {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // The recipe file itself is already gone; this sweeps the frozen
+            // rasters ("v3.mask-zone-sky.png"). The dot terminator keeps
+            // "v3." from matching "v30.recipe.json".
+            if name.starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Best-effort breadcrumb so a human browsing the hashed store can tell which
 /// photo a develop dir belongs to. Never fails the caller.
 pub fn note_source(src: &Path) {
@@ -225,25 +407,54 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// resumability finish any remainder on the next touch. No lock: the store is
 /// single-user by construction, and identical-content races cannot corrupt.
 pub fn migrate_legacy(src: &Path) -> bool {
-    migrate_legacy_in(&store_root(), src)
+    // Process-wide memo: a photo can only need migrating once per process, and
+    // this runs on every photo open (UI thread) — without the memo a library
+    // whose ./out holds thousands of exports pays a full directory enumeration
+    // on every reopen for nothing.
+    use std::sync::{Mutex, OnceLock};
+    static DONE: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let key = photo_key(src);
+    {
+        let mut done = DONE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if !done.insert(key) {
+            return false;
+        }
+    }
+    let mut moved = false;
+    for legacy_out in legacy_out_roots() {
+        moved |= migrate_legacy_in(&store_root(), &legacy_out, src);
+    }
+    moved
 }
 
-fn migrate_legacy_in(root: &Path, src: &Path) -> bool {
+/// Explicit migration from a user-picked old ./out folder (the GUI Settings
+/// 「Import develops」 button) — no memo, the user asked for this scan NOW.
+pub fn migrate_legacy_from(legacy_out: &Path, src: &Path) -> bool {
+    migrate_legacy_in(&store_root(), legacy_out, src)
+}
+
+fn migrate_legacy_in(root: &Path, legacy_out: &Path, src: &Path) -> bool {
+    if !legacy_out.is_dir() {
+        return false; // cheap gate — most calls find nothing legacy at all
+    }
     let stem = crate::pipeline::stem(src);
     let dev = develop_dir_in(root, src);
 
     // Collect (legacy file, new name) pairs. Versions are found by scan.
     let mut jobs: Vec<(PathBuf, String, bool)> = Vec::new(); // (from, to-name, is_recipe)
-    let lr = legacy_recipe(src);
+    let lr = legacy_out.join(format!("{stem}.recipe.json"));
     if lr.exists() {
         jobs.push((lr, "recipe.json".into(), true));
     }
-    let lx = legacy_xmp(src);
+    let lx = legacy_out.join(format!("{stem}.xmp"));
     if lx.exists() {
         jobs.push((lx, format!("{stem}.xmp"), false));
     }
     let vprefix = format!("{stem}.v");
-    if let Ok(dir) = std::fs::read_dir("out") {
+    if let Ok(dir) = std::fs::read_dir(legacy_out) {
         for e in dir.flatten() {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
@@ -277,7 +488,7 @@ fn migrate_legacy_in(root: &Path, src: &Path) -> bool {
             continue;
         }
         let ok = if is_recipe {
-            migrate_one_recipe(&from, &to, stem, &dev)
+            migrate_one_recipe(&from, &to, stem, &dev, legacy_out)
         } else {
             move_file(&from, &to).is_ok()
         };
@@ -295,7 +506,7 @@ fn migrate_legacy_in(root: &Path, src: &Path) -> bool {
 /// published next, and the legacy originals are deleted only after the recipe
 /// landed. Any earlier failure rolls the staged copies back and leaves every
 /// legacy file byte-identical — the read fallbacks keep serving it.
-fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path) -> bool {
+fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(from) else { return false };
     let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text) else {
         // Unparsable (interrupted write / newer schema): move byte-for-byte so
@@ -307,18 +518,29 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path) -> bool {
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
     for m in &mut r.masks {
         if let MaskGeometry::Bitmap { path } = &mut m.mask {
-            let p = PathBuf::from(path.as_str());
+            let mut p = PathBuf::from(path.as_str());
             if p.is_absolute() {
                 continue; // foreign reference — not ours to move
             }
             let Some(name) = p.file_name().and_then(|n| n.to_str()) else { continue };
-            let Some(bare) = name.strip_prefix(&raster_prefix) else { continue };
-            let dest = dev.join(bare);
+            let Some(bare) = name.strip_prefix(&raster_prefix).map(str::to_string) else {
+                continue;
+            };
+            // Legacy refs are relative to the OLD launch cwd ("out/<stem>.<kind>.png").
+            // When migrating another root (exe dir, user-picked folder), the
+            // raster sits in THAT root, not under today's cwd.
+            if !p.exists() {
+                let cand = legacy_out.join(name);
+                if cand.exists() {
+                    p = cand;
+                }
+            }
+            let dest = dev.join(&bare);
             if dest.exists() {
-                *path = bare.to_string(); // already migrated by an earlier file
+                *path = bare; // already migrated by an earlier file
             } else if p.exists() && std::fs::copy(&p, &dest).is_ok() {
                 staged.push((p.clone(), dest));
-                *path = bare.to_string();
+                *path = bare;
             }
             // Raster missing/uncopyable: keep the old reference — the engine's
             // missing-raster contract (inert + warning) reports it.
@@ -426,7 +648,7 @@ mod tests {
         let v2 = PathBuf::from(format!("out/{stem}.v2.recipe.json"));
         std::fs::write(&v2, serde_json::to_string_pretty(&EditRecipe::default()).unwrap()).unwrap();
 
-        assert!(migrate_legacy_in(&root, &src));
+        assert!(migrate_legacy_in(&root, Path::new("out"), &src));
         let dev = develop_dir_in(&root, &src);
         assert!(dev.join("recipe.json").exists());
         assert!(dev.join(format!("{stem}.xmp")).exists());
@@ -442,7 +664,52 @@ mod tests {
         assert_eq!(path, "mask-sky.png");
 
         // Idempotent: a second call finds nothing legacy and reports false.
-        assert!(!migrate_legacy_in(&root, &src));
+        assert!(!migrate_legacy_in(&root, Path::new("out"), &src));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backup_snapshot_is_a_copy_and_freezes_rasters() {
+        // Unique fake path → its own hashed develop dir under the real store
+        // root (same isolation pattern as the GUI sidecar test); scrubbed
+        // before and after.
+        let src = PathBuf::from("D:/nowhere/_store_backup_test.ARW");
+        let dev = develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("mask-zone-sky.png"), b"OLD").unwrap();
+        let mut r = EditRecipe { exposure_ev: 0.4, ..Default::default() };
+        r.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: "mask-zone-sky.png".into() },
+            ..Default::default()
+        });
+        std::fs::write(recipe_target(&src), serde_json::to_string_pretty(&r).unwrap()).unwrap();
+
+        // Identical incoming (after resolve) → no snapshot spam.
+        let mut same = r.clone();
+        resolve_mask_paths(&mut same, &dev);
+        assert_eq!(backup_saved_develop(&src, Some(&same)).unwrap(), None);
+
+        // Unconditional snapshot: v1 appears, the WORKING recipe stays (copy,
+        // not move — callers snapshot BEFORE operations that may still fail),
+        // and the raster is frozen with the snapshot's reference rewritten.
+        assert_eq!(backup_saved_develop(&src, None).unwrap(), Some(1));
+        assert!(recipe_target(&src).exists(), "copy semantics: working recipe stays");
+        let snap: EditRecipe =
+            serde_json::from_str(&std::fs::read_to_string(version_target(&src, 1)).unwrap())
+                .unwrap();
+        let MaskGeometry::Bitmap { path } = &snap.masks[0].mask else { panic!() };
+        assert_eq!(path, "v1.mask-zone-sky.png");
+        // Overwrite the live raster (what a re-run zoned fit does) — the
+        // frozen copy must keep the OLD bytes, or the snapshot lies.
+        std::fs::write(dev.join("mask-zone-sky.png"), b"NEW").unwrap();
+        assert_eq!(std::fs::read(dev.join("v1.mask-zone-sky.png")).unwrap(), b"OLD");
+        // Frozen rasters never pollute the version list.
+        assert_eq!(list_versions(&src), vec![1]);
+        // delete_version sweeps the snapshot recipe AND its frozen raster.
+        delete_version(&src, 1).unwrap();
+        assert!(!version_target(&src, 1).exists());
+        assert!(!dev.join("v1.mask-zone-sky.png").exists());
+        let _ = std::fs::remove_dir_all(&dev);
     }
 }

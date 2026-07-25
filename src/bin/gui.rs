@@ -211,7 +211,11 @@ enum Msg {
     /// Batch render advanced: `done` of `total` photos finished (ok or err).
     BatchProgress { done: usize, total: usize },
     /// Reverse-fit finished: the fitted recipe + a status note (fit.rs).
-    Fitted(Box<anyhow::Result<(EditRecipe, String)>>),
+    /// (recipe, status note, persisted): `persisted` is false when the backup
+    /// gate refused the store write — the ● baseline must NOT be advanced then.
+    Fitted(Box<anyhow::Result<(EditRecipe, String, bool)>>),
+    /// Settings → "Import develops from an old ./out folder": localized result.
+    LegacyImported(anyhow::Result<String>),
     /// Style-prompt extraction finished: the reusable prompt text.
     Styled(Box<anyhow::Result<String>>),
     /// A `GET /models` fetch finished: the account's model ids (Settings pick-list).
@@ -583,7 +587,7 @@ fn model_picker(ui: &mut egui::Ui, salt: &str, value: &mut String, options: &[St
     ui.add(
         egui::TextEdit::singleline(value)
             .desired_width(170.0)
-            .hint_text("or type a custom id"),
+            .hint_text(tr(lang, "or type a custom id")),
     );
 }
 
@@ -625,6 +629,20 @@ struct AutoshopApp {
     // silently destroy work; only Ctrl+S writes disk.
     saved_recipe: EditRecipe,
     nav_stash: HashMap<PathBuf, EditRecipe>,
+    // Paste-to-selected wrote the open photo's store: (path, exact recipe
+    // written) so Msg::Pasted can advance the ● baseline on full success.
+    pasted_open: Option<(PathBuf, EditRecipe)>,
+    // The title-bar ✕ was intercepted with unsaved edits: show the in-app
+    // save-all / discard / cancel layer until the user decides.
+    confirm_quit: bool,
+    // Local buffer for the selected mask's name TextEdit:
+    // (mask index, name at seed time, edited text). Committed on focus loss so
+    // a rename is ONE undo step, not one per key; the seed-time name lets a
+    // pending rename commit safely when the selection jumps rows (commit only
+    // while masks[i].name still equals the seed — index shifts can't misfire).
+    mask_name_buf: Option<(usize, String, String)>,
+    // Arrow-key navigation: gallery index to scroll into view next frame.
+    gallery_scroll_to: Option<usize>,
     // --- settings / denoise ---
     save_denoise: bool,     // run SCUNet AI denoise before the full-res render
     zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
@@ -861,6 +879,10 @@ impl Default for AutoshopApp {
             base_cache: Vec::new(),
             saved_recipe: EditRecipe::default(),
             nav_stash: HashMap::new(),
+            pasted_open: None,
+            confirm_quit: false,
+            mask_name_buf: None,
+            gallery_scroll_to: None,
             region: None,
             region_drag: None,
             paint_mode: false,
@@ -1162,15 +1184,17 @@ fn big_decode_gate() -> &'static std::sync::Mutex<()> {
 }
 
 /// Where the persistent 160px thumbnail for `src` lives, or `None` when the
-/// source can't be stat'ed (no stable key → no caching). The directory is
-/// derived at runtime (%LOCALAPPDATA%, else the system temp dir) and the key
-/// hashes absolute path + mtime + size, so an edited/replaced source misses.
+/// source can't be stat'ed (no stable key → no caching). Rooted at the same
+/// per-user store as develops/settings (`store_root()` honours the
+/// AUTOSHOP_DATA_DIR override — a portable setup must not split its data
+/// across two roots) and keyed by absolute path + mtime + size, so an
+/// edited/replaced source misses. DefaultHasher is fine HERE (unlike the
+/// develop keys): a hash that drifts across Rust releases only costs a
+/// one-time re-decode.
 fn thumb_cache_file(src: &std::path::Path) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let meta = std::fs::metadata(src).ok()?;
-    let dir = std::env::var_os("LOCALAPPDATA")
-        .map(|d| PathBuf::from(d).join("autoshop").join("thumbs"))
-        .unwrap_or_else(|| std::env::temp_dir().join("autoshop-thumbs"));
+    let dir = autoshop::store::store_root().join("thumbs");
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf()).hash(&mut h);
     meta.modified().ok().hash(&mut h);
@@ -1309,43 +1333,10 @@ fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
     }
 }
 
-/// Before a PROGRAMMATIC writer (AI Analyze, reverse-fit) replaces an existing
-/// saved develop, snapshot it to the next `v<N>.recipe.json` in the photo's
-/// develop dir so an explicit Ctrl+S save can never be silently destroyed.
-/// Explicit saves overwrite without backup — the user asked for that one.
-///
-/// `Ok(Some(n))` = backed up as v<n>; `Ok(None)` = nothing to back up (no
-/// existing save, or identical content); `Err` = an existing save COULD NOT
-/// be snapshotted — the caller must then leave it untouched, because
-/// overwriting without the promised backup is exactly the silent destruction
-/// this function exists to prevent.
-fn backup_saved_develop(
-    src: &std::path::Path,
-    incoming: &EditRecipe,
-) -> std::io::Result<Option<u32>> {
-    let rj = autoshop::store::recipe_target(src);
-    let text = match std::fs::read_to_string(&rj) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        // Unreadable ≠ absent (lock/permissions): refusing beats overwriting
-        // a save we could not even look at.
-        Err(e) => return Err(e),
-    };
-    if let Ok(mut existing) = serde_json::from_str::<EditRecipe>(&text) {
-        // The on-disk copy names rasters by bare file name while `incoming`
-        // carries absolute paths — resolve before comparing, or every
-        // raster-bearing rewrite would look "different" and snapshot itself.
-        if let Some(base) = rj.parent() {
-            autoshop::store::resolve_mask_paths(&mut existing, base);
-        }
-        if existing == *incoming {
-            return Ok(None); // rewriting the same content needs no snapshot
-        }
-    }
-    let n = autoshop::store::list_versions(src).last().copied().unwrap_or(0) + 1;
-    std::fs::rename(&rj, autoshop::store::version_target(src, n))?;
-    Ok(Some(n))
-}
+// The programmatic-overwrite backup gate lives in the LIB now
+// (autoshop::store::backup_saved_develop) so the web and CLI enforce the same
+// "never destroy an explicit save without a v<N> snapshot" contract — copy
+// semantics + frozen rasters; see store.rs for the full contract.
 
 impl AutoshopApp {
     fn open_path(&mut self, path: PathBuf) {
@@ -1612,7 +1603,11 @@ impl AutoshopApp {
     fn save_version(&mut self) {
         let lang = self.lang;
         let Some(src) = self.src_path.clone() else { return };
-        let n = self.versions.last().map_or(1, |m| m + 1);
+        // Number from DISK, not the cached list: the auto-backup writes v<N>
+        // through the same counter, and a failure path that skipped
+        // refresh_versions used to let this button compute the same N and
+        // overwrite the only remaining copy of a backed-up save.
+        let n = autoshop::store::list_versions(&src).last().map_or(1, |m| m + 1);
         match autoshop::pipeline::write_recipe(&src, &self.recipe, Some(Self::version_path(&src, n))) {
             Ok(p) => {
                 self.refresh_versions();
@@ -1713,12 +1708,19 @@ impl AutoshopApp {
         }
     }
 
-    /// Recipe replaced wholesale (undo/redo/Reset/version load): the derived
-    /// display state must follow, or the panel keeps showing an AI rationale /
-    /// verdict that describes a recipe no longer on screen.
+    /// Recipe replaced wholesale (undo/redo/Reset/version load/AI apply): the
+    /// derived display state must follow, or the panel keeps showing an AI
+    /// rationale / verdict that describes a recipe no longer on screen — and
+    /// an ARMED index-carrying tool (range sampler, ↻ Redraw) would fire into
+    /// whatever mask now happens to sit at its remembered index.
     fn resync_recipe_display(&mut self) {
         self.rationale = self.recipe.rationale.clone();
         self.verdict = None;
+        self.range_picking = None;
+        self.placing_mask = None;
+        self.place_start = None;
+        self.mask_drag = None;
+        self.mask_name_buf = None; // stale (index, text) must not cross-commit
     }
 
     fn undo(&mut self) {
@@ -1822,7 +1824,7 @@ impl AutoshopApp {
             return;
         }
         self.settings.fetching_models = true;
-        self.settings.status = "fetching models…".into();
+        self.settings.status = tr(self.lang, "fetching models…").into();
         let form_key = self.settings.image_api_key.trim().to_string();
         let form_base = self.settings.image_base_url.trim().to_string();
         // spawn_worker's catch_unwind guarantees the UI's `fetching_models`
@@ -1845,6 +1847,138 @@ impl AutoshopApp {
         );
     }
 
+    /// The quit-confirm layer (in-app egui window). Lists what quitting would
+    /// lose; 「Save all & quit」 writes each pending develop exactly like
+    /// Ctrl+S (explicit user save → no backup gate), 「Discard & quit」 makes
+    /// the state clean so the close guard lets the next close through.
+    fn confirm_quit_layer(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
+        // Everything quitting would lose: the stash + the open photo's canvas
+        // (the live canvas outranks its own stale stash entry).
+        let mut pending: Vec<(PathBuf, EditRecipe)> =
+            self.nav_stash.iter().map(|(p, r)| (p.clone(), r.clone())).collect();
+        if let Some(p) = self.src_path.clone()
+            && self.recipe != self.saved_recipe
+        {
+            pending.retain(|(q, _)| q != &p);
+            pending.push((p, self.recipe.clone()));
+        }
+        if pending.is_empty() {
+            // Saved (or discarded) since the guard fired — nothing to protect.
+            self.confirm_quit = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        let mut open = true;
+        let mut save_quit = false;
+        let mut discard_quit = false;
+        let mut cancel = false;
+        egui::Window::new(tr(lang, "Unsaved edits"))
+            .id(egui::Id::new("confirm_quit"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(trf(
+                    lang,
+                    "{n} photo(s) have edits that were never saved:",
+                    &[("n", &pending.len().to_string())],
+                ));
+                for (p, _) in pending.iter().take(8) {
+                    ui.label(
+                        egui::RichText::new(autoshop::pipeline::stem(p)).small().weak(),
+                    );
+                }
+                if pending.len() > 8 {
+                    ui.label(egui::RichText::new("…").small().weak());
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    save_quit = ui.button(tr(lang, "Save all & quit")).clicked();
+                    discard_quit = ui.button(tr(lang, "Discard & quit")).clicked();
+                    cancel = ui.button(tr(lang, "Cancel")).clicked();
+                });
+            });
+        if save_quit {
+            let mut failed: Option<String> = None;
+            for (p, r) in &pending {
+                let res = autoshop::pipeline::write_recipe(p, r, None).and_then(|_| {
+                    if autoshop::decode::is_raw(p) {
+                        autoshop::pipeline::write_xmp(p, r).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(e) = res {
+                    failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                    break;
+                }
+            }
+            match failed {
+                None => {
+                    self.nav_stash.clear();
+                    self.saved_recipe = self.recipe.clone();
+                    self.confirm_quit = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Some(e) => {
+                    // Stay open: a failed save on quit must never quietly quit.
+                    let t = trf(lang, "save failed: {err}", &[("err", &e)]);
+                    self.status = t.clone();
+                    self.toast(ToastKind::Error, t);
+                    self.confirm_quit = false;
+                }
+            }
+        } else if discard_quit {
+            self.nav_stash.clear();
+            self.saved_recipe = self.recipe.clone();
+            self.confirm_quit = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if cancel || !open {
+            self.confirm_quit = false;
+        }
+    }
+
+    /// Migrate every gallery photo's sidecars from a user-picked pre-store
+    /// ./out folder (Settings button). Worker-side: one read_dir per photo
+    /// over a possibly huge folder is I/O the UI thread must not pay.
+    fn start_import_legacy(&mut self, dir: PathBuf) {
+        if self.busy {
+            return;
+        }
+        let lang = self.lang;
+        let photos = self.gallery.clone();
+        if photos.is_empty() {
+            self.status = tr(
+                lang,
+                "Open a folder first — import migrates the photos currently in the gallery",
+            )
+            .into();
+            return;
+        }
+        self.busy = true;
+        self.status = trf(
+            lang,
+            "Importing develops from {path} …",
+            &[("path", &dir.display().to_string())],
+        );
+        self.spawn_worker(
+            move || {
+                let n = photos
+                    .iter()
+                    .filter(|p| autoshop::store::migrate_legacy_from(&dir, p))
+                    .count();
+                Msg::LegacyImported(Ok(trf(
+                    lang,
+                    "Imported saved develops for {n} photo(s) from {path}",
+                    &[("n", &n.to_string()), ("path", &dir.display().to_string())],
+                )))
+            },
+            |e| Msg::LegacyImported(Err(e)),
+        );
+    }
+
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let mut do_save = false;
         let mut do_fetch = false;
@@ -1854,7 +1988,7 @@ impl AutoshopApp {
         ui.label(
             egui::RichText::new(tr(
                 lang,
-                "Language & Reverse-fit apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json (gitignored) and apply to the next Analyze.",
+                "Language & Reverse-fit apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next Analyze.",
             ))
             .weak()
             .small(),
@@ -1876,6 +2010,30 @@ impl AutoshopApp {
             lang,
             "On reverse-fit, auto-split the sky on both sides and colour-correct sky↔sky separately (exposure / recolour gains / saturation, bitmap mask). Masks are rendered by the local engine; the LR sidecar carries only the global part. Needs the python segmentation deps (transformers + torch); falls back to pure global reverse-fit when unavailable, noting it in the rationale.",
         ));
+        ui.separator();
+        // The develop store is otherwise invisible (hashed AppData folders) —
+        // this is the one place that names it and rescues pre-store saves.
+        ui.heading(tr(lang, "Develop store"));
+        ui.label(
+            egui::RichText::new(autoshop::store::store_root().display().to_string())
+                .small()
+                .weak(),
+        )
+        .on_hover_text(tr(
+            lang,
+            "Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHOP_DATA_DIR environment variable.",
+        ));
+        if ui
+            .button(tr(lang, "Import develops from an old ./out folder…"))
+            .on_hover_text(tr(
+                lang,
+                "Saves made before v0.13 lived in a ./out folder next to wherever the app was launched. If your old edits are missing, point this at that folder — its recipes / XMP / versions migrate into the develop store.",
+            ))
+            .clicked()
+            && let Some(dir) = rfd::FileDialog::new().pick_folder()
+        {
+            self.start_import_legacy(dir);
+        }
         {
             let f = &mut self.settings;
             ui.separator();
@@ -2122,6 +2280,12 @@ impl AutoshopApp {
             .is_some_and(|base| Arc::ptr_eq(base, &frame.base))
             && self.recipe == frame.recipe;
         if !current {
+            // The frame was solved for a recipe that changed mid-flight. The
+            // redispatch gate is `dirty && !develop_inflight`, so a caller
+            // that mutated the recipe WITHOUT setting dirty (historically the
+            // crop path) would freeze the preview here forever — always
+            // re-arm, the gate coalesces to a single fresh develop.
+            self.dirty = true;
             ctx.request_repaint();
             return;
         }
@@ -2683,6 +2847,15 @@ impl AutoshopApp {
             return;
         }
         let lang = self.lang;
+        // Same library-read-only gate every CLI export runs: without it,
+        // Download…'s save dialog was the one door that could drop a
+        // developed.tif beside the source RAW.
+        if let Err(e) = autoshop::pipeline::guard_readonly(&out, &path) {
+            let t = e.to_string();
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
+            return;
+        }
         self.busy = true;
         self.status = if self.save_denoise {
             trf(
@@ -2892,7 +3065,8 @@ impl AutoshopApp {
         self.start_render_to(out);
     }
 
-    /// Write the Lightroom / Camera-Raw XMP sidecar to ./out (RAW sources only).
+    /// Save this photo's develop to the central store: recipe.json for every
+    /// source type + the Lightroom / Camera-Raw XMP projection for RAW.
     /// An XMP reproduces a look via develop PARAMETERS; a Generated variant's
     /// look lives in its pixels, not the recipe, so there's nothing faithful to
     /// write — steer the user to 反推 (which produces a Fitted variant whose XMP
@@ -2949,7 +3123,7 @@ impl AutoshopApp {
                     self.saved_recipe = EditRecipe::default();
                     self.nav_stash.remove(&path);
                     self.status = if removed {
-                        tr(lang, "neutral recipe — saved edits cleared (sidecars removed)").into()
+                        tr(lang, "neutral recipe — saved edits cleared (saved files removed)").into()
                     } else {
                         tr(lang, "neutral recipe — nothing to save").into()
                     };
@@ -3003,12 +3177,13 @@ impl AutoshopApp {
                     )
                 };
                 // An in-place heal/clone/fill bakes pixels into the variant's
-                // origin raster — the sidecar cannot carry them (recipe/XMP are
-                // parametric), so a bare "saved" would overpromise the restore.
+                // origin raster — the saved develop cannot carry them (recipe/
+                // XMP are parametric), so a bare "saved" would overpromise the
+                // restore.
                 if self.active_variant().is_some_and(|v| v.origin.is_some()) {
                     s.push_str(tr(
                         lang,
-                        " · note: retouched pixels live in the baked master, not the sidecar — Export to keep them",
+                        " · note: retouched pixels live in the baked master, not the saved develop — Export to keep them",
                     ));
                 }
                 self.status = s;
@@ -3070,11 +3245,17 @@ impl AutoshopApp {
         }
         // If the open photo is one of the targets, take the paste live in the
         // editor too (undo-able through the usual committed-snapshot step).
+        // Remember the pair so Msg::Pasted can advance the ● baseline: the
+        // worker writes this exact recipe to the open photo's store, so
+        // leaving `saved_recipe` behind kept a false "● unsaved" lit for
+        // edits that were already on disk.
+        self.pasted_open = None;
         if let Some(open) = &self.src_path
             && targets.iter().any(|t| t == open)
         {
             self.recipe = recipe.clone();
             self.dirty = true;
+            self.pasted_open = Some((open.clone(), recipe.clone()));
         }
         let lang = self.lang; // localise the UI status AND the worker's result strings
         self.busy = true;
@@ -3110,7 +3291,7 @@ impl AutoshopApp {
                     if errs.is_empty() {
                         Ok(trf(
                             lang,
-                            "Recipe pasted to {ok} photos ({xmp} XMP) → ./out",
+                            "Recipe pasted to {ok} photos ({xmp} XMP) → develop store",
                             &[("ok", &okn.to_string()), ("xmp", &xmpn.to_string())],
                         ))
                     } else {
@@ -3238,15 +3419,15 @@ impl AutoshopApp {
                                 }
                                 SavedDevelop::NoopOnly => {
                                     open_note = Some(
-                                        tr(lang, "sidecar exists but holds no effective edits")
+                                        tr(lang, "a saved develop exists but holds no effective edits")
                                             .into(),
                                     );
                                 }
                                 SavedDevelop::Nothing => {}
                             }
-                            // The sidecar is the ● baseline; a canvas stashed
-                            // when the user navigated away THIS session outranks
-                            // it — that stash is their newest work.
+                            // The saved develop is the ● baseline; a canvas
+                            // stashed when the user navigated away THIS session
+                            // outranks it — that stash is their newest work.
                             self.saved_recipe = recipe.clone();
                             let mut from_stash = false;
                             if let Some(st) =
@@ -3346,8 +3527,10 @@ impl AutoshopApp {
                 Msg::Analyzed(boxed) => match *boxed {
                     Ok((recipe, verdict)) => {
                         self.recipe = recipe;
+                        // Wholesale replacement: disarm index-carrying tools +
+                        // refresh rationale, THEN install the fresh verdict.
+                        self.resync_recipe_display();
                         self.verdict = Some(format!("{:?} — {}", verdict.decision, verdict.reasons.join("; ")));
-                        self.rationale = self.recipe.rationale.clone();
                         self.dirty = true;
                         self.busy = false;
                         // Persist like the CLI and the web do — the badge,
@@ -3359,7 +3542,7 @@ impl AutoshopApp {
                             // The backup gate comes FIRST: if the existing save
                             // cannot be snapshotted, it is not overwritten —
                             // the analyze result stays on the canvas only.
-                            Some(p) => match backup_saved_develop(&p, &self.recipe) {
+                            Some(p) => match autoshop::store::backup_saved_develop(&p, Some(&self.recipe)) {
                                 Err(e) => {
                                     let t = trf(
                                         lang,
@@ -3370,15 +3553,12 @@ impl AutoshopApp {
                                     t
                                 }
                                 Ok(backed) => {
-                                    let write = autoshop::pipeline::write_recipe(&p, &self.recipe, None)
-                                        .and_then(|rp| {
-                                            if autoshop::decode::is_raw(&p) {
-                                                autoshop::pipeline::write_xmp(&p, &self.recipe)
-                                            } else {
-                                                Ok(rp)
-                                            }
-                                        });
-                                    match write {
+                                    // The recipe write ALONE decides the saved
+                                    // state (same rule as save_xmp): once it
+                                    // lands, reopening restores it regardless
+                                    // of the XMP — so the ● baseline follows
+                                    // it even when the XMP half fails.
+                                    match autoshop::pipeline::write_recipe(&p, &self.recipe, None) {
                                         Ok(_) => {
                                             self.edited_badge.clear();
                                             self.saved_recipe = self.recipe.clone();
@@ -3386,20 +3566,43 @@ impl AutoshopApp {
                                             if backed.is_some() {
                                                 self.refresh_versions();
                                             }
-                                            match backed {
+                                            let mut s = match backed {
                                                 Some(n) => trf(
                                                     lang,
                                                     "AI develop applied · saved (previous save backed up as v{n})",
                                                     &[("n", &n.to_string())],
                                                 ),
-                                                None => tr(lang, "AI develop applied · saved to recipe.json").into(),
+                                                None => tr(lang, "AI develop applied · saved to recipe.json").to_string(),
+                                            };
+                                            if autoshop::decode::is_raw(&p)
+                                                && let Err(e) =
+                                                    autoshop::pipeline::write_xmp(&p, &self.recipe)
+                                            {
+                                                let t = trf(
+                                                    lang,
+                                                    "recipe saved — but the Lightroom XMP failed: {err}",
+                                                    &[("err", &e.to_string())],
+                                                );
+                                                self.toast(ToastKind::Error, t.clone());
+                                                s = t;
                                             }
+                                            s
                                         }
-                                        Err(e) => trf(
-                                            lang,
-                                            "AI develop applied — but saving the sidecar failed: {err}",
-                                            &[("err", &e.to_string())],
-                                        ),
+                                        Err(e) => {
+                                            // The old save was already COPIED
+                                            // to v<N>, so nothing is lost —
+                                            // but this photo's working save
+                                            // failed, and a status line alone
+                                            // scrolls away.
+                                            let t = trf(
+                                                lang,
+                                                "AI develop applied — but saving the sidecar failed: {err}",
+                                                &[("err", &e.to_string())],
+                                            );
+                                            self.toast(ToastKind::Error, t.clone());
+                                            self.refresh_versions();
+                                            t
+                                        }
                                     }
                                 }
                             },
@@ -3433,10 +3636,42 @@ impl AutoshopApp {
                         // SAME file, so re-select the mask that already
                         // references it instead of stacking a duplicate (whose
                         // sliders would all be 0 — an inert-looking copy).
-                        let existing = self.recipe.masks.iter().position(|m| {
-                            matches!(&m.mask,
-                                autoshop::recipe::MaskGeometry::Bitmap { path: p } if *p == path_s)
-                        });
+                        // Compare by RASTER NAME, not full string: the stored
+                        // reference may be bare ("mask-sky.png"), legacy
+                        // ("out/<stem>.mask-sky.png") or absolute, while
+                        // `path` is the absolute target — the kind-name is
+                        // unique per photo per target by construction. On a
+                        // hit, re-point the stored path at the freshly written
+                        // raster so a stale reference is revived instead of
+                        // stranding the user's sliders on a dead mask.
+                        let new_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let stem_prefix = self
+                            .src_path
+                            .as_deref()
+                            .map(|p| format!("{}.", autoshop::pipeline::stem(p)));
+                        let existing = self.recipe.masks.iter_mut().enumerate().find_map(
+                            |(i, m)| match &mut m.mask {
+                                autoshop::recipe::MaskGeometry::Bitmap { path: p } => {
+                                    let stored = std::path::Path::new(p.as_str())
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or_default();
+                                    let bare = stem_prefix
+                                        .as_deref()
+                                        .and_then(|sp| stored.strip_prefix(sp))
+                                        .unwrap_or(stored);
+                                    (bare == new_name).then(|| {
+                                        *p = path_s.clone();
+                                        i
+                                    })
+                                }
+                                _ => None,
+                            },
+                        );
                         match existing {
                             Some(i) => self.sel_mask = Some(i),
                             None => {
@@ -3564,14 +3799,19 @@ impl AutoshopApp {
                 Msg::Fitted(boxed) => match *boxed {
                     // Either way the worker may have persisted a recipe.json
                     // (an Err can land after that write) — recompute badges.
-                    Ok((recipe, note)) => {
+                    Ok((recipe, note, persisted)) => {
                         self.edited_badge.clear();
-                        // The sidecar now holds the fit (and a v<N> snapshot
-                        // may have appeared): resync the ● baseline + versions.
-                        self.saved_recipe = recipe.clone();
-                        self.nav_stash.remove(
-                            &self.src_path.clone().unwrap_or_default(),
-                        );
+                        // Advance the ● baseline ONLY when the store actually
+                        // holds the fit. A backup-gate refusal means nothing
+                        // was written: leaving the baseline alone keeps
+                        // ● unsaved lit and lets nav_stash protect the fit —
+                        // the ordinary unsaved-edit path takes over.
+                        if persisted {
+                            self.saved_recipe = recipe.clone();
+                            self.nav_stash.remove(
+                                &self.src_path.clone().unwrap_or_default(),
+                            );
+                        }
                         self.refresh_versions();
                         // The generated look, solved back into an editable recipe,
                         // becomes a NEW「反推」variant: base = the source neutral
@@ -3592,6 +3832,9 @@ impl AutoshopApp {
                     }
                     Err(e) => {
                         self.edited_badge.clear();
+                        // The pre-fit snapshot may exist even when the fit
+                        // errored — keep the Versions list truthful.
+                        self.refresh_versions();
                         self.fail(tr(lang, "Reverse-fit failed"), e);
                     }
                 },
@@ -3610,8 +3853,33 @@ impl AutoshopApp {
                     // recompute the gallery badges either way.
                     self.edited_badge.clear();
                     match res {
+                        Ok(s) => {
+                            // The open photo's paste is on disk: advance the
+                            // ● baseline so the marker doesn't cry wolf. Only
+                            // on FULL success — a partial failure could be
+                            // exactly the open photo, which must keep warning.
+                            // Guard on the photo still being open, and compare
+                            // nothing: edits made while the worker ran leave
+                            // recipe != saved_recipe, correctly re-lighting ●.
+                            if let Some((p, r)) = self.pasted_open.take()
+                                && self.src_path.as_ref() == Some(&p)
+                            {
+                                self.saved_recipe = r;
+                                self.nav_stash.remove(&p);
+                            }
+                            self.done(s);
+                        }
+                        Err(e) => {
+                            self.pasted_open = None;
+                            self.fail(tr(lang, "batch paste"), e);
+                        }
+                    }
+                }
+                Msg::LegacyImported(res) => {
+                    self.edited_badge.clear(); // imported sidecars light ● badges
+                    match res {
                         Ok(s) => self.done(s),
-                        Err(e) => self.fail(tr(lang, "batch paste"), e),
+                        Err(e) => self.fail(tr(lang, "import failed"), e),
                     }
                 }
                 Msg::Models(res) => match res {
@@ -3626,15 +3894,23 @@ impl AutoshopApp {
                             .filter(|s| autoshop::openai_models::is_image_model(s))
                             .cloned()
                             .collect();
-                        self.settings.status =
-                            format!("fetched {} models ({} chat · {} image)", ids.len(), chat.len(), imgs.len());
+                        self.settings.status = trf(
+                            lang,
+                            "fetched {n} models ({chat} chat · {img} image)",
+                            &[
+                                ("n", &ids.len().to_string()),
+                                ("chat", &chat.len().to_string()),
+                                ("img", &imgs.len().to_string()),
+                            ],
+                        );
                         self.settings.chat_choices = chat;
                         self.settings.image_gen_choices = imgs;
                         self.settings.fetching_models = false;
                     }
                     Err(e) => {
                         self.settings.fetching_models = false;
-                        self.settings.status = format!("fetch failed: {e}");
+                        self.settings.status =
+                            trf(lang, "fetch failed: {err}", &[("err", &e.to_string())]);
                     }
                 },
             }
@@ -3657,8 +3933,38 @@ impl AutoshopApp {
         max: f32,
         default: f32,
     ) -> bool {
+        Self::slider_impl(ui, lang, label, value, min, max, default, false)
+    }
+
+    /// Log-scaled variant for values whose useful band is a small fraction of
+    /// the range — Temp (K): 2000–40000 linear puts 4000–8000 K (where nearly
+    /// every photo lives) on ~40 px of a 320 px track, making a routine 100 K
+    /// nudge sub-pixel.
+    fn slider_log(
+        ui: &mut egui::Ui,
+        lang: Lang,
+        label: &str,
+        value: &mut f32,
+        min: f32,
+        max: f32,
+        default: f32,
+    ) -> bool {
+        Self::slider_impl(ui, lang, label, value, min, max, default, true)
+    }
+
+    #[allow(clippy::too_many_arguments)] // private impl detail shared by two thin public shapes
+    fn slider_impl(
+        ui: &mut egui::Ui,
+        lang: Lang,
+        label: &str,
+        value: &mut f32,
+        min: f32,
+        max: f32,
+        default: f32,
+        logarithmic: bool,
+    ) -> bool {
         let resp = ui
-            .add(egui::Slider::new(value, min..=max).text(label))
+            .add(egui::Slider::new(value, min..=max).logarithmic(logarithmic).text(label))
             .on_hover_text(tr(lang, "double-click resets"));
         if resp.double_clicked() && *value != default {
             *value = default;
@@ -3706,7 +4012,7 @@ impl AutoshopApp {
                 let n_s = n.to_string();
                 if ui
                     .small_button(trf(lang, "⇩ Paste to selected ({n})", &[("n", &n_s)]))
-                    .on_hover_text(tr(lang, "Writes a ./out recipe JSON for each; RAW also gets an XMP sidecar. Leaves library files untouched, renders nothing."))
+                    .on_hover_text(tr(lang, "Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing."))
                     .clicked()
                 {
                     self.start_paste();
@@ -3718,7 +4024,7 @@ impl AutoshopApp {
                     .small_button(trf(lang, "🖼 Render selected ({n})", &[("n", &n_s)]))
                     .on_hover_text(tr(
                         lang,
-                        "Each renders by its own ./out recipe (neutral develop if none) → ./out/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
+                        "Each renders by its own saved develop from the store (neutral develop if none) → ./out/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
                     ))
                     .clicked()
                 {
@@ -3752,8 +4058,16 @@ impl AutoshopApp {
         let mut to_request: Vec<usize> = Vec::new();
         let mut visible: std::ops::Range<usize> = 0..0;
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
+        let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(i) = self.gallery_scroll_to.take() {
+            // Keyboard navigation moved the selection: jump the viewport so the
+            // highlighted row sits roughly centred. show_rows only lays out
+            // visible rows, so scroll_to_me can never reach an off-screen row —
+            // the offset (rows are fixed-height) is the reliable route.
+            let target = (i as f32 * GALLERY_ROW_H - ui.available_height() * 0.4).max(0.0);
+            scroll = scroll.vertical_scroll_offset(target);
+        }
+        scroll
             .show_rows(ui, GALLERY_ROW_H, count, |ui, range| {
                 visible = range.clone();
                 for i in range {
@@ -3867,6 +4181,34 @@ impl AutoshopApp {
         self.histogram_ui(ui);
         ui.add_space(4.0);
 
+        // The AI's answer belongs where the user looks after Analyze — the top
+        // of the develop panel — not several screens down a scroll area below
+        // every adjustment section. Open exactly while a verdict is present.
+        if self.verdict.is_some() || !self.rationale.is_empty() {
+            egui::CollapsingHeader::new(section_title(tr(lang, "AI verdict"), self.verdict.is_some()))
+                .id_salt("sec_verdict")
+                .default_open(true)
+                .show(ui, |ui| {
+                    if let Some(v) = &self.verdict {
+                        // Accept reads calm; anything else (Revise/Reject)
+                        // gets the warn colour so it can't be skimmed past.
+                        let col = if v.starts_with("Accept") {
+                            ui.visuals().strong_text_color()
+                        } else {
+                            ui.visuals().warn_fg_color
+                        };
+                        ui.label(egui::RichText::new(v).color(col));
+                    }
+                    if !self.rationale.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!("“{}”", self.rationale))
+                                .italics()
+                                .weak(),
+                        );
+                    }
+                });
+        }
+
         // Lightroom-style grouping: a wall of 16 sliders scans terribly; four
         // titled sections (tone open, the rest by activity) scan at a glance.
         // A section whose values are non-neutral shows a ● so a collapsed
@@ -3885,8 +4227,19 @@ impl AutoshopApp {
                     || !r.blue_curve.is_empty(),
             )
         };
+        let tone_active = {
+            let r = &self.recipe;
+            r.temperature_k.is_some()
+                || r.tint != 0.0
+                || r.exposure_ev != 0.0
+                || r.contrast != 0.0
+                || r.highlights != 0.0
+                || r.shadows != 0.0
+                || r.whites != 0.0
+                || r.blacks != 0.0
+        };
 
-        egui::CollapsingHeader::new(tr(lang, "Tone & WB"))
+        egui::CollapsingHeader::new(section_title(tr(lang, "Tone & WB"), tone_active))
             .id_salt("sec_tone")
             .default_open(true)
             .show(ui, |ui| {
@@ -3917,7 +4270,7 @@ impl AutoshopApp {
                     }
                 });
                 if let Some(mut k) = self.recipe.temperature_k
-                    && Self::slider(ui, lang, tr(lang, "Temp (K)"), &mut k, 2000.0, 40000.0, 5500.0)
+                    && Self::slider_log(ui, lang, tr(lang, "Temp (K)"), &mut k, 2000.0, 40000.0, 5500.0)
                 {
                     self.recipe.temperature_k = Some(k);
                     changed = true;
@@ -4055,8 +4408,12 @@ impl AutoshopApp {
                                 ui.selectable_value(&mut self.crop_aspect, i, tr(lang, name));
                             }
                         });
-                    if ui.button(tr(lang, "Clear")).clicked() {
-                        self.recipe.crop = None;
+                    if ui.button(tr(lang, "Clear")).clicked()
+                        && self.recipe.crop.take().is_some()
+                    {
+                        // Through the panel's own change path: clamp + dirty,
+                        // so the crop-restricted histogram/clipping refresh.
+                        changed = true;
                     }
                 });
                 // Straighten: rotate + auto-crop (engine rotate_straighten);
@@ -4252,8 +4609,46 @@ impl AutoshopApp {
             if let Some(i) = self.sel_mask.filter(|&i| i < self.recipe.masks.len()) {
                 ui.separator();
                 ui.horizontal(|ui| {
+                    // The name edits a LOCAL buffer and commits one recipe
+                    // mutation on focus loss (Enter included) — binding the
+                    // TextEdit straight to the recipe pushed one undo step per
+                    // keystroke, so "sky gradient" burned 12 history slots and
+                    // Ctrl+Z walked the name back letter by letter. When the
+                    // selection jumps to another row mid-edit, the pending
+                    // rename commits to ITS OWN mask first — but only while
+                    // that mask's name still equals the seed-time snapshot, so
+                    // index shifts (delete/reorder) can never cross-commit.
+                    if self.mask_name_buf.as_ref().is_none_or(|(j, ..)| *j != i) {
+                        if let Some((j, orig, buf)) = self.mask_name_buf.take()
+                            && let Some(prev) = self.recipe.masks.get_mut(j)
+                            && prev.name == orig
+                            && buf != orig
+                        {
+                            prev.name = buf;
+                            changed = true;
+                        }
+                        let cur = self.recipe.masks[i].name.clone();
+                        self.mask_name_buf = Some((i, cur.clone(), cur));
+                    }
+                    let name_resp = {
+                        let buf = &mut self.mask_name_buf.as_mut().expect("seeded above").2;
+                        ui.add(
+                            egui::TextEdit::singleline(buf)
+                                .desired_width(110.0)
+                                .hint_text(tr(lang, "Name")),
+                        )
+                    };
+                    if name_resp.lost_focus()
+                        && let Some((_, orig, buf)) = self.mask_name_buf.as_mut()
+                        && *buf != self.recipe.masks[i].name
+                    {
+                        self.recipe.masks[i].name = buf.clone();
+                        // Re-baseline the seed: a SECOND rename in this row
+                        // must still cross-commit correctly on a row switch.
+                        *orig = buf.clone();
+                        changed = true;
+                    }
                     let m = &mut self.recipe.masks[i];
-                    ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(110.0).hint_text(tr(lang, "Name")));
                     // Raster masks have no drag-to-place geometry — no 重画.
                     let kind = match m.mask {
                         MaskGeometry::Linear { .. } => Some(MaskKind::Linear),
@@ -4452,16 +4847,44 @@ impl AutoshopApp {
                     self.save_version();
                 }
                 let mut load: Option<u32> = None;
+                let mut delete: Option<u32> = None;
                 for &n in &self.versions {
                     ui.horizontal(|ui| {
                         ui.label(format!("v{n}"));
                         if ui.small_button(tr(lang, "Load")).on_hover_text(tr(lang, "Replace current parameters (one Ctrl+Z to undo)")).clicked() {
                             load = Some(n);
                         }
+                        if ui
+                            .small_button("🗑")
+                            .on_hover_text(tr(lang, "Delete this snapshot (its frozen mask rasters go with it)"))
+                            .clicked()
+                        {
+                            delete = Some(n);
+                        }
                     });
                 }
                 if let Some(n) = load {
                     self.load_version(n);
+                }
+                if let Some(n) = delete
+                    && let Some(src) = self.src_path.clone()
+                {
+                    match autoshop::store::delete_version(&src, n) {
+                        Ok(()) => {
+                            self.refresh_versions();
+                            self.status =
+                                trf(lang, "Version v{n} deleted", &[("n", &n.to_string())]);
+                        }
+                        Err(e) => {
+                            let t = trf(
+                                lang,
+                                "Delete v{n} failed: {err}",
+                                &[("n", &n.to_string()), ("err", &e.to_string())],
+                            );
+                            self.status = t.clone();
+                            self.toast(ToastKind::Error, t);
+                        }
+                    }
                 }
                 if n_ver == 0 {
                     ui.label(
@@ -5176,8 +5599,15 @@ impl AutoshopApp {
                 c = [x.min(ax), y.min(ay), x.max(ax), y.max(ay)];
             }
             if c[2] - c[0] >= 0.05 && c[3] - c[1] >= 0.05 {
-                self.recipe.crop =
-                    Some(Crop { left: c[0], top: c[1], right: c[2], bottom: c[3] });
+                let next = Some(Crop { left: c[0], top: c[1], right: c[2], bottom: c[3] });
+                // The crop IS a develop input: build_preview restricts the
+                // histogram + clipping to it, so a crop change that never sets
+                // `dirty` leaves both describing the OLD crop until some
+                // unrelated slider is touched.
+                if self.recipe.crop != next {
+                    self.recipe.crop = next;
+                    self.dirty = true;
+                }
             }
         }
         if resp.drag_stopped() {
@@ -5766,17 +6196,34 @@ impl AutoshopApp {
         };
         self.spawn_worker(
             move || {
-                let res = (|| -> anyhow::Result<(EditRecipe, String)> {
+                let res = (|| -> anyhow::Result<(EditRecipe, String, bool)> {
                     let target = autoshop::decode::load_image(&tgt)?;
+                    // Snapshot the existing save BEFORE the fit runs: the
+                    // zoned pass rewrites mask-zone-sky.png in place, so a
+                    // snapshot taken afterwards would freeze the NEW raster
+                    // under the OLD recipe — the v<N> could no longer
+                    // reproduce the look it promises. Copy semantics make
+                    // this safe even if the fit then fails (the working
+                    // recipe.json is untouched; at worst an extra snapshot
+                    // exists). `None` = unconditional: the fit result is not
+                    // known yet, and a fit is never a byte-identical rewrite.
+                    let backed = match &src_path {
+                        Some(p) => autoshop::store::backup_saved_develop(p, None),
+                        None => Ok(None),
+                    };
                     // Zoned sky pass only when enabled AND the photo has a real
-                    // path (the mask raster needs a stem). The raster is named
-                    // mask-ZONE-sky — distinct from 「AI select sky」's
-                    // mask-sky.png on purpose: they used to share one file, and
-                    // the fit's cleanup deleted a raster an existing bitmap
-                    // mask still referenced. Everything that can go wrong
-                    // inside degrades to the global fit with a rationale note —
-                    // never an error.
-                    let rep = match (zoned, &src_path) {
+                    // path (the mask raster needs a stem) AND the snapshot
+                    // above succeeded — the zoned pass REWRITES the live
+                    // mask-zone-sky.png, so running it past a failed backup
+                    // would mutate the saved develop's raster while we refuse
+                    // to touch its recipe (the same contract, one file over).
+                    // The raster is named mask-ZONE-sky — distinct from
+                    // 「AI select sky」's mask-sky.png on purpose: they used to
+                    // share one file, and the fit's cleanup deleted a raster an
+                    // existing bitmap mask still referenced. Everything that
+                    // can go wrong inside degrades to the global fit with a
+                    // rationale note — never an error.
+                    let rep = match (zoned && backed.is_ok(), &src_path) {
                         (true, Some(p)) => {
                             let cfg = autoshop::config::Config::load();
                             let seg =
@@ -5801,20 +6248,38 @@ impl AutoshopApp {
                             " · includes sky-zone correction (adjustable in the mask panel; XMP carries the global part only)",
                         ));
                     }
+                    let mut persisted = false;
                     if let Some(p) = &src_path {
                         // Persist the fit losslessly: recipe.json carries the
                         // bitmap zone masks + recolour gains the XMP cannot,
-                        // so reopening the photo restores the whole fit. An
-                        // existing explicit save is snapshotted to v<N> first —
-                        // the fit must never destroy a Ctrl+S'd develop, so a
-                        // FAILED snapshot skips the persist entirely (the fit
-                        // still lands on the canvas; Ctrl+S saves explicitly).
-                        match backup_saved_develop(p, &rep.recipe) {
+                        // so reopening the photo restores the whole fit. The
+                        // snapshot above is the gate — if it FAILED, skip the
+                        // persist entirely (the fit stays on the canvas with
+                        // ● unsaved; Ctrl+S overwrites explicitly).
+                        match &backed {
                             Ok(backed) => {
                                 autoshop::pipeline::write_recipe(p, &rep.recipe, None)?;
+                                persisted = true;
                                 if autoshop::decode::is_raw(p) {
-                                    let x = autoshop::pipeline::write_xmp(p, &rep.recipe)?;
-                                    note.push_str(&format!(" · XMP → {}", x.display()));
+                                    // The recipe write ALONE decides the saved
+                                    // state (same rule as Ctrl+S / Analyze):
+                                    // an XMP failure must not collapse an
+                                    // already-persisted fit into an error —
+                                    // reopening WOULD restore it, so the UI
+                                    // must agree that it saved.
+                                    match autoshop::pipeline::write_xmp(p, &rep.recipe) {
+                                        Ok(x) => {
+                                            note.push_str(&format!(" · XMP → {}", x.display()));
+                                        }
+                                        Err(e) => {
+                                            note.push_str(" · ");
+                                            note.push_str(&trf(
+                                                lang,
+                                                "recipe saved — but the Lightroom XMP failed: {err}",
+                                                &[("err", &e.to_string())],
+                                            ));
+                                        }
+                                    }
                                 }
                                 if let Some(n) = backed {
                                     note.push_str(&trf(
@@ -5830,10 +6295,16 @@ impl AutoshopApp {
                                     " · NOT persisted: backing up your existing save failed ({err}) — Ctrl+S to save explicitly",
                                     &[("err", &e.to_string())],
                                 ));
+                                if zoned {
+                                    note.push_str(tr(
+                                        lang,
+                                        " · zoned sky pass skipped to protect the saved raster (the fit ran globally)",
+                                    ));
+                                }
                             }
                         }
                     }
-                    Ok((rep.recipe, note))
+                    Ok((rep.recipe, note, persisted))
                 })();
                 Msg::Fitted(Box::new(res))
             },
@@ -6005,8 +6476,8 @@ impl AutoshopApp {
                             .button(tr(lang, "🎛 Reverse-fit recipe → sliders/XMP"))
                             .on_hover_text(tr(lang,
                                 "Statistical fit: reverse the freshly generated look into editable develop params \
-                                 (local, no API cost). Sliders update (undoable), and for RAW an XMP is written to \
-                                 ./out; hit Save to render the full-resolution result.",
+                                 (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
+                                 into this photo's develop store; hit Export to render the full-resolution result.",
                             ))
                             .clicked()
                         {
@@ -6069,12 +6540,14 @@ impl AutoshopApp {
                 );
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("fill_quality")
-                        .selected_text(["high", "medium", "low"][self.fill_quality.min(2)])
+                        .selected_text(tr(lang, ["high", "medium", "low"][self.fill_quality.min(2)]))
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.fill_quality, 0, "high");
-                            ui.selectable_value(&mut self.fill_quality, 1, "medium");
-                            ui.selectable_value(&mut self.fill_quality, 2, "low");
-                        });
+                            ui.selectable_value(&mut self.fill_quality, 0, tr(lang, "high"));
+                            ui.selectable_value(&mut self.fill_quality, 1, tr(lang, "medium"));
+                            ui.selectable_value(&mut self.fill_quality, 2, tr(lang, "low"));
+                        })
+                        .response
+                        .on_hover_text(tr(lang, "gpt-image render quality — higher looks better and costs more per image"));
                     ui.checkbox(&mut self.fill_fullres, tr(lang, "Full-res"))
                         .on_hover_text(tr(lang, "Composite onto the full-sensor develop (slow, RAW only)"));
                     ui.add_enabled_ui(!self.busy, |ui| {
@@ -6105,7 +6578,8 @@ impl AutoshopApp {
                             self.start_heal(true);
                         }
                     });
-                    ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res"));
+                    ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res"))
+                        .on_hover_text(tr(lang, "Heal the full-resolution develop (slow, RAW only)"));
                 });
                 ui.label(
                     egui::RichText::new(tr(lang,
@@ -6160,6 +6634,22 @@ impl AutoshopApp {
 impl eframe::App for AutoshopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_workers(ctx);
+        // Window-close guard: the unsaved-edit protection (● + nav_stash)
+        // used to stop at photo switching — the title-bar ✕ dropped the open
+        // photo's uncommitted develop AND every stashed one with no prompt.
+        // An in-app confirm layer (egui Window, never an OS dialog) offers
+        // save-all / discard / cancel; the guard re-checks on the way out, so
+        // both quit buttons work by making the state genuinely clean.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let unsaved_open = self.src_path.is_some() && self.recipe != self.saved_recipe;
+            if unsaved_open || !self.nav_stash.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.confirm_quit = true;
+            }
+        }
+        if self.confirm_quit {
+            self.confirm_quit_layer(ctx);
+        }
         // Hover-to-preview is frame-scoped: take last frame's target; the mask
         // list re-sets it below if the cursor is still on a row. The diff is
         // checked right before the overlay refresh at the end of update().
@@ -6262,6 +6752,10 @@ impl eframe::App for AutoshopApp {
                 let cur = self.selected.map(|i| i as i32).unwrap_or(-nav.min(0));
                 let next = (cur + nav).clamp(0, self.gallery.len() as i32 - 1);
                 if Some(next as usize) != self.selected {
+                    // Keyboard walking must keep the highlight on screen — the
+                    // gallery scrolls to it next frame (clicks don't set this:
+                    // a clicked row is visible by definition).
+                    self.gallery_scroll_to = Some(next as usize);
                     self.open_gallery_index(next as usize);
                 }
             }
@@ -6493,7 +6987,7 @@ impl eframe::App for AutoshopApp {
                 }
                 if ui
                     .add_enabled(ready, egui::Button::new(tr(lang, "Save XMP")))
-                    .on_hover_text(tr(lang, "Ctrl+S · write a Lightroom/ACR sidecar to ./out (RAW only)"))
+                    .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW) to your develop store"))
                     .clicked()
                 {
                     self.save_xmp();
@@ -6506,9 +7000,9 @@ impl eframe::App for AutoshopApp {
                 if self.busy {
                     ui.spinner();
                 }
-                // The unsaved marker: canvas differs from the sidecar. It sits
-                // BEFORE the status text so a long message can never push it
-                // out of view.
+                // The unsaved marker: canvas differs from the saved develop.
+                // It sits BEFORE the status text so a long message can never
+                // push it out of view.
                 if self.src_path.is_some() && self.recipe != self.saved_recipe {
                     ui.label(
                         egui::RichText::new(tr(self.lang, "● unsaved"))
@@ -6516,7 +7010,7 @@ impl eframe::App for AutoshopApp {
                     )
                     .on_hover_text(tr(
                         self.lang,
-                        "Edits differ from the saved sidecar — Ctrl+S saves; switching photos keeps them for this session only",
+                        "Edits differ from your saved develop — Ctrl+S saves; switching photos keeps them for this session only",
                     ));
                 }
                 // Long messages (paths, batch reports) must clip, not blow the
@@ -6547,16 +7041,11 @@ impl eframe::App for AutoshopApp {
                 if self.src_path.is_some() {
                     self.develop_panel(ui);
                     self.retouch_panel(ui);
-                    if let Some(v) = &self.verdict {
-                        ui.separator();
-                        ui.label(egui::RichText::new("Verdict").strong());
-                        ui.label(v);
-                    }
-                    if !self.rationale.is_empty() {
-                        ui.label(egui::RichText::new(format!("“{}”", self.rationale)).italics().weak());
-                    }
+                    // Verdict + rationale moved to the TOP of develop_panel
+                    // ("AI verdict" section) — the output of the headline
+                    // feature no longer hides below every adjustment section.
                 } else {
-                    ui.label("No photo open.");
+                    ui.label(tr(self.lang, "No photo open."));
                 }
             });
         });
@@ -6634,7 +7123,11 @@ impl eframe::App for AutoshopApp {
                     let uv = self.view_uv(); // same window for both panes (synced zoom)
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Before (source)").weak().small());
+                            ui.label(
+                                egui::RichText::new(tr(self.lang, "Before (source)"))
+                                    .weak()
+                                    .small(),
+                            );
                             if let Some(t) = &self.before_tex {
                                 let size = t.size_vec2();
                                 let vis = egui::vec2(uv.width() * size.x, uv.height() * size.y);
@@ -6662,7 +7155,10 @@ impl eframe::App for AutoshopApp {
             // provider sections outgrow a small display, and without a scroll
             // area the 保存 button ends up unreachable off-screen.
             let max_h = ctx.screen_rect().height() * 0.85;
-            egui::Window::new("⚙ Settings")
+            egui::Window::new(tr(self.lang, "⚙ Settings"))
+                // Fixed id: the TITLE now varies with the language, and egui
+                // keys window state (position, size) off the id.
+                .id(egui::Id::new("settings_window"))
                 .collapsible(false)
                 .resizable(false)
                 .default_width(480.0)
@@ -7177,20 +7673,31 @@ mod tests {
         };
         assert_eq!(fallback.expect("XMP fallback rides along").1, "XMP");
 
-        // A pre-store legacy ./out sidecar is migrated in on first read and
+        // A pre-store legacy ./out sidecar is migrated in on FIRST read and
         // then restores from the CENTRAL copy (kind says recipe.json, not the
-        // legacy fallback — the file physically moved).
-        let _ = std::fs::remove_dir_all(&dev);
+        // legacy fallback — the file physically moved). A SEPARATE photo path:
+        // migrate_legacy memoizes per photo per process, so `src` (already
+        // touched above with nothing legacy) would correctly skip the scan —
+        // which is the production contract, not a test bug.
+        let src2 = std::path::Path::new("D:/library/_sidecar_prio_test_legacy.ARW");
+        let dev2 = autoshop::store::develop_dir(src2);
+        let _ = std::fs::remove_dir_all(&dev2);
+        let legacy_rj2 =
+            PathBuf::from("out").join("_sidecar_prio_test_legacy.recipe.json");
         let legacy = EditRecipe { contrast: -11.0, ..Default::default() };
-        std::fs::write(&legacy_rj, serde_json::to_string(&legacy).unwrap()).unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(src) else {
+        std::fs::write(&legacy_rj2, serde_json::to_string(&legacy).unwrap()).unwrap();
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src2) else {
             panic!("a legacy ./out recipe restores");
         };
         assert_eq!((r.contrast, kind), (-11.0, "recipe.json"));
-        assert!(!legacy_rj.exists(), "legacy file consumed by the migration");
-        assert!(rj.exists(), "…and now lives in the central store");
+        assert!(!legacy_rj2.exists(), "legacy file consumed by the migration");
+        assert!(
+            autoshop::store::recipe_target(src2).exists(),
+            "…and now lives in the central store"
+        );
 
         let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&dev2);
     }
 
     #[test]

@@ -19,6 +19,50 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **第二轮 debug + UI 打磨批次（2026-07-25，已提交未发布——待真机验收）**
+  ——用户令"再进行一遍debug+UI前端打磨"（中途不弹窗）。方法：6 维度工作流
+  （store 集成/GUI 状态机/GUI 打磨/web/双语文案/跨端契约）+ 按维度对抗验证
+  + 完整性批判 → 61 确认 + 4 批判补充，去重后 ~35 项全部处置；Codex 复审
+  再出 6 条（3 MAJOR）全修。要点：
+  1. **备份门下沉 lib**（store::backup_saved_develop）：复制式快照（工作
+     recipe 不动，可在操作前打快照）+ **栅格版本化**（v<N>.<name>.png 冻结
+     引用，快照不再被后续 fit 覆写栅格改写观感；复制失败=整个备份失败并
+     回滚——绝不假称有备份）；三端统一：web /api/analyze 与 GUI 同门（拒
+     写时 200+warning），CLI 侧 StyleIndex::save 拒绝空索引覆盖好索引；
+     delete_version 连冻结栅格一起清。
+  2. **GUI 数据安全**：Fitted 带 persisted 旗标（备份门拒绝时不再假清
+     ● 基线/nav_stash）；zoned fit 快照提到分割前+门拒绝时跳过 zoned
+     （保护已保存栅格）；fit 的 XMP 失败不再吞掉已成功的 recipe 写入；
+     Analyze 拆分 recipe/XMP 写（基线只随 recipe）+失败 toast；粘贴到
+     打开照片全成功后同步基线（假 ● 修）；save_version 从磁盘取号（缓存
+     失刷不再覆写自动备份）；**关窗拦截**（✕ 有未保存→应用内 保存全部/
+     放弃/取消 层，不弹系统窗）；crop 拖拽/Clear 置 dirty（直方图/削波
+     不再滞后 + 在飞帧丢弃后重派）；resync 清 range_picking/placing_mask
+     等武装工具索引；AI-select 去重按栅格名（stem 前缀感知）并复活旧引用。
+  3. **GUI 打磨**：AI verdict/rationale 移到显影面板顶部（Accept 平静色/
+     其余警示色）；设置窗新增「显影库」区（根路径展示 + **从旧 ./out 导入
+     显影**按钮→worker 迁移全图库）；版本行 🗑 删除；方向键走图自动滚动到
+     选中缩略图；Temp(K) 对数刻度；Tone & WB 补 ● 活动点；蒙版重命名缓冲
+     （一次改名=一步 undo，跨行安全提交）；Heal 全分辨率 tooltip/质量下拉
+     悬停+译；Download… 过 guard_readonly；缩略图缓存并入 store_root
+     （AUTOSHOP_DATA_DIR 生效）；设置窗标题/模型状态/Before 标签等全译。
+  4. **web**（子代理）：分析结果串照片根治（id 守卫）+selectPhoto
+     latest-wins；非 ASCII 文件名不再 panic（RFC5987）；损坏 recipe 422+
+     前端兜底；web Reset+Save=删四处存档（与 GUI 同义）；blob URL 回收；
+     文本框内 Ctrl+Z 不再回滚配方；分析/保存后徽章即时刷新；popover 展示
+     显影库路径+风格索引实际文件。
+  5. **migrate 加固**：进程内 memo（打开不再每次全枚举 ./out）+ legacy
+     多根探测（env AUTOSHOP_LEGACY_OUT → cwd → exe 目录，升级用户换目录
+     启动不再"丢"旧编辑）+ 显式导入 API。
+  6. **文案真相**：所有仍称显影态在 ./out 的字符串（GUI 5 处/CLI help 与
+     -o 尾注/web popover/README/ARCHITECTURE --bare 陈旧调用）全部改为显影
+     库表述；ZH 修正：变体≠版本、双击恢复默认值（非归零）、局部蒙版、
+     全分辨率（非全画幅）、gitignored 措辞、sidecar/边车保留给 XMP。
+  基线 **113 lib + 9 gui**（+2 serve 编码测试）、clippy 0、i18n 374 键
+  0/0/0。已知取舍：memo 使"会话中途出现的 legacy 文件"延至下次进程或
+  手动导入（文档化）；web 陈旧未保存分析提示只改文案不缓存提案；
+  serve `image_oauth_supported` 字段保持 false（web 端确实不可配置）。
+
 - **边车中央库批次（2026-07-24 实现，已随 v0.13.0 发布 2026-07-25）**——
   用户拍板"中央库+路径键"后实现。显影**状态**（recipe.json / <stem>.xmp /
   v<N> 快照 / 蒙版栅格）从 cwd 相对 ./out 的裸 stem 键迁至

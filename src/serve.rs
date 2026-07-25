@@ -394,13 +394,28 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // central develop dir (no-op when nothing legacy remains).
     crate::store::migrate_legacy(&raw);
     // Central first; then any legacy file a failed migration left behind.
+    let mut parse_err: Option<String> = None;
     for path in [crate::store::recipe_target(&raw), crate::store::legacy_recipe(&raw)] {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            // Served verbatim: the file is the authority, and re-serialising
-            // would drop anything a newer schema wrote. Bare raster names stay
-            // bare — api_develop/api_export re-anchor them before rendering.
-            return Ok(json_text(text));
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        // VALIDATE before serving. The policy stays "verbatim" — the file is the
+        // authority and re-serialising would drop anything a newer schema wrote —
+        // but a CORRUPT file served as-is made the browser's `await rr.json()`
+        // throw in the middle of `selectPhoto`, leaving an empty control panel
+        // and no error anywhere. The check is schema-AGNOSTIC (`Value`, not
+        // `EditRecipe`) so a newer-schema file still goes out byte-for-byte.
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(&text) {
+            parse_err = Some(e.to_string());
+            continue;
         }
+        // A NEUTRAL recipe.json is not a develop: fall through to the XMP, the
+        // GUI's `NoopOnly` rule (`read_saved_develop`). Returning it would tag
+        // the photo SAVED for an edit that does nothing.
+        if serde_json::from_str::<EditRecipe>(&text).is_ok_and(|r| r.is_noop()) {
+            continue;
+        }
+        // Bare raster names stay bare — api_develop/api_export re-anchor them
+        // before rendering.
+        return Ok(json_text(text));
     }
     // No recipe.json → fall back to the XMP sidecar, exactly like the GUI's
     // `read_saved_develop`: a foreign / neutral sidecar parses to a no-op recipe,
@@ -413,6 +428,11 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 return Ok(json_text(serde_json::to_string(&r)?));
             }
         }
+    }
+    // A damaged recipe.json with nothing else to fall back on is an ERROR, not
+    // "no recipe yet" — say so, or the UI silently pretends the photo is unedited.
+    if let Some(err) = parse_err {
+        return Ok(status_response(422, &format!("recipe.json is unreadable: {err}")));
     }
     Ok(status_response(404, "no recipe yet"))
 }
@@ -450,11 +470,15 @@ fn api_style_info(state: &AppState) -> Result<ResponseBox> {
         Err(_) => json!({ "built": false }),
     };
     Ok(json_response(&json!({
-        // Where the photos being browsed live (the "原图库"), where outputs
-        // land (the "成片库" = ./out), and the style-library status.
+        // Where the photos being browsed live (the "原图库"), where RENDERED
+        // outputs land (the "成片库" = ./out), where the develop store keeps
+        // recipes / XMP / versions, and the style-library status. out_dir and
+        // store_dir are DIFFERENT places — the XMP has lived in the store since
+        // the sidecars moved out of ./out.
         "working_dir": state.dir_display(),
         "working_count": state.count(),
         "out_dir": abs("out"),
+        "store_dir": crate::store::store_root().display().to_string(),
         "style": style,
     })))
 }
@@ -484,16 +508,18 @@ fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
     // An empty build is a FAILURE, not a success: `save` truncates the file in
     // place, so writing it would silently replace a good index (and every
     // surface's Style slider goes inert with nothing to say why). A folder
-    // yields 0 whenever no RAW has its Lightroom .xmp SITTING BESIDE IT —
-    // Autoshop's own analyses write theirs to ./out, so its output folders
-    // always index to 0. Refuse, and leave the previous index alone.
+    // yields 0 whenever no RAW has its Lightroom .xmp SITTING BESIDE IT — and
+    // Autoshop never puts one there: its own XMP projection lives in the
+    // per-user develop store. Point this at the folder you edit in LIGHTROOM.
+    // Refuse, and leave the previous index alone.
     if total == 0 {
         return Ok(status_response(
             400,
             &format!(
                 "nothing indexed in {} — found no RAW with its .xmp sidecar beside it \
-                 (Autoshop writes its own .xmp to ./out, so an Autoshop output folder \
-                 always yields 0). The existing style index was left untouched.",
+                 (Autoshop keeps its own .xmp in the develop store, never beside the \
+                 RAW, so point this at the folder you edit in Lightroom). The existing \
+                 style index was left untouched.",
                 p.display()
             ),
         ));
@@ -592,11 +618,33 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let style = req.style_strength.unwrap_or(cfg.style_strength);
     let (recipe, verdict) =
         pipeline::produce_recipe(&raw, &cfg, false, guidance, req.base.as_ref(), style)?;
-    pipeline::write_recipe(&raw, &recipe, None)?;
-    if decode::is_raw(&raw) {
-        pipeline::write_xmp(&raw, &recipe)?;
+    // Analyze is a PROGRAMMATIC writer: it may not destroy an explicit save
+    // without a `v<N>` snapshot — the same contract the GUI enforces. A backup
+    // that FAILS (locked / unreadable existing save) means we must not write at
+    // all: handing back an unsaved proposal beats overwriting a save we could
+    // not protect.
+    match crate::store::backup_saved_develop(&raw, Some(&recipe)) {
+        Ok(backed_up) => {
+            pipeline::write_recipe(&raw, &recipe, None)?;
+            if decode::is_raw(&raw) {
+                pipeline::write_xmp(&raw, &recipe)?;
+            }
+            let mut body = json!({ "recipe": recipe, "verdict": verdict, "saved": true });
+            if let Some(n) = backed_up {
+                body["backed_up"] = json!(n);
+            }
+            Ok(json_response(&body))
+        }
+        Err(e) => Ok(json_response(&json!({
+            "recipe": recipe,
+            "verdict": verdict,
+            "saved": false,
+            "warning": format!(
+                "not saved: backing up your existing save failed ({e}); \
+                 save explicitly to overwrite"
+            ),
+        }))),
     }
-    Ok(json_response(&json!({ "recipe": recipe, "verdict": verdict })))
 }
 
 fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
@@ -651,14 +699,24 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     let bytes = std::fs::read(&tmp).with_context(|| format!("read {}", tmp.display()))?;
     let _ = std::fs::remove_file(&tmp);
     let ctype = if ext == "jpg" { "image/jpeg" } else { "image/tiff" };
-    let filename = format!("{}.developed.{ext}", pipeline::stem(&raw));
-    let ct = Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap();
-    let cd = Header::from_bytes(
-        &b"Content-Disposition"[..],
-        format!("attachment; filename=\"{filename}\"").as_bytes(),
-    )
-    .unwrap();
-    Ok(Response::from_data(bytes).with_header(ct).with_header(cd).boxed())
+    // A header value is ASCII-only (tiny_http REJECTS non-ASCII bytes), so the
+    // photo's own stem cannot go in raw: a Chinese/accented name used to make
+    // `from_bytes(..).unwrap()` panic the request thread, and Download answered
+    // with an empty body. RFC 5987: a fixed ASCII `filename=` every client
+    // understands, plus `filename*=UTF-8''…` percent-encoded with the real name
+    // (which every current browser prefers).
+    let disposition = format!(
+        "attachment; filename=\"download.developed.{ext}\"; filename*=UTF-8''{}",
+        percent_encode(&format!("{}.developed.{ext}", pipeline::stem(&raw)))
+    );
+    let mut resp = Response::from_data(bytes);
+    if let Some(h) = header("Content-Type", ctype) {
+        resp = resp.with_header(h);
+    }
+    if let Some(h) = header("Content-Disposition", &disposition) {
+        resp = resp.with_header(h);
+    }
+    Ok(resp.boxed())
 }
 
 static DL_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -666,6 +724,38 @@ static DL_SEQ: AtomicU64 = AtomicU64::new(0);
 fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let req: XmpReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    // Reset-then-Save means "clear my edits", exactly as in the GUI's `save_xmp`:
+    // writing a NEUTRAL pair would pin a permanent ● edited badge with no in-app
+    // way to remove it (and the GUI then reports a no-op save on every open).
+    // BOTH homes are cleared — the central store AND any legacy ./out sidecar,
+    // which would otherwise resurrect the edits through the read fallbacks.
+    // Version snapshots are kept.
+    if req.recipe.is_noop() {
+        // A file already missing IS the desired end state; any other removal
+        // failure (lock, permissions) must not let us claim the edits were
+        // cleared — the surviving sidecar would resurrect them on reopen.
+        let del = |p: &Path| match std::fs::remove_file(p) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Some(e),
+            _ => None,
+        };
+        let mut first_err: Option<std::io::Error> = None;
+        for p in [
+            crate::store::recipe_target(&raw),
+            pipeline::xmp_target(&raw),
+            crate::store::legacy_recipe(&raw),
+            crate::store::legacy_xmp(&raw),
+        ] {
+            if let Some(e) = del(&p) {
+                first_err.get_or_insert(e);
+            }
+        }
+        return match first_err {
+            None => Ok(text_response("cleared — saved edits removed")),
+            Some(e) => {
+                Ok(status_response(500, &format!("could not clear the saved edits: {e}")))
+            }
+        };
+    }
     // Dual-write, exactly as the GUI's `save_xmp` does: the XMP alone is lossy
     // (no bitmap masks / recolour gains) AND neither surface reads it back while
     // a `recipe.json` exists — so an XMP-only save was unreachable, silently
@@ -718,10 +808,10 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             let mut buf = Vec::new();
             img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
                 .context("encode jpeg")?;
-            let ct = Header::from_bytes(&b"Content-Type"[..], &b"image/jpeg"[..]).unwrap();
-            let xp = Header::from_bytes(&b"X-Output-Path"[..], out.display().to_string().as_bytes())
-                .unwrap();
-            Ok(Response::from_data(buf).with_header(ct).with_header(xp).boxed())
+            // The saved path carries the photo's stem: percent-encoded, because
+            // a non-ASCII header value is rejected outright (`.unwrap()` there
+            // used to kill Fill on any non-ASCII filename). The UI decodes it.
+            Ok(image_with_path(buf, &out))
         }
         Err(e) => Ok(status_response(500, &format!("retouch failed: {e}"))),
     }
@@ -788,16 +878,12 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             let mut buf = Vec::new();
             img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
                 .context("encode jpeg")?;
-            let ct = Header::from_bytes(&b"Content-Type"[..], &b"image/jpeg"[..]).unwrap();
-            let xp = Header::from_bytes(&b"X-Output-Path"[..], out.display().to_string().as_bytes())
-                .unwrap();
-            let xs =
-                Header::from_bytes(&b"X-Heal-Spots"[..], rep.spots.to_string().as_bytes()).unwrap();
-            Ok(Response::from_data(buf)
-                .with_header(ct)
-                .with_header(xp)
-                .with_header(xs)
-                .boxed())
+            // Same non-ASCII trap as Fill: the path goes out percent-encoded.
+            let mut resp = image_with_path(buf, &out);
+            if let Some(h) = header("X-Heal-Spots", &rep.spots.to_string()) {
+                resp = resp.with_header(h);
+            }
+            Ok(resp)
         }
         Err(e) => Ok(status_response(500, &format!("heal failed: {e}"))),
     }
@@ -904,6 +990,48 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Percent-ENCODE for an HTTP header value (the inverse of [`percent_decode`]):
+/// everything outside the RFC 3986 unreserved set becomes `%XX` of its UTF-8
+/// bytes. Header values are ASCII-only — `Header::from_bytes` rejects anything
+/// else — so any value carrying a user filename/path must come through here or
+/// the header cannot be built at all.
+fn percent_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Build a header, or `None` when the value is not a legal header value.
+/// `Header::from_bytes(..).unwrap()` is only safe on compile-time-ASCII
+/// literals; on anything derived from a photo's name it is a panic waiting for
+/// the first non-ASCII library, and a panicking handler thread answers with an
+/// EMPTY body (tiny_http's `impl Drop for Request`).
+fn header(field: &str, value: &str) -> Option<Header> {
+    Header::from_bytes(field.as_bytes(), value.as_bytes()).ok()
+}
+
+/// A JPEG body plus the `X-Output-Path` of the master that was saved, with the
+/// path percent-encoded so a non-ASCII stem can never break the header.
+fn image_with_path(buf: Vec<u8>, out: &Path) -> ResponseBox {
+    let mut resp = Response::from_data(buf);
+    if let Some(h) = header("Content-Type", "image/jpeg") {
+        resp = resp.with_header(h);
+    }
+    if let Some(h) = header("X-Output-Path", &percent_encode(&out.display().to_string())) {
+        resp = resp.with_header(h);
+    }
+    resp.boxed()
+}
+
 fn query_param(url: &str, key: &str) -> Option<String> {
     let q = url.split_once('?')?.1;
     q.split('&').find_map(|pair| {
@@ -963,7 +1091,21 @@ fn status_response(code: u16, msg: &str) -> ResponseBox {
 
 #[cfg(test)]
 mod tests {
-    use super::percent_decode;
+    use super::{percent_decode, percent_encode};
+
+    #[test]
+    fn percent_encode_is_ascii_and_round_trips() {
+        // The whole point: whatever goes into a header value is pure ASCII, so
+        // `Header::from_bytes` can never reject it (that rejection + `.unwrap()`
+        // is what killed Download / Fill / Heal on non-ASCII photo names).
+        for s in ["DSC09528.developed.tif", "测试照片.developed.tif", "a b%c.jpg", "D:\\照片\\x.png"] {
+            let enc = percent_encode(s);
+            assert!(enc.is_ascii(), "{enc} is not ASCII");
+            assert_eq!(percent_decode(&enc), s, "round trip failed for {s}");
+        }
+        assert_eq!(percent_encode("a b.jpg"), "a%20b.jpg");
+        assert_eq!(percent_encode("~-_."), "~-_."); // unreserved set passes through
+    }
 
     #[test]
     fn percent_decode_unicode_and_literals() {

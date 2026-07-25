@@ -127,11 +127,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Copy every develop setting from the current photo", "复制当前照片的全部 develop 参数"),
     ("Recipe copied — Ctrl+click to pick several, then “Paste to selected”", "配方已复制 — Ctrl+点击选多张，再「粘贴到选中」"),
     ("⇩ Paste to selected ({n})", "⇩ 粘贴到选中({n})"),
-    ("Writes a ./out recipe JSON for each; RAW also gets an XMP sidecar. Leaves library files untouched, renders nothing.",
-        "对每张写 ./out 配方 JSON；RAW 同时写 XMP 边车。不动库文件、不渲染成品"),
+    ("Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing.",
+        "把每张照片的显影写入显影库（配方 JSON；RAW 另附 Lightroom XMP）。不动库文件、不渲染成品。"),
     ("🖼 Render selected ({n})", "🖼 渲染选中({n})"),
-    ("Each renders by its own ./out recipe (neutral develop if none) → ./out/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
-        "每张按它自己的 ./out 配方出图（没有配方则中性显影）→ ./out/<名>.developed.*，用当前格式/长边/锐化/质量；AI Denoise 不参与批量"),
+    ("Each renders by its own saved develop from the store (neutral develop if none) → ./out/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
+        "每张按它在显影库里保存的显影出图（没有则中性显影）→ ./out/<名>.developed.*，用当前格式/长边/锐化/质量；AI Denoise 不参与批量"),
     ("Clear selection", "清除多选"),
     ("Include crop / straighten when pasting", "粘贴时含裁剪/拉直"),
     ("Off by default — composition rarely transfers between photos", "默认不带几何 — 构图在照片间通常不可复用"),
@@ -148,8 +148,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Generate an image first and stay on that variant to reverse-fit its recipe.",
         "先「AI 生成出片」并停在该变体上，才能反推它的配方。"),
     ("🎛 Reverse-fit recipe → sliders/XMP", "🎛 反推配方 → 滑杆/XMP"),
-    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW an XMP is written to ./out; hit Save to render the full-resolution result.",
-        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 同时写 ./out XMP；再点 Save 可出全分辨率成品。"),
+    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result.",
+        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。"),
     ("📝 Extract style prompt", "📝 提取风格提示词"),
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills Direction (ready to Reimagine other photos) and saves ./out/<stem>.style.txt.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入 Direction（可直接给别的照片 Reimagine 用）并存 ./out/<stem>.style.txt。"),
@@ -164,7 +164,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("what belongs there, e.g. remove the trash can, extend the sky",
         "那里该有什么，例如：移除垃圾桶、延展天空"),
     ("Full-res", "全分辨率"),
-    ("Composite onto the full-sensor develop (slow, RAW only)", "合成到全画幅显影上（慢，仅 RAW）"),
+    ("Composite onto the full-sensor develop (slow, RAW only)", "合成到全分辨率显影上（慢，仅 RAW）"),
+    ("Heal the full-resolution develop (slow, RAW only)", "在全分辨率显影上修复（慢，仅 RAW）"),
+    ("gpt-image render quality — higher looks better and costs more per image",
+        "gpt-image 出图质量 — 越高画质越好、单张费用也越高"),
+    ("high", "高"),
+    ("medium", "中"),
+    ("low", "低"),
     ("Remove / Fill", "移除 / 填充"),
     ("Paint the area, write what belongs there, then Remove/Fill. Needs OPENAI_API_KEY.",
         "涂抹区域，写下那里该有什么，再点 Remove/Fill。需 OPENAI_API_KEY。"),
@@ -184,7 +190,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "Photoshop 的仿制图章：Alt+点击取源（十字标记），画笔涂要覆盖的区域，按源点原样搬运像素（羽化边缘、不做色调匹配）。本地运算，存 ./out 像素母版。"),
 
     // ── Develop · shared slider helper ───────────────────────────────────────
-    ("double-click resets", "双击归零 / double-click reset"),
+    // NOT 归零: five sliders reset to a non-zero default (Temp 5500, Blending/
+    // Midpoint 50, Lum. high 1.0, Feather 0.1) — matches 重置为默认值 in F1.
+    ("double-click resets", "双击恢复默认值 / double-click reset"),
 
     // ── Develop · panel + Tone & WB ──────────────────────────────────────────
     ("Develop", "显影 · Develop"),
@@ -349,9 +357,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "工作预览分辨率：1280 滑杆最流畅；2560/4096 供 1:1 查合焦/噪点（每次调整更慢）"),
 
     // ── Develop · variant strip (variant_strip) ──────────────────────────────
-    ("Variants", "版本"),
-    ("Click to switch to this variant (lossless)", "点击切到此版本（无损）"),
-    ("Delete this variant", "删除此版本"),
+    // Variants = 变体 (independent renditions), Versions = 版本 (parameter
+    // snapshots). One ZH word for both made "删除此版本" ambiguous between
+    // two different destructive actions.
+    ("Variants", "变体"),
+    ("Click to switch to this variant (lossless)", "点击切到此变体（无损）"),
+    ("Delete this variant", "删除此变体"),
 
     // ── Toolbar · top row (update()) ─────────────────────────────────────────
     ("Batch {done}/{total}", "批量 {done}/{total}"),
@@ -398,7 +409,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Download…", "下载…"),
     ("Save as… (full-resolution export to a path you choose)", "另存为…（选路径的全分辨率导出）"),
     ("Save XMP", "保存 XMP"),
-    ("Ctrl+S · write a Lightroom/ACR sidecar to ./out (RAW only)", "Ctrl+S · 写 Lightroom/ACR sidecar 到 ./out（仅 RAW）"),
+    ("Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW) to your develop store",
+        "Ctrl+S · 把这张照片的显影保存到显影库（配方 + RAW 附带 Lightroom/ACR XMP）"),
 
     // ── Empty-state landing screen (update()) ────────────────────────────────
     ("AI auto-develop · RAW develop", "AI 自动出片 · RAW develop"),
@@ -412,11 +424,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("✨ AI generated", "✨ AI 生成"),
     ("◭ Reverse-fit", "◭ 反推"),
     ("Switched to variant「{name}」 — variants are independent, switching is lossless",
-        "已切到「{name}」变体 — 各版本独立，切换无损"),
+        "已切到「{name}」变体 — 各变体独立，切换无损"),
 
     // ── Canvas mask badge + model-picker placeholder ─────────────────────────
     ("▨ Bitmap mask", "▨ 位图蒙版"),
     ("Select…", "选择… / pick"),
+    ("or type a custom id", "或输入自定义模型 id"),
 
     // ── Versions · save / load snapshots (status) ────────────────────────────
     ("Version v{n} saved → {path}", "版本 v{n} 已存 → {path}"),
@@ -471,12 +484,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Batch: {ok} succeeded, {fail} failed: {detail}", "批量：{ok} 成功、{fail} 失败：{detail}"),
     ("Batch-rendering {done}/{total} → ./out …", "批量渲染 {done}/{total} → ./out …"),
     ("Pasting recipe to {n} photos…", "粘贴配方到 {n} 张…"),
-    ("Recipe pasted to {ok} photos ({xmp} XMP) → ./out", "配方已粘贴到 {ok} 张（{xmp} 个 XMP）→ ./out"),
+    ("Recipe pasted to {ok} photos ({xmp} XMP) → develop store", "配方已粘贴到 {ok} 张（{xmp} 个 XMP）→ 显影库"),
     ("{ok} succeeded, {fail} failed: {detail}", "{ok} 成功、{fail} 失败：{detail}"),
     ("batch paste", "批量粘贴"),
     ("Preview resolution {px}px — re-decoded", "预览分辨率 {px}px — 已重解码"),
 
     // ── Status bar · XMP save ────────────────────────────────────────────────
+    // Terminology: sidecar/边车 is reserved for the RAW-adjacent .xmp; the
+    // store's recipe.json is "the saved develop / 已保存的显影" (it no longer
+    // sits beside anything).
     ("A generated variant's look lives in its pixels — there's no parametric recipe to export; run 「Reverse-fit」 first to get an exportable XMP",
         "生成变体的观感在像素里，没有参数配方可导；先「反推配方」得到可导出的 XMP"),
     ("XMP + recipe saved → {path}", "XMP + 配方已保存 → {path}"),
@@ -485,25 +501,25 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("recipe saved — but the Lightroom XMP failed: {err}",
         "配方已保存 — 但 Lightroom XMP 写入失败：{err}"),
     ("could not clear the saved edits: {err}", "无法清除已保存的编辑：{err}"),
-    ("neutral recipe — saved edits cleared (sidecars removed)",
-        "中性配方 — 已清除保存的编辑（边车已删除）"),
+    ("neutral recipe — saved edits cleared (saved files removed)",
+        "中性配方 — 已清除保存的编辑（存档文件已删除）"),
     ("neutral recipe — nothing to save", "中性配方 — 无需保存"),
-    (" · note: retouched pixels live in the baked master, not the sidecar — Export to keep them",
-        " · 注意：修饰像素在烘焙母版里、不在边车中 — 需「导出」保留"),
+    (" · note: retouched pixels live in the baked master, not the saved develop — Export to keep them",
+        " · 注意：修饰像素在烘焙母版里、不在已保存的显影中 — 需「导出」保留"),
     (" · previous save backed up as v{n}", " · 之前的保存已备份为 v{n}"),
     ("● unsaved", "● 未保存"),
-    ("Edits differ from the saved sidecar — Ctrl+S saves; switching photos keeps them for this session only",
-        "编辑与已保存的边车不同 — Ctrl+S 保存；切换照片仅在本会话内暂存"),
+    ("Edits differ from your saved develop — Ctrl+S saves; switching photos keeps them for this session only",
+        "编辑与已保存的显影不同 — Ctrl+S 保存；切换照片仅在本会话内暂存"),
     ("ready — restored this session's unsaved edits (● not saved yet; Ctrl+S)",
         "就绪 — 已恢复本会话未保存的编辑（● 尚未保存；Ctrl+S）"),
     ("recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it",
         "recipe.json 无法解析（{err}）— 编辑未完整恢复；Ctrl+S 会覆盖它"),
-    ("sidecar exists but holds no effective edits", "边车存在但不含有效编辑"),
+    ("a saved develop exists but holds no effective edits", "已保存的显影存在但不含有效编辑"),
     ("AI develop applied · saved to recipe.json", "AI 显影已应用 · 已保存到 recipe.json"),
     ("AI develop applied · saved (previous save backed up as v{n})",
         "AI 显影已应用 · 已保存（之前的保存已备份为 v{n}）"),
     ("AI develop applied — but saving the sidecar failed: {err}",
-        "AI 显影已应用 — 但边车保存失败：{err}"),
+        "AI 显影已应用 — 但显影保存失败：{err}"),
     ("AI develop applied — but NOT saved: backing up your existing save failed ({err}); Ctrl+S overwrites explicitly",
         "AI 显影已应用 — 但未保存：备份你已有的保存失败（{err}）；Ctrl+S 可显式覆盖"),
     (" · NOT persisted: backing up your existing save failed ({err}) — Ctrl+S to save explicitly",
@@ -519,8 +535,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
         "AI 分割{what}中…（首次运行自动下载模型；失败会在此报告）"),
     ("Reset to its default", "重置为默认值"),
-    ("Language & Reverse-fit apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json (gitignored) and apply to the next Analyze.",
-        "「语言」与「反推」立即生效。下方的提供商设置经「保存设置」写入 autoshop.local.json（已 gitignore），对下一次分析生效。"),
+    ("Language & Reverse-fit apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next Analyze.",
+        "「语言」与「反推」立即生效。下方的提供商设置经「保存设置」写入你 Autoshop 个人目录下的 autoshop.local.json（不在仓库里），对下一次分析生效。"),
 
     // ── Status bar · WB / range pick + manual mask placement ─────────────────
     ("WB eyedropper: {k} K · tint {tint} — fine-tune in the Tone section",
@@ -528,8 +544,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Colour range: sampled — the 「Tolerance」 slider adjusts the selection width",
         "颜色范围：已取样 — 「容差」滑杆调节选中宽度"),
     ("Manual {n}", "手动 {n}"),
+    // ZH must quote the panel's ACTUAL header 「局部蒙版」 (i18n "Local Masks
+    // ({n})"), not a panel that doesn't exist.
     ("mask placed — pull its sliders in 「Local Masks」 at left (all 0 now, no visible effect yet)",
-        "mask 已放置 — 在左侧「局部调整」里拉滑杆（当前全为 0，无可见效果）"),
+        "蒙版已放置 — 在左侧「局部蒙版」里拉滑杆（当前全为 0，无可见效果）"),
 
     // ── Status bar · generative fill / heal / clone ──────────────────────────
     ("write what should fill the painted area", "写下涂抹区域该填入什么"),
@@ -596,4 +614,37 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Drag & drop overlay ──────────────────────────────────────────────────
     ("Drop to open", "松开打开 · Drop to open"),
+
+    // ── Round-2 polish batch (AI verdict / quit guard / develop store /
+    //    versions delete / settings statuses) ─────────────────────────────────
+    ("AI verdict", "AI 判定 · Verdict"),
+    ("No photo open.", "未打开照片。"),
+    ("Before (source)", "原图（源）· Before"),
+    ("Delete this snapshot (its frozen mask rasters go with it)",
+        "删除该快照（连同其冻结的蒙版栅格）"),
+    ("Version v{n} deleted", "版本 v{n} 已删除"),
+    ("Delete v{n} failed: {err}", "删除 v{n} 失败：{err}"),
+    ("Unsaved edits", "未保存的编辑"),
+    ("{n} photo(s) have edits that were never saved:", "{n} 张照片的编辑尚未保存："),
+    ("Save all & quit", "全部保存并退出"),
+    ("Discard & quit", "放弃并退出"),
+    ("Cancel", "取消"),
+    ("Develop store", "显影库 · Develop store"),
+    ("Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHOP_DATA_DIR environment variable.",
+        "已保存显影的存放地：配方、Lightroom XMP、版本快照与蒙版栅格 — 每张照片一个文件夹，按其绝对路径键控。可用 AUTOSHOP_DATA_DIR 环境变量改存放位置。"),
+    ("Import develops from an old ./out folder…", "从旧 ./out 文件夹导入显影…"),
+    ("Saves made before v0.13 lived in a ./out folder next to wherever the app was launched. If your old edits are missing, point this at that folder — its recipes / XMP / versions migrate into the develop store.",
+        "v0.13 之前的保存放在启动目录旁的 ./out 里。如果旧编辑不见了，把这里指向那个文件夹 — 其中的配方/XMP/版本会迁入显影库。"),
+    ("Open a folder first — import migrates the photos currently in the gallery",
+        "请先打开文件夹 — 导入只迁移当前图库里的照片"),
+    ("Importing develops from {path} …", "正在从 {path} 导入显影…"),
+    ("Imported saved develops for {n} photo(s) from {path}",
+        "已从 {path} 导入 {n} 张照片的已保存显影"),
+    ("import failed", "导入失败"),
+    ("fetching models…", "正在拉取模型列表…"),
+    ("fetched {n} models ({chat} chat · {img} image)",
+        "已拉取 {n} 个模型（{chat} 对话 · {img} 图像）"),
+    ("fetch failed: {err}", "拉取失败：{err}"),
+    (" · zoned sky pass skipped to protect the saved raster (the fit ran globally)",
+        " · 已跳过天空分区（保护已保存的栅格），本次为全局拟合"),
 ];

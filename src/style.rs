@@ -209,6 +209,20 @@ impl StyleIndex {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        // An empty index is a FAILED build, not a result: `fs::write`
+        // truncates in place, so saving it would silently destroy a good index
+        // that took an hour to build (every surface's Style slider then goes
+        // inert with nothing to say why). The web handler had this guard; the
+        // CLI didn't — enforcing it HERE covers every caller for good.
+        if self.exemplars.is_empty() {
+            anyhow::bail!(
+                "refusing to save an EMPTY style index over {} — no RAW had its .xmp sidecar \
+                 beside it (Autoshop keeps its own .xmp in the develop store, never beside your \
+                 RAWs, so an Autoshop output folder always yields 0). Point the build at your \
+                 Lightroom-edited folder; the existing index was left untouched.",
+                path.display()
+            );
+        }
         pipeline::ensure_parent(path)?;
         std::fs::write(path, serde_json::to_string(self)?)
             .with_context(|| format!("write style index {}", path.display()))?;

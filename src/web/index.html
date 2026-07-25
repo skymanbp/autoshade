@@ -214,7 +214,7 @@
           <button class="secondary download">Download…</button>
           <button class="secondary savexmp">Save XMP</button>
         </div>
-        <div class="hint">Export writes to ./out; Download opens a Save-As. XMP only for RAW.</div>
+        <div class="hint">Export writes to ./out. XMP + recipe go to the develop store; XMP only for RAW.</div>
       </div>
       <div class="panel fill-panel" style="margin-top:14px">
         <h3>Generative Fill · 实验</h3>
@@ -252,7 +252,7 @@
 <div class="modal-bg" id="settings-modal" hidden>
   <div class="modal-card">
     <h2>Settings <button class="modal-x" id="settings-close" title="Close">✕</button></h2>
-    <p class="modal-note">Saved locally to <code id="settings-file">autoshop.local.json</code> (gitignored). Keys stay on this machine — the server is 127.0.0.1 only. Applies to the next Analyze.</p>
+    <p class="modal-note">Saved locally to <code id="settings-file">autoshop.local.json</code> in your per-user Autoshop folder (never in a repo). Keys stay on this machine — the server is 127.0.0.1 only. Applies to the next Analyze.</p>
 
     <section class="settings-sec">
       <h3>分析 / Analysis — the verifier</h3>
@@ -271,7 +271,7 @@
       <div class="srow">
         <label>Provider</label>
         <label class="chk"><input type="radio" name="im-provider" value="api" checked /> API (OpenAI-compatible)</label>
-        <label class="chk" title="The claude CLI has no image input in print mode, so Claude-via-OAuth can't do vision."><input type="radio" disabled /> OAuth (unavailable)</label>
+        <label class="chk" title="An image-role OAuth preset does exist — a ChatGPT subscription routed through a local Codex bridge — but it is configured in the desktop app's Settings, not from this web panel."><input type="radio" disabled /> OAuth (configure in the desktop app)</label>
       </div>
       <div class="srow"><label>Vision model</label><input id="im-model" class="sinput" placeholder="gpt-5.5" /></div>
       <div class="srow"><label>Base URL</label><input id="im-base" class="sinput" placeholder="https://api.openai.com/v1" /></div>
@@ -356,6 +356,16 @@ function applyHistory() {
 $("#undo").onclick = undo;
 $("#redo").onclick = redo;
 document.addEventListener("keydown", e => {
+  // Never steal Ctrl+Z from a TEXT FIELD: bound on the document with
+  // preventDefault, it both reverted the whole recipe and killed the browser's
+  // native undo while the user was typing a direction / fill prompt / path.
+  // Non-text inputs (the sliders, checkboxes) have no native undo to protect —
+  // and they hold focus right after a drag, which is exactly when Ctrl+Z is
+  // wanted — so only editable text bails out.
+  const t = e.target, NON_TEXT = ["range","checkbox","radio","button","submit","reset","file","color"];
+  const typing = t && (t.isContentEditable || t.tagName === "TEXTAREA" ||
+    (t.tagName === "INPUT" && !NON_TEXT.includes((t.type || "text").toLowerCase())));
+  if (typing) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
 });
@@ -609,6 +619,16 @@ function syncGrade() {
 }
 
 let afterTimer = null, afterSeq = 0;
+// Every blob URL handed to the `.after` <img> pins its bytes until revoked, and
+// a slider session makes one per gesture (plus multi-MB fill/heal results) — so
+// exactly ONE lives at a time: assign the new src first, then revoke the old.
+let lastAfterUrl = null;
+function setAfterSrc(img, blob) {
+  const url = URL.createObjectURL(blob);
+  if (img) img.src = url;
+  if (lastAfterUrl) URL.revokeObjectURL(lastAfterUrl);
+  lastAfterUrl = url;
+}
 function scheduleAfter() { clearTimeout(afterTimer); afterTimer = setTimeout(renderAfter, 220); }
 async function renderAfter() {
   if (state.id === null) return;
@@ -626,12 +646,18 @@ async function renderAfter() {
   if (!r.ok) { setStatus("render failed: " + await r.text()); return; }
   const blob = await r.blob();
   if (seq !== afterSeq || id !== state.id) return;   // it went stale while we decoded the body
-  $(".after").src = URL.createObjectURL(blob);
+  setAfterSrc($(".after"), blob);
   setStatus("");
 }
 
 // --- select + actions ------------------------------------------------------
+// Latest-wins for opens. /api/recipe answers are genuinely concurrent and their
+// cost is uneven (a legacy migration scan, a slow disk), so a click-through of
+// three photos could land the FIRST photo's recipe under the THIRD photo's
+// pixels — and the next Save would then write it to the wrong develop dir.
+let selectSeq = 0;
 async function selectPhoto(id, stem, el) {
+  const seq = ++selectSeq;
   document.querySelectorAll(".thumb").forEach(t=>t.classList.remove("sel"));
   if (el) el.classList.add("sel");
   state.id = id; state.stem = stem;
@@ -640,14 +666,27 @@ async function selectPhoto(id, stem, el) {
   main.appendChild($("#detail-tpl").content.cloneNode(true));
   $(".before").src = `/api/preview?id=${id}`;
 
-  const rr = await fetch(`/api/recipe?id=${id}`);
-  if (rr.ok) {
-    state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), await rr.json());
+  // A damaged / unreachable recipe must still leave a WORKING panel: fall back
+  // to the neutral recipe and show the server's reason, instead of throwing out
+  // of selectPhoto and leaving an empty control column with no explanation.
+  let loaded = null, loadErr = null;
+  try {
+    const rr = await fetch(`/api/recipe?id=${id}`);
+    if (seq !== selectSeq) return;
+    if (rr.ok) loaded = await rr.json();
+    else if (rr.status !== 404) loadErr = (await rr.text()) || `HTTP ${rr.status}`;
+    if (seq !== selectSeq) return;
+  } catch (e) {
+    if (seq !== selectSeq) return;
+    loadErr = "could not read the saved recipe: " + (e.message || e);
+  }
+  if (loaded) {
+    state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), loaded);
     $(".verdict").innerHTML = '<span class="tag saved">SAVED</span> Loaded a previously-saved recipe. Re-run Analyze for a live verdict.';
     showRationale();
   } else {
     state.recipe = structuredClone(DEFAULT_RECIPE);
-    $(".verdict").textContent = "Not analyzed yet.";
+    $(".verdict").textContent = loadErr ? loadErr : "Not analyzed yet.";
   }
   // Build the controls now that state.recipe is known, then populate them.
   buildSliders(main.querySelector(".sliders"));
@@ -657,6 +696,9 @@ async function selectPhoto(id, stem, el) {
   syncSliders();
   resetHistory(state.recipe);
   renderAfter();
+  // After renderAfter (which sets its own "rendering…" status) so the reason
+  // isn't overwritten the moment it appears; it also stays in the Verdict box.
+  if (loadErr) setStatus(loadErr);
 
   const ss = main.querySelector(".style-strength");
   ss.oninput = () => { main.querySelector(".style-val").textContent = ss.value + "%"; };
@@ -669,10 +711,11 @@ async function selectPhoto(id, stem, el) {
       const s = d.style || {};
       const styleHtml = !s.built
         ? `<b>Style reference library:</b> <i>not built yet</i> — the Style slider needs an index of YOUR past edits.`
-        : `<b>Style reference library:</b> ${s.total} of your edits indexed${s.source_dir?` from <code>${escapeHtml(s.source_dir)}</code>`:""}.<div class="scenes">Scenes it knows: ${(s.scenes||[]).map(x=>`${escapeHtml(x.tag)} ×${x.n}`).join("  ·  ") || "—"}</div>`;
+        : `<b>Style reference library:</b> ${s.total} of your edits indexed${s.source_dir?` from <code>${escapeHtml(s.source_dir)}</code>`:""}.${s.index_file?`<div class="scenes">Index file: <code>${escapeHtml(s.index_file)}</code></div>`:""}<div class="scenes">Scenes it knows: ${(s.scenes||[]).map(x=>`${escapeHtml(x.tag)} ×${x.n}`).join("  ·  ") || "—"}</div>`;
       pop.innerHTML = `<h4>Library</h4>
         <b>原图库 / Working folder:</b> <code>${escapeHtml(d.working_dir||"—")}</code> · ${d.working_count||0} source(s)<br>
-        <b>成片库 / Output:</b> <code>${escapeHtml(d.out_dir||"./out")}</code> — renders / heals / exports / XMP land here<br><br>
+        <b>成片库 / Output:</b> <code>${escapeHtml(d.out_dir||"./out")}</code> — renders / heals / exports land here<br>
+        <b>显影库 / Develop store:</b> <code>${escapeHtml(d.store_dir||"—")}</code> — recipes / XMP / versions live here<br><br>
         ${styleHtml}
         <div class="srow" style="margin-top:8px; gap:6px; flex-wrap:nowrap">
           <input class="sinput sb-dir" placeholder="Your library folder (RAW + .xmp pairs)…" style="font-size:11px" />
@@ -766,9 +809,9 @@ async function selectPhoto(id, stem, el) {
         body: JSON.stringify({ id: state.id, prompt, mask, quality, full_res: fullRes })});
       if (!r.ok) { setStatus("fill failed: " + await r.text()); return; }
       const blob = await r.blob();
-      afterImg.src = URL.createObjectURL(blob);
+      setAfterSrc(afterImg, blob);
       fctx.clearRect(0, 0, fc.width, fc.height);
-      const saved = r.headers.get("X-Output-Path");
+      const saved = outPath(r);
       setStatus("filled" + (saved ? " → " + saved : "") + " (saved to ./out; separate from the develop recipe)");
     } finally { btn.disabled = false; }
   };
@@ -795,9 +838,9 @@ async function selectPhoto(id, stem, el) {
         body: JSON.stringify({ id: state.id, mask, auto: !useMask, full_res: fullRes })});
       if (!r.ok) { setStatus("heal failed: " + await r.text()); return; }
       const blob = await r.blob();
-      afterImg.src = URL.createObjectURL(blob);
+      setAfterSrc(afterImg, blob);
       if (useMask) fctx.clearRect(0, 0, fc.width, fc.height);
-      const saved = r.headers.get("X-Output-Path"), n = r.headers.get("X-Heal-Spots");
+      const saved = outPath(r), n = r.headers.get("X-Heal-Spots");
       setStatus(`healed ${n || "?"} spot(s)${saved ? " → " + saved : ""} (saved to ./out; pixel retouch, not the develop recipe)`);
     } finally { btnA.disabled = false; btnP.disabled = false; }
   }
@@ -815,6 +858,13 @@ function showRationale() {
   $(".rationale").textContent = state.recipe.rationale ? `“${state.recipe.rationale}” (confidence ${state.recipe.confidence})` : "";
 }
 function escapeHtml(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+// The saved-master path travels percent-encoded (a header value is ASCII-only,
+// and a non-ASCII photo name used to make the server fail to build the header).
+function outPath(r) {
+  const v = r.headers.get("X-Output-Path");
+  if (!v) return null;
+  try { return decodeURIComponent(v); } catch (e) { return v; }
+}
 
 async function analyze() {
   const gi = document.querySelector(".guidance");
@@ -822,18 +872,43 @@ async function analyze() {
   const refine = document.querySelector(".refine")?.checked || false;
   setStatus(refine ? "refining your current edit with AI…" : "analyzing with GPT + Claude… (~10-30s)");
   const btn = $(".analyze"); btn.disabled = true;
+  // The photo this analysis belongs to. Analyze takes 10-30s and the gallery
+  // stays clickable, so WITHOUT this the answer would be applied to whatever is
+  // selected when it lands — corrupting that photo's recipe on screen, and a
+  // later Save would write it into the wrong photo's develop dir (same guard
+  // renderAfter uses).
+  const id = state.id;
+  // Careful promise: a stale answer may also have gone UNSAVED (backup-gate
+  // refusal), in which case reopening restores the OLD save — so say the
+  // result was discarded rather than promising it back.
+  const stale = () => setStatus("analysis for another photo finished — its result was NOT applied here; if it saved, reopening that photo shows it, otherwise re-run Analyze there");
   try {
     const style = (parseFloat(document.querySelector(".style-strength")?.value ?? "30") || 0) / 100;
-    const body = { id: state.id, guidance, style_strength: style };
+    const body = { id, guidance, style_strength: style };
     if (refine) body.base = state.recipe;          // adjust current edit, don't start over
     if (state.region) body.region = state.region;  // box-select: target this region
     const r = await fetch("/api/analyze", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
-    if (!r.ok) { setStatus("analyze failed: " + await r.text()); return; }
+    if (id !== state.id) { stale(); return; }
+    if (!r.ok) {
+      const msg = await r.text();
+      if (id !== state.id) { stale(); return; }
+      setStatus("analyze failed: " + msg); return;
+    }
     const data = await r.json();
+    if (id !== state.id) { stale(); return; }
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), data.recipe);
     syncSliders(); showVerdict(data.verdict); showRationale();
     pushHistory(state.recipe); renderAfter();
-    setStatus("done");
+    // `warning` = the proposal is on screen but was NOT persisted (an existing
+    // explicit save could not be snapshotted, so overwriting it was refused).
+    // Also pinned under the verdict: the status line is wiped by the preview
+    // render that is already in flight above.
+    if (data.warning) {
+      setStatus(data.warning);
+      $(".verdict").insertAdjacentHTML("beforeend", `<div class="hint" style="color:#e0a33c">⚠ ${escapeHtml(data.warning)}</div>`);
+    }
+    else setStatus("done" + (data.backed_up != null ? ` · previous save backed up as v${data.backed_up}` : ""));
+    loadList();   // the ● edited badge changes when analyze saves
   } finally { btn.disabled = false; }
 }
 
@@ -843,8 +918,12 @@ async function saveXmp() {
     body: JSON.stringify({id: state.id, recipe: state.recipe})});
   const body = await r.text();
   // The server writes the recipe.json alongside the XMP, so reopening this photo
-  // (here or in the GUI) restores exactly this edit.
-  setStatus(r.ok ? ("xmp + recipe saved → " + body) : ("save failed: " + body));
+  // (here or in the GUI) restores exactly this edit. A NEUTRAL recipe is not a
+  // save at all: the server deletes the sidecars instead (Reset + Save = "clear
+  // my edits") and answers "cleared …".
+  if (!r.ok) { setStatus("save failed: " + body); return; }
+  setStatus(body.startsWith("cleared") ? "saved edits cleared" : ("xmp + recipe saved → " + body));
+  loadList();   // the ● edited badge just appeared / disappeared
 }
 
 function saveBody() {
@@ -873,9 +952,14 @@ async function downloadFull() {
     if (!r.ok) { setStatus("download failed: " + await r.text()); return; }
     const blob = await r.blob();
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(blob);
+    a.href = url;
     a.download = `${state.stem || "photo"}.developed.${fmt}`;
     document.body.appendChild(a); a.click(); a.remove();
+    // A 16-bit TIFF is tens of MB and the anchor is gone the moment it's
+    // clicked — but the blob lives until revoked. Give the browser a generous
+    // window to actually start the save, then free it.
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
     setStatus("downloaded");
   } finally { btn.disabled = false; }
 }

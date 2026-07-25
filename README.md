@@ -54,8 +54,12 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   (deterministic; *not* generative — it invents nothing). Hybrid targeting: AI
   auto-detect + paint-to-add. Writes a pixel master to `./out`.
 - **Batch** the whole library, **eval** the AI against your own edits.
-- **Your library stays read-only** — outputs only ever go to `./out`; the engine
-  refuses to write into a source RAW's folder.
+- **Your library stays read-only** — the engine refuses to write into a source
+  RAW's folder. Exports (developed/heal/retouch images) go to `./out`; develop
+  STATE (recipes, Lightroom XMP, version snapshots, mask rasters) lives in a
+  per-user develop store (`AUTOSHOP_DATA_DIR`, else
+  `%LOCALAPPDATA%/autoshop/develops/<stem>-<path hash>/`), so two same-named
+  photos never collide and edits survive launching from any directory.
 
 <div align="center"><img src="assets/denoise-demo.png" width="520" alt="AI denoise before/after" /></div>
 
@@ -63,7 +67,7 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
 
 ```bash
 cargo build --release            # builds target/release/autoshop(.exe)
-cargo test                       # 27 passing tests
+cargo test                       # unit + engine tests
 ```
 
 Then either:
@@ -112,9 +116,10 @@ choice for the image role is a preset that points the endpoint at a local
 subscription bridge (e.g. CLIProxyAPI) instead of a keyed API — same wire
 protocol, different endpoint/credentials.
 
-Configure keys + models from the **Settings** panel — written to the gitignored
-`autoshop.local.json`, which overrides the environment. Keys never leave your
-machine (the server is `127.0.0.1` only). You can also use `.env`:
+Configure keys + models from the **Settings** panel — written to
+`autoshop.local.json` in your per-user Autoshop folder (never in a repo), which
+overrides the environment. Keys never leave your machine (the server is
+`127.0.0.1` only). You can also use `.env`:
 
 ```
 OPENAI_API_KEY=sk-...
@@ -137,8 +142,8 @@ blind, best for real high-ISO/astro), `color_real_gan`, `color_15/25/50`.
 
 ## Configuration (env vars)
 
-Everything below is also settable in the **Settings (⚙)** panel; the local file
-`autoshop.local.json` (gitignored) overrides the environment.
+Everything below is also settable in the **Settings (⚙)** panel; the per-user
+`autoshop.local.json` (in the Autoshop data folder) overrides the environment.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|

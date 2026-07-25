@@ -120,8 +120,11 @@ pinned in config — not hardcoded from memory.
 
 The verifier (analysis role) runs one of two providers (set in Settings):
 **OAuth** — the `claude` CLI for non-image reasoning + acceptance verification via
-`claude -p --bare --output-format json --model <opus>` (default `opus`; flags
-verified present in CLI v2.1.158), reusing Claude Code OAuth — no API key; or
+`claude -p --setting-sources "" --strict-mcp-config --disable-slash-commands
+--output-format json --model <opus>` (default `opus`), reusing Claude Code
+OAuth — no API key. `--bare` is deliberately NOT used: since CLI ≥ 2.1.210 it
+never reads the stored OAuth login ("OAuth and keychain are never read"), which
+is exactly the v0.11.2 auth failure — see `src/advisor/claude.rs`; or
 **API** — an OpenAI-compatible chat endpoint (`OpenAiVerifier`, `/chat/completions`)
 sharing the same data-only prompt. Either returns a `Verdict` (accept / revise /
 reject + reasons). A rejected recipe can trigger one revision round with the
