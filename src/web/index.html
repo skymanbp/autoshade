@@ -608,15 +608,24 @@ function syncGrade() {
   });
 }
 
-let afterTimer = null;
+let afterTimer = null, afterSeq = 0;
 function scheduleAfter() { clearTimeout(afterTimer); afterTimer = setTimeout(renderAfter, 220); }
 async function renderAfter() {
   if (state.id === null) return;
+  // Latest-wins. Preview requests are genuinely concurrent (the server gives each
+  // one a thread) and their cost is wildly uneven — a cold base decode can land
+  // AFTER a later warm one, and whoever answered last would stick on screen while
+  // the sliders (and Export/XMP, which send state.recipe) say something else.
+  // Same guard covers switching photos mid-flight: the pane belongs to the newest
+  // request only.
+  const seq = ++afterSeq, id = state.id;
   setStatus("rendering preview…");
   const r = await fetch("/api/develop", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({id: state.id, recipe: state.recipe})});
-  if (!r.ok) { setStatus("render failed"); return; }
+    body: JSON.stringify({id, recipe: state.recipe})});
+  if (seq !== afterSeq || id !== state.id) return;   // superseded: don't touch the pane or the status
+  if (!r.ok) { setStatus("render failed: " + await r.text()); return; }
   const blob = await r.blob();
+  if (seq !== afterSeq || id !== state.id) return;   // it went stale while we decoded the body
   $(".after").src = URL.createObjectURL(blob);
   setStatus("");
 }
@@ -678,7 +687,10 @@ async function selectPhoto(id, stem, el) {
         sbBuild.disabled = true; sbBuild.textContent = "building… (decodes your RAWs, can take minutes)";
         try {
           const rr = await fetch("/api/style-build", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({dir})});
-          if (!rr.ok) { sbBuild.textContent = "failed: " + (await rr.text()).slice(0,30); sbBuild.disabled = false; return; }
+          // The button is too small for the real reason (an empty build now
+          // REFUSES to overwrite a good index and says why) — put it in the
+          // status line, where the whole message fits.
+          if (!rr.ok) { sbBuild.textContent = "failed"; sbBuild.disabled = false; setStatus("style index: " + (await rr.text() || "build failed")); return; }
           const j = await rr.json();
           sbBuild.textContent = `built ${j.total} ✓`;
           setStatus(`style index built: ${j.total} edits from ${j.source_dir}`);
@@ -829,7 +841,10 @@ async function saveXmp() {
   setStatus("saving xmp…");
   const r = await fetch("/api/xmp", {method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({id: state.id, recipe: state.recipe})});
-  setStatus(r.ok ? ("xmp saved → " + await r.text()) : "save failed");
+  const body = await r.text();
+  // The server writes the recipe.json alongside the XMP, so reopening this photo
+  // (here or in the GUI) restores exactly this edit.
+  setStatus(r.ok ? ("xmp + recipe saved → " + body) : ("save failed: " + body));
 }
 
 function saveBody() {
@@ -844,7 +859,8 @@ async function exportFull() {
   const btn = $(".export"); btn.disabled = true;
   try {
     const r = await fetch("/api/export", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(saveBody())});
-    setStatus(r.ok ? ("exported → " + await r.text()) : "export failed");
+    const body = await r.text();
+    setStatus(r.ok ? ("exported → " + body) : ("export failed: " + body));
   } finally { btn.disabled = false; }
 }
 

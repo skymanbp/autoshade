@@ -409,6 +409,11 @@ pub enum MaskGeometry {
     /// Maps to ACR `What="Mask/Gradient"`.
     Linear { zero_x: f32, zero_y: f32, full_x: f32, full_y: f32 },
     /// Radial/elliptical gradient. Maps to ACR `What="Mask/CircularGradient"`.
+    /// `feather` IS engine-rendered (clamped to 0..1). `roundness` is **carried
+    /// only** — persisted, XMP round-tripped and accepted from the AI, but NOT
+    /// rendered: the engine draws a pure ellipse. Its scale and sign are
+    /// unverified (docs/V2_PLAN.md §7 item 1), so honouring it would reshape
+    /// imported and AI-authored masks on a guess; see `mask_weight` in render.rs.
     Radial {
         top: f32,
         left: f32,

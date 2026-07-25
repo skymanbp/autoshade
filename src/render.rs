@@ -753,6 +753,13 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
         // Bitmap geometry: decode the raster ONCE per mask per develop (never
         // inside the pixel loop); both the tone and the NR pass share it.
         let bmp = load_mask_bitmap(&m.mask);
+        // An unloadable raster carries NO coverage, so its weight must never
+        // reach the inversion below: 0 with `inverted` would apply this
+        // adjustment to the WHOLE frame at full strength. Skipping the whole
+        // adjustment is the inert contract (recipe.rs `MaskGeometry::Bitmap`).
+        if bmp.is_none() && matches!(m.mask, MaskGeometry::Bitmap { .. }) {
+            continue;
+        }
         // mask coverage × master amount at a pixel (with optional inversion).
         let weight_at = |x: usize, y: usize| -> f32 {
             let mut wgt = mask_weight(&m.mask, x as f32 / w as f32, y as f32 / h as f32, bmp.as_deref());
@@ -839,7 +846,16 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             }
             (((nx - zero_x) * vx + (ny - zero_y) * vy) / len2).clamp(0.0, 1.0)
         }
-        // Roundness is ignored in v1 (pure ellipse).
+        // `roundness` is carried but deliberately NOT rendered — pure ellipse,
+        // see `MaskGeometry::Radial` in recipe.rs. Nothing in the repo fixes its
+        // scale or sign (the advisor schema declares a bare number; docs/
+        // V2_PLAN.md §7 item 1 lists the radial ranges as unverified; every
+        // radial in the reference Lightroom sidecars carries Roundness="0"), and
+        // the sibling `feather` shows the cost of guessing: Lightroom writes it
+        // 0..100 and xmp.rs imports it raw, so the clamp below already reads an
+        // imported feather of 72 as fully feathered. Test
+        // radial_roundness_is_a_documented_no_op pins this no-op until a real
+        // sidecar with a non-zero roundness fixes the mapping.
         MaskGeometry::Radial { top, left, bottom, right, feather, roundness: _, flipped } => {
             let cx = (left + right) / 2.0;
             let cy = (top + bottom) / 2.0;
@@ -847,7 +863,10 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             let ry = ((bottom - top) / 2.0).abs().max(1e-4);
             let d = (((nx - cx) / rx).powi(2) + ((ny - cy) / ry).powi(2)).sqrt();
             let f = feather.clamp(0.0, 1.0);
-            let wgt = 1.0 - smoothstep(1.0 - f, 1.0, d);
+            // Guarded ramp, not raw `smoothstep`: feather 0 makes the edges
+            // equal, and 0/0 would be NaN exactly on the ellipse boundary
+            // (NaN survives the `wgt <= 0.001` early-out and casts to black).
+            let wgt = 1.0 - ramp(1.0 - f, 1.0, d);
             if *flipped {
                 1.0 - wgt
             } else {
@@ -943,6 +962,11 @@ pub fn mask_coverage(
     let rgb = reference.to_rgb8();
     let (w, h) = rgb.dimensions();
     let bmp = load_mask_bitmap(&m.mask);
+    // Same load-failure contract as `apply_masks` (inert, inversion included),
+    // so the overlay never advertises coverage the render will not apply.
+    if bmp.is_none() && matches!(m.mask, MaskGeometry::Bitmap { .. }) {
+        return image::GrayImage::new(w, h);
+    }
     let amount = m.amount.clamp(0.0, 1.0);
     let mut out = image::GrayImage::new(w, h);
     for (x, y, px) in out.enumerate_pixels_mut() {
@@ -979,14 +1003,6 @@ pub fn mask_coverage(
 ///   (d≈0.8) and opposite hues (d≳2); at 1.0 grey gains partial weight. Very
 ///   dark pixels (luma < 1e-4) have no reliable chroma and get weight 0.
 pub fn range_weight(rm: &RangeMask, px: &[f32; 3]) -> f32 {
-    // smoothstep with a degenerate-edge guard (equal edges = step function).
-    fn ramp(e0: f32, e1: f32, x: f32) -> f32 {
-        if e1 - e0 < 1e-6 {
-            if x < e0 { 0.0 } else { 1.0 }
-        } else {
-            smoothstep(e0, e1, x)
-        }
-    }
     match rm {
         RangeMask::Luminance { lo_outer, lo, hi, hi_outer } => {
             let l = luma601(px);
@@ -1283,6 +1299,17 @@ fn linear_to_srgb(c: f32) -> f32 {
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// `smoothstep` with a degenerate-edge guard: equal edges are a hard step
+/// instead of the 0/0 NaN `smoothstep` returns there (and `clamp` propagates).
+/// Identical to `smoothstep` whenever `e1 - e0 >= 1e-6`.
+fn ramp(e0: f32, e1: f32, x: f32) -> f32 {
+    if e1 - e0 < 1e-6 {
+        if x < e0 { 0.0 } else { 1.0 }
+    } else {
+        smoothstep(e0, e1, x)
+    }
 }
 
 /// Tone-model knot inputs. 0.66 is an explicit vertex so mid-bright water (≈0.66)
@@ -2740,6 +2767,106 @@ mod tests {
         let inert = develop_preview(&base, &missing).to_rgb8();
         assert_eq!(inert.get_pixel(5, 10)[0], ctrl_w, "missing raster ⇒ mask inert");
         assert_eq!(inert.get_pixel(35, 10)[0], ctrl_b);
+    }
+
+    #[test]
+    fn missing_bitmap_raster_is_inert_even_when_inverted() {
+        use crate::recipe::MaskGeometry;
+        // An unloadable raster carries no coverage, so `inverted` must NOT turn
+        // its zero weight into full-frame coverage — render AND overlay have to
+        // match a no-mask control for both inversion states.
+        let base =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(24, 16, image::Rgb([100, 100, 100])));
+        let control = develop_preview(&base, &EditRecipe::default()).to_rgb8();
+        for inverted in [false, true] {
+            let adj = LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: "out/_no_such_mask_inverted.png".into() },
+                exposure_ev: 2.0,
+                saturation: -100.0,
+                inverted,
+                ..Default::default()
+            };
+            let r = EditRecipe { masks: vec![adj.clone()], ..Default::default() };
+            let out = develop_preview(&base, &r).to_rgb8();
+            assert_eq!(
+                out.as_raw(),
+                control.as_raw(),
+                "missing raster (inverted={inverted}) must render byte-identically to no mask"
+            );
+            let cov = mask_coverage(&adj, &base);
+            assert!(
+                cov.as_raw().iter().all(|&v| v == 0),
+                "overlay must show zero coverage (inverted={inverted})"
+            );
+        }
+    }
+
+    #[test]
+    fn radial_feather_zero_stays_finite_on_the_boundary() {
+        use crate::recipe::MaskGeometry;
+        // Full-frame radial, feather 0: the normalised distance is EXACTLY 1.0
+        // at (0.0, 0.5), where the unguarded smoothstep divided 0/0 → NaN.
+        let g = MaskGeometry::Radial {
+            top: 0.0,
+            left: 0.0,
+            bottom: 1.0,
+            right: 1.0,
+            feather: 0.0,
+            roundness: 0.0,
+            flipped: false,
+        };
+        assert_eq!(mask_weight(&g, 0.0, 0.5, None), 0.0, "hard edge: boundary is outside");
+        assert_eq!(mask_weight(&g, 0.5, 0.5, None), 1.0, "hard edge: centre is inside");
+        for i in 0..=40 {
+            for j in 0..=40 {
+                let w = mask_weight(&g, i as f32 / 40.0, j as f32 / 40.0, None);
+                assert!(w.is_finite() && (0.0..=1.0).contains(&w), "weight {w} at ({i},{j})");
+            }
+        }
+        // User-visible symptom: a NaN weight blends to NaN and casts to 0 (a
+        // black pixel). 40×20 puts pixel (0,10) exactly on the boundary.
+        let base =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(40, 20, image::Rgb([120, 120, 120])));
+        let r = EditRecipe {
+            masks: vec![LocalAdjustment { mask: g, exposure_ev: 1.0, ..Default::default() }],
+            ..Default::default()
+        };
+        let out = develop_preview(&base, &r).to_rgb8();
+        assert!(
+            out.as_raw().iter().all(|&v| v > 100),
+            "feather 0 must brighten or leave pixels alone, never produce black"
+        );
+    }
+
+    #[test]
+    fn radial_roundness_is_a_documented_no_op() {
+        use crate::recipe::MaskGeometry;
+        // CONTRACT (see `MaskGeometry::Radial` in recipe.rs): roundness is
+        // carried by recipe/XMP/AI schema but NOT rendered, because its scale
+        // and sign are unverified. Pinning the no-op so any future
+        // implementation lands together with the doc and the XMP round-trip.
+        let radial = |roundness: f32| MaskGeometry::Radial {
+            top: 0.2,
+            left: 0.1,
+            bottom: 0.8,
+            right: 0.7,
+            feather: 0.5,
+            roundness,
+            flipped: false,
+        };
+        for i in 0..=10 {
+            for j in 0..=10 {
+                let (nx, ny) = (i as f32 / 10.0, j as f32 / 10.0);
+                let base = mask_weight(&radial(0.0), nx, ny, None);
+                for r in [-100.0, -35.0, -1.0, 1.0, 35.0, 100.0] {
+                    assert_eq!(
+                        mask_weight(&radial(r), nx, ny, None),
+                        base,
+                        "roundness {r} must not change the weight at ({nx},{ny})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

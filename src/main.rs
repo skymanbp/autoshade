@@ -114,7 +114,8 @@ enum Command {
     /// Batch-process every RAW under a folder (resumes by skipping done .xmp).
     /// Outputs go to ./out — the photo library stays read-only.
     Batch {
-        /// Folder to scan recursively for .ARW files.
+        /// Folder to scan recursively for RAW files (.arw/.dng/.nef/.cr2/.cr3/
+        /// .raf/.orf/.rw2 — the same set the GUI and web open).
         dir: PathBuf,
         /// Also render a 16-bit developed TIFF per RAW (slower, large files).
         #[arg(long)]
@@ -184,7 +185,9 @@ enum Command {
         /// model (./out/<stem>.style.txt; needs OPENAI_API_KEY).
         #[arg(long)]
         style_prompt: bool,
-        /// Recipe JSON output (default: ./out/<stem>.matched.json).
+        /// Named recipe JSON artifact for `apply` (default:
+        /// ./out/<stem>.matched.json). The canonical ./out/<stem>.recipe.json —
+        /// the sidecar the GUI and web restore — is ALWAYS written too.
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
@@ -353,6 +356,9 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     // "adjust current edit" path is a web-UI affordance.
     let style = style.unwrap_or(cfg.style_strength);
     let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
+    // Remember whether -o redirected the recipe: the XMP has to follow it (below)
+    // so one develop never splits across two folders.
+    let redirected = out.is_some();
     let recipe_path = write_recipe(raw, &recipe, out)?;
 
     println!("\n--- proposed recipe ---");
@@ -364,8 +370,20 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     println!("\nrecipe -> {}", recipe_path.display());
     // XMP only for a RAW; a baked source (PNG/TIFF) gets the recipe JSON only.
     if decode::is_raw(raw) {
-        let xmp_path = write_xmp(raw, &recipe)?;
+        // With -o the XMP goes BESIDE the redirected recipe (same dir + stem),
+        // not to ./out: a lone out/<stem>.xmp is what the GUI/web would restore
+        // instead of this recipe, silently dropping everything classic sidecars
+        // cannot carry (bitmap masks, recolour gains).
+        let xmp_path = if redirected {
+            pipeline::write_xmp_at(recipe_path.with_extension("xmp"), &recipe)?
+        } else {
+            write_xmp(raw, &recipe)?
+        };
         println!("xmp    -> {}", xmp_path.display());
+        if redirected {
+            println!("  (written beside the -o recipe so the pair stays together; nothing was written to ./out,");
+            println!("   so the GUI/web will NOT restore this develop — copy both files there to make them see it)");
+        }
         let s = stem(raw);
         println!("  (the library is read-only — copy {s}.xmp next to {s}.ARW to open it in Lightroom)");
     } else {
@@ -468,11 +486,15 @@ fn match_cmd(
     let tgt = decode::load_image(target)?;
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
     let rep = if zoned {
-        // Sky mask lands at the GUI's convention (out/<stem>.mask-sky.png) so
-        // opening the photo in the GUI shows the same raster in the mask panel.
+        // Sky mask lands at the GUI's convention (out/<stem>.mask-zone-sky.png —
+        // deliberately distinct from 「AI select sky」's mask-sky.png, which the
+        // fit's cleanup must never delete); the GUI shows that raster because
+        // the canonical recipe written below REFERENCES this path (masks are
+        // attached by reference, never found by filename), so the two must be
+        // written together.
         let cfg = Config::load();
         let seg = autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
-        let mask = default_out(raw, "mask-sky", "png");
+        let mask = default_out(raw, "mask-zone-sky", "png");
         pipeline::guard_readonly(&mask, raw)?;
         println!("  zoned: segmenting the sky in both images (local python sidecar) …");
         autoshop::fit_zoned::fit_recipe_zoned(&src, &tgt, &seg, &mask)
@@ -490,6 +512,17 @@ fn match_cmd(
     pipeline::guard_readonly(&out, raw)?;
     let recipe_path = write_recipe(raw, &rep.recipe, Some(out))?;
     println!("recipe -> {}", recipe_path.display());
+    // ALSO write the canonical sidecar. out/<stem>.recipe.json is the ONLY recipe
+    // name the GUI (read_saved_develop) and the web (/api/recipe) read back, and
+    // the XMP below cannot carry the zoned result at all (raster masks, colour
+    // gains, mask roles are recipe-only) — without this, `match --zoned` produced
+    // a full fit that no surface able to render it could ever load.
+    let canonical = default_out(raw, "recipe", "json");
+    if canonical != recipe_path {
+        pipeline::guard_readonly(&canonical, raw)?;
+        let p = write_recipe(raw, &rep.recipe, Some(canonical))?;
+        println!("sidecar-> {} (what the GUI/web restore; overwrites any earlier develop)", p.display());
+    }
     if decode::is_raw(raw) {
         let xmp_path = write_xmp(raw, &rep.recipe)?;
         let s = stem(raw);

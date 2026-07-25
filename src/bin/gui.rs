@@ -269,9 +269,13 @@ fn model_opts(fetched: &[String], fallback: &[&str], current: &str) -> Vec<Strin
 }
 
 /// Every source type the app opens — ONE list shared by the file dialog, drag &
-/// drop, and any future association, so they can't drift apart.
-const PHOTO_EXTS: [&str; 11] =
-    ["arw", "dng", "raf", "nef", "cr2", "cr3", "png", "tif", "tiff", "jpg", "jpeg"];
+/// drop, and any future association, so they can't drift apart. Must cover
+/// everything `decode::is_raw` accepts (the gallery + decoder already open
+/// ORF/RW2/RAW; the dialog refusing them was pure drift).
+const PHOTO_EXTS: [&str; 14] = [
+    "arw", "dng", "raf", "nef", "cr2", "cr3", "orf", "rw2", "raw", "png", "tif", "tiff", "jpg",
+    "jpeg",
+];
 
 fn is_photo_path(p: &std::path::Path) -> bool {
     p.extension()
@@ -286,28 +290,47 @@ fn photo_file_dialog() -> Option<PathBuf> {
 /// Visualise a mask geometry on the image: linear = the zero→full vector with
 /// end bars (solid = full-effect side); radial = the ellipse outline. Clipped
 /// to the image rect by the painter.
-fn draw_mask_overlay(ui: &egui::Ui, xf: ViewXform, geom: &MaskGeometry, lang: Lang) {
+/// `adj_inverted` is the owning LocalAdjustment's Invert flag: the engine
+/// flips the coverage with it, so the directional markers must flip too —
+/// otherwise the outline points at exactly the wrong side while the red
+/// coverage layer contradicts it in the same frame.
+fn draw_mask_overlay(
+    ui: &egui::Ui,
+    xf: ViewXform,
+    geom: &MaskGeometry,
+    adj_inverted: bool,
+    lang: Lang,
+) {
     let p = ui.painter_at(xf.rect);
     let stroke = egui::Stroke::new(2.0, ACCENT);
     match geom {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
             let a = xf.to_screen(*zero_x, *zero_y);
             let b = xf.to_screen(*full_x, *full_y);
+            // Invert swaps which end carries the full effect.
+            let (full, zero) = if adj_inverted { (a, b) } else { (b, a) };
             p.line_segment([a, b], stroke);
             let v = b - a;
             let len = v.length().max(1.0);
             let n = egui::vec2(-v.y / len, v.x / len) * 28.0;
-            p.line_segment([a - n, a + n], egui::Stroke::new(1.0, ACCENT));
-            p.line_segment([b - n, b + n], stroke);
-            p.circle_filled(b, 4.0, ACCENT); // full-effect end
-            p.circle_stroke(a, 4.0, stroke); // untouched end
+            p.line_segment([zero - n, zero + n], egui::Stroke::new(1.0, ACCENT));
+            p.line_segment([full - n, full + n], stroke);
+            p.circle_filled(full, 4.0, ACCENT); // full-effect end
+            p.circle_stroke(zero, 4.0, stroke); // untouched end
         }
-        MaskGeometry::Radial { top, left, bottom, right, .. } => {
+        MaskGeometry::Radial { top, left, bottom, right, flipped, .. } => {
             let c = xf.to_screen((left + right) / 2.0, (top + bottom) / 2.0);
             let rx = (xf.to_screen(*right, 0.0).x - xf.to_screen(*left, 0.0).x).abs() / 2.0;
             let ry = (xf.to_screen(0.0, *bottom).y - xf.to_screen(0.0, *top).y).abs() / 2.0;
             p.add(egui::Shape::ellipse_stroke(c, egui::vec2(rx, ry), stroke));
-            p.circle_filled(c, 3.0, ACCENT);
+            // Filled centre = the effect fills the INSIDE; hollow = the
+            // geometry's own `flipped` and/or the adjustment's Invert put the
+            // effect OUTSIDE the ellipse (the two compose, matching the engine).
+            if flipped ^ adj_inverted {
+                p.circle_stroke(c, 3.0, stroke);
+            } else {
+                p.circle_filled(c, 3.0, ACCENT);
+            }
         }
         // Raster masks have no parametric outline to draw — mark the selection
         // with a badge instead of pretending a shape (rendering the raster as a
@@ -595,6 +618,13 @@ struct AutoshopApp {
     committed: EditRecipe,        // current history head (last committed state)
     undo_stack: Vec<EditRecipe>,  // prior states, most recent last
     redo_stack: Vec<EditRecipe>,  // states undone away (cleared on a new edit)
+    // --- unsaved-edit protection ---
+    // What the sidecar last held for the open photo (neutral when none): the
+    // canvas differing from it is the "● unsaved" condition. Navigation stashes
+    // an unsaved canvas per-path for THIS session so switching photos can never
+    // silently destroy work; only Ctrl+S writes disk.
+    saved_recipe: EditRecipe,
+    nav_stash: HashMap<PathBuf, EditRecipe>,
     // --- settings / denoise ---
     save_denoise: bool,     // run SCUNet AI denoise before the full-res render
     zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
@@ -621,6 +651,7 @@ struct AutoshopApp {
     mask_paint: Option<image::RgbaImage>,  // painted overlay (red where painted), at preview res
     mask_tex: Option<egui::TextureHandle>, // overlay texture
     mask_dirty: bool,                      // re-upload the overlay
+    mask_tex_xform: (f32, f32), // (straighten, distortion) the texture was built under
     paint_last: Option<(f32, f32)>,        // last brush point in mask px (line fill)
     fill_prompt: String,                   // generative-fill instruction
     fill_quality: usize,                   // 0=high 1=medium 2=low
@@ -828,6 +859,8 @@ impl Default for AutoshopApp {
             thumb_inflight: 0,
             edited_badge: HashMap::new(),
             base_cache: Vec::new(),
+            saved_recipe: EditRecipe::default(),
+            nav_stash: HashMap::new(),
             region: None,
             region_drag: None,
             paint_mode: false,
@@ -835,6 +868,7 @@ impl Default for AutoshopApp {
             mask_paint: None,
             mask_tex: None,
             mask_dirty: false,
+            mask_tex_xform: (0.0, 0.0),
             paint_last: None,
             fill_prompt: String::new(),
             fill_quality: 0,
@@ -908,6 +942,10 @@ impl AutoshopApp {
             // Restore the UI language (an older save without this key decoded to
             // `Lang::En` via `#[serde(default)]`, so this is always valid).
             app.lang = prefs.lang;
+            // The greeting was set by default() BEFORE the language was known —
+            // re-issue it, or a Chinese install opens with one English line.
+            app.status =
+                tr(app.lang, "Open a photo, or open a folder to browse your library.").into();
             // Only known color spaces — an out-of-range pref falls back to sRGB.
             if prefs.exp_space <= 2 {
                 app.exp_space = prefs.exp_space;
@@ -1047,8 +1085,40 @@ fn build_preview(
     // into_rgb8 MOVES the buffer in the common no-geometry case (develop_preview
     // returns ImageRgb8) — to_rgb8() deep-copied ~3.3 MB per tick at 1280.
     let rgb = after.into_rgb8();
-    let histogram = compute_histogram_rgb(&rgb);
-    let clipping = show_clipping.then(|| clipping_overlay_rgb(&rgb));
+    // Histogram + clipping are judged on EXPORT pixels: the export applies
+    // `recipe.crop` normalised on this same post-distortion/straighten frame
+    // (render.rs — distortion → straighten → crop), so statistics over the
+    // crop sub-rect here match what actually ships. The preview image itself
+    // stays full-frame on purpose (immediate whole-frame slider feedback).
+    let crop_px = recipe.crop.map(|c| {
+        let (w, h) = (rgb.width() as f32, rgb.height() as f32);
+        let x0 = (c.left.clamp(0.0, 1.0) * w) as u32;
+        let y0 = (c.top.clamp(0.0, 1.0) * h) as u32;
+        let x1 = ((c.right.clamp(0.0, 1.0) * w) as u32).max(x0 + 1).min(rgb.width());
+        let y1 = ((c.bottom.clamp(0.0, 1.0) * h) as u32).max(y0 + 1).min(rgb.height());
+        (x0, y0, x1 - x0, y1 - y0)
+    });
+    let histogram = match crop_px {
+        Some((x, y, w, h)) => {
+            compute_histogram_rgb(&image::imageops::crop_imm(&rgb, x, y, w, h).to_image())
+        }
+        None => compute_histogram_rgb(&rgb),
+    };
+    let clipping = show_clipping.then(|| {
+        let mut overlay = clipping_overlay_rgb(&rgb);
+        // Outside the crop nothing exports — blank those warnings so a blown
+        // sky the user already cropped away stops shouting.
+        if let Some((x, y, w, h)) = crop_px {
+            let transparent = egui::Color32::TRANSPARENT;
+            for (i, px) in overlay.pixels.iter_mut().enumerate() {
+                let (cx, cy) = (i as u32 % overlay.size[0] as u32, i as u32 / overlay.size[0] as u32);
+                if cx < x || cx >= x + w || cy < y || cy >= y + h {
+                    *px = transparent;
+                }
+            }
+        }
+        overlay
+    });
     let thumb_rgb = image::imageops::thumbnail(&rgb, 96, 96);
     let thumb = rgb_to_color_image(&thumb_rgb);
     let after = rgb_to_color_image(&rgb);
@@ -1152,37 +1222,116 @@ type BaseCacheKey = (PathBuf, u32, Option<std::time::SystemTime>);
 /// each at the default 1280 edge; culling flips between neighbours constantly).
 const BASE_CACHE_CAP: usize = 4;
 
-/// The photo's saved develop from ./out, if any: the app-internal
-/// `<stem>.recipe.json` first (lossless — bitmap masks, recolour gains, roles
-/// all round-trip), else the Lightroom-compatible `<stem>.xmp` re-imported
-/// through the reverse crs mapping (globals, curves, crop, parametric masks —
-/// everything classic XMP can carry). Returns the recipe plus the sidecar kind
-/// (a technical filename, shown untranslated in the status line). `None` when
-/// no sidecar exists, none parses, or the XMP holds no actual edits.
-fn read_saved_develop(src: &std::path::Path) -> Option<(EditRecipe, &'static str)> {
+/// What ./out holds for a photo — the open path and the status line key off
+/// this, and every outcome is DISTINGUISHED so nothing degrades silently
+/// (an unparsable recipe.json used to fall through to the lossy XMP without
+/// a word, and a neutral sidecar claimed "restored saved edits").
+enum SavedDevelop {
+    /// A sidecar with real edits (kind = which file; technical name, shown
+    /// untranslated in the status line).
+    Restored(EditRecipe, &'static str),
+    /// recipe.json exists but does not parse (interrupted write, or written
+    /// by a newer build — EditRecipe is deny_unknown_fields). The XMP
+    /// fallback, when it held real edits, comes along.
+    Unreadable { err: String, fallback: Option<(EditRecipe, &'static str)> },
+    /// Sidecars exist but describe no effective edit (Reset-then-save
+    /// leftovers, or a foreign neutral XMP).
+    NoopOnly,
+    /// No sidecar at all.
+    Nothing,
+}
+
+/// The photo's saved develop from ./out: the app-internal `<stem>.recipe.json`
+/// first (lossless — bitmap masks, recolour gains, roles all round-trip), else
+/// the Lightroom-compatible `<stem>.xmp` re-imported through the reverse crs
+/// mapping (globals, curves, crop, parametric masks — everything classic XMP
+/// can carry).
+fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
     let rj = autoshop::pipeline::default_out(src, "recipe", "json");
-    if let Ok(text) = std::fs::read_to_string(&rj)
-        && let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
-    {
-        r.clamp();
-        return Some((r, "recipe.json"));
+    let mut any = false;
+    let mut parse_err: Option<String> = None;
+    if let Ok(text) = std::fs::read_to_string(&rj) {
+        any = true;
+        match serde_json::from_str::<EditRecipe>(&text) {
+            Ok(mut r) => {
+                if !r.is_noop() {
+                    r.clamp();
+                    return SavedDevelop::Restored(r, "recipe.json");
+                }
+                // Neutral recipe.json: fall through — an XMP with real edits
+                // may still exist beside it.
+            }
+            Err(e) => parse_err = Some(e.to_string()),
+        }
     }
+    let mut fallback = None;
     if let Ok(text) = std::fs::read_to_string(autoshop::pipeline::xmp_target(src)) {
+        any = true;
         let mut r = autoshop::xmp::xmp_to_recipe(&text);
         // A foreign / neutral sidecar parses to a no-op recipe — "restoring"
         // it would only produce a misleading status line.
         if !r.is_noop() {
             r.clamp();
-            return Some((r, "XMP"));
+            fallback = Some((r, "XMP"));
         }
     }
-    None
+    if let Some(err) = parse_err {
+        return SavedDevelop::Unreadable { err, fallback };
+    }
+    match (fallback, any) {
+        (Some((r, k)), _) => SavedDevelop::Restored(r, k),
+        (None, true) => SavedDevelop::NoopOnly,
+        (None, false) => SavedDevelop::Nothing,
+    }
+}
+
+/// Before a PROGRAMMATIC writer (AI Analyze, reverse-fit) replaces an existing
+/// saved develop, snapshot it to the next `./out/<stem>.v<N>.recipe.json` so an
+/// explicit Ctrl+S save can never be silently destroyed. Explicit saves
+/// overwrite without backup — the user asked for that one. Returns the version
+/// number when a backup was made; identical content is not backed up.
+fn backup_saved_develop(src: &std::path::Path, incoming: &EditRecipe) -> Option<u32> {
+    let rj = autoshop::pipeline::default_out(src, "recipe", "json");
+    let text = std::fs::read_to_string(&rj).ok()?;
+    if let Ok(existing) = serde_json::from_str::<EditRecipe>(&text)
+        && existing == *incoming
+    {
+        return None; // rewriting the same content needs no snapshot
+    }
+    let prefix = format!("{}.v", autoshop::pipeline::stem(src));
+    let mut maxn = 0u32;
+    if let Ok(dir) = std::fs::read_dir("out") {
+        for e in dir.flatten() {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if let Some(rest) = name.strip_prefix(&prefix)
+                && let Some(nums) = rest.strip_suffix(".recipe.json")
+                && let Ok(n) = nums.parse::<u32>()
+            {
+                maxn = maxn.max(n);
+            }
+        }
+    }
+    let n = maxn + 1;
+    let dst =
+        PathBuf::from("out").join(format!("{}.v{n}.recipe.json", autoshop::pipeline::stem(src)));
+    std::fs::rename(&rj, &dst).ok().map(|_| n)
 }
 
 impl AutoshopApp {
     fn open_path(&mut self, path: PathBuf) {
         if self.busy {
             return;
+        }
+        // Leaving a photo with unsaved edits: stash the canvas for this
+        // session so navigation can never silently destroy work (arrow keys /
+        // thumbnail clicks used to drop the whole develop). Ctrl+S still owns
+        // disk; returning to the photo restores the stash over the sidecar.
+        if let Some(old) = self.src_path.clone()
+            && old != path
+            && self.recipe != self.saved_recipe
+        {
+            self.nav_stash.insert(old, self.recipe.clone());
         }
         let lang = self.lang;
         self.busy = true;
@@ -1339,7 +1488,14 @@ impl AutoshopApp {
     /// edits are saved back into the variant you leave, then the target's
     /// recipe + pixels become current.
     fn switch_variant(&mut self, idx: usize, ctx: &egui::Context) {
-        if idx == self.active || idx >= self.variants.len() || self.busy {
+        if idx == self.active || idx >= self.variants.len() {
+            return;
+        }
+        if self.busy {
+            // Refusal must be visible — the card stays clickable and a silent
+            // no-op reads as a dead UI.
+            let t = tr(self.lang, "busy — variants unlock when the current task finishes");
+            self.toast(ToastKind::Error, t);
             return;
         }
         if let Some(cur) = self.variants.get_mut(self.active) {
@@ -1374,7 +1530,12 @@ impl AutoshopApp {
     /// COMPLETION time, so re-anchoring `active` mid-flight would bake its result
     /// onto the wrong variant.
     fn delete_variant(&mut self, idx: usize, ctx: &egui::Context) {
-        if self.busy || self.variants.len() <= 1 || idx >= self.variants.len() {
+        if self.busy {
+            let t = tr(self.lang, "busy — variants unlock when the current task finishes");
+            self.toast(ToastKind::Error, t);
+            return;
+        }
+        if self.variants.len() <= 1 || idx >= self.variants.len() {
             return;
         }
         let active_removed = idx == self.active;
@@ -1395,6 +1556,17 @@ impl AutoshopApp {
     /// never touching the library or the working `<stem>.recipe.json`).
     fn version_path(src: &std::path::Path, n: u32) -> PathBuf {
         PathBuf::from("out").join(format!("{}.v{n}.recipe.json", autoshop::pipeline::stem(src)))
+    }
+
+    /// Re-point every stored mask index (selection, colour-range sampler,
+    /// redraw target) after the mask list changed shape — delete, drag-drop
+    /// reorder, ⬆/⬇ swap. One place, so an index-carrying tool cannot be
+    /// forgotten: a dangling index used to make the range sampler write into
+    /// whatever mask slid under it.
+    fn remap_mask_indices(&mut self, f: impl Fn(usize) -> Option<usize>) {
+        self.sel_mask = self.sel_mask.and_then(&f);
+        self.range_picking = self.range_picking.and_then(&f);
+        self.placing_mask = self.placing_mask.take().map(|(k, r)| (k, r.and_then(&f)));
     }
 
     /// Rescan ./out for this photo's version snapshots (cached in
@@ -1433,7 +1605,11 @@ impl AutoshopApp {
                     &[("n", &n.to_string()), ("path", &p.display().to_string())],
                 );
             }
-            Err(e) => self.status = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]),
+            Err(e) => {
+                let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t);
+            }
         }
     }
 
@@ -1449,11 +1625,19 @@ impl AutoshopApp {
             Ok(mut r) => {
                 r.clamp();
                 self.recipe = r;
-                self.rationale = self.recipe.rationale.clone();
+                self.resync_recipe_display();
                 self.dirty = true;
                 self.status = trf(lang, "Loaded version v{n} — Ctrl+Z returns to before the load", &[("n", &n.to_string())]);
             }
-            Err(e) => self.status = trf(lang, "Load v{n} failed: {err}", &[("n", &n.to_string()), ("err", &e.to_string())]),
+            Err(e) => {
+                let t = trf(
+                    lang,
+                    "Load v{n} failed: {err}",
+                    &[("n", &n.to_string()), ("err", &e.to_string())],
+                );
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t);
+            }
         }
     }
 
@@ -1507,12 +1691,21 @@ impl AutoshopApp {
         }
     }
 
+    /// Recipe replaced wholesale (undo/redo/Reset/version load): the derived
+    /// display state must follow, or the panel keeps showing an AI rationale /
+    /// verdict that describes a recipe no longer on screen.
+    fn resync_recipe_display(&mut self) {
+        self.rationale = self.recipe.rationale.clone();
+        self.verdict = None;
+    }
+
     fn undo(&mut self) {
         if let Some(prev) = self.undo_stack.pop() {
             self.redo_stack.push(self.committed.clone());
             self.committed = prev.clone();
             self.recipe = prev;
             self.dirty = true;
+            self.resync_recipe_display();
         }
     }
 
@@ -1522,6 +1715,7 @@ impl AutoshopApp {
             self.committed = next.clone();
             self.recipe = next;
             self.dirty = true;
+            self.resync_recipe_display();
         }
     }
 
@@ -1530,9 +1724,12 @@ impl AutoshopApp {
     fn load_settings_form(&mut self) {
         let cfg = autoshop::config::Config::load();
         // Keep any model lists already fetched this session so reopening Settings
-        // doesn't force a re-fetch.
+        // doesn't force a re-fetch — and keep an in-flight fetch's flag alive:
+        // zeroing it mid-fetch stopped the repaint pump AND re-armed the fetch
+        // button (duplicate requests, stalled status).
         let chat_choices = std::mem::take(&mut self.settings.chat_choices);
         let image_gen_choices = std::mem::take(&mut self.settings.image_gen_choices);
+        let fetching_models = self.settings.fetching_models;
         self.settings = SettingsForm {
             analysis_provider_api: cfg.analysis_is_api(),
             image_provider_oauth: cfg.image_is_oauth(),
@@ -1548,7 +1745,7 @@ impl AutoshopApp {
             status: String::new(),
             chat_choices,
             image_gen_choices,
-            fetching_models: false,
+            fetching_models,
         };
     }
 
@@ -1578,8 +1775,12 @@ impl AutoshopApp {
             Ok(p) => {
                 self.settings.analysis_api_key.clear();
                 self.settings.image_api_key.clear();
-                self.settings.analysis_key_present = cur.analysis_api_key.is_some();
-                self.settings.image_key_present = cur.image_api_key.is_some();
+                // Presence reflects the RESOLVED config (file merged with env) —
+                // deriving it from the file alone told a user whose key lives in
+                // OPENAI_API_KEY that no key was set right after saving.
+                let cfg = autoshop::config::Config::load();
+                self.settings.analysis_key_present = cfg.analysis_api_key.is_some();
+                self.settings.image_key_present = cfg.openai_api_key.is_some();
                 self.settings.status =
                     trf(self.lang, "saved → {path}", &[("path", &p.display().to_string())]);
                 self.status = tr(self.lang, "settings saved — applies to the next Analyze").into();
@@ -1631,7 +1832,7 @@ impl AutoshopApp {
         ui.label(
             egui::RichText::new(tr(
                 lang,
-                "Saved to autoshop.local.json (gitignored, stays on this machine). Applies to the next Analyze.",
+                "Language & Reverse-fit apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json (gitignored) and apply to the next Analyze.",
             ))
             .weak()
             .small(),
@@ -1659,8 +1860,21 @@ impl AutoshopApp {
             ui.heading(tr(lang, "Analysis — the verifier"));
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Provider"));
-                ui.radio_value(&mut f.analysis_provider_api, false, "OAuth (Claude CLI)");
-                ui.radio_value(&mut f.analysis_provider_api, true, "API (OpenAI-compatible)");
+                let r1 = ui.radio_value(&mut f.analysis_provider_api, false, "OAuth (Claude CLI)");
+                let r2 = ui.radio_value(&mut f.analysis_provider_api, true, "API (OpenAI-compatible)");
+                if r1.changed() || r2.changed() {
+                    // Without this the OTHER provider's model id stays in the
+                    // field and the picker presents it as the current choice
+                    // (a claude alias sent to an OpenAI endpoint, or vice
+                    // versa). Swap to this provider's default on a flip.
+                    let claude_alias =
+                        matches!(f.analysis_model.as_str(), "opus" | "sonnet" | "haiku");
+                    if f.analysis_provider_api && claude_alias {
+                        f.analysis_model = "gpt-5.5".into();
+                    } else if !f.analysis_provider_api && !claude_alias {
+                        f.analysis_model = "opus".into();
+                    }
+                }
             });
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Model"));
@@ -1869,9 +2083,14 @@ impl AutoshopApp {
         let frame = match done {
             Ok(frame) => frame,
             // Pure preview work has no ordinary error path; only a caught panic
-            // lands here. Keep the last good frame and surface the failure.
+            // lands here. Keep the last good frame and surface the failure —
+            // WITHOUT fail(): that helper also clears the global `busy` flag,
+            // which the preview path never set, and a panicking preview worker
+            // mid-export used to unlock every busy-gated action.
             Err(e) => {
-                self.fail(tr(self.lang, "preview develop failed"), e);
+                let text = format!("{}: {e}", tr(self.lang, "preview develop failed"));
+                self.status = text.clone();
+                self.toast(ToastKind::Error, text);
                 return;
             }
         };
@@ -1896,8 +2115,17 @@ impl AutoshopApp {
             self.after_tex =
                 Some(ctx.load_texture("after", frame.after, egui::TextureOptions::LINEAR));
         }
+        // The clipping layer follows the CURRENT toggle, not the one baked at
+        // dispatch: pressing J changes no recipe field, so an in-flight frame
+        // is still accepted — its stale decision used to blank the layer under
+        // a lit ▲ (or resurrect a ghost layer after J-off).
+        let clip = if self.show_clipping {
+            Some(frame.clipping.unwrap_or_else(|| clipping_overlay_rgb(&frame.rgb)))
+        } else {
+            None
+        };
         self.last_rgb = Some(frame.rgb);
-        match frame.clipping {
+        match clip {
             Some(clip) => {
                 if let Some(tex) = &mut self.clip_tex {
                     tex.set(clip, egui::TextureOptions::NEAREST);
@@ -2473,16 +2701,17 @@ impl AutoshopApp {
             return;
         }
         let lang = self.lang;
-        // Localise the display name ONCE here (self.lang is only reachable on the
-        // UI thread); the worker returns this string so the mask row / status show
-        // it directly without re-translating.
+        // The STATUS shows a localised name; the mask's persisted `name` stays
+        // the stable English label — recipe.json / XMP are data and must
+        // survive a language switch (a translated name baked into the sidecar
+        // can never be matched or re-keyed again).
         let disp = tr(lang, label).to_string();
         let Some(base) = self.base_preview.clone() else { return };
         let Some(src) = self.src_path.clone() else { return };
         self.busy = true;
         self.status = trf(
             lang,
-            "AI segmenting {what}… (first run auto-downloads the model — watch the console log)",
+            "AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
             &[("what", &disp)],
         );
         self.spawn_worker(
@@ -2504,7 +2733,8 @@ impl AutoshopApp {
                     let run = autoshop::segment::segment_file(&opts, &tmp, &mask);
                     let _ = std::fs::remove_file(&tmp);
                     run?;
-                    Ok((disp, mask))
+                    // English label into the recipe (stable data), not `disp`.
+                    Ok((label.to_string(), mask))
                 })();
                 Msg::Segmented(res)
             },
@@ -2560,6 +2790,11 @@ impl AutoshopApp {
         // TERMINAL Msg::Exported is owned by spawn_worker (panic-safe).
         let tx = self.tx.clone();
         let ext = ext.to_string();
+        // The open photo's LIVE canvas outranks its sidecar — same rule as
+        // start_paste. Without this, batching the photo you are looking at
+        // renders the stale (or absent) recipe.json, visibly diverging from
+        // the screen.
+        let live = self.src_path.clone().map(|p| (p, self.recipe.clone()));
         self.spawn_worker(
             move || {
                 let res = (|| {
@@ -2568,7 +2803,11 @@ impl AutoshopApp {
                     for p in &targets {
                         let one = (|| -> anyhow::Result<()> {
                             let rj = autoshop::pipeline::default_out(p, "recipe", "json");
-                            let recipe = if rj.exists() {
+                            let recipe = if let Some(lr) =
+                                live.as_ref().and_then(|(lp, lr)| (lp == p).then_some(lr))
+                            {
+                                lr.clone()
+                            } else if rj.exists() {
                                 serde_json::from_str::<EditRecipe>(&std::fs::read_to_string(&rj)?)?
                             } else {
                                 EditRecipe::default()
@@ -2620,29 +2859,74 @@ impl AutoshopApp {
     fn save_xmp(&mut self) {
         let lang = self.lang;
         if self.active_is_generated() {
-            self.status = tr(
+            // A keyboard Ctrl+S refusal must be SEEN — the status line alone
+            // scrolls away under the very next message.
+            let t = tr(
                 lang,
                 "A generated variant's look lives in its pixels — there's no parametric recipe to export; run 「Reverse-fit」 first to get an exportable XMP",
-            )
-            .into();
+            );
+            self.status = t.into();
+            self.toast(ToastKind::Error, t);
             return;
         }
         let Some(path) = self.src_path.clone() else { return };
-        if !autoshop::decode::is_raw(&path) {
-            self.status = tr(lang, "XMP applies to RAW files only").into();
+        // Reset-then-save means "clear my edits": writing a neutral pair would
+        // only pin a misleading ● badge with no in-app way to remove it —
+        // delete the working sidecars instead (version snapshots are kept).
+        if self.recipe.is_noop() {
+            let rj = autoshop::pipeline::default_out(&path, "recipe", "json");
+            let xp = autoshop::pipeline::xmp_target(&path);
+            let existed = rj.exists() || xp.exists();
+            // A missing file is the desired end state — nothing to surface.
+            let _ = std::fs::remove_file(&rj);
+            let _ = std::fs::remove_file(&xp);
+            self.edited_badge.clear();
+            self.saved_recipe = EditRecipe::default();
+            self.nav_stash.remove(&path);
+            self.status = if existed {
+                tr(lang, "neutral recipe — saved edits cleared (sidecars removed)").into()
+            } else {
+                tr(lang, "neutral recipe — nothing to save").into()
+            };
             return;
         }
-        // The XMP alone is lossy (no bitmap masks / recolour gains), so persist
-        // the app-internal recipe.json alongside — reopening prefers it, which
-        // makes Ctrl+S → close → reopen lossless.
-        match autoshop::pipeline::write_xmp(&path, &self.recipe)
-            .and_then(|p| autoshop::pipeline::write_recipe(&path, &self.recipe, None).map(|_| p))
-        {
+        // recipe.json is the source of truth for EVERY source type (the badge,
+        // batch render and reopening all read it; the XMP alone is lossy — no
+        // bitmap masks / recolour gains). The XMP is the RAW-only Lightroom
+        // projection on top.
+        let raw = autoshop::decode::is_raw(&path);
+        match autoshop::pipeline::write_recipe(&path, &self.recipe, None).and_then(|rp| {
+            if raw { autoshop::pipeline::write_xmp(&path, &self.recipe) } else { Ok(rp) }
+        }) {
             Ok(p) => {
                 self.edited_badge.clear(); // the open photo just gained its badge
-                self.status = trf(lang, "XMP + recipe saved → {path}", &[("path", &p.display().to_string())])
+                self.saved_recipe = self.recipe.clone();
+                self.nav_stash.remove(&path);
+                let mut s = if raw {
+                    trf(lang, "XMP + recipe saved → {path}", &[("path", &p.display().to_string())])
+                } else {
+                    trf(
+                        lang,
+                        "recipe saved → {path} (XMP applies to RAW only)",
+                        &[("path", &p.display().to_string())],
+                    )
+                };
+                // An in-place heal/clone/fill bakes pixels into the variant's
+                // origin raster — the sidecar cannot carry them (recipe/XMP are
+                // parametric), so a bare "saved" would overpromise the restore.
+                if self.active_variant().is_some_and(|v| v.origin.is_some()) {
+                    s.push_str(tr(
+                        lang,
+                        " · note: retouched pixels live in the baked master, not the sidecar — Export to keep them",
+                    ));
+                }
+                self.status = s;
             }
-            Err(e) => self.status = trf(lang, "XMP save failed: {err}", &[("err", &e.to_string())]),
+            Err(e) => {
+                let t = trf(lang, "XMP save failed: {err}", &[("err", &e.to_string())]);
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t); // a failed save must be seen
+            }
         }
     }
 
@@ -2669,6 +2953,28 @@ impl AutoshopApp {
         if !self.paste_geometry {
             recipe.crop = None;
             recipe.straighten_deg = 0.0;
+        }
+        // Bitmap masks reference per-photo rasters keyed to the SOURCE stem —
+        // pasted onto another photo they point at the wrong file (and classic
+        // XMP cannot carry them, so recipe.json and .xmp would disagree).
+        // Strip them, visibly.
+        let n_bitmap = recipe
+            .masks
+            .iter()
+            .filter(|m| matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }))
+            .count();
+        if n_bitmap > 0 {
+            recipe
+                .masks
+                .retain(|m| !matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }));
+            self.toast(
+                ToastKind::Error,
+                trf(
+                    self.lang,
+                    "{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
+                    &[("n", &n_bitmap.to_string())],
+                ),
+            );
         }
         // If the open photo is one of the targets, take the paste live in the
         // editor too (undo-able through the usual committed-snapshot step).
@@ -2781,6 +3087,11 @@ impl AutoshopApp {
                                 self.mask_tex = None;
                                 self.mask_dirty = false;
                                 self.paint_last = None;
+                                // The range-mask reference develop was computed
+                                // from the OLD base — recipe-only keying would
+                                // serve it stale against these new pixels.
+                                self.overlay_ref = None;
+                                self.overlay_stale = true;
                                 self.base_preview = Some(base);
                             }
                             self.last_rgb = None; // resolution changed under the frame
@@ -2804,9 +3115,54 @@ impl AutoshopApp {
                             ));
                             self.source_preview = Some(base.clone());
                             self.base_preview = Some(base);
-                            let saved = self.src_path.as_deref().and_then(read_saved_develop);
-                            let restored = saved.as_ref().map(|(_, kind)| *kind);
-                            let recipe = saved.map(|(r, _)| r).unwrap_or_default();
+                            let saved = self
+                                .src_path
+                                .as_deref()
+                                .map(read_saved_develop)
+                                .unwrap_or(SavedDevelop::Nothing);
+                            let mut restored: Option<&'static str> = None;
+                            let mut open_note: Option<String> = None;
+                            let mut recipe = EditRecipe::default();
+                            match saved {
+                                SavedDevelop::Restored(r, kind) => {
+                                    recipe = r;
+                                    restored = Some(kind);
+                                }
+                                SavedDevelop::Unreadable { err, fallback } => {
+                                    // A damaged / newer-build recipe.json must
+                                    // never degrade to the lossy XMP silently:
+                                    // bitmap masks and recolour gains would be
+                                    // gone and the next Ctrl+S would overwrite
+                                    // the still-good file.
+                                    if let Some((r, kind)) = fallback {
+                                        recipe = r;
+                                        restored = Some(kind);
+                                    }
+                                    open_note = Some(trf(
+                                        lang,
+                                        "recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it",
+                                        &[("err", &err)],
+                                    ));
+                                }
+                                SavedDevelop::NoopOnly => {
+                                    open_note = Some(
+                                        tr(lang, "sidecar exists but holds no effective edits")
+                                            .into(),
+                                    );
+                                }
+                                SavedDevelop::Nothing => {}
+                            }
+                            // The sidecar is the ● baseline; a canvas stashed
+                            // when the user navigated away THIS session outranks
+                            // it — that stash is their newest work.
+                            self.saved_recipe = recipe.clone();
+                            let mut from_stash = false;
+                            if let Some(st) =
+                                self.src_path.as_ref().and_then(|p| self.nav_stash.remove(p))
+                            {
+                                recipe = st;
+                                from_stash = true;
+                            }
                             self.recipe = recipe.clone();
                             self.rationale = recipe.rationale.clone();
                             self.variants = vec![Variant {
@@ -2832,6 +3188,7 @@ impl AutoshopApp {
                             self.pan = egui::vec2(0.5, 0.5);
                             self.crop_mode = false;
                             self.crop_drag = None;
+                            self.mask_drag = None;
                             self.sel_mask = None;
                             self.overlay_ref = None; // the reference develop belongs to ONE base
                             self.overlay_stale = true;
@@ -2846,14 +3203,29 @@ impl AutoshopApp {
                             // (rationale already restored alongside the recipe)
                             self.refresh_versions(); // version snapshots are per-photo
                             self.dirty = true; // render the (restored or neutral) after
-                            self.status = match restored {
-                                Some(kind) => trf(
+                            self.status = if from_stash {
+                                tr(
                                     lang,
-                                    "ready — restored saved edits ({kind}); Reset returns to neutral",
-                                    &[("kind", kind)],
-                                ),
-                                None => tr(lang, "ready — adjust sliders or run AI Analyze").into(),
+                                    "ready — restored this session's unsaved edits (● not saved yet; Ctrl+S)",
+                                )
+                                .into()
+                            } else {
+                                match restored {
+                                    Some(kind) => trf(
+                                        lang,
+                                        "ready — restored saved edits ({kind}); Reset returns to neutral",
+                                        &[("kind", kind)],
+                                    ),
+                                    None => {
+                                        tr(lang, "ready — adjust sliders or run AI Analyze").into()
+                                    }
+                                }
                             };
+                            if let Some(note) = open_note {
+                                // Sidecar anomalies must be seen, not scrolled
+                                // away in the status line.
+                                self.toast(ToastKind::Error, note);
+                            }
                         }
                     }
                     Err(e) => {
@@ -2886,7 +3258,48 @@ impl AutoshopApp {
                         self.rationale = self.recipe.rationale.clone();
                         self.dirty = true;
                         self.busy = false;
-                        self.status = tr(lang, "AI develop applied").into();
+                        // Persist like the CLI and the web do — the badge,
+                        // batch render and reopening all read recipe.json, so
+                        // an unpersisted analyze silently diverges from every
+                        // one of them. An existing explicit save is snapshotted
+                        // to v<N> first, never destroyed.
+                        self.status = match self.src_path.clone() {
+                            Some(p) => {
+                                let backed = backup_saved_develop(&p, &self.recipe);
+                                let write = autoshop::pipeline::write_recipe(&p, &self.recipe, None)
+                                    .and_then(|rp| {
+                                        if autoshop::decode::is_raw(&p) {
+                                            autoshop::pipeline::write_xmp(&p, &self.recipe)
+                                        } else {
+                                            Ok(rp)
+                                        }
+                                    });
+                                match write {
+                                    Ok(_) => {
+                                        self.edited_badge.clear();
+                                        self.saved_recipe = self.recipe.clone();
+                                        self.nav_stash.remove(&p);
+                                        if backed.is_some() {
+                                            self.refresh_versions();
+                                        }
+                                        match backed {
+                                            Some(n) => trf(
+                                                lang,
+                                                "AI develop applied · saved (previous save backed up as v{n})",
+                                                &[("n", &n.to_string())],
+                                            ),
+                                            None => tr(lang, "AI develop applied · saved to recipe.json").into(),
+                                        }
+                                    }
+                                    Err(e) => trf(
+                                        lang,
+                                        "AI develop applied — but saving the sidecar failed: {err}",
+                                        &[("err", &e.to_string())],
+                                    ),
+                                }
+                            }
+                            None => tr(lang, "AI develop applied").into(),
+                        };
                     }
                     Err(e) => {
                         self.fail(tr(lang, "analyze failed"), e);
@@ -2910,14 +3323,29 @@ impl AutoshopApp {
                 }
                 Msg::Segmented(res) => match res {
                     Ok((label, path)) => {
-                        self.recipe.masks.push(autoshop::recipe::LocalAdjustment {
-                            mask: autoshop::recipe::MaskGeometry::Bitmap {
-                                path: path.to_string_lossy().into_owned(),
-                            },
-                            name: label.clone(),
-                            ..Default::default()
+                        let path_s = path.to_string_lossy().into_owned();
+                        // One raster per (photo, target): a re-run refreshed the
+                        // SAME file, so re-select the mask that already
+                        // references it instead of stacking a duplicate (whose
+                        // sliders would all be 0 — an inert-looking copy).
+                        let existing = self.recipe.masks.iter().position(|m| {
+                            matches!(&m.mask,
+                                autoshop::recipe::MaskGeometry::Bitmap { path: p } if *p == path_s)
                         });
-                        self.sel_mask = Some(self.recipe.masks.len() - 1);
+                        match existing {
+                            Some(i) => self.sel_mask = Some(i),
+                            None => {
+                                self.recipe.masks.push(autoshop::recipe::LocalAdjustment {
+                                    mask: autoshop::recipe::MaskGeometry::Bitmap {
+                                        path: path_s,
+                                    },
+                                    name: label.clone(),
+                                    ..Default::default()
+                                });
+                                self.sel_mask = Some(self.recipe.masks.len() - 1);
+                            }
+                        }
+                        self.overlay_stale = true; // fresh raster ⇒ fresh coverage
                         self.dirty = true; // committed-snapshot makes this one undo step
                         self.busy = false;
                         self.status = trf(
@@ -3008,6 +3436,10 @@ impl AutoshopApp {
                                     to_color_image(&img),
                                     egui::TextureOptions::LINEAR,
                                 ));
+                                // New baked base ⇒ the cached masks-cleared
+                                // reference develop no longer matches it.
+                                self.overlay_ref = None;
+                                self.overlay_stale = true;
                                 self.base_preview = Some(img);
                                 // Keep the paint canvas sized to the new base (the
                                 // retouch result can differ in dimensions — e.g. a
@@ -3029,6 +3461,13 @@ impl AutoshopApp {
                     // (an Err can land after that write) — recompute badges.
                     Ok((recipe, note)) => {
                         self.edited_badge.clear();
+                        // The sidecar now holds the fit (and a v<N> snapshot
+                        // may have appeared): resync the ● baseline + versions.
+                        self.saved_recipe = recipe.clone();
+                        self.nav_stash.remove(
+                            &self.src_path.clone().unwrap_or_default(),
+                        );
+                        self.refresh_versions();
                         // The generated look, solved back into an editable recipe,
                         // becomes a NEW「反推」variant: base = the source neutral
                         // (same negative as Original), look carried by the recipe —
@@ -3610,63 +4049,73 @@ impl AutoshopApp {
             // list re-sets it while the cursor is on a row — so leaving the
             // panel, collapsing this section or switching photos all fall back
             // to the selection with no stale index to chase.
-            // Rows are also DRAG SOURCES: drag one over another and release to
-            // reorder (order is render semantics — masks stack sequentially).
-            // egui clears the payload on release/Esc itself, and while a drag
-            // is in flight `hovered()` is false everywhere, so the hover
-            // preview pauses instead of churning the coverage overlay.
+            // Reorder is a dedicated ☰ grip per row (the ONLY drag source),
+            // NOT the row itself: `dnd_drag_source` overlays its contents with
+            // a drag-sensing interact (grab cursor), so wrapping the whole row
+            // made the slightest press-move float the row instead of selecting
+            // it (user-reported "click moves instead of selects"). Grip drags,
+            // row body clicks — the drop TARGET stays the whole row. egui
+            // clears the payload on release/Esc itself, and while a drag is in
+            // flight `hovered()` is false everywhere, so the hover preview
+            // pauses instead of churning the coverage overlay.
             let mut delete: Option<usize> = None;
             let mut dropped: Option<(usize, usize)> = None; // (from, insert-before)
             for i in 0..n_masks {
-                ui.horizontal(|ui| {
-                    let m = &self.recipe.masks[i];
-                    let kind = match m.mask {
-                        MaskGeometry::Linear { .. } => tr(self.lang, "Linear"),
-                        MaskGeometry::Radial { .. } => tr(self.lang, "Radial"),
-                        MaskGeometry::Bitmap { .. } => tr(self.lang, "Bitmap"),
-                    };
-                    // A user-given name wins; else a reverse-fit zone shows its
-                    // localised role label; else the generic placeholder.
-                    let base: &str = if !m.name.is_empty() {
-                        m.name.as_str()
-                    } else if let Some(en) = m.role.en_name() {
-                        tr(self.lang, en)
-                    } else {
-                        tr(self.lang, "mask")
-                    };
-                    let label = format!("{base} · {kind}");
-                    let egui::InnerResponse { inner: row, response: drag } = ui
-                        .dnd_drag_source(ui.id().with(("mask_row", i)), i, |ui| {
-                            ui.selectable_label(self.sel_mask == Some(i), label)
-                        });
-                    if row.hovered() {
-                        self.hover_mask = Some(i);
-                    }
-                    if row.clicked() {
-                        self.sel_mask = if self.sel_mask == Some(i) { None } else { Some(i) };
-                        self.overlay_stale = true; // coverage follows the selection
-                    }
-                    // A row being dragged over this one: mark the insertion
-                    // edge (above/below the midline) and take the drop.
-                    if let (Some(from), Some(p)) =
-                        (drag.dnd_hover_payload::<usize>(), ui.ctx().pointer_interact_pos())
-                    {
-                        let below = p.y > drag.rect.center().y;
-                        let y = if below { drag.rect.max.y } else { drag.rect.min.y };
-                        ui.painter().hline(
-                            drag.rect.x_range(),
-                            y,
-                            egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
-                        );
-                        let insert = if below { i + 1 } else { i };
-                        if drag.dnd_release_payload::<usize>().is_some() {
-                            dropped = Some((*from, insert));
+                let row_resp = ui
+                    .horizontal(|ui| {
+                        let m = &self.recipe.masks[i];
+                        let kind = match m.mask {
+                            MaskGeometry::Linear { .. } => tr(self.lang, "Linear"),
+                            MaskGeometry::Radial { .. } => tr(self.lang, "Radial"),
+                            MaskGeometry::Bitmap { .. } => tr(self.lang, "Bitmap"),
+                        };
+                        // A user-given name wins; else a reverse-fit zone shows
+                        // its localised role label; else the generic placeholder.
+                        let base: &str = if !m.name.is_empty() {
+                            m.name.as_str()
+                        } else if let Some(en) = m.role.en_name() {
+                            tr(self.lang, en)
+                        } else {
+                            tr(self.lang, "mask")
+                        };
+                        let label = format!("{base} · {kind}");
+                        ui.dnd_drag_source(ui.id().with(("mask_row", i)), i, |ui| {
+                            ui.label("☰");
+                        })
+                        .response
+                        .on_hover_text(tr(self.lang, "Drag to reorder"));
+                        let row = ui.selectable_label(self.sel_mask == Some(i), label);
+                        if row.hovered() {
+                            self.hover_mask = Some(i);
                         }
+                        if row.clicked() {
+                            self.sel_mask =
+                                if self.sel_mask == Some(i) { None } else { Some(i) };
+                            self.overlay_stale = true; // coverage follows the selection
+                        }
+                        if ui.small_button("🗑").clicked() {
+                            delete = Some(i);
+                        }
+                    })
+                    .response;
+                // A grip being dragged over this row: mark the insertion edge
+                // (above/below the row midline) and take the drop. The whole
+                // row rect is the drop zone, so aiming needs no precision.
+                if let (Some(from), Some(p)) =
+                    (row_resp.dnd_hover_payload::<usize>(), ui.ctx().pointer_interact_pos())
+                {
+                    let below = p.y > row_resp.rect.center().y;
+                    let y = if below { row_resp.rect.max.y } else { row_resp.rect.min.y };
+                    ui.painter().hline(
+                        row_resp.rect.x_range(),
+                        y,
+                        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                    );
+                    let insert = if below { i + 1 } else { i };
+                    if row_resp.dnd_release_payload::<usize>().is_some() {
+                        dropped = Some((*from, insert));
                     }
-                    if ui.small_button("🗑").clicked() {
-                        delete = Some(i);
-                    }
-                });
+                }
             }
             if let Some((from, insert)) = dropped
                 && insert != from
@@ -3675,17 +4124,21 @@ impl AutoshopApp {
                 let (to, remap) = reorder_move(from, insert);
                 let m = self.recipe.masks.remove(from);
                 self.recipe.masks.insert(to, m);
-                self.sel_mask = self.sel_mask.map(remap);
+                self.remap_mask_indices(|s| Some(remap(s)));
                 self.overlay_stale = true;
                 changed = true;
             }
             if let Some(i) = delete {
                 self.recipe.masks.remove(i);
-                self.sel_mask = match self.sel_mask {
-                    Some(s) if s == i => None,
-                    Some(s) if s > i => Some(s - 1),
-                    other => other,
-                };
+                self.remap_mask_indices(|s| {
+                    if s == i {
+                        None
+                    } else if s > i {
+                        Some(s - 1)
+                    } else {
+                        Some(s)
+                    }
+                });
                 self.overlay_stale = true;
                 changed = true;
             }
@@ -3727,7 +4180,9 @@ impl AutoshopApp {
                         .clicked()
                     {
                         self.recipe.masks.swap(i, i - 1);
-                        self.sel_mask = Some(i - 1);
+                        self.remap_mask_indices(|s| {
+                            Some(if s == i { i - 1 } else if s == i - 1 { i } else { s })
+                        });
                         self.overlay_stale = true;
                         changed = true;
                     }
@@ -3737,7 +4192,9 @@ impl AutoshopApp {
                         .clicked()
                     {
                         self.recipe.masks.swap(i, i + 1);
-                        self.sel_mask = Some(i + 1);
+                        self.remap_mask_indices(|s| {
+                            Some(if s == i { i + 1 } else if s == i + 1 { i } else { s })
+                        });
                         self.overlay_stale = true;
                         changed = true;
                     }
@@ -4059,8 +4516,16 @@ impl AutoshopApp {
                 self.pan = q - egui::vec2((fx - 0.5) * 2.0 * nh, (fy - 0.5) * 2.0 * nh);
             }
         }
-        // Double-click toggles fit ↔ 1:1 (preview pixels).
-        if resp.double_clicked() {
+        let tool_active = self.crop_mode
+            || self.placing_mask.is_some()
+            || self.wb_picking
+            || self.range_picking.is_some()
+            || self.clone_mode
+            || self.paint_mode;
+        // Double-click toggles fit ↔ 1:1 (preview pixels) — but never while a
+        // canvas tool is armed: a quick second tap inside brush/crop/pick used
+        // to teleport the view instead of reaching the tool.
+        if resp.double_clicked() && !tool_active {
             if self.zoom > 1.01 {
                 self.zoom = 1.0;
                 self.pan = egui::vec2(0.5, 0.5);
@@ -4075,14 +4540,10 @@ impl AutoshopApp {
         // Box-select stays reachable while zoomed via Ctrl+drag; an active
         // tool, a mask-knob hover/drag or a box drag in flight all take
         // priority over the implicit pan.
-        let space = ui.input(|i| i.key_down(egui::Key::Space));
+        // Focus-gated like B-compare: Space in a text field is a space.
+        let space = ui.ctx().memory(|m| m.focused()).is_none()
+            && ui.input(|i| i.key_down(egui::Key::Space));
         let ctrl = ui.input(|i| i.modifiers.command);
-        let tool_active = self.crop_mode
-            || self.placing_mask.is_some()
-            || self.wb_picking
-            || self.range_picking.is_some()
-            || self.clone_mode
-            || self.paint_mode;
         let over_knob = self.mask_drag.is_some()
             || self.sel_mask.and_then(|i| self.recipe.masks.get(i)).is_some_and(|m| {
                 let (dims, deg, dist) = self.geom_ctx();
@@ -4154,6 +4615,32 @@ impl AutoshopApp {
             }
         }
 
+        // The committed AI region (and a drag in flight) paints EVERY frame it
+        // exists — it still feeds the analyze prompt while a tool or a knob
+        // hover owns the pointer, so hiding it there misrepresented what the
+        // AI would see.
+        {
+            let stroke = egui::Stroke::new(2.0, ACCENT);
+            let fill =
+                egui::Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 40);
+            let draw = |r: egui::Rect| {
+                ui.painter().rect_filled(r, 0.0, fill);
+                ui.painter().rect_stroke(r, 0.0, stroke);
+            };
+            if let Some((s, e)) = self.region_drag {
+                draw(egui::Rect::from_two_pos(s, e).intersect(rect));
+            } else if let Some([l, t, rr, bb]) = self.region {
+                // Stored in the original frame → back into the transformed view.
+                let ((bw, bh), deg, dist) = self.geom_ctx();
+                let a = orig_norm_to_view(l, t, (bw, bh), deg, dist);
+                let b2 = orig_norm_to_view(rr, bb, (bw, bh), deg, dist);
+                draw(
+                    egui::Rect::from_min_max(xf.to_screen(a.0, a.1), xf.to_screen(b2.0, b2.1))
+                        .intersect(rect),
+                );
+            }
+        }
+
         // Selected mask stays visualised so its sliders have visual feedback
         // (geometry is stored in the original frame → map into the view),
         // with the editing knobs on top (drag = reshape/move, handle_mask_edit).
@@ -4163,7 +4650,42 @@ impl AutoshopApp {
         {
             let (dims, deg, dist) = self.geom_ctx();
             let vg = geom_to_view(&m.mask, dims, deg, dist);
-            draw_mask_overlay(ui, xf, &vg, self.lang);
+            if let MaskGeometry::Radial { top, left, bottom, right, flipped, .. } = &m.mask
+                && (deg != 0.0 || dist != 0.0)
+            {
+                // The engine evaluates the ellipse in the ORIGINAL frame; under
+                // straighten/distortion its image is a rotated/warped curve —
+                // not the axis-aligned ellipse the bbox mapping yields. Sample
+                // it parametrically and draw the true outline. (Knobs keep the
+                // bbox positions; HANDLE_HIT absorbs the difference.)
+                let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
+                let (rx, ry) = ((right - left) / 2.0, (bottom - top) / 2.0);
+                let pts: Vec<egui::Pos2> = (0..48)
+                    .map(|k| {
+                        let th = k as f32 / 48.0 * std::f32::consts::TAU;
+                        let (vx, vy) = orig_norm_to_view(
+                            cx + rx * th.cos(),
+                            cy + ry * th.sin(),
+                            dims,
+                            deg,
+                            dist,
+                        );
+                        xf.to_screen(vx, vy)
+                    })
+                    .collect();
+                let p = ui.painter_at(xf.rect);
+                p.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, ACCENT)));
+                // Same effect-side marker semantics as draw_mask_overlay.
+                let (ccx, ccy) = orig_norm_to_view(cx, cy, dims, deg, dist);
+                let cs = xf.to_screen(ccx, ccy);
+                if flipped ^ m.inverted {
+                    p.circle_stroke(cs, 3.0, egui::Stroke::new(2.0, ACCENT));
+                } else {
+                    p.circle_filled(cs, 3.0, ACCENT);
+                }
+            } else {
+                draw_mask_overlay(ui, xf, &vg, m.inverted, self.lang);
+            }
             let p = ui.painter_at(xf.rect);
             for (h, pos) in mask_handle_points(&vg, xf) {
                 let r = if h == 0 { 5.5 } else { 4.5 }; // centre knob reads bigger
@@ -4318,17 +4840,39 @@ impl AutoshopApp {
             self.mask_drag = None; // bitmap: nothing parametric to drag
             return false;
         }
-        let hover_h = resp.hover_pos().and_then(|p| {
-            handles.iter().find(|(_, hp)| hp.distance(p) <= HANDLE_HIT).map(|(h, _)| *h)
-        });
+        // A stranded grab (Esc / hold-B / pan swallowed the drag_stopped frame)
+        // must not turn the NEXT unrelated drag into a mask reshape: no drag in
+        // flight ⇒ no grab.
+        if !resp.dragged() && !resp.drag_started() {
+            self.mask_drag = None;
+        }
+        // Nearest handle wins, ties broken toward the edge/end knobs — the
+        // centre-move knob is emitted first and used to shadow them whenever a
+        // small mask put everything within HANDLE_HIT.
+        let pick = |p: egui::Pos2| {
+            handles
+                .iter()
+                .filter(|(_, hp)| hp.distance(p) <= HANDLE_HIT)
+                .min_by(|a, b| {
+                    a.1.distance(p).total_cmp(&b.1.distance(p)).then(b.0.cmp(&a.0))
+                })
+                .map(|(h, _)| *h)
+        };
+        let hover_h = resp.hover_pos().and_then(pick);
         let orig_at = |p: egui::Pos2| {
             let (nx, ny) = xf.to_norm(p);
             view_norm_to_orig(nx, ny, dims, deg, dist)
         };
         if resp.drag_started()
-            && let (Some(h), Some(p)) = (hover_h, resp.interact_pointer_pos())
+            && let Some(p) = resp.interact_pointer_pos()
         {
-            self.mask_drag = Some((h, orig_at(p)));
+            // egui reports drag_started only after ~6 px of travel — a fast
+            // flick has left the knob by then. Hit-test the PRESS ORIGIN so
+            // quick grabs don't fall through to box-select.
+            let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
+            if let Some(h) = pick(origin) {
+                self.mask_drag = Some((h, orig_at(p)));
+            }
         }
         if resp.dragged()
             && let (Some((h, last)), Some(p)) = (self.mask_drag, resp.interact_pointer_pos())
@@ -4381,8 +4925,7 @@ impl AutoshopApp {
         self.mask_drag.is_some() || hover_h.is_some()
     }
 
-    fn handle_region_select(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
-        let rect = xf.rect;
+    fn handle_region_select(&mut self, _ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
         if resp.drag_started() {
             if let Some(p) = resp.interact_pointer_pos() {
                 self.region_drag = Some((p, p));
@@ -4419,28 +4962,8 @@ impl AutoshopApp {
         } else if resp.clicked() {
             self.region = None; // a plain click clears the region
         }
-
-        // Draw the live drag box, else the committed region outline.
-        let stroke = egui::Stroke::new(2.0, ACCENT);
-        // The box fill is ACCENT at low alpha (was a hardcoded copy of it).
-        let fill =
-            egui::Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 40);
-        let draw = |r: egui::Rect| {
-            ui.painter().rect_filled(r, 0.0, fill);
-            ui.painter().rect_stroke(r, 0.0, stroke);
-        };
-        if let Some((s, e)) = self.region_drag {
-            draw(egui::Rect::from_two_pos(s, e).intersect(rect));
-        } else if let Some([l, t, rr, bb]) = self.region {
-            // Stored in the original frame → back into the transformed view.
-            let ((bw, bh), deg, dist) = self.geom_ctx();
-            let a = orig_norm_to_view(l, t, (bw, bh), deg, dist);
-            let b2 = orig_norm_to_view(rr, bb, (bw, bh), deg, dist);
-            draw(
-                egui::Rect::from_min_max(xf.to_screen(a.0, a.1), xf.to_screen(b2.0, b2.1))
-                    .intersect(rect),
-            );
-        }
+        // (Drawing lives in after_view so the box shows under every tool —
+        // this handler only owns the gesture.)
     }
 
     /// The interactive crop overlay: darkened surround, thirds grid, four
@@ -4485,11 +5008,20 @@ impl AutoshopApp {
                     r.contains(p).then_some(4)
                 })
         };
+        // A stranded grab (Esc mid-drag, or leaving/re-entering crop mode)
+        // must not resume against a stale anchor: no drag in flight ⇒ no grab.
+        if !resp.dragged() && !resp.drag_started() {
+            self.crop_drag = None;
+        }
         if resp.drag_started()
             && let Some(p) = resp.interact_pointer_pos()
-            && let Some(h) = pick_handle(&cur, p)
         {
-            self.crop_drag = Some((h, p, cur));
+            // Hit-test the PRESS ORIGIN — drag_started fires only after ~6 px
+            // of travel, and a fast corner grab has already left the handle.
+            let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
+            if let Some(h) = pick_handle(&cur, origin) {
+                self.crop_drag = Some((h, p, cur));
+            }
         }
         if resp.dragged()
             && let (Some((h, start, orig)), Some(p)) = (self.crop_drag, resp.interact_pointer_pos())
@@ -4644,10 +5176,33 @@ impl AutoshopApp {
                 flipped: false,
             },
         };
-        draw_mask_overlay(ui, xf, &geom_to_view(&geom, dims, deg, dist), self.lang); // live preview
+        // Live placement preview: no owning adjustment yet → markers upright.
+        draw_mask_overlay(ui, xf, &geom_to_view(&geom, dims, deg, dist), false, self.lang);
         if resp.drag_stopped() {
             match replace {
-                Some(i) if i < self.recipe.masks.len() => self.recipe.masks[i].mask = geom,
+                Some(i) if i < self.recipe.masks.len() => {
+                    // Redraw replaces the AREA only — a radial's tuned feather /
+                    // roundness / flipped are slider state, and silently
+                    // resetting them made ↻ Redraw destructive.
+                    let mut geom = geom;
+                    if let (
+                        autoshop::recipe::MaskGeometry::Radial {
+                            feather, roundness, flipped, ..
+                        },
+                        autoshop::recipe::MaskGeometry::Radial {
+                            feather: kept_f,
+                            roundness: kept_r,
+                            flipped: kept_fl,
+                            ..
+                        },
+                    ) = (&mut geom, &self.recipe.masks[i].mask)
+                    {
+                        *feather = *kept_f;
+                        *roundness = *kept_r;
+                        *flipped = *kept_fl;
+                    }
+                    self.recipe.masks[i].mask = geom;
+                }
                 _ => {
                     let n = self.recipe.masks.len();
                     let name = trf(self.lang, "Manual {n}", &[("n", &(n + 1).to_string())]);
@@ -4700,23 +5255,47 @@ impl AutoshopApp {
     }
 
     fn ensure_mask_tex(&mut self, ctx: &egui::Context) {
-        if self.mask_dirty {
+        // The canvas lives in the ORIGINAL frame (strokes are mapped there so
+        // fill/heal edit source pixels), but the texture is blitted over the
+        // After image, which has been through distortion + straighten — the
+        // overlay must go through the SAME remap or every stroke displays
+        // offset under a straightened view. Rebuild when the transform moved,
+        // not only when the canvas was painted.
+        let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion);
+        let stale_xform = self.mask_tex.is_some() && self.mask_tex_xform != xform_now;
+        if self.mask_dirty || stale_xform {
             if let Some(m) = &self.mask_paint {
-                let ci = egui::ColorImage::from_rgba_unmultiplied(
-                    [m.width() as usize, m.height() as usize],
-                    m.as_raw(),
-                );
+                let ci = if xform_now != (0.0, 0.0) {
+                    let mut img = image::DynamicImage::ImageRgba8(m.clone());
+                    if xform_now.1 != 0.0 {
+                        img = autoshop::render::apply_lens_distortion(&img, xform_now.1);
+                    }
+                    if xform_now.0 != 0.0 {
+                        img = autoshop::render::rotate_straighten(&img, xform_now.0);
+                    }
+                    let rgba = img.to_rgba8();
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [rgba.width() as usize, rgba.height() as usize],
+                        rgba.as_raw(),
+                    )
+                } else {
+                    // Common case: no geometry — zero-copy view of the canvas.
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [m.width() as usize, m.height() as usize],
+                        m.as_raw(),
+                    )
+                };
                 // Update in place: brushing sets mask_dirty on every pointer
                 // move, and a fresh texture per frame is the allocate/free
-                // churn finish_redevelop documents avoiding. The handle is
-                // None-ed wherever the canvas is resized (open / re-decode /
-                // variant switch), so set() can never change dimensions.
+                // churn finish_redevelop documents avoiding (set() re-uploads,
+                // size changes included).
                 if let Some(tex) = &mut self.mask_tex {
                     tex.set(ci, egui::TextureOptions::LINEAR);
                 } else {
                     self.mask_tex =
                         Some(ctx.load_texture("paintmask", ci, egui::TextureOptions::LINEAR));
                 }
+                self.mask_tex_xform = xform_now;
             }
             self.mask_dirty = false;
         }
@@ -4749,7 +5328,20 @@ impl AutoshopApp {
                 self.paint_last = Some(cur);
                 self.mask_dirty = true;
             }
-        } else if resp.drag_stopped() {
+        } else {
+            // A quick tap is a CLICK to egui (<6 px / <0.8 s — never a drag):
+            // stamp a single dot so marking dust spots doesn't require a smear.
+            if resp.clicked()
+                && let Some(p) = resp.interact_pointer_pos()
+            {
+                stamp_dot(m, to_mask(p), brush_mask);
+                self.mask_dirty = true;
+            }
+            // No stroke is in flight on any non-drag frame — clearing here
+            // (not just on drag_stopped) also covers strokes interrupted by
+            // Esc / hold-B / an Alt source-pick, whose drag_stopped frame
+            // never reaches this handler and used to leave a stale anchor
+            // that drew a full-width connecting streak into the next stroke.
             self.paint_last = None;
         }
     }
@@ -5071,17 +5663,20 @@ impl AutoshopApp {
                 let res = (|| -> anyhow::Result<(EditRecipe, String)> {
                     let target = autoshop::decode::load_image(&tgt)?;
                     // Zoned sky pass only when enabled AND the photo has a real
-                    // path (the mask raster lands at the GUI convention
-                    // out/<stem>.mask-sky.png, which needs a stem). Everything
-                    // that can go wrong inside degrades to the global fit with
-                    // a rationale note — never an error.
+                    // path (the mask raster needs a stem). The raster is named
+                    // mask-ZONE-sky — distinct from 「AI select sky」's
+                    // mask-sky.png on purpose: they used to share one file, and
+                    // the fit's cleanup deleted a raster an existing bitmap
+                    // mask still referenced. Everything that can go wrong
+                    // inside degrades to the global fit with a rationale note —
+                    // never an error.
                     let rep = match (zoned, &src_path) {
                         (true, Some(p)) => {
                             let cfg = autoshop::config::Config::load();
                             let seg =
                                 autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
                             let mask =
-                                autoshop::pipeline::default_out(p, "mask-sky", "png");
+                                autoshop::pipeline::default_out(p, "mask-zone-sky", "png");
                             autoshop::fit_zoned::fit_recipe_zoned(&base, &target, &seg, &mask)
                         }
                         _ => autoshop::fit::fit_recipe(&base, &target),
@@ -5103,11 +5698,21 @@ impl AutoshopApp {
                     if let Some(p) = &src_path {
                         // Persist the fit losslessly: recipe.json carries the
                         // bitmap zone masks + recolour gains the XMP cannot,
-                        // so reopening the photo restores the whole fit.
+                        // so reopening the photo restores the whole fit. An
+                        // existing explicit save is snapshotted to v<N> first —
+                        // the fit must never destroy a Ctrl+S'd develop.
+                        let backed = backup_saved_develop(p, &rep.recipe);
                         autoshop::pipeline::write_recipe(p, &rep.recipe, None)?;
                         if autoshop::decode::is_raw(p) {
                             let x = autoshop::pipeline::write_xmp(p, &rep.recipe)?;
                             note.push_str(&format!(" · XMP → {}", x.display()));
+                        }
+                        if let Some(n) = backed {
+                            note.push_str(&trf(
+                                lang,
+                                " · previous save backed up as v{n}",
+                                &[("n", &n.to_string())],
+                            ));
                         }
                     }
                     Ok((rep.recipe, note))
@@ -5318,8 +5923,16 @@ impl AutoshopApp {
                 .checkbox(&mut self.paint_mode, tr(lang, "Paint mask"))
                 .on_hover_text(tr(lang, "Brush over the area; box-select is paused while on. Shared by Fill and Heal."));
             if r.changed() && self.paint_mode {
-                self.clone_mode = false; // the stamp has its own paint dispatch
-                self.range_picking = None; // and painting cancels a pending colour sample
+                // Full mutual exclusion, like every other mode entry — the
+                // dispatch chain tries crop/place/wb/range/clone BEFORE paint,
+                // so any of them left armed made a ticked brush completely inert.
+                self.clone_mode = false;
+                self.range_picking = None;
+                self.crop_mode = false;
+                self.crop_drag = None;
+                self.placing_mask = None;
+                self.place_start = None;
+                self.wb_picking = false;
             }
             if ui.button(tr(lang, "Clear")).clicked() {
                 self.clear_mask();
@@ -5476,6 +6089,12 @@ impl eframe::App for AutoshopApp {
                 self.show_shortcuts = false;
                 do_escape = false;
             }
+            // Settings is the next transient in the stack (the cheat-sheet's
+            // own hint promises Esc closes windows).
+            if do_escape && self.show_settings {
+                self.show_settings = false;
+                do_escape = false;
+            }
             if do_escape {
                 let any = self.crop_mode
                     || self.placing_mask.is_some()
@@ -5493,6 +6112,11 @@ impl eframe::App for AutoshopApp {
                     self.clone_mode = false;
                     self.paint_mode = false;
                     self.region_drag = None;
+                    // Transient gesture anchors die with the tool — a grab or
+                    // stroke surviving Esc used to hijack the next drag.
+                    self.crop_drag = None;
+                    self.mask_drag = None;
+                    self.paint_last = None;
                     self.status = tr(self.lang, "Exited the current tool (Esc)").into();
                 }
             }
@@ -5529,6 +6153,7 @@ impl eframe::App for AutoshopApp {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect()
         });
+        let n_dropped = dropped.len();
         if let Some(p) = dropped.into_iter().next() {
             if self.busy {
                 self.toast(
@@ -5540,6 +6165,17 @@ impl eframe::App for AutoshopApp {
             } else if is_photo_path(&p) {
                 self.selected = None;
                 self.open_path(p);
+                if n_dropped > 1 {
+                    // Silently eating the rest read as "it opened them all".
+                    self.toast(
+                        ToastKind::Error,
+                        trf(
+                            self.lang,
+                            "opened the first photo — {n} more ignored (drop their folder to browse them all)",
+                            &[("n", &(n_dropped - 1).to_string())],
+                        ),
+                    );
+                }
             } else {
                 self.toast(
                     ToastKind::Error,
@@ -5607,6 +6243,9 @@ impl eframe::App for AutoshopApp {
                     self.recipe = EditRecipe::default();
                     self.region = None;
                     self.dirty = true;
+                    // The old AI rationale/verdict describe the recipe Reset
+                    // just discarded — showing them under neutral sliders lies.
+                    self.resync_recipe_display();
                 }
                 ui.separator();
                 if ui
@@ -5638,8 +6277,12 @@ impl eframe::App for AutoshopApp {
                     .on_hover_text(tr(lang, "The edit fills the canvas; hold B to quickly compare the original"));
                 ui.separator();
                 if ui.button(tr(lang, "⚙ Settings")).on_hover_text(tr(lang, "AI provider / model / API key")).clicked() {
+                    // Reload the form only on the closed→open edge — reloading
+                    // while open wiped everything already typed (incl. keys).
+                    if !self.show_settings {
+                        self.load_settings_form();
+                    }
                     self.show_settings = true;
-                    self.load_settings_form();
                 }
                 if ui.button("⌨").on_hover_text(tr(lang, "Keyboard shortcuts (F1 / ?)")).clicked() {
                     self.show_shortcuts = !self.show_shortcuts;
@@ -5745,6 +6388,19 @@ impl eframe::App for AutoshopApp {
                 if self.busy {
                     ui.spinner();
                 }
+                // The unsaved marker: canvas differs from the sidecar. It sits
+                // BEFORE the status text so a long message can never push it
+                // out of view.
+                if self.src_path.is_some() && self.recipe != self.saved_recipe {
+                    ui.label(
+                        egui::RichText::new(tr(self.lang, "● unsaved"))
+                            .color(ui.visuals().warn_fg_color),
+                    )
+                    .on_hover_text(tr(
+                        self.lang,
+                        "Edits differ from the saved sidecar — Ctrl+S saves; switching photos keeps them for this session only",
+                    ));
+                }
                 // Long messages (paths, batch reports) must clip, not blow the
                 // panel wide; the full text is one hover away.
                 ui.add(egui::Label::new(&self.status).truncate())
@@ -5848,8 +6504,11 @@ impl eframe::App for AutoshopApp {
             // panel). The displayed rect is what paint/box-select map against,
             // so sizing here never changes their coordinate math.
             let avail = ui.available_size() - egui::vec2(0.0, 22.0); // room for the caption row
-            // Hold B to flash the source in place — the Lightroom compare gesture.
-            let comparing = ctx.input(|i| i.key_down(egui::Key::B));
+            // Hold B to flash the source in place — the Lightroom compare
+            // gesture. Focus-gated like every other shortcut: typing a "b"
+            // into Direction must not flash the Before mid-word.
+            let comparing = ctx.memory(|m| m.focused()).is_none()
+                && ctx.input(|i| i.key_down(egui::Key::B));
 
             match self.view_mode {
                 ViewMode::SideBySide => {
@@ -5930,7 +6589,7 @@ impl eframe::App for AutoshopApp {
                         (tr(lang, "Space+drag / middle-drag"), tr(lang, "Pan")),
                         (tr(lang, "Drag when zoomed"), tr(lang, "Pan (Ctrl+drag = box-select)")),
                         (tr(lang, "Alt+click"), tr(lang, "Sample clone source")),
-                        (tr(lang, "Slider double-click"), tr(lang, "Reset to zero")),
+                        (tr(lang, "Slider double-click"), tr(lang, "Reset to its default")),
                         (tr(lang, "Curve: click / drag / drag-out"), tr(lang, "Add / move / delete point")),
                         (tr(lang, "Drag a mask handle"), tr(lang, "Reshape / move the selected mask")),
                     ];
@@ -6347,9 +7006,12 @@ mod tests {
 
     #[test]
     fn read_saved_develop_prefers_recipe_json_then_xmp() {
-        // The open-path restore contract: no sidecar → None; XMP-only → the
-        // reverse crs import; recipe.json present → preferred (lossless), even
-        // when an XMP sits beside it. Unique stem so parallel tests can't race.
+        // The open-path restore contract: no sidecar → Nothing; a NEUTRAL
+        // sidecar → NoopOnly (never announced as a restore); XMP-only → the
+        // reverse crs import; recipe.json present → preferred (lossless); a
+        // DAMAGED recipe.json → Unreadable with the XMP fallback attached
+        // (loud degradation, never a silent fall-through). Unique stem so
+        // parallel tests can't race.
         let src = std::path::Path::new("D:/library/_sidecar_prio_test.ARW"); // never touched
         std::fs::create_dir_all("out").unwrap();
         let rj = autoshop::pipeline::default_out(src, "recipe", "json");
@@ -6357,23 +7019,40 @@ mod tests {
         let _ = std::fs::remove_file(&rj); // a crashed earlier run may have left files
         let _ = std::fs::remove_file(&xp);
 
-        assert!(read_saved_develop(src).is_none(), "no sidecar → None");
+        assert!(
+            matches!(read_saved_develop(src), SavedDevelop::Nothing),
+            "no sidecar → Nothing"
+        );
 
         // A NEUTRAL XMP (foreign file, or ours with nothing set) restores nothing.
         std::fs::write(&xp, autoshop::xmp::recipe_to_xmp(&EditRecipe::default())).unwrap();
-        assert!(read_saved_develop(src).is_none(), "a no-op XMP must not claim a restore");
+        assert!(
+            matches!(read_saved_develop(src), SavedDevelop::NoopOnly),
+            "a no-op XMP must not claim a restore"
+        );
 
         // XMP with real edits → imported through the reverse crs mapping.
         let edited = EditRecipe { contrast: 22.0, ..Default::default() };
         std::fs::write(&xp, autoshop::xmp::recipe_to_xmp(&edited)).unwrap();
-        let (r, kind) = read_saved_develop(src).expect("an edited XMP restores");
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src) else {
+            panic!("an edited XMP restores");
+        };
         assert_eq!((r.contrast, kind), (22.0, "XMP"));
 
         // recipe.json appears → preferred over the XMP.
         let full = EditRecipe { exposure_ev: 0.5, ..Default::default() };
         std::fs::write(&rj, serde_json::to_string(&full).unwrap()).unwrap();
-        let (r, kind) = read_saved_develop(src).expect("recipe.json restores");
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src) else {
+            panic!("recipe.json restores");
+        };
         assert_eq!((r.exposure_ev, kind), (0.5, "recipe.json"));
+
+        // A damaged recipe.json degrades LOUDLY, XMP fallback attached.
+        std::fs::write(&rj, "{ not json").unwrap();
+        let SavedDevelop::Unreadable { fallback, .. } = read_saved_develop(src) else {
+            panic!("a damaged recipe.json must be reported, not skipped");
+        };
+        assert_eq!(fallback.expect("XMP fallback rides along").1, "XMP");
 
         let _ = std::fs::remove_file(&rj);
         let _ = std::fs::remove_file(&xp);

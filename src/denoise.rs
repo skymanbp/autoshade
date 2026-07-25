@@ -124,13 +124,16 @@ fn run_sidecar(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {
         .arg(format!("{:.4}", opts.strength))
         .arg("--cache")
         .arg(&opts.cache)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    // Don't flash a console window when the windowed GUI spawns the sidecar; the
-    // CLI still sees its output via the inherited handles.
+        // CAPTURE, never inherit (same reason as the segmentation sidecar): the
+        // release GUI has no console, so inherited handles silently discard the
+        // sidecar's reason for failing. Cost of the capture: the CLI no longer
+        // sees the live model-download progress, only the tail on failure.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Don't flash a console window when the windowed GUI spawns the sidecar.
     crate::hide_child_console(&mut cmd);
-    let status = cmd
-        .status()
+    let out = cmd
+        .output()
         .with_context(|| {
             format!(
                 "launch denoise sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
@@ -138,10 +141,11 @@ fn run_sidecar(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {
                 opts.script.display()
             )
         })?;
-    if !status.success() {
+    if !out.status.success() {
         bail!(
-            "denoise sidecar exited with {} (see its log above)",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+            "denoise sidecar exited with {}: {}",
+            out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+            crate::sidecar_tail(&out.stderr, &out.stdout)
         );
     }
     Ok(())

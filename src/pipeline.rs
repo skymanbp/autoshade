@@ -80,7 +80,6 @@ pub fn produce_recipe(
     // GPT vision when a key is set; on failure (quota/network) warn and fall back
     // to the heuristic so we still produce a recipe (disclosure, not masking).
     let openai = OpenAiProvider::new(cfg);
-    let heuristic = HeuristicProposer;
     let (mut recipe, can_revise) = if cfg.openai_api_key.is_some() {
         if verbose {
             println!("proposer : OpenAI ({})", cfg.openai_model);
@@ -89,6 +88,10 @@ pub fn produce_recipe(
             Ok(r) => (r, true),
             Err(e) => {
                 eprintln!("⚠ GPT proposer failed ({e})\n  → falling back to the heuristic baseline.");
+                // Hand the REAL cause to the heuristic: this stderr line is
+                // invisible in the windowed GUI, so the recipe's rationale is
+                // the only place the user can learn why the AI didn't run.
+                let heuristic = HeuristicProposer { fallback_reason: Some(e.to_string()) };
                 (heuristic.propose(&preview, meta, hist, None, None, None)?, false)
             }
         }
@@ -96,6 +99,7 @@ pub fn produce_recipe(
         if verbose {
             println!("proposer : heuristic baseline (set OPENAI_API_KEY to use GPT vision)");
         }
+        let heuristic = HeuristicProposer::default();
         (heuristic.propose(&preview, meta, hist, None, None, None)?, false)
     };
 
@@ -125,8 +129,36 @@ pub fn produce_recipe(
         if verbose {
             println!("verdict {:?} → revision {round}/{MAX_REVISIONS} (hint: {hint})", verdict.decision);
         }
-        recipe = openai.propose(&preview, meta, hist, ref_str, guidance, Some(&hint))?;
-        verdict = verifier.verify(&recipe, meta, hist)?;
+        // Disclosure, not masking (same policy as the propose fallback above): a
+        // transient provider failure in a LATER round must not throw away the
+        // already-paid-for, already-VERIFIED recipe from the previous round.
+        // Keep that (recipe, verdict) pair — they stay consistent, so the
+        // returned verdict still describes the returned recipe — and record why
+        // the loop stopped in the rationale, the one channel all three surfaces
+        // show (the windowed GUI has no console for the CLI's stderr). A
+        // FIRST-round failure still errors: there is no good pair to keep.
+        let revised = match openai.propose(&preview, meta, hist, ref_str, guidance, Some(&hint)) {
+            Ok(r) => r,
+            Err(e) => {
+                recipe.rationale.push_str(&format!(
+                    " [revision round {round} failed ({e}) — keeping the previous verified proposal]"
+                ));
+                break;
+            }
+        };
+        match verifier.verify(&revised, meta, hist) {
+            Ok(v) => {
+                recipe = revised;
+                verdict = v;
+            }
+            Err(e) => {
+                recipe.rationale.push_str(&format!(
+                    " [verification of revision round {round} failed ({e}) — keeping the previous \
+                     verified proposal]"
+                ));
+                break;
+            }
+        }
     }
 
     // Distill toward the user's historical style: a gentle, capped pull of the
@@ -155,7 +187,13 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
 }
 
 pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
-    let out = xmp_target(raw);
+    write_xmp_at(xmp_target(raw), recipe)
+}
+
+/// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
+/// `-o`: the two halves of one develop must stay in the same folder, or the
+/// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
+pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
     ensure_parent(&out)?;
     std::fs::write(&out, xmp::recipe_to_xmp(recipe))
         .with_context(|| format!("write xmp {}", out.display()))?;
@@ -221,7 +259,13 @@ fn entry_is_dir(entry: &std::fs::DirEntry) -> std::io::Result<bool> {
     Ok(if ft.is_symlink() { entry.path().is_dir() } else { ft.is_dir() })
 }
 
-/// Recursively collect every `.arw` (case-insensitive) under `dir`, sorted.
+/// Recursively collect every camera RAW under `dir`, sorted.
+///
+/// "A RAW" has exactly ONE definition app-wide — [`decode::is_raw`] (arw, dng,
+/// raw, raf, nef, cr2, cr3, orf, rw2), the same predicate [`find_sources`] and
+/// the render/decode path use. This scanner used to accept `.arw` alone, which
+/// left `batch`, `eval` and `style-index` blind to libraries the GUI and web
+/// open fine.
 pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
@@ -229,11 +273,7 @@ pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
             let p = entry.path();
             if entry_is_dir(&entry)? {
                 walk(&p, out)?;
-            } else if p
-                .extension()
-                .and_then(|x| x.to_str())
-                .is_some_and(|x| x.eq_ignore_ascii_case("arw"))
-            {
+            } else if decode::is_raw(&p) {
                 out.push(p);
             }
         }
@@ -294,6 +334,38 @@ mod tests {
         let out_src = Path::new("out/DSC0001.preview.jpg");
         let out_dst = Path::new("out/DSC0001.matched.json");
         assert!(guard_readonly(out_dst, out_src).is_ok(), "our ./out is always writable");
+    }
+
+    /// find_raws must accept EVERY format decode::is_raw does (one definition of
+    /// "a RAW" app-wide) and nothing else — a Canon/Nikon library used to scan
+    /// as empty for batch/eval/style-index.
+    #[test]
+    fn find_raws_accepts_every_raw_format_the_app_can_decode() {
+        let dir = std::env::temp_dir().join(format!("autoshop_find_raws_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("temp dir");
+        let raws = ["a.ARW", "b.dng", "c.NEF", "d.cr2", "e.cr3", "f.orf", "g.rw2", "h.raw"];
+        for name in raws {
+            std::fs::write(dir.join(name), b"").expect("write");
+        }
+        std::fs::write(dir.join("sub").join("i.raf"), b"").expect("write"); // recursion
+        for name in ["note.txt", "baked.png", "export.jpg", "DSC0001.xmp"] {
+            std::fs::write(dir.join(name), b"").expect("write");
+        }
+
+        let found = find_raws(&dir).expect("scan");
+        let mut names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_lowercase())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["a.arw", "b.dng", "c.nef", "d.cr2", "e.cr3", "f.orf", "g.rw2", "h.raw", "i.raf"],
+            "find_raws must see every RAW format (case-insensitive, recursive) and no baked/sidecar files"
+        );
+        assert!(found.iter().all(|p| decode::is_raw(p)), "one RAW predicate, app-wide");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

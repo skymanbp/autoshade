@@ -4,21 +4,24 @@
 //! is mutable (behind a lock) so the UI can **import** more files/folders at
 //! runtime.
 //!
-//! Interactive feedback (before/after, slider tweaks) runs on the *embedded
-//! preview* via [`render::develop_preview`] (fast); only explicit **Export** /
-//! **Download** run the full-resolution [`render::render_to_file`].
+//! Interactive feedback (before/after, slider tweaks) runs [`render::develop_preview`]
+//! over a downscaled **neutral develop of the RAW** ([`develop_base`]) — the same
+//! decode Export develops from, so a slider means the same thing in both; only
+//! explicit **Export** / **Download** run the full-resolution
+//! [`render::render_to_file`]. The gallery grid keeps the camera's cheap embedded
+//! rendition ([`thumb_base`]).
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use image::{DynamicImage, ImageFormat};
 use serde::Deserialize;
 use serde_json::json;
-use tiny_http::{Header, Request, Response, Server};
+use tiny_http::{Header, Request, Response, ResponseBox, Server};
 
 use crate::config::{Config, LocalSettings};
 use crate::decode;
@@ -89,38 +92,49 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
-fn handle(request: Request, state: &AppState) -> Result<()> {
+fn handle(mut request: Request, state: &AppState) -> Result<()> {
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("/");
     let is_post = request.method() == &tiny_http::Method::Post;
 
-    match (is_post, path) {
-        (false, "/") => respond_html(request, INDEX_HTML),
-        (false, "/api/list") => api_list(request, state),
-        (false, "/api/thumb") => api_image(request, state, 256),
-        (false, "/api/preview") => api_image(request, state, 1200),
-        (false, "/api/recipe") => api_recipe(request, state),
-        (false, "/api/style-info") => api_style_info(request, state),
-        (true, "/api/style-build") => api_style_build(request, state),
-        (false, "/api/settings") => api_settings_get(request, state),
-        (true, "/api/settings") => api_settings_post(request, state),
-        (true, "/api/setdir") => api_setdir(request, state),
-        (true, "/api/import") => api_import(request, state),
-        (true, "/api/upload") => api_upload(request, state),
-        (true, "/api/analyze") => api_analyze(request, state),
-        (true, "/api/develop") => api_develop(request, state),
-        (true, "/api/retouch") => api_retouch(request, state),
-        (true, "/api/heal") => api_heal(request, state),
-        (true, "/api/export") => api_export(request, state),
-        (true, "/api/download") => api_download(request, state),
-        (true, "/api/xmp") => api_xmp(request, state),
-        _ => respond_status(request, 404, "not found"),
-    }
+    // Handlers BUILD a response instead of consuming the request, so the request
+    // is still ours when one of them fails.
+    let reply = match (is_post, path) {
+        (false, "/") => Ok(html_response(INDEX_HTML)),
+        (false, "/api/list") => api_list(&request, state),
+        (false, "/api/thumb") => api_image(&request, state, 256),
+        (false, "/api/preview") => api_image(&request, state, PREVIEW_EDGE),
+        (false, "/api/recipe") => api_recipe(&request, state),
+        (false, "/api/style-info") => api_style_info(state),
+        (true, "/api/style-build") => api_style_build(&mut request),
+        (false, "/api/settings") => api_settings_get(state),
+        (true, "/api/settings") => api_settings_post(&mut request, state),
+        (true, "/api/setdir") => api_setdir(&mut request, state),
+        (true, "/api/import") => api_import(&mut request, state),
+        (true, "/api/upload") => api_upload(&mut request, state),
+        (true, "/api/analyze") => api_analyze(&mut request, state),
+        (true, "/api/develop") => api_develop(&mut request, state),
+        (true, "/api/retouch") => api_retouch(&mut request, state),
+        (true, "/api/heal") => api_heal(&mut request, state),
+        (true, "/api/export") => api_export(&mut request, state),
+        (true, "/api/download") => api_download(&mut request, state),
+        (true, "/api/xmp") => api_xmp(&mut request, state),
+        _ => Ok(status_response(404, "not found")),
+    };
+    // A failure has to reach the BROWSER: a dropped request answers with a
+    // BODYLESS 500 (tiny_http's `impl Drop for Request`), which is why the
+    // advisor's real message ("Not logged in · run /login") only ever appeared in
+    // the terminal. `{:#}` carries anyhow's whole source chain into the body.
+    let reply = reply.unwrap_or_else(|e| {
+        eprintln!("request error ({path}): {e:#}");
+        status_response(500, &format!("{e:#}"))
+    });
+    request.respond(reply).map_err(Into::into)
 }
 
 // --- handlers --------------------------------------------------------------
 
-fn api_list(request: Request, state: &AppState) -> Result<()> {
+fn api_list(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // Pagination: `?offset=&limit=` page through the full list (a folder can hold
     // thousands). `id` stays the GLOBAL index (enumerate BEFORE skip), so
     // selecting / previewing by id works across pages. `limit` is capped at
@@ -158,7 +172,7 @@ fn api_list(request: Request, state: &AppState) -> Result<()> {
         "shown": items.len(),
         "items": items,
     });
-    respond_json(request, &body)
+    Ok(json_response(&body))
 }
 
 #[derive(Deserialize)]
@@ -171,13 +185,13 @@ struct SetDirReq {
 /// replace the gallery. Path-based (a browser can't hand a local server a picked
 /// folder's real disk path), mirroring the Import field. Any files uploaded into
 /// ./out/imported drop out of the view but stay on disk.
-fn api_setdir(mut request: Request, state: &AppState) -> Result<()> {
-    let req: SetDirReq = read_json(&mut request)?;
+fn api_setdir(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: SetDirReq = read_json(request)?;
     // Tolerate Windows "Copy as path" (quotes) + stray whitespace, like Import.
     let cleaned = req.path.trim().trim_matches('"').trim();
     let p = PathBuf::from(cleaned);
     if !p.is_dir() {
-        return respond_status(request, 400, &format!("not a folder: {cleaned}"));
+        return Ok(status_response(400, &format!("not a folder: {cleaned}")));
     }
     let found = pipeline::find_sources(&p)?;
     let total = found.len();
@@ -189,7 +203,7 @@ fn api_setdir(mut request: Request, state: &AppState) -> Result<()> {
         let mut dir = state.dir.write().map_err(|_| anyhow!("lock poisoned"))?;
         *dir = p.clone();
     }
-    respond_json(request, &json!({ "dir": p.display().to_string(), "total": total }))
+    Ok(json_response(&json!({ "dir": p.display().to_string(), "total": total })))
 }
 
 #[derive(Deserialize)]
@@ -199,8 +213,8 @@ struct ImportReq {
 }
 
 /// Add a file or (recursively) a folder of sources to the gallery at runtime.
-fn api_import(mut request: Request, state: &AppState) -> Result<()> {
-    let req: ImportReq = read_json(&mut request)?;
+fn api_import(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: ImportReq = read_json(request)?;
     // Tolerate Windows "Copy as path" (wraps the path in quotes) + stray spaces.
     let cleaned = req.path.trim().trim_matches('"').trim();
     let p = PathBuf::from(cleaned);
@@ -209,7 +223,7 @@ fn api_import(mut request: Request, state: &AppState) -> Result<()> {
     } else if p.is_file() && (decode::is_raw(&p) || is_baked_ext(&p)) {
         vec![p.clone()]
     } else {
-        return respond_status(request, 400, &format!("not a file/folder I can read: {cleaned}"));
+        return Ok(status_response(400, &format!("not a file/folder I can read: {cleaned}")));
     };
 
     let mut added = 0usize;
@@ -222,14 +236,14 @@ fn api_import(mut request: Request, state: &AppState) -> Result<()> {
             }
         }
     }
-    respond_json(request, &json!({ "added": added, "total": state.count() }))
+    Ok(json_response(&json!({ "added": added, "total": state.count() })))
 }
 
 /// Accept dropped/picked file BYTES, save under ./out/imported, and add it to the
 /// gallery. Browsers can't hand a local server the original disk path, so
 /// drag-drop uploads the bytes (path-based Import stays for your on-disk library).
 /// Filename comes from the `X-Filename` header.
-fn api_upload(mut request: Request, state: &AppState) -> Result<()> {
+fn api_upload(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let name = request
         .headers()
         .iter()
@@ -244,7 +258,7 @@ fn api_upload(mut request: Request, state: &AppState) -> Result<()> {
         .to_string();
     let as_path = PathBuf::from(&safe);
     if safe.is_empty() || !(decode::is_raw(&as_path) || is_baked_ext(&as_path)) {
-        return respond_status(request, 400, "unsupported or unnamed file");
+        return Ok(status_response(400, "unsupported or unnamed file"));
     }
 
     let mut bytes = Vec::new();
@@ -265,23 +279,24 @@ fn api_upload(mut request: Request, state: &AppState) -> Result<()> {
             }
         }
     };
-    respond_json(
-        request,
+    Ok(json_response(
         &json!({ "id": id, "total": state.count(), "stem": pipeline::stem(&dest) }),
-    )
+    ))
 }
 
-/// Decode a source's embedded preview and resize it to the 1200px web base —
-/// through a process-wide (path, mtime)-keyed cache (same pattern as render.rs's
-/// bitmap-mask cache). The UI POSTs /api/develop on EVERY slider gesture, and
-/// `preview_only` decodes the FULL embedded JPEG (~60 MP on the user's bodies)
-/// each time — the per-gesture decode+resize dwarfed the develop itself. mtime in
-/// the key is the invalidation: an overwritten source misses and re-decodes.
-fn preview_base(raw: &Path) -> Result<Arc<DynamicImage>> {
-    use std::sync::{Mutex, OnceLock};
-    type Cache = Mutex<Vec<(PathBuf, std::time::SystemTime, Arc<DynamicImage>)>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
+/// A process-wide (path, mtime)-keyed cache of decoded bases (same pattern as
+/// render.rs's bitmap-mask cache). The UI re-asks for the same base on EVERY
+/// slider gesture, and decoding it is orders of magnitude dearer than the develop
+/// itself. mtime in the key is the invalidation: an overwritten source misses and
+/// re-decodes. `cap` bounds the memory; entries are evicted in insertion order.
+type BaseCache = Mutex<Vec<(PathBuf, std::time::SystemTime, Arc<DynamicImage>)>>;
+
+fn cached_base(
+    cache: &BaseCache,
+    cap: usize,
+    raw: &Path,
+    build: impl FnOnce() -> Result<DynamicImage>,
+) -> Result<Arc<DynamicImage>> {
     let mtime = std::fs::metadata(raw).and_then(|m| m.modified()).ok();
     if let Some(t) = mtime {
         // No user code runs under the lock, so poisoning is not reachable —
@@ -291,14 +306,11 @@ fn preview_base(raw: &Path) -> Result<Arc<DynamicImage>> {
             return Ok(img.clone());
         }
     }
-    let img = Arc::new(
-        decode::preview_only(raw)?
-            .resize(PREVIEW_EDGE, PREVIEW_EDGE, image::imageops::FilterType::Triangle),
-    );
+    let img = Arc::new(build()?);
     if let Some(t) = mtime {
         let mut list = cache.lock().unwrap_or_else(|p| p.into_inner());
         list.retain(|(p, _, _)| p != raw); // a stale-mtime entry for this path is dead
-        if list.len() >= 8 {
+        if list.len() >= cap {
             list.remove(0); // small Vec in insertion order → evict the oldest insert
         }
         list.push((raw.to_path_buf(), t, img.clone()));
@@ -306,36 +318,100 @@ fn preview_base(raw: &Path) -> Result<Arc<DynamicImage>> {
     Ok(img)
 }
 
-fn api_image(request: Request, state: &AppState, max_edge: u32) -> Result<()> {
-    let raw = raw_for(&request, state)?;
-    let base = preview_base(&raw)?;
+/// The camera's embedded rendition, resized to the web base — for the GALLERY
+/// GRID only, where an already tone-mapped JPEG is exactly what we want and a
+/// full demosaic per tile would be unusable (a page shows 200).
+fn thumb_base(raw: &Path) -> Result<Arc<DynamicImage>> {
+    static CACHE: OnceLock<BaseCache> = OnceLock::new();
+    cached_base(CACHE.get_or_init(Default::default), 8, raw, || {
+        Ok(decode::preview_only(raw)?
+            .resize(PREVIEW_EDGE, PREVIEW_EDGE, image::imageops::FilterType::Triangle))
+    })
+}
+
+/// The base BOTH panes of the editor use: the RAW sensor data developed with a
+/// NEUTRAL recipe and downscaled — the same decode `render_to_file` exports from,
+/// and the same base the GUI builds (`gui.rs` `open_path`). This used to develop
+/// the camera's baked 8-bit JPEG instead, which double-processes it: highlights
+/// already clipped to 255 cannot be recovered, so Highlights/Whites (and grain
+/// under clarity/contrast) behaved nothing like the export of the same recipe.
+///
+/// RESIDUAL DIVERGENCE from the export, inherent to a fast preview and NOT fixed
+/// here: the base is 8-bit and downscaled to `PREVIEW_EDGE`, so radius-based
+/// stages (clarity, noise reduction, sharpening) act on fewer pixels and read
+/// slightly softer; crop / straighten / lens distortion are deliberately skipped
+/// so the sliders keep full-frame feedback (see `render::develop_preview`); and
+/// AI denoise is export-only. The tone/colour/WB stages the sliders drive now see
+/// the same signal as the export.
+fn develop_base(raw: &Path) -> Result<Arc<DynamicImage>> {
+    static CACHE: OnceLock<BaseCache> = OnceLock::new();
+    // A full-sensor develop costs seconds and ~1.5 GB of transients. The before
+    // pane and the first slider gesture ask for the SAME photo at the same time
+    // (each request gets its own thread), so serialise the build: the loser waits
+    // and then finds the cache entry the winner just wrote.
+    static BUILD: Mutex<()> = Mutex::new(());
+    let _serialised = BUILD.lock().unwrap_or_else(|p| p.into_inner());
+    cached_base(CACHE.get_or_init(Default::default), 4, raw, || {
+        let full = if decode::is_raw(raw) {
+            render::render_to_image(raw, &EditRecipe::default(), None)?
+        } else {
+            decode::load_image(raw)?
+        };
+        // `thumbnail` (not `resize`) for the big downscale, like the GUI — and
+        // only ever DOWN: a source already under the edge is left alone, since
+        // its own pixels beat any upsample and the browser scales the <img>
+        // anyway. Store 8-bit: `develop_preview` and the JPEG encode both work in
+        // 8-bit, so keeping the 16-bit buffer would only double the cache and
+        // re-convert on every gesture.
+        let fitted = if full.width().max(full.height()) > PREVIEW_EDGE {
+            full.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE)
+        } else {
+            full
+        };
+        Ok(DynamicImage::ImageRgb8(fitted.to_rgb8()))
+    })
+}
+
+fn api_image(request: &Request, state: &AppState, max_edge: u32) -> Result<ResponseBox> {
+    let raw = raw_for(request, state)?;
     if max_edge >= PREVIEW_EDGE {
-        respond_jpeg(request, &base)
+        // The "before" pane must show the rendition the "after" is developed
+        // FROM, or the pair compares two different pictures.
+        let base = develop_base(&raw)?;
+        jpeg_response(&base)
     } else {
         // Thumbnail: resize DOWN from the cached 1200px base instead of paying a
         // second full decode of the same source.
-        let resized = base.resize(max_edge, max_edge, image::imageops::FilterType::Triangle);
-        respond_jpeg(request, &resized)
+        let base = thumb_base(&raw)?;
+        jpeg_response(&base.resize(max_edge, max_edge, image::imageops::FilterType::Triangle))
     }
 }
 
-fn api_recipe(request: Request, state: &AppState) -> Result<()> {
-    let raw = raw_for(&request, state)?;
+fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
+    let raw = raw_for(request, state)?;
     let path = pipeline::default_out(&raw, "recipe", "json");
-    if !path.exists() {
-        return respond_status(request, 404, "no recipe yet");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        // Served verbatim: the file is the authority, and re-serialising would
+        // drop anything a newer schema wrote.
+        return Ok(json_text(text));
     }
-    let text = std::fs::read_to_string(&path)?;
-    let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    request
-        .respond(Response::from_string(text).with_header(header))
-        .map_err(Into::into)
+    // No recipe.json → fall back to the XMP sidecar, exactly like the GUI's
+    // `read_saved_develop`: a foreign / neutral sidecar parses to a no-op recipe,
+    // and "restoring" that would only produce a misleading SAVED tag.
+    if let Ok(text) = std::fs::read_to_string(pipeline::xmp_target(&raw)) {
+        let mut r = crate::xmp::xmp_to_recipe(&text);
+        if !r.is_noop() {
+            r.clamp();
+            return Ok(json_text(serde_json::to_string(&r)?));
+        }
+    }
+    Ok(status_response(404, "no recipe yet"))
 }
 
 /// Style-library info for the UI's info box: is an index built, how many of the
 /// user's edits it holds, and the scene "tags" it covers. Instant (just reads the
 /// JSON; no per-photo decode).
-fn api_style_info(request: Request, state: &AppState) -> Result<()> {
+fn api_style_info(state: &AppState) -> Result<ResponseBox> {
     let abs = |p: &str| {
         std::path::absolute(p).map(|x| x.display().to_string()).unwrap_or_else(|_| p.to_string())
     };
@@ -356,17 +432,14 @@ fn api_style_info(request: Request, state: &AppState) -> Result<()> {
         }
         Err(_) => json!({ "built": false }),
     };
-    respond_json(
-        request,
-        &json!({
-            // Where the photos being browsed live (the "原图库"), where outputs
-            // land (the "成片库" = ./out), and the style-library status.
-            "working_dir": state.dir_display(),
-            "working_count": state.count(),
-            "out_dir": abs("out"),
-            "style": style,
-        }),
-    )
+    Ok(json_response(&json!({
+        // Where the photos being browsed live (the "原图库"), where outputs
+        // land (the "成片库" = ./out), and the style-library status.
+        "working_dir": state.dir_display(),
+        "working_count": state.count(),
+        "out_dir": abs("out"),
+        "style": style,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -379,25 +452,41 @@ struct StyleBuildReq {
 /// non-CLI users can point the app at THEIR OWN library from the info panel. Writes
 /// out/style-index.json (same as `autoshop style-index <dir>`). Decodes every RAW,
 /// so it can take minutes on a large library.
-fn api_style_build(mut request: Request, _state: &AppState) -> Result<()> {
-    let req: StyleBuildReq = read_json(&mut request)?;
+fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
+    let req: StyleBuildReq = read_json(request)?;
     let cleaned = req.dir.trim().trim_matches('"').trim();
     let p = PathBuf::from(cleaned);
     if !p.is_dir() {
-        return respond_status(request, 400, &format!("not a folder: {cleaned}"));
+        return Ok(status_response(400, &format!("not a folder: {cleaned}")));
     }
     let index = match crate::style::StyleIndex::build(&p) {
         Ok(ix) => ix,
-        Err(e) => return respond_status(request, 500, &format!("build failed: {e}")),
+        Err(e) => return Ok(status_response(500, &format!("build failed: {e}"))),
     };
     let total = index.exemplars.len();
-    if let Err(e) = index.save(Path::new("out/style-index.json")) {
-        return respond_status(request, 500, &format!("save index: {e}"));
+    // An empty build is a FAILURE, not a success: `save` truncates the file in
+    // place, so writing it would silently replace a good index (and every
+    // surface's Style slider goes inert with nothing to say why). A folder
+    // yields 0 whenever no RAW has its Lightroom .xmp SITTING BESIDE IT —
+    // Autoshop's own analyses write theirs to ./out, so its output folders
+    // always index to 0. Refuse, and leave the previous index alone.
+    if total == 0 {
+        return Ok(status_response(
+            400,
+            &format!(
+                "nothing indexed in {} — found no RAW with its .xmp sidecar beside it \
+                 (Autoshop writes its own .xmp to ./out, so an Autoshop output folder \
+                 always yields 0). The existing style index was left untouched.",
+                p.display()
+            ),
+        ));
     }
-    respond_json(
-        request,
+    if let Err(e) = index.save(Path::new("out/style-index.json")) {
+        return Ok(status_response(500, &format!("save index: {e}")));
+    }
+    Ok(json_response(
         &json!({ "ok": true, "total": total, "source_dir": p.display().to_string() }),
-    )
+    ))
 }
 
 #[derive(Deserialize)]
@@ -462,8 +551,8 @@ struct RetouchReq {
     full_res: bool,
 }
 
-fn api_analyze(mut request: Request, state: &AppState) -> Result<()> {
-    let req: AnalyzeReq = read_json(&mut request)?;
+fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: AnalyzeReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
     // A dragged region anchors the edit: fold its coords into the direction so the
     // AI places a mask over exactly that box (reuses the Phase-2 area→mask prompt).
@@ -490,15 +579,16 @@ fn api_analyze(mut request: Request, state: &AppState) -> Result<()> {
     if decode::is_raw(&raw) {
         pipeline::write_xmp(&raw, &recipe)?;
     }
-    respond_json(request, &json!({ "recipe": recipe, "verdict": verdict }))
+    Ok(json_response(&json!({ "recipe": recipe, "verdict": verdict })))
 }
 
-fn api_develop(mut request: Request, state: &AppState) -> Result<()> {
-    let req: DevelopReq = read_json(&mut request)?;
+fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
-    let preview = preview_base(&raw)?;
+    // Same decode source as `api_export` below — see `develop_base`.
+    let preview = develop_base(&raw)?;
     let after = render::develop_preview(&preview, &req.recipe);
-    respond_jpeg(request, &after)
+    jpeg_response(&after)
 }
 
 /// Resolve the output extension from the request ("jpg" → jpg, else 16-bit tif).
@@ -515,19 +605,19 @@ fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
 }
 
 /// Export to ./out (the library stays read-only). Returns the written path.
-fn api_export(mut request: Request, state: &AppState) -> Result<()> {
-    let req: DevelopReq = read_json(&mut request)?;
+fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
     let out = pipeline::default_out(&raw, "developed", fmt_ext(&req));
     pipeline::ensure_parent(&out)?;
     render::render_to_file(&raw, &req.recipe, &out, denoise_opts(&req, &state.config()).as_ref(), None)?;
-    respond_text(request, &out.display().to_string())
+    Ok(text_response(&out.display().to_string()))
 }
 
 /// Render and stream the image back as a download (browser "Save As"), without
 /// leaving a copy in ./out. Renders to a temp file, then streams + deletes it.
-fn api_download(mut request: Request, state: &AppState) -> Result<()> {
-    let req: DevelopReq = read_json(&mut request)?;
+fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
     let ext = fmt_ext(&req);
     let tmp = std::env::temp_dir().join(format!(
@@ -546,18 +636,21 @@ fn api_download(mut request: Request, state: &AppState) -> Result<()> {
         format!("attachment; filename=\"{filename}\"").as_bytes(),
     )
     .unwrap();
-    request
-        .respond(Response::from_data(bytes).with_header(ct).with_header(cd))
-        .map_err(Into::into)
+    Ok(Response::from_data(bytes).with_header(ct).with_header(cd).boxed())
 }
 
 static DL_SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn api_xmp(mut request: Request, state: &AppState) -> Result<()> {
-    let req: XmpReq = read_json(&mut request)?;
+fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: XmpReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    // Dual-write, exactly as the GUI's `save_xmp` does: the XMP alone is lossy
+    // (no bitmap masks / recolour gains) AND neither surface reads it back while
+    // a `recipe.json` exists — so an XMP-only save was unreachable, silently
+    // shadowed by whatever recipe.json Analyze had left behind.
     let path = pipeline::write_xmp(&raw, &req.recipe)?;
-    respond_text(request, &path.display().to_string())
+    pipeline::write_recipe(&raw, &req.recipe, None)?;
+    Ok(text_response(&path.display().to_string()))
 }
 
 /// Generative fill (Phase 4 in the UI): the browser posts a painted RGBA mask
@@ -565,17 +658,17 @@ fn api_xmp(mut request: Request, state: &AppState) -> Result<()> {
 /// composites the regenerated region back onto the FULL-resolution source and
 /// writes the master to ./out. We return a resized JPEG of the result for inline
 /// display, with the saved master path in `X-Output-Path`. Needs OPENAI_API_KEY.
-fn api_retouch(mut request: Request, state: &AppState) -> Result<()> {
-    let req: RetouchReq = read_json(&mut request)?;
+fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: RetouchReq = read_json(request)?;
     let raw = match state.at(req.id) {
         Some(r) => r,
-        None => return respond_status(request, 400, "bad id"),
+        None => return Ok(status_response(400, "bad id")),
     };
     // Accept either a "data:image/png;base64,XXXX" URL or bare base64.
     let b64 = req.mask.rsplit(',').next().unwrap_or(&req.mask).trim();
     let mask_bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
         Ok(b) => b,
-        Err(e) => return respond_status(request, 400, &format!("bad mask base64: {e}")),
+        Err(e) => return Ok(status_response(400, &format!("bad mask base64: {e}"))),
     };
     // generative::retouch takes a mask FILE path, so stage the PNG in a temp file.
     let mask_tmp = std::env::temp_dir().join(format!(
@@ -584,7 +677,7 @@ fn api_retouch(mut request: Request, state: &AppState) -> Result<()> {
         DL_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     if let Err(e) = std::fs::write(&mask_tmp, &mask_bytes) {
-        return respond_status(request, 500, &format!("stage mask: {e}"));
+        return Ok(status_response(500, &format!("stage mask: {e}")));
     }
     let out = pipeline::default_out(&raw, "retouch", "png");
     let cfg = state.config();
@@ -603,11 +696,9 @@ fn api_retouch(mut request: Request, state: &AppState) -> Result<()> {
             let ct = Header::from_bytes(&b"Content-Type"[..], &b"image/jpeg"[..]).unwrap();
             let xp = Header::from_bytes(&b"X-Output-Path"[..], out.display().to_string().as_bytes())
                 .unwrap();
-            request
-                .respond(Response::from_data(buf).with_header(ct).with_header(xp))
-                .map_err(Into::into)
+            Ok(Response::from_data(buf).with_header(ct).with_header(xp).boxed())
         }
-        Err(e) => respond_status(request, 500, &format!("retouch failed: {e}")),
+        Err(e) => Ok(status_response(500, &format!("retouch failed: {e}"))),
     }
 }
 
@@ -631,11 +722,11 @@ fn default_true() -> bool {
 /// the browser posts a painted mask; the deterministic engine heals each from
 /// SURROUNDING REAL pixels (no generation). Saves a pixel master to ./out and
 /// returns a JPEG of the result for inline display, path in `X-Output-Path`.
-fn api_heal(mut request: Request, state: &AppState) -> Result<()> {
-    let req: HealReq = read_json(&mut request)?;
+fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let req: HealReq = read_json(request)?;
     let raw = match state.at(req.id) {
         Some(r) => r,
-        None => return respond_status(request, 400, "bad id"),
+        None => return Ok(status_response(400, "bad id")),
     };
     // Stage the optional painted mask (data URL or bare base64) to a temp PNG.
     let mask_tmp = match &req.mask {
@@ -649,11 +740,11 @@ fn api_heal(mut request: Request, state: &AppState) -> Result<()> {
                         DL_SEQ.fetch_add(1, Ordering::Relaxed)
                     ));
                     if let Err(e) = std::fs::write(&t, &bytes) {
-                        return respond_status(request, 500, &format!("stage mask: {e}"));
+                        return Ok(status_response(500, &format!("stage mask: {e}")));
                     }
                     Some(t)
                 }
-                Err(e) => return respond_status(request, 400, &format!("bad mask base64: {e}")),
+                Err(e) => return Ok(status_response(400, &format!("bad mask base64: {e}"))),
             }
         }
         _ => None,
@@ -677,17 +768,19 @@ fn api_heal(mut request: Request, state: &AppState) -> Result<()> {
                 .unwrap();
             let xs =
                 Header::from_bytes(&b"X-Heal-Spots"[..], rep.spots.to_string().as_bytes()).unwrap();
-            request
-                .respond(Response::from_data(buf).with_header(ct).with_header(xp).with_header(xs))
-                .map_err(Into::into)
+            Ok(Response::from_data(buf)
+                .with_header(ct)
+                .with_header(xp)
+                .with_header(xs)
+                .boxed())
         }
-        Err(e) => respond_status(request, 500, &format!("heal failed: {e}")),
+        Err(e) => Ok(status_response(500, &format!("heal failed: {e}"))),
     }
 }
 
 /// Current provider/model settings for the Settings panel. Never returns the raw
 /// API keys — only whether each is present.
-fn api_settings_get(request: Request, state: &AppState) -> Result<()> {
+fn api_settings_get(state: &AppState) -> Result<ResponseBox> {
     let cfg = state.config();
     let body = json!({
         "analysis": {
@@ -707,14 +800,14 @@ fn api_settings_get(request: Request, state: &AppState) -> Result<()> {
         "image_oauth_supported": false,
         "settings_file": crate::config::local_settings_path().display().to_string(),
     });
-    respond_json(request, &body)
+    Ok(json_response(&body))
 }
 
 /// Persist provider/model/key changes to the gitignored local file, then
 /// hot-reload the running config. Blank key fields are left unchanged (the GET
 /// side never reveals existing keys, so the UI sends a key only when it changes).
-fn api_settings_post(mut request: Request, state: &AppState) -> Result<()> {
-    let inc: LocalSettings = read_json(&mut request)?;
+fn api_settings_post(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let inc: LocalSettings = read_json(request)?;
     let mut cur = crate::config::load_local_settings();
     // Non-secret fields: take whatever the UI sent (empty ⇒ falls back to default).
     if inc.analysis_provider.is_some() {
@@ -745,7 +838,7 @@ fn api_settings_post(mut request: Request, state: &AppState) -> Result<()> {
 
     let path = crate::config::save_local_settings(&cur).map_err(|e| anyhow!("write settings: {e}"))?;
     *state.cfg.write().unwrap_or_else(|e| e.into_inner()) = Config::load();
-    respond_json(request, &json!({ "ok": true, "saved": path.display().to_string() }))
+    Ok(json_response(&json!({ "ok": true, "saved": path.display().to_string() })))
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -800,14 +893,21 @@ fn read_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T>
     serde_json::from_str(&body).context("parse request JSON")
 }
 
-fn respond_json(request: Request, v: &serde_json::Value) -> Result<()> {
-    let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    request
-        .respond(Response::from_string(v.to_string()).with_header(header))
-        .map_err(Into::into)
+// Response builders. They BUILD a response rather than consuming the request, so
+// `handle` still owns it when a handler fails and can answer with the error text
+// instead of tiny_http's bodyless Drop-500.
+
+fn json_response(v: &serde_json::Value) -> ResponseBox {
+    json_text(v.to_string())
 }
 
-fn respond_html(request: Request, html: &str) -> Result<()> {
+/// A JSON body that is already serialised (e.g. a sidecar served verbatim).
+fn json_text(text: String) -> ResponseBox {
+    let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    Response::from_string(text).with_header(header).boxed()
+}
+
+fn html_response(html: &str) -> ResponseBox {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
     // No-cache: the UI HTML is embedded in the binary and changes on every rebuild,
     // so the browser MUST re-fetch it after a restart — otherwise a stale cached
@@ -817,29 +917,23 @@ fn respond_html(request: Request, html: &str) -> Result<()> {
         &b"no-cache, no-store, must-revalidate"[..],
     )
     .unwrap();
-    request
-        .respond(Response::from_string(html).with_header(ct).with_header(cc))
-        .map_err(Into::into)
+    Response::from_string(html).with_header(ct).with_header(cc).boxed()
 }
 
-fn respond_text(request: Request, text: &str) -> Result<()> {
-    request.respond(Response::from_string(text)).map_err(Into::into)
+fn text_response(text: &str) -> ResponseBox {
+    Response::from_string(text).boxed()
 }
 
-fn respond_jpeg(request: Request, img: &DynamicImage) -> Result<()> {
+fn jpeg_response(img: &DynamicImage) -> Result<ResponseBox> {
     let mut buf = Vec::new();
     img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
         .context("encode jpeg")?;
     let header = Header::from_bytes(&b"Content-Type"[..], &b"image/jpeg"[..]).unwrap();
-    request
-        .respond(Response::from_data(buf).with_header(header))
-        .map_err(Into::into)
+    Ok(Response::from_data(buf).with_header(header).boxed())
 }
 
-fn respond_status(request: Request, code: u16, msg: &str) -> Result<()> {
-    request
-        .respond(Response::from_string(msg).with_status_code(code))
-        .map_err(Into::into)
+fn status_response(code: u16, msg: &str) -> ResponseBox {
+    Response::from_string(msg).with_status_code(code).boxed()
 }
 
 #[cfg(test)]

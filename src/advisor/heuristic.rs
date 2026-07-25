@@ -11,7 +11,16 @@ use crate::recipe::EditRecipe;
 
 use super::{Advisor, AdvisorError, Preview};
 
-pub struct HeuristicProposer;
+#[derive(Default)]
+pub struct HeuristicProposer {
+    /// Why the heuristic is standing in for the vision proposer, when the cause
+    /// is NOT simply "no key configured". Quoted verbatim in the recipe's
+    /// rationale because that string is the only fallback explanation the user
+    /// ever sees: the windowed GUI has no console for the caller's stderr
+    /// warning, so a hard-coded "OPENAI_API_KEY unset" here would send a user
+    /// whose key is fine (quota, network, HTTP error) hunting for the wrong bug.
+    pub fallback_reason: Option<String>,
+}
 
 impl Advisor for HeuristicProposer {
     fn name(&self) -> &'static str {
@@ -63,8 +72,12 @@ impl Advisor for HeuristicProposer {
         r.vibrance = 8.0;
         r.clarity = 4.0;
 
+        let why = match &self.fallback_reason {
+            Some(e) => format!("AI vision unavailable: {e}"),
+            None => "no AI vision; OPENAI_API_KEY unset".to_string(),
+        };
         r.rationale = format!(
-            "Heuristic baseline (no AI vision; OPENAI_API_KEY unset). mean_luma={mean:.0}/255, \
+            "Heuristic baseline ({why}). mean_luma={mean:.0}/255, \
              clip black/white={:.1}%/{:.1}% → exposure {:+.1}EV, highlights {:.0}, shadows {:.0}.",
             hist.clip_black_pct, hist.clip_white_pct, r.exposure_ev, r.highlights, r.shadows,
         );

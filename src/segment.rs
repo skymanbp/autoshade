@@ -54,22 +54,26 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
         .arg(output)
         .arg("--target")
         .arg(&opts.target)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        // CAPTURE, never inherit: the release GUI is windows_subsystem="windows"
+        // and has NO console, so inherited handles discard the sidecar's output —
+        // the reason a missing dependency used to surface as a bare exit code.
+        // The tail goes into the error instead, which reaches the GUI toast.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     // Don't flash a console window when the windowed GUI spawns the sidecar.
     crate::hide_child_console(&mut cmd);
-    let status = cmd.status().with_context(|| {
+    let out = cmd.output().with_context(|| {
         format!(
             "launch segmentation sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
             opts.python_bin,
             opts.script.display()
         )
     })?;
-    if !status.success() {
+    if !out.status.success() {
         bail!(
-            "segmentation sidecar exited with {} (see its log above — a missing \
-             dependency prints the exact pip install line)",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+            "segmentation sidecar exited with {}: {}",
+            out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+            crate::sidecar_tail(&out.stderr, &out.stdout)
         );
     }
     if !output.exists() {

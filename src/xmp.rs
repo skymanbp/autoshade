@@ -516,7 +516,16 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
     Some(LocalAdjustment {
         mask,
         range,
-        name: crs_str(seg, "CorrectionName").map(xml_unescape).unwrap_or_default(),
+        // Our own writer synthesises "Autoshop <n>" for unnamed masks (the
+        // block above needs SOME CorrectionName) — importing that back as a
+        // user-given name froze the placeholder and hid the localised
+        // role/label. Round-trip it back to "unnamed".
+        name: crs_str(seg, "CorrectionName")
+            .map(xml_unescape)
+            .filter(|n| {
+                n.strip_prefix("Autoshop ").is_none_or(|rest| rest.parse::<u32>().is_err())
+            })
+            .unwrap_or_default(),
         amount: crs_f32(seg, "CorrectionAmount").unwrap_or(1.0),
         inverted: crs_str(&seg[geom_at..], "MaskInverted") == Some("true"),
         exposure_ev: crs_f32(seg, "LocalExposure2012").unwrap_or(0.0) * 4.0,

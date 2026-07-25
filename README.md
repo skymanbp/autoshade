@@ -106,8 +106,11 @@ Two roles, each configurable in the in-app **Settings (⚙)** panel (or via env)
 | **分析 / Analysis** (verifier) | data-only acceptance-check of each recipe | **OAuth** — the `claude` CLI on PATH, signed in (reuses Claude Code OAuth, **no API key**), model `opus` | **API** — any OpenAI-compatible chat endpoint (base URL + key + model) |
 | **图像 / Image** (vision advisor) | looks at the photo → `EditRecipe` | **API** — `OPENAI_API_KEY`, model `gpt-5.5` | point the base URL at any OpenAI-compatible **vision** endpoint. Without a key, a histogram heuristic is used. |
 
-The `claude` CLI has no image input in print mode, so the image role is
-**API-only** (the Settings panel shows its OAuth option as unavailable).
+The `claude` CLI has no image input in print mode, so the image role always
+speaks the OpenAI-compatible HTTP protocol. The Settings panel's "OAuth"
+choice for the image role is a preset that points the endpoint at a local
+subscription bridge (e.g. CLIProxyAPI) instead of a keyed API — same wire
+protocol, different endpoint/credentials.
 
 Configure keys + models from the **Settings** panel — written to the gitignored
 `autoshop.local.json`, which overrides the environment. Keys never leave your

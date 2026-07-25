@@ -16,6 +16,63 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **全量 debug + 协同性审计批次（2026-07-24，已提交未发布）**——用户令
+  "全量debug+打磨使用体验，同时检查各个功能之间的协同性"+报"蒙版按钮
+  点击变移动"。方法：6 维度并行审计工作流（指针状态机/异步预览/边车
+  持久化/蒙版渲染语义/偏好流程/跨面协同）+ 按维度对抗验证 → **77 项
+  findings 全部 CONFIRMED**；修复分四批（gui.rs 本体串行保协同性；
+  render.rs、serve.rs+web、pipeline/main/advisor/segment 三组互不相交
+  文件由隔离子代理执行）。基线 **107 lib + 9 gui**（+5 新测试），
+  clippy(--all-targets --features gui -D warnings) 0。要点：
+  1. **蒙版行点击=选择恢复**（用户报症）：整行曾包在 dnd_drag_source
+     里（drag 交互层吃掉点击、微动即浮行）→ ☰ 专用把手当唯一拖拽源，
+     行主体纯 selectable_label，drop 落点区=整行（gui.rs 蒙版列表）。
+  2. **持久化统一契约**：recipe.json = 任意源类型的唯一真源（Ctrl+S 对
+     PNG/TIFF 也写 recipe.json，仅 XMP 限 RAW）；中性配方存档=删除边车
+     （清 ● 徽章）；程序性写入者（AI 分析、反推）覆盖前自动把既有存档
+     备份为 v<N>（backup_saved_develop；显式 Ctrl+S 直接覆盖）；GUI 分析
+     现与 CLI/web 一样持久化；web /api/xmp 双写 + /api/recipe 回退 XMP；
+     CLI match 补写规范边车、analyze -o 时 XMP 跟随同目录。损坏的
+     recipe.json 走 SavedDevelop::Unreadable **响亮降级**（toast+状态），
+     中性边车 NoopOnly 不再谎称"已恢复"。
+  3. **未保存保护**：saved_recipe 基线 + 状态栏 ● 未保存标记 + 导航
+     nav_stash（切照片把未保存画布按路径暂存本会话、回来即恢复并提示）；
+     批渲染对打开中的照片改用活配方（与 paste 同规）。
+  4. **指针/工具状态机**：Esc/中断后残留 crop_drag/mask_drag/paint_last
+     全部清理（无拖拽即无抓取原则）；快速抓取用 press_origin 命中（egui
+     drag_started 有 ~6px 阈值）；小蒙版把手最近者优先取边缘；删除/拖放
+     /⬆⬇ 后 range_picking/placing_mask 索引统一经 remap_mask_indices
+     重映射；Paint 复选框补全模式互斥；画笔支持单击点涂+双击缩放在工具
+     态被禁；削波层以当前旗标为准（在飞帧不再覆盖 J 切换）；AI 区域框
+     常显（不再被工具/把手悬停藏掉）。
+  5. **引擎蒙版语义**（render.rs，子代理）：位图栅格缺失＋invert 曾整幅
+     全强度应用→现整体跳过（含 coverage 一致）；feather=0 椭圆边界 NaN
+     （黑点）→ ramp 钳制硬边；roundness 实测无法定契约（用户 160 个 LR
+     边车 201 个径向全 0）→ 显式记录为 no-op + 钉死测试。反推 sky 栅格
+     改名 mask-zone-sky（GUI+CLI），不再与「AI 选天空」的 mask-sky 相撞
+     互删；重跑分割去重同栅格蒙版；批量粘贴剥离位图蒙版（带提示）。
+  6. **Web 协同**（serve.rs+index.html，子代理）：预览与导出统一解码源
+     （develop_base 缓存 + 构建互斥锁）；latest-wins 序号防旧帧回流；
+     500 带真实错误文本（tiny_http Drop 空响应根因）；空风格索引拒绝
+     覆盖好索引。
+  7. **杂项 UX**：B 对比/Space 平移焦点门（打字不再闪原图）；⚙ 重点击
+     不再清空表单；模型拉取中重开设置不丢 in-flight；保存后 key 提示按
+     解析后配置（env key 不再误报"未设置"）；提供商切换换默认模型；预览
+     worker panic 不再误清 busy；变体条 busy 时点击给 toast；保存/版本
+     失败走 toast；启动语 i18n；多文件拖放提示；直方图/削波按裁剪窗计算
+     （与导出像素契约一致）；straighten 下径向真实轮廓多边形 + 画笔
+     overlay 过同一几何变换；XMP 读回"Autoshop N"占位名视为未命名；分割
+     蒙版持久名固定英文键（数据不随语言漂移）；F1 双击说明改"重置为默认
+     值"；README 图像 OAuth 描述纠正；python sidecar 输出改捕获、错误尾
+     部随报错透出（lib.rs sidecar_tail）。
+  已知取舍/遗留（勿当 bug 重报）：边车按裸 stem 键控在 ./out（同名异
+  目录照片相撞）与 out/settings 的 cwd 相对性=磁盘布局设计题，**待用户
+  拍板**；radial 边缘把手在 straighten 下的手感（引擎正确，显示已用
+  多边形，拖拽轴映射保持原语义）；>24MP 缩略图门排队策略未动；web 预览
+  8-bit 降采样基底与导出的残余差异已在 serve.rs 注释记录；badge 仍为
+  存在性检查（开销权衡，异常态由打开路径 toast 补偿）；pipeline 融合后
+  复验仍 fatal（子代理记录）。
+
 - **AI 分析认证修复（2026-07-17，已随 v0.11.2 发布）**——v0.11.1 过了
   信任门后用户再报 "分析失败: claude exited Some(1): "（冒号后空白）。
   三层根因（全部当日实测复现，`src/advisor/claude.rs`）：
