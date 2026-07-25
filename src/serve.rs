@@ -647,9 +647,12 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // Dual-write, exactly as the GUI's `save_xmp` does: the XMP alone is lossy
     // (no bitmap masks / recolour gains) AND neither surface reads it back while
     // a `recipe.json` exists — so an XMP-only save was unreachable, silently
-    // shadowed by whatever recipe.json Analyze had left behind.
-    let path = pipeline::write_xmp(&raw, &req.recipe)?;
+    // shadowed by whatever recipe.json Analyze had left behind. recipe.json
+    // FIRST (same order as the GUI): it is the authoritative projection, and
+    // writing the XMP first meant a failed recipe write left a NEW XMP shadowed
+    // by the STALE recipe both surfaces prefer.
     pipeline::write_recipe(&raw, &req.recipe, None)?;
+    let path = pipeline::write_xmp(&raw, &req.recipe)?;
     Ok(text_response(&path.display().to_string()))
 }
 

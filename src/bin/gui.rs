@@ -2876,39 +2876,72 @@ impl AutoshopApp {
         if self.recipe.is_noop() {
             let rj = autoshop::pipeline::default_out(&path, "recipe", "json");
             let xp = autoshop::pipeline::xmp_target(&path);
-            let existed = rj.exists() || xp.exists();
-            // A missing file is the desired end state — nothing to surface.
-            let _ = std::fs::remove_file(&rj);
-            let _ = std::fs::remove_file(&xp);
-            self.edited_badge.clear();
-            self.saved_recipe = EditRecipe::default();
-            self.nav_stash.remove(&path);
-            self.status = if existed {
-                tr(lang, "neutral recipe — saved edits cleared (sidecars removed)").into()
-            } else {
-                tr(lang, "neutral recipe — nothing to save").into()
+            // A file already missing IS the desired end state; any other
+            // removal failure (lock, permissions) must not let us claim the
+            // edits were cleared — the sidecar would resurrect them on reopen.
+            let del = |p: &std::path::Path| match std::fs::remove_file(p) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e),
             };
+            match (del(&rj), del(&xp)) {
+                (Ok(a), Ok(b)) => {
+                    self.edited_badge.clear();
+                    self.saved_recipe = EditRecipe::default();
+                    self.nav_stash.remove(&path);
+                    self.status = if a || b {
+                        tr(lang, "neutral recipe — saved edits cleared (sidecars removed)").into()
+                    } else {
+                        tr(lang, "neutral recipe — nothing to save").into()
+                    };
+                }
+                (ra, rb) => {
+                    let e = ra.err().or(rb.err()).expect("one arm failed");
+                    let t = trf(
+                        lang,
+                        "could not clear the saved edits: {err}",
+                        &[("err", &e.to_string())],
+                    );
+                    self.status = t.clone();
+                    self.toast(ToastKind::Error, t);
+                }
+            }
             return;
         }
         // recipe.json is the source of truth for EVERY source type (the badge,
         // batch render and reopening all read it; the XMP alone is lossy — no
         // bitmap masks / recolour gains). The XMP is the RAW-only Lightroom
-        // projection on top.
+        // projection on top. The recipe write ALONE decides the saved state:
+        // once it lands, reopening restores it regardless of the XMP — so the
+        // ● baseline must follow it even when the XMP half fails.
         let raw = autoshop::decode::is_raw(&path);
-        match autoshop::pipeline::write_recipe(&path, &self.recipe, None).and_then(|rp| {
-            if raw { autoshop::pipeline::write_xmp(&path, &self.recipe) } else { Ok(rp) }
-        }) {
-            Ok(p) => {
+        match autoshop::pipeline::write_recipe(&path, &self.recipe, None) {
+            Ok(rp) => {
                 self.edited_badge.clear(); // the open photo just gained its badge
                 self.saved_recipe = self.recipe.clone();
                 self.nav_stash.remove(&path);
                 let mut s = if raw {
-                    trf(lang, "XMP + recipe saved → {path}", &[("path", &p.display().to_string())])
+                    match autoshop::pipeline::write_xmp(&path, &self.recipe) {
+                        Ok(p) => trf(
+                            lang,
+                            "XMP + recipe saved → {path}",
+                            &[("path", &p.display().to_string())],
+                        ),
+                        Err(e) => {
+                            let t = trf(
+                                lang,
+                                "recipe saved — but the Lightroom XMP failed: {err}",
+                                &[("err", &e.to_string())],
+                            );
+                            self.toast(ToastKind::Error, t.clone());
+                            t
+                        }
+                    }
                 } else {
                     trf(
                         lang,
                         "recipe saved → {path} (XMP applies to RAW only)",
-                        &[("path", &p.display().to_string())],
+                        &[("path", &rp.display().to_string())],
                     )
                 };
                 // An in-place heal/clone/fill bakes pixels into the variant's
@@ -2923,7 +2956,7 @@ impl AutoshopApp {
                 self.status = s;
             }
             Err(e) => {
-                let t = trf(lang, "XMP save failed: {err}", &[("err", &e.to_string())]);
+                let t = trf(lang, "save failed: {err}", &[("err", &e.to_string())]);
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t); // a failed save must be seen
             }
