@@ -526,39 +526,53 @@ fn call_images_edit(
             Ok(r) => {
                 // A server may accept `stream` yet answer with plain JSON —
                 // dispatch on what actually came back, not on what was asked.
-                let v = if r.content_type().eq_ignore_ascii_case("text/event-stream") {
-                    read_sse_image(r.into_reader())?
+                let read = if r.content_type().eq_ignore_ascii_case("text/event-stream") {
+                    read_sse_image(r.into_reader())
                 } else {
-                    r.into_json().context("parse image API response")?
+                    r.into_json().context("parse image API response")
                 };
-                break (v, size.to_string());
+                match read {
+                    Ok(v) => break (v, size.to_string()),
+                    Err(e) => {
+                        // Body-read failures are the same connection-blip
+                        // class as the send-phase ones below — they used to
+                        // bypass the one-time retry via `?`. Only the
+                        // TRANSPORT-flavoured contexts retry: a model failure
+                        // event or a user cancel must not re-post (re-bills).
+                        let s = format!("{e:#}");
+                        let transportish = s.contains("read image stream")
+                            || s.contains("parse image API response");
+                        if transportish
+                            && !transport_retried
+                            && started.elapsed().as_secs()
+                                < crate::advisor::TRANSPORT_RETRY_UNDER_SECS
+                        {
+                            transport_retried = true;
+                            eprintln!(
+                                "  note: {s} — retrying once (connection blip, not generation time)"
+                            );
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                }
             }
             Err(ureq::Error::Status(code, r)) => {
                 let b = r.into_string().unwrap_or_default();
-                // Prefer the API's structured `error.param` when present — a
-                // bare substring can blame the wrong knob when the message
-                // merely MENTIONS another parameter (e.g. a size error whose
-                // text says "for streaming requests"). Substrings stay as the
-                // fallback for bridges that omit `param` — EXCEPT for
-                // `stream`, where only a quoted mention counts (a proxy's
-                // "upstream error" must not trigger the fallback; see
-                // advisor::error_blames_param), and only on a 400-class
-                // status (a 401/429/5xx mentioning a parameter is not a
-                // capability signal).
-                let param = serde_json::from_str::<serde_json::Value>(&b)
-                    .ok()
-                    .and_then(|v| v.get("error")?.get("param")?.as_str().map(str::to_owned));
-                let blames = |name: &str| match param.as_deref() {
-                    Some(p) => p == name,
-                    None => b.contains(name),
-                };
+                // ONE attribution rule for every knob, shared with the text
+                // path (advisor::error_blames_param): structured `error.param`
+                // wins (exact or dotted child); when absent only a QUOTED
+                // mention counts. The old bare-substring fallback here let any
+                // negotiable status whose message merely CONTAINED "size" (a
+                // common word) silently drop the flexible-size request — the
+                // exact false-positive class the quoted rule was built for.
+                // Negotiation stays limited to capability-shaped statuses
+                // (400/404/422): a 401/429/5xx mentioning a parameter is not
+                // a capability signal.
+                let blames = |name: &str| crate::advisor::error_blames_param(&b, name);
                 let negotiable = matches!(code, 400 | 404 | 422);
                 // Each guard flips its own flag, so each retry fires at most once.
-                if negotiable
-                    && use_stream
-                    && (crate::advisor::error_blames_param(&b, "stream")
-                        || blames("partial_images"))
-                {
+                if negotiable && use_stream && (blames("stream") || blames("partial_images")) {
                     eprintln!(
                         "  note: {} rejected streaming — retrying as one blocking call \
                          ({IMAGES_EDIT_TIMEOUT_SECS}s deadline)",

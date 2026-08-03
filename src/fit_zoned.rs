@@ -304,6 +304,13 @@ fn segment_both(
     for p in [&tmp_src, &tmp_tgt, &tmp_tgt_mask] {
         std::fs::remove_file(p).ok();
     }
+    if out.is_err() {
+        // The source segmentation writes mask_path FIRST — a later failure
+        // (target segmentation, mask decode) otherwise leaves a partial mask
+        // file no zone will ever reference (the caller degrades to the global
+        // fit). Removing it also releases a claimed unique raster name.
+        std::fs::remove_file(mask_path).ok();
+    }
     out
 }
 
@@ -512,7 +519,10 @@ fn attach_one_zone(
 /// (`render::sample_gray_norm` with x/w, y/h), so the moments are measured
 /// exactly where the render will apply them.
 fn mask_weights(mask: &GrayImage, w: u32, h: u32) -> Vec<f32> {
-    let mut out = Vec::with_capacity((w * h) as usize);
+    // usize-widen BEFORE multiplying: `w * h` is a u32 product and a frame
+    // over u32::MAX pixels would overflow the reservation (panic in debug,
+    // pathological reallocation in release) while the loops still push w×h.
+    let mut out = Vec::with_capacity(w as usize * h as usize);
     for y in 0..h {
         for x in 0..w {
             out.push(render::sample_gray_norm(mask, x as f32 / w as f32, y as f32 / h as f32));

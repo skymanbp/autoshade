@@ -19,6 +19,59 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **第三轮 64 路 gpt-5.6-sol 最高推理舰队全量复审 + 修复批（2026-08-03，
+  用户令"派发64路并行codex gpt 5.6 sol最高推理等级进行全面代码审查…
+  多跑两遍，跑到收敛"；中途按用户令全面切换到订阅 codex 通道）**——
+  64/64 单元产出（56 存量 + 8 订阅补跑 + 1 重发），190 findings 三轮
+  分批裁决：**~120 确认全修 / 10 驳回有据 / 9 记录立项**，跨 24 文件。
+  要点（细节见会话台账 adjudication64.md Batch 1-7）：
+  - **数据安全**：CLI Analyze/Auto/Match 三命令补备份门（HIGH，三端契约
+    补齐）；迁移 cwd 旁观者文件保护（HIGH）；store 原子拷贝/vMAX 拒绝/
+    崩溃残留冻结栅格重置/死引用永久惰性/pixels.json 三竞态；write_recipe
+    陈旧 .bak 预清 + 目录拒写；guard_readonly 别名根治 + 导出对渲染源与
+    原 RAW 双重把关；分区反推栅格改**每次 fit 唯一认领名**
+    （store::claim_raster，GUI+CLI 共用——写在配方落盘前的就地重写窗口
+    根除）；fit 计算成果在写库失败时降级为画布未保存而非丢弃；持久化
+    fit 同步 clear_pixel_source（配对语义）；设置文件 tmp+rename +
+    unix 0600。
+  - **校准语义钉死（InPlace=中性显影，Generated=像素含观感）**：Analyze/
+    Reset/版本载入/批量导出四路径改只对 Generated 剥 base_curve+
+    lens_profile（原 base.is_some() 误伤 InPlace 全部纠正）；Before 四处
+    改按画布配方曲线渲染（InPlace 不再假暗 0.6-1.4EV）；Generated 恢复
+    时 saved_recipe 同步归一化（假 ● 根除）；两处 v0.14 前"烘焙像素自带
+    相机观感"陈旧注释改真相。
+  - **GUI 交互**：同路径重开保留未保存工作（HIGH）；Save-all 活画布无条件
+    压制陈旧 stash + busy 窗口竞态修；快捷键两级门（Ctrl+O/E/S 焦点下
+    可用）；退出层 Enter 默认真可用（布防即交焦点）；WB 滴管逐像素采样；
+    HiDPI 1:1/百分比修；radial 边把手增量拖拽；放置四角映射+最小尺寸；
+    画笔局部尺度换算；定比角部主导轴按拖拽增量；蒙版拖拽越界守卫
+    （panic）；亮度端点 clamp 防振荡；CA 缺通道按通道补层；重试/清扫：
+    五个修饰 worker 失败释放 0 字节认领名；busy 期重绘 100ms 节流。
+  - **web**：换目录全代际失效+清网格；选照清 debounce 竞态；fill∥heal
+    互斥；r.ok 先行真相化 stale 消息；pageOffset 成功才提交；画布重设
+    保留已画蒙版；设置窗加载门+代际；saveXmp 防重叠；700px 响应式断点。
+  - **解码/元数据**：解码上限有界化（65536²/4GiB，替代 no_limits）；
+    烘焙图应用 EXIF 方向（导入 JPEG 不再侧躺）；Meta 尺寸改显示帧
+    （竖拍风格特征修正）；APEX/有理数非有限过滤；直方图只降采样。
+  - **XMP/eval/style**：feather 文本形状消歧（自家 1% 往返不再变 100%）；
+    CropAngle 按 HasCrop 门控；元组严格解析防移位；出处检测改属性形匹配；
+    as-shot WB 溯源规则进 eval+style（相机 Kelvin 不再算用户编辑/风格
+    偏好）；style 温度混合不再强改 as-shot；索引 tmp pid 唯一；不可读
+    sidecar 跳过样本。retouch：full_res 对烘焙源生效；空修复计划拒绝
+    写零斑点母版。denoise/segment：原子发布蒙版、.part/tmp 清扫、NaN
+    强度防线。图库导入改单次目录扫描（migrate_legacy_from_many，
+    O(photos×entries) 根除）。i18n 文案真相三条。
+  - **驳回有据（10）**：paste 继承源曲线/范围蒙版参考图无几何/覆盖层
+    display-only 降采样/Tab=LR 键盘语法/overlay_ref 全交换点清点/busy
+    双门挡陈旧 Fitted/produce_recipe 无 saved 早退/omit 独立成列/web
+    Reset 已回填校准/provider 翻转有 same_base 自失效。
+  - **记录立项（9）**：load_active/overlay 结算帧同步显影异步化；12× 缩放
+    帽 vs 真 1:1；全幅解码转预览内存（并入结构性内存池）；fit 深层 DSP
+    四项（饱和度次序非对易/异色净额否决/中性总体身份/岭回归活跃集）；
+    分区栅格孤儿清扫。
+  基线 **137 lib + 9 gui** 双配置全绿，clippy --all-targets 双零，
+  i18n 432 调用点/461 条目 0 未译 0 孤儿。**未发布**（下次发版=minor bump）。
+
 - **v0.15.0 RELEASED（2026-08-03）**——内容 = 自 v0.14.3 后全部四提交：
   在案后续工作全清批（a8f67d2：pixels.json 像素持久化 / worker 取消+进度 /
   61MP 内存八子项 / web 区域几何逆映射 / 字体·模型指纹·临时清扫）、用户

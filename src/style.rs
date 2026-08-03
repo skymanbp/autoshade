@@ -95,8 +95,15 @@ fn parse_hour(dt: Option<&str>) -> f32 {
 }
 
 fn read_settings(xmp: &str) -> BTreeMap<String, f32> {
+    // As-shot provenance (same rule as the eval harness): under
+    // WhiteBalance="As Shot", crs:Temperature/Tint record the CAMERA's
+    // values, not a user edit — learning them taught the style index to
+    // "prefer" whatever Kelvin the user's camera metered. Any other value
+    // (Custom / a preset) is a user decision; absent = non-LR, kept.
+    let user_wb = crate::xmp::crs_str(xmp, "WhiteBalance") != Some("As Shot");
     REF_KEYS
         .iter()
+        .filter(|(k, _)| user_wb || !matches!(*k, "Temperature" | "Tint"))
         .filter_map(|(k, label)| crs_f32(xmp, k).map(|v| (label.to_string(), v)))
         .collect()
 }
@@ -167,15 +174,27 @@ impl StyleIndex {
                     let ex = match decode::decode_raw(raw) {
                         Ok(d) => {
                             let feat = feature_vector(&d.meta, &d.histogram);
-                            let xmp = std::fs::read_to_string(raw.with_extension("xmp"))
-                                .unwrap_or_default();
-                            Some(StyleExemplar {
-                                stem: pipeline::stem(raw).to_string(),
-                                tag: derive_tag(&feat),
-                                feat: feat.to_vec(),
-                                settings: read_settings(&xmp),
-                                curve: crate::eval::user_curve_shape(&xmp).map(|(b, s)| [b, s]),
-                            })
+                            // An unreadable sidecar must SKIP the photo, not
+                            // produce a settings-free exemplar that dilutes
+                            // retrieval (the pair scan guaranteed the .xmp
+                            // exists — a read failure here is a real error).
+                            match std::fs::read_to_string(raw.with_extension("xmp")) {
+                                Ok(xmp) => Some(StyleExemplar {
+                                    stem: pipeline::stem(raw).to_string(),
+                                    tag: derive_tag(&feat),
+                                    feat: feat.to_vec(),
+                                    settings: read_settings(&xmp),
+                                    curve: crate::eval::user_curve_shape(&xmp)
+                                        .map(|(b, s)| [b, s]),
+                                }),
+                                Err(e) => {
+                                    eprintln!(
+                                        "  skip {}: xmp unreadable: {e}",
+                                        pipeline::stem(raw)
+                                    );
+                                    None
+                                }
+                            }
                         }
                         Err(e) => {
                             // println!/eprintln! are line-atomic, so per-photo
@@ -227,12 +246,17 @@ impl StyleIndex {
         // Publish atomically (tmp + rename): fs::write truncates in place, so
         // a disk-full/interrupt mid-write left the previous good index as a
         // corrupt partial file — the empty-index guard above can't catch that.
-        let tmp = path.with_extension("json.tmp");
+        // pid-unique tmp: a FIXED tmp name let two concurrent builders (GUI +
+        // CLI) truncate each other's staging file and publish a torn index.
+        let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
         std::fs::write(&tmp, serde_json::to_string(self)?)
             .with_context(|| format!("write style index {}", tmp.display()))?;
-        let _ = std::fs::remove_file(path); // Windows rename can't replace
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("publish style index {}", path.display()))?;
+        let _ = std::fs::remove_file(path); // pre-clear helps AV-locked Windows renames
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp); // don't leak the staging file
+            return Err(e)
+                .with_context(|| format!("publish style index {}", path.display()));
+        }
         Ok(())
     }
 
@@ -354,8 +378,13 @@ pub fn blend_toward(recipe: &mut EditRecipe, targets: &BTreeMap<&'static str, f3
             "saturation" => recipe.saturation = lerp(recipe.saturation, target),
             "dehaze" => recipe.dehaze = lerp(recipe.dehaze, target),
             "temperature_k" => {
-                let cur = recipe.temperature_k.unwrap_or(target);
-                recipe.temperature_k = Some(lerp(cur, target));
+                // Blending needs a base Kelvin: an as-shot recipe (None) has
+                // nothing to lerp FROM — `unwrap_or(target)` applied the
+                // exemplar's temperature IN FULL at any nonzero strength and
+                // silently flipped as-shot into custom WB. As-shot stays.
+                if let Some(cur) = recipe.temperature_k {
+                    recipe.temperature_k = Some(lerp(cur, target));
+                }
             }
             _ => {}
         }

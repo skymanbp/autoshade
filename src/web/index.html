@@ -68,6 +68,15 @@
   .slider { display:grid; grid-template-columns:92px 1fr 46px; gap:8px; align-items:center; margin:5px 0; }
   .slider label { font-size:12px; }
   .slider input[type=range] { width:100%; }
+
+  /* Narrow windows: the fixed 280px sidebar + 320px control column need
+     ~648px minimum — below that the columns stack instead of clipping
+     (the header already wraps; the grid did not). */
+  @media (max-width: 700px) {
+    .layout { grid-template-columns:1fr; grid-template-rows:minmax(120px, 30vh) 1fr; }
+    .sidebar { border-right:none; border-bottom:1px solid var(--line); }
+    .controls { grid-template-columns:1fr; }
+  }
   .slider .val { font-size:12px; text-align:right; color:var(--muted); }
   /* sub-selector row (HSL band / grading region) + a colour swatch for the band */
   .subrow { display:flex; gap:8px; align-items:center; margin:0 0 10px; flex-wrap:wrap; }
@@ -378,11 +387,23 @@ let pageOffset = 0;        // current page's first GLOBAL index
 let listSeq = 0;           // latest-wins: rapid Prev/Next answers race
 
 async function loadList(offset) {
-  if (offset != null) pageOffset = Math.max(0, offset);
-  const seq = ++listSeq, at = pageOffset;   // the offset THIS response is for
-  const r = await fetch(`/api/list?offset=${at}&limit=${PAGE}`);
-  const data = await r.json();
+  // The offset COMMITS only when its response actually renders: committing
+  // before the fetch left pageOffset pointing at a page that never appeared,
+  // so a retry via Next skipped a page and Prev drifted.
+  const at = offset != null ? Math.max(0, offset) : pageOffset;
+  const seq = ++listSeq;
+  let r, data;
+  try {
+    r = await fetch(`/api/list?offset=${at}&limit=${PAGE}`);
+    data = await r.json();
+  } catch (e) {
+    // A SUPERSEDED request's rejection is noise — only the newest one may
+    // reach the global rejection reporter.
+    if (seq === listSeq) throw e;
+    return;
+  }
   if (seq !== listSeq) return;   // superseded by a newer page request
+  pageOffset = at;               // this response owns the pane — commit now
   const grid = $("#grid");
   // Reflect the authoritative working folder in the field (unless the user is typing).
   const dp = $("#dir-path");
@@ -453,6 +474,11 @@ async function setWorkingDir() {
   if (!r.ok) { setStatus("open folder failed: " + await r.text()); return; }
   const d = await r.json();
   state.id = null; state.stem = null; state.recipe = null;
+  // Ids are folder-relative: EVERYTHING keyed to the old folder must die NOW —
+  // an in-flight selectPhoto (stale seq) and the old grid's thumbnail
+  // callbacks would otherwise resolve old ids against the NEW folder.
+  ++selectSeq; ++afterSeq; clearTimeout(afterTimer);
+  $("#grid").innerHTML = "";
   history = []; hi = -1; updateUndo();   // stale undo would re-apply the OLD photo's recipe
   $("#main").innerHTML = '<p style="color:var(--muted)">Select a photo on the left, or import more above.</p>';
   await loadList(0);   // a new folder starts at page 1
@@ -564,7 +590,9 @@ function syncWb() {
   on.checked = k != null;
   temp.disabled = k == null;
   temp.value = k != null ? k : 5500;
-  document.querySelector(".wb-temp-val").textContent = k != null ? Math.round(k) : "auto";
+  // "as-shot", matching the checkbox's own words — "auto" is a materially
+  // different claim when the camera used a manual WB or a preset.
+  document.querySelector(".wb-temp-val").textContent = k != null ? Math.round(k) : "as-shot";
 }
 
 // --- HSL colour mixer (8 bands × hue/sat/lum) ------------------------------
@@ -644,7 +672,7 @@ function setAfterSrc(img, blob) {
 }
 function scheduleAfter() { clearTimeout(afterTimer); afterTimer = setTimeout(renderAfter, 220); }
 async function renderAfter() {
-  if (state.id === null) return;
+  if (state.id === null || !state.recipe) return; // mid-select / mid-folder-switch: nothing coherent to render
   // Latest-wins. Preview requests are genuinely concurrent (the server gives each
   // one a thread) and their cost is wildly uneven — a cold base decode can land
   // AFTER a later warm one, and whoever answered last would stick on screen while
@@ -657,7 +685,14 @@ async function renderAfter() {
     const r = await fetch("/api/develop", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({id, recipe: state.recipe})});
     if (seq !== afterSeq || id !== state.id) return;   // superseded: don't touch the pane or the status
-    if (!r.ok) { setStatus("render failed: " + await r.text()); return; }
+    if (!r.ok) {
+      const t = await r.text();
+      // Re-check: a NEWER render can start (or finish) during that await —
+      // a stale failure must not overwrite the newer request's status.
+      if (seq !== afterSeq || id !== state.id) return;
+      setStatus("render failed: " + t);
+      return;
+    }
     const blob = await r.blob();
     if (seq !== afterSeq || id !== state.id) return;   // it went stale while we decoded the body
     setAfterSrc($(".after"), blob);
@@ -678,6 +713,9 @@ let selectSeq = 0;
 async function selectPhoto(id, stem, el) {
   const seq = ++selectSeq;
   ++afterSeq;   // A→B→A: an in-flight preview for the FIRST A still matches id+seq
+  // A pending slider-debounce timer would fire DURING the awaits below with a
+  // FRESH afterSeq — rendering the OLD photo's recipe under the NEW id.
+  clearTimeout(afterTimer);
   document.querySelectorAll(".thumb").forEach(t=>t.classList.remove("sel"));
   if (el) el.classList.add("sel");
   state.id = id; state.stem = stem;
@@ -819,9 +857,22 @@ async function selectPhoto(id, stem, el) {
   const afterImg = main.querySelector(".after");
   const fillToggle = main.querySelector(".fill-toggle"), brush = main.querySelector(".fill-brush");
   let painting = false, lastPt = null;
+  let retouchBusy = false; // one fill/heal at a time — see the fill handler
   const sizeFill = () => {
     const w = afterImg.clientWidth || 600, h = afterImg.clientHeight || 400;
-    if (fc.width !== w || fc.height !== h) { fc.width = w; fc.height = h; }
+    if (fc.width !== w || fc.height !== h) {
+      // Assigning width/height CLEARS a canvas — scale the painted mask into
+      // the new size instead of silently eating it on every layout change
+      // (the After img reloads on each preview render).
+      let old = null;
+      if (fc.width > 0 && fc.height > 0) {
+        old = document.createElement("canvas");
+        old.width = fc.width; old.height = fc.height;
+        old.getContext("2d").drawImage(fc, 0, 0);
+      }
+      fc.width = w; fc.height = h;
+      if (old) fctx.drawImage(old, 0, 0, old.width, old.height, 0, 0, w, h);
+    }
   };
   afterImg.addEventListener("load", () => { if (!fc.hidden) sizeFill(); });
   fillToggle.onchange = () => {
@@ -858,7 +909,13 @@ async function selectPhoto(id, stem, el) {
     const mask = m.toDataURL("image/png");
     const quality = main.querySelector(".fill-quality").value || "high";
     const fullRes = main.querySelector(".fill-fullres").checked;
-    const btn = main.querySelector(".fill-run"); btn.disabled = true;
+    // ONE retouch at a time: fill and heal each disabled only their own
+    // buttons, so both could run on the same selection and the EARLIER
+    // request, finishing later, overwrote the preview of the later one.
+    if (retouchBusy) { setStatus("another fill/heal is still running — wait for it to finish"); return; }
+    retouchBusy = true;
+    const btn = main.querySelector(".fill-run"), hA = main.querySelector(".heal-auto"), hP = main.querySelector(".heal-painted");
+    btn.disabled = true; hA.disabled = true; hP.disabled = true;
     setStatus(fullRes ? "generative fill (full-res render)… (slow, can take minutes)" : "generative fill via gpt-image… (~15-40s)");
     // The answer belongs to THIS photo/selection generation: navigating away
     // must not let a late fill overwrite the new pane (A→B, or A→B→A which
@@ -867,15 +924,22 @@ async function selectPhoto(id, stem, el) {
     try {
       const r = await fetch("/api/retouch", {method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({ id: reqId, prompt, mask, quality, full_res: fullRes })});
+      // r.ok FIRST: a failed request saved NOTHING — the stale-path message
+      // used to promise a ./out master that never existed.
+      if (!r.ok) {
+        const t = await r.text();
+        const stale = reqId !== state.id || reqSeq !== selectSeq;
+        setStatus((stale ? "fill for another photo failed: " : "fill failed: ") + t);
+        return;
+      }
       if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("fill for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
-      if (!r.ok) { setStatus("fill failed: " + await r.text()); return; }
       const blob = await r.blob();
       if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("fill for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
       setAfterSrc(afterImg, blob);
       fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r);
       setStatus("filled" + (saved ? " → " + saved : "") + " (saved to ./out; separate from the develop recipe)");
-    } finally { btn.disabled = false; }
+    } finally { retouchBusy = false; btn.disabled = false; hA.disabled = false; hP.disabled = false; }
   };
 
   // Pixel-retouch (heal): AI auto-detect and/or reuse the painted mask above; the
@@ -892,22 +956,32 @@ async function selectPhoto(id, stem, el) {
       mctx.putImageData(md, 0, 0); mask = m.toDataURL("image/png");
     }
     const fullRes = main.querySelector(".heal-fullres").checked;
+    // Same one-retouch-at-a-time gate as fill (see there).
+    if (retouchBusy) { setStatus("another fill/heal is still running — wait for it to finish"); return; }
+    retouchBusy = true;
     setStatus(fullRes ? "healing (full-res render)… (slow)" : (useMask ? "healing painted area…" : "AI spot heal… (~10-30s)"));
     const btnA = main.querySelector(".heal-auto"), btnP = main.querySelector(".heal-painted");
-    btnA.disabled = true; btnP.disabled = true;
+    const btnF = main.querySelector(".fill-run");
+    btnA.disabled = true; btnP.disabled = true; btnF.disabled = true;
     const reqId = state.id, reqSeq = selectSeq;
     try {
       const r = await fetch("/api/heal", {method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({ id: reqId, mask, auto: !useMask, full_res: fullRes })});
+      // r.ok FIRST — a failed heal saved nothing (see the fill handler).
+      if (!r.ok) {
+        const t = await r.text();
+        const stale = reqId !== state.id || reqSeq !== selectSeq;
+        setStatus((stale ? "heal for another photo failed: " : "heal failed: ") + t);
+        return;
+      }
       if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("heal for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
-      if (!r.ok) { setStatus("heal failed: " + await r.text()); return; }
       const blob = await r.blob();
       if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("heal for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
       setAfterSrc(afterImg, blob);
       if (useMask) fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r), n = r.headers.get("X-Heal-Spots");
       setStatus(`healed ${n || "?"} spot(s)${saved ? " → " + saved : ""} (saved to ./out; pixel retouch, not the develop recipe)`);
-    } finally { btnA.disabled = false; btnP.disabled = false; }
+    } finally { retouchBusy = false; btnA.disabled = false; btnP.disabled = false; btnF.disabled = false; }
   }
   main.querySelector(".heal-auto").onclick = () => runHeal(false);
   main.querySelector(".heal-painted").onclick = () => runHeal(true);
@@ -988,17 +1062,25 @@ async function analyze() {
 }
 
 async function saveXmp() {
+  // One save in flight: overlapping clicks are independent requests and the
+  // server only guarantees mutual exclusion, not invocation order — a slower
+  // OLDER click could land after (and silently overwrite) a newer one.
+  const btn = document.querySelector(".savexmp");
+  if (btn && btn.disabled) return;
+  if (btn) btn.disabled = true;
   setStatus("saving xmp…");
-  const r = await fetch("/api/xmp", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({id: state.id, recipe: state.recipe})});
-  const body = await r.text();
-  // The server writes the recipe.json alongside the XMP, so reopening this photo
-  // (here or in the GUI) restores exactly this edit. A NEUTRAL recipe is not a
-  // save at all: the server deletes the sidecars instead (Reset + Save = "clear
-  // my edits") and answers "cleared …".
-  if (!r.ok) { setStatus("save failed: " + body); return; }
-  setStatus(body.startsWith("cleared") ? "saved edits cleared" : ("xmp + recipe saved → " + body));
-  loadList();   // the ● edited badge just appeared / disappeared
+  try {
+    const r = await fetch("/api/xmp", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({id: state.id, recipe: state.recipe})});
+    const body = await r.text();
+    // The server writes the recipe.json alongside the XMP, so reopening this photo
+    // (here or in the GUI) restores exactly this edit. A NEUTRAL recipe is not a
+    // save at all: the server deletes the sidecars instead (Reset + Save = "clear
+    // my edits") and answers "cleared …".
+    if (!r.ok) { setStatus("save failed: " + body); return; }
+    setStatus(body.startsWith("cleared") ? "saved edits cleared" : ("xmp + recipe saved → " + body));
+    loadList();   // the ● edited badge just appeared / disappeared
+  } finally { if (btn) btn.disabled = false; }
 }
 
 function saveBody() {
@@ -1076,11 +1158,21 @@ $("#settings-btn").onclick = openSettings;
 $("#settings-close").onclick = () => settingsModal.hidden = true;
 settingsModal.onclick = e => { if (e.target === settingsModal) settingsModal.hidden = true; };
 
+const SETTINGS_FIELDS = ["#an-model", "#an-base", "#an-key", "#im-model", "#im-base", "#im-gen", "#im-key"];
+let settingsSeq = 0;
 async function openSettings() {
   settingsModal.hidden = false;
-  $("#settings-status").textContent = "";
+  // Gate the form while the load is in flight: the async populate used to
+  // silently overwrite anything the user had already started typing (and a
+  // re-open mid-load could double-populate) — disabled fields + a sequence
+  // make the load's authority explicit.
+  const seq = ++settingsSeq;
+  SETTINGS_FIELDS.forEach(s => { const e = $(s); if (e) e.disabled = true; });
+  $("#settings-status").textContent = "loading…";
   try {
     const d = await (await fetch("/api/settings")).json();
+    if (seq !== settingsSeq) return; // a newer open owns the form
+    $("#settings-status").textContent = "";
     $("#settings-file").textContent = d.settings_file || "autoshop.local.json";
     const ap = d.analysis.provider === "api" ? "api" : "oauth";
     document.querySelector(`input[name="an-provider"][value="${ap}"]`).checked = true;
@@ -1094,7 +1186,11 @@ async function openSettings() {
     $("#im-gen").value = d.image.gen_model || "";
     $("#im-key").value = "";
     $("#im-keystat").textContent = d.image.key_present ? "key set ✓" : "no key";
-  } catch (e) { $("#settings-status").textContent = "failed to load settings"; }
+  } catch (e) {
+    if (seq === settingsSeq) $("#settings-status").textContent = "failed to load settings";
+  } finally {
+    if (seq === settingsSeq) SETTINGS_FIELDS.forEach(s => { const e = $(s); if (e) e.disabled = false; });
+  }
 }
 
 $("#settings-save").onclick = async () => {
@@ -1110,7 +1206,7 @@ $("#settings-save").onclick = async () => {
   };
   $("#settings-status").textContent = "saving…";
   const r = await fetch("/api/settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
-  if (r.ok) { $("#settings-status").textContent = "saved ✓ — applies to the next Analyze"; setStatus("settings saved"); }
+  if (r.ok) { $("#settings-status").textContent = "saved ✓ — applies to the next AI call (Analyze / Fill / Heal)"; setStatus("settings saved"); }
   else { $("#settings-status").textContent = "save failed: " + await r.text(); }
 };
 

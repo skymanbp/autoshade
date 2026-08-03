@@ -171,6 +171,9 @@ pub(crate) fn post_with_stall_timeout(url: &str, stall: std::time::Duration) -> 
     let stall = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
+        // 0 would arm an instant read timeout and kill every call on
+        // arrival — an explicit low override is the user's call, zero is not.
+        .filter(|s: &u64| *s > 0)
         .map(std::time::Duration::from_secs)
         .unwrap_or(stall);
     ureq::builder()
@@ -231,39 +234,58 @@ pub(crate) fn for_each_sse_json(
     mut on_json: impl FnMut(serde_json::Value) -> std::ops::ControlFlow<()>,
 ) -> std::io::Result<()> {
     use std::io::BufRead;
-    let mut lines = std::io::BufReader::new(r.take(cap)).lines();
+    let mut rd = std::io::BufReader::new(r.take(cap));
     let mut event_data = String::new();
+    let mut seg: Vec<u8> = Vec::new();
+    // Flush one completed event to the consumer; true = consumer broke.
+    let flush_event =
+        |event_data: &mut String, on_json: &mut dyn FnMut(serde_json::Value) -> std::ops::ControlFlow<()>| {
+            if event_data.is_empty() {
+                return false;
+            }
+            let payload = std::mem::take(event_data);
+            matches!(
+                serde_json::from_str::<serde_json::Value>(&payload).map(&mut *on_json),
+                Ok(std::ops::ControlFlow::Break(()))
+            )
+        };
     loop {
-        let line = match lines.next() {
-            Some(l) => Some(l?),
-            None => None,
-        };
-        let flush = match &line {
-            None => true,                    // EOF flushes an unterminated event
-            Some(l) if l.is_empty() => true, // blank line = event boundary
-            Some(l) => {
-                if let Some(data) = l.strip_prefix("data:") {
-                    let data = data.trim();
-                    if data != "[DONE]" {
-                        if !event_data.is_empty() {
-                            event_data.push('\n');
-                        }
-                        event_data.push_str(data);
-                    }
-                }
-                false // event:/id:/comment lines never end the event
-            }
-        };
-        if flush && !event_data.is_empty() {
-            let payload = std::mem::take(&mut event_data);
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload)
-                && let std::ops::ControlFlow::Break(()) = on_json(v)
-            {
-                return Ok(());
-            }
-        }
-        if line.is_none() {
+        seg.clear();
+        let n = rd.read_until(b'\n', &mut seg)?;
+        if n == 0 {
+            // EOF flushes an unterminated final event.
+            flush_event(&mut event_data, &mut on_json);
             return Ok(());
+        }
+        // The SSE spec permits CR, LF, or CRLF line terminators. read_until
+        // frames LF and CRLF; CR-only lines arrive EMBEDDED in one segment
+        // (the old BufRead::lines never saw their boundaries and dropped the
+        // whole stream's payloads) — split them out so all three endings
+        // frame identically.
+        let owned = String::from_utf8_lossy(&seg).into_owned();
+        let text = owned.strip_suffix('\n').unwrap_or(&owned);
+        let mut lines: Vec<&str> = text.split('\r').collect();
+        // "data: x\r\n" leaves a trailing "" split artifact — that is the
+        // CRLF pair itself, not an SSE blank line.
+        if lines.len() > 1 && lines.last() == Some(&"") {
+            lines.pop();
+        }
+        for l in lines {
+            if l.is_empty() {
+                // blank line = event boundary
+                if flush_event(&mut event_data, &mut on_json) {
+                    return Ok(());
+                }
+            } else if let Some(data) = l.strip_prefix("data:") {
+                let data = data.trim();
+                if data != "[DONE]" {
+                    if !event_data.is_empty() {
+                        event_data.push('\n');
+                    }
+                    event_data.push_str(data);
+                }
+            }
+            // event:/id:/comment lines never end the event
         }
     }
 }
@@ -379,7 +401,21 @@ pub(crate) fn post_ai_json(
                     }
                     return res;
                 }
-                return r.into_json().map_err(|e| AdvisorError::Transport(e.to_string()));
+                // A body-read failure on the blocking path is the SAME
+                // connection blip class as the pre-response and SSE cases —
+                // it used to bypass the one-time retry entirely.
+                let res = r
+                    .into_json()
+                    .map_err(|e| AdvisorError::Transport(format!("read AI response body: {e}")));
+                if let Err(AdvisorError::Transport(msg)) = &res
+                    && !transport_retried
+                    && started.elapsed().as_secs() < TRANSPORT_RETRY_UNDER_SECS
+                {
+                    transport_retried = true;
+                    eprintln!("  note: {msg} — retrying once (connection blip, not model time)");
+                    continue;
+                }
+                return res;
             }
             Err(ureq::Error::Status(code, r)) => {
                 let b = r.into_string().unwrap_or_default();
@@ -475,6 +511,11 @@ fn assemble_sse(
         SseFamily::Chat => {
             let mut text = String::new();
             let mut failure: Option<String> = None;
+            // A clean EOF is NOT success by itself: without a terminal
+            // finish_reason a proxy-truncated stream (connection closed
+            // mid-generation) would hand partial JSON downstream — the same
+            // strictness the Responses arm gets from response.completed.
+            let mut finished = false;
             for_each_sse_json(r, CAP, |v| {
                 if v.get("error").is_some() {
                     failure = Some(v.to_string());
@@ -497,12 +538,14 @@ fn assemble_sse(
                     // text was TRUNCATED — surfacing that beats handing the
                     // partial JSON downstream, whose parse error would blame
                     // the wrong thing.
-                    if let Some(fr) = c.get("finish_reason").and_then(serde_json::Value::as_str)
-                        && fr != "stop"
-                    {
-                        failure =
-                            Some(format!("chat stream finished with reason '{fr}' — output truncated"));
-                        return Break(());
+                    if let Some(fr) = c.get("finish_reason").and_then(serde_json::Value::as_str) {
+                        if fr != "stop" {
+                            failure = Some(format!(
+                                "chat stream finished with reason '{fr}' — output truncated"
+                            ));
+                            return Break(());
+                        }
+                        finished = true;
                     }
                     if let Some(delta) = c
                         .get("delta")
@@ -521,6 +564,12 @@ fn assemble_sse(
             if text.is_empty() {
                 return Err(AdvisorError::Transport(
                     "chat stream ended without any content deltas".into(),
+                ));
+            }
+            if !finished {
+                return Err(AdvisorError::Transport(
+                    "chat stream ended without a terminal finish_reason — output may be truncated"
+                        .into(),
                 ));
             }
             Ok(serde_json::json!({"choices": [{"message": {"content": text}}]}))
@@ -667,18 +716,32 @@ mod tests {
     #[test]
     fn sse_chat_stream_reassembles_the_blocking_shape() {
         // Includes a chunk whose ARRAY position 0 is a different choice index —
-        // choice identity is the "index" field, not array position — and a
-        // usage-style chunk with an empty choices array.
+        // choice identity is the "index" field, not array position — a
+        // terminal finish_reason chunk (a compliant stream always sends one),
+        // and a usage-style chunk with an empty choices array.
         let body = concat!(
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
             "data: {\"choices\":[{\"index\":1,\"delta\":{\"content\":\"WRONG\"}},\
 {\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"total_tokens\":5}}\n\n",
             "data: [DONE]\n\n",
         );
         let v = assemble_sse(body.as_bytes(), SseFamily::Chat).unwrap();
         assert_eq!(v["choices"][0]["message"]["content"], "Hello");
+
+        // CR-only framing (spec-permitted) must reassemble identically.
+        let cr = body.replace('\n', "\r");
+        let v = assemble_sse(cr.as_bytes(), SseFamily::Chat).unwrap();
+        assert_eq!(v["choices"][0]["message"]["content"], "Hello");
+
+        // A clean EOF with content but NO terminal finish_reason is a
+        // truncated stream, not a success.
+        let cut =
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"{\\\"partial\\\":\"}}]}\n\n";
+        let err = assemble_sse(cut.as_bytes(), SseFamily::Chat).unwrap_err();
+        assert!(err.to_string().contains("without a terminal finish_reason"), "{err}");
     }
 
     #[test]

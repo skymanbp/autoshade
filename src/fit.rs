@@ -564,8 +564,17 @@ fn residual_channel_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]], ch: usize) -> Vec<
     let mut pts: Vec<CurvePoint> = Vec::with_capacity(XS.len());
     let (mut prev_in, mut prev_out) = (-1i32, 0i32);
     for &x in &XS {
-        let y = quantile(&t_cdf, cdf_at(&c_cdf, x).clamp(P_CLIP, 1.0 - P_CLIP)).clamp(0.0, 1.0);
-        max_dev = max_dev.max((y - x).abs());
+        let f = cdf_at(&c_cdf, x);
+        let y = quantile(&t_cdf, f.clamp(P_CLIP, 1.0 - P_CLIP)).clamp(0.0, 1.0);
+        // Deviation is judged only where PIXEL MASS actually sits (F interior):
+        // a low-dynamic-range channel identical on both sides used to trip the
+        // gate purely on its clipped endpoint samples (x=0 mapping to the
+        // distribution's floor) and emit a non-identity curve through real
+        // pixel values. The endpoint control points still anchor the curve
+        // whenever an interior deviation keeps it.
+        if (P_CLIP..=1.0 - P_CLIP).contains(&f) {
+            max_dev = max_dev.max((y - x).abs());
+        }
         let input = (x * 255.0).round() as i32;
         let output = ((y * 255.0).round() as i32).max(prev_out);
         if input <= prev_in {
@@ -1138,7 +1147,7 @@ mod tests {
         // Render the fitted recipe and audit the sky region (rows y ≥ 108).
         let out = render::develop_preview(&src, &rep.recipe).to_rgb8();
         let (mut sin, mut cos, mut n) = (0.0f64, 0.0f64, 0.0f64);
-        for y in 108..128 {
+        for y in 112..128 { // sky rows only — the fixtures paint rock below y=112
             for x in 0..192 {
                 let p = out.get_pixel(x, y);
                 let (r, g, b) =
@@ -1223,7 +1232,7 @@ mod tests {
         let rep = fit_recipe(&src, &tgt);
         let out = render::develop_preview(&src, &rep.recipe).to_rgb8();
         let (mut sin, mut cos, mut n) = (0.0f64, 0.0f64, 0.0f64);
-        for y in 108..128 {
+        for y in 112..128 { // sky rows only — the fixtures paint rock below y=112
             for x in 0..192 {
                 let p = out.get_pixel(x, y);
                 let (r, g, b) =
@@ -1361,7 +1370,7 @@ mod tests {
         );
         let out = render::develop_preview(&src, &rep.recipe).to_rgb8();
         let (mut sin, mut cos, mut n) = (0.0f64, 0.0f64, 0.0f64);
-        for y in 108..128 {
+        for y in 112..128 { // sky rows only — the fixtures paint rock below y=112
             for x in 0..192 {
                 let p = out.get_pixel(x, y);
                 let (r, g, b) =

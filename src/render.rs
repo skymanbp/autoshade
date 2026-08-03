@@ -472,6 +472,10 @@ pub fn render_to_file(
             .map(std::io::BufWriter::new)
             .with_context(|| format!("create {}", p.display()))
     };
+    // Every buffered arm FLUSHES explicitly before success: BufWriter's
+    // drop-time flush SWALLOWS its error, so a full disk could report a
+    // successful export over a truncated file.
+    use std::io::Write as _;
     match ext.as_str() {
         "jpg" | "jpeg" => {
             // JPEG is 8-bit only — downconvert from 16-bit.
@@ -482,18 +486,23 @@ pub fn render_to_file(
             tag_icc(&mut enc, space);
             enc.write_image(rgb8.as_raw(), rgb8.width(), rgb8.height(), image::ExtendedColorType::Rgb8)
                 .with_context(|| format!("encode jpeg {}", out.display()))?;
+            wr.flush().with_context(|| format!("flush {}", out.display()))?;
         }
         "tif" | "tiff" => {
-            let mut enc = image::codecs::tiff::TiffEncoder::new(create(out)?);
+            let mut wr = create(out)?;
+            let mut enc = image::codecs::tiff::TiffEncoder::new(&mut wr);
             tag_icc(&mut enc, space);
             img.write_with_encoder(enc)
                 .with_context(|| format!("encode tiff {}", out.display()))?;
+            wr.flush().with_context(|| format!("flush {}", out.display()))?;
         }
         "png" => {
-            let mut enc = image::codecs::png::PngEncoder::new(create(out)?);
+            let mut wr = create(out)?;
+            let mut enc = image::codecs::png::PngEncoder::new(&mut wr);
             tag_icc(&mut enc, space);
             img.write_with_encoder(enc)
                 .with_context(|| format!("encode png {}", out.display()))?;
+            wr.flush().with_context(|| format!("flush {}", out.display()))?;
         }
         // Unknown extensions keep the generic 16-bit save (no ICC tag, so the
         // pixels above were deliberately left in sRGB).
@@ -891,7 +900,10 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
 
         // --- local noise reduction pass (only where the mask covers) ---
         let nr = (m.noise_reduction / 100.0).clamp(0.0, 1.0);
-        if nr > 0.0 {
+        // Gate matches the per-pixel `nw <= 0.001` skip below: with nr at or
+        // under it every weight is rejected anyway, and the two full-frame
+        // f32 planes (~488 MB at 61 MP) were allocated for nothing.
+        if nr > 0.001 {
             let luma: Vec<f32> = data.par_iter().map(luma601).collect();
             let blur = blur_plane(&luma, w, h, 2);
             data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
@@ -974,46 +986,52 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
 /// inert instead of killing the develop).
 fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>> {
     use std::sync::{Arc, Mutex, OnceLock};
-    type Cache = Mutex<
-        std::collections::HashMap<String, (std::time::SystemTime, Arc<image::GrayImage>)>,
-    >;
+    // Keyed by (mtime, size): mtime alone misses a same-length-of-time
+    // overwrite on coarse-timestamp filesystems (the thumb cache already
+    // carries size for the same reason). `None` payload = the file at this
+    // identity FAILED to decode — cached so the warning fires once, not on
+    // every slider tick (the fn doc promises exactly that).
+    type Key = (std::time::SystemTime, u64);
+    type Cache = Mutex<std::collections::HashMap<String, (Key, Option<Arc<image::GrayImage>>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let MaskGeometry::Bitmap { path } = g else { return None };
     let cache = CACHE.get_or_init(Default::default);
-    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    if let Some(t) = mtime {
+    let ident: Option<Key> = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+    if let Some(t) = ident {
         // No user code runs under the lock, so poisoning is not reachable —
         // recover anyway rather than turning a past panic into a new one.
         let map = cache.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((cached_t, img)) = map.get(path.as_str())
             && *cached_t == t
         {
-            return Some(img.clone());
+            return img.clone();
         }
     }
-    match image::open(path) {
-        Ok(img) => {
-            let img = Arc::new(img.to_luma8());
-            if let Some(t) = mtime {
-                let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
-                // A recipe holds a handful of masks — a rare hard reset beats
-                // LRU bookkeeping on this hot path. Budgeted in BYTES as well
-                // as entries: sixteen full-res 61 MP rasters would otherwise
-                // pin ~1 GB for the life of the process.
-                const MASK_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
-                let held: usize = map.values().map(|(_, i)| i.as_raw().len()).sum();
-                if map.len() > 16 || held + img.as_raw().len() > MASK_CACHE_BUDGET_BYTES {
-                    map.clear();
-                }
-                map.insert(path.clone(), (t, img.clone()));
-            }
-            Some(img)
-        }
+    let decoded = match image::open(path) {
+        Ok(img) => Some(Arc::new(img.to_luma8())),
         Err(e) => {
             eprintln!("⚠ bitmap mask '{path}' could not be loaded ({e}) — mask is inert");
             None
         }
+    };
+    if let Some(t) = ident {
+        let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        // A recipe holds a handful of masks — a rare hard reset beats
+        // LRU bookkeeping on this hot path. Budgeted in BYTES as well
+        // as entries: sixteen full-res 61 MP rasters would otherwise
+        // pin ~1 GB for the life of the process.
+        const MASK_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+        let held: usize =
+            map.values().filter_map(|(_, i)| i.as_ref()).map(|i| i.as_raw().len()).sum();
+        let incoming = decoded.as_ref().map_or(0, |i| i.as_raw().len());
+        if map.len() > 16 || held + incoming > MASK_CACHE_BUDGET_BYTES {
+            map.clear();
+        }
+        map.insert(path.clone(), (t, decoded.clone()));
     }
+    decoded
 }
 
 /// Bilinear weight lookup in an 8-bit greyscale mask at normalised (nx, ny).
@@ -1091,9 +1109,25 @@ pub fn range_weight(rm: &RangeMask, px: &[f32; 3]) -> f32 {
     match rm {
         RangeMask::Luminance { lo_outer, lo, hi, hi_outer } => {
             let l = luma601(px);
-            ramp(*lo_outer, *lo, l) * (1.0 - ramp(*hi, *hi_outer, l))
+            // The upper edge must stay INCLUSIVE at l == hi (the trapezoid
+            // holds 1 across lo..=hi): ramp's degenerate step counts x == e0
+            // as already past, so a full-range {0,0,1,1} mask silently
+            // rejected pure white. The lower edge needs no twin — ramp's
+            // step already includes l == lo on the hold side.
+            let up = if *hi_outer - *hi < 1e-6 {
+                if l > *hi { 1.0 } else { 0.0 }
+            } else {
+                ramp(*hi, *hi_outer, l)
+            };
+            ramp(*lo_outer, *lo, l) * (1.0 - up)
         }
         RangeMask::Color { r, g, b, amount, .. } => {
+            // Documented: very dark pixels have no reliable chroma and get
+            // weight 0 — clamping instead let a black pixel match a black
+            // reference at full weight through arbitrary 1e-4/1e-4 ratios.
+            if luma601(px) < 1e-4 {
+                return 0.0;
+            }
             let rl = luma601(&[*r, *g, *b]).max(1e-4);
             let pl = luma601(px).max(1e-4);
             let mut d2 = 0.0;
@@ -1990,8 +2024,21 @@ pub(crate) fn oriented(img: DynamicImage, o: Orientation) -> DynamicImage {
         Orientation::VerticalFlip => img.flipv(),
         Orientation::Rotate90 => img.rotate90(),
         Orientation::Rotate270 => img.rotate270(),
-        Orientation::Transpose => img.rotate90().fliph(),
-        Orientation::Transverse => img.rotate270().fliph(),
+        // The rotate must allocate (dims swap) but the flip runs IN PLACE:
+        // the old rotate().fliph() chain held a THIRD full frame while the
+        // source was still alive (~2.2 GB transient on a 61 MP Rgb32F frame).
+        Orientation::Transpose => {
+            let mut r = img.rotate90();
+            drop(img);
+            image::imageops::flip_horizontal_in_place(&mut r);
+            r
+        }
+        Orientation::Transverse => {
+            let mut r = img.rotate270();
+            drop(img);
+            image::imageops::flip_horizontal_in_place(&mut r);
+            r
+        }
     }
 }
 
@@ -2362,10 +2409,22 @@ fn profile_fill_scale(knots: &[f32], dims: (f32, f32)) -> f32 {
     }
     let (w, h) = dims;
     let rmin = (w.min(h) / (w * w + h * h).sqrt().max(1e-6)).clamp(0.0, 1.0);
-    let mut s = f32::MIN;
-    for i in 0..=256 {
-        let r = rmin + (1.0 - rmin) * i as f32 / 256.0;
-        s = s.max(profile_knot_interp(knots, r));
+    // The spline is piecewise LINEAR (knot i at r = (i+0.5)/(n−1)), so its
+    // maximum over [rmin, 1] sits at an interval endpoint or an interior
+    // knot — evaluate those EXACTLY. The old 257-point uniform sweep could
+    // undershoot a peak that fell between samples, and a factor above the
+    // true edge maximum sends edge samples outside the source (clamped and
+    // smeared by the RGB sampler).
+    let mut s = profile_knot_interp(knots, rmin).max(profile_knot_interp(knots, 1.0));
+    let n = knots.len();
+    if n > 1 {
+        let denom = (n - 1) as f32;
+        for (j, k) in knots.iter().enumerate() {
+            let rj = (j as f32 + 0.5) / denom;
+            if rj >= rmin && rj <= 1.0 {
+                s = s.max(*k);
+            }
+        }
     }
     s.max(1e-3)
 }
@@ -2424,15 +2483,30 @@ fn sample_bilinear_rgba8(src: &image::RgbaImage, x: f32, y: f32) -> image::Rgba<
             [0.0; 4]
         } else {
             let p = src.get_pixel(xi as u32, yi as u32).0;
-            [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32]
+            // PREMULTIPLIED components: interpolating straight RGBA drags the
+            // colour toward transparent neighbours' arbitrary (zero) RGB and
+            // then attenuates AGAIN at composite time — dark fringes on every
+            // overlay edge under geometry.
+            let a = p[3] as f32 / 255.0;
+            [p[0] as f32 * a, p[1] as f32 * a, p[2] as f32 * a, p[3] as f32]
         }
     };
     let (a, b, c, d) = (px(x0, y0), px(x0 + 1, y0), px(x0, y0 + 1), px(x0 + 1, y0 + 1));
-    let mut o = [0u8; 4];
+    let mut acc = [0f32; 4];
     for i in 0..4 {
         let top = a[i] * (1.0 - fx) + b[i] * fx;
         let bot = c[i] * (1.0 - fx) + d[i] * fx;
-        o[i] = (top * (1.0 - fy) + bot * fy).round().clamp(0.0, 255.0) as u8;
+        acc[i] = top * (1.0 - fy) + bot * fy;
+    }
+    let alpha = acc[3];
+    let mut o = [0u8; 4];
+    if alpha > 0.0 {
+        for i in 0..3 {
+            // Un-premultiply by the interpolated alpha (255·a normalisation
+            // cancels) so straight-alpha consumers see the true colour.
+            o[i] = (acc[i] * 255.0 / alpha).round().clamp(0.0, 255.0) as u8;
+        }
+        o[3] = alpha.round().clamp(0.0, 255.0) as u8;
     }
     image::Rgba(o)
 }
@@ -2447,6 +2521,11 @@ pub fn apply_lens_geometry_rgba(
     amount: f32,
 ) -> image::RgbaImage {
     let dist_on = profile.distortion_on && !profile.distortion.is_empty();
+    // Degenerate frame: par_chunks_mut(0) below would panic — same guard the
+    // RGB16 twin (apply_lens_geometry) carries.
+    if src.width() == 0 || src.height() == 0 {
+        return src.clone();
+    }
     if !dist_on && amount.abs() < 1e-3 {
         return src.clone();
     }
@@ -2600,7 +2679,10 @@ pub fn view_to_original_norm(
     amount: f32,
 ) -> (f32, f32) {
     let (w, h) = dims;
-    let (cx, cy) = if deg == 0.0 {
+    // Same identity threshold as BOTH raster rotators (rotate_straighten /
+    // rotate_straighten_rgba use |deg| < 1e-3): an exact-zero test here made
+    // the maps rotate for a sub-threshold angle the pixels never got.
+    let (cx, cy) = if deg.abs() < 1e-3 {
         (nx, ny)
     } else {
         let (cw, ch) = inscribed_dims(w, h, deg);
@@ -2628,7 +2710,9 @@ pub fn original_to_view_norm(
     amount: f32,
 ) -> (f32, f32) {
     let (nx, ny) = lens_ungeom_norm(nx, ny, dims, profile, amount);
-    if deg == 0.0 {
+    // Same 1e-3 identity threshold as the raster rotators — see
+    // view_to_original_norm.
+    if deg.abs() < 1e-3 {
         return (nx, ny);
     }
     let (w, h) = dims;

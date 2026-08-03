@@ -364,6 +364,16 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders.
     let redirected = out.is_some();
+    // The v<N> backup gate (store.rs "any surface" contract): a programmatic
+    // canonical overwrite snapshots an existing explicit save first and is
+    // REFUSED when the snapshot fails — the GUI and web already do this; the
+    // CLI used to overwrite ungated. A redirected -o write leaves the
+    // canonical develop untouched and needs no gate.
+    if !redirected
+        && let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe))
+    {
+        anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
+    }
     let recipe_path = write_recipe(raw, &recipe, out)?;
 
     println!("\n--- proposed recipe ---");
@@ -434,6 +444,10 @@ fn auto_cmd(
     let cfg = Config::load();
     let style = style.unwrap_or(cfg.style_strength);
     let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
+    // Same backup gate as analyze: `auto` is a programmatic canonical writer.
+    if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
+        anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
+    }
     write_recipe(raw, &recipe, None)?;
 
     // Default to a 16-bit TIFF master (highest fidelity); pass -o foo.jpg for a
@@ -511,18 +525,24 @@ fn match_cmd(
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
     let rep = if zoned {
         // Sky mask lands at the GUI's convention (the photo's develop dir,
-        // `mask-zone-sky.png` — deliberately distinct from 「AI select sky」's
-        // mask-sky.png, which the fit's cleanup must never delete); the GUI
-        // shows that raster because the canonical recipe written below
-        // REFERENCES this path (masks are attached by reference, never found
-        // by filename), so the two must be written together.
+        // a FRESH claimed `mask-zone-sky*.png` per run — see
+        // store::claim_raster: rewriting one fixed name in place left the
+        // still-live saved recipe pointing at replaced bytes whenever the
+        // canonical write below failed); the GUI shows that raster because
+        // the canonical recipe written below REFERENCES this path (masks are
+        // attached by reference, never found by filename), so the two must
+        // be written together.
         let cfg = Config::load();
         let seg = autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
-        let mask = autoshop::store::raster_target(raw, "mask-zone-sky");
+        let mask = autoshop::store::claim_raster(raw, "mask-zone-sky")?;
         pipeline::guard_readonly(&mask, raw)?;
-        // fit_recipe_zoned writes the raster but does not create its folder —
-        // a fresh develop dir must exist before the fit runs.
-        ensure_parent(&mask)?;
+        // Snapshot up front — this is the zoned path's programmatic-overwrite
+        // gate for the canonical recipe write below (the plain fit gates at
+        // the write site instead). The store gate is copy-based precisely so
+        // it can run ahead of the operation — store.rs doc.
+        if let Err(e) = autoshop::store::backup_saved_develop(raw, None) {
+            anyhow::bail!("refusing zoned match: backing up the saved develop failed ({e})");
+        }
         println!("  zoned: segmenting the sky in both images (local python sidecar) …");
         autoshop::fit_zoned::fit_recipe_zoned(&src, &tgt, &seg, &mask)
     } else {
@@ -547,6 +567,13 @@ fn match_cmd(
     let canonical = autoshop::store::recipe_target(raw);
     if canonical != recipe_path {
         pipeline::guard_readonly(&canonical, raw)?;
+        // The zoned path already snapshotted (pre-fit, above); the plain fit
+        // gates here like every other programmatic canonical writer.
+        if !zoned
+            && let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&rep.recipe))
+        {
+            anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
+        }
         let p = write_recipe(raw, &rep.recipe, Some(canonical))?;
         println!("sidecar-> {} (what the GUI/web restore; overwrites any earlier develop)", p.display());
     }
@@ -673,26 +700,37 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     let results = results.into_inner().unwrap();
     let ok = results.iter().filter(|r| **r == Some(true)).count();
     let fail = results.iter().filter(|r| **r == Some(false)).count();
-    println!("\nbatch done: {ok} ok, {fail} failed, {} still pending.", todo.saturating_sub(n));
+    // Failed attempts produced no sidecar, so they are STILL pending — count
+    // only the successes as done.
+    println!("\nbatch done: {ok} ok, {fail} failed, {} still pending.", todo.saturating_sub(ok));
     Ok(())
 }
 
 fn process_one(raw: &Path, cfg: &Config, render_master: bool) -> Result<Verdict> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
     let (recipe, verdict) = produce_recipe(raw, cfg, false, None, None, cfg.style_strength)?;
-    // Every fallible product BEFORE the completion markers, and the recipe
-    // LAST of all: `has_develop` (the batch resume filter) keys on the
-    // sidecars, so any failure after they land would leave a photo both
-    // "failed" in this run AND skipped by every later resume. The render is
-    // idempotent, so a crash after it but before the sidecars simply
-    // re-renders on retry.
+    // Every fallible product BEFORE the completion markers: `has_develop`
+    // (the batch resume filter) keys on the sidecars, so any failure after
+    // one lands would leave a photo both "failed" in this run AND skipped by
+    // every later resume. The render is idempotent, so a crash after it but
+    // before the sidecars simply re-renders on retry. Between the two
+    // sidecars the RECIPE goes first — it is the lossless truth and the
+    // cross-surface rule is "the recipe write alone decides the saved state";
+    // the old xmp-first order could crash into an XMP-only marker that
+    // suppressed every retry while the authoritative recipe never landed.
     if render_master {
         let out = default_out(raw, "developed", "tif"); // 16-bit master
         ensure_parent(&out)?;
         render::render_to_file(raw, &recipe, &out, None, None)?;
     }
-    write_xmp(raw, &recipe)?;
+    // Backup gate, same as every surface: cheap Ok(None) in the batch's
+    // usual no-develop-yet case, and a save created mid-batch by another
+    // process can no longer be silently destroyed.
+    if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
+        anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
+    }
     write_recipe(raw, &recipe, None)?;
+    write_xmp(raw, &recipe)?;
     Ok(verdict)
 }
 

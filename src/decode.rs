@@ -98,17 +98,35 @@ pub fn is_raw(path: &Path) -> bool {
     })
 }
 
-/// Load a baked raster (PNG/TIFF/JPEG) with the decoder memory limit lifted —
-/// a 60 MP export would otherwise trip the image crate's default allocation cap.
+/// Load a baked raster (PNG/TIFF/JPEG) with a RAISED (not lifted) decoder
+/// memory limit — a 60 MP export trips the image crate's default cap, but
+/// `no_limits()` let a corrupt header with absurd declared dimensions drive an
+/// unbounded allocation straight into OOM. 61 MP 16-bit RGBA is ~0.5 GiB;
+/// 4 GiB leaves headroom without trusting arbitrary headers.
+/// Also applies the EXIF orientation: phone/Lightroom JPEGs store rotation as
+/// metadata the decoder does NOT apply — imported photos rendered sideways
+/// (the RAW path already orients via the sensor metadata).
 pub fn load_image(path: &Path) -> Result<DynamicImage> {
+    use image::ImageDecoder as _;
     let mut reader = image::ImageReader::open(path)
         .with_context(|| format!("open image {}", path.display()))?;
-    reader.limits(image::Limits::no_limits());
-    reader
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(65_536);
+    limits.max_image_height = Some(65_536);
+    limits.max_alloc = Some(4 * 1024 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader
         .with_guessed_format()
         .with_context(|| format!("probe image {}", path.display()))?
-        .decode()
-        .with_context(|| format!("decode image {}", path.display()))
+        .into_decoder()
+        .with_context(|| format!("decode image {}", path.display()))?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(decoder)
+        .with_context(|| format!("decode image {}", path.display()))?;
+    img.apply_orientation(orientation);
+    Ok(img)
 }
 
 /// Decode any supported source — a camera RAW or an already-baked image. The
@@ -140,9 +158,30 @@ fn decode_baked(path: &Path) -> Result<Decoded> {
         height: h as usize,
         as_shot_wb_coeffs: [1.0, 1.0, 1.0, 1.0],
     };
-    let small = preview.resize(1024, 1024, image::imageops::FilterType::Triangle);
-    let histogram = compute_histogram(&small);
+    let histogram = compute_histogram(&hist_copy(&preview));
     Ok(Decoded { preview, meta, histogram, embedded_xmp: None })
+}
+
+/// Does this EXIF orientation swap width and height in the display frame?
+fn orientation_transposes(o: rawler::Orientation) -> bool {
+    matches!(
+        o,
+        rawler::Orientation::Rotate90
+            | rawler::Orientation::Rotate270
+            | rawler::Orientation::Transpose
+            | rawler::Orientation::Transverse
+    )
+}
+
+/// Histogram working copy: DOWNSCALE-only to ≤1024 (`resize` also UPSCALES a
+/// smaller input, and interpolating a small thumbnail up distorted clipping
+/// percentages before histogramming).
+fn hist_copy(img: &DynamicImage) -> DynamicImage {
+    if img.width().max(img.height()) > 1024 {
+        img.resize(1024, 1024, image::imageops::FilterType::Triangle)
+    } else {
+        img.clone()
+    }
 }
 
 /// Decode a RAW file: embedded preview + metadata + histogram. Reads the file
@@ -200,12 +239,19 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
             // ApertureValue is an APEX Av, not an f-number: N = 2^(Av/2)
             // (Av 4 ⇒ f/4, Av 5 ⇒ f/5.7). Feeding it raw overstated fast
             // lenses in metadata + the AI prompt whenever FNumber was absent.
-            .or_else(|| exif.aperture_value.as_ref().map(|v| (ratio(v) / 2.0).exp2())),
-        focal_length_mm: exif.focal_length.as_ref().map(ratio),
-        exposure_bias_ev: exif.exposure_bias.as_ref().map(sratio),
+            .or_else(|| exif.aperture_value.as_ref().map(|v| (ratio(v) / 2.0).exp2()))
+            // A malformed rational (0-denominator NaN, huge Av → exp2 = ∞)
+            // must not enter Meta — serde_json refuses non-finite floats
+            // (same rule as the WB coeffs below).
+            .filter(|v| v.is_finite()),
+        focal_length_mm: exif.focal_length.as_ref().map(ratio).filter(|v| v.is_finite()),
+        exposure_bias_ev: exif.exposure_bias.as_ref().map(sratio).filter(|v| v.is_finite()),
         date_time: exif.date_time_original.clone(),
-        width: raw.width,
-        height: raw.height,
+        // DISPLAY-frame dims, agreeing with the oriented preview below:
+        // sensor width/height made every rotated (portrait) shot's aspect —
+        // and the style index's portrait feature — read as landscape.
+        width: if orientation_transposes(raw.orientation) { raw.height } else { raw.width },
+        height: if orientation_transposes(raw.orientation) { raw.width } else { raw.height },
         // Sony stores only 3 WB multipliers, so rawler leaves the 4th (second
         // green) as NaN. Replace any non-finite coeff with the neutral 1.0 —
         // otherwise serde_json refuses to serialise Meta when we hand it to the
@@ -226,10 +272,9 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
     // the dummy raw's orientation, which is already decoded above for Meta.
     let preview = crate::render::oriented(preview, raw.orientation);
 
-    // Histogram on a downscaled copy of the preview — representative and fast
-    // even for a 60 MP embedded JPEG.
-    let small = preview.resize(1024, 1024, image::imageops::FilterType::Triangle);
-    let histogram = compute_histogram(&small);
+    // Histogram on a downscale-only copy of the preview — representative and
+    // fast even for a 60 MP embedded JPEG (see hist_copy).
+    let histogram = compute_histogram(&hist_copy(&preview));
 
     let embedded_xmp = decoder
         .xpacket(&src, &params)

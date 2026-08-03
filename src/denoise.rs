@@ -41,7 +41,9 @@ impl DenoiseOpts {
             script: PathBuf::from(&cfg.denoise_script),
             cache: PathBuf::from(&cfg.denoise_cache),
             model: model_override.unwrap_or_else(|| cfg.denoise_model.clone()),
-            strength: strength.clamp(0.0, 1.0),
+            // clamp KEEPS NaN — a non-finite strength would ship "--strength
+            // NaN" to the sidecar instead of honouring the 0..1 contract.
+            strength: if strength.is_finite() { strength.clamp(0.0, 1.0) } else { 1.0 },
         }
     }
 }
@@ -140,8 +142,12 @@ pub fn denoise_active(
             Some(2048),
         )?;
         let tmp = temp_path("autoshop_denoise_base");
-        img.save(&tmp)
-            .with_context(|| format!("write denoise input {}", tmp.display()))?;
+        if let Err(e) = img.save(&tmp) {
+            // A failed save can still have created a partial file — don't
+            // leak it into the temp dir.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e).with_context(|| format!("write denoise input {}", tmp.display()));
+        }
         let res = denoise_file(opts, &tmp, out);
         let _ = std::fs::remove_file(&tmp);
         res

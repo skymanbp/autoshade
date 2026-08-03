@@ -53,6 +53,11 @@ pub fn produce_recipe(
         .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
         .context("encode preview JPEG for advisor")?;
     let preview = Preview { jpeg };
+    // The full-resolution preview buffer is DEAD from here on — only meta and
+    // histogram feed the advise chain, which can stall on the network for
+    // minutes. Keeping `decoded` whole pinned hundreds of MB of 61MP pixels
+    // for that entire window.
+    let decode::Decoded { meta, histogram, .. } = decoded;
 
     // Style influence: retrieve the user's edits on the most SIMILAR past shots
     // (needs `autoshop style-index`). style_strength == 0 disables it entirely;
@@ -70,7 +75,7 @@ pub fn produce_recipe(
         })
         .flatten()
         .map(|ix| {
-            let ex = ix.retrieve(&decoded.meta, &decoded.histogram, 4, stem(raw));
+            let ex = ix.retrieve(&meta, &histogram, 4, stem(raw));
             (ix.render_reference(&ex), crate::style::style_targets(&ex))
         });
     let reference: Option<String> = style.as_ref().and_then(|(r, _)| r.clone());
@@ -83,7 +88,7 @@ pub fn produce_recipe(
             println!("direction: {g}");
         }
 
-    let (meta, hist) = (&decoded.meta, &decoded.histogram);
+    let (meta, hist) = (&meta, &histogram);
 
     // GPT vision when a key is set; on failure (quota/network) warn and fall back
     // to the heuristic so we still produce a recipe (disclosure, not masking).
@@ -203,9 +208,34 @@ pub fn produce_recipe(
     // Without this, a CLI-written analyze recipe carried an empty curve and
     // the open-time "recipe.json keeps its saved curve" rule then pinned the
     // dark pre-base-look rendering onto that photo forever.
-    recipe.base_curve = photo_base_curve(raw);
-    recipe.lens_profile = photo_lens_profile(raw);
+    // ONE read of the saved recipe for BOTH calibration fields: two separate
+    // reads could straddle a concurrent writer's retire/publish window (GUI
+    // and web are separate processes) and stamp a curve from the saved recipe
+    // beside a lens profile from the fresh fallback.
+    match saved_recipe_snapshot(raw) {
+        Some(saved) => {
+            recipe.base_curve = saved.base_curve;
+            recipe.lens_profile = saved.lens_profile;
+        }
+        None => {
+            recipe.base_curve = photo_base_knots(raw);
+            recipe.lens_profile = fresh_lens_profile(raw);
+        }
+    }
     Ok((recipe, verdict))
+}
+
+/// The photo's saved recipe (central store first, then legacy), parsed once —
+/// the calibration-stamping snapshot both fields must come from.
+fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
+    for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
+        if let Ok(text) = std::fs::read_to_string(&p)
+            && let Ok(r) = serde_json::from_str::<EditRecipe>(&text)
+        {
+            return Some(r);
+        }
+    }
+    None
 }
 
 /// The base_curve a programmatic writer must carry for `raw`: an existing
@@ -213,14 +243,10 @@ pub fn produce_recipe(
 /// which must keep rendering exactly as it was tuned — otherwise the photo's
 /// fresh camera-matched estimate ([`photo_base_knots`]).
 pub fn photo_base_curve(raw: &Path) -> Vec<[f32; 2]> {
-    for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
-        if let Ok(text) = std::fs::read_to_string(&p)
-            && let Ok(r) = serde_json::from_str::<EditRecipe>(&text)
-        {
-            return r.base_curve;
-        }
+    match saved_recipe_snapshot(raw) {
+        Some(r) => r.base_curve,
+        None => photo_base_knots(raw),
     }
-    photo_base_knots(raw)
 }
 
 /// The lens profile a programmatic writer must carry for `raw` — the same
@@ -229,14 +255,10 @@ pub fn photo_base_curve(raw: &Path) -> Vec<[f32; 2]> {
 /// otherwise the photo's own in-camera metadata with every available
 /// component enabled ([`fresh_lens_profile`]).
 pub fn photo_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
-    for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
-        if let Ok(text) = std::fs::read_to_string(&p)
-            && let Ok(r) = serde_json::from_str::<EditRecipe>(&text)
-        {
-            return r.lens_profile;
-        }
+    match saved_recipe_snapshot(raw) {
+        Some(r) => r.lens_profile,
+        None => fresh_lens_profile(raw),
     }
-    fresh_lens_profile(raw)
 }
 
 /// Fresh in-camera lens profile for `raw`, stamped "all available components
@@ -290,6 +312,16 @@ pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
 
 pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Result<PathBuf> {
     let out = out.unwrap_or_else(|| crate::store::recipe_target(raw));
+    // `-o some_dir` names an existing DIRECTORY: refuse instead of renaming
+    // the whole directory to .bak below and publishing a recipe FILE in its
+    // place (the user meant "write into it", which this API does not do).
+    if out.is_dir() {
+        anyhow::bail!(
+            "recipe target {} is a directory — pass a file path (e.g. {}/recipe.json)",
+            out.display(),
+            out.display()
+        );
+    }
     ensure_parent(&out)?;
     // Rasters living beside the recipe are stored by bare file name so the
     // develop dir stays relocatable (store::resolve_mask_paths re-anchors them
@@ -320,8 +352,12 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // Retire the old file to .bak instead of deleting it (Windows rename
     // cannot replace): if the publish rename then fails (AV lock, racing
     // writer), the authoritative recipe is RESTORED, not lost. On success
-    // the .bak is dropped.
+    // the .bak is dropped. A STALE .bak (crash in that window) is cleared
+    // first — Windows rename cannot replace it either, so it used to wedge
+    // every later save: retire fails, had_old reads false, and the publish
+    // then fails forever on the still-present target.
     let bak = out.with_extension("json.bak");
+    let _ = std::fs::remove_file(&bak);
     let had_old = std::fs::rename(&out, &bak).is_ok();
     if let Err(e) = std::fs::rename(&tmp, &out) {
         // A failed restore must be SAID, not swallowed — the authoritative
@@ -342,6 +378,32 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
         crate::store::note_source(raw); // breadcrumb for the hashed store dir
     }
     Ok(out)
+}
+
+/// First FREE ./out artifact path for `tag` (`tag`, `tag-2`, … `tag-999`),
+/// CLAIMED atomically (`create_new`): pixels.json links these paths, GUI undo
+/// history holds them, and a CANCELLED worker may still be running toward the
+/// name it probed — an existence probe alone would hand the same name to the
+/// replacement task and let the two write over each other. The claimed
+/// placeholder is simply overwritten by the worker's save. `None` past the
+/// 999 cap (refuse, never alias). Shared by the GUI's five starters and the
+/// web fill/heal handlers — a fixed web output name used to overwrite a
+/// master an earlier develop still referenced.
+pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
+    // n = 0 → "tag"; n = 1..=998 → "tag-2".."tag-999" (never tag-1000).
+    for n in 0..=998u32 {
+        let t = if n == 0 { tag.to_string() } else { format!("{tag}-{}", n + 1) };
+        let cand = default_out(path, &t, "png");
+        if ensure_parent(&cand).is_err() {
+            return None;
+        }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&cand) {
+            Ok(_) => return Some(cand),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
@@ -405,15 +467,42 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
         }
         n
     }
+    // Canonicalize the deepest EXISTING ancestor, then re-attach the
+    // not-yet-created tail: a junction / subst / symlink alias or a
+    // case-flipped spelling ("d:\photography" for "D:\Photography" — NTFS is
+    // case-insensitive, starts_with is not) otherwise denotes the library
+    // while failing every lexical comparison below. Canonical paths carry the
+    // TRUE on-disk casing and resolved links, and all sides go through the
+    // same lens, so the \\?\ verbatim prefix cancels out.
+    fn resolve_existing(p: &Path) -> PathBuf {
+        let mut cur = p;
+        let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+        loop {
+            if let Ok(mut c) = std::fs::canonicalize(cur) {
+                for t in tail.iter().rev() {
+                    c.push(t);
+                }
+                return c;
+            }
+            match (cur.parent(), cur.file_name()) {
+                (Some(par), Some(name)) if !par.as_os_str().is_empty() => {
+                    tail.push(name);
+                    cur = par;
+                }
+                _ => return p.to_path_buf(),
+            }
+        }
+    }
     let (Ok(out_abs), Ok(raw_abs)) = (absolute(out), absolute(raw)) else {
         return Ok(());
     };
-    let (out_abs, raw_abs) = (normalize(&out_abs), normalize(&raw_abs));
-    if out_abs.starts_with(crate::store::store_root()) {
+    let (out_abs, raw_abs) =
+        (resolve_existing(&normalize(&out_abs)), resolve_existing(&normalize(&raw_abs)));
+    if out_abs.starts_with(resolve_existing(&crate::store::store_root())) {
         return Ok(());
     }
     if let Ok(own_out) = absolute(Path::new("out"))
-        && out_abs.starts_with(normalize(&own_out)) {
+        && out_abs.starts_with(resolve_existing(&normalize(&own_out))) {
             return Ok(());
         }
     if let Some(raw_dir) = raw_abs.parent()
@@ -462,12 +551,18 @@ fn entry_is_dir(entry: &std::fs::DirEntry) -> std::io::Result<bool> {
 /// left `batch`, `eval` and `style-index` blind to libraries the GUI and web
 /// open fine.
 pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) -> std::io::Result<()> {
+        // Same directory-symlink-cycle cap as `find_sources`: entry_is_dir
+        // deliberately follows dir links, so an uncapped walk recurses until
+        // the OS errors or the stack dies.
+        if depth > 64 {
+            return Ok(());
+        }
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let p = entry.path();
             if entry_is_dir(&entry)? {
-                walk(&p, out)?;
+                walk(&p, out, depth + 1)?;
             } else if decode::is_raw(&p) {
                 out.push(p);
             }
@@ -475,7 +570,7 @@ pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
         Ok(())
     }
     let mut out = Vec::new();
-    walk(dir, &mut out).with_context(|| format!("scan {}", dir.display()))?;
+    walk(dir, &mut out, 0).with_context(|| format!("scan {}", dir.display()))?;
     out.sort();
     Ok(out)
 }

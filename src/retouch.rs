@@ -468,7 +468,11 @@ pub fn heal(
         let cap = if full_res { None } else { Some(2048) };
         crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None, cap)?
     } else {
-        decode::load_image(src_path)?
+        // Same full-or-≤2048 contract as the RAW arm: the flag used to be
+        // ignored for baked sources, so a "preview mode" heal still processed
+        // (and saved) an entire high-resolution TIFF/JPEG.
+        let img = decode::load_image(src_path)?;
+        if full_res { img } else { img.thumbnail(2048, 2048) }
     };
     let mut rgb = base.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -509,6 +513,9 @@ pub fn heal(
                     return Err(e);
                 }
                 eprintln!("⚠ AI spot-detection failed ({e}); healing the painted mask only.");
+                // stderr is invisible from the GUI — carry the disclosure in
+                // the report too.
+                rationale = format!("AI spot-detection failed ({e}); healed the painted mask only.");
             }
         }
     }
@@ -517,6 +524,19 @@ pub fn heal(
             .with_context(|| format!("open mask {}", mp.display()))?
             .to_rgba8();
         spots.extend(plan_from_mask(&m));
+    }
+    if spots.is_empty() {
+        // Writing (and linking) a byte-identical zero-spot master helps
+        // nobody — and after an AI failure it silently masked the failure as
+        // success. Say what happened instead.
+        anyhow::bail!(
+            "nothing to heal: {}",
+            if manual_mask.is_some() {
+                "the painted mask selected no area (and AI detection added nothing)"
+            } else {
+                "AI detection found no spots"
+            }
+        );
     }
 
     let n = spots.len();
@@ -548,7 +568,9 @@ pub fn clone_stamp(
         let cap = if full_res { None } else { Some(2048) };
         crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None, cap)?
     } else {
-        decode::load_image(src_path)?
+        // full-or-≤2048 for baked sources too (see heal).
+        let img = decode::load_image(src_path)?;
+        if full_res { img } else { img.thumbnail(2048, 2048) }
     };
     let mut rgb = base.to_rgb8();
     let (w, h) = rgb.dimensions();

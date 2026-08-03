@@ -415,10 +415,34 @@ pub fn recipe_to_xmp(r: &EditRecipe) -> String {
 // don't come back — the app-internal recipe.json is the lossless sidecar; this
 // reader is the recovery path when only an XMP exists.
 
+/// Autoshop provenance: an ATTRIBUTE-shaped `x:xmptk = "Autoshop"` /
+/// `x:xmptk='Autoshop'` match (either quote style, optional whitespace around
+/// `=`). The old raw-substring test both missed semantically identical XML
+/// spellings and matched the literal inside a comment — and this boolean
+/// decides whether an As-Shot tint imports as a real edit.
+fn is_autoshop_sidecar(xmp: &str) -> bool {
+    let mut rest = xmp;
+    while let Some(i) = rest.find("x:xmptk") {
+        let after = rest[i + "x:xmptk".len()..].trim_start();
+        if let Some(v) = after.strip_prefix('=') {
+            let v = v.trim_start();
+            if v.strip_prefix('"').is_some_and(|r| r.starts_with("Autoshop\""))
+                || v.strip_prefix('\'').is_some_and(|r| r.starts_with("Autoshop'"))
+            {
+                return true;
+            }
+        }
+        rest = &rest[i + "x:xmptk".len()..];
+    }
+    false
+}
+
 /// Raw string value of a `crs:<key>="…"` attribute (first occurrence). The
 /// `crs:` anchor makes prefixed cousins unambiguous (`crs:Tint` can never match
-/// inside `crs:LocalTint`).
-fn crs_str<'a>(xmp: &'a str, key: &str) -> Option<&'a str> {
+/// inside `crs:LocalTint`). pub(crate): the style index shares the
+/// WhiteBalance="Custom" provenance rule (as-shot Temperature/Tint are camera
+/// values, not user edits) — see `style::read_settings`.
+pub(crate) fn crs_str<'a>(xmp: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("crs:{key}=\"");
     let start = xmp.find(&needle)? + needle.len();
     let rest = &xmp[start..];
@@ -516,14 +540,25 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
     } else if let Some(p) = seg.find("crs:What=\"Mask/CircularGradient\"") {
         let g = &seg[p..];
         // Lightroom's Feather is 0..100 (reference sidecars: 50 / 72 …); the
-        // engine's is 0..1. The old reader took the value raw, so every LR
-        // radial with Feather ≥ 1 clamped to fully feathered. Values ≤ 1.0
-        // pass through verbatim — that range is what OUR old writer emitted
-        // (breaking every legacy own sidecar to fix a genuine LR "Feather=1",
-        // i.e. 1%, is the wrong trade; the corner case is documented here).
+        // engine's is 0..1. Three writers share this attribute, disambiguated
+        // by TEXT SHAPE:
+        //  * > 1.0 — unambiguous LR 0..100 scale;
+        //  * ≤ 1.0 WITH a decimal point — our LEGACY 0..1 writer (it printed
+        //    floats like "0.5"), passed through verbatim;
+        //  * ≤ 1.0 integer text ("0"/"1") — LR's 0..100 (a genuine 1% edge)
+        //    AND the CURRENT writer (which rounds to integers): both mean
+        //    value/100. The old blanket ≤1.0-verbatim rule made our OWN 1%
+        //    XMP round-trip back as a 100% feather.
+        // (A legacy sidecar holding EXACTLY 1.0 prints as "1" and now reads
+        //  as 1% — the current writer's round-trip wins that corner.)
         let feather_raw = crs_f32(g, "Feather")?;
-        let feather =
-            if feather_raw > 1.0 { feather_raw / 100.0 } else { feather_raw };
+        let feather = if feather_raw > 1.0 {
+            feather_raw / 100.0
+        } else if crs_str(g, "Feather").is_some_and(|s| s.contains('.')) {
+            feather_raw
+        } else {
+            feather_raw / 100.0
+        };
         (
             MaskGeometry::Radial {
                 top: crs_f32(g, "Top")?,
@@ -544,8 +579,13 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
     // from the geometry component only — hence the `geom_at`-anchored scan.
     let range = seg.find("crs:What=\"Mask/RangeMask\"").and_then(|p| {
         let r = &seg[p..];
+        // STRICT token parse (`collect::<Option<…>>`), not filter_map: a
+        // malformed token used to vanish, letting the remaining values shift
+        // one field left and still pass the length check.
         if let Some(lum) = crs_str(r, "LumRange") {
-            let v: Vec<f32> = lum.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            let v: Option<Vec<f32>> =
+                lum.split_whitespace().map(|x| x.parse().ok()).collect();
+            let v = v?;
             (v.len() == 4).then(|| RangeMask::Luminance {
                 lo_outer: v[0],
                 lo: v[1],
@@ -555,7 +595,9 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         } else if let Some(amount) = crs_f32(r, "ColorAmount") {
             // PointModels entry: "r g b px py 0" (writer + LR convention).
             let li = block_between(r, "<rdf:li>", "</rdf:li>")?;
-            let v: Vec<f32> = li.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            let v: Option<Vec<f32>> =
+                li.split_whitespace().map(|x| x.parse().ok()).collect();
+            let v = v?;
             (v.len() >= 5)
                 .then(|| RangeMask::Color { r: v[0], g: v[1], b: v[2], amount, px: v[3], py: v[4] })
         } else {
@@ -608,7 +650,7 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
 /// Callers should [`EditRecipe::clamp`] the result before use, like any other
 /// untrusted recipe input.
 pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
-    let ours = xmp.contains("x:xmptk=\"Autoshop\"");
+    let ours = is_autoshop_sidecar(xmp);
     let custom_wb = crs_str(xmp, "WhiteBalance") == Some("Custom");
     let f = |k: &str| crs_f32(xmp, k).unwrap_or(0.0);
 
@@ -666,7 +708,10 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         lens_vignette: f("VignetteAmount"),
         lens_vignette_mid: crs_f32(xmp, "VignetteMidpoint").unwrap_or(50.0),
         lens_distortion: f("LensManualDistortionAmount"),
-        straighten_deg: f("CropAngle"),
+        // Adobe applies CropAngle only under HasCrop="True" (see the crop
+        // comment below) — importing a stale angle from a DISABLED crop
+        // activated a straighten Adobe itself does not render.
+        straighten_deg: if crs_str(xmp, "HasCrop") == Some("True") { f("CropAngle") } else { 0.0 },
         crop: (crs_str(xmp, "HasCrop") == Some("True"))
             .then(|| {
                 Some(Crop {

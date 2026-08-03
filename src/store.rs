@@ -100,6 +100,33 @@ pub fn raster_target(src: &Path, kind: &str) -> PathBuf {
     develop_dir(src).join(format!("{kind}.png"))
 }
 
+/// Claim a FRESH raster name in the photo's develop dir: `<prefix>.png`,
+/// `<prefix>-2.png` … `-999`, atomically create_new-claimed so two surfaces
+/// can never hand out the same name (the same scheme `pipeline::unique_out`
+/// uses for ./out masters). The zoned reverse-fit writes each run's raster
+/// under its own claimed name instead of rewriting one fixed file in place —
+/// the in-place rewrite left the still-live saved recipe referencing freshly
+/// replaced bytes whenever the recipe write AFTER it failed or crashed.
+/// Superseded rasters stay on disk (small greyscale PNGs; version snapshots
+/// freeze their own copies regardless).
+pub fn claim_raster(src: &Path, prefix: &str) -> std::io::Result<PathBuf> {
+    for n in 0..=998u32 {
+        let kind = if n == 0 { prefix.to_string() } else { format!("{prefix}-{}", n + 1) };
+        let cand = raster_target(src, &kind);
+        if let Some(par) = cand.parent() {
+            std::fs::create_dir_all(par)?;
+        }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&cand) {
+            Ok(_) => return Ok(cand),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "over 999 '{prefix}' rasters for this photo — clean up its develop folder first"
+    )))
+}
+
 /// Sidecar recording the saved develop's PIXEL SOURCE when it is a baked
 /// raster — an in-place heal/clone/fill/denoise master, or a reimagine
 /// rendition. The recipe/XMP are parametric and cannot carry baked pixels;
@@ -141,18 +168,41 @@ pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io
     let mut retired = false;
     if target.exists() {
         let bak = dir.join("pixels.json.bak");
+        // Make room (Windows rename cannot replace). Losing an OLD .bak to a
+        // concurrent writer is last-writer-wins by design — the same stance
+        // recipe.json documents for its shared .bak.
         let _ = std::fs::remove_file(&bak);
-        std::fs::rename(&target, &bak)?;
-        retired = true;
+        match std::fs::rename(&target, &bak) {
+            Ok(()) => retired = true,
+            // Target vanished mid-race (another writer retired it): nothing
+            // left to retire — this write's publish still proceeds.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
     }
     if let Err(e) = std::fs::rename(&tmp, &target) {
         // The publish failed AFTER the old file was retired — put it back so
-        // the previous linkage stays the live one, not a .bak orphan.
+        // the previous linkage stays the live one, not a .bak orphan. A
+        // failed restore must be SAID: the error then names where the
+        // previous linkage survives instead of pretending it is live.
+        let mut restore_note = String::new();
         if retired {
-            let _ = std::fs::rename(dir.join("pixels.json.bak"), &target);
+            let bak = dir.join("pixels.json.bak");
+            if std::fs::rename(&bak, &target).is_err() {
+                restore_note = format!(
+                    " (restoring the previous pixels.json ALSO failed — it survives at {})",
+                    bak.display()
+                );
+            }
         }
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+        if restore_note.is_empty() {
+            return Err(e);
+        }
+        return Err(std::io::Error::new(e.kind(), format!("{e}{restore_note}")));
     }
     Ok(())
 }
@@ -177,7 +227,20 @@ pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
 /// traceable instead of looking like data loss with no cause.
 pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
     let sidecar = pixel_source_path(src);
-    let bytes = std::fs::read(&sidecar).ok()?;
+    let bytes = match std::fs::read(&sidecar) {
+        Ok(b) => b,
+        // Missing IS the normal parametric-only case — stay silent.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // An EXISTING sidecar we cannot read (permissions, I/O) must warn —
+        // the doc above promises the revert-to-source stays traceable.
+        Err(e) => {
+            eprintln!(
+                "⚠ {} exists but cannot be read ({e}) — the baked retouch master is not restored",
+                sidecar.display()
+            );
+            return None;
+        }
+    };
     let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         eprintln!(
             "⚠ {} is unreadable — the baked retouch master is not restored",
@@ -304,8 +367,17 @@ pub fn resolve_mask_paths(r: &mut EditRecipe, base: &Path) {
         if let MaskGeometry::Bitmap { path } = &mut m.mask {
             let p = Path::new(path.as_str());
             if p.is_relative() {
+                // A BARE name is the store's own convention and can only mean
+                // "this develop dir" — anchor it even when the file is GONE,
+                // or a missing raster would stay process-relative and could
+                // silently pick up an unrelated same-named file from the
+                // launch cwd. Multi-component legacy refs ("out/…") keep the
+                // exists-gated rewrite: cwd resolution IS their pre-store
+                // contract, and rewriting a missing one would break a launch
+                // from the original directory.
+                let bare = p.parent().is_none_or(|x| x.as_os_str().is_empty());
                 let cand = base.join(p);
-                if cand.exists() {
+                if bare || cand.exists() {
                     *path = cand.to_string_lossy().into_owned();
                 }
             }
@@ -377,9 +449,28 @@ pub fn backup_saved_develop(
     }
     let dev = develop_dir(src);
     // saturating: a (hand-crafted) v4294967295 snapshot must not wrap the
-    // next number back onto an existing low version and overwrite it.
-    let n = list_versions(src).last().copied().unwrap_or(0).saturating_add(1);
+    // next number back onto an existing low version and overwrite it. And a
+    // COLLIDING number (only reachable at that saturated ceiling) is refused
+    // outright: publishing over an existing snapshot would replace it on
+    // Unix and, on Windows, fail late and roll back frozen rasters the OLD
+    // snapshot still references.
+    let last = list_versions(src).last().copied();
+    if last == Some(u32::MAX) {
+        return Err(std::io::Error::other(
+            "version namespace exhausted (a v4294967295 snapshot exists)",
+        ));
+    }
+    let n = last.unwrap_or(0).saturating_add(1);
     let dst = version_target(src, n);
+    // Per-process AND per-call tmp name: GUI + web server are separate
+    // PROCESSES backing up the same photo — a shared fixed tmp path lets the
+    // two writes interleave into corrupt JSON before either rename runs.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dst.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     match parsed {
         Some(mut r) => {
             // A raster that cannot be frozen fails the WHOLE backup: returning
@@ -388,18 +479,24 @@ pub fn backup_saved_develop(
             snapshot_rasters(&mut r, &dev, n)?;
             let publish = (|| {
                 let json = serde_json::to_string_pretty(&r).map_err(std::io::Error::other)?;
-                let tmp = dst.with_extension("json.tmp");
                 std::fs::write(&tmp, json)?;
                 std::fs::rename(&tmp, &dst)
             })();
             if let Err(e) = publish {
+                let _ = std::fs::remove_file(&tmp);
                 rollback_frozen_rasters(&dev, n);
                 return Err(e);
             }
         }
         // Unparsable: snapshot the bytes as-is — still recoverable by hand.
+        // Staged + renamed so a failed copy can never leave a PARTIAL file
+        // wearing the final v<n>.recipe.json name (list_versions would then
+        // count a corrupt snapshot as real).
         None => {
-            std::fs::copy(&rj, &dst)?;
+            if let Err(e) = std::fs::copy(&rj, &tmp).and_then(|_| std::fs::rename(&tmp, &dst)) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
         }
     }
     Ok(Some(n))
@@ -423,18 +520,24 @@ pub fn snapshot_rasters(r: &mut EditRecipe, dev: &Path, n: u32) -> std::io::Resu
                 None
             };
             let Some(name) = name.and_then(|x| x.to_str()) else { continue };
-            let live = dev.join(name);
-            if !live.exists() {
-                continue; // already-dead reference: nothing to freeze
-            }
             let frozen_name = format!("v{n}.{name}");
-            let frozen = dev.join(&frozen_name);
-            if !frozen.exists()
-                && let Err(e) = std::fs::copy(&live, &frozen)
-            {
-                rollback_frozen_rasters(dev, n);
-                return Err(e);
+            let live = dev.join(name);
+            if live.exists() {
+                // `n` is guaranteed FRESH (backup_saved_develop refuses
+                // colliding numbers), so an existing v<n>.* file here is a
+                // crashed earlier attempt's leftover — possibly PARTIAL.
+                // Re-stage it atomically instead of trusting it.
+                let frozen = dev.join(&frozen_name);
+                if let Err(e) = copy_atomic(&live, &frozen) {
+                    rollback_frozen_rasters(dev, n);
+                    return Err(e);
+                }
             }
+            // The reference moves to the frozen name EVEN when the live
+            // raster is already gone: a dead reference frozen as v<n>.<name>
+            // stays inert forever (the engine's missing-raster warning),
+            // while keeping the live name would silently bind this snapshot
+            // to any FUTURE raster recreated under it.
             *path = frozen_name;
         }
     }
@@ -471,7 +574,19 @@ pub fn delete_version(src: &Path, n: u32) -> std::io::Result<()> {
     let mut first_err: Option<std::io::Error> = None;
     match std::fs::read_dir(develop_dir(src)) {
         Ok(dir) => {
-            for e in dir.flatten() {
+            for e in dir {
+                // A per-ENTRY enumeration error is an enumeration failure
+                // too: swallowing it (the old `.flatten()`) let the recipe
+                // deletion below proceed past rasters the sweep never saw.
+                let e = match e {
+                    Ok(e) => e,
+                    Err(err) => {
+                        if first_err.is_none() {
+                            first_err = Some(err);
+                        }
+                        continue;
+                    }
+                };
                 let name = e.file_name();
                 let Some(name) = name.to_str() else { continue };
                 // The dot terminator keeps "v3." from matching "v30.recipe.json".
@@ -511,14 +626,39 @@ pub fn note_source(src: &Path) {
     }
 }
 
-/// `fs::rename`, falling back to copy+delete: ./out and the store root are
-/// routinely on DIFFERENT volumes (project on D:, %LOCALAPPDATA% on C:), where
-/// rename fails with a cross-device error.
+/// Copy `from` to `to` ATOMICALLY: stage beside the destination, then rename.
+/// A bare `fs::copy` can leave a PARTIAL destination on failure — which the
+/// migration/backup existence checks would then trust as a completed artifact
+/// forever. Clobbers an existing `to` (callers gate on their own semantics).
+fn copy_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut name = to.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let tmp = to.with_file_name(name);
+    if let Err(e) = std::fs::copy(from, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let _ = std::fs::remove_file(to); // make room (Windows rename cannot replace)
+    if let Err(e) = std::fs::rename(&tmp, to) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// `fs::rename`, falling back to atomic copy+delete: ./out and the store root
+/// are routinely on DIFFERENT volumes (project on D:, %LOCALAPPDATA% on C:),
+/// where rename fails with a cross-device error.
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    std::fs::copy(from, to)?;
+    copy_atomic(from, to)?;
     std::fs::remove_file(from)
 }
 
@@ -555,8 +695,21 @@ pub fn migrate_legacy(src: &Path) -> bool {
         }
     }
     let mut moved = false;
+    let mut failed = false;
     for legacy_out in legacy_out_roots() {
-        moved |= migrate_legacy_in(&store_root(), &legacy_out, src);
+        let (m, f) = migrate_legacy_in(&store_root(), &legacy_out, src);
+        moved |= m;
+        failed |= f;
+    }
+    if failed {
+        // A transient failure (AV lock, network volume) must stay RETRYABLE:
+        // leaving the memo key in place silenced every later open this
+        // process, hiding legacy sidecars for the whole session.
+        let mut done = DONE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        done.remove(&photo_key(src));
     }
     moved
 }
@@ -564,17 +717,91 @@ pub fn migrate_legacy(src: &Path) -> bool {
 /// Explicit migration from a user-picked old ./out folder (the GUI Settings
 /// 「Import develops」 button) — no memo, the user asked for this scan NOW.
 pub fn migrate_legacy_from(legacy_out: &Path, src: &Path) -> bool {
-    migrate_legacy_in(&store_root(), legacy_out, src)
+    migrate_legacy_in(&store_root(), legacy_out, src).0
 }
 
-fn migrate_legacy_in(root: &Path, legacy_out: &Path, src: &Path) -> bool {
+/// Gallery-wide variant of [`migrate_legacy_from`]: the legacy folder is
+/// scanned ONCE for version snapshots and the result shared across photos —
+/// the per-photo call re-ran that `read_dir` for every photo, making a big
+/// import O(photos × directory entries). Returns how many photos had
+/// anything migrated.
+pub fn migrate_legacy_from_many(legacy_out: &Path, photos: &[PathBuf]) -> usize {
     if !legacy_out.is_dir() {
-        return false; // cheap gate — most calls find nothing legacy at all
+        return 0;
     }
+    // stem → its legacy "v<N>" snapshot files. A snapshot is named
+    // "<stem>.v<digits>.recipe.json"; stems may contain dots, so split at the
+    // LAST ".v<digits>" tail and require the head to be an actual gallery
+    // stem (same answer the old per-stem prefix scan produced).
+    let stems: std::collections::HashSet<&str> =
+        photos.iter().map(|p| crate::pipeline::stem(p)).collect();
+    let mut versions: std::collections::HashMap<String, Vec<(PathBuf, String)>> =
+        std::collections::HashMap::new();
+    if let Ok(dir) = std::fs::read_dir(legacy_out) {
+        for e in dir.flatten() {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(rest) = name.strip_suffix(".recipe.json") else { continue };
+            let Some((head, nums)) = rest.rsplit_once(".v") else { continue };
+            if nums.parse::<u32>().is_ok() && stems.contains(head) {
+                versions
+                    .entry(head.to_string())
+                    .or_default()
+                    .push((e.path(), format!("v{nums}.recipe.json")));
+            }
+        }
+    }
+    let root = store_root();
+    photos
+        .iter()
+        .filter(|p| {
+            let vjobs = versions
+                .get(crate::pipeline::stem(p))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            migrate_legacy_jobs(&root, legacy_out, p, vjobs).0
+        })
+        .count()
+}
+
+/// Returns `(moved_anything, any_attempt_failed)` — the second flag lets the
+/// memoized caller keep a FAILED photo retryable instead of silencing it for
+/// the process lifetime.
+fn migrate_legacy_in(root: &Path, legacy_out: &Path, src: &Path) -> (bool, bool) {
+    if !legacy_out.is_dir() {
+        return (false, false); // cheap gate — most calls find nothing legacy at all
+    }
+    let stem = crate::pipeline::stem(src);
+    let vprefix = format!("{stem}.v");
+    let mut vjobs: Vec<(PathBuf, String)> = Vec::new();
+    if let Ok(dir) = std::fs::read_dir(legacy_out) {
+        for e in dir.flatten() {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if let Some(rest) = name.strip_prefix(&vprefix)
+                && let Some(nums) = rest.strip_suffix(".recipe.json")
+                && nums.parse::<u32>().is_ok()
+            {
+                vjobs.push((e.path(), format!("v{nums}.recipe.json")));
+            }
+        }
+    }
+    migrate_legacy_jobs(root, legacy_out, src, &vjobs)
+}
+
+/// The per-photo migration body, with the version-snapshot scan factored OUT
+/// so gallery imports can share one directory listing (`version_jobs` =
+/// `(legacy file, central v<N> name)` pairs for this photo's stem).
+fn migrate_legacy_jobs(
+    root: &Path,
+    legacy_out: &Path,
+    src: &Path,
+    version_jobs: &[(PathBuf, String)],
+) -> (bool, bool) {
     let stem = crate::pipeline::stem(src);
     let dev = develop_dir_in(root, src);
 
-    // Collect (legacy file, new name) pairs. Versions are found by scan.
+    // Collect (legacy file, new name) pairs.
     let mut jobs: Vec<(PathBuf, String, bool)> = Vec::new(); // (from, to-name, is_recipe)
     let lr = legacy_out.join(format!("{stem}.recipe.json"));
     if lr.exists() {
@@ -584,24 +811,14 @@ fn migrate_legacy_in(root: &Path, legacy_out: &Path, src: &Path) -> bool {
     if lx.exists() {
         jobs.push((lx, format!("{stem}.xmp"), false));
     }
-    let vprefix = format!("{stem}.v");
-    if let Ok(dir) = std::fs::read_dir(legacy_out) {
-        for e in dir.flatten() {
-            let name = e.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if let Some(rest) = name.strip_prefix(&vprefix)
-                && let Some(nums) = rest.strip_suffix(".recipe.json")
-                && nums.parse::<u32>().is_ok()
-            {
-                jobs.push((e.path(), format!("v{nums}.recipe.json"), true));
-            }
-        }
+    for (from, to_name) in version_jobs {
+        jobs.push((from.clone(), to_name.clone(), true));
     }
     if jobs.is_empty() {
-        return false;
+        return (false, false);
     }
     if std::fs::create_dir_all(&dev).is_err() {
-        return false;
+        return (false, true);
     }
     let abs_src = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
     let marker = dev.join("source.txt");
@@ -610,6 +827,7 @@ fn migrate_legacy_in(root: &Path, legacy_out: &Path, src: &Path) -> bool {
     }
 
     let mut moved = false;
+    let mut failed = false;
     for (from, to_name, is_recipe) in jobs {
         let to = dev.join(&to_name);
         if to.exists() {
@@ -624,8 +842,9 @@ fn migrate_legacy_in(root: &Path, legacy_out: &Path, src: &Path) -> bool {
             move_file(&from, &to).is_ok()
         };
         moved |= ok;
+        failed |= !ok;
     }
-    moved
+    (moved, failed)
 }
 
 /// Move one legacy recipe file, carrying its `./out/<stem>.<kind>.png` raster
@@ -645,8 +864,9 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
         return move_file(from, to).is_ok();
     };
     let raster_prefix = format!("{stem}.");
-    // (legacy raster to delete on success, staged central copy to roll back on failure)
-    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // (legacy raster to delete on success — None for a bystander source that
+    //  must be preserved, staged central copy to roll back on failure)
+    let mut staged: Vec<(Option<PathBuf>, PathBuf)> = Vec::new();
     for m in &mut r.masks {
         if let MaskGeometry::Bitmap { path } = &mut m.mask {
             let mut p = PathBuf::from(path.as_str());
@@ -671,8 +891,16 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
             let dest = dev.join(&bare);
             if dest.exists() {
                 *path = bare; // already migrated by an earlier file
-            } else if p.exists() && std::fs::copy(&p, &dest).is_ok() {
-                staged.push((p.clone(), dest));
+            } else if p.exists() && copy_atomic(&p, &dest).is_ok() {
+                // Only a source inside the root BEING MIGRATED may be deleted
+                // on success: the cwd-relative fallback can name a bystander
+                // file from an UNRELATED context (same stem, different
+                // photo) — that one is copied, never deleted.
+                let ours = std::path::absolute(&p)
+                    .ok()
+                    .zip(std::path::absolute(legacy_out).ok())
+                    .is_some_and(|(ap, al)| ap.starts_with(al));
+                staged.push((ours.then(|| p.clone()), dest));
                 *path = bare;
             }
             // Raster missing/uncopyable: keep the old reference — the engine's
@@ -695,7 +923,9 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
     }
     let _ = std::fs::remove_file(from);
     for (legacy, _) in &staged {
-        let _ = std::fs::remove_file(legacy);
+        if let Some(legacy) = legacy {
+            let _ = std::fs::remove_file(legacy);
+        }
     }
     true
 }
@@ -781,7 +1011,11 @@ mod tests {
         let v2 = PathBuf::from(format!("out/{stem}.v2.recipe.json"));
         std::fs::write(&v2, serde_json::to_string_pretty(&EditRecipe::default()).unwrap()).unwrap();
 
-        assert!(migrate_legacy_in(&root, Path::new("out"), &src));
+        assert_eq!(
+            migrate_legacy_in(&root, Path::new("out"), &src),
+            (true, false),
+            "moved everything, no failures"
+        );
         let dev = develop_dir_in(&root, &src);
         assert!(dev.join("recipe.json").exists());
         assert!(dev.join(format!("{stem}.xmp")).exists());
@@ -796,8 +1030,9 @@ mod tests {
         let MaskGeometry::Bitmap { path } = &back.masks[0].mask else { panic!() };
         assert_eq!(path, "mask-sky.png");
 
-        // Idempotent: a second call finds nothing legacy and reports false.
-        assert!(!migrate_legacy_in(&root, Path::new("out"), &src));
+        // Idempotent: a second call finds nothing legacy and reports
+        // (nothing moved, nothing failed).
+        assert_eq!(migrate_legacy_in(&root, Path::new("out"), &src), (false, false));
         let _ = std::fs::remove_dir_all(&root);
     }
 

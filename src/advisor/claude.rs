@@ -99,10 +99,28 @@ impl Advisor for ClaudeProvider {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn()?;
+        // Drain BOTH pipes concurrently while polling: a child that fills the
+        // ~64 KiB pipe buffer before exiting would otherwise block writing
+        // against our undrained pipe until the budget killed it — a verbose
+        // SUCCESSFUL run turned into a timeout. (`wait_with_output` drains,
+        // but only starts draining after try_wait already saw an exit.)
+        fn drain<R: std::io::Read + Send + 'static>(
+            r: Option<R>,
+        ) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut r) = r {
+                    let _ = r.read_to_end(&mut buf);
+                }
+                buf
+            })
+        }
+        let out_thread = drain(child.stdout.take());
+        let err_thread = drain(child.stderr.take());
         let start = std::time::Instant::now();
-        let output = loop {
+        let status = loop {
             match child.try_wait()? {
-                Some(_) => break child.wait_with_output()?,
+                Some(s) => break s,
                 None if start.elapsed().as_secs() >= budget => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -113,6 +131,18 @@ impl Advisor for ClaudeProvider {
                 }
                 None => std::thread::sleep(std::time::Duration::from_millis(200)),
             }
+        };
+        // Killing the child (above) closes the pipes, so these joins cannot
+        // hang; a panicked reader degrades to empty output, reported below.
+        struct Output {
+            status: std::process::ExitStatus,
+            stdout: Vec<u8>,
+            stderr: Vec<u8>,
+        }
+        let output = Output {
+            status,
+            stdout: out_thread.join().unwrap_or_default(),
+            stderr: err_thread.join().unwrap_or_default(),
         };
 
         // The CLI envelope; we only need these fields (serde ignores the rest).

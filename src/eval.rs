@@ -31,6 +31,13 @@ struct UserEdit {
 }
 
 fn parse_user_xmp(xmp: &str) -> UserEdit {
+    // As-shot provenance: under WhiteBalance="As Shot", crs:Temperature/Tint
+    // record the CAMERA's values, not a user edit — counting them charged the
+    // AI a false "omission" for correctly leaving WB as-shot. Any OTHER value
+    // (Custom, Daylight, …) is a user decision; an absent attribute (non-LR /
+    // hand-trimmed sidecar) keeps the Kelvin as intentional.
+    let user_wb = crate::xmp::crs_str(xmp, "WhiteBalance") != Some("As Shot");
+    let wb = |k: &str| if user_wb { crs_f32(xmp, k) } else { None };
     UserEdit {
         fields: vec![
             ("exposure_ev", crs_f32(xmp, "Exposure2012")),
@@ -39,7 +46,7 @@ fn parse_user_xmp(xmp: &str) -> UserEdit {
             ("shadows", crs_f32(xmp, "Shadows2012")),
             ("whites", crs_f32(xmp, "Whites2012")),
             ("blacks", crs_f32(xmp, "Blacks2012")),
-            ("tint", crs_f32(xmp, "Tint")),
+            ("tint", wb("Tint")),
             ("vibrance", crs_f32(xmp, "Vibrance")),
             ("saturation", crs_f32(xmp, "Saturation")),
             ("clarity", crs_f32(xmp, "Clarity2012")),
@@ -47,7 +54,7 @@ fn parse_user_xmp(xmp: &str) -> UserEdit {
             // crs Sharpness is 0..100; recipe sharpening is 0..150.
             ("sharpening", crs_f32(xmp, "Sharpness").map(|s| s * 1.5)),
             ("noise_reduction", crs_f32(xmp, "LuminanceSmoothing")),
-            ("temperature_k", crs_f32(xmp, "Temperature")),
+            ("temperature_k", wb("Temperature")),
         ],
     }
 }
@@ -272,10 +279,15 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         }
 
         // --- master tone curve: did the AI commit to a curve like you did? ---
+        // Entered when EITHER side has a real curve: gating on the user's
+        // alone made an AI-only curve invisible to the metric (an identity
+        // user curve is a valid comparison baseline — curve_lut of no points
+        // is the identity LUT).
         let user_curve = parse_tone_curve(&xmp_text, "ToneCurvePV2012");
-        if user_curve.len() >= 2 {
+        let ai_curve = ai_tone_curve_points(&ai);
+        if user_curve.len() >= 2 || ai_curve.len() >= 2 {
             let ulut = curve_lut(&user_curve);
-            let alut = curve_lut(&ai_tone_curve_points(&ai));
+            let alut = curve_lut(&ai_curve);
             curve_n += 1;
             sum_curve_rmse += curve_rmse(&ulut, &alut);
             sum_user_lift += curve_black_lift(&ulut) as f64;

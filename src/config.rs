@@ -60,15 +60,35 @@ pub fn load_local_settings() -> LocalSettings {
 }
 
 /// Persist the local settings file (the POST /api/settings target).
+/// tmp + rename: `fs::write` truncates in place, so a crash / disk-full mid-
+/// write left partial JSON that `load_local_settings` silently turned into
+/// complete defaults — losing every saved key and model choice.
 pub fn save_local_settings(s: &LocalSettings) -> std::io::Result<PathBuf> {
     let p = local_settings_path();
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&p, serde_json::to_string_pretty(s).unwrap_or_default())?;
+    let tmp = p.with_extension(format!("json.tmp{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(s).unwrap_or_default())?;
+    // The file carries API keys: keep it out of other local users' reach.
+    // Windows AppData is per-user already; on Unix the umask can default the
+    // new file to world-readable 0644.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &p) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(p)
 }
 
+// Clone: the web server snapshots the config OUT of its RwLock before long AI
+// calls — holding the read guard across a multi-minute retouch blocked every
+// settings save for the whole stall window.
+#[derive(Clone)]
 pub struct Config {
     // --- image role: the vision proposer (OpenAI-compatible API only) ---------
     /// API key for the image (vision) role + generative edits. `None` ⇒ the

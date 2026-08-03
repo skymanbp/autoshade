@@ -84,12 +84,32 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
         println!("        configure providers + keys in the in-app Settings (⚙) panel.");
     }
 
+    // Bounded request concurrency: thread-per-request with NO cap let a burst
+    // of expensive requests (an upload alone can hold ~500 MiB) stack
+    // unbounded threads and memory. Eight far exceeds a single-user browser's
+    // real parallelism; excess requests WAIT in the accept loop (browsers
+    // queue politely) instead of failing.
+    const MAX_CONCURRENT: usize = 8;
+    let gate = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
     for request in server.incoming_requests() {
         let state = Arc::clone(&state);
+        let gate = Arc::clone(&gate);
+        {
+            let (lock, cv) = &*gate;
+            let mut n = lock.lock().unwrap_or_else(|p| p.into_inner());
+            while *n >= MAX_CONCURRENT {
+                n = cv.wait(n).unwrap_or_else(|p| p.into_inner());
+            }
+            *n += 1;
+        }
         std::thread::spawn(move || {
             if let Err(e) = handle(request, &state) {
                 eprintln!("request error: {e}");
             }
+            let (lock, cv) = &*gate;
+            let mut n = lock.lock().unwrap_or_else(|p| p.into_inner());
+            *n = n.saturating_sub(1);
+            cv.notify_one();
         });
     }
     Ok(())
@@ -131,10 +151,30 @@ fn handle(mut request: Request, state: &AppState) -> Result<()> {
     // the terminal. `{:#}` carries anyhow's whole source chain into the body.
     let reply = reply.unwrap_or_else(|e| {
         eprintln!("request error ({path}): {e:#}");
-        status_response(500, &format!("{e:#}"))
+        // A CLIENT-caused failure (malformed JSON, bad id) answers 400 — the
+        // blanket 500 told the web UI the SERVER broke.
+        let status = if e.downcast_ref::<ClientErr>().is_some() { 400 } else { 500 };
+        status_response(status, &format!("{e:#}"))
     });
     request.respond(reply).map_err(Into::into)
 }
+
+/// Serializes the backup-gate + sidecar writes WITHIN this process: two
+/// threaded requests saving the same photo could interleave between
+/// `backup_saved_develop` and `write_recipe`, overwriting a save that never
+/// got its v<N> snapshot. (Cross-PROCESS races remain the recorded v0.13
+/// trade-off.)
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Marker for client-caused failures — `handle` maps these to HTTP 400.
+#[derive(Debug)]
+struct ClientErr(String);
+impl std::fmt::Display for ClientErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ClientErr {}
 
 // --- handlers --------------------------------------------------------------
 
@@ -235,8 +275,13 @@ fn api_import(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let mut added = 0usize;
     {
         let mut raws = state.raws.write().map_err(|_| anyhow!("lock poisoned"))?;
+        // Set-based dedupe: the old linear `contains` per candidate was
+        // O(M×N) under the EXCLUSIVE lock — a big folder import froze every
+        // reader for the whole scan. `insert` (not `contains`) keeps the old
+        // semantics for duplicates WITHIN one import batch too.
+        let mut existing: std::collections::HashSet<PathBuf> = raws.iter().cloned().collect();
         for np in found {
-            if !raws.contains(&np) {
+            if existing.insert(np.clone()) {
                 raws.push(np);
                 added += 1;
             }
@@ -346,7 +391,10 @@ fn api_upload(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 /// slider gesture, and decoding it is orders of magnitude dearer than the develop
 /// itself. mtime in the key is the invalidation: an overwritten source misses and
 /// re-decodes. `cap` bounds the memory; entries are evicted in insertion order.
-type BaseCache = Mutex<Vec<(PathBuf, std::time::SystemTime, Arc<DynamicImage>)>>;
+// Identity = (mtime, size): mtime alone misses a same-timestamp overwrite on
+// coarse-granularity filesystems (thumb + mask caches carry size for the same
+// reason).
+type BaseCache = Mutex<Vec<(PathBuf, (std::time::SystemTime, u64), Arc<DynamicImage>)>>;
 
 fn cached_base(
     cache: &BaseCache,
@@ -354,8 +402,10 @@ fn cached_base(
     raw: &Path,
     build: impl FnOnce() -> Result<DynamicImage>,
 ) -> Result<Arc<DynamicImage>> {
-    let mtime = std::fs::metadata(raw).and_then(|m| m.modified()).ok();
-    if let Some(t) = mtime {
+    let ident = std::fs::metadata(raw)
+        .ok()
+        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+    if let Some(t) = ident {
         // No user code runs under the lock, so poisoning is not reachable —
         // recover anyway rather than turning a past panic into a new one.
         let list = cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -364,9 +414,9 @@ fn cached_base(
         }
     }
     let img = Arc::new(build()?);
-    if let Some(t) = mtime {
+    if let Some(t) = ident {
         let mut list = cache.lock().unwrap_or_else(|p| p.into_inner());
-        list.retain(|(p, _, _)| p != raw); // a stale-mtime entry for this path is dead
+        list.retain(|(p, _, _)| p != raw); // a stale-identity entry for this path is dead
         if list.len() >= cap {
             list.remove(0); // small Vec in insertion order → evict the oldest insert
         }
@@ -487,7 +537,17 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // Central first; then any legacy file a failed migration left behind.
     let mut parse_err: Option<String> = None;
     for path in [crate::store::recipe_target(&raw), crate::store::legacy_recipe(&raw)] {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            // Missing IS absence; any OTHER read failure (permissions, I/O)
+            // is an EXISTING save we could not honour — treating it as
+            // absent silently resurrected stale legacy/XMP edits over it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                parse_err = Some(format!("cannot read {}: {e}", path.display()));
+                continue;
+            }
+        };
         // VALIDATE before serving. The policy stays "verbatim" — the file is the
         // authority and re-serialising would drop anything a newer schema wrote —
         // but a CORRUPT file served as-is made the browser's `await rr.json()`
@@ -813,8 +873,10 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         )
     });
     let guidance = region_guidance.as_deref().or(req.guidance.as_deref());
-    // base = Some → refine the current edit; None → fresh proposal from original.
-    let cfg = state.config();
+    // base = Some → refine the current edit; None → fresh proposal from
+    // original. SNAPSHOT the config — the read guard must not sit across the
+    // whole AI chain blocking every settings save.
+    let cfg = state.config().clone();
     let style = req.style_strength.unwrap_or(cfg.style_strength);
     // The analyze pipeline proposes/verifies over the camera's embedded
     // preview, where the base look AND the lens corrections are already IN
@@ -833,13 +895,20 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // that FAILS (locked / unreadable existing save) means we must not write at
     // all: handing back an unsaved proposal beats overwriting a save we could
     // not protect.
+    let _save = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     match crate::store::backup_saved_develop(&raw, Some(&recipe)) {
         Ok(backed_up) => {
             pipeline::write_recipe(&raw, &recipe, None)?;
-            if decode::is_raw(&raw) {
-                pipeline::write_xmp(&raw, &recipe)?;
-            }
+            // The recipe write ALONE decides the saved state (the GUI/CLI
+            // rule): a failed XMP projection degrades to a warning — the old
+            // `?` answered 500 and hid the committed save from the browser.
             let mut body = json!({ "recipe": recipe, "verdict": verdict, "saved": true });
+            if decode::is_raw(&raw)
+                && let Err(e) = pipeline::write_xmp(&raw, &recipe)
+            {
+                body["warning"] =
+                    json!(format!("saved, but the Lightroom XMP projection failed: {e:#}"));
+            }
             if let Some(n) = backed_up {
                 body["backed_up"] = json!(n);
             }
@@ -978,7 +1047,10 @@ fn sweep_stale_temp_files() {
     for e in rd.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
-        if !(name.starts_with("autoshop_dl_") || name.starts_with("autoshop_mask_")) {
+        if !(name.starts_with("autoshop_dl_")
+            || name.starts_with("autoshop_mask_")
+            || name.starts_with("autoshop_heal_"))
+        {
             continue;
         }
         let stale = e.metadata().and_then(|m| m.modified()).map(|t| t < cutoff).unwrap_or(false);
@@ -990,7 +1062,9 @@ fn sweep_stale_temp_files() {
 
 fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let req: XmpReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
+    // Same intra-process save serialization as api_analyze.
+    let _save = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // Reset-then-Save means "clear my edits", exactly as in the GUI's `save_xmp`:
     // writing a NEUTRAL pair would pin a permanent ● edited badge with no in-app
     // way to remove it (and the GUI then reports a no-op save on every open).
@@ -1034,8 +1108,15 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // writing the XMP first meant a failed recipe write left a NEW XMP shadowed
     // by the STALE recipe both surfaces prefer.
     pipeline::write_recipe(&raw, &req.recipe, None)?;
-    let path = pipeline::write_xmp(&raw, &req.recipe)?;
-    Ok(text_response(&path.display().to_string()))
+    // Recipe committed = saved (the cross-surface rule): a failed XMP
+    // projection reports success WITH the warning instead of a 500 that
+    // contradicts the on-disk state.
+    match pipeline::write_xmp(&raw, &req.recipe) {
+        Ok(path) => Ok(text_response(&path.display().to_string())),
+        Err(e) => Ok(text_response(&format!(
+            "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}"
+        ))),
+    }
 }
 
 /// Generative fill (Phase 4 in the UI): the browser posts a painted RGBA mask
@@ -1064,12 +1145,18 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     if let Err(e) = std::fs::write(&mask_tmp, &mask_bytes) {
         return Ok(status_response(500, &format!("stage mask: {e}")));
     }
-    let out = pipeline::default_out(&raw, "retouch", "png");
-    let cfg = state.config();
+    // Atomically CLAIMED unique name (retouch, retouch-2, …): the fixed
+    // default_out name let a rerun overwrite a master an earlier develop —
+    // possibly a GUI-saved pixels.json — still references.
+    let Some(out) = pipeline::unique_out(&raw, "retouch") else {
+        return Ok(status_response(500, "no free retouch output name (999 in ./out)"));
+    };
+    // Config SNAPSHOT, not the read guard: holding the RwLock across the
+    // multi-minute AI call blocked every settings save until it finished.
+    let cfg = state.config().clone();
     let quality = req.quality.unwrap_or_else(|| cfg.openai_image_quality.clone());
     let result =
         crate::generative::retouch(&cfg, &raw, &mask_tmp, &req.prompt, &quality, req.full_res, &out);
-    drop(cfg);
     let _ = std::fs::remove_file(&mask_tmp);
     match result {
         Ok(()) => {
@@ -1134,10 +1221,12 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         }
         _ => None,
     };
-    let out = pipeline::default_out(&raw, "heal", "png");
-    let cfg = state.config();
+    // Same unique-claim + config-snapshot rules as api_retouch (see there).
+    let Some(out) = pipeline::unique_out(&raw, "heal") else {
+        return Ok(status_response(500, "no free heal output name (999 in ./out)"));
+    };
+    let cfg = state.config().clone();
     let result = crate::retouch::heal(&cfg, &raw, mask_tmp.as_deref(), req.auto, req.full_res, &out);
-    drop(cfg);
     if let Some(t) = &mask_tmp {
         let _ = std::fs::remove_file(t);
     }
@@ -1233,8 +1322,8 @@ fn is_baked_ext(p: &Path) -> bool {
 fn raw_for(request: &Request, state: &AppState) -> Result<PathBuf> {
     let id = query_param(request.url(), "id")
         .and_then(|v| v.parse::<usize>().ok())
-        .ok_or_else(|| anyhow!("missing/invalid id"))?;
-    state.at(id).ok_or_else(|| anyhow!("bad id"))
+        .ok_or_else(|| anyhow!(ClientErr("missing/invalid id".into())))?;
+    state.at(id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))
 }
 
 /// Percent-decode a value (e.g. an `encodeURIComponent`-encoded filename) back to
@@ -1311,9 +1400,23 @@ fn query_param(url: &str, key: &str) -> Option<String> {
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T> {
+    // Bounded: an unbounded read_to_string materialized an arbitrarily large
+    // (or hostile) body in memory before parsing ever ran. 256 MiB clears any
+    // legitimate payload (the largest is a full-res mask base64) many times
+    // over.
+    use std::io::Read as _;
+    const BODY_CAP: u64 = 256 * 1024 * 1024;
     let mut body = String::new();
-    request.as_reader().read_to_string(&mut body).context("read body")?;
-    serde_json::from_str(&body).context("parse request JSON")
+    // UFCS: `as_reader` hands out `&mut dyn Read`; autoref would try `take`
+    // on the UNSIZED trait object, but the sized `&mut dyn Read` itself
+    // implements Read.
+    std::io::Read::take(request.as_reader(), BODY_CAP + 1)
+        .read_to_string(&mut body)
+        .context("read body")?;
+    if body.len() as u64 > BODY_CAP {
+        anyhow::bail!(ClientErr(format!("request body exceeds {} MiB", BODY_CAP / (1024 * 1024))));
+    }
+    serde_json::from_str(&body).map_err(|e| anyhow!(ClientErr(format!("parse request JSON: {e}"))))
 }
 
 // Response builders. They BUILD a response rather than consuming the request, so

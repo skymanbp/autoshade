@@ -240,6 +240,7 @@ impl LensProfile {
 /// Normalised crop rectangle. All values in [0.0, 1.0], with (0,0) at the
 /// top-left of the full frame.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Crop {
     pub left: f32,
     pub top: f32,
@@ -249,6 +250,7 @@ pub struct Crop {
 
 /// A single point on the master tone curve.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CurvePoint {
     /// Input value, 0..=255.
     pub input: u8,
@@ -488,6 +490,10 @@ impl MaskRole {
 
 /// Where a local adjustment applies. Coordinates are normalised to the frame and
 /// MAY fall outside [0,1] for gradients (matching ACR's geometry).
+// KNOWN BOUNDARY: serde does not support `deny_unknown_fields` on
+// internally-tagged enums (this one and RangeMask) — an unknown field inside
+// a variant deserializes silently and is dropped on the next rewrite. The
+// top-level recipe and every plain struct DO deny.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MaskGeometry {
@@ -549,7 +555,11 @@ impl EditRecipe {
     /// instructed to stay in range, but we never trust the input blindly —
     /// an out-of-range value would otherwise corrupt the render downstream.
     pub fn clamp(&mut self) {
-        let c = |v: f32, lo: f32, hi: f32| v.clamp(lo, hi);
+        // f32::clamp passes a NaN receiver STRAIGHT THROUGH — a non-finite
+        // slider from malformed input (hand-edited JSON, foreign XMP) must
+        // collapse to the neutral 0.0 instead, the same corrupt-component-
+        // goes-inert rule the crop and range-mask guards below follow.
+        let c = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0 };
         self.exposure_ev = c(self.exposure_ev, -5.0, 5.0);
         self.contrast = c(self.contrast, -100.0, 100.0);
         self.highlights = c(self.highlights, -100.0, 100.0);
@@ -571,14 +581,19 @@ impl EditRecipe {
         self.lens_profile.clamp();
         self.straighten_deg = c(self.straighten_deg, -45.0, 45.0);
         self.confidence = c(self.confidence, 0.0, 1.0);
-        if let Some(k) = self.temperature_k {
+        self.temperature_k = match self.temperature_k {
             // Ceiling matches the render engine's blackbody fit validity (kelvin_to_rgb
             // is documented + re-clamped to 1000..40000); keep one source of truth so
             // the recipe never carries a Kelvin the engine would silently re-clamp.
-            self.temperature_k = Some(c(k, 2000.0, 40000.0));
-        }
+            Some(k) if k.is_finite() => Some(k.clamp(2000.0, 40000.0)),
+            // A non-finite Kelvin cannot fall back to the closure's 0.0 (out
+            // of range) — corrupt WB goes back to as-shot.
+            _ => None,
+        };
         // Base-look knots are luma coordinates — anything outside [0,1] is
         // corrupt input (monotonisation is the LUT builder's job, values here).
+        // A non-finite knot survives f32::clamp: drop it outright.
+        self.base_curve.retain(|p| p[0].is_finite() && p[1].is_finite());
         for p in self.base_curve.iter_mut() {
             p[0] = p[0].clamp(0.0, 1.0);
             p[1] = p[1].clamp(0.0, 1.0);
@@ -615,25 +630,29 @@ impl EditRecipe {
         }
         // Clamp each local adjustment to the same UI ranges as the globals.
         for m in self.masks.iter_mut() {
-            m.amount = m.amount.clamp(0.0, 1.0);
-            m.exposure_ev = m.exposure_ev.clamp(-5.0, 5.0);
+            // Same finite-or-neutral closure as the globals: a NaN amount
+            // used to survive and poison every weighted blend downstream.
+            m.amount = c(m.amount, 0.0, 1.0);
+            m.exposure_ev = c(m.exposure_ev, -5.0, 5.0);
             for v in [
                 &mut m.contrast, &mut m.highlights, &mut m.shadows, &mut m.whites,
                 &mut m.blacks, &mut m.clarity, &mut m.dehaze, &mut m.texture,
                 &mut m.saturation, &mut m.temperature, &mut m.tint,
             ] {
-                *v = (*v).clamp(-100.0, 100.0);
+                *v = c(*v, -100.0, 100.0);
             }
-            m.noise_reduction = m.noise_reduction.clamp(0.0, 100.0);
+            m.noise_reduction = c(m.noise_reduction, 0.0, 100.0);
             // Recolour gains: keep each channel strictly positive and inside
             // a generous-but-sane range (0 would kill a channel outright; the
             // real repaint demands measure ≲ 3×). Neutral-ish gains collapse
             // back to None so a hand-rounded recipe stays clean.
             if let Some(g) = &mut m.color_gains {
-                for c in g.iter_mut() {
-                    *c = c.clamp(0.05, 8.0);
+                for ch in g.iter_mut() {
+                    // Neutral gain is 1.0 — the right inert value for a
+                    // non-finite channel (0.0 would kill the channel).
+                    *ch = if ch.is_finite() { ch.clamp(0.05, 8.0) } else { 1.0 };
                 }
-                if g.iter().all(|c| (c - 1.0).abs() < 1e-3) {
+                if g.iter().all(|ch| (ch - 1.0).abs() < 1e-3) {
                     m.color_gains = None;
                 }
             }

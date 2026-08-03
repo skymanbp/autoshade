@@ -45,7 +45,7 @@ impl Advisor for OpenAiVerifier {
             )
         })?;
         let prompt = build_verify_prompt(recipe, meta, hist)?;
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [{ "role": "user", "content": prompt }],
             "temperature": 0
@@ -55,13 +55,31 @@ impl Advisor for OpenAiVerifier {
         // reasoning-class verifier still outgrows any fixed overall budget.
         // Streaming-first: token deltas prove liveness, the budget bounds
         // silence, and the reassembled value keeps the blocking shape below.
-        let value: Value = super::post_ai_json(
+        let value: Value = match super::post_ai_json(
             &url,
             key,
-            body,
+            body.clone(),
             super::VERIFY_TIMEOUT_SECS,
             super::SseFamily::Chat,
-        )?;
+        ) {
+            // Reasoning-class models accept only the DEFAULT temperature and
+            // reject the deterministic pin with a 400 blaming it — the pin is
+            // a preference, not a requirement, so drop it and retry once
+            // (same attribution rule as every negotiated knob).
+            Err(AdvisorError::Http { status: 400 | 404 | 422, body: b })
+                if super::error_blames_param(&b, "temperature") =>
+            {
+                eprintln!(
+                    "  note: {} rejected temperature=0 — retrying without the pin",
+                    self.model
+                );
+                if let Some(o) = body.as_object_mut() {
+                    o.remove("temperature");
+                }
+                super::post_ai_json(&url, key, body, super::VERIFY_TIMEOUT_SECS, super::SseFamily::Chat)?
+            }
+            other => other?,
+        };
 
         let text = value
             .get("choices")

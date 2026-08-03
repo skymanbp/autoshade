@@ -60,20 +60,32 @@ def _download(url, dest):
     # Unique temp per process: two first-time runs racing on ONE ".part"
     # truncated each other and could publish a corrupted download.
     tmp = f"{dest}.{os.getpid()}.part"
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("Content-Length", 0))
-        done = 0
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                f.write(chunk)
-                done += len(chunk)
-                if total:
-                    pct = 100 * done / total
-                    print(f"\r[denoise]   {done >> 20}/{total >> 20} MB ({pct:4.1f}%)",
-                          end="", file=sys.stderr, flush=True)
-    print("", file=sys.stderr)
-    os.replace(tmp, dest)
+    try:
+        with requests.get(url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length", 0))
+            done = 0
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        pct = 100 * done / total
+                        print(f"\r[denoise]   {done >> 20}/{total >> 20} MB ({pct:4.1f}%)",
+                              end="", file=sys.stderr, flush=True)
+        print("", file=sys.stderr)
+        os.replace(tmp, dest)
+    finally:
+        # A failed / interrupted download must not accumulate per-process
+        # .part litter in the cache (after os.replace this is a no-op).
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                # why: best-effort cleanup on the ERROR path — the original
+                # download exception is already propagating; an unremovable
+                # .part (AV lock) must not replace it with a cleanup error.
+                pass
 
 
 def _install_timm_shim():

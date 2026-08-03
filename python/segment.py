@@ -19,6 +19,7 @@ render engine samples bilinearly — so edges come pre-feathered.
 """
 
 import argparse
+import os
 import sys
 
 
@@ -101,7 +102,23 @@ def main() -> None:
 
     mask = subject_mask(a.input) if a.target == "subject" else sky_mask(a.input)
     mask = mask.convert("L")
-    mask.save(a.output)
+    # tmp + os.replace: a direct save truncates in place, so an interrupted /
+    # failed / racing rerun could corrupt a mask a saved recipe already
+    # references (fixed names like mask-sky.png outlive this process). The
+    # .png suffix keeps PIL's format inference; os.replace is atomic on
+    # Windows and POSIX.
+    tmp = f"{a.output}.{os.getpid()}.tmp.png"
+    try:
+        mask.save(tmp)
+        os.replace(tmp, a.output)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                # why: best-effort cleanup on the error path — the original
+                # save/replace exception is already propagating.
+                pass
     print(f"segment.py: {a.target} mask -> {a.output}")
 
 
