@@ -74,6 +74,9 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
     });
     let addr = format!("127.0.0.1:{port}");
     let server = Server::http(&addr).map_err(|e| anyhow!("start server on {addr}: {e}"))?;
+    // Reclaim download/mask temp files a previous run failed to unlink —
+    // Windows has no automatic %TEMP% cleaner, so nobody else ever would.
+    sweep_stale_temp_files();
     println!("Autoshop UI: {n} source(s) under {}", dir.display());
     println!("  open  →  http://{addr}");
     if state.config().openai_api_key.is_none() {
@@ -407,7 +410,9 @@ fn develop_base(raw: &Path) -> Result<Arc<DynamicImage>> {
     let _serialised = BUILD.lock().unwrap_or_else(|p| p.into_inner());
     cached_base(CACHE.get_or_init(Default::default), 4, raw, || {
         let full = if decode::is_raw(raw) {
-            render::render_to_image(raw, &EditRecipe::default(), None)?
+            // Develop AT the preview edge (the cap runs before tone/geometry)
+            // — the old full-sensor develop existed only to be thumbnailed.
+            render::render_to_image(raw, &EditRecipe::default(), None, Some(PREVIEW_EDGE))?
         } else {
             decode::load_image(raw)?
         };
@@ -678,6 +683,12 @@ struct AnalyzeReq {
     /// edit; the direction is then applied to a mask over that region.
     #[serde(default)]
     region: Option<Region>,
+    /// The recipe whose GEOMETRY (lens / straighten / crop) produced the
+    /// preview the box was dragged on. Sent whenever a region is set — even on
+    /// a fresh (non-refine) analyze — so the box can be mapped back into the
+    /// original frame the analysis preview and recipe masks live in.
+    #[serde(default)]
+    view: Option<EditRecipe>,
 }
 
 #[derive(Deserialize)]
@@ -722,21 +733,82 @@ struct RetouchReq {
     full_res: bool,
 }
 
+/// Map a dragged region from the DISPLAYED After frame (post lens geometry,
+/// straighten and user crop) back into the ORIGINAL frame. Un-crop first
+/// (recipe.crop lives in the view frame), then the engine's shared
+/// view→original map per corner; the bounding box of the mapped corners is the
+/// honest axis-aligned target (same policy as the GUI's radial display map).
+/// Identity when the viewing recipe has no geometry; if the source dims can't
+/// be read the box passes through unmapped (the pre-fix behaviour) rather than
+/// failing the analyze.
+fn region_to_original(
+    g: &Region,
+    view: Option<&EditRecipe>,
+    raw: &Path,
+) -> (f32, f32, f32, f32) {
+    let unmapped = (g.left, g.top, g.right, g.bottom);
+    let Some(rec) = view else { return unmapped };
+    let lens_on = rec.lens_distortion != 0.0
+        || (rec.lens_profile.distortion_on && !rec.lens_profile.distortion.is_empty());
+    if rec.crop.is_none() && rec.straighten_deg == 0.0 && !lens_on {
+        return unmapped;
+    }
+    let Some(dims) = source_dims(raw) else { return unmapped };
+    let (cl, ct, cr, cb) = rec
+        .crop
+        .as_ref()
+        .map_or((0.0, 0.0, 1.0, 1.0), |c| (c.left, c.top, c.right, c.bottom));
+    let corners = [(g.left, g.top), (g.right, g.top), (g.left, g.bottom), (g.right, g.bottom)];
+    let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (vx, vy) in corners {
+        let sx = cl + vx * (cr - cl);
+        let sy = ct + vy * (cb - ct);
+        let (ox, oy) = render::view_to_original_norm(
+            sx,
+            sy,
+            dims,
+            rec.straighten_deg,
+            &rec.lens_profile,
+            rec.lens_distortion,
+        );
+        l = l.min(ox);
+        t = t.min(oy);
+        r = r.max(ox);
+        b = b.max(oy);
+    }
+    (l, t, r, b)
+}
+
+/// Dims of the oriented source frame — only the ASPECT matters to the
+/// normalised geometry maps, so preview-scale dims are exact. RAW: the
+/// oriented embedded preview (a decode, but analyze is already a multi-second
+/// AI call); baked sources: a header-only dimension read.
+fn source_dims(raw: &Path) -> Option<(f32, f32)> {
+    if decode::is_raw(raw) {
+        let img = decode::embedded_preview(raw).ok()??;
+        Some((img.width() as f32, img.height() as f32))
+    } else {
+        image::image_dimensions(raw).ok().map(|(w, h)| (w as f32, h as f32))
+    }
+}
+
 fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let req: AnalyzeReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
     // A dragged region anchors the edit: fold its coords into the direction so the
     // AI places a mask over exactly that box (reuses the Phase-2 area→mask prompt).
+    // The box was dragged on the DISPLAYED preview (post lens/straighten/crop);
+    // the AI proposes over the embedded preview and masks live in the ORIGINAL
+    // frame — map the corners back through the inverse geometry first, or any
+    // active geometry offsets the mask from what the user boxed.
     let region_guidance = req.region.as_ref().map(|g| {
+        let view = req.view.as_ref().or(req.base.as_ref());
+        let (l, t, r, b) = region_to_original(g, view, &raw);
         format!(
-            "The user SELECTED a target region (normalized 0..1 frame coords): left={:.3} top={:.3} \
-             right={:.3} bottom={:.3}. Apply the direction ONLY to that region — emit a mask covering \
+            "The user SELECTED a target region (normalized 0..1 frame coords): left={l:.3} top={t:.3} \
+             right={r:.3} bottom={b:.3}. Apply the direction ONLY to that region — emit a mask covering \
              it (a radial mask with those exact left/top/right/bottom bounds and feather ~0.4 is \
              ideal, or a linear gradient for a thin edge band). Direction: {}",
-            g.left,
-            g.top,
-            g.right,
-            g.bottom,
             req.guidance.as_deref().unwrap_or("make a tasteful local improvement"),
         )
     });
@@ -876,14 +948,38 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     if let Some(h) = header("Content-Disposition", &disposition) {
         resp = resp.with_header(h);
     }
-    // Windows cannot delete a file with an open read handle — this succeeds
-    // on Unix now and is retried by the OS temp cleaner on Windows; the
-    // process-id + sequence name prevents collisions either way.
+    // Unlink while the stream handle is open: works on Unix, and on Windows
+    // too (std opens files with FILE_SHARE_DELETE, and Win10+ deletes
+    // POSIX-style — verified empirically on this exact pattern). The failure
+    // tail — an AV scanner/indexer briefly holding the file without delete
+    // sharing, or a crash between render and unlink — would leak forever
+    // because Windows has NO automatic %TEMP% cleaner; those stragglers are
+    // age-swept at the next server start (`sweep_stale_temp_files`).
     let _ = std::fs::remove_file(&tmp);
     Ok(resp.boxed())
 }
 
 static DL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Best-effort sweep of leftover `autoshop_dl_*` / `autoshop_mask_*` temp
+/// files from previous runs (crash before unlink, or an unlink refused by a
+/// scanner's non-sharing handle). Age-gated at one hour so an in-flight
+/// download owned by a parallel server instance is never touched.
+fn sweep_stale_temp_files() {
+    let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with("autoshop_dl_") || name.starts_with("autoshop_mask_")) {
+            continue;
+        }
+        let stale = e.metadata().and_then(|m| m.modified()).map(|t| t < cutoff).unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
 
 fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let req: XmpReq = read_json(request)?;
@@ -908,6 +1004,9 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             pipeline::xmp_target(&raw),
             crate::store::legacy_recipe(&raw),
             crate::store::legacy_xmp(&raw),
+            // The GUI's baked-pixels link too — a "cleared" answer here must
+            // not let the next GUI open resurrect a retouched master.
+            crate::store::pixel_source_path(&raw),
         ] {
             if let Some(e) = del(&p) {
                 first_err.get_or_insert(e);

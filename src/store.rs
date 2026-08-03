@@ -100,6 +100,95 @@ pub fn raster_target(src: &Path, kind: &str) -> PathBuf {
     develop_dir(src).join(format!("{kind}.png"))
 }
 
+/// Sidecar recording the saved develop's PIXEL SOURCE when it is a baked
+/// raster — an in-place heal/clone/fill/denoise master, or a reimagine
+/// rendition. The recipe/XMP are parametric and cannot carry baked pixels;
+/// without this record, reopening a photo silently reverted the canvas to the
+/// un-retouched source (the "variant linkage lost on navigation" boundary).
+pub fn pixel_source_path(src: &Path) -> PathBuf {
+    develop_dir(src).join("pixels.json")
+}
+
+/// Record `origin` as the photo's baked pixel source. Stored by bare name when
+/// it already lives inside the develop dir (relocatable, like mask rasters);
+/// otherwise ABSOLUTIZED — an `out/`-relative master would silently stop
+/// resolving the moment the app is launched from a different directory.
+pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io::Result<()> {
+    let dir = develop_dir(src);
+    std::fs::create_dir_all(&dir)?;
+    let stored: PathBuf = if origin.parent() == Some(dir.as_path()) {
+        origin.file_name().map(PathBuf::from).unwrap_or_else(|| origin.to_path_buf())
+    } else {
+        std::path::absolute(origin)?
+    };
+    let doc = serde_json::json!({
+        "origin": stored.to_string_lossy(),
+        "kind": if generated { "generated" } else { "inplace" },
+    });
+    // Same publish discipline as recipe.json: per-process AND per-call tmp
+    // name (the web server threads requests), and the old file is RETIRED to
+    // .bak rather than deleted before the rename — a crash in the window
+    // then leaves the previous linkage recoverable beside the photo, never
+    // nothing at all (Windows rename cannot replace an existing target).
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let target = pixel_source_path(src);
+    let tmp = dir.join(format!(
+        "pixels.json.tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)?)?;
+    if target.exists() {
+        let bak = dir.join("pixels.json.bak");
+        let _ = std::fs::remove_file(&bak);
+        std::fs::rename(&target, &bak)?;
+    }
+    std::fs::rename(&tmp, &target)
+}
+
+/// Forget the baked pixel source (the develop went back to parametric-only).
+pub fn clear_pixel_source(src: &Path) {
+    let _ = std::fs::remove_file(pixel_source_path(src));
+}
+
+/// The photo's recorded baked pixel source, if it still resolves on disk:
+/// `(master_path, is_generated)`. A missing sidecar is silent (the normal
+/// parametric-only case); an EXISTING sidecar that cannot be honoured —
+/// unreadable JSON or a deleted/moved master — degrades to `None` with a
+/// stderr warning, so "the canvas reverted to the un-retouched source" stays
+/// traceable instead of looking like data loss with no cause.
+pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
+    let sidecar = pixel_source_path(src);
+    let bytes = std::fs::read(&sidecar).ok()?;
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        eprintln!(
+            "⚠ {} is unreadable — the baked retouch master is not restored",
+            sidecar.display()
+        );
+        return None;
+    };
+    let Some(origin) = doc.get("origin").and_then(|o| o.as_str()) else {
+        eprintln!(
+            "⚠ {} has no origin field — the baked retouch master is not restored",
+            sidecar.display()
+        );
+        return None;
+    };
+    let generated = doc.get("kind").and_then(|k| k.as_str()) == Some("generated");
+    let mut path = PathBuf::from(origin);
+    if path.is_relative() {
+        path = develop_dir(src).join(path);
+    }
+    if !path.exists() {
+        eprintln!(
+            "⚠ baked master {} is gone — the retouched canvas cannot be restored (the develop falls back to the source)",
+            path.display()
+        );
+        return None;
+    }
+    Some((path, generated))
+}
+
 /// The style reference index — one per user, not per photo.
 pub fn style_index_path() -> PathBuf {
     store_root().join("style-index.json")

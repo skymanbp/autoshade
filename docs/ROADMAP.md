@@ -19,6 +19,79 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **在案后续工作全清批（2026-08-03，用户令"把所有后续工作推完"）**——
+  此前三个 backlog 池（v0.14.1 内存专项 4 项 + v0.14.2 待办 2 项 +
+  32 路舰队立项 7 项）一次性全部落地：
+  - **像素修饰变体关联持久化**：新 store 边车 `pixels.json`
+    （store.rs `write/read/clear_pixel_source`，库外 origin 绝对化、库内
+    裸名）；Ctrl+S 随 recipe 写/清（gui `save_xmp`，保存文案改真话——
+    重新打开会恢复）；打开 worker 连带解码烘焙母版（`OpenedBase` 第 4 元
+    `BakedBase`），fresh-open/px 重解码两分支恢复（px 重解码还把 undo 栈
+    Arc 重指新分辨率母版）；`nav_stash` 升级为 `StashEntry`（recipe+像素
+    身份，wholesale 优先于磁盘）；退出层 pending 携带像素身份、Save-all
+    同写；关窗守卫把"像素未保存"也算 unsaved；`forget_open_base` 在修饰
+    落地/保存/清除时废弃 LRU。验收：修瑕疵→保存→关→重开，画布仍是修
+    过的像素。
+  - **GUI worker 取消 + 进度**：状态栏 busy 时对修饰族显示「✕ Cancel」；
+    取消=epoch 弃用（`gen_epoch`/`Msg::Retouched(u64,..)` 迟到结果整体丢
+    弃、UI 立即解锁）+ generative 线程局部 `WorkerHooks`（fill/reimagine
+    传播 cancel 旗标：协商环顶/每 SSE 事件/合成前三处检查点真停流）；
+    partial-image 心跳与协商备注经 `Msg::Progress` 进状态栏。
+  - **61MP 内存专项（8 子项全落地）**：① render_to_image 加 `max_edge`
+    （orient 后 develop 前 f32 降采样 `downscale_f32`，demosaic 后全链在
+    工作分辨率跑）——9 调用点接线：GUI 开照 Some(edge)（开照不再全幅驻
+    留）、heal/clone/fill/denoise 预览基 Some(2048)、reimagine 高清输入
+    Some(2×目标边)、photo_base_knots Some(2048)、web develop_base
+    Some(PREVIEW_EDGE)、导出 None；② 生成合成缓冲生命周期分级（mask_full
+    即建即弃成 weight、16-bit base 提前 drop、box_blur 复用入参、
+    composite_in_place 原位混合）——61MP 全幅填充峰值 ~1.8GB→~750MB，
+    输出逐位不变（composite_region 留作 cfg(test) 包装）；③ 色彩取样点击
+    改共享覆盖层 `overlay_ref` 缓存（pre 构造与 overlay 对齐：几何字段剥
+    除后键相等；miss 时反向预热 overlay），采样 25 像素 get_pixel 替代整
+    幅 to_rgb8——2560/4096 预览下点击不再 100-300ms 冻结；④ plan_from_mask
+    painted/seen 改 u64 位集（1/8 内存）+ 坐标表改 u32 索引（减半），半
+    径数学逐位不变；⑤ fit_zoned 分割输入 ≤2048 帽（CLI 全幅帧不再写
+    ~180MB PNG 往返 python；蒙版为归一化数据，引擎任意分辨率重采样）；
+    ⑥ CA 逐通道单采样 `sample_bilinear_ch`（逐位同 math，省 2/3 插值
+    功）；⑦ 位图蒙版缓存加 256MB 字节预算（原 16 条目可钉 ~1GB）；
+    ⑧ 蒙版纹理：笔刷期间脏矩形 `set_partial` 增量上传（无几何常见路径，
+    原每帧全幅克隆+重传；8192 预览 ~270MB/帧）+ 有几何时中笔划 120ms 节
+    流重建。
+  - **web 区域选择几何逆映射**：GUI 的 view→original 复合映射下沉
+    render.rs 唯一实现（`view_to_original_norm`/`original_to_view_norm`，
+    GUI 变薄封装+往返测试）；analyze 带 region 时 web 端随发 `view`（取景
+    配方），serve `region_to_original` 逐角 un-crop→un-rotate→正向畸变映
+    射回原始帧再折入提示词（源尺寸不可读时降级为原行为）。
+  - **杂项**：CJK 字体候选表 cfg 分平台（macOS PingFang/Hiragino、Linux
+    Noto 各发行版布局+文泉驿）；设置窗模型列表按抓取源指纹自动失效
+    （`models_from_base`，换 Base/Bridge URL 或供应商即清列表回退保底
+    项，fetch 起手即清防失败残留）；serve 启动清扫 >1h 的
+    `autoshop_dl_*`/`autoshop_mask_*` 残留（实证 Win11+std 打开句柄下
+    unlink 本已成功——泄漏面是 AV 短暂独占后的永久残留，Windows 无自动
+    %TEMP% 清理器；api_download 撒谎注释同步改真）。
+  **Codex 只读复审 12 条**：8 修——#1 noop 配方+烘焙像素被"清除编辑"路
+    径吞掉（Critical，真：clear 门补 `origin.is_none()`——修瑕疵后
+    Ctrl+S 现在走保存路径写 recipe+pixels）；#2 Some→None 像素转变不算未
+    保存（三处判定改双向比较 `read != origin`）；#3+#4 固定名母版被复跑
+    覆写 / 取消后立即重跑同路径写竞态（`unique_out` 探测唯一名统一五个
+    starter，含 reimagine 收编；999 上限拒绝）；#5 web 中性保存清单补
+    pixels.json；#7b Progress 无 epoch（改 `Progress(u64,..)` 门控）；
+    #8 pixels.json tmp 名加计数+旧档退位 .bak；#9 边车在而不可用时
+    stderr 警告（不再无声回退）；#12 plan_from_mask >u32 索引空间显式拒
+    绝。4 条有据取舍：#6 版本快照不含像素身份（v<N> 先于 pixels.json 设
+    计，**立项**：vN.pixels 快照+恢复流）；#7a 取消对静默流最迟等到
+    600s 静默上限（钩子悬停文案已如实）；#10 库外母版绝对路径不可迁移
+    （./out 本为 cwd 产物，复制进库=每保存全幅 PNG 拷贝，代价不值，注释
+    在案）；#11 降采样先于显影 ≠ 先显影后缩（有意语义——与 GUI 预览同
+    序，CDF 统计与归一化坐标不受影响，注释在案）。
+  基线 **137 lib + 9 gui**（+1：view/original 映射往返），clippy
+  --all-targets（含/不含 gui）-D warnings 双零，i18n 421 调用点 0 dup/
+  0 漂移（+6 键：取消/母版关联/999 上限文案）。已知边界：Generated 变体
+  仍不可 Ctrl+S（无参数化配方，Save-all 例外可存）；取消对本地长算
+  （python 去噪）为弃用式（子进程不杀）；web/CLI 导出与 web 预览不读
+  pixels.json（GUI 级恢复，跨面统一另行立项——web 清除侧已对齐）；版本
+  快照不含像素身份（立项见上）。
+
 - **32 路 gpt-5.6-sol 双视角舰队审查 + 修复/打磨批（2026-08-03，已提交
   未推送）**——用户令"整体 GUI 再打磨一轮 + 派 32 路并行检查 debug，我统筹"。
   执行：fleet32.py（10 片 gui + 2 片 web 带 UX 授权，20 单元全库 debug）
@@ -65,11 +138,10 @@
     线（1488 行明文设计）；crop_imm panic（image crate 会截断）；fit 不盖
     戳/retouch 中性基图/store 迁移并发/feather=1（历史裁决在案）；env 覆盖
     低于 600s 下限（旋钮语义如此）。
-  - **立项/待办**：像素修饰的变体关联持久化（导航后基图链接丢失——会话态
-    设计的已知边界）；web 区域选择的几何逆映射（有几何时错位）；Windows
-    下载临时文件延迟清理；61MP 内存专项扩充（fit_zoned 全幅 PNG、
-    plan_from_mask 坐标表、CA 三通道采样、色彩取样同步显影）；蒙版纹理
-    每帧重传；设置窗模型列表/URL 陈旧性；非 Windows CJK 字体。
+  - ~~**立项/待办**：像素修饰的变体关联持久化；web 区域选择的几何逆映
+    射；Windows 下载临时文件延迟清理；61MP 内存专项扩充；蒙版纹理每帧重
+    传；设置窗模型列表/URL 陈旧性；非 Windows CJK 字体。~~ → **全部已随
+    2026-08-03「在案后续工作全清批」落地**（见上方首条）。
   - Codex 复审 3 条全修：同进程 tmp 撞名（pid+计数）；上传失败清已认领
     残体；NaN 裁剪穿透 clamp（+测试）。
   基线 136 lib（+2：clamp 裁剪、拉直-only XMP 往返）+ 9 gui，clippy
@@ -167,8 +239,9 @@
     威胁模型；DNS 解析不可中断为 ureq 2.12.1 既有性质，旧总死线路径同样
     如此，无回归）；#5 三旗全拒最多 4 次 POST = 单调协商成本，接受；
     #7 GUI busy 在健康长跑期间无界禁用按钮且无取消途径 → 立项待办。
-  - **待办（未做，用户点单再做）**：GUI 生成/修饰 worker 取消按钮（busy
-    期间可中止流式连接）；分片进度透出 GUI 状态栏（当前仅 stderr）。
+  - ~~**待办（未做，用户点单再做）**：GUI 生成/修饰 worker 取消按钮；分
+    片进度透出 GUI 状态栏。~~ → **已随 2026-08-03「在案后续工作全清批」
+    落地**（见上方首条）。
   基线 129 lib（+5：SSE 分帧×3、双形提取、EOF 冲刷并入）+ 9 gui，clippy
   --all-targets 0，i18n 407 调用点 dup/漂移 0。真机验收点：修饰/AI 生成在
   quality=high 大图上不再 ~10 分钟超时（console 见分片心跳行）；僵死代理
@@ -210,9 +283,9 @@
   strict 模式不支持会 400，代码注释已录）；config 空串键（Settings UI
   契约=空即保留）；eval 锐化 ×1.5（与 xmp ×2/3 互逆，正确）；egui
   drag_delta 累加（API 为本帧增量）；undo 24GB（基图为预览分辨率）。
-  **记录为内存专项待办（未做）**：非全分辨率修饰先全幅显影再缩
-  （render 加 max_edge 参数）；生成合成全幅多缓冲分块化；位图蒙版缓存
-  改字节预算；开照全幅驻留优化。验证：**124 lib + 9 gui** 全绿、clippy
+  ~~**记录为内存专项待办（未做）**：非全分辨率修饰先全幅显影再缩；生成
+  合成全幅多缓冲分块化；位图蒙版缓存改字节预算；开照全幅驻留优化。~~
+  → **已随 2026-08-03「在案后续工作全清批」落地**（见上方首条）。验证：**124 lib + 9 gui** 全绿、clippy
   --all-targets 0、i18n 407 键 0/0/0、双 exe（gui 34967155 / cli
   26888658）。
 

@@ -244,33 +244,51 @@ fn heal_one(
 pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
     let (w, h) = mask.dimensions();
     let wu = w as usize;
-    let painted: Vec<bool> = mask.pixels().map(|p| p.0[3] < 128).collect();
-    let mut seen = vec![false; painted.len()];
+    let n_px = wu * h as usize;
+    // The per-blob pixel list stores flat u32 indices; a raster past that
+    // index space (>4.29 G px — far beyond any real canvas) must refuse
+    // loudly, not wrap indices into corrupt radii.
+    if n_px > u32::MAX as usize {
+        eprintln!("⚠ mask raster {w}x{h} exceeds the u32 index space — no heal spots planned");
+        return Vec::new();
+    }
+    // u64 bitsets, not Vec<bool>: at an 8192-edge painted canvas the two flat
+    // maps were ~88 MB of bookkeeping for one bit of information per pixel.
+    let mut painted = vec![0u64; n_px.div_ceil(64)];
+    for (i, p) in mask.pixels().enumerate() {
+        if p.0[3] < 128 {
+            painted[i / 64] |= 1 << (i % 64);
+        }
+    }
+    let mut seen = vec![0u64; painted.len()];
+    let get = |bits: &[u64], i: usize| bits[i / 64] >> (i % 64) & 1 == 1;
     let short = w.min(h) as f32;
     let mut spots = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
-    for start in 0..painted.len() {
-        if !painted[start] || seen[start] {
+    for start in 0..n_px {
+        if !get(&painted, start) || get(&seen, start) {
             continue;
         }
         stack.clear();
         stack.push(start);
-        seen[start] = true;
+        seen[start / 64] |= 1 << (start % 64);
         let (mut sx, mut sy, mut cnt) = (0f64, 0f64, 0u32);
-        let mut pts: Vec<(i32, i32)> = Vec::new();
+        // Flat u32 indices (the exact same pixels the (x,y) pair list held,
+        // at half the bytes) — needed for the second, radius pass below.
+        let mut pts: Vec<u32> = Vec::new();
         while let Some(i) = stack.pop() {
             let (x, y) = ((i % wu) as i32, (i / wu) as i32);
             sx += x as f64;
             sy += y as f64;
             cnt += 1;
-            pts.push((x, y));
+            pts.push(i as u32);
             for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
                 if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
                     continue;
                 }
                 let j = ny as usize * wu + nx as usize;
-                if painted[j] && !seen[j] {
-                    seen[j] = true;
+                if get(&painted, j) && !get(&seen, j) {
+                    seen[j / 64] |= 1 << (j % 64);
                     stack.push(j);
                 }
             }
@@ -281,8 +299,9 @@ pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
         let cxp = (sx / cnt as f64) as f32;
         let cyp = (sy / cnt as f64) as f32;
         let mut rad = 0f32;
-        for (x, y) in &pts {
-            let dd = ((*x as f32 - cxp).powi(2) + (*y as f32 - cyp).powi(2)).sqrt();
+        for i in &pts {
+            let (x, y) = ((*i as usize % wu) as f32, (*i as usize / wu) as f32);
+            let dd = ((x - cxp).powi(2) + (y - cyp).powi(2)).sqrt();
             if dd > rad {
                 rad = dd;
             }
@@ -442,9 +461,10 @@ pub fn heal(
 ) -> Result<HealReport> {
     let is_raw = decode::is_raw(src_path);
     let base = if is_raw {
-        let full =
-            crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None)?;
-        if full_res { full } else { full.thumbnail(2048, 2048) }
+        // Preview mode develops AT ≤2048 (cap before tone/geometry) instead
+        // of developing 61 MP and thumbnailing the result.
+        let cap = if full_res { None } else { Some(2048) };
+        crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None, cap)?
     } else {
         decode::load_image(src_path)?
     };
@@ -508,9 +528,8 @@ pub fn clone_stamp(
     // Same base contract as `heal`: the engine's OWN neutral develop (full or
     // ≤2048px), never the camera's baked preview — see the heal doc comment.
     let base = if is_raw {
-        let full =
-            crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None)?;
-        if full_res { full } else { full.thumbnail(2048, 2048) }
+        let cap = if full_res { None } else { Some(2048) };
+        crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None, cap)?
     } else {
         decode::load_image(src_path)?
     };

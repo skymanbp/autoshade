@@ -65,6 +65,51 @@ const IMAGES_EDIT_STALL_SECS: u64 = 600;
 /// multi-minute generation to a timeout.
 const IMAGES_EDIT_PARTIALS: u32 = 3;
 
+// --- GUI worker wiring (progress heartbeats + cooperative cancel) -----------
+
+/// Hooks a GUI worker installs on ITS OWN thread before a generative call:
+/// `progress` receives the human-readable liveness lines (partial-image
+/// heartbeats, negotiation notes) that otherwise reach only stderr; `cancel`
+/// is a cooperative stop flag checked between negotiation attempts, per
+/// stream event, and before the composite. Thread-local by design — the whole
+/// call runs on the caller's thread, the web server threads requests, and a
+/// process-wide global would cross-wire concurrent callers.
+pub struct WorkerHooks {
+    pub progress: Box<dyn FnMut(String)>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+thread_local! {
+    static WORKER_HOOKS: std::cell::RefCell<Option<WorkerHooks>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install this thread's worker hooks. Workers run on a fresh thread each
+/// (`spawn_worker`), so a hook can never leak onto another task — it dies
+/// with the thread.
+pub fn set_worker_hooks(hooks: Option<WorkerHooks>) {
+    WORKER_HOOKS.with(|h| *h.borrow_mut() = hooks);
+}
+
+/// Mirror a liveness line into the installed GUI hook (no-op elsewhere).
+/// Callers keep their own stderr/stdout prints — CLI output stays identical.
+fn gui_progress(line: &str) {
+    WORKER_HOOKS.with(|h| {
+        if let Some(hooks) = h.borrow_mut().as_mut() {
+            (hooks.progress)(line.trim_start().to_string());
+        }
+    });
+}
+
+/// Cooperative cancel: true once the user hit Cancel in the GUI.
+fn cancelled() -> bool {
+    WORKER_HOOKS.with(|h| {
+        h.borrow().as_ref().is_some_and(|hooks| {
+            hooks.cancel.load(std::sync::atomic::Ordering::Relaxed)
+        })
+    })
+}
+
 /// Full-frame generative restyle (the user's experiment). `fidelity` = "high"
 /// keeps it recognizably the same photo; "low" gives the model free rein.
 /// `quality` is the output tier (low|medium|high|auto).
@@ -86,7 +131,15 @@ pub fn reimagine(
     // upscaled ~1.6 MP preview (input quality bounds faithful-region output).
     let base = if decode::is_raw(raw_path) && sw.max(sh) > w.max(h) {
         println!("  developing full sensor for a sharp high-res input …");
-        crate::render::render_to_image(raw_path, &crate::recipe::EditRecipe::default(), None)?
+        gui_progress("developing full sensor for a sharp high-res input …");
+        // Capped at 2× the API target edge: visually native for the final
+        // Lanczos downsample, ~16× lighter than a full 61 MP develop.
+        crate::render::render_to_image(
+            raw_path,
+            &crate::recipe::EditRecipe::default(),
+            None,
+            Some(sw.max(sh).saturating_mul(2)),
+        )?
     } else {
         src
     };
@@ -127,9 +180,10 @@ pub fn retouch(
 ) -> Result<()> {
     let raw = decode::is_raw(raw_path);
     let base = if raw {
-        let full =
-            crate::render::render_to_image(raw_path, &crate::recipe::EditRecipe::default(), None)?;
-        if full_res { full } else { full.thumbnail(2048, 2048) }
+        // Preview mode develops AT ≤2048 (the cap runs before tone/geometry)
+        // instead of developing 61 MP and thumbnailing the result.
+        let cap = if full_res { None } else { Some(2048) };
+        crate::render::render_to_image(raw_path, &crate::recipe::EditRecipe::default(), None, cap)?
     } else {
         decode::load_image(raw_path)?
     };
@@ -155,18 +209,33 @@ pub fn retouch(
         if full_res && raw { "full-res" } else { "preview" }
     );
     let (result, _used) = call_images_edit(cfg, &png, Some(&mask_png), prompt, "high", &sizes, quality)?;
+    if cancelled() {
+        // The user gave up while the model ran; skip the (full-res) composite
+        // — at 61 MP it is real work whose result would be discarded anyway.
+        return Err(anyhow!("cancelled by user"));
+    }
 
     // Composite the regenerated region back onto the base. Upscale the generative
     // tile to base dimensions; the user's mask (alpha=0 = regenerate) becomes the
-    // blend weight, feathered for a soft seam.
+    // blend weight, feathered for a soft seam. Buffer LIFETIMES are staged so
+    // a 61 MP full-res fill never holds every plane at once (the old
+    // one-expression flow peaked ~1.8 GB; this stays under half of that):
+    // the full-res mask exists only long enough to become the weight plane,
+    // and the 16-bit base drops as soon as its 8-bit composite copy exists.
     let gen_img = image::load_from_memory(&result)
         .context("decode generative result")?
         .resize_exact(bw, bh, FilterType::Lanczos3)
         .to_rgba8();
-    let mask_full = mask_img.resize_exact(bw, bh, FilterType::Nearest).to_rgba8();
-    let base_rgba = base.to_rgba8();
     let feather = ((bw.min(bh) as usize) / 100).clamp(2, 64); // ~1% of short side, capped
-    let composite = composite_region(&base_rgba, &gen_img, &mask_full, feather);
+    let weight = {
+        let mask_full = mask_img.resize_exact(bw, bh, FilterType::Nearest).to_rgba8();
+        let w: Vec<f32> = mask_full.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
+        if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
+    };
+    let mut composite = base.to_rgba8();
+    drop(base); // the 16-bit master (366 MB at 61 MP) is no longer needed
+    composite_in_place(&mut composite, &gen_img, &weight);
+    drop(gen_img);
 
     pipeline::ensure_parent(out)?;
     composite
@@ -262,6 +331,10 @@ fn parse_size(s: &str) -> (u32, u32) {
 /// regenerate), feathering the boundary so the seam is soft. All three share
 /// dimensions. Untouched areas keep the original `base` pixels; only the
 /// inpainted region carries generative pixels.
+/// Test-facing wrapper over the mask→weight→blend chain: the production path
+/// ([`retouch`]) stages the same pieces with explicit buffer lifetimes so a
+/// 61 MP fill never holds every plane at once.
+#[cfg(test)]
 fn composite_region(
     base: &RgbaImage,
     gen_img: &RgbaImage,
@@ -273,30 +346,41 @@ fn composite_region(
     // weight = 1 where mask is transparent (regenerate), 0 where opaque (keep base).
     let mut weight: Vec<f32> = mask.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
     if feather > 0 {
-        weight = box_blur(&weight, wu, hu, feather);
+        weight = box_blur(weight, wu, hu, feather);
     }
     let mut out = base.clone();
+    composite_in_place(&mut out, gen_img, &weight);
+    out
+}
+
+/// The blend pass over an owned base copy. Each pixel is written at most once,
+/// so reading back from `out` is exact — no separate source plane needed (the
+/// memory-staged full-res path in [`retouch`] rides on that).
+fn composite_in_place(out: &mut RgbaImage, gen_img: &RgbaImage, weight: &[f32]) {
+    let (w, h) = out.dimensions();
+    let wu = w as usize;
     for y in 0..h {
         for x in 0..w {
             let a = weight[(y as usize) * wu + x as usize].clamp(0.0, 1.0);
             if a <= 0.0001 {
                 continue; // outside the (feathered) mask → keep the full-res original
             }
-            let b = base.get_pixel(x, y);
+            let b = *out.get_pixel(x, y);
             let g = gen_img.get_pixel(x, y);
             let mix =
                 |bc: u8, gc: u8| (bc as f32 * (1.0 - a) + gc as f32 * a).round().clamp(0.0, 255.0) as u8;
             out.put_pixel(x, y, Rgba([mix(b[0], g[0]), mix(b[1], g[1]), mix(b[2], g[2]), 255]));
         }
     }
-    out
 }
 
 /// Separable box blur with prefix sums — cost is O(w·h), independent of `radius`,
-/// so a wide feather on a full-res frame stays cheap.
-fn box_blur(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+/// so a wide feather on a full-res frame stays cheap. Takes `src` by value and
+/// reuses its allocation as the output plane — one fewer 244 MB transient on a
+/// 61 MP weight field.
+fn box_blur(src: Vec<f32>, w: usize, h: usize, radius: usize) -> Vec<f32> {
     if radius == 0 || w == 0 || h == 0 {
-        return src.to_vec();
+        return src;
     }
     let mut tmp = vec![0.0f32; src.len()];
     let mut prefix = vec![0.0f32; w + 1];
@@ -311,7 +395,9 @@ fn box_blur(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
             tmp[row + x] = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
         }
     }
-    let mut out = vec![0.0f32; src.len()];
+    // Vertical pass writes back into the caller's plane (src is fully
+    // consumed by the horizontal pass above — every read now hits `tmp`).
+    let mut out = src;
     let mut col = vec![0.0f32; h + 1];
     for x in 0..w {
         for y in 0..h {
@@ -407,6 +493,9 @@ fn call_images_edit(
     let mut use_stream = true;
     let mut transport_retried = false;
     let (value, used_size): (serde_json::Value, String) = loop {
+        if cancelled() {
+            return Err(anyhow!("cancelled by user"));
+        }
         let size = if use_flexible {
             sizes.flexible.as_deref().unwrap_or(sizes.enum_size)
         } else {
@@ -475,6 +564,11 @@ fn call_images_edit(
                          ({IMAGES_EDIT_TIMEOUT_SECS}s deadline)",
                         cfg.openai_image_model
                     );
+                    gui_progress(&format!(
+                        "{} rejected streaming — retrying as one blocking call (no progress \
+                         events in this mode)",
+                        cfg.openai_image_model
+                    ));
                     use_stream = false;
                     continue;
                 }
@@ -582,7 +676,15 @@ fn read_sse_image(r: impl std::io::Read) -> Result<serde_json::Value> {
     let mut partials = 0u32;
     let mut completed: Option<serde_json::Value> = None;
     let mut failure: Option<String> = None;
+    let mut was_cancelled = false;
     crate::advisor::for_each_sse_json(r, STREAM_CAP, |v| {
+        if cancelled() {
+            // Cooperative stop between events — the cheapest safe point to
+            // abandon a stream (the job is already billed server-side; this
+            // just stops the download and frees the worker).
+            was_cancelled = true;
+            return Break(());
+        }
         if v.get("error").is_some() || v.get("type").and_then(|t| t.as_str()) == Some("error") {
             failure = Some(v.to_string());
             return Break(());
@@ -591,6 +693,9 @@ fn read_sse_image(r: impl std::io::Read) -> Result<serde_json::Value> {
         if ty.ends_with(".partial_image") {
             partials += 1;
             eprintln!("  … streaming: partial image {partials} received (generation alive)");
+            gui_progress(&format!(
+                "streaming: partial image {partials} received (generation alive)"
+            ));
         } else if ty.ends_with(".completed") {
             completed = Some(v);
             return Break(());
@@ -598,6 +703,9 @@ fn read_sse_image(r: impl std::io::Read) -> Result<serde_json::Value> {
         Continue(())
     })
     .context("read image stream")?;
+    if was_cancelled {
+        return Err(anyhow!("cancelled by user"));
+    }
     if let Some(f) = failure {
         return Err(anyhow!("image stream error: {f}"));
     }

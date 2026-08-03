@@ -940,7 +940,13 @@ async function analyze() {
     const style = (parseFloat(document.querySelector(".style-strength")?.value ?? "30") || 0) / 100;
     const body = { id, guidance, style_strength: style };
     if (refine) body.base = state.recipe;          // adjust current edit, don't start over
-    if (state.region) body.region = state.region;  // box-select: target this region
+    if (state.region) {
+      body.region = state.region;  // box-select: target this region
+      // The box was dragged on a preview rendered WITH this recipe's crop /
+      // straighten / lens geometry; the server needs it to map the box back
+      // into the original frame (even on a fresh, non-refine analyze).
+      body.view = state.recipe;
+    }
     const r = await fetch("/api/analyze", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
     if (id !== state.id) { stale(); return; }
     if (!r.ok) {

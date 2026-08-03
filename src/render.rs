@@ -56,10 +56,16 @@ fn transfer_luts() -> &'static ([f32; LUT_N], [f32; LUT_N]) {
 /// Develop `raw_path` and apply `recipe`, returning the finished image. When
 /// `denoise` is set, the demosaiced buffer is AI-denoised (via the Python
 /// sidecar) before any tonal/colour work — i.e. denoise-before-sharpen.
+/// `max_edge`: develop at a bounded working resolution — the oriented f32
+/// buffer is downscaled right after demosaic, BEFORE denoise/tone/geometry,
+/// so a preview-resolution caller (retouch base, web preview, base-look
+/// estimation) stops paying a 61 MP develop + 16-bit pack + geometry chain
+/// only to thumbnail the result at the end. `None` = full resolution (export).
 pub fn render_to_image(
     raw_path: &Path,
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
+    max_edge: Option<u32>,
 ) -> Result<DynamicImage> {
     let src = RawSource::new(raw_path)
         .with_context(|| format!("open RAW {}", raw_path.display()))?;
@@ -90,7 +96,13 @@ pub fn render_to_image(
     // end — as this pipeline once did — made portrait RAWs apply crop and
     // straighten in the wrong axis vs the un-oriented GUI preview (the decode
     // side now orients too, see decode.rs). Identity for landscape shots.
-    let (mut data, w, h) = orient_f32(data, w, h, orientation);
+    let (data, w, h) = orient_f32(data, w, h, orientation);
+    // Working-resolution cap: downscale-then-develop, the same order the GUI
+    // preview path uses — masks/sharpen/geometry are resolution-normalised.
+    let (mut data, w, h) = match max_edge {
+        Some(edge) => downscale_f32(data, w, h, edge),
+        None => (data, w, h),
+    };
 
     // --- AI denoise (opt-in) on the clean demosaiced pixels, before tone/sharpen
     if let Some(opts) = denoise {
@@ -404,7 +416,7 @@ pub fn render_to_file(
     export: Option<&ExportOpts>,
 ) -> Result<(u32, u32)> {
     let mut img = if crate::decode::is_raw(src_path) {
-        render_to_image(src_path, recipe, denoise)?
+        render_to_image(src_path, recipe, denoise, None)?
     } else {
         let src = crate::decode::load_image(src_path)?;
         render_baked_to_image(&src, recipe, denoise)?
@@ -970,8 +982,12 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
             if let Some(t) = mtime {
                 let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
                 // A recipe holds a handful of masks — a rare hard reset beats
-                // LRU bookkeeping on this hot path.
-                if map.len() > 16 {
+                // LRU bookkeeping on this hot path. Budgeted in BYTES as well
+                // as entries: sixteen full-res 61 MP rasters would otherwise
+                // pin ~1 GB for the life of the process.
+                const MASK_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+                let held: usize = map.values().map(|(_, i)| i.as_raw().len()).sum();
+                if map.len() > 16 || held + img.as_raw().len() > MASK_CACHE_BUDGET_BYTES {
                     map.clear();
                 }
                 map.insert(path.clone(), (t, img.clone()));
@@ -1996,6 +2012,34 @@ fn orient_f32(
     (data, ow as usize, oh as usize)
 }
 
+/// Downscale the oriented f32 buffer to fit `max_edge` (triangle-filtered,
+/// aspect preserved; the same zero-copy [f32;3]⇄f32 casts as [`orient_f32`]).
+/// No-op when the frame already fits. Backs `render_to_image`'s working-
+/// resolution cap: developing 61 MP only to thumbnail the result wasted a
+/// ~1.5 GB transient chain on every preview-resolution retouch base.
+fn downscale_f32(
+    data: Vec<[f32; 3]>,
+    w: usize,
+    h: usize,
+    max_edge: u32,
+) -> (Vec<[f32; 3]>, usize, usize) {
+    let edge = max_edge.max(1) as usize;
+    if w.max(h) <= edge || w == 0 || h == 0 {
+        return (data, w, h);
+    }
+    let flat: Vec<f32> = bytemuck::cast_vec(data);
+    let img = ImageBuffer::<Rgb<f32>, Vec<f32>>::from_raw(w as u32, h as u32, flat)
+        .expect("downscale_f32: buffer size matches dims");
+    let scaled = match DynamicImage::ImageRgb32F(img).thumbnail(max_edge, max_edge) {
+        DynamicImage::ImageRgb32F(b) => b, // resize keeps the variant
+        other => other.to_rgb32f(),
+    };
+    let (nw, nh) = scaled.dimensions();
+    let data: Vec<[f32; 3]> = bytemuck::try_cast_vec(scaled.into_raw())
+        .unwrap_or_else(|(_, v)| v.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect());
+    (data, nw as usize, nh as usize)
+}
+
 /// The largest axis-aligned rectangle (same aspect freedom as Lightroom's
 /// auto-constrain) inscribed in a `w`×`h` rectangle rotated by `deg` degrees —
 /// the closed-form solution, so a straightened image never shows black
@@ -2070,6 +2114,25 @@ pub fn rotate_straighten(img: &DynamicImage, deg: f32) -> DynamicImage {
 
 /// Clamped bilinear lookup in a 16-bit RGB buffer — the shared resampling core
 /// of the geometric ops ([`rotate_straighten`], [`apply_lens_distortion`]).
+/// Single-channel bilinear fetch — SAME per-channel math as
+/// [`sample_bilinear_rgb16`] (bit-identical result), for the CA path where
+/// each channel samples at its own radius and the other two would be wasted.
+fn sample_bilinear_ch(src: &ImageBuffer<Rgb<u16>, Vec<u16>>, sx: f32, sy: f32, ch: usize) -> u16 {
+    let (w, h) = (src.width() as f32, src.height() as f32);
+    let x0 = sx.floor().clamp(0.0, w - 1.0);
+    let y0 = sy.floor().clamp(0.0, h - 1.0);
+    let x1 = (x0 + 1.0).min(w - 1.0);
+    let y1 = (y0 + 1.0).min(h - 1.0);
+    let (fx, fy) = ((sx - x0).clamp(0.0, 1.0), (sy - y0).clamp(0.0, 1.0));
+    let p00 = src.get_pixel(x0 as u32, y0 as u32)[ch] as f32;
+    let p10 = src.get_pixel(x1 as u32, y0 as u32)[ch] as f32;
+    let p01 = src.get_pixel(x0 as u32, y1 as u32)[ch] as f32;
+    let p11 = src.get_pixel(x1 as u32, y1 as u32)[ch] as f32;
+    let top = p00 * (1.0 - fx) + p10 * fx;
+    let bot = p01 * (1.0 - fx) + p11 * fx;
+    (top * (1.0 - fy) + bot * fy).round().clamp(0.0, 65535.0) as u16
+}
+
 fn sample_bilinear_rgb16(src: &ImageBuffer<Rgb<u16>, Vec<u16>>, sx: f32, sy: f32) -> Rgb<u16> {
     let (w, h) = (src.width() as f32, src.height() as f32);
     let x0 = sx.floor().clamp(0.0, w - 1.0);
@@ -2500,6 +2563,62 @@ pub fn lens_ungeom_norm(
     ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
 }
 
+/// View-frame normalised point (the straightened, auto-cropped frame the user
+/// SEES, before the user crop) → ORIGINAL-frame normalised point: un-rotate
+/// (view → corrected, the counter-clockwise matrix), then the forward sampling
+/// map (corrected → original). Clamped once, at the end. This is the ONE
+/// shared implementation of the C2 interaction mapping — the GUI wraps it and
+/// the web server maps analyze region boxes through it, so they cannot drift.
+pub fn view_to_original_norm(
+    nx: f32,
+    ny: f32,
+    dims: (f32, f32),
+    deg: f32,
+    profile: &crate::recipe::LensProfile,
+    amount: f32,
+) -> (f32, f32) {
+    let (w, h) = dims;
+    let (cx, cy) = if deg == 0.0 {
+        (nx, ny)
+    } else {
+        let (cw, ch) = inscribed_dims(w, h, deg);
+        let rad = deg.to_radians();
+        let (s, c) = (rad.sin(), rad.cos());
+        let (dx, dy) = ((nx - 0.5) * cw, (ny - 0.5) * ch);
+        // Content was rotated clockwise; undo with the counter-clockwise matrix.
+        (((c * dx + s * dy) / w) + 0.5, ((-s * dx + c * dy) / h) + 0.5)
+    };
+    let (ox, oy) = lens_geom_norm(cx, cy, dims, profile, amount);
+    (ox.clamp(0.0, 1.0), oy.clamp(0.0, 1.0))
+}
+
+/// ORIGINAL-frame normalised point → view normalised point: the inverse
+/// geometry map (original → corrected), then the forward rotation. NOT
+/// clamped: an original point can legitimately fall outside the view window
+/// (content a barrel fix crops away lands just outside the unit square);
+/// callers clip.
+pub fn original_to_view_norm(
+    nx: f32,
+    ny: f32,
+    dims: (f32, f32),
+    deg: f32,
+    profile: &crate::recipe::LensProfile,
+    amount: f32,
+) -> (f32, f32) {
+    let (nx, ny) = lens_ungeom_norm(nx, ny, dims, profile, amount);
+    if deg == 0.0 {
+        return (nx, ny);
+    }
+    let (w, h) = dims;
+    let (cw, ch) = inscribed_dims(w, h, deg);
+    let rad = deg.to_radians();
+    let (s, c) = (rad.sin(), rad.cos());
+    let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
+    let rx = c * dx - s * dy; // clockwise forward
+    let ry = s * dx + c * dy;
+    (rx / cw.max(1e-3) + 0.5, ry / ch.max(1e-3) + 0.5)
+}
+
 /// Resample the frame through the COMPOSED lens geometry: profile distortion
 /// (+ per-channel CA) and the manual amount in one bilinear pass. Identity →
 /// clone. Same 16-bit precision policy as [`apply_lens_distortion`], which
@@ -2561,10 +2680,13 @@ pub fn apply_lens_geometry(
             let dx = x as f32 - cx;
             let rn = ((dx * dx + dy * dy).sqrt() / rr).clamp(0.0, 1.0);
             if ca_on {
-                // Red and blue sample at their own CA-refined radius.
+                // Red and blue sample at their own CA-refined radius — one
+                // channel per fetch (the full-RGB sampler computed all three
+                // channels only to keep one, tripling the interpolation work
+                // across a 61 MP frame).
                 for (c, lut) in luts.iter().enumerate() {
                     let f = sample_lut(lut, rn);
-                    orow[x * 3 + c] = sample_bilinear_rgb16(src, cx + dx * f, cy + dy * f).0[c];
+                    orow[x * 3 + c] = sample_bilinear_ch(src, cx + dx * f, cy + dy * f, c);
                 }
             } else {
                 let f = sample_lut(&luts[1], rn);
@@ -2734,7 +2856,7 @@ mod tests {
         println!("knots: {knots:?}");
         assert!(!knots.is_empty(), "expected a base look on a camera RAW");
         let neutral =
-            render_to_image(&raw, &EditRecipe::default(), None).unwrap().thumbnail(1536, 1536);
+            render_to_image(&raw, &EditRecipe::default(), None, None).unwrap().thumbnail(1536, 1536);
         let based = develop_preview(
             &neutral,
             &EditRecipe { base_curve: knots, ..Default::default() },
@@ -3417,6 +3539,28 @@ mod tests {
             ratio(0.95, -100.0),
             ratio(0.6, -100.0)
         );
+    }
+
+    #[test]
+    fn view_original_norm_maps_roundtrip_and_identity() {
+        let dims = (1200.0, 800.0);
+        let off = crate::recipe::LensProfile::default();
+        // Identity when every control is zero.
+        assert_eq!(view_to_original_norm(0.31, 0.77, dims, 0.0, &off, 0.0), (0.31, 0.77));
+        assert_eq!(original_to_view_norm(0.31, 0.77, dims, 0.0, &off, 0.0), (0.31, 0.77));
+        // Round-trip through straighten + manual distortion for interior
+        // points (the composed map the web region box and every GUI mask
+        // gesture ride on).
+        for (deg, amt) in [(4.5f32, 0.0f32), (0.0, 35.0), (-3.0, -60.0), (7.0, 80.0)] {
+            for (nx, ny) in [(0.3, 0.4), (0.55, 0.6), (0.42, 0.35), (0.5, 0.5)] {
+                let (ox, oy) = view_to_original_norm(nx, ny, dims, deg, &off, amt);
+                let (bx, by) = original_to_view_norm(ox, oy, dims, deg, &off, amt);
+                assert!(
+                    (bx - nx).abs() < 3e-3 && (by - ny).abs() < 3e-3,
+                    "roundtrip deg={deg} amt={amt}: ({nx},{ny}) → ({ox},{oy}) → ({bx},{by})"
+                );
+            }
+        }
     }
 
     #[test]

@@ -269,7 +269,9 @@ pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
             return Vec::new();
         }
     };
-    match crate::render::render_to_image(raw, &EditRecipe::default(), None) {
+    // The estimate is CDF statistics — a ≤2048 working develop carries the
+    // same histogram signal as 61 MP at a fraction of the transients.
+    match crate::render::render_to_image(raw, &EditRecipe::default(), None, Some(2048)) {
         Ok(neutral) => {
             // Estimate on the profile-vignette-corrected neutral — the same
             // base a stamped canvas starts from (see render::estimation_base).

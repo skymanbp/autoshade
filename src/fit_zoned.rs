@@ -271,6 +271,26 @@ fn segment_both(
     let tmp_src = sibling(".src-in.png");
     let tmp_tgt = sibling(".tgt-in.png");
     let tmp_tgt_mask = sibling(".tgt-mask.png");
+    // Segmentation reads scene SEMANTICS, not pixels: a ≤2048 input finds the
+    // sky exactly as well as a 61 MP master while skipping a ~180 MB PNG
+    // round-trip per side (the CLI fit hands full-res frames here). The
+    // persisted mask raster is normalised-coordinate data — the engine
+    // resamples it at whatever resolution the develop runs, and the GUI's own
+    // reverse-fit already segments preview-res frames.
+    let small_src;
+    let src = if src.width().max(src.height()) > 2048 {
+        small_src = src.thumbnail(2048, 2048);
+        &small_src
+    } else {
+        src
+    };
+    let small_tgt;
+    let target = if target.width().max(target.height()) > 2048 {
+        small_tgt = target.thumbnail(2048, 2048);
+        &small_tgt
+    } else {
+        target
+    };
     let run = || -> Result<(GrayImage, GrayImage)> {
         src.to_rgb8().save(&tmp_src).context("write segmentation input (source)")?;
         target.to_rgb8().save(&tmp_tgt).context("write segmentation input (target)")?;

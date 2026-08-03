@@ -131,9 +131,14 @@ pub fn denoise_active(
             )?;
             return Ok(());
         }
-        let img =
-            crate::render::render_to_image(input, &crate::recipe::EditRecipe::default(), None)?
-                .thumbnail(2048, 2048);
+        // Working copy developed AT ≤2048 (not full-res then thumbnailed):
+        // the cap runs before tone/geometry, skipping the 61 MP transients.
+        let img = crate::render::render_to_image(
+            input,
+            &crate::recipe::EditRecipe::default(),
+            None,
+            Some(2048),
+        )?;
         let tmp = temp_path("autoshop_denoise_base");
         img.save(&tmp)
             .with_context(|| format!("write denoise input {}", tmp.display()))?;

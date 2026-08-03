@@ -225,7 +225,15 @@ enum Msg {
     /// folder switch can't insert a stale thumbnail under a reused index.
     Thumb { generation: u64, idx: usize, img: Box<anyhow::Result<image::DynamicImage>> },
     /// A generative-fill / heal / clone / reimagine result — see [`RetouchDone`].
-    Retouched(Box<RetouchDone>),
+    /// The `u64` is the cancel epoch the task was started under: Cancel bumps
+    /// the app's epoch, so a cancelled worker's late result arrives with a
+    /// stale epoch and is discarded instead of mutating the canvas.
+    Retouched(u64, Box<RetouchDone>),
+    /// A liveness line from a running generative worker (partial-image
+    /// heartbeats, negotiation notes) — mirrored into the status bar. Carries
+    /// the worker's cancel epoch: an abandoned task's heartbeat must not
+    /// overwrite the status of the task the user started after cancelling.
+    Progress(u64, String),
     /// AI segmentation finished: (mask display name, grayscale raster path)
     /// — attached to the recipe as a `MaskGeometry::Bitmap` local mask.
     Segmented(anyhow::Result<(String, PathBuf)>),
@@ -276,6 +284,10 @@ struct SettingsForm {
     chat_choices: Vec<String>,      // text/vision chat ids (proposer + api verifier)
     image_gen_choices: Vec<String>, // gpt-image-* ids (generative edits)
     fetching_models: bool,          // a GET /models worker is in flight
+    // The endpoint the lists were fetched FROM. Editing the Base/Bridge URL
+    // (or the provider auto-swap rewriting it) makes them ids of a different
+    // server — the pickers self-invalidate instead of offering stale ids.
+    models_from_base: String,
 }
 
 /// Build the option list for a model ComboBox: the live-fetched ids if we have
@@ -520,43 +532,18 @@ struct LensArg {
     amount: f32,
 }
 
-/// View normalized point → original-frame normalized point:
-/// un-rotate (view → corrected), then the engine's forward sampling map
-/// (corrected → original). Clamped once, at the end.
+/// View normalized point → original-frame normalized point. Thin wrapper over
+/// the engine's shared C2 interaction map (`render::view_to_original_norm`) —
+/// the web server routes analyze region boxes through the SAME function, so
+/// the two surfaces cannot drift.
 fn view_norm_to_orig(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: &LensArg) -> (f32, f32) {
-    let (w, h) = dims;
-    let (cx, cy) = if deg == 0.0 {
-        (nx, ny)
-    } else {
-        let (cw, ch) = autoshop::render::inscribed_dims(w, h, deg);
-        let rad = deg.to_radians();
-        let (s, c) = (rad.sin(), rad.cos());
-        let (dx, dy) = ((nx - 0.5) * cw, (ny - 0.5) * ch);
-        // Content was rotated clockwise; undo with the counter-clockwise matrix.
-        (((c * dx + s * dy) / w) + 0.5, ((-s * dx + c * dy) / h) + 0.5)
-    };
-    let (ox, oy) = autoshop::render::lens_geom_norm(cx, cy, dims, &dist.profile, dist.amount);
-    (ox.clamp(0.0, 1.0), oy.clamp(0.0, 1.0))
+    autoshop::render::view_to_original_norm(nx, ny, dims, deg, &dist.profile, dist.amount)
 }
 
-/// Original-frame normalized point → view normalized point: the engine's
-/// inverse distortion map (original → corrected), then the forward rotation.
-/// NOT clamped: an original point can legitimately fall outside the view
-/// window (the painter clips overlays to the image rect anyway; original
-/// content a barrel fix crops away comes back just outside the unit square).
+/// Original-frame normalized point → view normalized point (engine-shared;
+/// NOT clamped — the painter clips overlays to the image rect anyway).
 fn orig_norm_to_view(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: &LensArg) -> (f32, f32) {
-    let (nx, ny) = autoshop::render::lens_ungeom_norm(nx, ny, dims, &dist.profile, dist.amount);
-    if deg == 0.0 {
-        return (nx, ny);
-    }
-    let (w, h) = dims;
-    let (cw, ch) = autoshop::render::inscribed_dims(w, h, deg);
-    let rad = deg.to_radians();
-    let (s, c) = (rad.sin(), rad.cos());
-    let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
-    let rx = c * dx - s * dy; // clockwise forward
-    let ry = s * dx + c * dy;
-    (rx / cw.max(1e-3) + 0.5, ry / ch.max(1e-3) + 0.5)
+    autoshop::render::original_to_view_norm(nx, ny, dims, deg, &dist.profile, dist.amount)
 }
 
 /// A mask geometry mapped from the ORIGINAL frame into the view for on-screen
@@ -665,7 +652,7 @@ struct AutoshopApp {
     // an unsaved canvas per-path for THIS session so switching photos can never
     // silently destroy work; only Ctrl+S writes disk.
     saved_recipe: EditRecipe,
-    nav_stash: HashMap<PathBuf, EditRecipe>,
+    nav_stash: HashMap<PathBuf, StashEntry>,
     // Paste-to-selected wrote the open photo's store: (path, exact recipe
     // written) so Msg::Pasted can advance the ● baseline on full success.
     pasted_open: Option<(PathBuf, EditRecipe)>,
@@ -729,6 +716,12 @@ struct AutoshopApp {
     mask_tex: Option<egui::TextureHandle>, // overlay texture
     mask_dirty: bool,                      // re-upload the overlay
     mask_tex_xform: (f32, f32, bool), // (straighten, distortion, profile geometry on) at build
+    // Union of the brush segments painted since the last texture upload
+    // (canvas px, [x0,y0,x1,y1] half-open). With no geometry active, only
+    // this sub-rectangle is uploaded (set_partial) — brushing used to clone
+    // + re-upload the WHOLE canvas on every pointer move.
+    mask_dirty_rect: Option<[u32; 4]>,
+    mask_tex_built: Instant, // last full rebuild — throttles mid-stroke geometry remaps
     paint_last: Option<(f32, f32)>,        // last brush point in mask px (line fill)
     fill_prompt: String,                   // generative-fill instruction
     fill_quality: usize,                   // 0=high 1=medium 2=low
@@ -790,6 +783,14 @@ struct AutoshopApp {
     clone_mode: bool,                      // brush paints the clone target; Alt+click = source
     clone_src: Option<(f32, f32)>,         // picked source point, original-frame normalized
     clone_fullres: bool,                   // clone on the full-res develop (RAW only)
+    // --- cancellable retouch/generative workers ---
+    // Cancel bumps `gen_epoch`; a worker's Retouched message carries the epoch
+    // it was started under and is discarded on mismatch (the canvas is never
+    // mutated by an abandoned task). `gen_cancel` is Some while such a worker
+    // is in flight — it arms the status-bar ✕ and, for streaming generative
+    // calls, is polled between events to stop the download itself.
+    gen_epoch: u64,
+    gen_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     // --- variants (版本/变体): parallel renditions of the open photo ---
     // Original + any AI-generated / reverse-fitted versions. The active one
     // drives the sliders, histogram and canvas; switching is lossless (each
@@ -844,6 +845,38 @@ impl UndoStep {
         };
         base_eq && self.origin == other.origin
     }
+}
+
+/// One photo the quit dialog would save: path + canvas recipe + its baked
+/// pixel identity (`origin`, is_generated) when one exists.
+type PendingSave = (PathBuf, EditRecipe, Option<(PathBuf, bool)>);
+
+/// First FREE ./out artifact path for `tag` (`tag`, `tag-2`, `tag-3` …),
+/// probing the filesystem so a re-run NEVER overwrites a master an earlier
+/// run produced: pixels.json links these paths, undo history holds them, and
+/// a cancelled worker may still be finishing the previous one — unique names
+/// close that write race too. `None` past the 999 cap (refuse, never alias).
+fn unique_out(path: &std::path::Path, tag: &str) -> Option<PathBuf> {
+    for n in 0..=999u32 {
+        let t = if n == 0 { tag.to_string() } else { format!("{tag}-{}", n + 1) };
+        let cand = autoshop::pipeline::default_out(path, &t, "png");
+        if !cand.exists() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// The canvas snapshot navigation stashes for a photo with unsaved work:
+/// the recipe PLUS the active variant's pixel identity. A baked in-place
+/// retouch is unsaved work too — restoring the recipe alone silently dropped
+/// the healed pixels when you navigated away and back. `base` is the
+/// preview-res Arc (refcount bump, no copy); `origin` the full-res master.
+struct StashEntry {
+    recipe: EditRecipe,
+    base: Option<Arc<image::DynamicImage>>,
+    origin: Option<PathBuf>,
+    generated: bool,
 }
 
 /// One rendition in the variant strip — a Lightroom-style virtual copy /
@@ -1007,6 +1040,8 @@ impl Default for AutoshopApp {
             brush: 30.0,
             mask_paint: None,
             mask_tex: None,
+            mask_dirty_rect: None,
+            mask_tex_built: Instant::now(),
             mask_dirty: false,
             mask_tex_xform: (0.0, 0.0, false),
             paint_last: None,
@@ -1040,6 +1075,8 @@ impl Default for AutoshopApp {
             clone_mode: false,
             clone_src: None,
             clone_fullres: false,
+            gen_epoch: 0,
+            gen_cancel: None,
             variants: Vec::new(),
             active: 0,
             keep_recipe: false,
@@ -1127,6 +1164,33 @@ impl AutoshopApp {
         self.status = text.clone();
         self.toast(ToastKind::Error, text);
         self.busy = false;
+    }
+
+    /// Arm the cancellable-worker state for a retouch/generative task: a fresh
+    /// cancel flag (this shows the status-bar ✕) and the epoch its result must
+    /// present to be applied. Streaming generative workers also hand the flag
+    /// to the lib so the download itself stops at the next event; local
+    /// compute is abandon-only (its late result is discarded by epoch).
+    fn arm_cancel(&mut self) -> (u64, Arc<std::sync::atomic::AtomicBool>) {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.gen_cancel = Some(flag.clone());
+        (self.gen_epoch, flag)
+    }
+
+    /// The status-bar ✕: stop the running retouch/generative task. The UI
+    /// unblocks NOW; the worker sees the flag at its next checkpoint and its
+    /// late result arrives under a stale epoch — discarded, never applied.
+    fn cancel_generative(&mut self) {
+        if let Some(flag) = self.gen_cancel.take() {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.gen_epoch = self.gen_epoch.wrapping_add(1);
+            self.busy = false;
+            self.status = tr(
+                self.lang,
+                "cancelled — the app is free again; the running call stops at its next checkpoint and its late result is discarded",
+            )
+            .into();
+        }
     }
 
     /// Spawn a worker whose PANIC still delivers a terminal message. Every
@@ -1375,10 +1439,15 @@ fn save_thumb_cache(cache: &std::path::Path, thumb: &image::DynamicImage) {
 /// Decoded-base LRU key: source path + requested preview edge + file mtime
 /// (an on-disk change or a different resolution simply misses).
 type BaseCacheKey = (PathBuf, u32, Option<std::time::SystemTime>);
+/// A persisted baked master restored at open (store `pixels.json`): its
+/// preview-res pixels, the full-res path, and whether it is an AI-generated
+/// rendition (restores as a Generated variant — no parametric XMP).
+type BakedBase = (Arc<image::DynamicImage>, PathBuf, bool);
 /// A decoded preview base + the photo's camera-matched base-look knots
 /// (`render::camera_base_knots`; empty = no base look) + its in-camera lens
 /// profile (`pipeline::fresh_lens_profile`; default = none available).
-type OpenedBase = (Arc<image::DynamicImage>, Vec<[f32; 2]>, autoshop::recipe::LensProfile);
+type OpenedBase =
+    (Arc<image::DynamicImage>, Vec<[f32; 2]>, autoshop::recipe::LensProfile, Option<BakedBase>);
 
 /// How many decoded preview bases to keep for instant photo revisits (~3.3 MB
 /// each at the default 1280 edge; culling flips between neighbours constantly).
@@ -1537,11 +1606,29 @@ impl AutoshopApp {
         // session so navigation can never silently destroy work (arrow keys /
         // thumbnail clicks used to drop the whole develop). Ctrl+S still owns
         // disk; returning to the photo restores the stash over the sidecar.
+        // "Unsaved" covers PIXELS too: a baked retouch whose master isn't the
+        // one recorded in the store's pixels.json would otherwise vanish from
+        // the canvas on the way back even though its raster is on disk.
         if let Some(old) = self.src_path.clone()
             && old != path
-            && dirty_vs(&self.recipe, &self.saved_recipe)
         {
-            self.nav_stash.insert(old, self.recipe.clone());
+            let origin = self.active_variant().and_then(|v| v.origin.clone());
+            // Compared BOTH ways: a canvas that dropped its baked master
+            // (undo back to source) is as unsaved as one that gained it —
+            // without the stash, reopening would resurrect the disk pixels.
+            let pixels_unsaved =
+                autoshop::store::read_pixel_source(&old).map(|(p, _)| p) != origin;
+            if dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved {
+                self.nav_stash.insert(
+                    old,
+                    StashEntry {
+                        recipe: self.recipe.clone(),
+                        base: self.active_variant().and_then(|v| v.base.clone()),
+                        origin,
+                        generated: self.active_is_generated(),
+                    },
+                );
+            }
         }
         let lang = self.lang;
         self.busy = true;
@@ -1568,10 +1655,16 @@ impl AutoshopApp {
                 // source. Demosaic is slow, so this runs off the UI thread.
                 let res = (|| -> anyhow::Result<OpenedBase> {
                     let (thumb, knots, lens) = if autoshop::decode::is_raw(&path) {
+                        // Developed AT the working edge (the cap runs before
+                        // tone/geometry): opening a 61 MP RAW no longer keeps
+                        // a full-resolution develop resident just to be
+                        // thumbnailed — the knots estimate below is CDF
+                        // statistics and reads the same at working res.
                         let full = autoshop::render::render_to_image(
                             &path,
                             &EditRecipe::default(),
                             None,
+                            Some(edge),
                         )?;
                         let thumb = full.thumbnail(edge, edge);
                         // In-camera lens profile (Sony 0x70xx): one cheap TIFF
@@ -1601,9 +1694,20 @@ impl AutoshopApp {
                             Default::default(),
                         )
                     };
+                    // The saved develop's baked pixel master (in-place heal /
+                    // clone / fill / denoise), when the store records one and
+                    // it still resolves — decoded HERE so the UI thread never
+                    // loads a 61 MP PNG. A missing/unreadable master degrades
+                    // to the plain source open, never a failure.
+                    let baked = autoshop::store::read_pixel_source(&path).and_then(
+                        |(origin, generated)| {
+                            let img = autoshop::decode::load_image(&origin).ok()?;
+                            Some((Arc::new(img.thumbnail(edge, edge)), origin, generated))
+                        },
+                    );
                     // Arc once here so every downstream sharer (variants, the
                     // preview worker) is an O(1) refcount bump, not a deep copy.
-                    Ok((Arc::new(thumb), knots, lens))
+                    Ok((Arc::new(thumb), knots, lens, baked))
                 })();
                 Msg::Opened(Box::new(res))
             },
@@ -1629,22 +1733,22 @@ impl AutoshopApp {
     /// Remember a freshly decoded base. Called from the Opened handler — the px
     /// combo is disabled while busy, so `preview_edge` still describes the
     /// decode that just completed.
-    fn remember_base(
-        &mut self,
-        path: &std::path::Path,
-        edge: u32,
-        base: &Arc<image::DynamicImage>,
-        knots: &[[f32; 2]],
-        lens: &autoshop::recipe::LensProfile,
-    ) {
+    fn remember_base(&mut self, path: &std::path::Path, edge: u32, opened: &OpenedBase) {
         let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         self.base_cache.retain(|((p, e, _), _)| !(p == path && *e == edge));
-        self.base_cache.push((
-            (path.to_path_buf(), edge, mtime),
-            (base.clone(), knots.to_vec(), lens.clone()),
-        ));
+        self.base_cache.push(((path.to_path_buf(), edge, mtime), opened.clone()));
         if self.base_cache.len() > BASE_CACHE_CAP {
             self.base_cache.remove(0); // least-recent first
+        }
+    }
+
+    /// Drop the open photo's decoded-base cache entries. Called whenever its
+    /// BAKED pixel identity changes (a retouch lands, a save writes/clears
+    /// pixels.json) — the source mtime doesn't move then, so the mtime guard
+    /// alone would happily serve a hit with stale baked pixels.
+    fn forget_open_base(&mut self) {
+        if let Some(p) = self.src_path.clone() {
+            self.base_cache.retain(|((q, _, _), _)| q != &p);
         }
     }
 
@@ -2091,6 +2195,7 @@ impl AutoshopApp {
         let chat_choices = std::mem::take(&mut self.settings.chat_choices);
         let image_gen_choices = std::mem::take(&mut self.settings.image_gen_choices);
         let fetching_models = self.settings.fetching_models;
+        let models_from_base = std::mem::take(&mut self.settings.models_from_base);
         self.settings = SettingsForm {
             analysis_provider_api: cfg.analysis_is_api(),
             image_provider_oauth: cfg.image_is_oauth(),
@@ -2107,6 +2212,7 @@ impl AutoshopApp {
             chat_choices,
             image_gen_choices,
             fetching_models,
+            models_from_base,
         };
     }
 
@@ -2164,6 +2270,16 @@ impl AutoshopApp {
         self.settings.status = tr(self.lang, "fetching models…").into();
         let form_key = self.settings.image_api_key.trim().to_string();
         let form_base = self.settings.image_base_url.trim().to_string();
+        // Drop the previous endpoint's lists NOW and stamp the base this fetch
+        // targets: a failed fetch then leaves empty lists (grounded fallbacks)
+        // rather than ids from the old server under the new URL's name.
+        self.settings.chat_choices.clear();
+        self.settings.image_gen_choices.clear();
+        self.settings.models_from_base = if form_base.is_empty() {
+            autoshop::config::Config::load().openai_base_url.clone()
+        } else {
+            form_base.clone()
+        };
         // spawn_worker's catch_unwind guarantees the UI's `fetching_models`
         // flag always clears — a panic still delivers Msg::Models(Err) (this
         // site used to hand-roll a Drop guard for exactly that; the helper
@@ -2191,14 +2307,26 @@ impl AutoshopApp {
     fn confirm_quit_layer(&mut self, ctx: &egui::Context) {
         let lang = self.lang;
         // Everything quitting would lose: the stash + the open photo's canvas
-        // (the live canvas outranks its own stale stash entry).
-        let mut pending: Vec<(PathBuf, EditRecipe)> =
-            self.nav_stash.iter().map(|(p, r)| (p.clone(), r.clone())).collect();
-        if let Some(p) = self.src_path.clone()
-            && dirty_vs(&self.recipe, &self.saved_recipe)
-        {
-            pending.retain(|(q, _)| q != &p);
-            pending.push((p, self.recipe.clone()));
+        // (the live canvas outranks its own stale stash entry). Each entry
+        // carries its pixel identity so 「Save all」 persists a baked retouch's
+        // master link exactly like Ctrl+S would.
+        let mut pending: Vec<PendingSave> = self
+            .nav_stash
+            .iter()
+            .map(|(p, st)| {
+                (p.clone(), st.recipe.clone(), st.origin.clone().map(|o| (o, st.generated)))
+            })
+            .collect();
+        if let Some(p) = self.src_path.clone() {
+            let origin = self.active_variant().and_then(|v| v.origin.clone());
+            // Both directions count (gained OR dropped master) — see open_path.
+            let pixels_unsaved =
+                autoshop::store::read_pixel_source(&p).map(|(q, _)| q) != origin;
+            if dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved {
+                pending.retain(|(q, ..)| q != &p);
+                let pix = origin.map(|o| (o, self.active_is_generated()));
+                pending.push((p, self.recipe.clone(), pix));
+            }
         }
         if pending.is_empty() {
             // Saved (or discarded) since the guard fired — nothing to protect.
@@ -2239,7 +2367,7 @@ impl AutoshopApp {
                 // Parent folder + stem: two DSC_0431 from two shoots must be
                 // distinguishable in the one dialog where the stakes are real.
                 egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                    for (p, _) in &pending {
+                    for (p, ..) in &pending {
                         let folder = p
                             .parent()
                             .and_then(|d| d.file_name())
@@ -2277,8 +2405,15 @@ impl AutoshopApp {
             });
         if save_quit {
             let mut failed: Option<String> = None;
-            for (p, r) in &pending {
+            for (p, r, pix) in &pending {
                 let res = autoshop::pipeline::write_recipe(p, r, None).and_then(|_| {
+                    // The baked-pixels link saves/clears with the recipe —
+                    // the same pairing Ctrl+S writes.
+                    match pix {
+                        Some((o, g)) => autoshop::store::write_pixel_source(p, o, *g)
+                            .map_err(anyhow::Error::from)?,
+                        None => autoshop::store::clear_pixel_source(p),
+                    }
                     if autoshop::decode::is_raw(p) {
                         autoshop::pipeline::write_xmp(p, r).map(|_| ())
                     } else {
@@ -2411,6 +2546,16 @@ impl AutoshopApp {
         }
         {
             let f = &mut self.settings;
+            // Fetched ids belong to the endpoint recorded at fetch time; once
+            // the Base/Bridge URL stops matching (typed edit, provider
+            // auto-swap), they describe a DIFFERENT server — self-invalidate
+            // so the pickers fall back to grounded defaults, not a stale menu.
+            if (!f.chat_choices.is_empty() || !f.image_gen_choices.is_empty())
+                && !same_base(&f.image_base_url, &f.models_from_base)
+            {
+                f.chat_choices.clear();
+                f.image_gen_choices.clear();
+            }
             ui.separator();
             ui.heading(tr(lang, "Analysis — the verifier"));
             ui.horizontal(|ui| {
@@ -3542,7 +3687,11 @@ impl AutoshopApp {
         // BOTH homes are cleared: the central store AND any legacy ./out file
         // a pre-store build left behind — a surviving legacy sidecar would
         // resurrect the "cleared" edits through the read fallbacks.
-        if self.recipe.is_noop() {
+        // A baked pixel retouch IS an edit even under a neutral recipe — a
+        // heal on an untouched photo must take the SAVE path (recipe.json +
+        // pixels.json), not report "nothing to save" while deleting the very
+        // linkage the retouch needs to survive a reopen.
+        if self.recipe.is_noop() && self.active_variant().is_none_or(|v| v.origin.is_none()) {
             // A file already missing IS the desired end state; any other
             // removal failure (lock, permissions) must not let us claim the
             // edits were cleared — the sidecar would resurrect them on reopen.
@@ -3558,6 +3707,9 @@ impl AutoshopApp {
                 autoshop::pipeline::xmp_target(&path),
                 autoshop::store::legacy_recipe(&path),
                 autoshop::store::legacy_xmp(&path),
+                // "Clear my edits" includes the baked-pixels link — keeping it
+                // would resurrect the retouched master on reopen.
+                autoshop::store::pixel_source_path(&path),
             ] {
                 match del(&p) {
                     Ok(b) => removed |= b,
@@ -3573,6 +3725,7 @@ impl AutoshopApp {
                     self.edited_badge.clear();
                     self.saved_recipe = EditRecipe::default();
                     self.nav_stash.remove(&path);
+                    self.forget_open_base();
                     self.status = if removed {
                         tr(lang, "neutral recipe — saved edits cleared (saved files removed)").into()
                     } else {
@@ -3628,15 +3781,33 @@ impl AutoshopApp {
                     )
                 };
                 // An in-place heal/clone/fill bakes pixels into the variant's
-                // origin raster — the saved develop cannot carry them (recipe/
-                // XMP are parametric), so a bare "saved" would overpromise the
-                // restore.
-                if self.active_variant().is_some_and(|v| v.origin.is_some()) {
-                    s.push_str(tr(
-                        lang,
-                        " · note: retouched pixels live in the baked master, not the saved develop — Export to keep them",
-                    ));
+                // origin raster — parametric recipe/XMP cannot carry them, so
+                // the store records the master's path (pixels.json) and
+                // reopening restores the retouched canvas from it. A
+                // parametric-only save clears any stale record instead.
+                match self.active_variant().and_then(|v| v.origin.clone()) {
+                    Some(origin) => {
+                        let generated = self.active_is_generated();
+                        match autoshop::store::write_pixel_source(&path, &origin, generated) {
+                            Ok(()) => s.push_str(tr(
+                                lang,
+                                " · retouched pixels: master linked — reopening restores them (the Lightroom XMP stays parametric-only)",
+                            )),
+                            Err(e) => {
+                                let t = trf(
+                                    lang,
+                                    "could not record the retouched master ({err}) — reopening shows the un-retouched source; Export keeps the pixels",
+                                    &[("err", &e.to_string())],
+                                );
+                                self.toast(ToastKind::Error, t.clone());
+                                s.push_str(" · ");
+                                s.push_str(&t);
+                            }
+                        }
+                    }
+                    None => autoshop::store::clear_pixel_source(&path),
                 }
+                self.forget_open_base();
                 self.status = s;
             }
             Err(e) => {
@@ -3805,11 +3976,11 @@ impl AutoshopApp {
                     // open.
                     let keep = std::mem::take(&mut self.keep_recipe);
                     match *boxed {
-                    Ok((base, knots, lens)) => {
+                    Ok((base, knots, lens, baked)) => {
                         self.busy = false;
                         if let Some(p) = self.src_path.clone() {
                             let edge = self.preview_edge.clamp(640, 8192);
-                            self.remember_base(&p, edge, &base, &knots, &lens);
+                            self.remember_base(&p, edge, &(base.clone(), knots.clone(), lens.clone(), baked.clone()));
                         }
                         // Kept for Reset: "reset" = the fresh-open look, so it
                         // needs this photo's knots even when the restored
@@ -3841,6 +4012,44 @@ impl AutoshopApp {
                                 self.overlay_ref = None;
                                 self.overlay_stale = true;
                                 self.base_preview = Some(base);
+                            } else if let Some((bimg, borigin, _)) = &baked
+                                && self.active_variant().is_some_and(|v| {
+                                    v.origin.as_deref() == Some(borigin.as_path())
+                                })
+                            {
+                                // The active variant renders a PERSISTED baked
+                                // master: hand it the master re-decoded at the
+                                // new preview edge too, or 1:1 inspection stays
+                                // at the old resolution. History steps holding
+                                // the old Arc are repointed — same master, new
+                                // resolution — so Ctrl+Z can't flip the canvas
+                                // back to the stale-res pixels.
+                                let old = self
+                                    .variants
+                                    .get(self.active)
+                                    .and_then(|v| v.base.clone());
+                                if let Some(v) = self.variants.get_mut(self.active) {
+                                    v.base = Some(bimg.clone());
+                                }
+                                if let Some(old) = old {
+                                    let repoint = |s: &mut UndoStep| {
+                                        if s.base.as_ref().is_some_and(|b| Arc::ptr_eq(b, &old)) {
+                                            s.base = Some(bimg.clone());
+                                        }
+                                    };
+                                    repoint(&mut self.committed);
+                                    self.undo_stack.iter_mut().for_each(repoint);
+                                    self.redo_stack.iter_mut().for_each(repoint);
+                                }
+                                let (bw, bh) = bimg.dimensions();
+                                self.set_before(ctx, bimg, &[]);
+                                self.mask_paint = Some(image::RgbaImage::new(bw, bh));
+                                self.mask_tex = None;
+                                self.mask_dirty = false;
+                                self.paint_last = None;
+                                self.overlay_ref = None;
+                                self.overlay_stale = true;
+                                self.base_preview = Some(bimg.clone());
                             }
                             self.last_rgb = None; // resolution changed under the frame
                             self.dirty = true;
@@ -3939,10 +4148,19 @@ impl AutoshopApp {
                             // outranks it — that stash is their newest work.
                             self.saved_recipe = recipe.clone();
                             let mut from_stash = false;
+                            // The stash (this session's newest work) outranks
+                            // disk WHOLESALE — recipe and pixel identity both:
+                            // a stashed source-based canvas (e.g. the retouch
+                            // was undone) must not resurrect disk pixels.
+                            let mut pixels: Option<BakedBase> = baked;
                             if let Some(st) =
                                 self.src_path.as_ref().and_then(|p| self.nav_stash.remove(p))
                             {
-                                recipe = st;
+                                recipe = st.recipe;
+                                pixels = match (st.base, st.origin) {
+                                    (Some(b), Some(o)) => Some((b, o, st.generated)),
+                                    _ => None,
+                                };
                                 from_stash = true;
                             }
                             self.recipe = recipe.clone();
@@ -3969,6 +4187,26 @@ impl AutoshopApp {
                             self.mask_dirty = false;
                             self.paint_last = None;
                             self.paint_mode = false;
+                            if let Some((bimg, borigin, generated)) = pixels {
+                                // Restore the baked pixel master (persisted
+                                // pixels.json, or this session's stash): the
+                                // canvas sits on the retouched pixels again
+                                // with the recipe rendering on top. A baked
+                                // base already carries the camera look in its
+                                // pixels — Before compares curve-less, exactly
+                                // like the InPlace flow that made it.
+                                let (bw, bh) = bimg.dimensions();
+                                if let Some(v) = self.variants.get_mut(0) {
+                                    v.base = Some(bimg.clone());
+                                    v.origin = Some(borigin);
+                                    if generated {
+                                        v.kind = VariantKind::Generated;
+                                    }
+                                }
+                                self.set_before(ctx, &bimg, &[]);
+                                self.base_preview = Some(bimg);
+                                self.mask_paint = Some(image::RgbaImage::new(bw, bh));
+                            }
                             self.last_rgb = None; // retained frame was the old photo's
                             self.reset_history(); // a new photo starts a fresh undo history
                             self.region = None; // and a fresh local-edit selection
@@ -4284,7 +4522,25 @@ impl AutoshopApp {
                         }
                     }
                 }
-                Msg::Retouched(boxed) => match *boxed {
+                Msg::Progress(epoch, m) => {
+                    // Liveness lines from a running generative worker. Epoch-
+                    // gated: after Cancel + an immediate re-run, the abandoned
+                    // worker's heartbeats must not overwrite the new task's
+                    // status line.
+                    if self.busy && self.gen_cancel.is_some() && epoch == self.gen_epoch {
+                        self.status = m;
+                    }
+                }
+                Msg::Retouched(epoch, boxed) => {
+                    if epoch != self.gen_epoch {
+                        // A cancelled task's late result: the user already
+                        // moved on — never let it mutate the canvas. Its ./out
+                        // artifact stays on disk (harmless, and Err is just as
+                        // silent).
+                        continue;
+                    }
+                    self.gen_cancel = None;
+                    match *boxed {
                     Ok((img, msg, saved, kind)) => {
                         self.clear_mask();
                         match kind {
@@ -4339,6 +4595,9 @@ impl AutoshopApp {
                                 // — a same-frame Ctrl+Z otherwise undoes an
                                 // older recipe step over the new pixels.
                                 self.commit_now();
+                                // The decoded-base cache now describes pixels
+                                // this photo no longer shows.
+                                self.forget_open_base();
                             }
                         }
                         self.done(msg);
@@ -4346,7 +4605,8 @@ impl AutoshopApp {
                     Err(e) => {
                         self.fail(tr(lang, "retouch failed"), e);
                     }
-                },
+                    }
+                }
                 Msg::Fitted(boxed) => match *boxed {
                     // Either way the worker may have persisted a recipe.json
                     // (an Err can land after that write) — recompute badges.
@@ -6223,11 +6483,25 @@ impl AutoshopApp {
         let ((bw, bh), deg, dist) = self.geom_ctx();
         let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
         let smp = {
-            let Some(base) = &self.base_preview else { return };
+            let Some(base) = self.base_preview.clone() else { return };
+            // The masks-cleared reference, built EXACTLY like the coverage
+            // overlay's (geometry fields stripped — develop_preview has no
+            // geometry stage, they'd only break the cache key) and SHARING
+            // its cache: with the overlay on, a click costs a 5×5 read
+            // instead of a full preview develop on the UI thread (the
+            // 100-300 ms freeze class at 2560/4096 working previews) — and
+            // a miss here pre-warms the overlay's next rebuild.
             let mut pre = self.recipe.clone();
             pre.masks.clear();
-            let rgb = autoshop::render::develop_preview(base, &pre).to_rgb8();
-            let (w, h) = rgb.dimensions();
+            pre.straighten_deg = 0.0;
+            pre.lens_distortion = 0.0;
+            pre.crop = None;
+            if !matches!(&self.overlay_ref, Some((r, _)) if *r == pre) {
+                let img = autoshop::render::develop_preview(&base, &pre);
+                self.overlay_ref = Some((pre, img));
+            }
+            let reference = &self.overlay_ref.as_ref().expect("range reference cached").1;
+            let (w, h) = (reference.width(), reference.height());
             let (cx, cy) = (
                 (nx * (w.saturating_sub(1)) as f32).round() as i64,
                 (ny * (h.saturating_sub(1)) as f32).round() as i64,
@@ -6237,7 +6511,9 @@ impl AutoshopApp {
                 for dx in -2..=2i64 {
                     let (x, y) = (cx + dx, cy + dy);
                     if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
-                        let p = rgb.get_pixel(x as u32, y as u32);
+                        // Per-pixel conversion on 25 samples beats the old
+                        // full-frame to_rgb8 copy made per click.
+                        let p = reference.get_pixel(x as u32, y as u32);
                         for c in 0..3 {
                             acc[c] += p[c] as f32 / 255.0;
                         }
@@ -6831,6 +7107,49 @@ impl AutoshopApp {
         let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion, profile_dist);
         let stale_xform = self.mask_tex.is_some() && self.mask_tex_xform != xform_now;
         if self.mask_dirty || stale_xform {
+            // Fast path (the common no-geometry case): the change since the
+            // last upload is a known brush rect — upload ONLY that
+            // sub-rectangle. Brushing used to clone and re-upload the WHOLE
+            // canvas on every pointer move (at an 8192 working preview that
+            // is a ~270 MB round trip per frame).
+            if xform_now == (0.0, 0.0, false) && !stale_xform && self.mask_dirty {
+                let rect = self.mask_dirty_rect;
+                if let (Some(m), Some(tex), Some([x0, y0, x1, y1])) =
+                    (&self.mask_paint, &mut self.mask_tex, rect)
+                    && tex.size() == [m.width() as usize, m.height() as usize]
+                    && x1 > x0
+                    && y1 > y0
+                    && x1 <= m.width()
+                    && y1 <= m.height()
+                {
+                    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+                    let mut sub = Vec::with_capacity(w * h * 4);
+                    for y in y0..y1 {
+                        let start = ((y * m.width() + x0) * 4) as usize;
+                        sub.extend_from_slice(&m.as_raw()[start..start + w * 4]);
+                    }
+                    tex.set_partial(
+                        [x0 as usize, y0 as usize],
+                        egui::ColorImage::from_rgba_unmultiplied([w, h], &sub),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.mask_dirty_rect = None;
+                    self.mask_dirty = false;
+                    return;
+                }
+            }
+            // Geometry active: the remap is whole-frame work — mid-stroke,
+            // rebuild at a bounded cadence instead of on every pointer move
+            // (the stroke's final shape lands on the release frame, when the
+            // pointer is no longer down).
+            if !stale_xform
+                && xform_now != (0.0, 0.0, false)
+                && self.mask_tex.is_some()
+                && ctx.input(|i| i.pointer.any_down())
+                && self.mask_tex_built.elapsed() < std::time::Duration::from_millis(120)
+            {
+                return; // mask_dirty stays armed; retried next frame
+            }
             if let Some(m) = &self.mask_paint {
                 let ci = if xform_now != (0.0, 0.0, false) {
                     // Alpha-preserving RGBA twins: the RGB16 photo paths
@@ -6870,7 +7189,9 @@ impl AutoshopApp {
                         Some(ctx.load_texture("paintmask", ci, egui::TextureOptions::LINEAR));
                 }
                 self.mask_tex_xform = xform_now;
+                self.mask_tex_built = Instant::now();
             }
+            self.mask_dirty_rect = None; // full upload covered everything pending
             self.mask_dirty = false;
         }
     }
@@ -6892,6 +7213,21 @@ impl AutoshopApp {
             (ox * mw, oy * mh)
         };
         let brush_mask = (brush * (xf.uv.width() * mw) / xf.rect.width().max(1.0)).max(1.0);
+        // Union a brush segment's bounding box (± radius, canvas px) into the
+        // pending dirty rect — ensure_mask_tex's partial-upload path.
+        let grow = |rect: &mut Option<[u32; 4]>, a: (f32, f32), b: (f32, f32)| {
+            let r = brush_mask + 1.0;
+            let n = [
+                (a.0.min(b.0) - r).floor().clamp(0.0, mw) as u32,
+                (a.1.min(b.1) - r).floor().clamp(0.0, mh) as u32,
+                (a.0.max(b.0) + r).ceil().clamp(0.0, mw) as u32,
+                (a.1.max(b.1) + r).ceil().clamp(0.0, mh) as u32,
+            ];
+            *rect = Some(match rect {
+                Some(o) => [o[0].min(n[0]), o[1].min(n[1]), o[2].max(n[2]), o[3].max(n[3])],
+                None => n,
+            });
+        };
         if resp.dragged() || resp.drag_started() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let cur = to_mask(p);
@@ -6899,6 +7235,7 @@ impl AutoshopApp {
                     Some(prev) => stamp_line(m, prev, cur, brush_mask),
                     None => stamp_dot(m, cur, brush_mask),
                 }
+                grow(&mut self.mask_dirty_rect, self.paint_last.unwrap_or(cur), cur);
                 self.paint_last = Some(cur);
                 self.mask_dirty = true;
             }
@@ -6908,7 +7245,9 @@ impl AutoshopApp {
             if resp.clicked()
                 && let Some(p) = resp.interact_pointer_pos()
             {
-                stamp_dot(m, to_mask(p), brush_mask);
+                let cur = to_mask(p);
+                stamp_dot(m, cur, brush_mask);
+                grow(&mut self.mask_dirty_rect, cur, cur);
                 self.mask_dirty = true;
             }
             // No stroke is in flight on any non-drag frame — clearing here
@@ -6983,6 +7322,10 @@ impl AutoshopApp {
             self.status = tr(lang, "paint the area to remove/fill first (tick Paint mask)").into();
             return;
         };
+        let Some(out) = unique_out(&path, "retouch") else {
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            return;
+        };
         self.busy = true;
         self.status = if self.fill_fullres {
             tr(lang, "generative fill (full-res render)… (slow, minutes)").into()
@@ -6992,11 +7335,20 @@ impl AutoshopApp {
         let quality = ["high", "medium", "low"][self.fill_quality.min(2)].to_string();
         let full_res = self.fill_fullres;
         let edge = self.preview_edge.clamp(640, 8192); // bake at the working res, not a fixed 1280
+        let (epoch, flag) = self.arm_cancel();
+        let ptx = self.tx.clone();
         self.spawn_worker(
             move || {
+                // Progress heartbeats → status bar; the cancel flag stops the
+                // stream between events. Installed on THIS worker thread only.
+                autoshop::generative::set_worker_hooks(Some(autoshop::generative::WorkerHooks {
+                    progress: Box::new(move |m| {
+                        let _ = ptx.send(Msg::Progress(epoch, m));
+                    }),
+                    cancel: flag,
+                }));
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
-                    let out = autoshop::pipeline::default_out(&path, "retouch", "png");
                     let mask_tmp = std::env::temp_dir()
                         .join(format!("autoshop_gui_fill_{}.png", std::process::id()));
                     std::fs::write(&mask_tmp, &mask_png)?;
@@ -7018,9 +7370,9 @@ impl AutoshopApp {
                         RetouchKind::InPlace,
                     ))
                 })();
-                Msg::Retouched(Box::new(res))
+                Msg::Retouched(epoch, Box::new(res))
             },
-            |e| Msg::Retouched(Box::new(Err(e))),
+            move |e| Msg::Retouched(epoch, Box::new(Err(e))),
         );
     }
 
@@ -7045,6 +7397,10 @@ impl AutoshopApp {
         } else {
             None
         };
+        let Some(out) = unique_out(&path, "heal") else {
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            return;
+        };
         self.busy = true;
         self.status = if use_mask {
             tr(lang, "healing painted area…").into()
@@ -7053,11 +7409,11 @@ impl AutoshopApp {
         };
         let full_res = self.heal_fullres;
         let edge = self.preview_edge.clamp(640, 8192); // bake at the working res, not a fixed 1280
+        let (epoch, _flag) = self.arm_cancel(); // local compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
-                    let out = autoshop::pipeline::default_out(&path, "heal", "png");
                     let mask_tmp = match mask_png {
                         Some(bytes) => {
                             let t = std::env::temp_dir()
@@ -7085,9 +7441,9 @@ impl AutoshopApp {
                         RetouchKind::InPlace,
                     ))
                 })();
-                Msg::Retouched(Box::new(res))
+                Msg::Retouched(epoch, Box::new(res))
             },
-            |e| Msg::Retouched(Box::new(Err(e))),
+            move |e| Msg::Retouched(epoch, Box::new(Err(e))),
         );
     }
 
@@ -7104,6 +7460,10 @@ impl AutoshopApp {
             return;
         }
         let lang = self.lang; // localise UI statuses AND the worker's result string
+        let Some(out) = unique_out(&path, "denoise") else {
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            return;
+        };
         self.busy = true;
         self.status = if self.denoise_fullres {
             tr(lang, "AI denoise (full-res)… (GPU sidecar, can take minutes; first run downloads the model)").into()
@@ -7112,11 +7472,11 @@ impl AutoshopApp {
         };
         let full_res = self.denoise_fullres;
         let edge = self.preview_edge.clamp(640, 8192); // show at the working res
+        let (epoch, _flag) = self.arm_cancel(); // sidecar compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
-                    let out = autoshop::pipeline::default_out(&path, "denoise", "png");
                     let opts =
                         autoshop::denoise::DenoiseOpts::from_config(&cfg, None, 1.0);
                     autoshop::denoise::denoise_active(&opts, &path, full_res, &out)?;
@@ -7133,9 +7493,9 @@ impl AutoshopApp {
                         RetouchKind::InPlace,
                     ))
                 })();
-                Msg::Retouched(Box::new(res))
+                Msg::Retouched(epoch, Box::new(res))
             },
-            |e| Msg::Retouched(Box::new(Err(e))),
+            move |e| Msg::Retouched(epoch, Box::new(Err(e))),
         );
     }
 
@@ -7157,14 +7517,18 @@ impl AutoshopApp {
             self.status = tr(lang, "Brush the area to clone over first").into();
             return;
         };
+        let Some(out) = unique_out(&path, "clone") else {
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            return;
+        };
         self.busy = true;
         self.status = tr(lang, "Cloning… (local pixel compute)").into();
         let full_res = self.clone_fullres;
         let edge = self.preview_edge.clamp(640, 8192); // bake at the working res, not a fixed 1280
+        let (epoch, _flag) = self.arm_cancel(); // local compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
                 let res = (|| -> RetouchDone {
-                    let out = autoshop::pipeline::default_out(&path, "clone", "png");
                     let mask_tmp = std::env::temp_dir()
                         .join(format!("autoshop_gui_clone_{}.png", std::process::id()));
                     std::fs::write(&mask_tmp, &mask_png)?;
@@ -7185,9 +7549,9 @@ impl AutoshopApp {
                         RetouchKind::InPlace,
                     ))
                 })();
-                Msg::Retouched(Box::new(res))
+                Msg::Retouched(epoch, Box::new(res))
             },
-            |e| Msg::Retouched(Box::new(Err(e))),
+            move |e| Msg::Retouched(epoch, Box::new(Err(e))),
         );
     }
 
@@ -7208,25 +7572,14 @@ impl AutoshopApp {
         if self.busy {
             return;
         }
-        // First FREE ./out name — probing the filesystem (not a live-variant
-        // count) so delete-then-reimagine can't reuse a number whose PNG a
-        // surviving variant still points at. Bounded by a hard cap.
-        let out = {
-            let mut n = 0u32;
-            loop {
-                let tag = if n == 0 { "reimagine".to_string() } else { format!("reimagine-{}", n + 1) };
-                let cand = autoshop::pipeline::default_out(&path, &tag, "png");
-                if !cand.exists() {
-                    break cand;
-                }
-                if n >= 999 {
-                    // Refuse rather than alias: reusing an existing origin
-                    // would cross-wire two variants' export / reverse-fit.
-                    self.status = tr(self.lang, "over 999 generated variants for this photo — clean up ./out first").into();
-                    return;
-                }
-                n += 1;
-            }
+        // First FREE ./out name (shared `unique_out` probe) so
+        // delete-then-reimagine can't reuse a number whose PNG a surviving
+        // variant still points at. Refuse past the cap rather than alias:
+        // reusing an existing origin would cross-wire two variants'
+        // export / reverse-fit.
+        let Some(out) = unique_out(&path, "reimagine") else {
+            self.status = tr(self.lang, "over 999 generated variants for this photo — clean up ./out first").into();
+            return;
         };
         let prompt = {
             // The Reimagine section's OWN prompt field (no longer the shared
@@ -7245,8 +7598,18 @@ impl AutoshopApp {
         self.status =
             tr(lang, "AI generating… (gpt-image; high quality can run minutes — the window stays busy until it lands; hi-res input needs a full-frame develop first)").into();
         let edge = self.preview_edge.clamp(640, 8192);
+        let (epoch, flag) = self.arm_cancel();
+        let ptx = self.tx.clone();
         self.spawn_worker(
             move || {
+                // Progress heartbeats → status bar; the cancel flag stops the
+                // stream between events. Installed on THIS worker thread only.
+                autoshop::generative::set_worker_hooks(Some(autoshop::generative::WorkerHooks {
+                    progress: Box::new(move |m| {
+                        let _ = ptx.send(Msg::Progress(epoch, m));
+                    }),
+                    cancel: flag,
+                }));
                 let res = (|| -> RetouchDone {
                     let cfg = autoshop::config::Config::load();
                     // fidelity "high" keeps it recognisably the same photo.
@@ -7260,9 +7623,9 @@ impl AutoshopApp {
                     // NewGenerated: a whole-frame rendition → a new Generated variant.
                     Ok((img, msg, out, RetouchKind::NewGenerated))
                 })();
-                Msg::Retouched(Box::new(res))
+                Msg::Retouched(epoch, Box::new(res))
             },
-            |e| Msg::Retouched(Box::new(Err(e))),
+            move |e| Msg::Retouched(epoch, Box::new(Err(e))),
         );
     }
 
@@ -7767,8 +8130,16 @@ impl eframe::App for AutoshopApp {
         // save-all / discard / cancel; the guard re-checks on the way out, so
         // both quit buttons work by making the state genuinely clean.
         if ctx.input(|i| i.viewport().close_requested()) {
-            let unsaved_open =
-                self.src_path.is_some() && dirty_vs(&self.recipe, &self.saved_recipe);
+            // Unsaved covers PIXELS too: a baked retouch whose master isn't
+            // recorded in the store yet dies with the window exactly like an
+            // unsaved slider move (the master PNG survives, its linkage not).
+            let pixels_unsaved = self.src_path.as_deref().is_some_and(|p| {
+                let origin = self.active_variant().and_then(|v| v.origin.clone());
+                // Both directions count (gained OR dropped master).
+                autoshop::store::read_pixel_source(p).map(|(q, _)| q) != origin
+            });
+            let unsaved_open = self.src_path.is_some()
+                && (dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved);
             if self.busy {
                 // A running export / retouch / paid AI generation dies with
                 // the process — the ✕ used to bypass every guard mid-flight.
@@ -8115,6 +8486,20 @@ impl eframe::App for AutoshopApp {
             ui.horizontal(|ui| {
                 if self.busy {
                     ui.spinner();
+                    // Only retouch/generative workers are cancellable — the ✕
+                    // appears exactly while one is in flight (busy long-runs
+                    // like a full-res fill / reimagine / sidecar denoise).
+                    if self.gen_cancel.is_some()
+                        && ui
+                            .small_button(tr(self.lang, "✕ Cancel"))
+                            .on_hover_text(tr(
+                                self.lang,
+                                "Stop this retouch/generation: the app unblocks now, the call halts at its next checkpoint, and its late result is discarded",
+                            ))
+                            .clicked()
+                    {
+                        self.cancel_generative();
+                    }
                 }
                 // The unsaved marker: canvas differs from the saved develop
                 // (base_curve excluded — calibration is not an edit, dirty_vs).
@@ -8462,11 +8847,30 @@ impl eframe::App for AutoshopApp {
 /// not registered. Appended as a FALLBACK so Latin keeps egui's default look.
 fn install_cjk_font(ctx: &egui::Context) {
     // Single-face TTFs first (always parse); TTC collections (face 0) last.
+    // System font directories per OS (not user-specific paths); a miss just
+    // falls through to the next candidate, so distro variance is harmless.
+    #[cfg(target_os = "windows")]
     const CANDIDATES: &[&str] = &[
         r"C:\Windows\Fonts\Deng.ttf",   // DengXian — clean modern UI face
         r"C:\Windows\Fonts\simhei.ttf", // SimHei
         r"C:\Windows\Fonts\msyh.ttc",   // Microsoft YaHei (collection, face 0)
         r"C:\Windows\Fonts\simsun.ttc", // SimSun (collection, face 0)
+    ];
+    #[cfg(target_os = "macos")]
+    const CANDIDATES: &[&str] = &[
+        "/System/Library/Fonts/PingFang.ttc", // PingFang SC — macOS system CJK
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+    ];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    const CANDIDATES: &[&str] = &[
+        // Noto Sans CJK across the major distro layouts, then WenQuanYi.
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", // Debian/Ubuntu
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",      // Arch
+        "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc", // Fedora
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
     ];
     let Some(bytes) = CANDIDATES.iter().find_map(|p| {
         let b = std::fs::read(p).ok()?;
@@ -8875,7 +9279,7 @@ mod tests {
             ..Default::default()
         };
         let p = std::path::Path::new("D:/__autoshop_nonexistent__/x.ARW");
-        app.remember_base(p, 1280, &base, &knots, &lens);
+        app.remember_base(p, 1280, &(base.clone(), knots.clone(), lens.clone(), None));
         let hit = app.cached_base(p, 1280);
         assert!(hit.is_some(), "same path+edge hits");
         let hit = hit.unwrap();
@@ -8887,7 +9291,7 @@ mod tests {
             .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/{i}.ARW")))
             .collect();
         for o in &others {
-            app.remember_base(o, 1280, &base, &[], &Default::default());
+            app.remember_base(o, 1280, &(base.clone(), Vec::new(), Default::default(), None));
         }
         assert!(app.cached_base(p, 1280).is_none(), "least-recent evicted at cap");
         assert!(app.cached_base(&others[1], 1280).is_some(), "newer entries survive");
