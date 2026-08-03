@@ -16,6 +16,7 @@ pub mod eval;
 pub mod fit;
 pub mod fit_zoned;
 pub mod generative;
+pub mod lensmeta;
 pub mod openai_models;
 pub mod pipeline;
 pub mod recipe;

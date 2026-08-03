@@ -114,6 +114,15 @@ pub struct EditRecipe {
     /// Lightroom renders XMP over its own camera profile, so xmp.rs ignores it.
     pub base_curve: Vec<[f32; 2]>,
 
+    // --- In-camera lens profile corrections (engine-only, NEVER in XMP) ------
+    /// Per-photo lens corrections read from the RAW's own metadata (Sony
+    /// 0x7031-0x7037 — see `lensmeta`): the manufacturer's exact profile for
+    /// THIS lens at THIS focal/aperture, no lensfun database needed. The
+    /// default (empty, everything off) is what every legacy recipe.json
+    /// deserialises to, so existing saved develops render byte-identically.
+    /// Lightroom applies its own profile db to XMP, so xmp.rs ignores this.
+    pub lens_profile: LensProfile,
+
     // --- Local (masked) adjustments -----------------------------------------
     /// Local adjustments applied through gradient masks. Empty = global-only
     /// (v1-compatible). Emitted as `crs:MaskGroupBasedCorrections` in the XMP
@@ -157,9 +166,70 @@ impl Default for EditRecipe {
             green_curve: Vec::new(),
             blue_curve: Vec::new(),
             base_curve: Vec::new(),
+            lens_profile: LensProfile::default(),
             masks: Vec::new(),
             rationale: String::new(),
             confidence: 0.0,
+        }
+    }
+}
+
+/// In-camera lens profile corrections in ENGINE space: per-knot factors over
+/// the normalised radius (0 = centre, 1 = corner; knot `i` sits at
+/// `(i + 0.5) / (n − 1)`, the placement RawTherapee's metadata path uses).
+/// `vignette` holds linear-light GAINS; `distortion` / `ca_r` / `ca_b` hold
+/// radius scale factors (CA multiplies the distortion map per channel).
+/// Conversion from the camera's raw integers lives in `lensmeta` — this
+/// struct is camera-agnostic on purpose. Engine-only, never written to XMP.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct LensProfile {
+    pub vignette: Vec<f32>,
+    pub distortion: Vec<f32>,
+    pub ca_r: Vec<f32>,
+    pub ca_b: Vec<f32>,
+    pub vignette_on: bool,
+    pub distortion_on: bool,
+    pub ca_on: bool,
+}
+
+impl LensProfile {
+    /// Vignette stage active? (toggle on AND data present)
+    pub fn vignette_active(&self) -> bool {
+        self.vignette_on && !self.vignette.is_empty()
+    }
+    /// Any geometric component (distortion / CA) active?
+    pub fn geometry_active(&self) -> bool {
+        (self.distortion_on && !self.distortion.is_empty())
+            || (self.ca_on && !self.ca_r.is_empty() && !self.ca_b.is_empty())
+    }
+    /// Exactly the state stamping produces: every AVAILABLE component enabled
+    /// (a toggle for absent data is meaningless either way). The default
+    /// (all empty, all off) satisfies this too — so `is_noop` can treat the
+    /// as-stamped profile as calibration-not-an-edit, while any user toggle
+    /// AWAY from the stamp counts as an edit and survives saves.
+    pub fn is_as_stamped(&self) -> bool {
+        // Each toggle must equal "data present" (clippy's != form of a
+        // boolean-equality with a negation).
+        self.vignette_on != self.vignette.is_empty()
+            && self.distortion_on != self.distortion.is_empty()
+            && self.ca_on != self.ca_r.is_empty()
+    }
+    /// Defensive ranges for hand-edited files: knot counts capped, vignette
+    /// gains and radius factors held to physically plausible bands (the real
+    /// Sony data sits well inside: gains ≲ 1.5×, distortion within ±6%).
+    pub fn clamp(&mut self) {
+        for v in [&mut self.vignette, &mut self.distortion, &mut self.ca_r, &mut self.ca_b] {
+            v.truncate(32);
+        }
+        for g in self.vignette.iter_mut() {
+            *g = g.clamp(0.25, 4.0);
+        }
+        for f in self.distortion.iter_mut() {
+            *f = f.clamp(0.7, 1.3);
+        }
+        for f in self.ca_r.iter_mut().chain(self.ca_b.iter_mut()) {
+            *f = f.clamp(0.98, 1.02);
         }
     }
 }
@@ -495,6 +565,7 @@ impl EditRecipe {
         self.lens_vignette = c(self.lens_vignette, -100.0, 100.0);
         self.lens_vignette_mid = c(self.lens_vignette_mid, 0.0, 100.0);
         self.lens_distortion = c(self.lens_distortion, -100.0, 100.0);
+        self.lens_profile.clamp();
         self.straighten_deg = c(self.straighten_deg, -45.0, 45.0);
         self.confidence = c(self.confidence, 0.0, 1.0);
         if let Some(k) = self.temperature_k {
@@ -605,10 +676,18 @@ impl EditRecipe {
             // Ignore provenance fields when judging "did it actually edit?".
             // base_curve is the photo's camera-matched BASE (stamped on open),
             // not a user edit — a fresh-open recipe must still count as no-op.
+            // The lens profile is the same kind of calibration WHILE it stays
+            // exactly as stamped (every available component on); a user toggle
+            // away from that is a real edit and must keep the recipe non-noop.
             || EditRecipe {
                 rationale: String::new(),
                 confidence: 0.0,
                 base_curve: Vec::new(),
+                lens_profile: if self.lens_profile.is_as_stamped() {
+                    LensProfile::default()
+                } else {
+                    self.lens_profile.clone()
+                },
                 ..self.clone()
             } == EditRecipe::default()
     }
@@ -617,6 +696,36 @@ impl EditRecipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lens_profile_legacy_json_noop_and_toggle_semantics() {
+        // A pre-profile recipe.json has no lens_profile → default (all off):
+        // the byte-identical legacy render contract.
+        let legacy: EditRecipe = serde_json::from_str(r#"{"exposure_ev":0.5}"#).unwrap();
+        assert_eq!(legacy.lens_profile, LensProfile::default());
+        // As-stamped (every available component on) is calibration, not an edit.
+        let stamped = EditRecipe {
+            lens_profile: LensProfile {
+                vignette: vec![1.0, 1.2],
+                distortion: vec![1.0, 0.95],
+                ca_r: vec![1.0],
+                ca_b: vec![1.0],
+                vignette_on: true,
+                distortion_on: true,
+                ca_on: true,
+            },
+            ..Default::default()
+        };
+        assert!(stamped.is_noop(), "as-stamped profile must stay a no-op");
+        // Turning one component OFF is a user edit that must survive.
+        let mut toggled = stamped.clone();
+        toggled.lens_profile.distortion_on = false;
+        assert!(!toggled.is_noop(), "a toggle away from the stamp is an edit");
+        // Round-trip.
+        let json = serde_json::to_string(&toggled).unwrap();
+        let back: EditRecipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.lens_profile, toggled.lens_profile);
+    }
 
     #[test]
     fn base_curve_legacy_json_noop_and_round_trip() {

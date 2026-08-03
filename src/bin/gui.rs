@@ -504,10 +504,20 @@ fn reorder_move(from: usize, insert: usize) -> (usize, impl Fn(usize) -> usize) 
 // the user crop AFTER the geometric chain, so the crop tool needs no mapping.
 // All maps are the identity when both controls are zero.
 
+/// The lens-geometry half of the view mapping: the in-camera profile (the
+/// composed map needs its distortion knots) plus the manual amount. Cloned
+/// out of `geom_ctx` per gesture — a few 16-float Vecs, noise next to any
+/// develop tick.
+#[derive(Clone, Default)]
+struct LensArg {
+    profile: autoshop::recipe::LensProfile,
+    amount: f32,
+}
+
 /// View normalized point → original-frame normalized point:
 /// un-rotate (view → corrected), then the engine's forward sampling map
 /// (corrected → original). Clamped once, at the end.
-fn view_norm_to_orig(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: f32) -> (f32, f32) {
+fn view_norm_to_orig(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: &LensArg) -> (f32, f32) {
     let (w, h) = dims;
     let (cx, cy) = if deg == 0.0 {
         (nx, ny)
@@ -519,7 +529,7 @@ fn view_norm_to_orig(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: f32) ->
         // Content was rotated clockwise; undo with the counter-clockwise matrix.
         (((c * dx + s * dy) / w) + 0.5, ((-s * dx + c * dy) / h) + 0.5)
     };
-    let (ox, oy) = autoshop::render::distort_norm(cx, cy, dims, dist);
+    let (ox, oy) = autoshop::render::lens_geom_norm(cx, cy, dims, &dist.profile, dist.amount);
     (ox.clamp(0.0, 1.0), oy.clamp(0.0, 1.0))
 }
 
@@ -528,8 +538,8 @@ fn view_norm_to_orig(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: f32) ->
 /// NOT clamped: an original point can legitimately fall outside the view
 /// window (the painter clips overlays to the image rect anyway; original
 /// content a barrel fix crops away comes back just outside the unit square).
-fn orig_norm_to_view(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: f32) -> (f32, f32) {
-    let (nx, ny) = autoshop::render::undistort_norm(nx, ny, dims, dist);
+fn orig_norm_to_view(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: &LensArg) -> (f32, f32) {
+    let (nx, ny) = autoshop::render::lens_ungeom_norm(nx, ny, dims, &dist.profile, dist.amount);
     if deg == 0.0 {
         return (nx, ny);
     }
@@ -548,8 +558,11 @@ fn orig_norm_to_view(nx: f32, ny: f32, dims: (f32, f32), deg: f32, dist: f32) ->
 /// Radial anchor points map exactly; the radial ellipse is shown as the
 /// bounding box of its transformed corners — display-only, and tight at the
 /// small tilt angles and gentle distortions the sliders allow.
-fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist: f32) -> MaskGeometry {
-    if deg == 0.0 && dist == 0.0 {
+fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist: &LensArg) -> MaskGeometry {
+    // Off = no manual amount AND no active profile distortion.
+    let geom_off = dist.amount == 0.0
+        && (!dist.profile.distortion_on || dist.profile.distortion.is_empty());
+    if deg == 0.0 && geom_off {
         return geom.clone();
     }
     match *geom {
@@ -656,6 +669,9 @@ struct AutoshopApp {
     // "reset" always means the fresh-open look — including on a photo whose
     // legacy save carries no curve and therefore opened dark.
     photo_knots: Vec<[f32; 2]>,
+    // This photo's in-camera lens profile (open worker) — the twin of
+    // photo_knots: Reset re-stamps it, legacy toggles re-enable from it.
+    photo_lens: autoshop::recipe::LensProfile,
     // The base_curve baked into `before_tex`. The Before pane mirrors the
     // canvas recipe's calibration (Reset / paste / restore can change it), so
     // a mismatch triggers a cheap rebuild in `update`.
@@ -707,7 +723,7 @@ struct AutoshopApp {
     mask_paint: Option<image::RgbaImage>,  // painted overlay (red where painted), at preview res
     mask_tex: Option<egui::TextureHandle>, // overlay texture
     mask_dirty: bool,                      // re-upload the overlay
-    mask_tex_xform: (f32, f32), // (straighten, distortion) the texture was built under
+    mask_tex_xform: (f32, f32, bool), // (straighten, distortion, profile geometry on) at build
     paint_last: Option<(f32, f32)>,        // last brush point in mask px (line fill)
     fill_prompt: String,                   // generative-fill instruction
     fill_quality: usize,                   // 0=high 1=medium 2=low
@@ -965,6 +981,7 @@ impl Default for AutoshopApp {
             nav_stash: HashMap::new(),
             pasted_open: None,
             photo_knots: Vec::new(),
+            photo_lens: Default::default(),
             before_curve: Vec::new(),
             confirm_quit: false,
             mask_name_buf: None,
@@ -976,7 +993,7 @@ impl Default for AutoshopApp {
             mask_paint: None,
             mask_tex: None,
             mask_dirty: false,
-            mask_tex_xform: (0.0, 0.0),
+            mask_tex_xform: (0.0, 0.0, false),
             paint_last: None,
             fill_prompt: String::new(),
             fill_quality: 0,
@@ -1189,8 +1206,12 @@ fn build_preview(
     show_clipping: bool,
 ) -> PreviewDone {
     let mut after = autoshop::render::develop_preview(&base, &recipe);
-    if recipe.lens_distortion != 0.0 {
-        after = autoshop::render::apply_lens_distortion(&after, recipe.lens_distortion);
+    if recipe.lens_profile.geometry_active() || recipe.lens_distortion != 0.0 {
+        after = autoshop::render::apply_lens_geometry(
+            &after,
+            &recipe.lens_profile,
+            recipe.lens_distortion,
+        );
     }
     if recipe.straighten_deg != 0.0 {
         after = autoshop::render::rotate_straighten(&after, recipe.straighten_deg);
@@ -1337,8 +1358,9 @@ fn save_thumb_cache(cache: &std::path::Path, thumb: &image::DynamicImage) {
 /// (an on-disk change or a different resolution simply misses).
 type BaseCacheKey = (PathBuf, u32, Option<std::time::SystemTime>);
 /// A decoded preview base + the photo's camera-matched base-look knots
-/// (`render::camera_base_knots`; empty = no base look).
-type OpenedBase = (Arc<image::DynamicImage>, Vec<[f32; 2]>);
+/// (`render::camera_base_knots`; empty = no base look) + its in-camera lens
+/// profile (`pipeline::fresh_lens_profile`; default = none available).
+type OpenedBase = (Arc<image::DynamicImage>, Vec<[f32; 2]>, autoshop::recipe::LensProfile);
 
 /// How many decoded preview bases to keep for instant photo revisits (~3.3 MB
 /// each at the default 1280 edge; culling flips between neighbours constantly).
@@ -1451,6 +1473,7 @@ fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe
     let mut r = pasted.clone();
     if !autoshop::decode::is_raw(target) {
         r.base_curve = Vec::new();
+        r.lens_profile = Default::default();
         return r;
     }
     for p in [
@@ -1461,9 +1484,16 @@ fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe
             && let Ok(saved) = serde_json::from_str::<EditRecipe>(&text)
         {
             r.base_curve = saved.base_curve;
+            // A saved develop owns its profile verbatim — including any user
+            // toggle and the legacy default-off.
+            r.lens_profile = saved.lens_profile;
             return r;
         }
     }
+    // No saved develop: the SOURCE photo's correction data is meaningless on
+    // a different lens/focal — re-derive the target's own, stamped default-on
+    // (paste transfers EDITS; the profile is per-photo calibration).
+    r.lens_profile = autoshop::pipeline::fresh_lens_profile(target);
     r
 }
 
@@ -1518,8 +1548,8 @@ impl AutoshopApp {
                 // re-developing that double-processes it and amplifies its grain when
                 // you push tone/clarity. Baked images (PNG/TIFF/JPEG) are their own
                 // source. Demosaic is slow, so this runs off the UI thread.
-                let res = (|| -> anyhow::Result<(Arc<image::DynamicImage>, Vec<[f32; 2]>)> {
-                    let (thumb, knots) = if autoshop::decode::is_raw(&path) {
+                let res = (|| -> anyhow::Result<OpenedBase> {
+                    let (thumb, knots, lens) = if autoshop::decode::is_raw(&path) {
                         let full = autoshop::render::render_to_image(
                             &path,
                             &EditRecipe::default(),
@@ -1539,13 +1569,20 @@ impl AutoshopApp {
                             }
                             _ => Vec::new(),
                         };
-                        (thumb, knots)
+                        // In-camera lens profile (Sony 0x70xx): one cheap TIFF
+                        // parse, stamped all-available-on (the user default).
+                        let lens = autoshop::pipeline::fresh_lens_profile(&path);
+                        (thumb, knots, lens)
                     } else {
-                        (autoshop::decode::load_image(&path)?.thumbnail(edge, edge), Vec::new())
+                        (
+                            autoshop::decode::load_image(&path)?.thumbnail(edge, edge),
+                            Vec::new(),
+                            Default::default(),
+                        )
                     };
                     // Arc once here so every downstream sharer (variants, the
                     // preview worker) is an O(1) refcount bump, not a deep copy.
-                    Ok((Arc::new(thumb), knots))
+                    Ok((Arc::new(thumb), knots, lens))
                 })();
                 Msg::Opened(Box::new(res))
             },
@@ -1556,11 +1593,7 @@ impl AutoshopApp {
     /// Decoded-base LRU lookup (most-recent entry kept last). Missing metadata
     /// (mtime `None`) matches itself, so the cache still works where mtime is
     /// unavailable — it just loses the staleness guard there.
-    fn cached_base(
-        &mut self,
-        path: &std::path::Path,
-        edge: u32,
-    ) -> Option<(Arc<image::DynamicImage>, Vec<[f32; 2]>)> {
+    fn cached_base(&mut self, path: &std::path::Path, edge: u32) -> Option<OpenedBase> {
         let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         let pos = self
             .base_cache
@@ -1581,11 +1614,14 @@ impl AutoshopApp {
         edge: u32,
         base: &Arc<image::DynamicImage>,
         knots: &[[f32; 2]],
+        lens: &autoshop::recipe::LensProfile,
     ) {
         let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         self.base_cache.retain(|((p, e, _), _)| !(p == path && *e == edge));
-        self.base_cache
-            .push(((path.to_path_buf(), edge, mtime), (base.clone(), knots.to_vec())));
+        self.base_cache.push((
+            (path.to_path_buf(), edge, mtime),
+            (base.clone(), knots.to_vec(), lens.clone()),
+        ));
         if self.base_cache.len() > BASE_CACHE_CAP {
             self.base_cache.remove(0); // least-recent first
         }
@@ -2704,8 +2740,15 @@ impl AutoshopApp {
             reference
         };
         let mut cov = image::DynamicImage::ImageLuma8(autoshop::render::mask_coverage(&mask, cov_ref));
-        if self.recipe.lens_distortion != 0.0 {
-            cov = autoshop::render::apply_lens_distortion(&cov, self.recipe.lens_distortion);
+        if self.recipe.lens_profile.geometry_active() || self.recipe.lens_distortion != 0.0 {
+            // The coverage overlay must follow the SAME geometric chain as the
+            // rendered pixels — profile distortion included, or the red wash
+            // drifts off its mask near the frame edges.
+            cov = autoshop::render::apply_lens_geometry(
+                &cov,
+                &self.recipe.lens_profile,
+                self.recipe.lens_distortion,
+            );
         }
         if self.recipe.straighten_deg != 0.0 {
             cov = autoshop::render::rotate_straighten(&cov, self.recipe.straighten_deg);
@@ -2729,9 +2772,9 @@ impl AutoshopApp {
     }
 
     /// The geometric mapping context every interaction boundary needs:
-    /// original preview pixel dims + the current straighten angle + the
-    /// current manual distortion amount.
-    fn geom_ctx(&self) -> ((f32, f32), f32, f32) {
+    /// original preview pixel dims + the current straighten angle + the lens
+    /// geometry (in-camera profile + manual distortion amount).
+    fn geom_ctx(&self) -> ((f32, f32), f32, LensArg) {
         let dims = self
             .base_preview
             .as_ref()
@@ -2740,7 +2783,14 @@ impl AutoshopApp {
                 (w as f32, h as f32)
             })
             .unwrap_or((1.0, 1.0));
-        (dims, self.recipe.straighten_deg, self.recipe.lens_distortion)
+        (
+            dims,
+            self.recipe.straighten_deg,
+            LensArg {
+                profile: self.recipe.lens_profile.clone(),
+                amount: self.recipe.lens_distortion,
+            },
+        )
     }
 
     /// Draw the live histogram (R/G/B filled, luma outline; one bin per 8-bit
@@ -3079,10 +3129,11 @@ impl AutoshopApp {
         let base = self.refine.then(|| {
             let mut r = self.recipe.clone();
             // The refine prompt/verifier work over the camera's embedded
-            // preview, where the base look is already IN the pixels — leaking
-            // the canvas base_curve into the prompt would double-apply it in
-            // the verifier's render. Msg::Analyzed stamps it back afterwards.
+            // preview, where the base look AND the lens corrections are
+            // already IN the pixels — leaking either into the prompt would
+            // double-apply them. Msg::Analyzed stamps both back afterwards.
             r.base_curve = Vec::new();
+            r.lens_profile = Default::default();
             r
         });
         self.spawn_worker(
@@ -3313,6 +3364,7 @@ impl AutoshopApp {
                                 // while its open canvas shows the bright one).
                                 found.unwrap_or_else(|| EditRecipe {
                                     base_curve: autoshop::pipeline::photo_base_knots(p),
+                                    lens_profile: autoshop::pipeline::fresh_lens_profile(p),
                                     ..Default::default()
                                 })
                             };
@@ -3630,16 +3682,17 @@ impl AutoshopApp {
                     // open.
                     let keep = std::mem::take(&mut self.keep_recipe);
                     match *boxed {
-                    Ok((base, knots)) => {
+                    Ok((base, knots, lens)) => {
                         self.busy = false;
                         if let Some(p) = self.src_path.clone() {
                             let edge = self.preview_edge.clamp(640, 8192);
-                            self.remember_base(&p, edge, &base, &knots);
+                            self.remember_base(&p, edge, &base, &knots, &lens);
                         }
                         // Kept for Reset: "reset" = the fresh-open look, so it
                         // needs this photo's knots even when the restored
                         // recipe (legacy save) deliberately carries none.
                         self.photo_knots = knots.clone();
+                        self.photo_lens = lens.clone();
                         if keep {
                             // Preview-resolution re-decode: the SOURCE pixels just
                             // changed resolution — keep the whole variant set,
@@ -3732,8 +3785,15 @@ impl AutoshopApp {
                                 }
                                 SavedDevelop::Nothing => {}
                             }
-                            if stamp && !knots.is_empty() {
-                                recipe.base_curve = knots.clone();
+                            if stamp {
+                                if !knots.is_empty() {
+                                    recipe.base_curve = knots.clone();
+                                }
+                                // Same rule as the curve: fresh opens and
+                                // XMP-only restores get the photo's in-camera
+                                // lens profile (all-available-on); a saved
+                                // recipe.json keeps its own verbatim.
+                                recipe.lens_profile = lens.clone();
                             } else if !stamp
                                 && recipe.base_curve.is_empty()
                                 && !knots.is_empty()
@@ -3875,6 +3935,7 @@ impl AutoshopApp {
                         let mut canvas = stamped.clone();
                         if self.active_variant().is_some_and(|v| v.base.is_some()) {
                             canvas.base_curve = Vec::new();
+                            canvas.lens_profile = Default::default();
                         }
                         self.recipe = canvas;
                         // Wholesale replacement: disarm index-carrying tools +
@@ -4868,12 +4929,74 @@ impl AutoshopApp {
                 );
             });
 
-        // --- 镜头校正: manual lens corrections (gap batch C) ------------------
-        let lens_active = self.recipe.lens_vignette != 0.0 || self.recipe.lens_distortion != 0.0;
+        // --- 镜头校正: in-camera profile + manual corrections -----------------
+        let lens_active = self.recipe.lens_vignette != 0.0
+            || self.recipe.lens_distortion != 0.0
+            || self.recipe.lens_profile.vignette_active()
+            || self.recipe.lens_profile.geometry_active();
         egui::CollapsingHeader::new(section_title(tr(lang, "Lens"), lens_active))
             .id_salt("sec_lens")
             .default_open(false)
             .show(ui, |ui| {
+                // In-camera profile corrections (lensmeta): the manufacturer's
+                // exact per-shot data read from the RAW itself — no lens
+                // database. Toggling a component ON whose data a legacy
+                // restore dropped re-fills it from this photo's metadata.
+                let photo = self.photo_lens.clone();
+                let lp = &mut self.recipe.lens_profile;
+                let has_v = !lp.vignette.is_empty() || !photo.vignette.is_empty();
+                let has_d = !lp.distortion.is_empty() || !photo.distortion.is_empty();
+                let has_c = (!lp.ca_r.is_empty() || !photo.ca_r.is_empty())
+                    && (!lp.ca_b.is_empty() || !photo.ca_b.is_empty());
+                if has_v || has_d || has_c {
+                    ui.label(tr(lang, "Profile corrections (from camera metadata)"));
+                    let mut pch = false;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(has_v, egui::Checkbox::new(&mut lp.vignette_on, tr(lang, "Vignetting")))
+                            .on_hover_text(tr(lang, "The camera's own falloff map for this shot, applied in linear light"))
+                            .changed()
+                        {
+                            if lp.vignette_on && lp.vignette.is_empty() {
+                                lp.vignette = photo.vignette.clone();
+                            }
+                            pch = true;
+                        }
+                        if ui
+                            .add_enabled(has_d, egui::Checkbox::new(&mut lp.distortion_on, tr(lang, "Distortion")))
+                            .on_hover_text(tr(lang, "The camera's own geometric correction; masks and crop follow the corrected frame"))
+                            .changed()
+                        {
+                            if lp.distortion_on && lp.distortion.is_empty() {
+                                lp.distortion = photo.distortion.clone();
+                            }
+                            pch = true;
+                        }
+                        if ui
+                            .add_enabled(has_c, egui::Checkbox::new(&mut lp.ca_on, tr(lang, "Chromatic aberration")))
+                            .on_hover_text(tr(lang, "Per-channel radius correction: removes red/blue colour fringing at edges"))
+                            .changed()
+                        {
+                            if lp.ca_on && lp.ca_r.is_empty() {
+                                lp.ca_r = photo.ca_r.clone();
+                                lp.ca_b = photo.ca_b.clone();
+                            }
+                            pch = true;
+                        }
+                    });
+                    if pch {
+                        self.overlay_stale = true;
+                        changed = true;
+                    }
+                    ui.separator();
+                } else if self.src_path.as_deref().is_some_and(autoshop::decode::is_raw) {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "No in-camera lens correction data in this file"))
+                            .weak()
+                            .small(),
+                    );
+                    ui.separator();
+                }
                 changed |= Self::slider(ui, lang, tr(lang, "Vignette"), &mut self.recipe.lens_vignette, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Midpoint"), &mut self.recipe.lens_vignette_mid, 0.0, 100.0, 50.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Distortion"), &mut self.recipe.lens_distortion, -100.0, 100.0, 0.0);
@@ -5540,7 +5663,7 @@ impl AutoshopApp {
             || self.sel_mask.and_then(|i| self.recipe.masks.get(i)).is_some_and(|m| {
                 let (dims, deg, dist) = self.geom_ctx();
                 resp.hover_pos().is_some_and(|p| {
-                    mask_handle_points(&geom_to_view(&m.mask, dims, deg, dist), xf)
+                    mask_handle_points(&geom_to_view(&m.mask, dims, deg, &dist), xf)
                         .iter()
                         .any(|(_, hp)| hp.distance(p) <= HANDLE_HIT)
                 })
@@ -5624,8 +5747,8 @@ impl AutoshopApp {
             } else if let Some([l, t, rr, bb]) = self.region {
                 // Stored in the original frame → back into the transformed view.
                 let ((bw, bh), deg, dist) = self.geom_ctx();
-                let a = orig_norm_to_view(l, t, (bw, bh), deg, dist);
-                let b2 = orig_norm_to_view(rr, bb, (bw, bh), deg, dist);
+                let a = orig_norm_to_view(l, t, (bw, bh), deg, &dist);
+                let b2 = orig_norm_to_view(rr, bb, (bw, bh), deg, &dist);
                 draw(
                     egui::Rect::from_min_max(xf.to_screen(a.0, a.1), xf.to_screen(b2.0, b2.1))
                         .intersect(rect),
@@ -5641,9 +5764,11 @@ impl AutoshopApp {
             && let Some(m) = self.sel_mask.and_then(|i| self.recipe.masks.get(i))
         {
             let (dims, deg, dist) = self.geom_ctx();
-            let vg = geom_to_view(&m.mask, dims, deg, dist);
+            let vg = geom_to_view(&m.mask, dims, deg, &dist);
+            let geom_active = dist.amount != 0.0
+                || (dist.profile.distortion_on && !dist.profile.distortion.is_empty());
             if let MaskGeometry::Radial { top, left, bottom, right, flipped, .. } = &m.mask
-                && (deg != 0.0 || dist != 0.0)
+                && (deg != 0.0 || geom_active)
             {
                 // The engine evaluates the ellipse in the ORIGINAL frame; under
                 // straighten/distortion its image is a rotated/warped curve —
@@ -5660,7 +5785,7 @@ impl AutoshopApp {
                             cy + ry * th.sin(),
                             dims,
                             deg,
-                            dist,
+                            &dist,
                         );
                         xf.to_screen(vx, vy)
                     })
@@ -5668,7 +5793,7 @@ impl AutoshopApp {
                 let p = ui.painter_at(xf.rect);
                 p.add(egui::Shape::closed_line(pts, egui::Stroke::new(2.0, ACCENT)));
                 // Same effect-side marker semantics as draw_mask_overlay.
-                let (ccx, ccy) = orig_norm_to_view(cx, cy, dims, deg, dist);
+                let (ccx, ccy) = orig_norm_to_view(cx, cy, dims, deg, &dist);
                 let cs = xf.to_screen(ccx, ccy);
                 if flipped ^ m.inverted {
                     p.circle_stroke(cs, 3.0, egui::Stroke::new(2.0, ACCENT));
@@ -5701,7 +5826,7 @@ impl AutoshopApp {
         let (nx, ny) = xf.to_norm(q);
         // base_preview is the ORIGINAL frame — map out of the transformed view.
         let ((bw, bh), deg, dist) = self.geom_ctx();
-        let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, dist);
+        let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
         let px = {
             let Some(base) = &self.base_preview else { return };
             let rgb = base.to_rgb8();
@@ -5758,7 +5883,7 @@ impl AutoshopApp {
         let (nx, ny) = xf.to_norm(q);
         // develop_preview works in the ORIGINAL frame — map out of the view.
         let ((bw, bh), deg, dist) = self.geom_ctx();
-        let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, dist);
+        let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
         let smp = {
             let Some(base) = &self.base_preview else { return };
             let mut pre = self.recipe.clone();
@@ -5826,7 +5951,7 @@ impl AutoshopApp {
             return false;
         };
         let (dims, deg, dist) = self.geom_ctx();
-        let view_geom = geom_to_view(&self.recipe.masks[i].mask, dims, deg, dist);
+        let view_geom = geom_to_view(&self.recipe.masks[i].mask, dims, deg, &dist);
         let handles = mask_handle_points(&view_geom, xf);
         if handles.is_empty() {
             self.mask_drag = None; // bitmap: nothing parametric to drag
@@ -5853,7 +5978,7 @@ impl AutoshopApp {
         let hover_h = resp.hover_pos().and_then(pick);
         let orig_at = |p: egui::Pos2| {
             let (nx, ny) = xf.to_norm(p);
-            view_norm_to_orig(nx, ny, dims, deg, dist)
+            view_norm_to_orig(nx, ny, dims, deg, &dist)
         };
         if resp.drag_started()
             && let Some(p) = resp.interact_pointer_pos()
@@ -5932,7 +6057,7 @@ impl AutoshopApp {
                 let ((bw, bh), deg, dist) = self.geom_ctx();
                 let map = |p: egui::Pos2| {
                     let (nx, ny) = xf.to_norm(p);
-                    view_norm_to_orig(nx, ny, (bw, bh), deg, dist)
+                    view_norm_to_orig(nx, ny, (bw, bh), deg, &dist)
                 };
                 let (sn, en) = (map(s), map(e));
                 let (l, r) = (sn.0.min(en.0), sn.0.max(en.0));
@@ -6240,13 +6365,13 @@ impl AutoshopApp {
             && let Some(p) = resp.interact_pointer_pos()
         {
             let (nx, ny) = xf.to_norm(p);
-            self.place_start = Some(view_norm_to_orig(nx, ny, dims, deg, dist));
+            self.place_start = Some(view_norm_to_orig(nx, ny, dims, deg, &dist));
         }
         let Some(s) = self.place_start else { return };
         let Some(p) = resp.interact_pointer_pos() else { return };
         let e = {
             let (nx, ny) = xf.to_norm(p);
-            view_norm_to_orig(nx, ny, dims, deg, dist)
+            view_norm_to_orig(nx, ny, dims, deg, &dist)
         };
         let geom = match kind {
             MaskKind::Linear => autoshop::recipe::MaskGeometry::Linear {
@@ -6266,7 +6391,7 @@ impl AutoshopApp {
             },
         };
         // Live placement preview: no owning adjustment yet → markers upright.
-        draw_mask_overlay(ui, xf, &geom_to_view(&geom, dims, deg, dist), false, self.lang);
+        draw_mask_overlay(ui, xf, &geom_to_view(&geom, dims, deg, &dist), false, self.lang);
         if resp.drag_stopped() {
             match replace {
                 Some(i) if i < self.recipe.masks.len() => {
@@ -6350,14 +6475,22 @@ impl AutoshopApp {
         // overlay must go through the SAME remap or every stroke displays
         // offset under a straightened view. Rebuild when the transform moved,
         // not only when the canvas was painted.
-        let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion);
+        // The profile toggle is part of the transform key: switching profile
+        // distortion on/off must re-blit the canvas (data only changes per
+        // photo, and opening a photo resets the texture anyway).
+        let profile_geom = self.recipe.lens_profile.geometry_active();
+        let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion, profile_geom);
         let stale_xform = self.mask_tex.is_some() && self.mask_tex_xform != xform_now;
         if self.mask_dirty || stale_xform {
             if let Some(m) = &self.mask_paint {
-                let ci = if xform_now != (0.0, 0.0) {
+                let ci = if xform_now != (0.0, 0.0, false) {
                     let mut img = image::DynamicImage::ImageRgba8(m.clone());
-                    if xform_now.1 != 0.0 {
-                        img = autoshop::render::apply_lens_distortion(&img, xform_now.1);
+                    if xform_now.1 != 0.0 || profile_geom {
+                        img = autoshop::render::apply_lens_geometry(
+                            &img,
+                            &self.recipe.lens_profile,
+                            xform_now.1,
+                        );
                     }
                     if xform_now.0 != 0.0 {
                         img = autoshop::render::rotate_straighten(&img, xform_now.0);
@@ -6403,7 +6536,7 @@ impl AutoshopApp {
         // pixels), so pointer positions map out of the transformed view.
         let to_mask = |p: egui::Pos2| {
             let (nx, ny) = xf.to_norm(p);
-            let (ox, oy) = view_norm_to_orig(nx, ny, dims, deg, dist);
+            let (ox, oy) = view_norm_to_orig(nx, ny, dims, deg, &dist);
             (ox * mw, oy * mh)
         };
         let brush_mask = (brush * (xf.uv.width() * mw) / xf.rect.width().max(1.0)).max(1.0);
@@ -6448,7 +6581,7 @@ impl AutoshopApp {
             {
                 let (dims, deg, dist) = self.geom_ctx();
                 let (nx, ny) = xf.to_norm(q);
-                self.clone_src = Some(view_norm_to_orig(nx, ny, dims, deg, dist));
+                self.clone_src = Some(view_norm_to_orig(nx, ny, dims, deg, &dist));
                 self.status = tr(
                     self.lang,
                     "Clone source sampled — brush the area to cover, then 「⎘ Clone painted area」",
@@ -6460,7 +6593,7 @@ impl AutoshopApp {
         }
         if let Some((sx, sy)) = self.clone_src {
             let (dims, deg, dist) = self.geom_ctx();
-            let (vx, vy) = orig_norm_to_view(sx, sy, dims, deg, dist);
+            let (vx, vy) = orig_norm_to_view(sx, sy, dims, deg, &dist);
             let q = xf.to_screen(vx, vy);
             let p = ui.painter_at(xf.rect);
             p.circle_stroke(q, 9.0, egui::Stroke::new(2.0, PILL));
@@ -7453,12 +7586,14 @@ impl eframe::App for AutoshopApp {
                     // made Reset stay dark on every previously-edited photo.
                     // A BAKED variant keeps no curve (its pixels already carry
                     // the camera look).
-                    let base_curve = if self.active_variant().is_some_and(|v| v.base.is_some()) {
-                        Vec::new()
-                    } else {
-                        self.photo_knots.clone()
-                    };
-                    self.recipe = EditRecipe { base_curve, ..EditRecipe::default() };
+                    let baked = self.active_variant().is_some_and(|v| v.base.is_some());
+                    let base_curve = if baked { Vec::new() } else { self.photo_knots.clone() };
+                    // The lens profile is the same kind of calibration: Reset
+                    // re-stamps the photo's own (baked variants carry the
+                    // corrections in their pixels already — none re-applied).
+                    let lens_profile =
+                        if baked { Default::default() } else { self.photo_lens.clone() };
+                    self.recipe = EditRecipe { base_curve, lens_profile, ..EditRecipe::default() };
                     self.region = None;
                     self.dirty = true;
                     // The old AI rationale/verdict describe the recipe Reset
@@ -8071,25 +8206,38 @@ mod tests {
     #[test]
     fn geometric_view_mapping_roundtrips() {
         // The two boundary maps must be exact inverses (they share the
-        // engine's inscribed_dims / distort_norm formulas), and all-zero
+        // engine's inscribed_dims / lens_geom_norm formulas), and all-zero
         // controls must be the identity so no existing flow changes.
         // Interior points only: originals near the frame edge can be
         // legitimately cropped away by a strong barrel fix (no preimage).
         let dims = (1280.0, 853.0);
-        assert_eq!(view_norm_to_orig(0.31, 0.77, dims, 0.0, 0.0), (0.31, 0.77));
+        let off = LensArg::default();
+        assert_eq!(view_norm_to_orig(0.31, 0.77, dims, 0.0, &off), (0.31, 0.77));
+        // A real-shaped in-camera profile joins the sweep: the composed map
+        // must round-trip exactly like the manual-only one.
+        let profile = autoshop::recipe::LensProfile {
+            distortion: (0..16).map(|i| 1.0008 - 0.053 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion_on: true,
+            ..Default::default()
+        };
         for deg in [0.0f32, 2.5, -7.0, 12.0] {
             for dist in [0.0f32, 60.0, -60.0, 100.0] {
-                for (nx, ny) in [(0.5, 0.5), (0.35, 0.65), (0.6, 0.42)] {
-                    let (vx, vy) = orig_norm_to_view(nx, ny, dims, deg, dist);
-                    let (ox, oy) = view_norm_to_orig(vx, vy, dims, deg, dist);
-                    assert!(
-                        (ox - nx).abs() < 2e-3 && (oy - ny).abs() < 2e-3,
-                        "deg {deg} dist {dist}: ({nx},{ny}) → view ({vx},{vy}) → back ({ox},{oy})"
-                    );
+                for lens in [
+                    LensArg { profile: Default::default(), amount: dist },
+                    LensArg { profile: profile.clone(), amount: dist },
+                ] {
+                    for (nx, ny) in [(0.5, 0.5), (0.35, 0.65), (0.6, 0.42)] {
+                        let (vx, vy) = orig_norm_to_view(nx, ny, dims, deg, &lens);
+                        let (ox, oy) = view_norm_to_orig(vx, vy, dims, deg, &lens);
+                        assert!(
+                            (ox - nx).abs() < 2e-3 && (oy - ny).abs() < 2e-3,
+                            "deg {deg} dist {dist}: ({nx},{ny}) → view ({vx},{vy}) → back ({ox},{oy})"
+                        );
+                    }
+                    // The centre is a fixed point at any angle + geometry.
+                    let (cx, cy) = view_norm_to_orig(0.5, 0.5, dims, deg, &lens);
+                    assert!((cx - 0.5).abs() < 1e-4 && (cy - 0.5).abs() < 1e-4);
                 }
-                // The centre is a fixed point at any angle + distortion.
-                let (cx, cy) = view_norm_to_orig(0.5, 0.5, dims, deg, dist);
-                assert!((cx - 0.5).abs() < 1e-4 && (cy - 0.5).abs() < 1e-4);
             }
         }
     }
@@ -8337,18 +8485,25 @@ mod tests {
         let mut app = AutoshopApp::default();
         let base = Arc::new(image::DynamicImage::new_rgb8(4, 3));
         let knots: Vec<[f32; 2]> = vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]];
+        let lens = autoshop::recipe::LensProfile {
+            vignette: vec![1.0, 1.2],
+            vignette_on: true,
+            ..Default::default()
+        };
         let p = std::path::Path::new("D:/__autoshop_nonexistent__/x.ARW");
-        app.remember_base(p, 1280, &base, &knots);
+        app.remember_base(p, 1280, &base, &knots, &lens);
         let hit = app.cached_base(p, 1280);
         assert!(hit.is_some(), "same path+edge hits");
-        assert_eq!(hit.unwrap().1, knots, "base-look knots ride the cache entry");
+        let hit = hit.unwrap();
+        assert_eq!(hit.1, knots, "base-look knots ride the cache entry");
+        assert_eq!(hit.2, lens, "the lens profile rides the cache entry too");
         assert!(app.cached_base(p, 2560).is_none(), "edge is part of the key");
         // Filling past the cap evicts the least-recently-used entry.
         let others: Vec<std::path::PathBuf> = (0..BASE_CACHE_CAP)
             .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/{i}.ARW")))
             .collect();
         for o in &others {
-            app.remember_base(o, 1280, &base, &[]);
+            app.remember_base(o, 1280, &base, &[], &Default::default());
         }
         assert!(app.cached_base(p, 1280).is_none(), "least-recent evicted at cap");
         assert!(app.cached_base(&others[1], 1280).is_some(), "newer entries survive");

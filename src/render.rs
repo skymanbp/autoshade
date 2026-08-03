@@ -117,12 +117,13 @@ pub fn render_to_image(
     // buffer is already in the display frame — no tail rotation.
     let mut dynimg = DynamicImage::ImageRgb16(img);
 
-    // --- manual lens distortion: radial resample FIRST in the geometric chain
-    // (masks were applied above, in the original frame). The map depends only
-    // on the radius normalised by the half-diagonal, so it is orientation-
-    // invariant and identical between the small preview and this full render.
-    if recipe.lens_distortion != 0.0 {
-        dynimg = apply_lens_distortion(&dynimg, recipe.lens_distortion);
+    // --- lens geometry (profile distortion/CA + manual amount): radial
+    // resample FIRST in the geometric chain (masks were applied above, in the
+    // original frame). The map depends only on the radius normalised by the
+    // half-diagonal, so it is orientation-invariant and identical between the
+    // small preview and this full render.
+    if recipe.lens_profile.geometry_active() || recipe.lens_distortion != 0.0 {
+        dynimg = apply_lens_geometry(&dynimg, &recipe.lens_profile, recipe.lens_distortion);
     }
 
     // --- straighten: rotate + auto-crop BEFORE the user crop, in display
@@ -185,10 +186,10 @@ pub fn render_baked_to_image(
         .ok_or_else(|| anyhow!("baked pixel buffer size mismatch"))?;
     let mut dynimg = DynamicImage::ImageRgb16(out);
 
-    // Distortion, then straighten, before the user crop — same order as the
-    // RAW path (the geometric chain is original → corrected → view).
-    if recipe.lens_distortion != 0.0 {
-        dynimg = apply_lens_distortion(&dynimg, recipe.lens_distortion);
+    // Lens geometry, then straighten, before the user crop — same order as
+    // the RAW path (the geometric chain is original → corrected → view).
+    if recipe.lens_profile.geometry_active() || recipe.lens_distortion != 0.0 {
+        dynimg = apply_lens_geometry(&dynimg, &recipe.lens_profile, recipe.lens_distortion);
     }
     if recipe.straighten_deg != 0.0 {
         dynimg = rotate_straighten(&dynimg, recipe.straighten_deg);
@@ -521,6 +522,13 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
 /// ACR: tone → clarity → saturation/vibrance → noise reduction → sharpening.
 /// Operates in place on sRGB-gamma RGB in [0,1].
 fn apply_develop(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
+    // 0a) in-camera lens profile vignetting (lensmeta): the manufacturer's own
+    //     falloff map for THIS shot, a radial gain in LINEAR light. Runs before
+    //     the manual stage — both are multiplicative gains, so order between
+    //     them is cosmetic, but profile-as-base reads as "calibration first".
+    if r.lens_profile.vignette_active() {
+        apply_profile_vignette(data, w, h, &r.lens_profile.vignette);
+    }
     // 0) lens vignette compensation — a radial gain in LINEAR light (falloff is
     //    multiplicative on sensor irradiance), before any tonal work so the tone
     //    curve sees evenly-lit pixels. Preview and export share this stage.
@@ -631,6 +639,33 @@ fn apply_vignette(data: &mut [[f32; 3]], w: usize, h: usize, amount: f32, midpoi
     // independent, so the pass is also row-parallel.
     let gain_lut: Vec<f32> = (0..LUT_N)
         .map(|i| 1.0 + k * (i as f32 / (LUT_N - 1) as f32).powf(gamma))
+        .collect();
+    let (dec, enc) = transfer_luts();
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let dy = y as f32 - cy;
+        for (x, px) in row.iter_mut().enumerate() {
+            let dx = x as f32 - cx;
+            let rn = ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0);
+            let gain = sample_lut(&gain_lut, rn);
+            if (gain - 1.0).abs() < 1e-6 {
+                continue;
+            }
+            for c in px.iter_mut() {
+                *c = sample_lut(enc, (sample_lut(dec, *c) * gain).clamp(0.0, 1.0));
+            }
+        }
+    });
+}
+
+/// In-camera profile vignetting: per-knot linear-light GAINS over the
+/// normalised corner radius (knot placement (i+0.5)/(n−1) — see `lensmeta`),
+/// linearly interpolated. Same LUT + row-parallel skeleton as the manual
+/// stage below; gains come from the camera, not a slider model.
+fn apply_profile_vignette(data: &mut [[f32; 3]], w: usize, h: usize, knots: &[f32]) {
+    let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
+    let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
+    let gain_lut: Vec<f32> = (0..LUT_N)
+        .map(|i| profile_knot_interp(knots, i as f32 / (LUT_N - 1) as f32))
         .collect();
     let (dec, enc) = transfer_luts();
     data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
@@ -2193,6 +2228,220 @@ pub fn apply_lens_distortion(img: &DynamicImage, amount: f32) -> DynamicImage {
     DynamicImage::ImageRgb16(out)
 }
 
+// --- In-camera lens profile geometry (lensmeta knots) -----------------------
+//
+// Same coordinate contract as the manual correction above: pure radial maps
+// about the frame centre, radius normalised by the half-diagonal. The profile
+// spline (knot i at (i+0.5)/(n−1), linear interpolation, clamped ends —
+// RawTherapee's placement) runs FIRST, the manual amount composes on top, and
+// CA multiplies the resulting map per channel (red/blue sample at a slightly
+// different radius than green). Composition happens in ONE resample pass so
+// the frame is only softened by a single bilinear step.
+
+/// Linear interpolation over profile knots at (i+0.5)/(n−1), clamped outside.
+fn profile_knot_interp(knots: &[f32], r: f32) -> f32 {
+    let n = knots.len();
+    if n == 0 {
+        return 1.0;
+    }
+    if n == 1 {
+        return knots[0];
+    }
+    let t = r * (n - 1) as f32 - 0.5;
+    if t <= 0.0 {
+        return knots[0];
+    }
+    if t >= (n - 1) as f32 {
+        return knots[n - 1];
+    }
+    let i = t.floor() as usize;
+    let f = t - i as f32;
+    knots[i] * (1.0 - f) + knots[i + 1] * f
+}
+
+/// The profile's fill scale s_p = max g over the frame EDGE (Stannum's `s`):
+/// dividing the map by it is the minimal zoom that keeps every edge source
+/// sample inside the frame — no black borders, minimal crop. Edge radii sweep
+/// [min(w,h)/diagonal, 1] continuously, so a max over that interval suffices.
+fn profile_fill_scale(knots: &[f32], dims: (f32, f32)) -> f32 {
+    if knots.is_empty() {
+        return 1.0;
+    }
+    let (w, h) = dims;
+    let rmin = (w.min(h) / (w * w + h * h).sqrt().max(1e-6)).clamp(0.0, 1.0);
+    let mut s = f32::MIN;
+    for i in 0..=256 {
+        let r = rmin + (1.0 - rmin) * i as f32 / 256.0;
+        s = s.max(profile_knot_interp(knots, r));
+    }
+    s.max(1e-3)
+}
+
+/// Composed forward radial factor at normalised radius `rn` (green/base
+/// channel): profile spline (over its fill scale) then the manual amount.
+fn lens_geom_factor(rn: f32, dist_knots: &[f32], s_p: f32, k: f32, s: f32) -> f32 {
+    let f1 = if dist_knots.is_empty() { 1.0 } else { profile_knot_interp(dist_knots, rn) / s_p };
+    let r1 = rn * f1;
+    let f2 = s * (1.0 + k * (s * r1) * (s * r1));
+    f1 * f2
+}
+
+/// Corrected-frame normalised point → ORIGINAL-frame normalised point through
+/// the COMPOSED geometry (profile distortion + manual amount — the green map;
+/// CA is a render-only chromatic refinement the GUI never needs). Falls back
+/// to [`distort_norm`]'s exact math when the profile is inactive.
+pub fn lens_geom_norm(
+    nx: f32,
+    ny: f32,
+    dims: (f32, f32),
+    profile: &crate::recipe::LensProfile,
+    amount: f32,
+) -> (f32, f32) {
+    let dist_on = profile.distortion_on && !profile.distortion.is_empty();
+    if !dist_on {
+        return distort_norm(nx, ny, dims, amount);
+    }
+    let (w, h) = dims;
+    let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
+    let s_p = profile_fill_scale(&profile.distortion, dims);
+    let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
+    let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
+    let rn = (dx * dx + dy * dy).sqrt() / rr;
+    let f = lens_geom_factor(rn, &profile.distortion, s_p, k, s);
+    ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
+}
+
+/// ORIGINAL-frame normalised point → corrected-frame point: numeric inverse of
+/// [`lens_geom_norm`] by bisection on the forward radial map (monotone for
+/// every real profile — factors live in `clamp()`'s 0.7..1.3 band and the
+/// spline slopes are gentle; a crafted zigzag would merely land on ONE valid
+/// preimage). Falls back to [`undistort_norm`] when the profile is inactive.
+pub fn lens_ungeom_norm(
+    nx: f32,
+    ny: f32,
+    dims: (f32, f32),
+    profile: &crate::recipe::LensProfile,
+    amount: f32,
+) -> (f32, f32) {
+    let dist_on = profile.distortion_on && !profile.distortion.is_empty();
+    if !dist_on {
+        return undistort_norm(nx, ny, dims, amount);
+    }
+    let (w, h) = dims;
+    let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
+    let s_p = profile_fill_scale(&profile.distortion, dims);
+    let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
+    let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
+    let rho = (dx * dx + dy * dy).sqrt() / rr;
+    if rho < 1e-6 {
+        return (nx, ny);
+    }
+    // Bisection over output radius on the RISING PREFIX of the forward map:
+    // fwd(rn) = rn · factor(rn) increases and then — under a strong manual
+    // barrel fix — folds back (the same shape undistort_norm's u_max clamp
+    // handles). Scan for the peak first; originals beyond the reachable
+    // maximum clamp there and land honestly off-screen, like undistort_norm.
+    let fwd = |rn: f32| rn * lens_geom_factor(rn, &profile.distortion, s_p, k, s);
+    let mut hi = 2.0f32;
+    let mut peak = 0.0f32;
+    for i in 1..=256 {
+        let rn = 2.0 * i as f32 / 256.0;
+        let v = fwd(rn);
+        if v < peak {
+            hi = 2.0 * (i - 1) as f32 / 256.0;
+            break;
+        }
+        peak = v;
+    }
+    if fwd(hi) <= rho {
+        let f = hi / rho;
+        return ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5);
+    }
+    let mut lo = 0.0f32;
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        if fwd(mid) < rho {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let rn = 0.5 * (lo + hi);
+    let f = rn / rho; // r_corrected / r_original
+    ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
+}
+
+/// Resample the frame through the COMPOSED lens geometry: profile distortion
+/// (+ per-channel CA) and the manual amount in one bilinear pass. Identity →
+/// clone. Same 16-bit precision policy as [`apply_lens_distortion`], which
+/// remains as the manual-only special case this generalises.
+pub fn apply_lens_geometry(
+    img: &DynamicImage,
+    profile: &crate::recipe::LensProfile,
+    amount: f32,
+) -> DynamicImage {
+    let dist_on = profile.distortion_on && !profile.distortion.is_empty();
+    let ca_on = profile.ca_on && !profile.ca_r.is_empty() && !profile.ca_b.is_empty();
+    if !dist_on && !ca_on {
+        return apply_lens_distortion(img, amount);
+    }
+    let owned;
+    let src = match img.as_rgb16() {
+        Some(b) => b,
+        None => {
+            owned = img.to_rgb16();
+            &owned
+        }
+    };
+    let (w, h) = (src.width() as f32, src.height() as f32);
+    let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
+    let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
+    let s_p = if dist_on { profile_fill_scale(&profile.distortion, (w, h)) } else { 1.0 };
+    // Per-channel radial factor LUTs over rn ∈ [0,1]: one lookup per channel
+    // per pixel instead of spline walks. CA multiplies the green map.
+    let luts: [Vec<f32>; 3] = {
+        let base: Vec<f32> = (0..LUT_N)
+            .map(|i| lens_geom_factor(i as f32 / (LUT_N - 1) as f32, dist_knots, s_p, k, s))
+            .collect();
+        let chan = |knots: &[f32]| -> Vec<f32> {
+            if !ca_on || knots.is_empty() {
+                return base.clone();
+            }
+            (0..LUT_N)
+                .map(|i| {
+                    let rn = i as f32 / (LUT_N - 1) as f32;
+                    base[i] * profile_knot_interp(knots, rn)
+                })
+                .collect()
+        };
+        [chan(&profile.ca_r), base.clone(), chan(&profile.ca_b)]
+    };
+    let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
+    let (cx, cy) = ((w - 1.0) * 0.5, (h - 1.0) * 0.5);
+    let ow = src.width() as usize;
+    let mut out: ImageBuffer<Rgb<u16>, Vec<u16>> = ImageBuffer::new(src.width(), src.height());
+    let obuf: &mut [u16] = &mut out;
+    obuf.par_chunks_mut(ow * 3).enumerate().for_each(|(y, orow)| {
+        let dy = y as f32 - cy;
+        for x in 0..ow {
+            let dx = x as f32 - cx;
+            let rn = ((dx * dx + dy * dy).sqrt() / rr).clamp(0.0, 1.0);
+            if ca_on {
+                // Red and blue sample at their own CA-refined radius.
+                for (c, lut) in luts.iter().enumerate() {
+                    let f = sample_lut(lut, rn);
+                    orow[x * 3 + c] = sample_bilinear_rgb16(src, cx + dx * f, cy + dy * f).0[c];
+                }
+            } else {
+                let f = sample_lut(&luts[1], rn);
+                orow[x * 3..x * 3 + 3]
+                    .copy_from_slice(&sample_bilinear_rgb16(src, cx + dx * f, cy + dy * f).0);
+            }
+        }
+    });
+    DynamicImage::ImageRgb16(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3034,6 +3283,53 @@ mod tests {
             ratio(0.95, -100.0),
             ratio(0.6, -100.0)
         );
+    }
+
+    #[test]
+    fn lens_profile_vignette_lifts_corners_only_and_geometry_roundtrips() {
+        use crate::recipe::LensProfile;
+        // Real A7RIV-shaped data (DSC08276 conversions): rising corner gains,
+        // falling distortion factors (barrel), near-unity CA.
+        let profile = LensProfile {
+            vignette: (0..16).map(|i| 1.0 + 0.42 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion: (0..16).map(|i| 1.0008 - 0.053 * (i as f32 / 15.0).powi(2)).collect(),
+            ca_r: vec![1.0005; 16],
+            ca_b: vec![0.9995; 16],
+            vignette_on: true,
+            distortion_on: true,
+            ca_on: true,
+        };
+        // (a) Vignette: corners brighten, the centre stays put.
+        let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(120, 80, image::Rgb([100, 100, 100])));
+        let vig_only = EditRecipe {
+            lens_profile: LensProfile { distortion_on: false, ca_on: false, ..profile.clone() },
+            ..Default::default()
+        };
+        let out = develop_preview(&base, &vig_only).to_rgb8();
+        assert_eq!(out[(60, 40)][0], 100, "centre untouched (gain 1.0)");
+        assert!(out[(0, 0)][0] > 110, "corner lifted, got {}", out[(0, 0)][0]);
+
+        // (b) Geometry: forward/inverse round-trip through the composed map.
+        let dims = (1200.0, 800.0);
+        for (nx, ny) in [(0.1, 0.1), (0.5, 0.2), (0.85, 0.7), (0.5, 0.5)] {
+            let (ox, oy) = lens_geom_norm(nx, ny, dims, &profile, 20.0);
+            let (bx, by) = lens_ungeom_norm(ox, oy, dims, &profile, 20.0);
+            assert!(
+                (bx - nx).abs() < 2e-3 && (by - ny).abs() < 2e-3,
+                "roundtrip ({nx},{ny}) → ({ox},{oy}) → ({bx},{by})"
+            );
+        }
+        // Inactive profile must be EXACTLY the manual path.
+        let off = LensProfile::default();
+        assert_eq!(lens_geom_norm(0.3, 0.8, dims, &off, 33.0), distort_norm(0.3, 0.8, dims, 33.0));
+
+        // (c) Resample: a barrel profile pulls samples inward (like the manual
+        // barrel fix) and leaves no unfilled pixels; identity-profile resample
+        // with CA stays within a hair of the plain image.
+        let white = DynamicImage::ImageRgb8(RgbImage::from_pixel(121, 81, image::Rgb([255, 255, 255])));
+        let r = apply_lens_geometry(&white, &profile, 0.0).to_rgb16();
+        let min = r.pixels().flat_map(|p| p.0).min().unwrap();
+        assert!(min >= 65000, "unfilled pixels through the profile map: min {min}");
     }
 
     #[test]

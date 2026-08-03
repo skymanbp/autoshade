@@ -19,6 +19,50 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **自动镜头校正（A 档立项落地，2026-08-03，已提交未推送）**——三批之三。
+  技术侦察结论（改变方案）：**Sony ARW 每张自带机内校正三件套**（0x7032
+  暗角 / 0x7035 CA / 0x7037 畸变，各 16 节点样条，真机 DSC08276 实测齐
+  全）——**不需要 lensfun 数据库**，逐张即本镜头在本焦距/光圈的厂商精确
+  profile。公式实证（RawTherapee `rtengine/lensmetadata.cc` 实现 +
+  stannum.io/blog/0PwljB 逆向互证，量级自洽）：暗角 gain=1/2^(0.5−
+  2^(v·2⁻¹³−1))（v=0→恰 1.0）、畸变 factor=v·2⁻¹⁴+1、CA=v·2⁻²¹+1（R/B
+  乘在绿通道映射上）；节点位 (i+0.5)/(n−1)，线性插值。用户拍板：**新照
+  默认三项全开**（与机内 JPEG 观感一致）。架构：
+  1. **[src/lensmeta.rs](../src/lensmeta.rs)**（新模块）：rawler
+     GenericTiffReader 提取 + 换算为引擎空间 f32 因子；计数守卫（畸形→
+     该分量缺失，绝不报错）；真值单测（A7RIV 实测向量：角落暗角 1.4249/
+     畸变 0.9478）+ 常驻真机探针 probe_real_lens_metadata（env 门控）。
+  2. **recipe.LensProfile**（引擎专用，不进 XMP）：三数据组+三开关；旧档
+     缺字段→默认全关→**逐字节不变**（硬契约，测钉）；is_noop 视"如盖戳
+     态"（全部可用分量开）为校准非编辑——用户拨开关=真编辑，存档/导航
+     全程存活；clamp 防御手编档（增益 0.25-4/因子 0.7-1.3/CA 0.98-1.02）。
+  3. **引擎**：暗角=apply_develop 0a 段线性光增益（16 节点径向 LUT，与
+     手动暗角同骨架）；几何=apply_lens_geometry **一次重采样**合成
+     profile 样条（Stannum 填幅 s=边缘 max g）+手动量+CA 分通道（R/G/B
+     各自半径采样，非 CA 快路径单采样）；lens_geom_norm/lens_ungeom_norm
+     正/逆映射（逆=上升前缀二分——复合映射在强手动桶形下过峰回折，域限
+     制到峰前，与 undistort_norm 的 u_max 同语义）。
+  4. **盖戳三端**：produce_recipe 尾部 photo_lens_profile（saved-first：
+     有存档用其 verbatim 含旧档全关与用户开关，否则 fresh_lens_profile
+     全开盖戳）；GUI 开照（OpenedBase 三元组+photo_lens 应用态+新照/仅
+     XMP 恢复盖戳，recipe.json 原样）、Reset 重盖（烘焙变体空）、粘贴按
+     目标重派生（源的校正数据对异镜头无意义）、分析 refine 剥/结果盖、
+     烘焙变体画布剥；web：404/fresh-base 双端点带 lens_profile+客户端
+     Reset 同义；GUI 批量渲染无存档 RAW 补戳。
+  5. **GUI**：Lens 面板顶部"机内镜头校正"三开关（数据缺失灰禁；legacy
+     恢复后拨开→从 photo_lens 回填数据）；蒙版/裁剪坐标映射
+     (view_norm_to_orig/orig_norm_to_view/geom_to_view) 全量换 LensArg
+     （profile+手动量）走复合映射——蒙版把手/覆盖层/画笔栅格在校正后画
+     面上不漂移；ensure_mask_tex 变换键含 profile 开关。
+  验证：**124 lib（+4：lensmeta 真值/序列化契约/引擎复合与往返/LRU 载
+  荷）+ 9 gui** 全绿、clippy --all-targets 0、i18n 390 键 0/0/0、真机
+  lensmeta 探针 PASS（16 节点×3）、双 exe（gui 34913095 / cli
+  26852437）。真机验收点：开新 ARW 畸变/暗角/CA 即校正（对比机内 JPEG
+  构图应一致）；Lens 面板三开关即时生效；旧存档观感不变；蒙版在开校正
+  后的画面上位置正确。未做（记录）：非 Sony 机型（Fuji 0xf00b 等）、
+  去紫边 de-fringe、lensfun 数据库路线（Sony 元数据已覆盖用户全部机
+  身）。
+
 - **LR 对标·手感批（2026-08-03，已提交未推送）**——用户拍板三批之第二批
   （缺陷→**手感**→A 档自动镜头校正）。纯 GUI（引擎/CLI 零改动，cli exe
   字节不变）。4 组：

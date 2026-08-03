@@ -192,6 +192,7 @@ pub fn produce_recipe(
     // the open-time "recipe.json keeps its saved curve" rule then pinned the
     // dark pre-base-look rendering onto that photo forever.
     recipe.base_curve = photo_base_curve(raw);
+    recipe.lens_profile = photo_lens_profile(raw);
     Ok((recipe, verdict))
 }
 
@@ -208,6 +209,33 @@ pub fn photo_base_curve(raw: &Path) -> Vec<[f32; 2]> {
         }
     }
     photo_base_knots(raw)
+}
+
+/// The lens profile a programmatic writer must carry for `raw` — the same
+/// saved-first rule as [`photo_base_curve`]: an existing recipe.json owns its
+/// profile verbatim (including the legacy default-off, and any user toggle),
+/// otherwise the photo's own in-camera metadata with every available
+/// component enabled ([`fresh_lens_profile`]).
+pub fn photo_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
+    for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
+        if let Ok(text) = std::fs::read_to_string(&p)
+            && let Ok(r) = serde_json::from_str::<EditRecipe>(&text)
+        {
+            return r.lens_profile;
+        }
+    }
+    fresh_lens_profile(raw)
+}
+
+/// Fresh in-camera lens profile for `raw`, stamped "all available components
+/// on" (the user's chosen default: match the in-camera JPEG, which applies
+/// these same corrections). Cheap — one TIFF metadata parse, no decode.
+pub fn fresh_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
+    let mut p = crate::lensmeta::read(raw);
+    p.vignette_on = !p.vignette.is_empty();
+    p.distortion_on = !p.distortion.is_empty();
+    p.ca_on = !p.ca_r.is_empty() && !p.ca_b.is_empty();
+    p
 }
 
 /// Fresh camera-matched base-look estimate for `raw`: a neutral develop

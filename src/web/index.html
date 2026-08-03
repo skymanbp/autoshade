@@ -669,16 +669,20 @@ async function selectPhoto(id, stem, el) {
   // A damaged / unreachable recipe must still leave a WORKING panel: fall back
   // to the neutral recipe and show the server's reason, instead of throwing out
   // of selectPhoto and leaving an empty control column with no explanation.
-  let loaded = null, loadErr = null, freshCurve = null;
+  let loaded = null, loadErr = null, freshCurve = null, freshLens = null;
   try {
     const rr = await fetch(`/api/recipe?id=${id}`);
     if (seq !== selectSeq) return;
     if (rr.ok) loaded = await rr.json();
     else if (rr.status === 404) {
       // "Not analyzed yet" — but the 404 body carries the photo's camera-
-      // matched base look, so a fresh open starts as bright as the GUI's
-      // instead of brightening only after the first Analyze.
-      try { const fresh = await rr.json(); if (fresh && Array.isArray(fresh.base_curve)) freshCurve = fresh.base_curve; } catch (_) { /* older server: plain-text 404 */ }
+      // matched base look AND its in-camera lens profile, so a fresh open
+      // matches a fresh GUI open instead of changing after the first Analyze.
+      try {
+        const fresh = await rr.json();
+        if (fresh && Array.isArray(fresh.base_curve)) freshCurve = fresh.base_curve;
+        if (fresh && fresh.lens_profile) freshLens = fresh.lens_profile;
+      } catch (_) { /* older server: plain-text 404 */ }
     }
     else loadErr = (await rr.text()) || `HTTP ${rr.status}`;
     if (seq !== selectSeq) return;
@@ -689,14 +693,15 @@ async function selectPhoto(id, stem, el) {
   if (loaded) {
     // The saved recipe is served verbatim (a legacy save deliberately carries
     // an EMPTY base_curve) — but Reset means "the fresh-open look" (the GUI's
-    // photo_knots rule, d1f6986), so the photo's own fresh knots are fetched
-    // separately for it. Failure just leaves Reset preserving the curve.
+    // photo_knots rule, d1f6986), so the photo's own fresh calibration is
+    // fetched separately for it. Failure just leaves Reset preserving state.
     try {
       const fr = await fetch(`/api/fresh-base?id=${id}`);
       if (seq !== selectSeq) return;
       if (fr.ok) {
         const f = await fr.json();
         if (f && Array.isArray(f.base_curve)) freshCurve = f.base_curve;
+        if (f && f.lens_profile) freshLens = f.lens_profile;
       }
     } catch (_) { /* older server without /api/fresh-base */ }
     if (seq !== selectSeq) return;
@@ -706,11 +711,13 @@ async function selectPhoto(id, stem, el) {
   } else {
     state.recipe = structuredClone(DEFAULT_RECIPE);
     if (freshCurve && freshCurve.length) state.recipe.base_curve = freshCurve;
+    if (freshLens) state.recipe.lens_profile = freshLens;
     $(".verdict").textContent = loadErr ? loadErr : "Not analyzed yet.";
   }
-  // Kept for Reset: this photo's fresh camera-matched base knots (null when
-  // unavailable — non-RAW, no embedded preview, or an older server).
+  // Kept for Reset: this photo's fresh camera-matched calibration (null when
+  // unavailable — non-RAW, no metadata, or an older server).
   state.freshCurve = (freshCurve && freshCurve.length) ? freshCurve : null;
+  state.freshLens = freshLens || null;
   // Build the controls now that state.recipe is known, then populate them.
   buildSliders(main.querySelector(".sliders"));
   buildWb(main.querySelector(".sliders"));
@@ -780,7 +787,7 @@ async function selectPhoto(id, stem, el) {
   // deliberately-empty curve must NOT survive Reset — "preserve the canvas
   // curve" kept those photos dark. Fallback when fresh knots are unavailable
   // (non-RAW / older server): preserve the current curve, the old behaviour.
-  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const bc = (state.freshCurve && state.freshCurve.length) ? state.freshCurve : cur; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
+  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const bc = (state.freshCurve && state.freshCurve.length) ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (lp) state.recipe.lens_profile = structuredClone(lp); state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
   main.querySelector(".savexmp").onclick = saveXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;

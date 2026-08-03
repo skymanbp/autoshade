@@ -457,6 +457,9 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             if !r.is_noop() {
                 r.clamp();
                 r.base_curve = fresh_base_knots(&raw);
+                // Same stamp rule as the GUI's XMP-only restore: Lightroom
+                // tuned this file over its own profile-corrected base.
+                r.lens_profile = pipeline::fresh_lens_profile(&raw);
                 return Ok(json_text(serde_json::to_string(&r)?));
             }
         }
@@ -470,7 +473,11 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // but the body carries the photo's camera-matched base look so the fresh
     // web canvas starts as bright as a fresh GUI open instead of jumping
     // only after the first Analyze.
-    let body = serde_json::json!({ "base_curve": fresh_base_knots(&raw) }).to_string();
+    let body = serde_json::json!({
+        "base_curve": fresh_base_knots(&raw),
+        "lens_profile": pipeline::fresh_lens_profile(&raw),
+    })
+    .to_string();
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static ASCII header");
     Ok(Response::from_string(body).with_status_code(404).with_header(ct).boxed())
@@ -483,7 +490,11 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
 /// the first call — `fresh_base_knots` reuses the cached `develop_base`.
 fn api_fresh_base(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let raw = raw_for(request, state)?;
-    let body = serde_json::json!({ "base_curve": fresh_base_knots(&raw) }).to_string();
+    let body = serde_json::json!({
+        "base_curve": fresh_base_knots(&raw),
+        "lens_profile": pipeline::fresh_lens_profile(&raw),
+    })
+    .to_string();
     Ok(json_text(body))
 }
 
@@ -667,12 +678,13 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let cfg = state.config();
     let style = req.style_strength.unwrap_or(cfg.style_strength);
     // The analyze pipeline proposes/verifies over the camera's embedded
-    // preview, where the base look is already IN the pixels: strip the
-    // client's base_curve from the refine base (it would double-apply in the
-    // verifier's render). produce_recipe stamps the photo's own curve onto
-    // the result — the single authority for every surface.
+    // preview, where the base look AND the lens corrections are already IN
+    // the pixels: strip both from the refine base (either would double-apply
+    // in the verifier's render). produce_recipe stamps the photo's own back
+    // onto the result — the single authority for every surface.
     let refine_base = req.base.clone().map(|mut b| {
         b.base_curve = Vec::new();
+        b.lens_profile = Default::default();
         b
     });
     let (recipe, verdict) =
