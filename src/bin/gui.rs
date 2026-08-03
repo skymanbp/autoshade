@@ -1854,19 +1854,28 @@ impl AutoshopApp {
         self.redo_stack.clear();
     }
 
-    /// Commit the current state as ONE undo step once the edit gesture settles
-    /// (pointer released) — dragging a slider is one step, not one per frame.
-    /// Programmatic edits (Analyze, Reset) and baked pixel retouches (the
-    /// variant base swap) also land here on the next frame.
-    fn commit_if_settled(&mut self, ctx: &egui::Context) {
+    /// Commit the current state as one undo step RIGHT NOW (when it differs
+    /// from the head). Used directly by programmatic pixel swaps (the retouch
+    /// bake-in): waiting for `commit_if_settled` left a one-frame window where
+    /// a same-frame Ctrl+Z saw only the older history and undid a recipe step
+    /// while keeping the freshly retouched pixels installed.
+    fn commit_now(&mut self) {
         let cur = self.current_step();
-        let differs = cur.recipe != self.committed.recipe || !cur.same_pixels(&self.committed);
-        if differs && !ctx.input(|i| i.pointer.any_down()) {
+        if cur.recipe != self.committed.recipe || !cur.same_pixels(&self.committed) {
             self.undo_stack.push(std::mem::replace(&mut self.committed, cur));
             if self.undo_stack.len() > 100 {
                 self.undo_stack.remove(0); // cap history memory
             }
             self.redo_stack.clear();
+        }
+    }
+
+    /// Commit the current state as ONE undo step once the edit gesture settles
+    /// (pointer released) — dragging a slider is one step, not one per frame.
+    /// Programmatic edits (Analyze, Reset) land here on the next frame.
+    fn commit_if_settled(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.commit_now();
         }
     }
 
@@ -1883,6 +1892,12 @@ impl AutoshopApp {
         self.place_start = None;
         self.mask_drag = None;
         self.mask_name_buf = None; // stale (index, text) must not cross-commit
+        // A wholesale recipe swap can shrink the mask list — an out-of-range
+        // selection must not linger (every consumer bounds-checks, but the
+        // panel would silently deselect anyway; do it deterministically).
+        // Same-index-different-mask after undo is a known cosmetic residue —
+        // mask identity isn't tracked across history steps.
+        self.sel_mask = self.sel_mask.filter(|&i| i < self.recipe.masks.len());
     }
 
     /// Apply a history step: recipe always; the active variant's pixels only
@@ -4077,6 +4092,10 @@ impl AutoshopApp {
                                 self.mask_tex = None;
                                 self.mask_dirty = false;
                                 self.dirty = true;
+                                // The pixel swap must enter history THIS frame
+                                // — a same-frame Ctrl+Z otherwise undoes an
+                                // older recipe step over the new pixels.
+                                self.commit_now();
                             }
                         }
                         self.done(msg);

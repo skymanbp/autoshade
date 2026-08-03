@@ -1654,6 +1654,9 @@ pub fn curve_lut(points: &[crate::recipe::CurvePoint]) -> Vec<f32> {
         .map(|p| (p.input as f32 / 255.0, p.output as f32 / 255.0))
         .collect();
     pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Duplicate inputs (possible via a hand-edited / imported recipe; the GUI
+    // editor keeps inputs strictly increasing) resolve FIRST-point-wins: the
+    // sort is stable and `interp` returns on the first bracketing window.
     // Pin the endpoints Lightroom-style: a curve that places no point of its
     // own AT an end keeps (0,0)/(1,1) authoritative there. Without the pins,
     // interp's flat clamp beyond the first/last point turns a single mid-curve
