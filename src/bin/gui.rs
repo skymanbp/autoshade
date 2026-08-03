@@ -635,6 +635,11 @@ struct AutoshopApp {
     // Paste-to-selected wrote the open photo's store: (path, exact recipe
     // written) so Msg::Pasted can advance the ● baseline on full success.
     pasted_open: Option<(PathBuf, EditRecipe)>,
+    // The OPEN photo's fresh camera-matched base-look knots (computed by the
+    // open worker, empty for non-RAW / no preview). Reset re-stamps these so
+    // "reset" always means the fresh-open look — including on a photo whose
+    // legacy save carries no curve and therefore opened dark.
+    photo_knots: Vec<[f32; 2]>,
     // The title-bar ✕ was intercepted with unsaved edits: show the in-app
     // save-all / discard / cancel layer until the user decides.
     confirm_quit: bool,
@@ -884,6 +889,7 @@ impl Default for AutoshopApp {
             saved_recipe: EditRecipe::default(),
             nav_stash: HashMap::new(),
             pasted_open: None,
+            photo_knots: Vec::new(),
             confirm_quit: false,
             mask_name_buf: None,
             gallery_scroll_to: None,
@@ -3444,6 +3450,10 @@ impl AutoshopApp {
                             let edge = self.preview_edge.clamp(640, 8192);
                             self.remember_base(&p, edge, &base, &knots);
                         }
+                        // Kept for Reset: "reset" = the fresh-open look, so it
+                        // needs this photo's knots even when the restored
+                        // recipe (legacy save) deliberately carries none.
+                        self.photo_knots = knots.clone();
                         if keep {
                             // Preview-resolution re-decode: the SOURCE pixels just
                             // changed resolution — keep the whole variant set,
@@ -3543,6 +3553,22 @@ impl AutoshopApp {
                             }
                             if stamp && !knots.is_empty() {
                                 recipe.base_curve = knots.clone();
+                            } else if !stamp
+                                && recipe.base_curve.is_empty()
+                                && !knots.is_empty()
+                                && open_note.is_none()
+                            {
+                                // A legacy save renders exactly as it was
+                                // tuned — on the old dark base. Say so, and
+                                // point at the way out, or the photo just
+                                // looks broken next to fresh opens.
+                                open_note = Some(
+                                    tr(
+                                        lang,
+                                        "saved before the camera base look — renders as originally tuned; Reset switches to the camera-matched base",
+                                    )
+                                    .into(),
+                                );
                             }
                             // The saved develop is the ● baseline; a canvas
                             // stashed when the user navigated away THIS session
@@ -6987,14 +7013,21 @@ impl eframe::App for AutoshopApp {
                     .on_hover_text(tr(lang, "Adjust the CURRENT edit instead of proposing from scratch"));
                 if ui
                     .add_enabled(ready, egui::Button::new(tr(lang, "Reset")))
-                    .on_hover_text(tr(lang, "Clear every slider back to neutral (one undo brings it back)"))
+                    .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera-matched base (one undo brings it back)"))
                     .clicked()
                 {
-                    // Reset clears the USER edit, not the photo's calibration:
-                    // the camera-matched base look survives, so "neutral" stays
-                    // the same starting point a fresh open shows — not the
-                    // darker scene-referred develop.
-                    let base_curve = std::mem::take(&mut self.recipe.base_curve);
+                    // Reset = the fresh-open look: sliders neutral on this
+                    // photo's camera-matched base. RE-STAMP the open knots
+                    // rather than keeping the canvas curve — a legacy save
+                    // deliberately carries none, and preserving that emptiness
+                    // made Reset stay dark on every previously-edited photo.
+                    // A BAKED variant keeps no curve (its pixels already carry
+                    // the camera look).
+                    let base_curve = if self.active_variant().is_some_and(|v| v.base.is_some()) {
+                        Vec::new()
+                    } else {
+                        self.photo_knots.clone()
+                    };
                     self.recipe = EditRecipe { base_curve, ..EditRecipe::default() };
                     self.region = None;
                     self.dirty = true;
