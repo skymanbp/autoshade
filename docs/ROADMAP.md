@@ -41,10 +41,19 @@
      ——Hue/Saturation/Luminance 页签 × 8 波段行全显 + 每行色标
      （HSL_SWATCH 展示用波段中心色；引擎数学不动）；hsl_band 字段改
      hsl_tab。
-  验证：120 lib + 9 gui 绿、clippy --all-targets 0、i18n 383 键 0/0/0、
-  gui exe 34685075（cli 26641585 不变）。真机验收点：悬停滑杆 ↑/↓ 可
-  微调且值为整数；R/Tab/[ ] 生效；裁剪拖边、框外转、4:3 可选；HSL 8 行
-  同屏。未做（记录）：颜色分级 2D 色轮、TAT 图上拖拽调整、面板记忆折叠。——用户真机报分析回退启发式基线：「AI vision unavailable:
+  验证：120 lib + 9 gui 绿、clippy --all-targets 0、i18n 383 键 0/0/0。
+  Codex 只读复审 6 条**全实证全修**（含 egui 源码引证）：①旋转 atan2
+  ±180° 支切未归一→跨切 2° 被读成 −358° 撞夹（wrap 到 (−180,180]）；
+  ②Frac snap 0.001 被 egui fixed_decimals(2) 的**存值取整**吃掉→snap 改
+  0.01 与显示位一致；③Tab 的 egui 焦点遍历在 update 前已定向、consume
+  拦不住→defocus_next 下帧 surrender_focus（否则首个控件持焦杀死全部
+  快捷键）；④Ctrl+Z 中途撤销后 crop_drag 旧锚回写→resync 清 crop_drag；
+  ⑤确认退出层背后 R/Tab/[ ] 仍活→快捷键门加 !confirm_quit；⑥微调直赋
+  绕过 egui 取整（13.485→14.485 隐藏精度）→按类小数位 round。终版
+  gui exe 34683663（cli 26641585 字节不变）。真机验收点：悬停滑杆 ↑/↓
+  微调且整数域显示整数；R/Tab/[ ] 生效且 Tab 不吃后续快捷键；裁剪拖边、
+  框外转（跨 180° 不跳）、4:3 可选；HSL 8 行同屏。未做（记录）：颜色
+  分级 2D 色轮、TAT 图上拖拽调整、面板记忆折叠。——用户真机报分析回退启发式基线：「AI vision unavailable:
   http transport: …/v1/responses: Network Error: timed out reading
   response」。回退与披露本身按设计工作（heuristic.rs 带原因兜底）；根因
   与 8f62b8a（images/edits 300→600s）同类：`/responses` 各调用点预算按

@@ -680,6 +680,11 @@ struct AutoshopApp {
     // Session-only on purpose: relaunching with an invisible library reads as
     // a broken app, so the state never persists.
     panels_hidden: bool,
+    // egui derives Tab's focus-traversal direction from raw input BEFORE
+    // update() runs, so consuming the key can't stop the first widget from
+    // taking focus this frame — which would also kill every focused-none
+    // shortcut. Cleared on the NEXT frame instead.
+    defocus_next: bool,
     settings: SettingsForm, // editable buffers for that window
     lang: Lang,             // UI language: English skeleton / Chinese overlay (i18n.rs)
     // --- library / gallery ---
@@ -942,6 +947,7 @@ impl Default for AutoshopApp {
             show_settings: false,
             show_shortcuts: false,
             panels_hidden: false,
+            defocus_next: false,
             settings: SettingsForm::default(),
             // English is the default / skeleton language; a persisted pref
             // (restored in `new`) overrides this on launch.
@@ -1928,6 +1934,10 @@ impl AutoshopApp {
         self.place_start = None;
         self.mask_drag = None;
         self.mask_name_buf = None; // stale (index, text) must not cross-commit
+        // A live crop/rotate drag anchored on the PRE-swap state must die with
+        // it: Ctrl+Z mid-rotate otherwise re-applies the stale start angle
+        // over the freshly restored recipe on the very next drag frame.
+        self.crop_drag = None;
         // A wholesale recipe swap can shrink the mask list — an out-of-range
         // selection must not linger (every consumer bounds-checks, but the
         // panel would silently deselect anyway; do it deterministically).
@@ -4328,21 +4338,23 @@ impl AutoshopApp {
         feel: SliderFeel,
     ) -> bool {
         let range = max - min;
-        // (drag snap, ↑/↓ nudge, shown decimals) per feel class. Frac keeps
-        // EV at 0.1-arrow / 0.01-drag and 0..1 amounts at 0.01 / 0.001; LogK's
+        // (drag snap, ↑/↓ nudge, shown decimals) per feel class. Frac's snap
+        // matches its 2 shown decimals exactly — egui's fixed_decimals ALSO
+        // rounds the stored value (slider.rs), so a finer snap would silently
+        // lose to the display rounding. EV: 0.01-drag / 0.1-arrow. LogK's
         // nudge is ~1% of the current Kelvin (≈55 K at 5500) — a fixed step
         // would be sub-pixel at one end of a log track and huge at the other.
         let (snap, nudge, decimals) = match feel {
-            SliderFeel::Int => (1.0, 1.0, 0),
+            SliderFeel::Int => (1.0, 1.0, 0usize),
             SliderFeel::Fine => (0.1, 0.1, 1),
-            SliderFeel::Frac => ((range / 1000.0).max(0.001), range / 100.0, 2),
+            SliderFeel::Frac => (0.01, range / 100.0, 2),
             SliderFeel::LogK => (1.0, ((*value).abs() * 0.01).max(1.0).round(), 0),
         };
         let resp = ui
             .add(
                 egui::Slider::new(value, min..=max)
                     .logarithmic(matches!(feel, SliderFeel::LogK))
-                    .step_by(snap as f64)
+                    .step_by(snap)
                     .fixed_decimals(decimals)
                     .text(label),
             )
@@ -4366,7 +4378,12 @@ impl AutoshopApp {
             });
             if up != down {
                 let step = nudge * if shift { 10.0 } else { 1.0 };
-                let next = (*value + if up { step } else { -step }).clamp(min, max);
+                // Round to the class's shown decimals — direct assignment
+                // bypasses egui's set_value rounding, and an inherited
+                // 13.485 must nudge to 14, not to a hidden 14.485.
+                let f = 10f32.powi(decimals as i32);
+                let next = ((*value + if up { step } else { -step }) * f).round() / f;
+                let next = next.clamp(min, max);
                 if next != *value {
                     *value = next;
                     changed = true;
@@ -6022,7 +6039,12 @@ impl AutoshopApp {
                 let b = xf.to_screen(orig[2], orig[3]);
                 let centre = egui::pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
                 let ang = |q: egui::Pos2| (q.y - centre.y).atan2(q.x - centre.x);
-                let next = (deg0 + (ang(p) - ang(start)).to_degrees()).clamp(-45.0, 45.0);
+                // Wrap the delta into (-180°, 180°]: crossing atan2's ±180°
+                // branch cut otherwise reads a 2° clockwise move near the
+                // leftward ray as −358° and slams the slider to the clamp.
+                let delta = (ang(p) - ang(start)).to_degrees();
+                let delta = (delta + 540.0) % 360.0 - 180.0;
+                let next = (deg0 + delta).clamp(-45.0, 45.0);
                 if self.recipe.straighten_deg != next {
                     self.recipe.straighten_deg = next;
                     self.dirty = true;
@@ -7187,12 +7209,22 @@ impl eframe::App for AutoshopApp {
         // checked right before the overlay refresh at the end of update().
         let hover_prev = self.hover_mask.take();
 
+        // Tab's egui focus traversal fired last frame despite the consume (see
+        // `defocus_next`): drop that focus now so the panel toggle doesn't
+        // leave a surprise-focused widget eating every later shortcut.
+        if std::mem::take(&mut self.defocus_next)
+            && let Some(id) = ctx.memory(|m| m.focused())
+        {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
         // Global shortcuts. Skip while a widget is focused so the Direction text
-        // field keeps its own text editing / undo. Ctrl+Z/Y = undo/redo,
-        // Ctrl+O = open, Ctrl+E = export, Ctrl+S = save XMP, ←/→ = walk the
-        // gallery, R = crop, [ ] = brush size, Tab = hide the side panels —
-        // the keyboard grammar of every desktop photo editor.
-        if ctx.memory(|m| m.focused()).is_none() {
+        // field keeps its own text editing / undo, and while the quit-confirm
+        // layer is up (R/Tab/[ ] must not mutate the very state the user is
+        // deciding whether to save). Ctrl+Z/Y = undo/redo, Ctrl+O = open,
+        // Ctrl+E = export, Ctrl+S = save XMP, ←/→ = walk the gallery,
+        // R = crop, [ ] = brush size, Tab = hide the side panels — the
+        // keyboard grammar of every desktop photo editor.
+        if !self.confirm_quit && ctx.memory(|m| m.focused()).is_none() {
             let (mut do_undo, mut do_redo, mut do_open, mut do_export, mut do_xmp) =
                 (false, false, false, false, false);
             let (mut do_escape, mut do_overlay, mut do_clip) = (false, false, false);
@@ -7244,6 +7276,7 @@ impl eframe::App for AutoshopApp {
             }
             if do_panels {
                 self.panels_hidden = !self.panels_hidden;
+                self.defocus_next = true; // undo egui's Tab focus traversal next frame
             }
             if brush_delta != 0.0 {
                 self.brush = (self.brush + brush_delta).clamp(4.0, 80.0);
