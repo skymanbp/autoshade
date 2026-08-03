@@ -198,11 +198,12 @@ fn api_setdir(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let found = pipeline::find_sources(&p)?;
     let total = found.len();
     {
+        // Replace BOTH under simultaneously-held locks — separate scopes let
+        // two concurrent setdir calls interleave into raws(A) + dir(B),
+        // permanently mismatching the list and its folder.
         let mut raws = state.raws.write().map_err(|_| anyhow!("lock poisoned"))?;
-        *raws = found;
-    }
-    {
         let mut dir = state.dir.write().map_err(|_| anyhow!("lock poisoned"))?;
+        *raws = found;
         *dir = p.clone();
     }
     Ok(json_response(&json!({ "dir": p.display().to_string(), "total": total })))
@@ -287,19 +288,40 @@ fn api_upload(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     std::fs::create_dir_all(&dir).context("create out/imported")?;
     // Same basename ≠ same photo: never truncate an existing import — pick
     // "name (2).ext" style until free, so two shoots' DSC0001.ARW coexist.
+    // The claim must be ATOMIC (create_new): request handlers run
+    // concurrently, and two same-named uploads could both pass a bare
+    // exists() probe and then truncate each other.
+    let stem = as_path.file_stem().and_then(|s| s.to_str()).unwrap_or("upload").to_string();
+    let ext = as_path.extension().and_then(|s| s.to_str()).unwrap_or("bin").to_string();
     let mut dest = dir.join(&safe);
-    if dest.exists() {
-        let stem = as_path.file_stem().and_then(|s| s.to_str()).unwrap_or("upload");
-        let ext = as_path.extension().and_then(|s| s.to_str()).unwrap_or("bin");
-        for n in 2.. {
-            let cand = dir.join(format!("{stem} ({n}).{ext}"));
-            if !cand.exists() {
-                dest = cand;
+    let mut file = None;
+    for n in 1u32.. {
+        if n > 1 {
+            dest = dir.join(format!("{stem} ({n}).{ext}"));
+        }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
+            Ok(f) => {
+                file = Some(f);
                 break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("create {}", dest.display()));
             }
         }
     }
-    std::fs::write(&dest, &bytes).with_context(|| format!("write {}", dest.display()))?;
+    {
+        use std::io::Write as _;
+        let mut f = file.expect("the claim loop only breaks with an open file");
+        if let Err(e) = f.write_all(&bytes) {
+            // Drop the claim on failure — a partial file left at the intended
+            // basename would corrupt the import AND push every retry to
+            // "name (2)" forever.
+            drop(f);
+            let _ = std::fs::remove_file(&dest);
+            return Err(e).with_context(|| format!("write {}", dest.display()));
+        }
+    }
 
     let id = {
         let mut raws = state.raws.write().map_err(|_| anyhow!("lock poisoned"))?;
@@ -467,9 +489,19 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         // throw in the middle of `selectPhoto`, leaving an empty control panel
         // and no error anywhere. The check is schema-AGNOSTIC (`Value`, not
         // `EditRecipe`) so a newer-schema file still goes out byte-for-byte.
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(&text) {
-            parse_err = Some(e.to_string());
-            continue;
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Err(e) => {
+                parse_err = Some(e.to_string());
+                continue;
+            }
+            // `null`, an array or a bare scalar parses as Value yet can never
+            // be a recipe of ANY schema generation — that is corruption, not
+            // a newer schema (which is still an object and goes out verbatim).
+            Ok(v) if !v.is_object() => {
+                parse_err = Some("recipe JSON is not an object".into());
+                continue;
+            }
+            Ok(_) => {}
         }
         // A NEUTRAL recipe.json is not a develop: fall through to the XMP, the
         // GUI's `NoopOnly` rule (`read_saved_develop`). Returning it would tag

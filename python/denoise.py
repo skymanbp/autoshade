@@ -139,6 +139,10 @@ def _tile_window(th, tw, overlap):
     """Linear feather window so overlapping tiles blend without seams."""
     wy = np.ones(th, dtype=np.float32)
     wx = np.ones(tw, dtype=np.float32)
+    # A tile smaller than the overlap (a tiny image or an edge sliver) must
+    # shrink the ramp, or the [:overlap] slice is shorter than the ramp and
+    # np.minimum fails to broadcast.
+    overlap = min(overlap, th // 2, tw // 2)
     if overlap > 0:
         ramp = np.linspace(0, 1, overlap, dtype=np.float32)
         wy[:overlap] = np.minimum(wy[:overlap], ramp)

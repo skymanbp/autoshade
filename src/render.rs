@@ -798,6 +798,12 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
                 colour_gain_luts([g[0] * cg[0], g[1] * cg[1], g[2] * cg[2]])
             });
         let amount = m.amount.clamp(0.0, 1.0);
+        // Amount 0 zeroes every weight below (inverted or not) — skip the
+        // full-frame tone scan and a possible NR blur that would all be
+        // multiplied away (a real cost at 61 MP for a merely parked mask).
+        if amount == 0.0 {
+            continue;
+        }
         // Bitmap geometry: decode the raster ONCE per mask per develop (never
         // inside the pixel loop); both the tone and the NR pass share it.
         let bmp = load_mask_bitmap(&m.mask);
@@ -2005,12 +2011,14 @@ pub fn inscribed_dims(w: f32, h: f32, deg: f32) -> (f32, f32) {
     }
     let (s, c) = (a.sin(), a.cos());
     let (long, short) = (w.max(h), w.min(h));
-    if short <= 2.0 * s * c * long {
+    let cos2 = c * c - s * s;
+    // At exactly 45° a square lands in the general branch with 0/0 → NaN →
+    // a 1×1 output; cos2 ≈ 0 always means the half-diagonal fit applies.
+    if short <= 2.0 * s * c * long || cos2.abs() < 1e-6 {
         // Thin case: the short side limits both dimensions (half-diagonal fit).
         let x = 0.5 * short;
         if w >= h { (x / s, x / c) } else { (x / c, x / s) }
     } else {
-        let cos2 = c * c - s * s;
         ((w * c - h * s) / cos2, (h * c - w * s) / cos2)
     }
 }
@@ -2501,6 +2509,11 @@ pub fn apply_lens_geometry(
     profile: &crate::recipe::LensProfile,
     amount: f32,
 ) -> DynamicImage {
+    // Degenerate input: rayon's par_chunks_mut(0) panics on a zero-size
+    // chunk — an empty frame maps to itself.
+    if img.width() == 0 || img.height() == 0 {
+        return img.clone();
+    }
     let dist_on = profile.distortion_on && !profile.distortion.is_empty();
     let ca_on = profile.ca_on && !profile.ca_r.is_empty() && !profile.ca_b.is_empty();
     if !dist_on && !ca_on {

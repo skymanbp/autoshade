@@ -19,6 +19,83 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **32 路 gpt-5.6-sol 双视角舰队审查 + 修复/打磨批（2026-08-03，已提交
+  未推送）**——用户令"整体 GUI 再打磨一轮 + 派 32 路并行检查 debug，我统筹"。
+  执行：fleet32.py（10 片 gui + 2 片 web 带 UX 授权，20 单元全库 debug）
+  32/32 成功，118 findings（11H/51M/23L/26UX/7info），40.8万 in/9.0万 out
+  tokens。逐条对抗核实后落地（要点）：
+  - **advisor**：协商状态窄化到 400|404|422（我自己的注释/代码矛盾——401
+    也在旧区间里）；SSE 中途读失败（"read AI stream:" 前缀）纳入 <30s 瞬断
+    重试（error/response.failed 事件不重试——不重计费真实失败）。
+  - **generative**：fidelity/size 协商同样加状态码门（原任意状态可重发）。
+  - **render**：amount=0 蒙版整帧空转跳过；inscribed_dims 45° 正方形
+    cos2≈0 → NaN → 1×1 修（走半对角支）；apply_lens_geometry 零尺寸守卫。
+  - **recipe**：clamp() 补裁剪校验（NaN 丢弃/夹取/排序/去退化 + 测试）。
+  - **xmp**：拉直-only 写 HasCrop=True+全幅载体（LR 只在裁剪态下应用
+    CropAngle），读方把全幅载体坍缩回 None（往返测试钉死）；xml_escape 先
+    剥 XML 1.0 禁用控制字符。
+  - **serve**：上传 create_new 原子认领（并发同名不再互相截断）+失败清残
+    体；setdir 双锁同持替换（raws/dir 不再错配）；/api/recipe 拒非对象
+    JSON（null/数组=损坏而非新 schema）。
+  - **store**：migrate 优先迁移根下的栅格（cwd 同名旁观者文件不再被 staged
+    删除——数据丢失级）；delete_version 枚举失败即中止（非 NotFound）。
+  - **pipeline**：guard_readonly 词法折叠 `..`（"out/../图库" 绕过修）；
+    write_recipe tmp 名带 pid+原子计数（web 线程同进程并发）；.bak 还原失
+    败写进报错。
+  - **main**：批处理 XMP 先写、recipe 后写（完成标记必须最后落）；auto
+    输出位深按扩展名如实播报。
+  - **retouch**：AI 斑点上限 30 强制截断。config：NaN 风格强度过滤。
+    denoise：临时文件全错误路径清理。lensmeta：CA 至少 8 节点成对。
+    denoise.py：overlap 随小图收缩（广播崩溃修）。
+  - **gui 状态/手感**：分析落库后 ● 基线改画布投影（烘焙变体不再秒亮
+    ●）；AI-select 去重双侧剥 stem 前缀；范围蒙版切离 Color 解除取色武
+    装；覆盖层失效改"Amount 前任何改动"+键去重；径向中心拖动夹取位移
+    （边界不再压扁）；定比角把手取主导轴（纵向拖不再无效）；1:1 两处
+    夹到渲染上限 12；As-shot 取消勾选连 Tint 一起归零；busy 期间 ✕ 拦截
+    +提示；方向键无选中时从第 0 张进入；Reimagine 999 上限拒绝而非复用。
+  - **文案真相**（i18n 双侧）：修饰基图注释改中性显影真相；"streams
+    progress" 状态改"窗口保持忙碌"；OPENAI_API_KEY 必需说法补 OAuth 桥；
+    Ctrl/⌘+click；曲线帮助不再承诺 XMP 逐位一致。
+  - **web**：分页 latest-wins epoch；换目录清撤销栈；selectPhoto 作废全部
+    在飞预览（A→B→A）；下载文件名快照；上传直接流 File（省一倍内存）；
+    renderAfter/import 补 catch；布局改 flex（换行表头不再把应用挤出视
+    口）；设置说明如实（也作用于生成填充）。
+  - **驳回**（证据在案）：heal InPlace"二次显影"（基图=中性显影，注释已
+    改）；覆盖层"几何双重应用"（develop_preview 无几何段）；粘贴继承源曲
+    线（1488 行明文设计）；crop_imm panic（image crate 会截断）；fit 不盖
+    戳/retouch 中性基图/store 迁移并发/feather=1（历史裁决在案）；env 覆盖
+    低于 600s 下限（旋钮语义如此）。
+  - **立项/待办**：像素修饰的变体关联持久化（导航后基图链接丢失——会话态
+    设计的已知边界）；web 区域选择的几何逆映射（有几何时错位）；Windows
+    下载临时文件延迟清理；61MP 内存专项扩充（fit_zoned 全幅 PNG、
+    plan_from_mask 坐标表、CA 三通道采样、色彩取样同步显影）；蒙版纹理
+    每帧重传；设置窗模型列表/URL 陈旧性；非 Windows CJK 字体。
+  - Codex 复审 3 条全修：同进程 tmp 撞名（pid+计数）；上传失败清已认领
+    残体；NaN 裁剪穿透 clamp（+测试）。
+  基线 136 lib（+2：clamp 裁剪、拉直-only XMP 往返）+ 9 gui，clippy
+  --all-targets 0，i18n 416 调用点 0/0。
+
+- **真机反馈批：瞬断重试 + 主动 AI 去噪 + 提示词配按钮 + 双动词分析
+  （2026-08-03，60f8444，已提交未推送）**——四项真机反馈一批落地：
+  ① 传输瞬断误报根治：真机报"十几秒就弹 600s 无流活动"→ CLI 无窗复现
+    **成功**（52.4s 出真配方）证明是连接期瞬断；修复 = <30s 传输失败自动
+    重试一次（post_ai_json 与 images/edits 两处），报错文案改用**实测
+    耗时**（远早于静默预算 = 连接/握手故障，措辞不再谎报静默超时）；
+  ② AI 去噪改主动画布操作：Detail 节「🤖 立即 AI 去噪」对当前变体像素跑
+    SCUNet（RAW→中性显影，默认 ≤2048 工作副本，Full-res 可选全画幅），
+    走 heal 的 InPlace 基图烘焙管线（可撤销、滑杆继续其上生效）；新 lib
+    入口 denoise::denoise_active；导出时去噪开关保留；
+  ③ 提示词入口配专属按钮（用户："AI分析按钮得放到输入提示词那里"）：
+    AI Analyze 从工具栏移入 AI 区 Direction 正下方；Reimagine 获得自己的
+    提示词输入框+同排生成按钮（原偷用顶部 Direction），提取风格现在回填
+    Reimagine 提示词；Generative Fill 本就合规；
+  ④ 「微调」勾选框废除（预先勾选的隐藏模式）→ 双动词按钮「AI Analyze /
+    AI Refine」（Refine 在编辑中性时禁用——中性时微调即分析）；
+    start_analyze(refine: bool) 显式传意图，模式字段删除。
+  基线 134 lib + 9 gui，clippy --all-targets 0，i18n 414 调用点 0/0。
+  同日随后：32 路 gpt-5.6-sol 双视角舰队（10 片 gui+2 片 web 带 UX 打磨
+  授权，其余 20 单元全库 debug）审查本提交树——结果与修复批见下一条记录。
+
 - **v0.14.3 RELEASED（2026-08-03）**——内容 = 全 AI 调用流式化批
   （5ecbbdb，下条）。发版细节见 git tag v0.14.3 与 GitHub Release 页。
 

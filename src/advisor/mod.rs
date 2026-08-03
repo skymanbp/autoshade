@@ -362,15 +362,32 @@ pub(crate) fn post_ai_json(
             Ok(r) => {
                 // Dispatch on what actually came back, not on what was asked.
                 if r.content_type().eq_ignore_ascii_case("text/event-stream") {
-                    return assemble_sse(r.into_reader(), family);
+                    let res = assemble_sse(r.into_reader(), family);
+                    // A mid-stream READ failure this early is the same
+                    // connection blip the pre-response retry absorbs — the
+                    // stream died, not the model. Genuine model failures
+                    // (error / response.failed events) are NOT retried:
+                    // re-posting those would re-bill a real failure.
+                    if let Err(AdvisorError::Transport(msg)) = &res
+                        && msg.starts_with("read AI stream:")
+                        && !transport_retried
+                        && started.elapsed().as_secs() < TRANSPORT_RETRY_UNDER_SECS
+                    {
+                        transport_retried = true;
+                        eprintln!("  note: {msg} — retrying once (connection blip, not model time)");
+                        continue;
+                    }
+                    return res;
                 }
                 return r.into_json().map_err(|e| AdvisorError::Transport(e.to_string()));
             }
             Err(ureq::Error::Status(code, r)) => {
                 let b = r.into_string().unwrap_or_default();
-                // Only 400-class statuses negotiate: a 401/429/5xx that
-                // happens to mention a parameter is not a capability signal.
-                let negotiable = (400..=422).contains(&code);
+                // Only capability-shaped statuses negotiate (bad request /
+                // not found / unprocessable). 401/403/429 etc. are NOT — an
+                // auth or quota body that happens to mention a parameter must
+                // not trigger a re-post.
+                let negotiable = matches!(code, 400 | 404 | 422);
                 if negotiable && use_stream && use_summary && error_blames_param(&b, "reasoning") {
                     eprintln!(
                         "  note: endpoint rejected the reasoning-summary stream — retrying \

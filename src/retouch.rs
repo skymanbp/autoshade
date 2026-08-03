@@ -362,6 +362,9 @@ If the photo is clean, return an empty list.";
         serde_json::from_str(strip_fence(&text)).context("parse retouch plan JSON")?;
     // Defend the engine + keep it "retouch not generation": clamp to small spots.
     plan.spots.retain(|s| s.radius > 0.0);
+    // The prompt asks for AT MOST 30 — enforce it (strict mode cannot cap an
+    // array), or an over-eager response triggers unbounded full-res healing.
+    plan.spots.truncate(30);
     for s in plan.spots.iter_mut() {
         s.cx = s.cx.clamp(0.0, 1.0);
         s.cy = s.cy.clamp(0.0, 1.0);

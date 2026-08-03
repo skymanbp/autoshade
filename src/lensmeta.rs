@@ -67,7 +67,11 @@ pub fn read(path: &Path) -> LensProfile {
         .map(|&v| v as f32 * (-14f32).exp2() + 1.0)
         .collect();
     let ca = knots(ExifTag::ChromaticAberrationCorrParams);
-    if !ca.is_empty() && ca.len() % 2 == 0 {
+    // The pair split needs an even count AND enough knots per channel for a
+    // meaningful radial spline (real bodies write 16+16; a malformed 2-value
+    // array would otherwise become two 1-knot "constants" instead of
+    // degrading to absent, per the malformed-metadata contract).
+    if ca.len() % 2 == 0 && ca.len() >= 8 {
         let half = ca.len() / 2;
         let f = |v: &i16| *v as f32 * (-21f32).exp2() + 1.0;
         out.ca_r = ca[..half].iter().map(f).collect();

@@ -583,6 +583,36 @@ impl EditRecipe {
             p[0] = p[0].clamp(0.0, 1.0);
             p[1] = p[1].clamp(0.0, 1.0);
         }
+        // Crop is a normalized [0,1] view-frame rectangle; untrusted input
+        // (AI JSON, foreign XMP, a hand-edited recipe) can carry values
+        // outside the frame or an inverted/empty rectangle. Clamp into the
+        // frame, order the edges, and drop a degenerate crop entirely — the
+        // geometry stage must never see an empty rectangle.
+        if let Some(cr) = &mut self.crop {
+            // NaN SURVIVES f32::clamp and defeats every comparison below — a
+            // non-finite coordinate (malformed foreign XMP) drops the crop.
+            if !(cr.left.is_finite()
+                && cr.top.is_finite()
+                && cr.right.is_finite()
+                && cr.bottom.is_finite())
+            {
+                self.crop = None;
+            } else {
+                cr.left = cr.left.clamp(0.0, 1.0);
+                cr.top = cr.top.clamp(0.0, 1.0);
+                cr.right = cr.right.clamp(0.0, 1.0);
+                cr.bottom = cr.bottom.clamp(0.0, 1.0);
+                if cr.left > cr.right {
+                    std::mem::swap(&mut cr.left, &mut cr.right);
+                }
+                if cr.top > cr.bottom {
+                    std::mem::swap(&mut cr.top, &mut cr.bottom);
+                }
+                if cr.right - cr.left < 1e-3 || cr.bottom - cr.top < 1e-3 {
+                    self.crop = None;
+                }
+            }
+        }
         // Clamp each local adjustment to the same UI ranges as the globals.
         for m in self.masks.iter_mut() {
             m.amount = m.amount.clamp(0.0, 1.0);
@@ -699,6 +729,33 @@ impl EditRecipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_normalizes_untrusted_crop() {
+        // Out-of-range + inverted edges: clamp into the frame and reorder.
+        let mut r = EditRecipe {
+            crop: Some(Crop { left: 1.2, top: 0.8, right: -0.1, bottom: 0.2 }),
+            ..Default::default()
+        };
+        r.clamp();
+        let c = r.crop.expect("a real rectangle survives");
+        assert!((c.left, c.top, c.right, c.bottom) == (0.0, 0.2, 1.0, 0.8), "{c:?}");
+        // A degenerate rectangle is dropped — the geometry stage must never
+        // see an empty crop.
+        let mut r = EditRecipe {
+            crop: Some(Crop { left: 0.5, top: 0.1, right: 0.5, bottom: 0.9 }),
+            ..Default::default()
+        };
+        r.clamp();
+        assert_eq!(r.crop, None);
+        // NaN survives f32::clamp — a non-finite coordinate drops the crop.
+        let mut r = EditRecipe {
+            crop: Some(Crop { left: f32::NAN, top: 0.0, right: 1.0, bottom: 1.0 }),
+            ..Default::default()
+        };
+        r.clamp();
+        assert_eq!(r.crop, None);
+    }
 
     #[test]
     fn lens_profile_legacy_json_noop_and_toggle_semantics() {

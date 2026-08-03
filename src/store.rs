@@ -360,19 +360,26 @@ pub fn delete_version(src: &Path, n: u32) -> std::io::Result<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let mut first_err: Option<std::io::Error> = None;
-    if let Ok(dir) = std::fs::read_dir(develop_dir(src)) {
-        for e in dir.flatten() {
-            let name = e.file_name();
-            let Some(name) = name.to_str() else { continue };
-            // The dot terminator keeps "v3." from matching "v30.recipe.json".
-            if name.starts_with(&prefix)
-                && name != recipe_name
-                && let Err(err) = std::fs::remove_file(e.path())
-                && first_err.is_none()
-            {
-                first_err = Some(err);
+    match std::fs::read_dir(develop_dir(src)) {
+        Ok(dir) => {
+            for e in dir.flatten() {
+                let name = e.file_name();
+                let Some(name) = name.to_str() else { continue };
+                // The dot terminator keeps "v3." from matching "v30.recipe.json".
+                if name.starts_with(&prefix)
+                    && name != recipe_name
+                    && let Err(err) = std::fs::remove_file(e.path())
+                    && first_err.is_none()
+                {
+                    first_err = Some(err);
+                }
             }
         }
+        // A missing dir has nothing to strand; any OTHER enumeration failure
+        // must abort BEFORE the recipe deletion, or rasters hidden behind it
+        // lose their version entry and become unreachable forever.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
     }
     if let Some(err) = first_err {
         return Err(err);
@@ -542,13 +549,15 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
                 continue;
             };
             // Legacy refs are relative to the OLD launch cwd ("out/<stem>.<kind>.png").
-            // When migrating another root (exe dir, user-picked folder), the
-            // raster sits in THAT root, not under today's cwd.
-            if !p.exists() {
-                let cand = legacy_out.join(name);
-                if cand.exists() {
-                    p = cand;
-                }
+            // PREFER the raster inside the root being migrated: a same-named
+            // file under TODAY'S cwd can belong to a different context, and
+            // the staged source is DELETED on success — resolving the cwd
+            // file first would destroy a bystander. The recipe's own
+            // cwd-relative reading stays as the fallback for a launch from
+            // the original directory (where the two spellings coincide).
+            let cand = legacy_out.join(name);
+            if cand.exists() {
+                p = cand;
             }
             let dest = dev.join(&bare);
             if dest.exists() {

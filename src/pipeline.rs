@@ -302,7 +302,17 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // Unreadable, but the develop was gone). Windows rename cannot replace an
     // existing destination, so the old file is retired first — worst case is a
     // briefly missing file with the intact .tmp beside it, never corrupt JSON.
-    let tmp = out.with_extension("json.tmp");
+    // Per-process AND per-call tmp name: a GUI and a web server saving the
+    // same photo used to share one fixed .tmp — and the web server threads
+    // REQUESTS, so two same-process saves need the counter too. (.bak stays
+    // shared — the retire/restore pair below is last-writer-wins by design;
+    // one photo has one interactive writer in practice.)
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = out.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, serde_json::to_string_pretty(&on_disk)?)
         .with_context(|| format!("write recipe {}", tmp.display()))?;
     // Retire the old file to .bak instead of deleting it (Windows rename
@@ -312,10 +322,16 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     let bak = out.with_extension("json.bak");
     let had_old = std::fs::rename(&out, &bak).is_ok();
     if let Err(e) = std::fs::rename(&tmp, &out) {
-        if had_old {
-            let _ = std::fs::rename(&bak, &out);
-        }
-        return Err(e).with_context(|| format!("publish recipe {}", out.display()));
+        // A failed restore must be SAID, not swallowed — the authoritative
+        // file is then missing and the save survives only at the .bak path.
+        let restore_note = if had_old && std::fs::rename(&bak, &out).is_err() {
+            format!(" (restoring the previous file ALSO failed — it survives at {})", bak.display())
+        } else {
+            String::new()
+        };
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e)
+            .with_context(|| format!("publish recipe {}{restore_note}", out.display()));
     }
     if had_old {
         let _ = std::fs::remove_file(&bak);
@@ -358,14 +374,35 @@ pub fn xmp_target(raw: &Path) -> PathBuf {
 /// library is still refused.
 pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     use std::path::absolute;
+    // Fold `.`/`..` LEXICALLY (no filesystem access — the target may not
+    // exist yet): `std::path::absolute` keeps `..` segments, so a path like
+    // "out/../<library>/x.tif" used to START WITH ./out for the allow-check
+    // while the filesystem resolved it INTO the protected library.
+    fn normalize(p: &Path) -> PathBuf {
+        use std::path::Component;
+        let mut n = PathBuf::new();
+        for c in p.components() {
+            match c {
+                Component::ParentDir => {
+                    if !n.pop() {
+                        n.push("..");
+                    }
+                }
+                Component::CurDir => {}
+                other => n.push(other.as_os_str()),
+            }
+        }
+        n
+    }
     let (Ok(out_abs), Ok(raw_abs)) = (absolute(out), absolute(raw)) else {
         return Ok(());
     };
+    let (out_abs, raw_abs) = (normalize(&out_abs), normalize(&raw_abs));
     if out_abs.starts_with(crate::store::store_root()) {
         return Ok(());
     }
     if let Ok(own_out) = absolute(Path::new("out"))
-        && out_abs.starts_with(&own_out) {
+        && out_abs.starts_with(normalize(&own_out)) {
             return Ok(());
         }
     if let Some(raw_dir) = raw_abs.parent()

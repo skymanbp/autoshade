@@ -64,24 +64,27 @@ pub fn denoise_buffer(opts: &DenoiseOpts, data: &mut [[f32; 3]], w: usize, h: us
     }
     let img: ImageBuffer<Rgb<u16>, _> = ImageBuffer::from_raw(w as u32, h as u32, buf16)
         .ok_or_else(|| anyhow!("denoise: pack buffer size mismatch"))?;
-    DynamicImage::ImageRgb16(img)
-        .save(&tmp_in)
-        .with_context(|| format!("write denoise input {}", tmp_in.display()))?;
-
-    let run = run_sidecar(opts, &tmp_in, &tmp_out);
+    let result = (|| -> Result<DynamicImage> {
+        DynamicImage::ImageRgb16(img)
+            .save(&tmp_in)
+            .with_context(|| format!("write denoise input {}", tmp_in.display()))?;
+        run_sidecar(opts, &tmp_in, &tmp_out)?;
+        // read 16-bit result back into the buffer
+        // A 60 MP 16-bit image exceeds the decoder's default memory cap, so lift
+        // the limit explicitly for this trusted, self-produced file.
+        let mut reader = image::ImageReader::open(&tmp_out)
+            .with_context(|| format!("open denoise output {}", tmp_out.display()))?;
+        reader.limits(image::Limits::no_limits());
+        reader
+            .decode()
+            .with_context(|| format!("decode denoise output {}", tmp_out.display()))
+    })();
+    // BOTH temp files go regardless of WHERE the pipeline failed — a partial
+    // input/output from a failed save / sidecar / decode used to leak
+    // full-resolution frames into the temp dir on every error path.
     let _ = std::fs::remove_file(&tmp_in);
-    run?;
-
-    // read 16-bit result back into the buffer
-    // A 60 MP 16-bit image exceeds the decoder's default memory cap, so lift the
-    // limit explicitly for this trusted, self-produced file.
-    let mut reader = image::ImageReader::open(&tmp_out)
-        .with_context(|| format!("open denoise output {}", tmp_out.display()))?;
-    reader.limits(image::Limits::no_limits());
-    let out = reader
-        .decode()
-        .with_context(|| format!("decode denoise output {}", tmp_out.display()))?;
     let _ = std::fs::remove_file(&tmp_out);
+    let out = result?;
     let (ow, oh) = out.dimensions();
     if ow as usize != w || oh as usize != h {
         bail!("denoise changed dimensions: {ow}x{oh} != {w}x{h}");

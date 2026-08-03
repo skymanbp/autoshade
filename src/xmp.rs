@@ -22,7 +22,13 @@ fn signed(v: f32) -> String {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
+    // Strip XML-1.0-forbidden control characters FIRST (an AI rationale or a
+    // pasted mask name can carry them; escaped or not, they make the whole
+    // sidecar unparsable) — tab/newline/CR are the legal exceptions.
+    s.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+        .collect::<String>()
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
@@ -312,12 +318,22 @@ pub fn recipe_to_xmp(r: &EditRecipe) -> String {
     }
 
     // Crop (normalised [0,1]); only applied by Lightroom when HasCrop is True.
+    // Straighten rides the SAME crop transform in Adobe's model: a nonzero
+    // CropAngle under HasCrop="False" is ignored by Lightroom, so a
+    // straighten-only recipe must ship HasCrop=True with the full frame (the
+    // reader below collapses that full-frame rectangle back to `None`).
     if let Some(c) = &r.crop {
         attr(&mut a, "HasCrop", "True");
         attr(&mut a, "CropTop", &format!("{:.6}", c.top));
         attr(&mut a, "CropLeft", &format!("{:.6}", c.left));
         attr(&mut a, "CropBottom", &format!("{:.6}", c.bottom));
         attr(&mut a, "CropRight", &format!("{:.6}", c.right));
+    } else if r.straighten_deg != 0.0 {
+        attr(&mut a, "HasCrop", "True");
+        attr(&mut a, "CropTop", "0.000000");
+        attr(&mut a, "CropLeft", "0.000000");
+        attr(&mut a, "CropBottom", "1.000000");
+        attr(&mut a, "CropRight", "1.000000");
     } else {
         attr(&mut a, "HasCrop", "False");
     }
@@ -651,7 +667,13 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
                     bottom: crs_f32(xmp, "CropBottom")?,
                 })
             })
-            .flatten(),
+            .flatten()
+            // A full-frame rectangle is the writer's straighten-only carrier
+            // (Adobe activates CropAngle only under HasCrop=True) — collapse
+            // it back to "no crop" so the round-trip stays lossless.
+            .filter(|c| {
+                !(c.left <= 0.0 && c.top <= 0.0 && c.right >= 1.0 && c.bottom >= 1.0)
+            }),
         tone_curve: parse_curve(xmp, "ToneCurvePV2012"),
         red_curve: parse_curve(xmp, "ToneCurvePV2012Red"),
         green_curve: parse_curve(xmp, "ToneCurvePV2012Green"),
@@ -667,6 +689,27 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
 mod tests {
     use super::*;
     use crate::recipe::{CurvePoint, EditRecipe, LocalAdjustment};
+
+    #[test]
+    fn straighten_only_activates_crop_and_round_trips_to_no_crop() {
+        // Lightroom applies CropAngle only under HasCrop="True" — a
+        // straighten-only recipe ships the full frame as its carrier, and the
+        // reader collapses that full-frame rectangle back to None.
+        let r = EditRecipe { straighten_deg: 2.5, ..Default::default() };
+        let x = recipe_to_xmp(&r);
+        assert!(x.contains("crs:HasCrop=\"True\""), "straighten must activate the crop state");
+        assert!(x.contains("crs:CropAngle=\"2.5\""), "{x}");
+        let back = xmp_to_recipe(&x);
+        assert_eq!(back.crop, None, "the full-frame carrier must not become a real crop");
+        assert_eq!(back.straighten_deg, 2.5);
+        // Control chars in a mask name must not poison the document.
+        let dirty = EditRecipe {
+            masks: vec![LocalAdjustment { name: "sky\u{0}\u{7}".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let x = recipe_to_xmp(&dirty);
+        assert!(!x.contains('\u{0}') && !x.contains('\u{7}'), "forbidden chars stripped");
+    }
 
     #[test]
     fn renders_local_masks_with_correct_scale() {

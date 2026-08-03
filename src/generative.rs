@@ -463,7 +463,7 @@ fn call_images_edit(
                     Some(p) => p == name,
                     None => b.contains(name),
                 };
-                let negotiable = (400..=422).contains(&code);
+                let negotiable = matches!(code, 400 | 404 | 422);
                 // Each guard flips its own flag, so each retry fires at most once.
                 if negotiable
                     && use_stream
@@ -478,7 +478,7 @@ fn call_images_edit(
                     use_stream = false;
                     continue;
                 }
-                if include_fidelity && blames("input_fidelity") {
+                if negotiable && include_fidelity && blames("input_fidelity") {
                     eprintln!(
                         "  note: {} rejected input_fidelity — retrying without it",
                         cfg.openai_image_model
@@ -486,7 +486,7 @@ fn call_images_edit(
                     include_fidelity = false;
                     continue;
                 }
-                if use_flexible && blames("size") {
+                if negotiable && use_flexible && blames("size") {
                     eprintln!(
                         "  note: {} rejected flexible size {size} — falling back to {}",
                         cfg.openai_image_model, sizes.enum_size

@@ -7,7 +7,7 @@
 <style>
   :root { --bg:#141518; --panel:#1e2023; --panel2:#26292d; --line:#33373b; --fg:#e9e9ea; --muted:#9aa0a6; --accent:#4c8bf5; --accent2:#2b5fb8; }
   * { box-sizing: border-box; }
-  body { margin:0; font:14px/1.45 system-ui,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--fg); }
+  body { margin:0; font:14px/1.45 system-ui,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
 
   header { padding:8px 14px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
   header h1 { font-size:15px; margin:0; font-weight:700; letter-spacing:.02em; }
@@ -23,7 +23,9 @@
   button:disabled { opacity:.4; cursor:default; }
   select, .toolbar select { background:#101113; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:12px; }
 
-  .layout { display:grid; grid-template-columns:280px 1fr; height:calc(100vh - 46px); }
+  /* flex:1 under the header (which WRAPS on narrow windows — a fixed 46px
+     assumption pushed the app below the viewport whenever it did). */
+  .layout { display:grid; grid-template-columns:280px 1fr; flex:1; min-height:0; }
   .sidebar { display:flex; flex-direction:column; border-right:1px solid var(--line); overflow:hidden; }
   .folderbar { display:flex; gap:6px; padding:8px; border-bottom:1px solid var(--line); align-items:center; }
   .folderbar input { flex:1; min-width:0; background:#101113; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11px; }
@@ -252,7 +254,7 @@
 <div class="modal-bg" id="settings-modal" hidden>
   <div class="modal-card">
     <h2>Settings <button class="modal-x" id="settings-close" title="Close">✕</button></h2>
-    <p class="modal-note">Saved locally to <code id="settings-file">autoshop.local.json</code> in your per-user Autoshop folder (never in a repo). Keys stay on this machine — the server is 127.0.0.1 only. Applies to the next Analyze.</p>
+    <p class="modal-note">Saved locally to <code id="settings-file">autoshop.local.json</code> in your per-user Autoshop folder (never in a repo). Keys stay on this machine — the server is 127.0.0.1 only. Applies to the next AI call (Analyze / Generative Fill).</p>
 
     <section class="settings-sec">
       <h3>Analysis — the verifier</h3>
@@ -373,11 +375,14 @@ document.addEventListener("keydown", e => {
 // --- gallery + import ------------------------------------------------------
 const PAGE = 200;          // gallery page size (a folder can hold thousands)
 let pageOffset = 0;        // current page's first GLOBAL index
+let listSeq = 0;           // latest-wins: rapid Prev/Next answers race
 
 async function loadList(offset) {
   if (offset != null) pageOffset = Math.max(0, offset);
-  const r = await fetch(`/api/list?offset=${pageOffset}&limit=${PAGE}`);
+  const seq = ++listSeq, at = pageOffset;   // the offset THIS response is for
+  const r = await fetch(`/api/list?offset=${at}&limit=${PAGE}`);
   const data = await r.json();
+  if (seq !== listSeq) return;   // superseded by a newer page request
   const grid = $("#grid");
   // Reflect the authoritative working folder in the field (unless the user is typing).
   const dp = $("#dir-path");
@@ -386,12 +391,12 @@ async function loadList(offset) {
   const pb = $("#pagebar"), total = data.total || 0;
   if (total > PAGE) {
     pb.hidden = false;
-    const from = total ? pageOffset + 1 : 0, to = pageOffset + data.shown;
+    const from = total ? at + 1 : 0, to = at + data.shown;
     $("#page-info").textContent = `${from}–${to} of ${total}`;
-    $("#page-prev").disabled = pageOffset <= 0;
-    $("#page-next").disabled = pageOffset + data.shown >= total;
+    $("#page-prev").disabled = at <= 0;
+    $("#page-next").disabled = at + data.shown >= total;
   } else { pb.hidden = true; }
-  grid.innerHTML = `<div class="ghead">${total} source${total===1?"":"s"}${total>PAGE?` · page from ${pageOffset+1}`:""}</div>`;
+  grid.innerHTML = `<div class="ghead">${total} source${total===1?"":"s"}${total>PAGE?` · page from ${at+1}`:""}</div>`;
   for (const it of data.items) {
     const div = document.createElement("div");
     div.className = "thumb"; div.dataset.id = it.id;
@@ -426,12 +431,14 @@ $("#import-btn").onclick = async () => {
   const path = $("#import-path").value.trim().replace(/^"+|"+$/g, "").trim();
   if (!path) { setStatus("type or paste a file/folder path to import"); return; }
   setStatus("importing…");
-  const r = await fetch("/api/import", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({path})});
-  if (!r.ok) { setStatus("import failed: " + await r.text()); return; }
-  const d = await r.json();
-  $("#import-path").value = "";
-  if (d.added > 0) { setStatus(`imported ${d.added} (total ${d.total})`); revealNew(d.total - d.added); }
-  else setStatus(`already in the gallery (total ${d.total})`);
+  try {
+    const r = await fetch("/api/import", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({path})});
+    if (!r.ok) { setStatus("import failed: " + await r.text()); return; }
+    const d = await r.json();
+    $("#import-path").value = "";
+    if (d.added > 0) { setStatus(`imported ${d.added} (total ${d.total})`); revealNew(d.total - d.added); }
+    else setStatus(`already in the gallery (total ${d.total})`);
+  } catch (e) { setStatus("import failed: " + (e.message || e)); }
 };
 $("#import-path").addEventListener("keydown", e => { if (e.key === "Enter") $("#import-btn").click(); });
 
@@ -446,6 +453,7 @@ async function setWorkingDir() {
   if (!r.ok) { setStatus("open folder failed: " + await r.text()); return; }
   const d = await r.json();
   state.id = null; state.stem = null; state.recipe = null;
+  history = []; hi = -1; updateUndo();   // stale undo would re-apply the OLD photo's recipe
   $("#main").innerHTML = '<p style="color:var(--muted)">Select a photo on the left, or import more above.</p>';
   await loadList(0);   // a new folder starts at page 1
   setStatus(`working folder: ${d.dir} · ${d.total} source${d.total===1?"":"s"}`);
@@ -460,11 +468,11 @@ async function uploadFiles(files) {
   for (const f of files) {
     setStatus(`uploading ${f.name}…`);
     try {
-      const buf = await f.arrayBuffer();
       // Header values are Latin-1 only, so percent-encode the name — otherwise a
       // non-ASCII (e.g. Chinese) filename throws and the upload silently fails.
-      // The server percent-decodes it back.
-      const r = await fetch("/api/upload", {method:"POST", headers:{"X-Filename": encodeURIComponent(f.name)}, body: buf});
+      // The server percent-decodes it back. The File streams as the body —
+      // reading it into an ArrayBuffer first doubled a 500 MB import's memory.
+      const r = await fetch("/api/upload", {method:"POST", headers:{"X-Filename": encodeURIComponent(f.name)}, body: f});
       if (!r.ok) { failed.push(`${f.name}: ${await r.text()}`); continue; }
       const d = await r.json();
       if (firstId == null) { firstId = d.id; firstStem = d.stem; }
@@ -640,14 +648,20 @@ async function renderAfter() {
   // request only.
   const seq = ++afterSeq, id = state.id;
   setStatus("rendering preview…");
-  const r = await fetch("/api/develop", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({id, recipe: state.recipe})});
-  if (seq !== afterSeq || id !== state.id) return;   // superseded: don't touch the pane or the status
-  if (!r.ok) { setStatus("render failed: " + await r.text()); return; }
-  const blob = await r.blob();
-  if (seq !== afterSeq || id !== state.id) return;   // it went stale while we decoded the body
-  setAfterSrc($(".after"), blob);
-  setStatus("");
+  try {
+    const r = await fetch("/api/develop", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({id, recipe: state.recipe})});
+    if (seq !== afterSeq || id !== state.id) return;   // superseded: don't touch the pane or the status
+    if (!r.ok) { setStatus("render failed: " + await r.text()); return; }
+    const blob = await r.blob();
+    if (seq !== afterSeq || id !== state.id) return;   // it went stale while we decoded the body
+    setAfterSrc($(".after"), blob);
+    setStatus("");
+  } catch (e) {
+    // Network-level rejection: without this the promise died unhandled and
+    // the status claimed "rendering preview…" forever.
+    if (seq === afterSeq && id === state.id) setStatus("render failed: " + (e.message || e));
+  }
 }
 
 // --- select + actions ------------------------------------------------------
@@ -658,6 +672,7 @@ async function renderAfter() {
 let selectSeq = 0;
 async function selectPhoto(id, stem, el) {
   const seq = ++selectSeq;
+  ++afterSeq;   // A→B→A: an in-flight preview for the FIRST A still matches id+seq
   document.querySelectorAll(".thumb").forEach(t=>t.classList.remove("sel"));
   if (el) el.classList.add("sel");
   state.id = id; state.stem = stem;
@@ -984,6 +999,7 @@ async function exportFull() {
 
 async function downloadFull() {
   const fmt = document.querySelector(".save-format")?.value || "tif";
+  const stem = state.stem;   // snapshot: switching photos mid-render must not rename the file
   setStatus("rendering for download…");
   const btn = $(".download"); btn.disabled = true;
   try {
@@ -993,7 +1009,7 @@ async function downloadFull() {
     const a = document.createElement("a");
     const url = URL.createObjectURL(blob);
     a.href = url;
-    a.download = `${state.stem || "photo"}.developed.${fmt}`;
+    a.download = `${stem || "photo"}.developed.${fmt}`;
     document.body.appendChild(a); a.click(); a.remove();
     // A 16-bit TIFF is tens of MB and the anchor is gone the moment it's
     // clicked — but the blob lives until revoked. Give the browser a generous

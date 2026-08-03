@@ -445,8 +445,15 @@ fn auto_cmd(
     let dn = denoise
         .then(|| denoise::DenoiseOpts::from_config(&cfg, denoise_model, denoise_strength.unwrap_or(1.0)));
     println!(
-        "verdict: {:?}; rendering full-resolution (16-bit){} ...",
+        "verdict: {:?}; rendering full-resolution ({}){} ...",
         verdict.decision,
+        // Bit depth follows the chosen extension — claiming "16-bit" for a
+        // requested .jpg was a lie the line above explicitly disclaims.
+        match out.extension().and_then(|e| e.to_str()) {
+            Some("jpg" | "jpeg") => "8-bit JPEG",
+            Some("png") => "16-bit PNG",
+            _ => "16-bit TIFF",
+        },
         if denoise { " with AI denoise" } else { "" }
     );
     let (w, h) = render::render_to_file(raw, &recipe, &out, dn.as_ref(), None)?;
@@ -673,8 +680,12 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
 fn process_one(raw: &Path, cfg: &Config, render_master: bool) -> Result<Verdict> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
     let (recipe, verdict) = produce_recipe(raw, cfg, false, None, None, cfg.style_strength)?;
-    write_recipe(raw, &recipe, None)?;
+    // XMP first, recipe LAST: `has_develop` (the batch resume filter) keys on
+    // the recipe file, so the completion marker must be the FINAL write — the
+    // old order marked a photo done, then a failed XMP/render left it both
+    // "failed" in this run AND skipped by every later resume.
     write_xmp(raw, &recipe)?;
+    write_recipe(raw, &recipe, None)?;
     if render_master {
         let out = default_out(raw, "developed", "tif"); // 16-bit master
         ensure_parent(&out)?;

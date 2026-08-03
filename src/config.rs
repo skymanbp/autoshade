@@ -188,6 +188,10 @@ impl Config {
                 .unwrap_or_else(|| "python/segment.py".to_string()),
             style_strength: nonempty("AUTOSHOP_STYLE_STRENGTH")
                 .and_then(|s| s.parse::<f32>().ok())
+                // "NaN" parses as a valid f32 and SURVIVES clamp (clamp keeps
+                // NaN) — a non-finite blend strength would poison the style
+                // math downstream, so it falls back to the default instead.
+                .filter(|v| v.is_finite())
                 .unwrap_or(0.3)
                 .clamp(0.0, 1.0),
         }

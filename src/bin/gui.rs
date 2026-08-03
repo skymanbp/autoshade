@@ -3195,7 +3195,7 @@ impl AutoshopApp {
         ui.label(
             egui::RichText::new(tr(
                 self.lang,
-                "Click to add a point · drag to move · drag outside the box to delete — preview / export / XMP all match",
+                "Click to add a point · drag to move · drag outside the box to delete — preview and export match (XMP carries the closest Lightroom form)",
             ))
             .weak()
             .small(),
@@ -4093,7 +4093,14 @@ impl AutoshopApp {
                                     match autoshop::pipeline::write_recipe(&p, &stamped, None) {
                                         Ok(_) => {
                                             self.edited_badge.clear();
-                                            self.saved_recipe = stamped.clone();
+                                            // The ● baseline lives in CANVAS
+                                            // coordinates: on a baked variant
+                                            // the canvas copy dropped the
+                                            // curve + lens profile, and a
+                                            // baseline keeping them (the
+                                            // disk form) lit ● the instant a
+                                            // successful analyze landed.
+                                            self.saved_recipe = self.recipe.clone();
                                             self.nav_stash.remove(&p);
                                             if backed.is_some() {
                                                 self.refresh_versions();
@@ -4196,7 +4203,16 @@ impl AutoshopApp {
                                         .as_deref()
                                         .and_then(|sp| stored.strip_prefix(sp))
                                         .unwrap_or(stored);
-                                    (bare == new_name).then(|| {
+                                    // Strip the NEW name symmetrically: a
+                                    // legacy-out target carries the stem
+                                    // prefix that a central bare name lacks —
+                                    // one-sided stripping missed the match
+                                    // and stacked an inert duplicate.
+                                    let new_bare = stem_prefix
+                                        .as_deref()
+                                        .and_then(|sp| new_name.strip_prefix(sp))
+                                        .unwrap_or(&new_name);
+                                    (bare == new_bare).then(|| {
                                         *p = path_s.clone();
                                         i
                                     })
@@ -4290,13 +4306,14 @@ impl AutoshopApp {
                                 );
                             }
                             RetouchKind::InPlace => {
-                                // fill/heal/clone: a pixel touch-up of the CURRENT
-                                // rendition — bake it into the active variant's base
-                                // (so later slider edits develop OVER the retouched
-                                // pixels) AND repoint its origin at the saved
-                                // full-res artifact, so export / reverse-fit / a
-                                // further retouch all follow the retouched pixels
-                                // rather than the pre-retouch source (WYSIWYG).
+                                // fill/heal/clone/denoise: a pixel touch-up of the
+                                // NEUTRAL-DEVELOP base (never the developed
+                                // rendition — the recipe keeps rendering ON TOP,
+                                // so baking developed pixels would cook the tone
+                                // twice). Bake it into the active variant's base
+                                // AND repoint its origin at the saved full-res
+                                // artifact, so export / reverse-fit / a further
+                                // retouch all follow the retouched pixels.
                                 let img = Arc::new(img);
                                 let (mw, mh) = img.dimensions();
                                 if let Some(v) = self.variants.get_mut(self.active) {
@@ -4605,7 +4622,7 @@ impl AutoshopApp {
                 {
                     self.copied = Some(self.recipe.clone());
                     self.copied_from = self.src_path.clone();
-                    self.status = tr(lang, "Recipe copied — Ctrl+click to pick several, then “Paste to selected”").to_string();
+                    self.status = tr(lang, "Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”").to_string();
                 }
             });
             let n = self.multi_sel.len();
@@ -4896,6 +4913,12 @@ impl AutoshopApp {
                     let mut custom_wb = self.recipe.temperature_k.is_some();
                     if ui.checkbox(&mut custom_wb, tr(lang, "Custom white balance (off = as-shot)")).changed() {
                         self.recipe.temperature_k = if custom_wb { Some(5500.0) } else { None };
+                        if !custom_wb {
+                            // "As-shot" is the WHOLE white balance: a custom
+                            // Tint surviving the un-check kept a WB edit
+                            // active behind a label claiming there was none.
+                            self.recipe.tint = 0.0;
+                        }
                         changed = true;
                     }
                     let label = if self.wb_picking { tr(lang, "💧 Click in image…") } else { tr(lang, "💧 Eyedropper") };
@@ -5522,11 +5545,11 @@ impl AutoshopApp {
                 }
                 // --- Range Mask（LR 范围蒙版）: refines WHERE the geometry applies —
                 // final weight = geometry × range, live in preview + export + XMP.
-                // `changed` is watched across the whole block: range edits are
-                // COVERAGE edits, so the red overlay must rebuild too — only
-                // the geometry controls used to set overlay_stale, leaving the
-                // wash stale against the new range until an unrelated toggle.
-                let range_changed_before = changed;
+                // Coverage invalidation happens ONCE below (after Amount): any
+                // edit up to there can move the wash, and the overlay key
+                // compare dedupes rebuilds — the old "range-section-only"
+                // tracker went blind whenever an earlier control had already
+                // set `changed` in the same frame.
                 {
                     let cur = match &self.recipe.masks[i].range {
                         None => 0usize,
@@ -5546,6 +5569,12 @@ impl AutoshopApp {
                             });
                     });
                     if sel != cur {
+                        // Leaving Color: the armed sampler goes too, or the
+                        // canvas keeps advertising (and dispatching) a colour
+                        // pick for a range that no longer exists.
+                        if cur == 2 && self.range_picking == Some(i) {
+                            self.range_picking = None;
+                        }
                         self.recipe.masks[i].range = match sel {
                             // Full range = neutral start; narrow from there.
                             1 => Some(RangeMask::Luminance { lo_outer: 0.0, lo: 0.0, hi: 1.0, hi_outer: 1.0 }),
@@ -5606,11 +5635,16 @@ impl AutoshopApp {
                         }
                     }
                 }
-                if changed && !range_changed_before {
-                    self.overlay_stale = true; // range IS coverage — rebuild the wash
-                }
                 let m = &mut self.recipe.masks[i];
                 changed |= Self::slider(ui, lang, tr(lang, "Amount"), &mut m.amount, 0.0, 1.0, 1.0);
+                // Any edit up to here — geometry, range, Amount — can move the
+                // coverage wash (the overlay key carries them all); the key
+                // compare inside refresh_mask_overlay dedupes rebuilds, so
+                // over-flagging is free. The tone sliders below are not
+                // coverage and deliberately stay out.
+                if changed {
+                    self.overlay_stale = true;
+                }
                 changed |= Self::slider(ui, lang, tr(lang, "Exposure"), &mut m.exposure_ev, -5.0, 5.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Contrast"), &mut m.contrast, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Highlights"), &mut m.highlights, -100.0, 100.0, 0.0);
@@ -5863,7 +5897,9 @@ impl AutoshopApp {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("1:1").on_hover_text(tr(lang, "Preview pixels 1:1 (double-click the image to toggle)")).clicked() {
-                    self.zoom = (vis_px.x * self.zoom / disp.x).max(1.0);
+                    // Same ceiling as the render path (view_uv clamps at 12) —
+                    // an unclamped value desynced zoom/pan math from the view.
+                    self.zoom = (vis_px.x * self.zoom / disp.x).clamp(1.0, 12.0);
                 }
                 if ui.small_button("Fit").on_hover_text(tr(lang, "Fit the whole image to the canvas (double-click the image to toggle)")).clicked() {
                     self.zoom = 1.0;
@@ -5947,7 +5983,7 @@ impl AutoshopApp {
                 self.zoom = 1.0;
                 self.pan = egui::vec2(0.5, 0.5);
             } else {
-                self.zoom = (vis_px.x / disp.x).max(1.0);
+                self.zoom = (vis_px.x / disp.x).clamp(1.0, 12.0);
             }
         }
 
@@ -6320,10 +6356,17 @@ impl AutoshopApp {
                         3 => *right = cl(cur.0).max(*left + MIN_SIZE),
                         4 => *bottom = cl(cur.1).max(*top + MIN_SIZE),
                         _ => {
-                            *left = cl(*left + dx);
-                            *right = cl(*right + dx);
-                            *top = cl(*top + dy);
-                            *bottom = cl(*bottom + dy);
+                            // Clamp the SHIFT, not each edge — independent
+                            // clamps at the band boundary squashed the
+                            // ellipse toward zero size instead of parking it.
+                            let (lx, hx) = (-0.5 - *left, 1.5 - *right);
+                            let (ly, hy) = (-0.5 - *top, 1.5 - *bottom);
+                            let dx = dx.clamp(lx.min(hx), lx.max(hx));
+                            let dy = dy.clamp(ly.min(hy), ly.max(hy));
+                            *left += dx;
+                            *right += dx;
+                            *top += dy;
+                            *bottom += dy;
                         }
                     }
                 }
@@ -6549,10 +6592,12 @@ impl AutoshopApp {
                     })
                     .clamp(0.0, 1.0);
                     if let Some(rn) = ratio_n {
-                        // Width drives; height follows the ratio; if the
+                        // The DOMINANT drag axis drives and the other follows
+                        // the ratio — width-only driving made a mostly
+                        // vertical corner pull do nothing at all. If the
                         // derived height leaves the frame, shrink both to fit.
                         let top_corner = h == 0 || h == 1;
-                        let mut w_n = (x - ax).abs();
+                        let mut w_n = (x - ax).abs().max((y - ay).abs() * rn);
                         let mut h_n = w_n / rn;
                         let room = if top_corner { ay } else { 1.0 - ay };
                         if h_n > room {
@@ -6942,7 +6987,7 @@ impl AutoshopApp {
         self.status = if self.fill_fullres {
             tr(lang, "generative fill (full-res render)… (slow, minutes)").into()
         } else {
-            tr(lang, "generative fill via gpt-image… (streams progress; high quality can run minutes)").into()
+            tr(lang, "generative fill via gpt-image… (high quality can run minutes — the window stays busy until it lands)").into()
         };
         let quality = ["high", "medium", "low"][self.fill_quality.min(2)].to_string();
         let full_res = self.fill_fullres;
@@ -7171,8 +7216,14 @@ impl AutoshopApp {
             loop {
                 let tag = if n == 0 { "reimagine".to_string() } else { format!("reimagine-{}", n + 1) };
                 let cand = autoshop::pipeline::default_out(&path, &tag, "png");
-                if !cand.exists() || n >= 999 {
+                if !cand.exists() {
                     break cand;
+                }
+                if n >= 999 {
+                    // Refuse rather than alias: reusing an existing origin
+                    // would cross-wire two variants' export / reverse-fit.
+                    self.status = tr(self.lang, "over 999 generated variants for this photo — clean up ./out first").into();
+                    return;
                 }
                 n += 1;
             }
@@ -7192,7 +7243,7 @@ impl AutoshopApp {
         self.busy = true;
         let lang = self.lang;
         self.status =
-            tr(lang, "AI generating… (gpt-image streams progress; high quality can run minutes; hi-res input needs a full-frame develop first)").into();
+            tr(lang, "AI generating… (gpt-image; high quality can run minutes — the window stays busy until it lands; hi-res input needs a full-frame develop first)").into();
         let edge = self.preview_edge.clamp(640, 8192);
         self.spawn_worker(
             move || {
@@ -7493,7 +7544,7 @@ impl AutoshopApp {
                 // This entry's OWN style prompt, right next to its trigger
                 // (it used to silently borrow the Direction field at the top
                 // of the panel — a prompt and its button belong together).
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.reimagine_prompt)
                             .desired_width((ui.available_width() - 130.0).max(80.0))
@@ -7507,7 +7558,7 @@ impl AutoshopApp {
                                  (empty = a neutral finished develop). Repainted pixels = not faithful; the \
                                  result is added as an 「AI generated」 variant at the bottom and switched to, \
                                  so you can keep tweaking without reverting. Models that accept any size \
-                                 (gpt-image-2) reach ~8MP, others ~1.5K. Needs OPENAI_API_KEY.",
+                                 (gpt-image-2) reach ~8MP, others ~1.5K. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
                             ))
                             .clicked()
                         {
@@ -7618,7 +7669,7 @@ impl AutoshopApp {
                 });
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Paint the area, write what belongs there, then Remove/Fill. Needs OPENAI_API_KEY.",
+                        "Paint the area, write what belongs there, then Remove/Fill. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
                     ))
                     .weak()
                     .small(),
@@ -7718,7 +7769,14 @@ impl eframe::App for AutoshopApp {
         if ctx.input(|i| i.viewport().close_requested()) {
             let unsaved_open =
                 self.src_path.is_some() && dirty_vs(&self.recipe, &self.saved_recipe);
-            if unsaved_open || !self.nav_stash.is_empty() {
+            if self.busy {
+                // A running export / retouch / paid AI generation dies with
+                // the process — the ✕ used to bypass every guard mid-flight.
+                // Block and say why; close again once the worker lands.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                let t = tr(self.lang, "An operation is still running — wait for it to finish, then close").to_string();
+                self.toast(ToastKind::Error, t);
+            } else if unsaved_open || !self.nav_stash.is_empty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm_quit = true;
             }
@@ -7842,8 +7900,12 @@ impl eframe::App for AutoshopApp {
                 self.save_xmp();
             }
             if nav != 0 && !self.busy && !self.gallery.is_empty() {
-                let cur = self.selected.map(|i| i as i32).unwrap_or(-nav.min(0));
-                let next = (cur + nav).clamp(0, self.gallery.len() as i32 - 1);
+                // Nothing selected yet: either arrow ENTERS the gallery at its
+                // first photo (the old Right-arrow default skipped index 0).
+                let next = match self.selected {
+                    Some(i) => (i as i32 + nav).clamp(0, self.gallery.len() as i32 - 1),
+                    None => 0,
+                };
                 if Some(next as usize) != self.selected {
                     // Keyboard walking must keep the highlight on screen — the
                     // gallery scrolls to it next frame (clicks don't set this:
