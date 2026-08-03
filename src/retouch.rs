@@ -341,17 +341,36 @@ If the photo is clean, return an empty list.";
     });
 
     let url = format!("{}/responses", cfg.openai_base_url.trim_end_matches('/'));
-    let resp = ureq::post(&url)
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Content-Type", "application/json")
-        .send_json(body);
+    // Same latency class as the analyze proposer (high-detail image + strict
+    // schema on /responses) — and previously a BARE `ureq::post` with no
+    // deadline at all: a stalled endpoint parked the retouch worker forever,
+    // and `busy` gates every GUI action. Shares the propose budget and the
+    // AUTOSHOP_HTTP_TIMEOUT_SECS override.
+    let resp = crate::advisor::post_with_timeout(
+        &url,
+        std::time::Duration::from_secs(crate::advisor::PROPOSE_TIMEOUT_SECS),
+    )
+    .set("Authorization", &format!("Bearer {key}"))
+    .set("Content-Type", "application/json")
+    .send_json(body);
 
     let value: serde_json::Value = match resp {
         Ok(r) => r.into_json().context("parse vision response")?,
         Err(ureq::Error::Status(code, r)) => {
             return Err(anyhow!("vision API {code}: {}", r.into_string().unwrap_or_default()))
         }
-        Err(ureq::Error::Transport(t)) => return Err(anyhow!("transport: {t}")),
+        Err(ureq::Error::Transport(t)) => {
+            let mut msg = format!("transport: {t}");
+            // A read timeout usually means the model outran the deadline, not
+            // a dead network — say so, with the knob (generative.rs pattern).
+            if msg.contains("timed out") {
+                msg.push_str(&format!(
+                    " (hit the HTTP deadline, default {}s — raise AUTOSHOP_HTTP_TIMEOUT_SECS)",
+                    crate::advisor::PROPOSE_TIMEOUT_SECS
+                ));
+            }
+            return Err(anyhow!(msg));
+        }
     };
 
     let text = extract_text(&value)

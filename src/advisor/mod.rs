@@ -105,13 +105,42 @@ pub trait Advisor {
     }
 }
 
+/// Per-call HTTP deadline classes for the analysis endpoints. Recalibrated
+/// 2026-08-03: the original 60–120 s budgets predate reasoning-class vision
+/// models — a real /responses propose on direct api.openai.com outran 120 s
+/// and the client killed a HEALTHY request mid-generation (the analyze path
+/// then fell back to "Heuristic baseline (AI vision unavailable: … timed out
+/// reading response)"). Same failure class as the images/edits 300→600 s
+/// recalibration in generative.rs. `AUTOSHOP_HTTP_TIMEOUT_SECS` still
+/// overrides every one of these (see [`post_with_timeout`]).
+pub(crate) const PROPOSE_TIMEOUT_SECS: u64 = 360; // high-detail image + strict schema — slowest text call
+pub(crate) const STYLE_TIMEOUT_SECS: u64 = 240; // two low-detail images, short prose out
+pub(crate) const VERIFY_TIMEOUT_SECS: u64 = 180; // text-only chat, temperature 0
+
+/// Wrap a ureq transport failure as [`AdvisorError::Transport`], appending
+/// the actionable deadline note when it is a read timeout: a mid-request kill
+/// prints as "Network Error: timed out reading response", which reads like a
+/// dead network but usually means the model outran the per-call deadline
+/// (the generative path learned this first — see generative.rs).
+pub(crate) fn transport_error(t: &ureq::Transport, default_secs: u64) -> AdvisorError {
+    let mut msg = t.to_string();
+    if msg.contains("timed out") {
+        msg.push_str(&format!(
+            " (hit the HTTP deadline, default {default_secs}s for this call — \
+             reasoning-class models can legitimately run longer; raise \
+             AUTOSHOP_HTTP_TIMEOUT_SECS to extend every AI call's deadline)"
+        ));
+    }
+    AdvisorError::Transport(msg)
+}
+
 /// POST builder with a hard overall deadline. The default `ureq::post` agent
 /// has NO read/overall timeout: a server that accepts the TCP connection and
 /// then never responds (a dead local bridge, a stalled proxy) blocks the
 /// worker thread FOREVER — and every GUI action gates on that worker's `busy`
 /// flag, so the whole app soft-locks. Per-call budgets reflect each
-/// endpoint's real latency class; `AUTOSHOP_HTTP_TIMEOUT_SECS` overrides all
-/// of them for outlier deployments.
+/// endpoint's real latency class (the consts above); `AUTOSHOP_HTTP_TIMEOUT_SECS`
+/// overrides all of them for outlier deployments.
 pub(crate) fn post_with_timeout(url: &str, overall: std::time::Duration) -> ureq::Request {
     let overall = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
         .ok()

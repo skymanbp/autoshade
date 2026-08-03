@@ -19,6 +19,26 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **分析链超时预算重校准 + AI 去瑕疵裸请求补时限（2026-08-03，已提交未
+  推送）**——用户真机报分析回退启发式基线：「AI vision unavailable:
+  http transport: …/v1/responses: Network Error: timed out reading
+  response」。回退与披露本身按设计工作（heuristic.rs 带原因兜底）；根因
+  与 8f62b8a（images/edits 300→600s）同类：`/responses` 各调用点预算按
+  前推理模型时代校准（提案 120s / 风格描述 90s / 验证 60s），直连
+  api.openai.com 跑推理级视觉模型（高细节图 + strict schema）的健康请求
+  被客户端中途掐死。修复（[src/advisor/mod.rs](../src/advisor/mod.rs)）：
+  ①预算常量化重校准 `PROPOSE=360s / STYLE=240s / VERIFY=180s`（类别注释
+  记录实证依据；`AUTOSHOP_HTTP_TIMEOUT_SECS` 仍可全局覆盖）；②中央
+  `transport_error` 助手——"timed out" 传输错误一律追加可操作提示（默认
+  时限数值 + 覆盖旋钮），三个调用点（openai.rs 提案/describe_style、
+  openai_verify.rs）统一换用；③顺藤修出同类更重隐患：**retouch.rs
+  `detect_spots`（AI 去瑕疵 auto）用的是裸 `ureq::post`——完全无超时**，
+  端点僵死会把 worker 永久卡住而 busy 锁死全 GUI——改走
+  `post_with_timeout`（共享 PROPOSE 预算+覆盖）+ 同款超时提示。验证：
+  120 lib + 9 gui 绿、clippy --all-targets 0、双 exe（gui 34678011 /
+  cli 26641585）。真机验收点：重跑分析应不再 120s 掐断（慢也等到 6 分
+  钟）；再超时的报错会写明时限与旋钮。
+
 - **LR 对标·缺陷修复批（2026-08-03，已提交未推送）**——用户拍板三批打磨
   （缺陷修复 → 手感 → A 档立项=自动镜头校正）之第一批；问题源=4 区域 LR
   对标盘点工作流（tone-color/geometry-detail/local-retouch/workflow-ux，

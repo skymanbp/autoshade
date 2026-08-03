@@ -141,12 +141,16 @@ follow it closely): ");
         });
 
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        // 120 s: a high-detail image + strict structured output is the slowest
-        // text call in the app (the codex bridge adds its own hop).
-        let resp = super::post_with_timeout(&url, std::time::Duration::from_secs(120))
-            .set("Authorization", &format!("Bearer {key}"))
-            .set("Content-Type", "application/json")
-            .send_json(body);
+        // A high-detail image + strict structured output is the slowest text
+        // call in the app (the codex bridge adds its own hop) — budget class
+        // rationale at the const (a real 120 s deadline killed healthy calls).
+        let resp = super::post_with_timeout(
+            &url,
+            std::time::Duration::from_secs(super::PROPOSE_TIMEOUT_SECS),
+        )
+        .set("Authorization", &format!("Bearer {key}"))
+        .set("Content-Type", "application/json")
+        .send_json(body);
 
         let value: Value = match resp {
             Ok(r) => r.into_json().map_err(|e| AdvisorError::Transport(e.to_string()))?,
@@ -155,7 +159,7 @@ follow it closely): ");
                 return Err(AdvisorError::Http { status: code, body });
             }
             Err(ureq::Error::Transport(t)) => {
-                return Err(AdvisorError::Transport(t.to_string()))
+                return Err(super::transport_error(&t, super::PROPOSE_TIMEOUT_SECS))
             }
         };
 
@@ -212,18 +216,23 @@ so the same prompt can restyle ANY other photograph. Output ONLY the prompt text
     });
 
     let url = format!("{}/responses", cfg.openai_base_url.trim_end_matches('/'));
-    // 90 s: two low-detail images, short prose out.
-    let resp = super::post_with_timeout(&url, std::time::Duration::from_secs(90))
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Content-Type", "application/json")
-        .send_json(body);
+    // Two low-detail images, short prose out — budget class at the const.
+    let resp = super::post_with_timeout(
+        &url,
+        std::time::Duration::from_secs(super::STYLE_TIMEOUT_SECS),
+    )
+    .set("Authorization", &format!("Bearer {key}"))
+    .set("Content-Type", "application/json")
+    .send_json(body);
     let value: Value = match resp {
         Ok(r) => r.into_json().map_err(|e| AdvisorError::Transport(e.to_string()))?,
         Err(ureq::Error::Status(code, r)) => {
             let body = r.into_string().unwrap_or_default();
             return Err(AdvisorError::Http { status: code, body });
         }
-        Err(ureq::Error::Transport(t)) => return Err(AdvisorError::Transport(t.to_string())),
+        Err(ureq::Error::Transport(t)) => {
+            return Err(super::transport_error(&t, super::STYLE_TIMEOUT_SECS))
+        }
     };
     let text = extract_output_text(&value).ok_or_else(|| {
         AdvisorError::Transport("could not locate output text in OpenAI response".into())

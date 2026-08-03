@@ -51,11 +51,16 @@ impl Advisor for OpenAiVerifier {
             "temperature": 0
         });
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        // 60 s: text-only chat at temperature 0 — the fastest AI call here.
-        let resp = super::post_with_timeout(&url, std::time::Duration::from_secs(60))
-            .set("Authorization", &format!("Bearer {key}"))
-            .set("Content-Type", "application/json")
-            .send_json(body);
+        // Text-only chat at temperature 0 — the fastest AI call here, but a
+        // reasoning-class verifier model still outgrows a 60 s budget
+        // (class rationale at the const in mod.rs).
+        let resp = super::post_with_timeout(
+            &url,
+            std::time::Duration::from_secs(super::VERIFY_TIMEOUT_SECS),
+        )
+        .set("Authorization", &format!("Bearer {key}"))
+        .set("Content-Type", "application/json")
+        .send_json(body);
 
         let value: Value = match resp {
             Ok(r) => r.into_json().map_err(|e| AdvisorError::Transport(e.to_string()))?,
@@ -63,7 +68,9 @@ impl Advisor for OpenAiVerifier {
                 let body = r.into_string().unwrap_or_default();
                 return Err(AdvisorError::Http { status: code, body });
             }
-            Err(ureq::Error::Transport(t)) => return Err(AdvisorError::Transport(t.to_string())),
+            Err(ureq::Error::Transport(t)) => {
+                return Err(super::transport_error(&t, super::VERIFY_TIMEOUT_SECS))
+            }
         };
 
         let text = value
