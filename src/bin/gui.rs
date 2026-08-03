@@ -650,7 +650,6 @@ struct AutoshopApp {
     hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance
     grade_region: usize,
     guidance: String, // free-text direction for the AI ("warmer, moodier")
-    refine: bool,     // adjust the CURRENT recipe vs propose from scratch
     save_jpeg: bool,  // export/download as JPEG instead of 16-bit TIFF
     // --- undo / redo (a drag is one step, committed on release). Each step
     // carries the recipe AND the active variant's pixel identity (base Arc +
@@ -735,6 +734,8 @@ struct AutoshopApp {
     fill_quality: usize,                   // 0=high 1=medium 2=low
     fill_fullres: bool,                    // composite onto the full-res develop
     heal_fullres: bool,                    // heal the full-res develop
+    denoise_fullres: bool,                 // AI-denoise the full-sensor develop (slow)
+    reimagine_prompt: String,              // whole-image restyle prompt (its own entry)
     // --- production niceties ---
     view_mode: ViewMode,                   // side-by-side vs after-only (hold B = compare)
     toasts: Vec<Toast>,                    // transient corner notifications
@@ -968,7 +969,6 @@ impl Default for AutoshopApp {
             hsl_tab: 0,
             grade_region: 0,
             guidance: String::new(),
-            refine: false,
             save_jpeg: false,
             committed: UndoStep::default(),
             undo_stack: Vec::new(),
@@ -1014,6 +1014,8 @@ impl Default for AutoshopApp {
             fill_quality: 0,
             fill_fullres: false,
             heal_fullres: false,
+            denoise_fullres: false,
+            reimagine_prompt: String::new(),
             view_mode: ViewMode::SideBySide,
             toasts: Vec::new(),
             histogram: None,
@@ -3201,23 +3203,24 @@ impl AutoshopApp {
         changed
     }
 
-    fn start_analyze(&mut self) {
+    fn start_analyze(&mut self, refine: bool) {
         let Some(path) = self.src_path.clone() else { return };
         if self.busy {
             return;
         }
         let lang = self.lang;
         self.busy = true;
-        self.status = if self.refine {
+        self.status = if refine {
             tr(lang, "refining your current edit with AI…").into()
         } else {
             tr(lang, "analyzing with AI (GPT + Claude)…").into()
         };
         let style = self.style_strength;
-        // Free-text direction ("warmer, moodier") steers the proposal; when
-        // `refine` is on, the AI ADJUSTS the current recipe instead of starting
-        // from scratch. A box-selected region (if any) folds into the direction so
-        // the AI masks exactly there — same prompt the web UI sends.
+        // Free-text direction ("warmer, moodier") steers the proposal; with
+        // `refine` (its own button now — no pre-armed checkbox), the AI
+        // ADJUSTS the current recipe instead of starting from scratch. A
+        // box-selected region (if any) folds into the direction so the AI
+        // masks exactly there — same prompt the web UI sends.
         let guidance = {
             let g = self.guidance.trim();
             match self.region {
@@ -3232,7 +3235,7 @@ impl AutoshopApp {
                 None => (!g.is_empty()).then(|| g.to_string()),
             }
         };
-        let base = self.refine.then(|| {
+        let base = refine.then(|| {
             let mut r = self.recipe.clone();
             // The refine prompt/verifier work over the camera's embedded
             // preview, where the base look AND the lens corrections are
@@ -4371,9 +4374,9 @@ impl AutoshopApp {
                 },
                 Msg::Styled(boxed) => match *boxed {
                     Ok(prompt) => {
-                        // Into the Direction box: ready to restyle OTHER photos.
-                        self.guidance = prompt;
-                        self.done(tr(lang, "Style prompt extracted → filled into Direction (also saved ./out/<stem>.style.txt)"));
+                        // Into the Reimagine prompt: ready to restyle OTHER photos.
+                        self.reimagine_prompt = prompt;
+                        self.done(tr(lang, "Style prompt extracted → filled into the Reimagine prompt (also saved ./out/<stem>.style.txt)"));
                     }
                     Err(e) => {
                         self.fail(tr(lang, "Style extraction failed"), e);
@@ -4783,7 +4786,7 @@ impl AutoshopApp {
         // place (UX batch — Direction/Refine/Style used to be scattered
         // across two toolbar rows with Undo/Redo in between). Open whenever
         // there's a verdict to show; the inputs are always present.
-        let ai_active = self.verdict.is_some() || !self.guidance.is_empty() || self.refine;
+        let ai_active = self.verdict.is_some() || !self.guidance.is_empty();
         egui::CollapsingHeader::new(section_title(tr(lang, "AI"), ai_active))
             .id_salt("sec_verdict")
             .default_open(true)
@@ -4806,15 +4809,44 @@ impl AutoshopApp {
                     );
                 }
                 ui.label(tr(lang, "Direction"))
-                    .on_hover_text(tr(lang, "Free-text direction for AI Analyze and Reimagine — e.g. warmer and moodier"));
+                    .on_hover_text(tr(lang, "Free-text direction for AI Analyze — e.g. warmer and moodier"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.guidance)
                         .desired_width(f32::INFINITY)
                         .hint_text(tr(lang, "e.g. warmer and moodier, lift the shadows")),
                 );
+                // The prompt's triggers sit DIRECTLY under it (user feedback:
+                // the toolbar Analyze button sat nowhere near the text it
+                // consumes). TWO explicit verbs replace the old pre-armed
+                // 「Refine」 checkbox — a mode you had to remember to tick
+                // (and untick) before clicking is exactly the kind of hidden
+                // state a button-per-intent design removes.
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.refine, tr(lang, "Refine"))
-                        .on_hover_text(tr(lang, "Adjust the CURRENT edit instead of proposing from scratch"));
+                    let ready = self.src_path.is_some() && !self.busy;
+                    if ui
+                        .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
+                        .on_hover_text(tr(lang,
+                            "AI proposes a recipe from scratch (GPT proposal + validation), written into \
+                             the sliders — undoable. Uses the Direction above; Style steers it.",
+                        ))
+                        .clicked()
+                    {
+                        self.start_analyze(false);
+                    }
+                    // Refining a neutral edit IS analyzing — disable the verb
+                    // until there is an edit to refine.
+                    let has_edit = ready && !self.recipe.is_noop();
+                    if ui
+                        .add_enabled(has_edit, egui::Button::new(tr(lang, "AI Refine")))
+                        .on_hover_text(tr(lang,
+                            "Adjust the CURRENT edit instead of proposing from scratch — your sliders are \
+                             the starting point (enabled once the edit is non-neutral).",
+                        ))
+                        .clicked()
+                    {
+                        self.start_analyze(true);
+                    }
+                    ui.separator();
                     ui.label(tr(lang, "Style")).on_hover_text(
                         tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
                     );
@@ -5019,10 +5051,36 @@ impl AutoshopApp {
             .id_salt("sec_detail")
             .default_open(false)
             .show(ui, |ui| {
-                let r = &mut self.recipe;
-                changed |= Self::slider(ui, lang, tr(lang, "Sharpening"), &mut r.sharpening, 0.0, 150.0, 0.0);
-                changed |=
-                    Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut r.noise_reduction, 0.0, 100.0, 0.0);
+                {
+                    let r = &mut self.recipe;
+                    changed |= Self::slider(ui, lang, tr(lang, "Sharpening"), &mut r.sharpening, 0.0, 150.0, 0.0);
+                    changed |=
+                        Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut r.noise_reduction, 0.0, 100.0, 0.0);
+                }
+                // AI denoise as an ACTIVE op: run now, see it on canvas —
+                // export-time denoise (the Export section toggle) stays for
+                // batch/full-res workflows, but nobody should have to export
+                // to find out what the denoiser does.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let ready = self.src_path.is_some() && !self.busy;
+                    if ui
+                        .add_enabled(ready, egui::Button::new(tr(lang, "🤖 AI Denoise now")))
+                        .on_hover_text(tr(lang,
+                            "Run the SCUNet GPU sidecar on this variant's pixels and show the result on canvas \
+                             (undoable — bakes a clean base into the current variant; the develop sliders keep \
+                             applying on top; first run downloads the model)",
+                        ))
+                        .clicked()
+                    {
+                        self.start_ai_denoise();
+                    }
+                    ui.checkbox(&mut self.denoise_fullres, tr(lang, "Full-res"))
+                        .on_hover_text(tr(lang,
+                            "Denoise the full-sensor develop (slow, minutes on GPU); off = a ≤2048px working copy \
+                             for a quick on-canvas result",
+                        ));
+                });
             });
 
         // --- 镜头校正: in-camera profile + manual corrections -----------------
@@ -6988,6 +7046,54 @@ impl AutoshopApp {
         );
     }
 
+    /// AI denoise (SCUNet, GPU sidecar) as an ACTIVE canvas operation: run on
+    /// the current variant's pixels NOW and bake the clean base in-place, so
+    /// the user sees the result immediately instead of only in an export.
+    /// Mirrors heal's plumbing: RetouchKind::InPlace swaps the variant base
+    /// (undoable) and the develop chain keeps rendering on top.
+    fn start_ai_denoise(&mut self) {
+        // Denoise the ACTIVE variant's pixels (a Generated variant → its
+        // origin PNG), same source rule as heal/clone.
+        let Some(path) = self.active_source_path() else { return };
+        if self.busy {
+            return;
+        }
+        let lang = self.lang; // localise UI statuses AND the worker's result string
+        self.busy = true;
+        self.status = if self.denoise_fullres {
+            tr(lang, "AI denoise (full-res)… (GPU sidecar, can take minutes; first run downloads the model)").into()
+        } else {
+            tr(lang, "AI denoise… (GPU sidecar on a ≤2048px working copy; first run downloads the model)").into()
+        };
+        let full_res = self.denoise_fullres;
+        let edge = self.preview_edge.clamp(640, 8192); // show at the working res
+        self.spawn_worker(
+            move || {
+                let res = (|| -> RetouchDone {
+                    let cfg = autoshop::config::Config::load();
+                    let out = autoshop::pipeline::default_out(&path, "denoise", "png");
+                    let opts =
+                        autoshop::denoise::DenoiseOpts::from_config(&cfg, None, 1.0);
+                    autoshop::denoise::denoise_active(&opts, &path, full_res, &out)?;
+                    let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
+                    // InPlace: bake into the active variant's base + repoint origin.
+                    Ok((
+                        img,
+                        trf(
+                            lang,
+                            "AI denoised → {path} (updated current variant)",
+                            &[("path", &out.display().to_string())],
+                        ),
+                        out,
+                        RetouchKind::InPlace,
+                    ))
+                })();
+                Msg::Retouched(Box::new(res))
+            },
+            |e| Msg::Retouched(Box::new(Err(e))),
+        );
+    }
+
     /// Run the clone stamp on a worker: painted target mask + the Alt+picked
     /// source point → `retouch::clone_stamp` (deterministic, no AI) → ./out
     /// pixel master shown in the After pane, exactly like heal.
@@ -7072,7 +7178,9 @@ impl AutoshopApp {
             }
         };
         let prompt = {
-            let g = self.guidance.trim();
+            // The Reimagine section's OWN prompt field (no longer the shared
+            // Direction — each prompt entry pairs with its own trigger).
+            let g = self.reimagine_prompt.trim();
             if g.is_empty() {
                 "Develop this photo into a finished, natural-looking edit: balanced exposure and \
                  contrast, pleasing realistic colour; keep the scene true to the original."
@@ -7382,19 +7490,30 @@ impl AutoshopApp {
             .id_salt("sec_reimagine")
             .default_open(true)
             .show(ui, |ui| {
-                ui.add_enabled_ui(!self.busy, |ui| {
-                    if ui
-                        .button(tr(lang, "✨ Generate image"))
-                        .on_hover_text(tr(lang,
-                            "Repaint the whole image with gpt-image (uses the Direction text above as the style). \
-                             Repainted pixels = not faithful; the result is added as an 「AI generated」 variant \
-                             at the bottom and switched to, so you can keep tweaking without reverting. Models that \
-                             accept any size (gpt-image-2) reach ~8MP, others ~1.5K. Needs OPENAI_API_KEY.",
-                        ))
-                        .clicked()
-                    {
-                        self.start_reimagine();
-                    }
+                // This entry's OWN style prompt, right next to its trigger
+                // (it used to silently borrow the Direction field at the top
+                // of the panel — a prompt and its button belong together).
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.reimagine_prompt)
+                            .desired_width((ui.available_width() - 130.0).max(80.0))
+                            .hint_text(tr(lang, "style to repaint toward — e.g. golden-hour glow, moody film look")),
+                    );
+                    ui.add_enabled_ui(!self.busy, |ui| {
+                        if ui
+                            .button(tr(lang, "✨ Generate image"))
+                            .on_hover_text(tr(lang,
+                                "Repaint the whole image with gpt-image, styled by the prompt on the left \
+                                 (empty = a neutral finished develop). Repainted pixels = not faithful; the \
+                                 result is added as an 「AI generated」 variant at the bottom and switched to, \
+                                 so you can keep tweaking without reverting. Models that accept any size \
+                                 (gpt-image-2) reach ~8MP, others ~1.5K. Needs OPENAI_API_KEY.",
+                            ))
+                            .clicked()
+                        {
+                            self.start_reimagine();
+                        }
+                    });
                 });
                 // Reverse-fit the active generated variant's look back into an
                 // editable recipe — how the low-res experiment becomes a
@@ -7425,8 +7544,8 @@ impl AutoshopApp {
                             .button(tr(lang, "📝 Extract style prompt"))
                             .on_hover_text(tr(lang,
                                 "Compare the original / generated images and have the vision model write a reusable \
-                                 style prompt: auto-fills Direction (ready to Reimagine other photos) and saves \
-                                 ./out/<stem>.style.txt.",
+                                 style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and \
+                                 saves ./out/<stem>.style.txt.",
                             ))
                             .clicked()
                         {
@@ -7436,8 +7555,8 @@ impl AutoshopApp {
                 });
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Uses the Direction above as the style. After generating, use 「Reverse-fit recipe」 to turn \
-                         the look into sliders + XMP (the full-resolution way).",
+                        "After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP \
+                         (the full-resolution way).",
                     ))
                     .weak()
                     .small(),
@@ -7808,14 +7927,11 @@ impl eframe::App for AutoshopApp {
                     self.selected = None; // a one-off file isn't a gallery selection
                     self.open_path(path);
                 }
+                // AI Analyze moved INTO the AI section, onto the same row as
+                // the Direction prompt it consumes (user feedback: a trigger
+                // stranded in the toolbar, far from its input, reads as
+                // unrelated — every prompt entry now carries its own button).
                 let ready = self.src_path.is_some() && !self.busy;
-                if ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
-                    .on_hover_text(tr(lang, "AI proposes a recipe (GPT proposal + validation), written into the sliders — undoable. Direction / Refine / Style live in the AI section of the Develop panel."))
-                    .clicked()
-                {
-                    self.start_analyze();
-                }
                 if ui
                     .add_enabled(ready, egui::Button::new(tr(lang, "Reset")))
                     .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera-matched base (one undo brings it back)"))

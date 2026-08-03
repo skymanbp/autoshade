@@ -181,20 +181,40 @@ pub(crate) fn post_with_stall_timeout(url: &str, stall: std::time::Duration) -> 
         .post(url)
 }
 
-/// [`transport_error`]'s streaming sibling: on the stall path a read timeout
-/// means the server went SILENT (healthy calls keep streaming events), not
-/// that some total budget was exceeded — say that, with the knob.
-pub(crate) fn stall_transport_error(t: &ureq::Transport, stall_secs: u64) -> AdvisorError {
+/// [`transport_error`]'s streaming sibling. Crucially it reports the MEASURED
+/// elapsed time: ureq surfaces both a connect-phase kill (≈10 s) and a real
+/// read stall with the same "timed out reading response" text, and a real
+/// user report showed the old fixed wording blaming a "600 s stall" for a
+/// failure that took a dozen seconds. If the call died well before the stall
+/// budget it was a connection problem, and the message must say so.
+pub(crate) fn stall_transport_error(
+    t: &ureq::Transport,
+    stall_secs: u64,
+    elapsed_secs: u64,
+) -> AdvisorError {
     let mut msg = t.to_string();
     if msg.contains("timed out") {
-        msg.push_str(&format!(
-            " (no stream activity for {stall_secs}s — the server or a proxy stopped sending; \
-             healthy calls stream events and are not time-capped. Raise \
-             AUTOSHOP_HTTP_TIMEOUT_SECS if a proxy buffers server-sent events)"
-        ));
+        if elapsed_secs + 30 < stall_secs {
+            msg.push_str(&format!(
+                " (failed after {elapsed_secs}s — well before the {stall_secs}s stall budget, so \
+                 this is a connection/handshake/proxy failure, not a slow model; it was already \
+                 retried once)"
+            ));
+        } else {
+            msg.push_str(&format!(
+                " (no stream activity for ~{elapsed_secs}s — the server or a proxy stopped \
+                 sending; healthy calls stream events and are not time-capped. Raise \
+                 AUTOSHOP_HTTP_TIMEOUT_SECS if a proxy buffers server-sent events)"
+            ));
+        }
     }
     AdvisorError::Transport(msg)
 }
+
+/// A transport failure this fast is a connection blip (TLS stall, dropped
+/// socket, flaky proxy), not model time — a real analyze died at ~10 s and
+/// succeeded end-to-end on the immediate rerun. One retry absorbs those.
+pub(crate) const TRANSPORT_RETRY_UNDER_SECS: u64 = 30;
 
 /// SSE framing core, shared by every streaming AI consumer (the text calls
 /// below and generative.rs's image stream). Follows the SSE contract: an
@@ -314,6 +334,7 @@ pub(crate) fn post_ai_json(
     let mut use_stream = true;
     let mut use_summary =
         matches!(family, SseFamily::Responses) && body.get("reasoning").is_none();
+    let mut transport_retried = false;
     loop {
         // Rebuild from the caller's body each attempt — dropping a negotiated
         // flag must not leave the other attempt's keys behind.
@@ -332,6 +353,7 @@ pub(crate) fn post_ai_json(
         } else {
             post_with_timeout(url, std::time::Duration::from_secs(budget_secs))
         };
+        let started = std::time::Instant::now();
         let resp = req
             .set("Authorization", &format!("Bearer {key}"))
             .set("Content-Type", "application/json")
@@ -368,8 +390,20 @@ pub(crate) fn post_ai_json(
                 return Err(AdvisorError::Http { status: code, body: b });
             }
             Err(ureq::Error::Transport(t)) => {
+                let elapsed = started.elapsed().as_secs();
+                // A fast transport failure is a connection blip, not model
+                // time — retry once before surfacing (a real analyze died at
+                // ~10 s on a TLS/connect stall and succeeded on rerun).
+                if !transport_retried && elapsed < TRANSPORT_RETRY_UNDER_SECS {
+                    transport_retried = true;
+                    eprintln!(
+                        "  note: transport failed after {elapsed}s ({t}) — retrying once \
+                         (a fast failure is a connection blip, not model time)"
+                    );
+                    continue;
+                }
                 return Err(if use_stream {
-                    stall_transport_error(&t, budget_secs.max(STREAM_STALL_FLOOR_SECS))
+                    stall_transport_error(&t, budget_secs.max(STREAM_STALL_FLOOR_SECS), elapsed)
                 } else {
                     transport_error(&t, budget_secs)
                 });

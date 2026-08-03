@@ -104,6 +104,44 @@ pub fn denoise_file(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<(
     run_sidecar(opts, input, output)
 }
 
+/// Denoise the ACTIVE working pixels for an on-canvas result (the GUI's
+/// interactive "AI Denoise now"): a RAW goes through a neutral develop first —
+/// the full sensor with `full_res`, else a ≤2048 px working copy (the same
+/// base contract as retouch: never the camera's baked preview, so the develop
+/// chain keeps running on the engine's own tone pipeline) — a baked PNG/TIFF
+/// is denoised as-is. The caller bakes the output into the current variant,
+/// exactly like a heal result.
+pub fn denoise_active(
+    opts: &DenoiseOpts,
+    input: &Path,
+    full_res: bool,
+    out: &Path,
+) -> Result<()> {
+    if crate::decode::is_raw(input) {
+        if full_res {
+            crate::render::render_to_file(
+                input,
+                &crate::recipe::EditRecipe::default(),
+                out,
+                Some(opts),
+                None,
+            )?;
+            return Ok(());
+        }
+        let img =
+            crate::render::render_to_image(input, &crate::recipe::EditRecipe::default(), None)?
+                .thumbnail(2048, 2048);
+        let tmp = temp_path("autoshop_denoise_base");
+        img.save(&tmp)
+            .with_context(|| format!("write denoise input {}", tmp.display()))?;
+        let res = denoise_file(opts, &tmp, out);
+        let _ = std::fs::remove_file(&tmp);
+        res
+    } else {
+        denoise_file(opts, input, out)
+    }
+}
+
 fn run_sidecar(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {
     if !opts.script.exists() {
         bail!(

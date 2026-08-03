@@ -405,6 +405,7 @@ fn call_images_edit(
     let mut include_fidelity = true;
     let mut use_flexible = sizes.flexible.is_some();
     let mut use_stream = true;
+    let mut transport_retried = false;
     let (value, used_size): (serde_json::Value, String) = loop {
         let size = if use_flexible {
             sizes.flexible.as_deref().unwrap_or(sizes.enum_size)
@@ -427,6 +428,7 @@ fn call_images_edit(
                 std::time::Duration::from_secs(IMAGES_EDIT_TIMEOUT_SECS),
             )
         };
+        let started = std::time::Instant::now();
         let resp = req
             .set("Authorization", &format!("Bearer {key}"))
             .set("Content-Type", &format!("multipart/form-data; boundary={BOUNDARY}"))
@@ -495,14 +497,33 @@ fn call_images_edit(
                 return Err(anyhow!("image API {code}: {b}"));
             }
             Err(ureq::Error::Transport(t)) => {
+                let elapsed = started.elapsed().as_secs();
+                // A fast transport failure is a connection blip, not
+                // generation time — retry once before surfacing (same policy
+                // as advisor::post_ai_json, same real-world failure mode).
+                if !transport_retried && elapsed < crate::advisor::TRANSPORT_RETRY_UNDER_SECS {
+                    transport_retried = true;
+                    eprintln!(
+                        "  note: transport failed after {elapsed}s ({t}) — retrying once \
+                         (a fast failure is a connection blip, not generation time)"
+                    );
+                    continue;
+                }
                 let mut msg = format!("transport: {t}");
-                // A read timeout means different things per mode: streaming =
-                // the server went SILENT (healthy runs keep sending partials);
-                // blocking = the generation outran the overall deadline.
+                // A read timeout means different things per mode — and the
+                // MEASURED elapsed time tells connection failures apart from
+                // real stalls (both surface as "timed out reading response").
                 if msg.contains("timed out") {
-                    if use_stream {
+                    if use_stream && elapsed + 30 < IMAGES_EDIT_STALL_SECS {
                         msg.push_str(&format!(
-                            " (no stream activity for {IMAGES_EDIT_STALL_SECS}s — the server or a \
+                            " (failed after {elapsed}s — well before the \
+                             {IMAGES_EDIT_STALL_SECS}s stall budget, so this is a \
+                             connection/handshake/proxy failure, not a slow generation; it was \
+                             already retried once)"
+                        ));
+                    } else if use_stream {
+                        msg.push_str(&format!(
+                            " (no stream activity for ~{elapsed}s — the server or a \
                              proxy stopped sending; healthy generations stream partial images and \
                              are not time-capped. Raise AUTOSHOP_HTTP_TIMEOUT_SECS if a proxy \
                              buffers server-sent events, or lower AUTOSHOP_IMAGE_QUALITY / \
