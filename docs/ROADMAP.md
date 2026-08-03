@@ -19,6 +19,60 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **GUI 信息架构打磨批（UX batch，2026-08-03，已提交未推送）**——用户报
+  "GUI 还是有些乱"，4 区域 UX 盘点工作流（toolbar/develop-panel/retouch-
+  tools/visual-consistency，44.8 万 tokens，~80 项分级 findings 全带行号）
+  后拍板"工具栏瘦身+归位"。落地：
+  1. **工具栏单行化**：第二行整行删除——导出设置六件（格式/长边/锐化/
+     质量/色彩空间/AI 降噪）迁入显影面板尾部新 **Export 折叠节**（质量
+     滑杆常驻仅禁用=不再回流；AI 降噪 tooltip 补"批量渲染不含"），工具栏
+     Export/Download 按钮 hover 动态回显当前交付摘要（export_summary：
+     "JPEG · 2560 px · q95 · sRGB"）；AI 三件（Direction 输入框/Refine/
+     Style 滑杆）迁入面板顶部 **AI 区**（原 AI verdict 节扩展，一次分析
+     的全部输入输出一处齐）；批量进度条迁状态栏（原插在工具栏行首，
+     等待时把全部控件右推 160px）；"Autoshop" 字标删除（标题栏已有）；
+     Open 忙时禁用（原静默无操作）；Save XMP→**Save develop**（真相：
+     非 RAW 根本不写 XMP）；"Export → ./out"→"Export"；撤销/重做 tooltip
+     补说明；⿲(U+2FF2 CJK 字形,无 CJK 字体即豆腐块)→◫；⚙ 改开关语义；
+     分组用 add_space（separator 换行成孤儿竖线）。
+  2. **显影面板重排**（LR 顺序）：AI → 直方图 → Tone & WB → Presence →
+     Curves → HSL → Grading →〔分隔〕→ Detail →〔几何〕Lens → **Crop**
+     （镜头校正重定义画幅，故 Lens 在前）→〔分隔〕→ Masks → Versions →
+     Export；节间 add_space(6)；Grading 的 Blending/Balance 加"全部区域"
+     scope 标注（原读作"shadow Blending"）。
+  3. **工具武装根治**：新 `disarm_tools()`/`tool_armed()` 取代 **14 处
+     手抄互斥列表**（历史上两个真 bug 都来自抄本漂移；瞬时手势锚
+     place_start/crop_drag/mask_drag/paint_last 一并归属）；
+     resync_recipe_display 全量禁武装（Reset/undo 不再留半武装工具）；
+     **range_picking 随蒙版选中变化清除**（原选中换行后取色仍写旧蒙版）；
+     **进入图章不再清空画笔涂抹**（原 clear_mask 无撤销地毁掉为填充/修复
+     画的区域；Clear 按钮独占清空职责）；放置类按钮（线性/径向/Redraw）
+     改 selectable 武装态+可点击取消（原武装后面板毫无变化）；画布提示
+     武装时 **ACCENT 常规对比度**（原 .weak().small() 与帮助文字同级）+
+     全部armed 提示补"· Esc 退出"+ 径向放置不再被叫"渐变"+画笔提示改
+     "Brush —"前缀（原与闲置态同读"After —"）。
+  4. **退出确认层安全**：Esc=取消、Enter=全存后退（原快捷键块被 gate 完
+     全失灵、备忘单却承诺 Esc）；按钮重排 [Cancel]…[Discard(警示色)]
+     [Save all(PILL)]（原三个同样式按钮毁灭键居中）；列表滚动化+显示
+     父目录/文件名（原裸 stem 截断 8 个，同名文件不可分辨）；标题
+     "● Unsaved edits" 与状态栏 ● 呼应。
+  5. **视觉一致性**：克隆源十字 PILL→ACCENT（双层色规自我违反——金色
+     在暖色画面上消失）；修饰区 6 个按钮（含 2 个付费 API、2 个毁灭性
+     像素操作）补齐 tooltip；蒙版 🗑 补 tooltip；命名规范："Noise Red."→
+     "Noise Reduction"、"brush"→"Brush size"（并入 house slider=获双击
+     重置+↑/↓ 微调）、两个"Clear"→"Clear crop"/"Clear brush"、蒙版
+     "Temp/Tint"→"Temp shift/Tint shift"（相对量≠全局开尔文）、分级区域
+     Title Case（Shadows/Midtones/Highlights/Global）、"＋ Radial"→
+     "＋ Radial gradient"、🖊→⎘ 图章双钮同形。
+  i18n：+40 新键 −26 死键（审计 407 调用点 0 漏译/0 漂移/0 重复）。
+  验证：**124 lib + 9 gui** 全绿、clippy --all-targets 0、双 exe（gui
+  34957187 / cli 26875258 未变——纯 GUI）。真机验收点：工具栏一行放下；
+  导出设置在 Export 节且按钮 hover 显摘要；AI 三件在 AI 区；节序 LR 化；
+  武装任何工具有 ACCENT 提示+Esc 可退；退出确认层 Esc/Enter 可用。
+  记录未做（盘点在案）：变体条重构/状态栏上下文组/WB Temp 常驻/版本
+  时间戳/直方图占位/长帮助文demote/Color-Colour 拼写统一/设置窗标题
+  层级/全res三勾合一/工具条画布快捷键(K/W)。
+
 - **自动镜头校正（A 档立项落地，2026-08-03，已提交未推送）**——三批之三。
   技术侦察结论（改变方案）：**Sony ARW 每张自带机内校正三件套**（0x7032
   暗角 / 0x7035 CA / 0x7037 畸变，各 16 节点样条，真机 DSC08276 实测齐

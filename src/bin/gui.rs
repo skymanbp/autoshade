@@ -129,7 +129,7 @@ const HSL_SWATCH: [egui::Color32; 8] = [
     egui::Color32::from_rgb(142, 90, 217), // Purple
     egui::Color32::from_rgb(208, 82, 184), // Magenta
 ];
-const GRADE_REGIONS: [&str; 4] = ["shadow", "midtone", "highlight", "global"];
+const GRADE_REGIONS: [&str; 4] = ["Shadows", "Midtones", "Highlights", "Global"];
 
 // Two-tier colour rule (deliberate, not drift):
 //  * PILL gold is the ONE chrome accent — panel selections, badges, active
@@ -888,6 +888,11 @@ enum MaskKind {
 // Display names are English skeleton keys (localised via `tr` at the render
 // site); the ratio values are language-neutral. "1:1"…"9:16" have no ZH entry
 // and fall back to themselves in both languages.
+/// Export colour-space display names (indices = `exp_space`). Shared by the
+/// Export section and the toolbar buttons' delivery-summary hover.
+const EXPORT_SPACES: [&str; 3] =
+    ["sRGB (universal)", "Display P3 (wide-gamut screens)", "Adobe RGB (print)"];
+
 const CROP_ASPECTS: [(&str, Option<f32>); 11] = [
     ("Free", None),
     ("Original", Some(0.0)),
@@ -1719,15 +1724,8 @@ impl AutoshopApp {
         self.overlay_ref = None;
         self.overlay_stale = true;
         self.last_rgb = None; // the retained frame belongs to the OLD variant
-        self.placing_mask = None;
-        self.place_start = None;
-        self.paint_mode = false;
-        self.clone_mode = false;
-        self.clone_src = None;
-        self.wb_picking = false;
-        self.range_picking = None;
-        self.crop_mode = false;
-        self.crop_drag = None;
+        self.disarm_tools();
+        self.clone_src = None; // unlike a mere disarm, a variant switch drops the sample
         self.zoom = 1.0;
         self.pan = egui::vec2(0.5, 0.5);
         self.verdict = None;
@@ -1965,18 +1963,46 @@ impl AutoshopApp {
     /// rationale / verdict that describes a recipe no longer on screen — and
     /// an ARMED index-carrying tool (range sampler, ↻ Redraw) would fire into
     /// whatever mask now happens to sit at its remembered index.
-    fn resync_recipe_display(&mut self) {
-        self.rationale = self.recipe.rationale.clone();
-        self.verdict = None;
+    /// One tool at a time on the canvas — the SINGLE owner of the disarm
+    /// list. Ten arming sites used to hand-copy these assignments, and the
+    /// comments at two of them record real bugs born from copies drifting;
+    /// every arming site now calls this before setting its own flag.
+    /// Transient gesture anchors die with the tools: a stale place_start or
+    /// crop_drag used to hijack the next drag. clone_src (the sampled source
+    /// pin) deliberately survives — samples stay for resuming, like paint.
+    fn disarm_tools(&mut self) {
+        self.crop_mode = false;
+        self.paint_mode = false;
+        self.clone_mode = false;
+        self.wb_picking = false;
         self.range_picking = None;
         self.placing_mask = None;
         self.place_start = None;
-        self.mask_drag = None;
-        self.mask_name_buf = None; // stale (index, text) must not cross-commit
-        // A live crop/rotate drag anchored on the PRE-swap state must die with
-        // it: Ctrl+Z mid-rotate otherwise re-applies the stale start angle
-        // over the freshly restored recipe on the very next drag frame.
         self.crop_drag = None;
+        self.mask_drag = None;
+        self.paint_last = None;
+    }
+
+    /// Any canvas tool armed? (the once-hand-written OR list)
+    fn tool_armed(&self) -> bool {
+        self.crop_mode
+            || self.paint_mode
+            || self.clone_mode
+            || self.wb_picking
+            || self.range_picking.is_some()
+            || self.placing_mask.is_some()
+    }
+
+    fn resync_recipe_display(&mut self) {
+        self.rationale = self.recipe.rationale.clone();
+        self.verdict = None;
+        // A wholesale recipe swap (undo/redo/Reset/version load/AI apply)
+        // disarms EVERY canvas tool — an armed index-carrying tool would fire
+        // into whatever now sits at its remembered index, and a live
+        // crop/rotate drag would re-apply its stale start angle over the
+        // freshly restored recipe on the very next drag frame.
+        self.disarm_tools();
+        self.mask_name_buf = None; // stale (index, text) must not cross-commit
         // A wholesale recipe swap can shrink the mask list — an out-of-range
         // selection must not linger (every consumer bounds-checks, but the
         // panel would silently deselect anyway; do it deterministically).
@@ -2171,7 +2197,18 @@ impl AutoshopApp {
         let mut save_quit = false;
         let mut discard_quit = false;
         let mut cancel = false;
-        egui::Window::new(tr(lang, "Unsaved edits"))
+        // The global shortcut block is gated off while this layer is up, so
+        // the promised keyboard grammar is honoured HERE: Esc = the safe
+        // escape, Enter = the safe default (save everything).
+        ctx.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                cancel = true;
+            }
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                save_quit = true;
+            }
+        });
+        egui::Window::new(tr(lang, "● Unsaved edits"))
             .id(egui::Id::new("confirm_quit"))
             .collapsible(false)
             .resizable(false)
@@ -2183,19 +2220,43 @@ impl AutoshopApp {
                     "{n} photo(s) have edits that were never saved:",
                     &[("n", &pending.len().to_string())],
                 ));
-                for (p, _) in pending.iter().take(8) {
-                    ui.label(
-                        egui::RichText::new(autoshop::pipeline::stem(p)).small().weak(),
-                    );
-                }
-                if pending.len() > 8 {
-                    ui.label(egui::RichText::new("…").small().weak());
-                }
+                // Parent folder + stem: two DSC_0431 from two shoots must be
+                // distinguishable in the one dialog where the stakes are real.
+                egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                    for (p, _) in &pending {
+                        let folder = p
+                            .parent()
+                            .and_then(|d| d.file_name())
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("");
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{folder}/{}",
+                                autoshop::pipeline::stem(p)
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    }
+                });
                 ui.add_space(6.0);
+                // Safe escape far left, the destructive action fenced off by
+                // space, the primary (save) tinted and last — a 4px slip from
+                // Save must not land on an unrecoverable Discard.
                 ui.horizontal(|ui| {
-                    save_quit = ui.button(tr(lang, "Save all & quit")).clicked();
-                    discard_quit = ui.button(tr(lang, "Discard & quit")).clicked();
-                    cancel = ui.button(tr(lang, "Cancel")).clicked();
+                    cancel |= ui.button(tr(lang, "Cancel")).on_hover_text("Esc").clicked();
+                    ui.add_space(18.0);
+                    discard_quit = ui
+                        .button(
+                            egui::RichText::new(tr(lang, "Discard & quit"))
+                                .color(ui.visuals().warn_fg_color),
+                        )
+                        .on_hover_text(tr(lang, "Quit WITHOUT saving — these edits are gone for good"))
+                        .clicked();
+                    save_quit |= ui
+                        .button(egui::RichText::new(tr(lang, "Save all & quit")).color(PILL))
+                        .on_hover_text(tr(lang, "Enter · save every listed develop, then quit"))
+                        .clicked();
                 });
             });
         if save_quit {
@@ -2772,6 +2833,31 @@ impl AutoshopApp {
         }
         self.overlay_key = Some(key);
         self.overlay_build_count += 1;
+    }
+
+    /// One-line echo of the current delivery settings for the Export /
+    /// Download hover — e.g. "JPEG · 2560 px · q95 · sRGB (universal)" — so
+    /// the state stays glanceable now that the settings live in the Export
+    /// section instead of a toolbar row.
+    fn export_summary(&self, lang: Lang) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(if self.save_jpeg { "JPEG".into() } else { tr(lang, "16-bit TIFF").to_string() });
+        parts.push(if self.exp_long_edge == 0 {
+            tr(lang, "Original size").to_string()
+        } else {
+            format!("{} px", self.exp_long_edge)
+        });
+        if self.save_jpeg {
+            parts.push(format!("q{:.0}", self.exp_quality));
+        }
+        if self.exp_sharpen > 0.0 {
+            parts.push(format!("{} {:.0}", tr(lang, "Output sharpening"), self.exp_sharpen));
+        }
+        parts.push(tr(lang, EXPORT_SPACES[(self.exp_space as usize).min(2)]).to_string());
+        if self.save_denoise {
+            parts.push(tr(lang, "AI Denoise").to_string());
+        }
+        parts.join(" · ")
     }
 
     /// The geometric mapping context every interaction boundary needs:
@@ -3856,14 +3942,10 @@ impl AutoshopApp {
                             // View + tool state is per-photo.
                             self.zoom = 1.0;
                             self.pan = egui::vec2(0.5, 0.5);
-                            self.crop_mode = false;
-                            self.crop_drag = None;
-                            self.mask_drag = None;
+                            self.disarm_tools();
                             self.sel_mask = None;
                             self.overlay_ref = None; // the reference develop belongs to ONE base
                             self.overlay_stale = true;
-                            self.placing_mask = None;
-                            self.place_start = None;
                             self.curve_drag = None; // curve_channel is a UI pref, keep it
                             self.wb_picking = false;
                             self.range_picking = None;
@@ -4665,33 +4747,52 @@ impl AutoshopApp {
         self.histogram_ui(ui);
         ui.add_space(4.0);
 
-        // The AI's answer belongs where the user looks after Analyze — the top
-        // of the develop panel — not several screens down a scroll area below
-        // every adjustment section. Open exactly while a verdict is present.
-        if self.verdict.is_some() || !self.rationale.is_empty() {
-            egui::CollapsingHeader::new(section_title(tr(lang, "AI verdict"), self.verdict.is_some()))
-                .id_salt("sec_verdict")
-                .default_open(true)
-                .show(ui, |ui| {
-                    if let Some(v) = &self.verdict {
-                        // Accept reads calm; anything else (Revise/Reject)
-                        // gets the warn colour so it can't be skimmed past.
-                        let col = if v.starts_with("Accept") {
-                            ui.visuals().strong_text_color()
-                        } else {
-                            ui.visuals().warn_fg_color
-                        };
-                        ui.label(egui::RichText::new(v).color(col));
-                    }
-                    if !self.rationale.is_empty() {
-                        ui.label(
-                            egui::RichText::new(format!("“{}”", self.rationale))
-                                .italics()
-                                .weak(),
+        // The AI area: everything one Analyze run reads or writes, in ONE
+        // place (UX batch — Direction/Refine/Style used to be scattered
+        // across two toolbar rows with Undo/Redo in between). Open whenever
+        // there's a verdict to show; the inputs are always present.
+        let ai_active = self.verdict.is_some() || !self.guidance.is_empty() || self.refine;
+        egui::CollapsingHeader::new(section_title(tr(lang, "AI"), ai_active))
+            .id_salt("sec_verdict")
+            .default_open(true)
+            .show(ui, |ui| {
+                if let Some(v) = &self.verdict {
+                    // Accept reads calm; anything else (Revise/Reject)
+                    // gets the warn colour so it can't be skimmed past.
+                    let col = if v.starts_with("Accept") {
+                        ui.visuals().strong_text_color()
+                    } else {
+                        ui.visuals().warn_fg_color
+                    };
+                    ui.label(egui::RichText::new(v).color(col));
+                }
+                if !self.rationale.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("“{}”", self.rationale))
+                            .italics()
+                            .weak(),
+                    );
+                }
+                ui.label(tr(lang, "Direction"))
+                    .on_hover_text(tr(lang, "Free-text direction for AI Analyze and Reimagine — e.g. warmer and moodier"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.guidance)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(tr(lang, "e.g. warmer and moodier, lift the shadows")),
+                );
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.refine, tr(lang, "Refine"))
+                        .on_hover_text(tr(lang, "Adjust the CURRENT edit instead of proposing from scratch"));
+                    ui.label(tr(lang, "Style")).on_hover_text(
+                        tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
+                    );
+                    ui.add(egui::Slider::new(&mut self.style_strength, 0.0..=1.0).show_value(false))
+                        .on_hover_text(
+                            tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
                         );
-                    }
+                    ui.label(format!("{:.0}%", self.style_strength * 100.0));
                 });
-        }
+            });
 
         // Lightroom-style grouping: a wall of 16 sliders scans terribly; four
         // titled sections (tone open, the rest by activity) scan at a glance.
@@ -4741,14 +4842,10 @@ impl AutoshopApp {
                         ))
                         .clicked()
                     {
-                        self.wb_picking = !self.wb_picking;
-                        if self.wb_picking {
-                            // One canvas tool at a time.
-                            self.crop_mode = false;
-                            self.paint_mode = false;
-                            self.placing_mask = None;
-                            self.range_picking = None;
-                            self.clone_mode = false;
+                        let on = !self.wb_picking;
+                        self.disarm_tools();
+                        self.wb_picking = on;
+                        if on {
                             self.status = tr(lang, "WB eyedropper: click a spot that should be neutral grey/white").into();
                         }
                     }
@@ -4769,15 +4866,12 @@ impl AutoshopApp {
                 changed |= Self::slider(ui, lang, tr(lang, "Blacks"), &mut r.blacks, -100.0, 100.0, 0.0);
             });
 
-        // --- 曲线: master + RGB tone curves (engine + XMP already apply them,
-        // this is purely the editing surface — Lightroom's panel order) --------
-        egui::CollapsingHeader::new(section_title(tr(lang, "Curves"), curves_active))
-            .id_salt("sec_curves")
-            .default_open(false)
-            .show(ui, |ui| {
-                changed |= self.curve_editor(ui);
-            });
-
+        // LR-Basic order (UX batch): Presence sits directly under Tone & WB —
+        // the two halves of Lightroom's Basic panel — then Curves, then the
+        // two colour sections; Detail moved BELOW them so colour work isn't
+        // interrupted by sharpening. add_space fences each header so the ten
+        // sections read as groups, not one undivided list.
+        ui.add_space(6.0);
         egui::CollapsingHeader::new(section_title(tr(lang, "Presence"), presence_active))
             .id_salt("sec_presence")
             .default_open(true)
@@ -4789,16 +4883,18 @@ impl AutoshopApp {
                 changed |= Self::slider(ui, lang, tr(lang, "Saturation"), &mut r.saturation, -100.0, 100.0, 0.0);
             });
 
-        egui::CollapsingHeader::new(section_title(tr(lang, "Detail"), detail_active))
-            .id_salt("sec_detail")
+        ui.add_space(6.0);
+        // --- 曲线: master + RGB tone curves (engine + XMP already apply them,
+        // this is purely the editing surface — Lightroom's panel order) --------
+        egui::CollapsingHeader::new(section_title(tr(lang, "Curves"), curves_active))
+            .id_salt("sec_curves")
             .default_open(false)
             .show(ui, |ui| {
-                let r = &mut self.recipe;
-                changed |= Self::slider(ui, lang, tr(lang, "Sharpening"), &mut r.sharpening, 0.0, 150.0, 0.0);
-                changed |=
-                    Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut r.noise_reduction, 0.0, 100.0, 0.0);
+                changed |= self.curve_editor(ui);
             });
+        ui.add_space(6.0);
 
+        ui.add_space(6.0);
         egui::CollapsingHeader::new(section_title(tr(lang, "Color Mixer (HSL)"), hsl_active))
             .id_salt("sec_hsl")
             .default_open(false)
@@ -4835,6 +4931,7 @@ impl AutoshopApp {
                 }
             });
 
+        ui.add_space(6.0);
         egui::CollapsingHeader::new(section_title(tr(lang, "Color Grading"), grade_active))
             .id_salt("sec_grade")
             .default_open(false)
@@ -4872,67 +4969,32 @@ impl AutoshopApp {
                     }
                     changed = true;
                 }
+                // Blending/Balance shape the WHOLE grade, not the region the
+                // combo shows — a scope caption keeps them from reading as
+                // "shadow Blending".
+                ui.separator();
+                ui.label(egui::RichText::new(tr(lang, "All regions")).weak().small());
                 changed |= Self::slider(ui, lang, tr(lang, "Blending"), &mut cg.blending, 0.0, 100.0, 50.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Balance"), &mut cg.balance, -100.0, 100.0, 0.0);
             });
 
-        // --- 裁剪 + 拉直: recipe.crop / straighten_deg (export + XMP paths) ---
-        let crop_active = self.recipe.crop.is_some() || self.recipe.straighten_deg != 0.0;
-        egui::CollapsingHeader::new(section_title(tr(lang, "Crop"), crop_active))
-            .id_salt("sec_crop")
+        // Look ends here — detail, then geometry (lens BEFORE crop: the lens
+        // profile / manual distortion redefine the frame the crop sits in).
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        egui::CollapsingHeader::new(section_title(tr(lang, "Detail"), detail_active))
+            .id_salt("sec_detail")
             .default_open(false)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let label = if self.crop_mode { tr(lang, "✅ Done") } else { tr(lang, "⛶ Enter crop") };
-                    if ui.button(label).clicked() {
-                        self.crop_mode = !self.crop_mode;
-                        if self.crop_mode {
-                            // One tool at a time on the canvas.
-                            self.paint_mode = false;
-                            self.placing_mask = None;
-                            self.wb_picking = false;
-                            self.range_picking = None;
-                            self.clone_mode = false;
-                        }
-                    }
-                    egui::ComboBox::from_id_salt("crop_aspect")
-                        .selected_text(tr(lang, CROP_ASPECTS[self.crop_aspect].0))
-                        .width(70.0)
-                        .show_ui(ui, |ui| {
-                            for (i, (name, _)) in CROP_ASPECTS.iter().enumerate() {
-                                ui.selectable_value(&mut self.crop_aspect, i, tr(lang, name));
-                            }
-                        });
-                    if ui.button(tr(lang, "Clear")).clicked()
-                        && self.recipe.crop.take().is_some()
-                    {
-                        // Through the panel's own change path: clamp + dirty,
-                        // so the crop-restricted histogram/clipping refresh.
-                        changed = true;
-                    }
-                });
-                // Straighten: rotate + auto-crop (engine rotate_straighten);
-                // the preview shows exactly the export geometry. Fine class:
-                // levelling needs 0.1°, not the wide-range integer snap.
-                changed |= Self::slider_fine(
-                    ui,
-                    lang,
-                    tr(lang, "Straighten (°)"),
-                    &mut self.recipe.straighten_deg,
-                    -45.0,
-                    45.0,
-                    0.0,
-                );
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box to rotate-straighten; preview, export and XMP all match. Straighten auto-crops the black corners.",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                let r = &mut self.recipe;
+                changed |= Self::slider(ui, lang, tr(lang, "Sharpening"), &mut r.sharpening, 0.0, 150.0, 0.0);
+                changed |=
+                    Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut r.noise_reduction, 0.0, 100.0, 0.0);
             });
 
         // --- 镜头校正: in-camera profile + manual corrections -----------------
+        ui.add_space(6.0);
         let lens_active = self.recipe.lens_vignette != 0.0
             || self.recipe.lens_distortion != 0.0
             || self.recipe.lens_profile.vignette_active()
@@ -5012,6 +5074,61 @@ impl AutoshopApp {
                 );
             });
 
+        // --- 裁剪 + 拉直: recipe.crop / straighten_deg (export + XMP paths) ---
+        ui.add_space(6.0);
+        let crop_active = self.recipe.crop.is_some() || self.recipe.straighten_deg != 0.0;
+        egui::CollapsingHeader::new(section_title(tr(lang, "Crop"), crop_active))
+            .id_salt("sec_crop")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let label = if self.crop_mode { tr(lang, "✅ Done") } else { tr(lang, "⛶ Enter crop") };
+                    if ui.button(label).clicked() {
+                        let on = !self.crop_mode;
+                        self.disarm_tools();
+                        self.crop_mode = on;
+                    }
+                    egui::ComboBox::from_id_salt("crop_aspect")
+                        .selected_text(tr(lang, CROP_ASPECTS[self.crop_aspect].0))
+                        .width(70.0)
+                        .show_ui(ui, |ui| {
+                            for (i, (name, _)) in CROP_ASPECTS.iter().enumerate() {
+                                ui.selectable_value(&mut self.crop_aspect, i, tr(lang, name));
+                            }
+                        });
+                    if ui.button(tr(lang, "Clear crop")).clicked()
+                        && self.recipe.crop.take().is_some()
+                    {
+                        // Through the panel's own change path: clamp + dirty,
+                        // so the crop-restricted histogram/clipping refresh.
+                        changed = true;
+                    }
+                });
+                // Straighten: rotate + auto-crop (engine rotate_straighten);
+                // the preview shows exactly the export geometry. Fine class:
+                // levelling needs 0.1°, not the wide-range integer snap.
+                changed |= Self::slider_fine(
+                    ui,
+                    lang,
+                    tr(lang, "Straighten (°)"),
+                    &mut self.recipe.straighten_deg,
+                    -45.0,
+                    45.0,
+                    0.0,
+                );
+                ui.label(
+                    egui::RichText::new(tr(lang,
+                        "Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box to rotate-straighten; preview, export and XMP all match. Straighten auto-crops the black corners.",
+                    ))
+                    .weak()
+                    .small(),
+                );
+            });
+
+        // Geometry ends here — local adjustments and management below.
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
         // --- 局部调整: manual masks — the SAME recipe.masks the AI writes -----
         let n_masks = self.recipe.masks.len();
         let n_masks_s = n_masks.to_string();
@@ -5023,23 +5140,21 @@ impl AutoshopApp {
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button(tr(lang, "＋ Linear gradient")).on_hover_text(tr(lang, "Drag on the image: start = unaffected side, end = fully-applied side")).clicked() {
-                    self.placing_mask = Some((MaskKind::Linear, None));
-                    self.paint_mode = false;
-                    self.crop_mode = false;
-                    self.wb_picking = false;
-                    self.range_picking = None;
-                    self.clone_mode = false;
-                    self.status = tr(lang, "Drag on the image to draw a linear gradient (start unaffected → end fully applied)").into();
+                let lin_armed = matches!(self.placing_mask, Some((MaskKind::Linear, None)));
+                if ui.selectable_label(lin_armed, tr(lang, "＋ Linear gradient")).on_hover_text(tr(lang, "Drag on the image: start = unaffected side, end = fully-applied side")).clicked() {
+                    self.disarm_tools();
+                    if !lin_armed {
+                        self.placing_mask = Some((MaskKind::Linear, None));
+                        self.status = tr(lang, "Drag on the image to draw a linear gradient (start unaffected → end fully applied)").into();
+                    }
                 }
-                if ui.button(tr(lang, "＋ Radial")).on_hover_text(tr(lang, "Drag on the image to draw an elliptical area")).clicked() {
-                    self.placing_mask = Some((MaskKind::Radial, None));
-                    self.paint_mode = false;
-                    self.crop_mode = false;
-                    self.wb_picking = false;
-                    self.range_picking = None;
-                    self.clone_mode = false;
-                    self.status = tr(lang, "Drag on the image to draw a radial (elliptical) area").into();
+                let rad_armed = matches!(self.placing_mask, Some((MaskKind::Radial, None)));
+                if ui.selectable_label(rad_armed, tr(lang, "＋ Radial gradient")).on_hover_text(tr(lang, "Drag on the image to draw an elliptical area")).clicked() {
+                    self.disarm_tools();
+                    if !rad_armed {
+                        self.placing_mask = Some((MaskKind::Radial, None));
+                        self.status = tr(lang, "Drag on the image to draw a radial (elliptical) area").into();
+                    }
                 }
             });
             // --- AI segmentation → bitmap masks (gap batch A②) ---------------
@@ -5113,8 +5228,17 @@ impl AutoshopApp {
                             self.sel_mask =
                                 if self.sel_mask == Some(i) { None } else { Some(i) };
                             self.overlay_stale = true; // coverage follows the selection
+                            // The colour sampler is INDEX-armed: left live
+                            // across a selection change, the next canvas click
+                            // wrote a range into the OLD mask with no visible
+                            // feedback (its row's 🎯 label was gone).
+                            self.range_picking = None;
                         }
-                        if ui.small_button("🗑").clicked() {
+                        if ui
+                            .small_button("🗑")
+                            .on_hover_text(tr(self.lang, "Delete this mask (its stack order shifts the ones below)"))
+                            .clicked()
+                        {
                             delete = Some(i);
                         }
                     })
@@ -5213,15 +5337,21 @@ impl AutoshopApp {
                         MaskGeometry::Radial { .. } => Some(MaskKind::Radial),
                         MaskGeometry::Bitmap { .. } => None,
                     };
-                    if let Some(kind) = kind
-                        && ui.small_button(tr(lang, "↻ Redraw")).on_hover_text(tr(lang, "Re-drag this mask's area on the image")).clicked()
-                    {
-                        self.placing_mask = Some((kind, Some(i)));
-                        self.paint_mode = false;
-                        self.crop_mode = false;
-                        self.wb_picking = false;
-                        self.range_picking = None;
-                        self.clone_mode = false;
+                    if let Some(kind) = kind {
+                        let redraw_armed =
+                            matches!(self.placing_mask, Some((k, Some(j))) if k == kind && j == i);
+                        if ui
+                            .selectable_label(redraw_armed, tr(lang, "↻ Redraw"))
+                            .on_hover_text(tr(lang, "Re-drag this mask's area on the image"))
+                            .clicked()
+                        {
+                            self.disarm_tools();
+                            if !redraw_armed {
+                                self.placing_mask = Some((kind, Some(i)));
+                                self.status =
+                                    tr(lang, "Re-drag this mask's area on the image").into();
+                            }
+                        }
                     }
                     if ui
                         .checkbox(&mut self.show_mask_overlay, tr(lang, "Overlay"))
@@ -5327,12 +5457,8 @@ impl AutoshopApp {
                         if sel == 2 {
                             // Jump straight into sampling — a colour range without
                             // a picked colour selects nothing useful.
+                            self.disarm_tools();
                             self.range_picking = Some(i);
-                            self.paint_mode = false;
-                            self.crop_mode = false;
-                            self.placing_mask = None;
-                            self.wb_picking = false;
-                            self.clone_mode = false;
                             self.status = tr(lang, "Colour range: click the colour to pick in the image").into();
                         }
                         changed = true;
@@ -5375,13 +5501,9 @@ impl AutoshopApp {
                         None => {}
                     }
                     if want_pick {
-                        self.range_picking = if picking_this { None } else { Some(i) };
-                        if self.range_picking.is_some() {
-                            self.paint_mode = false;
-                            self.crop_mode = false;
-                            self.placing_mask = None;
-                            self.wb_picking = false;
-                            self.clone_mode = false;
+                        self.disarm_tools();
+                        if !picking_this {
+                            self.range_picking = Some(i);
                             self.status = tr(lang, "Colour range: click the colour to pick in the image").into();
                         }
                     }
@@ -5398,9 +5520,9 @@ impl AutoshopApp {
                 // Engine-rendered since batch #2-B (render.rs apply_masks
                 // mirrors the global WB model inside the mask) — live in the
                 // preview like the tone sliders above.
-                changed |= Self::slider(ui, lang, tr(lang, "Temp"), &mut m.temperature, -100.0, 100.0, 0.0);
-                changed |= Self::slider(ui, lang, tr(lang, "Tint"), &mut m.tint, -100.0, 100.0, 0.0);
-                changed |= Self::slider(ui, lang, tr(lang, "Noise Red."), &mut m.noise_reduction, 0.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Temp shift"), &mut m.temperature, -100.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Tint shift"), &mut m.tint, -100.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut m.noise_reduction, 0.0, 100.0, 0.0);
                 // These serialise to the XMP but the in-app preview doesn't
                 // render them yet (documented engine scope) — honest label.
                 egui::CollapsingHeader::new(tr(lang, "More (XMP/Lightroom only)"))
@@ -5422,6 +5544,7 @@ impl AutoshopApp {
         });
 
         // --- 版本: recipe snapshots ≈ LR virtual copies (gap batch G) --------
+        ui.add_space(6.0);
         let n_ver = self.versions.len();
         let n_ver_s = n_ver.to_string();
         egui::CollapsingHeader::new(section_title(&trf(lang, "Versions ({n})", &[("n", &n_ver_s)]), n_ver > 0))
@@ -5484,6 +5607,69 @@ impl AutoshopApp {
                 }
             });
 
+        // --- 导出设置 (UX batch): moved out of the toolbar — touched once per
+        // delivery, these are Export-dialog contents, not toolbar chrome. The
+        // toolbar keeps the ACTIONS; their hover echoes this section's state.
+        ui.add_space(6.0);
+        let export_active = self.save_jpeg
+            || self.exp_long_edge != 0
+            || self.exp_sharpen != 0.0
+            || self.exp_space != 0
+            || self.save_denoise;
+        egui::CollapsingHeader::new(section_title(tr(lang, "Export"), export_active))
+            .id_salt("sec_export")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "Format"));
+                    egui::ComboBox::from_id_salt("save_fmt")
+                        .selected_text(if self.save_jpeg { "JPEG" } else { tr(lang, "16-bit TIFF") })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.save_jpeg, false, tr(lang, "16-bit TIFF"));
+                            ui.selectable_value(&mut self.save_jpeg, true, "JPEG");
+                        });
+                    ui.label(tr(lang, "Long edge"));
+                    egui::ComboBox::from_id_salt("exp_long_edge")
+                        .selected_text(if self.exp_long_edge == 0 {
+                            tr(lang, "Original size").to_string()
+                        } else {
+                            format!("{} px", self.exp_long_edge)
+                        })
+                        .width(110.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.exp_long_edge, 0, tr(lang, "Original size"));
+                            for px in [1600u32, 2048, 2560, 3840, 5120] {
+                                ui.selectable_value(&mut self.exp_long_edge, px, format!("{px} px"));
+                            }
+                        });
+                });
+                Self::slider(ui, lang, tr(lang, "Output sharpening"), &mut self.exp_sharpen, 0.0, 100.0, 0.0);
+                // Always allocated, merely disabled for TIFF — the old
+                // appear/disappear reflowed every control to its right.
+                ui.add_enabled_ui(self.save_jpeg, |ui| {
+                    Self::slider(ui, lang, tr(lang, "JPEG quality"), &mut self.exp_quality, 60.0, 100.0, 95.0);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "Colour space"));
+                    egui::ComboBox::from_id_salt("exp_space")
+                        .selected_text(tr(lang, EXPORT_SPACES[(self.exp_space as usize).min(2)]))
+                        .width(170.0)
+                        .show_ui(ui, |ui| {
+                            for (i, name) in EXPORT_SPACES.iter().enumerate() {
+                                ui.selectable_value(&mut self.exp_space, i as u8, tr(lang, name));
+                            }
+                        });
+                });
+                ui.checkbox(&mut self.save_denoise, tr(lang, "AI Denoise")).on_hover_text(
+                    tr(lang, "SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it."),
+                );
+                ui.label(
+                    egui::RichText::new(tr(lang, "Applied by Export / Download… in the toolbar (Ctrl+E). Files land in ./out unless Download picks a path."))
+                        .weak()
+                        .small(),
+                );
+            });
+
         if changed {
             self.recipe.clamp();
             self.dirty = true;
@@ -5537,26 +5723,39 @@ impl AutoshopApp {
         let disp = fit_in(vis_px, max_w, avail_y);
         let scale = disp.x / vis_px.x.max(1.0); // display px per image px
 
-        // Caption row: mode hint left, zoom readout + Fit / 1:1 right.
+        // Caption row: mode hint left, zoom readout + Fit / 1:1 right. Every
+        // armed-tool hint names its exit (Esc), and the placement hint speaks
+        // the armed KIND's language instead of calling a radial a gradient.
         let hint = if comparing {
             tr(lang, "Before (source) — release B to return to editing")
         } else if self.crop_mode {
-            tr(lang, "Crop — drag corners/edges to resize, inside to move, outside to rotate")
-        } else if self.placing_mask.is_some() {
-            tr(lang, "Local adjustment — drag on the image to draw the gradient area")
+            tr(lang, "Crop — drag corners/edges to resize, inside to move, outside to rotate · Esc to exit")
+        } else if let Some((kind, _)) = self.placing_mask {
+            match kind {
+                MaskKind::Linear => tr(lang, "Linear gradient — drag from the unaffected side to the fully-applied side · Esc to exit"),
+                MaskKind::Radial => tr(lang, "Radial gradient — drag to draw an elliptical area · Esc to exit"),
+            }
         } else if self.wb_picking {
-            tr(lang, "WB eyedropper — click a spot that should be neutral grey/white")
+            tr(lang, "WB eyedropper — click a spot that should be neutral grey/white · Esc to exit")
         } else if self.range_picking.is_some() {
-            tr(lang, "Colour range — click the colour to pick in the image")
+            tr(lang, "Colour range — click the colour to pick in the image · Esc to exit")
         } else if self.clone_mode {
-            tr(lang, "Stamp — Alt+click to set the source · drag to brush the area to cover")
+            tr(lang, "Stamp — Alt+click to set the source · drag to brush the area to cover · Esc to exit")
         } else if self.paint_mode {
-            tr(lang, "After — paint over the area to fill / heal")
+            tr(lang, "Brush — paint over the area to fill / heal · Esc to exit")
         } else {
             tr(lang, "After — drag a box = local AI · scroll to zoom · space/middle-drag to pan · hold B to compare")
         };
+        // An armed tool must be visible at NORMAL contrast — .weak().small()
+        // is the passive-help style, and it was the only always-on indicator
+        // when the arming control sat in a collapsed section.
+        let armed = !comparing && self.tool_armed();
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(hint).weak().small());
+            if armed {
+                ui.label(egui::RichText::new(hint).color(ACCENT).small());
+            } else {
+                ui.label(egui::RichText::new(hint).weak().small());
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("1:1").on_hover_text(tr(lang, "Preview pixels 1:1 (double-click the image to toggle)")).clicked() {
                     self.zoom = (vis_px.x * self.zoom / disp.x).max(1.0);
@@ -5634,12 +5833,7 @@ impl AutoshopApp {
                 self.pan = q - egui::vec2((fx - 0.5) * 2.0 * nh, (fy - 0.5) * 2.0 * nh);
             }
         }
-        let tool_active = self.crop_mode
-            || self.placing_mask.is_some()
-            || self.wb_picking
-            || self.range_picking.is_some()
-            || self.clone_mode
-            || self.paint_mode;
+        let tool_active = self.tool_armed();
         // Double-click toggles fit ↔ 1:1 (preview pixels) — but never while a
         // canvas tool is armed: a quick second tap inside brush/crop/pick used
         // to teleport the view instead of reaching the tool.
@@ -6604,14 +6798,17 @@ impl AutoshopApp {
             let (vx, vy) = orig_norm_to_view(sx, sy, dims, deg, &dist);
             let q = xf.to_screen(vx, vy);
             let p = ui.painter_at(xf.rect);
-            p.circle_stroke(q, 9.0, egui::Stroke::new(2.0, PILL));
+            // ACCENT, per the two-tier colour rule: on-canvas tool overlays
+            // never wear the PILL chrome gold — a source pin sampled on skin,
+            // sand or a sunset sky simply vanished in gold.
+            p.circle_stroke(q, 9.0, egui::Stroke::new(2.0, ACCENT));
             p.line_segment(
                 [q - egui::vec2(13.0, 0.0), q + egui::vec2(13.0, 0.0)],
-                egui::Stroke::new(1.0, PILL),
+                egui::Stroke::new(1.0, ACCENT),
             );
             p.line_segment(
                 [q - egui::vec2(0.0, 13.0), q + egui::vec2(0.0, 13.0)],
-                egui::Stroke::new(1.0, PILL),
+                egui::Stroke::new(1.0, ACCENT),
             );
         }
     }
@@ -7206,22 +7403,21 @@ impl AutoshopApp {
                 .checkbox(&mut self.paint_mode, tr(lang, "Paint mask"))
                 .on_hover_text(tr(lang, "Brush over the area; box-select is paused while on. Shared by Fill and Heal."));
             if r.changed() && self.paint_mode {
-                // Full mutual exclusion, like every other mode entry — the
-                // dispatch chain tries crop/place/wb/range/clone BEFORE paint,
-                // so any of them left armed made a ticked brush completely inert.
-                self.clone_mode = false;
-                self.range_picking = None;
-                self.crop_mode = false;
-                self.crop_drag = None;
-                self.placing_mask = None;
-                self.place_start = None;
-                self.wb_picking = false;
+                // Mutual exclusion lives in ONE place now (disarm_tools) —
+                // this site's own hand copy once drifted and made a ticked
+                // brush completely inert (dispatch tries the others first).
+                self.disarm_tools();
+                self.paint_mode = true; // re-arm after the sweep
             }
-            if ui.button(tr(lang, "Clear")).clicked() {
+            if ui
+                .button(tr(lang, "Clear brush"))
+                .on_hover_text(tr(lang, "Wipe the painted area (shared by Fill, Heal and Stamp)"))
+                .clicked()
+            {
                 self.clear_mask();
             }
         });
-        ui.add(egui::Slider::new(&mut self.brush, 4.0..=80.0).text(tr(lang, "brush")));
+        Self::slider(ui, lang, tr(lang, "Brush size"), &mut self.brush, 4.0, 80.0, 30.0);
 
         egui::CollapsingHeader::new(tr(lang, "Generative Fill"))
             .id_salt("sec_fill")
@@ -7245,7 +7441,11 @@ impl AutoshopApp {
                     ui.checkbox(&mut self.fill_fullres, tr(lang, "Full-res"))
                         .on_hover_text(tr(lang, "Composite onto the full-sensor develop (slow, RAW only)"));
                     ui.add_enabled_ui(!self.busy, |ui| {
-                        if ui.button(tr(lang, "Remove / Fill")).clicked() {
+                        if ui
+                            .button(tr(lang, "Remove / Fill"))
+                            .on_hover_text(tr(lang, "Regenerate ONLY the painted area from your prompt (gpt-image API call — costs per image); the rest keeps the engine's own develop"))
+                            .clicked()
+                        {
                             self.start_fill();
                         }
                     });
@@ -7265,10 +7465,18 @@ impl AutoshopApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(!self.busy, |ui| {
-                        if ui.button(tr(lang, "✦ AI heal (auto)")).clicked() {
+                        if ui
+                            .button(tr(lang, "✦ AI heal (auto)"))
+                            .on_hover_text(tr(lang, "A vision model finds small dust spots / blemishes (API call), then each is healed from surrounding REAL pixels — never generated"))
+                            .clicked()
+                        {
                             self.start_heal(false);
                         }
-                        if ui.button(tr(lang, "Heal painted area")).clicked() {
+                        if ui
+                            .button(tr(lang, "Heal painted area"))
+                            .on_hover_text(tr(lang, "Heal the brushed area from surrounding real pixels — local compute, no API"))
+                            .clicked()
+                        {
                             self.start_heal(true);
                         }
                     });
@@ -7289,17 +7497,20 @@ impl AutoshopApp {
             .default_open(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let label = if self.clone_mode { tr(lang, "✅ Done") } else { tr(lang, "🖊 Enter stamp") };
-                    if ui.button(label).clicked() {
-                        self.clone_mode = !self.clone_mode;
-                        if self.clone_mode {
-                            // One canvas tool at a time; a fresh target mask.
-                            self.paint_mode = false;
-                            self.crop_mode = false;
-                            self.placing_mask = None;
-                            self.wb_picking = false;
-                            self.range_picking = None;
-                            self.clear_mask();
+                    let label = if self.clone_mode { tr(lang, "✅ Done") } else { tr(lang, "⎘ Enter stamp") };
+                    if ui
+                        .button(label)
+                        .on_hover_text(tr(lang, "Arm the stamp: Alt+click samples a source, the brush paints the target; your painted mask survives"))
+                        .clicked()
+                    {
+                        let on = !self.clone_mode;
+                        self.disarm_tools();
+                        self.clone_mode = on;
+                        // The painted canvas SURVIVES arming — it used to be
+                        // wiped here with no undo, so a mask painted for
+                        // Fill/Heal died the moment the user peeked at the
+                        // stamp. The explicit Clear button owns wiping.
+                        if on {
                             self.status =
                                 tr(lang, "Stamp: Alt+click to set the source → brush the target area → 「⎘ Clone painted area」").into();
                         }
@@ -7307,7 +7518,11 @@ impl AutoshopApp {
                     ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res"))
                         .on_hover_text(tr(lang, "Clone on the full-resolution develop (slow, RAW only)"));
                     ui.add_enabled_ui(!self.busy && self.clone_mode, |ui| {
-                        if ui.button(tr(lang, "⎘ Clone painted area")).clicked() {
+                        if ui
+                            .button(tr(lang, "⎘ Clone painted area"))
+                            .on_hover_text(tr(lang, "Copy the sampled source over the brushed area verbatim (feathered edges, no tone matching) — local compute"))
+                            .clicked()
+                        {
                             self.start_clone();
                         }
                     });
@@ -7406,14 +7621,9 @@ impl eframe::App for AutoshopApp {
             // R mirrors the crop button exactly (incl. the one-tool-at-a-time
             // disarms); no photo → nothing to crop.
             if do_crop && self.src_path.is_some() {
-                self.crop_mode = !self.crop_mode;
-                if self.crop_mode {
-                    self.paint_mode = false;
-                    self.placing_mask = None;
-                    self.wb_picking = false;
-                    self.range_picking = None;
-                    self.clone_mode = false;
-                }
+                let on = !self.crop_mode;
+                self.disarm_tools();
+                self.crop_mode = on;
             }
             if do_panels {
                 self.panels_hidden = !self.panels_hidden;
@@ -7438,30 +7648,12 @@ impl eframe::App for AutoshopApp {
                 self.show_settings = false;
                 do_escape = false;
             }
-            if do_escape {
-                let any = self.crop_mode
-                    || self.placing_mask.is_some()
-                    || self.wb_picking
-                    || self.range_picking.is_some()
-                    || self.clone_mode
-                    || self.paint_mode
-                    || self.region_drag.is_some();
-                if any {
-                    self.crop_mode = false;
-                    self.placing_mask = None;
-                    self.place_start = None;
-                    self.wb_picking = false;
-                    self.range_picking = None;
-                    self.clone_mode = false;
-                    self.paint_mode = false;
-                    self.region_drag = None;
-                    // Transient gesture anchors die with the tool — a grab or
-                    // stroke surviving Esc used to hijack the next drag.
-                    self.crop_drag = None;
-                    self.mask_drag = None;
-                    self.paint_last = None;
-                    self.status = tr(self.lang, "Exited the current tool (Esc)").into();
-                }
+            if do_escape && (self.tool_armed() || self.region_drag.is_some()) {
+                // disarm_tools also kills the transient gesture anchors — a
+                // grab or stroke surviving Esc used to hijack the next drag.
+                self.disarm_tools();
+                self.region_drag = None;
+                self.status = tr(self.lang, "Exited the current tool (Esc)").into();
             }
             if do_overlay {
                 self.show_mask_overlay = !self.show_mask_overlay;
@@ -7546,27 +7738,19 @@ impl eframe::App for AutoshopApp {
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             let lang = self.lang;
-            // BOTH toolbar rows wrap: a plain horizontal row CLIPS whatever
-            // falls past the window edge (the "shrink the window and lose
-            // the buttons" bug). horizontal_wrapped only wraps between
-            // ATOMIC widget allocations — nested add_enabled_ui scopes get
-            // squeezed at the row edge instead of wrapping — so the enabled
-            // gating is per-widget (ui.add_enabled) rather than per-group.
+            // ONE wrapped row of ACTIONS only (UX batch): settings that used
+            // to live here moved to where they are used — export options into
+            // the Develop panel's Export section, the AI direction/refine/
+            // style trio into the AI section. The row wraps, never clips (the
+            // "shrink the window and lose the buttons" bug); wrapping only
+            // works between ATOMIC widget allocations, so the enabled gating
+            // stays per-widget (ui.add_enabled), and groups are fenced with
+            // add_space (a separator that wraps to a line start orphans).
             ui.horizontal_wrapped(|ui| {
-                ui.heading("Autoshop");
-                ui.separator();
-                // Live batch-render progress (full-res develops take seconds
-                // each — a bare toast at the end reads as a hang).
-                if let Some((done, total)) = self.batch_progress {
-                    ui.add(
-                        egui::ProgressBar::new(done as f32 / total.max(1) as f32)
-                            .desired_width(150.0)
-                            .text(trf(lang, "Batch {done}/{total}",
-                                &[("done", &done.to_string()), ("total", &total.to_string())])),
-                    );
-                    ui.separator();
-                }
-                if ui.button(tr(lang, "Open photo…")).on_hover_text(tr(lang, "Ctrl+O · or drag a file into the window")).clicked()
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new(tr(lang, "Open photo…")))
+                    .on_hover_text(tr(lang, "Ctrl+O · or drag a file into the window"))
+                    .clicked()
                     && let Some(path) = photo_file_dialog()
                 {
                     self.selected = None; // a one-off file isn't a gallery selection
@@ -7574,14 +7758,12 @@ impl eframe::App for AutoshopApp {
                 }
                 let ready = self.src_path.is_some() && !self.busy;
                 if ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "✨ AI Analyze")))
-                    .on_hover_text(tr(lang, "AI proposes a recipe (GPT proposal + validation), written into the sliders — undoable"))
+                    .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
+                    .on_hover_text(tr(lang, "AI proposes a recipe (GPT proposal + validation), written into the sliders — undoable. Direction / Refine / Style live in the AI section of the Develop panel."))
                     .clicked()
                 {
                     self.start_analyze();
                 }
-                ui.add_enabled(ready, egui::Checkbox::new(&mut self.refine, tr(lang, "Refine")))
-                    .on_hover_text(tr(lang, "Adjust the CURRENT edit instead of proposing from scratch"));
                 if ui
                     .add_enabled(ready, egui::Button::new(tr(lang, "Reset")))
                     .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera-matched base (one undo brings it back)"))
@@ -7608,10 +7790,10 @@ impl eframe::App for AutoshopApp {
                     // just discarded — showing them under neutral sliders lies.
                     self.resync_recipe_display();
                 }
-                ui.separator();
+                ui.add_space(12.0);
                 if ui
                     .add_enabled(ready && !self.undo_stack.is_empty(), egui::Button::new(tr(lang, "↶ Undo")))
-                    .on_hover_text("Ctrl+Z")
+                    .on_hover_text(tr(lang, "Ctrl+Z · undo the last edit"))
                     .clicked()
                 {
                     let ctx = ui.ctx().clone();
@@ -7619,108 +7801,48 @@ impl eframe::App for AutoshopApp {
                 }
                 if ui
                     .add_enabled(ready && !self.redo_stack.is_empty(), egui::Button::new(tr(lang, "↷ Redo")))
-                    .on_hover_text("Ctrl+Y")
+                    .on_hover_text(tr(lang, "Ctrl+Y · redo the undone edit"))
                     .clicked()
                 {
                     let ctx = ui.ctx().clone();
                     self.redo(&ctx);
                 }
-                ui.separator();
-                ui.label(tr(lang, "Style")).on_hover_text(
-                    tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
-                );
-                ui.add(egui::Slider::new(&mut self.style_strength, 0.0..=1.0).show_value(false))
-                    .on_hover_text(tr(lang, "Personal style strength: how far AI proposals lean toward your past editing habits"));
-                ui.label(format!("{:.0}%", self.style_strength * 100.0));
-                ui.separator();
-                // View mode: side-by-side vs a full-width edit (hold B = compare).
-                ui.selectable_value(&mut self.view_mode, ViewMode::SideBySide, tr(lang, "⿲ Compare"))
+                ui.add_space(12.0);
+                // View mode: side-by-side vs a full-width edit (hold B =
+                // compare). ◫ lives in egui's bundled fonts — the old ⿲
+                // (U+2FF2) only rendered when the OPTIONAL CJK fallback font
+                // loaded, tofu otherwise.
+                ui.selectable_value(&mut self.view_mode, ViewMode::SideBySide, tr(lang, "◫ Compare"))
                     .on_hover_text(tr(lang, "Before/After side by side"));
                 ui.selectable_value(&mut self.view_mode, ViewMode::AfterOnly, tr(lang, "⬛ Single"))
                     .on_hover_text(tr(lang, "The edit fills the canvas; hold B to quickly compare the original"));
-                ui.separator();
-                if ui.button(tr(lang, "⚙ Settings")).on_hover_text(tr(lang, "AI provider / model / API key")).clicked() {
-                    // Reload the form only on the closed→open edge — reloading
-                    // while open wiped everything already typed (incl. keys).
-                    if !self.show_settings {
-                        self.load_settings_form();
-                    }
-                    self.show_settings = true;
-                }
-                if ui.button("⌨").on_hover_text(tr(lang, "Keyboard shortcuts (F1 / ?)")).clicked() {
-                    self.show_shortcuts = !self.show_shortcuts;
-                }
-            });
-            // AI direction (free text) + save options. Export SETTINGS
-            // (format / size / sharpen / colour space) stay editable with no
-            // photo open — they're persisted preferences; only the ACTIONS
-            // (Export / Download / Save XMP) gate on a ready photo. That also
-            // keeps every widget an atomic allocation so the row can wrap.
-            ui.horizontal_wrapped(|ui| {
-                ui.label(tr(lang, "Direction:"));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.guidance)
-                        .desired_width(340.0)
-                        .hint_text(tr(lang, "e.g. warmer and moodier, lift the shadows")),
-                );
-                let ready = self.src_path.is_some() && !self.busy;
-                ui.separator();
-                egui::ComboBox::from_id_salt("save_fmt")
-                    .selected_text(if self.save_jpeg { "JPEG" } else { tr(lang, "16-bit TIFF") })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.save_jpeg, false, tr(lang, "16-bit TIFF"));
-                        ui.selectable_value(&mut self.save_jpeg, true, "JPEG");
-                    });
-                // --- delivery pipeline (gap batch F): resize → sharpen → quality ---
-                ui.label(tr(lang, "Long edge"));
-                egui::ComboBox::from_id_salt("exp_long_edge")
-                    .selected_text(if self.exp_long_edge == 0 {
-                        tr(lang, "Original size").to_string()
-                    } else {
-                        format!("{} px", self.exp_long_edge)
-                    })
-                    .width(86.0)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.exp_long_edge, 0, tr(lang, "Original size"));
-                        for px in [1600u32, 2048, 2560, 3840, 5120] {
-                            ui.selectable_value(&mut self.exp_long_edge, px, format!("{px} px"));
-                        }
-                    });
-                Self::slider(ui, lang, tr(lang, "Output sharpening"), &mut self.exp_sharpen, 0.0, 100.0, 0.0);
-                if self.save_jpeg {
-                    Self::slider(ui, lang, tr(lang, "JPEG quality"), &mut self.exp_quality, 60.0, 100.0, 95.0);
-                }
-                // --- delivery color space (gap batch D2): a real gamut
-                // transform + matching embedded profile, not a tag swap.
-                ui.label(tr(lang, "Colour space"));
-                const SPACES: [&str; 3] = ["sRGB (universal)", "Display P3 (wide-gamut screens)", "Adobe RGB (print)"];
-                egui::ComboBox::from_id_salt("exp_space")
-                    .selected_text(tr(lang, SPACES[(self.exp_space as usize).min(2)]))
-                    .width(170.0)
-                    .show_ui(ui, |ui| {
-                        for (i, name) in SPACES.iter().enumerate() {
-                            ui.selectable_value(&mut self.exp_space, i as u8, tr(lang, name));
-                        }
-                    });
-                ui.checkbox(&mut self.save_denoise, tr(lang, "AI Denoise")).on_hover_text(
-                    tr(lang, "SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar)"),
-                );
+                ui.add_space(12.0);
+                // Delivery ACTIONS (their settings live in the Develop panel's
+                // Export section; the hover echoes the current delivery state
+                // so it stays glanceable without a toolbar row of combos).
+                let summary = self.export_summary(lang);
                 if ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "Export → ./out")))
-                    .on_hover_text(tr(lang, "Ctrl+E · full-resolution render to ./out (follows the current variant's pixels)"))
+                    .add_enabled(ready, egui::Button::new(tr(lang, "Export")))
+                    .on_hover_text(format!(
+                        "{}\n{summary}",
+                        tr(lang, "Ctrl+E · full-resolution render to ./out (follows the current variant's pixels); settings in the Export section")
+                    ))
                     .clicked()
                 {
                     self.start_export();
                 }
                 if ui
                     .add_enabled(ready, egui::Button::new(tr(lang, "Download…")))
-                    .on_hover_text(tr(lang, "Save as… (full-resolution export to a path you choose)"))
+                    .on_hover_text(format!(
+                        "{}\n{summary}",
+                        tr(lang, "Save as… (full-resolution export to a path you choose)")
+                    ))
                     .clicked()
                 {
                     let ext = if self.save_jpeg { "jpg" } else { "tif" };
                     // Suggest a name from the ACTIVE variant's pixel source (a
                     // Generated variant → its reimagine stem), matching what
-                    // Export → ./out writes; the rendered pixels already follow it.
+                    // Export writes; the rendered pixels already follow it.
                     let src = self.active_source_path();
                     let stem = src
                         .as_deref()
@@ -7737,11 +7859,24 @@ impl eframe::App for AutoshopApp {
                     }
                 }
                 if ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "Save XMP")))
+                    .add_enabled(ready, egui::Button::new(tr(lang, "Save develop")))
                     .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW) to your develop store"))
                     .clicked()
                 {
                     self.save_xmp();
+                }
+                ui.add_space(12.0);
+                if ui.button(tr(lang, "⚙ Settings")).on_hover_text(tr(lang, "AI provider / model / API key")).clicked() {
+                    // Reload the form only on the closed→open edge — reloading
+                    // while open wiped everything already typed (incl. keys).
+                    // Toggle semantics, matching ⌨ next door.
+                    if !self.show_settings {
+                        self.load_settings_form();
+                    }
+                    self.show_settings = !self.show_settings;
+                }
+                if ui.button("⌨").on_hover_text(tr(lang, "Keyboard shortcuts (F1 / ?)")).clicked() {
+                    self.show_shortcuts = !self.show_shortcuts;
                 }
             });
         });
@@ -7750,6 +7885,17 @@ impl eframe::App for AutoshopApp {
             ui.horizontal(|ui| {
                 if self.busy {
                     ui.spinner();
+                }
+                // Live batch-render progress. Lives HERE with the spinner —
+                // its old home at the START of the toolbar shifted every
+                // control right by ~160px exactly while the user was waiting.
+                if let Some((done, total)) = self.batch_progress {
+                    ui.add(
+                        egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                            .desired_width(150.0)
+                            .text(trf(self.lang, "Batch {done}/{total}",
+                                &[("done", &done.to_string()), ("total", &total.to_string())])),
+                    );
                 }
                 // The unsaved marker: canvas differs from the saved develop
                 // (base_curve excluded — calibration is not an edit, dirty_vs).
@@ -7958,8 +8104,8 @@ impl eframe::App for AutoshopApp {
                     // natural-language words, so they stay literal.
                     let rows: [(&str, &str); 22] = [
                         ("Ctrl+O", tr(lang, "Open photo")),
-                        ("Ctrl+E", tr(lang, "Export → ./out")),
-                        ("Ctrl+S", tr(lang, "Save XMP sidecar")),
+                        ("Ctrl+E", tr(lang, "Export (settings in the Export section)")),
+                        ("Ctrl+S", tr(lang, "Save develop (recipe + XMP for RAW)")),
                         ("Ctrl+Z / Ctrl+Y", tr(lang, "Undo / Redo")),
                         ("← / →", tr(lang, "Step through the library")),
                         ("R", tr(lang, "Enter / exit crop")),
