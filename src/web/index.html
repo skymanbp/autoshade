@@ -669,12 +669,18 @@ async function selectPhoto(id, stem, el) {
   // A damaged / unreachable recipe must still leave a WORKING panel: fall back
   // to the neutral recipe and show the server's reason, instead of throwing out
   // of selectPhoto and leaving an empty control column with no explanation.
-  let loaded = null, loadErr = null;
+  let loaded = null, loadErr = null, freshCurve = null;
   try {
     const rr = await fetch(`/api/recipe?id=${id}`);
     if (seq !== selectSeq) return;
     if (rr.ok) loaded = await rr.json();
-    else if (rr.status !== 404) loadErr = (await rr.text()) || `HTTP ${rr.status}`;
+    else if (rr.status === 404) {
+      // "Not analyzed yet" — but the 404 body carries the photo's camera-
+      // matched base look, so a fresh open starts as bright as the GUI's
+      // instead of brightening only after the first Analyze.
+      try { const fresh = await rr.json(); if (fresh && Array.isArray(fresh.base_curve)) freshCurve = fresh.base_curve; } catch (_) { /* older server: plain-text 404 */ }
+    }
+    else loadErr = (await rr.text()) || `HTTP ${rr.status}`;
     if (seq !== selectSeq) return;
   } catch (e) {
     if (seq !== selectSeq) return;
@@ -686,6 +692,7 @@ async function selectPhoto(id, stem, el) {
     showRationale();
   } else {
     state.recipe = structuredClone(DEFAULT_RECIPE);
+    if (freshCurve && freshCurve.length) state.recipe.base_curve = freshCurve;
     $(".verdict").textContent = loadErr ? loadErr : "Not analyzed yet.";
   }
   // Build the controls now that state.recipe is known, then populate them.
@@ -752,7 +759,10 @@ async function selectPhoto(id, stem, el) {
     selBox.hidden = true; e.preventDefault();
   };
   main.querySelector(".analyze").onclick = analyze;
-  main.querySelector(".reset").onclick = ()=>{ state.recipe = structuredClone(DEFAULT_RECIPE); state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
+  // Reset clears the USER edit, not the photo's calibration: base_curve is the
+  // camera-matched base look Analyze stamped — dropping it would darken the
+  // pane back to the scene-referred develop (the GUI Reset preserves it too).
+  main.querySelector(".reset").onclick = ()=>{ const bc = state.recipe && state.recipe.base_curve; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = bc; state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
   main.querySelector(".savexmp").onclick = saveXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;

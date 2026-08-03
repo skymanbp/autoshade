@@ -183,7 +183,62 @@ pub fn produce_recipe(
             verdict = verifier.verify(&recipe, meta, hist)?;
         }
     }
+    // Base look, stamped in ONE place for every surface: the proposal and the
+    // verification above both ran over the camera's embedded preview — the
+    // very base the curve approximates — so the AI's JSON round-trip never
+    // decides it. A saved recipe.json owns its curve verbatim (a legacy save
+    // must keep rendering as it was tuned); otherwise a fresh estimate.
+    // Without this, a CLI-written analyze recipe carried an empty curve and
+    // the open-time "recipe.json keeps its saved curve" rule then pinned the
+    // dark pre-base-look rendering onto that photo forever.
+    recipe.base_curve = photo_base_curve(raw);
     Ok((recipe, verdict))
+}
+
+/// The base_curve a programmatic writer must carry for `raw`: an existing
+/// saved recipe.json owns it verbatim — including the legacy EMPTY curve,
+/// which must keep rendering exactly as it was tuned — otherwise the photo's
+/// fresh camera-matched estimate ([`photo_base_knots`]).
+pub fn photo_base_curve(raw: &Path) -> Vec<[f32; 2]> {
+    for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
+        if let Ok(text) = std::fs::read_to_string(&p)
+            && let Ok(r) = serde_json::from_str::<EditRecipe>(&text)
+        {
+            return r.base_curve;
+        }
+    }
+    photo_base_knots(raw)
+}
+
+/// Fresh camera-matched base-look estimate for `raw`: a neutral develop
+/// CDF-matched against the embedded preview (`render::camera_base_knots`).
+/// Costs a demosaic for a RAW — callers that already hold a neutral render
+/// (the GUI open worker) call the estimator directly instead. Best-effort by
+/// design: the base look is an enhancement, so a develop/decode failure here
+/// yields "no base look" rather than failing the caller's real operation
+/// (whose own render will surface the same error loudly).
+pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
+    if !decode::is_raw(raw) {
+        return Vec::new();
+    }
+    let camera = match decode::embedded_preview(raw) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            eprintln!("⚠ base look skipped: embedded preview of {} failed ({e})", raw.display());
+            return Vec::new();
+        }
+    };
+    match crate::render::render_to_image(raw, &EditRecipe::default(), None) {
+        Ok(neutral) => crate::render::camera_base_knots(&neutral, &camera),
+        Err(e) => {
+            // Disclosed, not silent: the caller's own render will surface the
+            // same failure loudly, but the resulting darker-than-canvas output
+            // needs a traceable cause in the log.
+            eprintln!("⚠ base look skipped: neutral develop of {} failed ({e})", raw.display());
+            Vec::new()
+        }
+    }
 }
 
 pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Result<PathBuf> {

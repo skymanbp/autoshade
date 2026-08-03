@@ -209,8 +209,8 @@ enum Command {
         /// higher cost). Defaults to AUTOSHOP_IMAGE_QUALITY (config default: high).
         #[arg(long)]
         quality: Option<String>,
-        /// Composite onto the full-sensor develop (e.g. 61 MP) instead of the
-        /// embedded preview — the untouched area keeps native resolution. Slow;
+        /// Composite onto the full-sensor develop (e.g. 61 MP) instead of a
+        /// ≤2048px develop — the untouched area keeps native resolution. Slow;
         /// the regenerated patch is upscaled. No effect on baked PNG/TIFF sources.
         #[arg(long)]
         full_res: bool,
@@ -232,8 +232,8 @@ enum Command {
         /// Skip AI auto-detection (heal only the painted mask).
         #[arg(long)]
         no_auto: bool,
-        /// Heal the full-sensor develop (e.g. 61 MP) instead of the embedded
-        /// preview. Slow; RAW only.
+        /// Heal the full-sensor develop (e.g. 61 MP) instead of a ≤2048px
+        /// develop. Slow; RAW only.
         #[arg(long)]
         full_res: bool,
         /// Output image (default: ./out/<stem>.heal.png).

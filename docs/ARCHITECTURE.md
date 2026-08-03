@@ -168,8 +168,10 @@ spot-removals) and/or the user paints regions in the UI
 both feed the deterministic [`heal_image`](../src/retouch.rs) engine. Donors are
 auto-searched (the in-bounds neighbour whose surroundings best match the spot's
 border) unless an explicit source offset is given. Output is a pixel master in
-./out — **non-XMP** (pixel edits don't serialise to ACR). Runs on the embedded
-preview by default; `--full-res` heals the full-sensor develop (slow, RAW only).
+./out — **non-XMP** (pixel edits don't serialise to ACR). For a RAW it runs on
+the engine's own neutral develop — a ≤2048px thumbnail by default, the full
+sensor with `--full-res` (slow, RAW only) — never the camera's baked preview,
+so the healed master stays on the same tone chain as the canvas develop.
 
 ## 5. Why Rust
 

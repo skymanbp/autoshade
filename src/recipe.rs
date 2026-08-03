@@ -102,6 +102,18 @@ pub struct EditRecipe {
     pub green_curve: Vec<CurvePoint>,
     pub blue_curve: Vec<CurvePoint>,
 
+    // --- Camera-matched base look (engine-only, NEVER exported to XMP) -------
+    /// Base tone curve `[x, y]` knots (luma, 0..=1) mapping the NEUTRAL raw
+    /// develop toward the camera's own rendition, estimated per photo by
+    /// luma-CDF-matching the neutral develop against the embedded preview
+    /// (`render::camera_base_knots`). The engine composes it UNDER the user
+    /// tone controls (`build_tone_lut`), so sliders start from a camera-like
+    /// base instead of the darker scene-referred develop. Empty = no base look
+    /// — exactly the pre-0.14 rendering, which every legacy recipe.json
+    /// deserialises to, so existing saved develops keep their appearance.
+    /// Lightroom renders XMP over its own camera profile, so xmp.rs ignores it.
+    pub base_curve: Vec<[f32; 2]>,
+
     // --- Local (masked) adjustments -----------------------------------------
     /// Local adjustments applied through gradient masks. Empty = global-only
     /// (v1-compatible). Emitted as `crs:MaskGroupBasedCorrections` in the XMP
@@ -144,6 +156,7 @@ impl Default for EditRecipe {
             red_curve: Vec::new(),
             green_curve: Vec::new(),
             blue_curve: Vec::new(),
+            base_curve: Vec::new(),
             masks: Vec::new(),
             rationale: String::new(),
             confidence: 0.0,
@@ -490,6 +503,12 @@ impl EditRecipe {
             // the recipe never carries a Kelvin the engine would silently re-clamp.
             self.temperature_k = Some(c(k, 2000.0, 40000.0));
         }
+        // Base-look knots are luma coordinates — anything outside [0,1] is
+        // corrupt input (monotonisation is the LUT builder's job, values here).
+        for p in self.base_curve.iter_mut() {
+            p[0] = p[0].clamp(0.0, 1.0);
+            p[1] = p[1].clamp(0.0, 1.0);
+        }
         // Clamp each local adjustment to the same UI ranges as the globals.
         for m in self.masks.iter_mut() {
             m.amount = m.amount.clamp(0.0, 1.0);
@@ -583,10 +602,13 @@ impl EditRecipe {
     /// useful to detect a "the AI declined to edit" no-op result.
     pub fn is_noop(&self) -> bool {
         *self == EditRecipe::default()
-            // ignore provenance fields when judging "did it actually edit?"
+            // Ignore provenance fields when judging "did it actually edit?".
+            // base_curve is the photo's camera-matched BASE (stamped on open),
+            // not a user edit — a fresh-open recipe must still count as no-op.
             || EditRecipe {
                 rationale: String::new(),
                 confidence: 0.0,
+                base_curve: Vec::new(),
                 ..self.clone()
             } == EditRecipe::default()
     }
@@ -595,6 +617,31 @@ impl EditRecipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_curve_legacy_json_noop_and_round_trip() {
+        // A pre-0.14 recipe.json has no base_curve → empty (renders as before).
+        let legacy: EditRecipe = serde_json::from_str(r#"{"exposure_ev":0.5}"#).unwrap();
+        assert!(legacy.base_curve.is_empty(), "legacy files must deserialise to NO base look");
+        // A stamped-but-untouched recipe is still a no-op: the base look is the
+        // photo's calibration, not a user edit (fresh opens must stay neutral).
+        let stamped = EditRecipe {
+            base_curve: vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
+            ..Default::default()
+        };
+        assert!(stamped.is_noop());
+        // And the curve survives the JSON round trip byte-exactly.
+        let back: EditRecipe =
+            serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+        assert_eq!(back.base_curve, stamped.base_curve);
+        // clamp() sanitises corrupt knot coordinates into [0,1].
+        let mut wild = EditRecipe {
+            base_curve: vec![[-0.5, 2.0], [0.5, 0.7]],
+            ..Default::default()
+        };
+        wild.clamp();
+        assert_eq!(wild.base_curve, vec![[0.0, 1.0], [0.5, 0.7]]);
+    }
 
     #[test]
     fn temper_lifts_white_point_and_soft_caps_extremes() {

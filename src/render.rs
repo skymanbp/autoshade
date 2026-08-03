@@ -548,13 +548,15 @@ fn apply_develop(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
     //    A fully-neutral tone recipe skips the pass outright: sampling an
     //    identity LUT is the identity map up to interpolation rounding, and this
     //    pass used to run unconditionally over the full sensor on every open.
+    //    A camera-matched base curve is tone work too — it must not be skipped.
     let tone_neutral = r.exposure_ev == 0.0
         && r.contrast == 0.0
         && r.highlights == 0.0
         && r.shadows == 0.0
         && r.whites == 0.0
         && r.blacks == 0.0
-        && r.tone_curve.is_empty();
+        && r.tone_curve.is_empty()
+        && r.base_curve.is_empty();
     if !tone_neutral {
         let lut = build_tone_lut(r);
         data.par_iter_mut().for_each(|px| {
@@ -1412,12 +1414,161 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 
     let m = fc_tangents(&TONE_KNOTS_X, &ys);
     let curve = curve_lut(&r.tone_curve); // the recipe's own tone_curve, composed on top
-    (0..LUT_N)
+    let user: Vec<f32> = (0..LUT_N)
         .map(|i| {
             let x = i as f32 / (LUT_N - 1) as f32;
             sample_lut(&curve, hermite_eval(&TONE_KNOTS_X, &ys, &m, x))
         })
+        .collect();
+    if r.base_curve.is_empty() {
+        return user;
+    }
+    // Camera-matched base look: composed UNDER the user controls — sliders act
+    // on the camera-like base, the same profile-then-sliders order Lightroom
+    // uses. final(x) = user(base(x)); one LUT, still zero extra per-pixel cost.
+    let base = base_curve_lut(&r.base_curve);
+    (0..LUT_N).map(|i| sample_lut(&user, base[i])).collect()
+}
+
+/// LUT for the recipe's camera-matched base curve (`EditRecipe::base_curve`).
+/// Knot hygiene mirrors `build_tone_lut`: sort by x, drop non-increasing x,
+/// force non-decreasing y (a tone curve cannot invert), pin the (0,0)/(1,1)
+/// endpoints — a hand-edited recipe must not unpin black/white through the
+/// base stage — then the same monotone Fritsch–Carlson Hermite as the tone
+/// model, so the base look inherits its no-inversion/no-overshoot guarantees.
+fn base_curve_lut(knots: &[[f32; 2]]) -> Vec<f32> {
+    const EPS: f32 = 1e-4;
+    let mut pts: Vec<(f32, f32)> = knots
+        .iter()
+        .map(|p| (p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0)))
+        .collect();
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut xs = vec![0.0f32];
+    let mut ys = vec![0.0f32];
+    for (x, y) in pts {
+        if x <= *xs.last().expect("seeded") + EPS || x >= 1.0 - EPS {
+            continue; // endpoint pins own x=0 / x=1
+        }
+        xs.push(x);
+        ys.push(y);
+    }
+    xs.push(1.0);
+    ys.push(1.0);
+    for i in 1..ys.len() {
+        if ys[i] < ys[i - 1] + EPS {
+            ys[i] = ys[i - 1] + EPS;
+        }
+    }
+    for v in &mut ys {
+        *v = v.clamp(0.0, 1.0);
+    }
+    let m = fc_tangents(&xs, &ys);
+    (0..LUT_N)
+        .map(|i| hermite_eval(&xs, &ys, &m, i as f32 / (LUT_N - 1) as f32))
         .collect()
+}
+
+/// Estimate a photo's camera base curve: `[x, y]` knots mapping the NEUTRAL
+/// develop's luma toward the camera's embedded rendition by CDF match.
+///
+/// Knots are QUANTILE-anchored — `x = Q_neutral(p), y = Q_camera(p)` over a
+/// shared probability grid — so they only ever sit where the neutral
+/// histogram HAS mass. A fixed input grid (the first design) planted pairs
+/// of equal-y knots inside empty luma bands (night sky vs street lamps),
+/// which the monotone LUT builder flattened into ~30-level posterised
+/// plateaus; and on any frame darker than the grid its top knots hit
+/// `quantile(1.0)` and latched to 1.0, pinning whole upper bands to pure
+/// white in the export (adversarial review, reproduced on synthetic gapped
+/// histograms). The probability grid stops at p = 0.98 and the pinned (1,1)
+/// endpoint carries the tail smoothly instead.
+///
+/// Both inputs go through the SAME ≤1024px box-thumbnail + 1024-bin
+/// histogram before matching: resampling narrows a luma distribution, so
+/// comparing a small thumbnail against a native-size preview used to read as
+/// phantom camera contrast (a spurious S on an identity pair, dependent on
+/// the GUI preview-size dropdown). Symmetric processing removes that
+/// asymmetry; residual sensitivity to a caller's own pre-thumbnailing is
+/// sub-bin. Field-measured on A7RIV ARWs: the neutral develop sits
+/// 0.6–1.4 EV under the camera JPEG with a consistent S shape that is NOT a
+/// single gain (midtones move ~3× more than the toe) — hence a curve.
+/// Returns EMPTY (= no base look) when near-identity or degenerate.
+pub fn camera_base_knots(neutral: &DynamicImage, camera: &DynamicImage) -> Vec<[f32; 2]> {
+    const BINS: usize = 1024;
+    const EST_EDGE: u32 = 1024;
+    fn luma_hist(img: &DynamicImage) -> (Vec<u64>, u64) {
+        let small;
+        let img = if img.width().max(img.height()) > EST_EDGE {
+            small = img.thumbnail(EST_EDGE, EST_EDGE);
+            &small
+        } else {
+            img
+        };
+        let rgb = img.to_rgb8();
+        let px = rgb.as_raw();
+        let n_px = px.len() / 3;
+        // Every pixel of the ≤1024px thumbnail (≤~0.7 MP — cheap). A regular
+        // stride here could phase-lock onto periodic image structure, and the
+        // two sides would alias DIFFERENTLY (their strides derive from their
+        // own sizes), distorting the CDF match.
+        let mut h = vec![0u64; BINS];
+        for i in 0..n_px {
+            let p = &px[i * 3..i * 3 + 3];
+            let l = 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+            h[((l / 255.0) * (BINS - 1) as f32) as usize] += 1;
+        }
+        (h, n_px as u64)
+    }
+    let (hist_n, count_n) = luma_hist(neutral);
+    let (hist_c, count_c) = luma_hist(camera);
+    if count_n < 10_000 || count_c < 10_000 {
+        return Vec::new();
+    }
+    let cumulate = |h: &[u64]| -> Vec<u64> {
+        let mut acc = 0u64;
+        h.iter().map(|&v| { acc += v; acc }).collect()
+    };
+    let cum_n = cumulate(&hist_n);
+    let cum_c = cumulate(&hist_c);
+    // Smallest bin whose cumulative mass reaches p — the same rule on both
+    // sides, so an identical pair maps every p to the identical bin and the
+    // guard below sees an exact identity.
+    let quantile = |cum: &[u64], count: u64, p: f64| -> f32 {
+        let target = (p * count as f64).ceil() as u64;
+        let bin = cum.partition_point(|&c| c < target).min(BINS - 1);
+        bin as f32 / (BINS - 1) as f32
+    };
+    // Denser toward the toe where the S bends hardest; capped at 0.98 (see
+    // the doc comment — the (1,1) pin owns the tail). Quantiles that land in
+    // the SAME neutral bin (spiky / posterised neutrals) are merged by
+    // averaging their camera side: base_curve_lut's strictly-increasing-x
+    // pass would otherwise keep only the FIRST duplicate, biasing that tone
+    // toward the spike's lowest camera quantile.
+    const PS: [f64; 11] = [0.02, 0.05, 0.10, 0.20, 0.32, 0.45, 0.58, 0.70, 0.82, 0.92, 0.98];
+    let mut groups: Vec<(f32, f32, u32)> = Vec::with_capacity(PS.len()); // (x, Σy, n)
+    for &p in &PS {
+        let x = quantile(&cum_n, count_n, p);
+        let y = quantile(&cum_c, count_c, p);
+        match groups.last_mut() {
+            Some(g) if (x - g.0).abs() < 0.5 / (BINS - 1) as f32 => {
+                g.1 += y;
+                g.2 += 1;
+            }
+            _ => groups.push((x, y, 1)),
+        }
+    }
+    let mut knots: Vec<[f32; 2]> = Vec::with_capacity(groups.len() + 2);
+    knots.push([0.0, 0.0]);
+    for (x, y_sum, n) in groups {
+        knots.push([x, y_sum / n as f32]);
+    }
+    knots.push([1.0, 1.0]);
+    // Identity guard: a baked source (or an already camera-matched render)
+    // maps onto itself — return empty so the recipe stays clean.
+    let max_dev = knots.iter().map(|p| (p[1] - p[0]).abs()).fold(0.0f32, f32::max);
+    if max_dev < 0.02 {
+        return Vec::new();
+    }
+    knots
 }
 
 /// Monotone cubic Hermite tangents (Fritsch–Carlson). With `xs` strictly increasing
@@ -2020,6 +2171,183 @@ pub fn apply_lens_distortion(img: &DynamicImage, amount: f32) -> DynamicImage {
 mod tests {
     use super::*;
     use crate::recipe::{EditRecipe, LocalAdjustment};
+
+    #[test]
+    fn base_curve_composes_under_user_tone_and_is_not_skipped() {
+        // Mid-grey through a lifting base curve must brighten even with a
+        // fully-neutral user recipe — the neutral short-circuit must treat the
+        // base look as tone work — and user exposure must act ON TOP of it.
+        let base =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([100, 100, 100])));
+        let mut lifted = EditRecipe {
+            base_curve: vec![[0.0, 0.0], [0.4, 0.62], [1.0, 1.0]],
+            ..Default::default()
+        };
+        let neutral_px = develop_preview(&base, &EditRecipe::default()).to_rgb8()[(0, 0)][0];
+        assert_eq!(neutral_px, 100, "a truly neutral recipe is the identity");
+        let lifted_px = develop_preview(&base, &lifted).to_rgb8()[(0, 0)][0];
+        assert!(lifted_px > 130, "base curve must lift mid-grey: {lifted_px}");
+        lifted.exposure_ev = 1.0;
+        let more_px = develop_preview(&base, &lifted).to_rgb8()[(0, 0)][0];
+        assert!(more_px > lifted_px, "exposure composes on top of the base look: {more_px}");
+        // Endpoints stay pinned through the composition: black in → black out.
+        let black = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0])));
+        lifted.exposure_ev = 0.0;
+        assert_eq!(develop_preview(&black, &lifted).to_rgb8()[(0, 0)][0], 0);
+    }
+
+    #[test]
+    fn camera_base_knots_recovers_the_map_and_identity_is_empty() {
+        // neutral = a luma gradient; camera = the SAME frame through a known
+        // pointwise lift (x^0.6). The CDF match must recover that map at the
+        // interior knots, and a self-match must collapse to empty (no-op).
+        let (w, h) = (512u32, 64u32);
+        let mut n = RgbImage::new(w, h);
+        let mut c = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let t = x as f32 / (w - 1) as f32;
+                let v = (t * 255.0).round() as u8;
+                n.put_pixel(x, y, image::Rgb([v, v, v]));
+                let l = (t.powf(0.6) * 255.0).round() as u8;
+                c.put_pixel(x, y, image::Rgb([l, l, l]));
+            }
+        }
+        let n = DynamicImage::ImageRgb8(n);
+        let c = DynamicImage::ImageRgb8(c);
+        let knots = camera_base_knots(&n, &c);
+        assert!(!knots.is_empty(), "a real lift must be detected");
+        assert_eq!(knots.first(), Some(&[0.0, 0.0]), "black endpoint pinned");
+        assert_eq!(knots.last(), Some(&[1.0, 1.0]), "white endpoint pinned");
+        for p in &knots {
+            if p[0] > 0.05 && p[0] < 0.95 {
+                assert!(
+                    (p[1] - p[0].powf(0.6)).abs() < 0.04,
+                    "knot {p:?} vs expected {}",
+                    p[0].powf(0.6)
+                );
+            }
+        }
+        assert!(camera_base_knots(&n, &n).is_empty(), "identity map → empty (no base look)");
+    }
+
+    #[test]
+    fn base_curve_bridges_histogram_gaps_without_plateaus_or_white_pinning() {
+        // Night-street-like pair: luma mass in two bands (0..0.30 and
+        // 0.62..0.95) with NOTHING between, both sides the same frame through
+        // a known lift (x^0.75). The first estimator planted equal-y knots
+        // inside the empty band (→ ~30-level posterised plateaus) and latched
+        // its top knots to 1.0 on frames darker than its fixed grid (→ whole
+        // upper bands pinned to pure white). Quantile-anchored knots must
+        // bridge the gap monotonically and keep the tail off white.
+        // 512×64 keeps the sample count above the degenerate-input guard.
+        let (w, h) = (512u32, 64u32);
+        let mut n = RgbImage::new(w, h);
+        let mut c = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let t = x as f32 / (w - 1) as f32;
+                let nv = if x % 2 == 0 { 0.30 * t } else { 0.62 + 0.33 * t };
+                let cv = nv.powf(0.75).min(1.0);
+                n.put_pixel(x, y, image::Rgb([(nv * 255.0).round() as u8; 3]));
+                c.put_pixel(x, y, image::Rgb([(cv * 255.0).round() as u8; 3]));
+            }
+        }
+        let knots =
+            camera_base_knots(&DynamicImage::ImageRgb8(n), &DynamicImage::ImageRgb8(c));
+        assert!(!knots.is_empty(), "a real lift must be detected");
+        // Apply through the real render path over a full ramp and measure.
+        let mut ramp = RgbImage::new(256, 1);
+        for x in 0..256 {
+            ramp.put_pixel(x, 0, image::Rgb([x as u8; 3]));
+        }
+        let r = EditRecipe { base_curve: knots, ..Default::default() };
+        let out = develop_preview(&DynamicImage::ImageRgb8(ramp), &r).to_rgb8();
+        let vals: Vec<u8> = (0..256u32).map(|x| out[(x, 0)][0]).collect();
+        let (mut longest, mut run) = (1usize, 1usize);
+        for i in 1..256 {
+            if vals[i] == vals[i - 1] {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 1;
+            }
+        }
+        assert!(longest <= 12, "posterised plateau of {longest} identical output levels");
+        assert!(vals[229] < 250, "input 0.9 must not latch to white: {}", vals[229]);
+        assert!(vals[250] > vals[235], "the tail keeps rising toward the (1,1) pin");
+    }
+
+    #[test]
+    fn camera_base_knots_merges_same_bin_quantiles_with_a_mean() {
+        // A posterised neutral (one constant tone) against a camera side whose
+        // mass splits across two levels: every probability lands on the same
+        // neutral bin, and keeping only the first duplicate would map that
+        // tone to the LOWER camera level. The merged knot must sit between.
+        let (w, h) = (512u32, 64u32);
+        let mut n = RgbImage::new(w, h);
+        let mut c = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                n.put_pixel(x, y, image::Rgb([77; 3])); // luma 0.302
+                let cv = if x % 2 == 0 { 128 } else { 179 }; // 0.502 / 0.702
+                c.put_pixel(x, y, image::Rgb([cv; 3]));
+            }
+        }
+        let knots =
+            camera_base_knots(&DynamicImage::ImageRgb8(n), &DynamicImage::ImageRgb8(c));
+        assert_eq!(knots.len(), 3, "one merged mid knot between the pins: {knots:?}");
+        let mid = knots[1];
+        assert!((mid[0] - 0.302).abs() < 0.01, "x = the neutral spike: {mid:?}");
+        assert!(
+            mid[1] > 0.52 && mid[1] < 0.68,
+            "y = a mean over the camera split, not its floor: {mid:?}"
+        );
+    }
+
+    /// Real-machine probe, never run in CI: point AUTOSHOP_PROBE_RAW at an
+    /// ARW and run with `--ignored` to check the whole base-look chain on a
+    /// real photo — estimator knots + the luma median of the base-curved
+    /// render vs the camera's own preview (they must land close).
+    #[test]
+    #[ignore = "real-machine probe: set AUTOSHOP_PROBE_RAW to an ARW path"]
+    fn probe_real_raw_base_look() {
+        let Ok(raw) = std::env::var("AUTOSHOP_PROBE_RAW") else {
+            panic!("set AUTOSHOP_PROBE_RAW to a RAW path");
+        };
+        let raw = std::path::PathBuf::from(raw);
+        let cam_probe = crate::decode::embedded_preview(&raw);
+        println!(
+            "embedded_preview: {:?}",
+            cam_probe.as_ref().map(|o| o.as_ref().map(|i| (i.width(), i.height())))
+        );
+        let knots = crate::pipeline::photo_base_knots(&raw);
+        println!("knots: {knots:?}");
+        assert!(!knots.is_empty(), "expected a base look on a camera RAW");
+        let neutral =
+            render_to_image(&raw, &EditRecipe::default(), None).unwrap().thumbnail(1536, 1536);
+        let based = develop_preview(
+            &neutral,
+            &EditRecipe { base_curve: knots, ..Default::default() },
+        );
+        let cam = crate::decode::embedded_preview(&raw).unwrap().unwrap();
+        let median = |img: &DynamicImage| -> f32 {
+            let rgb = img.to_rgb8();
+            let mut v: Vec<f32> = rgb
+                .as_raw()
+                .chunks(3)
+                .map(|p| 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32)
+                .collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2] / 255.0
+        };
+        let (mn, mb, mc) = (median(&neutral), median(&based), median(&cam));
+        println!("median neutral={mn:.3} based={mb:.3} camera={mc:.3}");
+        assert!(
+            (mb - mc).abs() < 0.06,
+            "base-curved render should sit near the camera preview: based={mb:.3} camera={mc:.3}"
+        );
+    }
 
     #[test]
     fn white_point_is_invariant_to_highlights_and_bright_stays_bright() {

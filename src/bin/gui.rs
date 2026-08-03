@@ -192,7 +192,10 @@ struct OverlayKey {
 /// Messages from worker threads back to the UI. The large payloads are boxed so
 /// the channel message stays small (clippy::large_enum_variant).
 enum Msg {
-    Opened(Box<anyhow::Result<Arc<image::DynamicImage>>>),
+    /// Decoded base + the photo's camera-matched base-look knots (empty for
+    /// non-RAW sources, missing embedded previews, or a near-identity map —
+    /// see `render::camera_base_knots`).
+    Opened(Box<anyhow::Result<OpenedBase>>),
     /// A synchronous GUI develop used to block egui's update loop. Preview work
     /// now returns here from a single latest-wins worker.
     Developed(Box<anyhow::Result<PreviewDone>>),
@@ -659,7 +662,8 @@ struct AutoshopApp {
     thumb_requested: HashSet<usize>,             // indices already queued/decoded
     thumb_inflight: usize,                       // live thumbnail-decode threads
     edited_badge: HashMap<usize, bool>,          // cached "● edited" sidecar stat per index
-    base_cache: Vec<(BaseCacheKey, Arc<image::DynamicImage>)>, // decoded-base LRU (recent last)
+    // Decoded-base LRU (recent last): base pixels + the photo's base-look knots.
+    base_cache: Vec<(BaseCacheKey, OpenedBase)>,
     // --- region box-select (local-edit target on the After image) ---
     region: Option<[f32; 4]>,                      // normalized [left, top, right, bottom]
     region_drag: Option<(egui::Pos2, egui::Pos2)>, // transient drag (start, current) in screen px
@@ -1241,6 +1245,9 @@ fn save_thumb_cache(cache: &std::path::Path, thumb: &image::DynamicImage) {
 /// Decoded-base LRU key: source path + requested preview edge + file mtime
 /// (an on-disk change or a different resolution simply misses).
 type BaseCacheKey = (PathBuf, u32, Option<std::time::SystemTime>);
+/// A decoded preview base + the photo's camera-matched base-look knots
+/// (`render::camera_base_knots`; empty = no base look).
+type OpenedBase = (Arc<image::DynamicImage>, Vec<[f32; 2]>);
 
 /// How many decoded preview bases to keep for instant photo revisits (~3.3 MB
 /// each at the default 1280 edge; culling flips between neighbours constantly).
@@ -1338,6 +1345,50 @@ fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
 // "never destroy an explicit save without a v<N> snapshot" contract — copy
 // semantics + frozen rasters; see store.rs for the full contract.
 
+/// The recipe a paste actually writes to `target`: the copied USER EDIT with
+/// the base-look calibration resolved per target. `base_curve` is per-photo
+/// (camera-matched at open), so:
+///   * a BAKED target (PNG/JPEG/TIFF) gets NO curve — its pixels already
+///     carry the camera look, and pasting a RAW's curve would apply the
+///     camera tone twice;
+///   * a target with a saved recipe (central store OR a not-yet-migrated
+///     legacy ./out file) keeps its own curve — including the legacy empty
+///     curve, which must keep rendering exactly as it was tuned;
+///   * a RAW with no saved develop inherits the source's curve (same-camera
+///     S curves — far closer than the dark base).
+fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe {
+    let mut r = pasted.clone();
+    if !autoshop::decode::is_raw(target) {
+        r.base_curve = Vec::new();
+        return r;
+    }
+    for p in [
+        autoshop::store::recipe_target(target),
+        autoshop::store::legacy_recipe(target),
+    ] {
+        if let Ok(text) = std::fs::read_to_string(&p)
+            && let Ok(saved) = serde_json::from_str::<EditRecipe>(&text)
+        {
+            r.base_curve = saved.base_curve;
+            return r;
+        }
+    }
+    r
+}
+
+/// "Does the canvas hold real USER edits vs this baseline?" — the ● marker,
+/// the quit guard and the nav stash all key off this. `base_curve` is the
+/// photo's camera calibration, not an edit: a curve-only difference (a fresh
+/// stamp over a neutral-cleared baseline, a Generated variant's empty curve,
+/// a paste that resolved the target's own curve) must not light ●, block
+/// quit, or stash a canvas — that was exactly the "permanent ● with no way
+/// to clear it" regression the adversarial review caught.
+fn dirty_vs(canvas: &EditRecipe, baseline: &EditRecipe) -> bool {
+    canvas != baseline
+        && EditRecipe { base_curve: Vec::new(), ..canvas.clone() }
+            != EditRecipe { base_curve: Vec::new(), ..baseline.clone() }
+}
+
 impl AutoshopApp {
     fn open_path(&mut self, path: PathBuf) {
         if self.busy {
@@ -1349,7 +1400,7 @@ impl AutoshopApp {
         // disk; returning to the photo restores the stash over the sidecar.
         if let Some(old) = self.src_path.clone()
             && old != path
-            && self.recipe != self.saved_recipe
+            && dirty_vs(&self.recipe, &self.saved_recipe)
         {
             self.nav_stash.insert(old, self.recipe.clone());
         }
@@ -1376,15 +1427,34 @@ impl AutoshopApp {
                 // re-developing that double-processes it and amplifies its grain when
                 // you push tone/clarity. Baked images (PNG/TIFF/JPEG) are their own
                 // source. Demosaic is slow, so this runs off the UI thread.
-                let res = (|| -> anyhow::Result<Arc<image::DynamicImage>> {
-                    let full = if autoshop::decode::is_raw(&path) {
-                        autoshop::render::render_to_image(&path, &EditRecipe::default(), None)?
+                let res = (|| -> anyhow::Result<(Arc<image::DynamicImage>, Vec<[f32; 2]>)> {
+                    let (thumb, knots) = if autoshop::decode::is_raw(&path) {
+                        let full = autoshop::render::render_to_image(
+                            &path,
+                            &EditRecipe::default(),
+                            None,
+                        )?;
+                        let thumb = full.thumbnail(edge, edge);
+                        // Camera-matched base look: CDF-match the neutral
+                        // develop against the camera's own rendition. From
+                        // the FULL render, not `thumb` — the estimator
+                        // normalises both sides itself, so the stamped curve
+                        // no longer depends on the preview-px dropdown. A RAW
+                        // with no embedded preview (or a decode hiccup) just
+                        // opens without a base look — never an open failure.
+                        let knots = match autoshop::decode::embedded_preview(&path) {
+                            Ok(Some(cam)) => {
+                                autoshop::render::camera_base_knots(&full, &cam)
+                            }
+                            _ => Vec::new(),
+                        };
+                        (thumb, knots)
                     } else {
-                        autoshop::decode::load_image(&path)?
+                        (autoshop::decode::load_image(&path)?.thumbnail(edge, edge), Vec::new())
                     };
                     // Arc once here so every downstream sharer (variants, the
                     // preview worker) is an O(1) refcount bump, not a deep copy.
-                    Ok(Arc::new(full.thumbnail(edge, edge)))
+                    Ok((Arc::new(thumb), knots))
                 })();
                 Msg::Opened(Box::new(res))
             },
@@ -1395,7 +1465,11 @@ impl AutoshopApp {
     /// Decoded-base LRU lookup (most-recent entry kept last). Missing metadata
     /// (mtime `None`) matches itself, so the cache still works where mtime is
     /// unavailable — it just loses the staleness guard there.
-    fn cached_base(&mut self, path: &std::path::Path, edge: u32) -> Option<Arc<image::DynamicImage>> {
+    fn cached_base(
+        &mut self,
+        path: &std::path::Path,
+        edge: u32,
+    ) -> Option<(Arc<image::DynamicImage>, Vec<[f32; 2]>)> {
         let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         let pos = self
             .base_cache
@@ -1410,10 +1484,17 @@ impl AutoshopApp {
     /// Remember a freshly decoded base. Called from the Opened handler — the px
     /// combo is disabled while busy, so `preview_edge` still describes the
     /// decode that just completed.
-    fn remember_base(&mut self, path: &std::path::Path, edge: u32, base: &Arc<image::DynamicImage>) {
+    fn remember_base(
+        &mut self,
+        path: &std::path::Path,
+        edge: u32,
+        base: &Arc<image::DynamicImage>,
+        knots: &[[f32; 2]],
+    ) {
         let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         self.base_cache.retain(|((p, e, _), _)| !(p == path && *e == edge));
-        self.base_cache.push(((path.to_path_buf(), edge, mtime), base.clone()));
+        self.base_cache
+            .push(((path.to_path_buf(), edge, mtime), (base.clone(), knots.to_vec())));
         if self.base_cache.len() > BASE_CACHE_CAP {
             self.base_cache.remove(0); // least-recent first
         }
@@ -1858,7 +1939,7 @@ impl AutoshopApp {
         let mut pending: Vec<(PathBuf, EditRecipe)> =
             self.nav_stash.iter().map(|(p, r)| (p.clone(), r.clone())).collect();
         if let Some(p) = self.src_path.clone()
-            && self.recipe != self.saved_recipe
+            && dirty_vs(&self.recipe, &self.saved_recipe)
         {
             pending.retain(|(q, _)| q != &p);
             pending.push((p, self.recipe.clone()));
@@ -2803,7 +2884,15 @@ impl AutoshopApp {
                 None => (!g.is_empty()).then(|| g.to_string()),
             }
         };
-        let base = self.refine.then(|| self.recipe.clone());
+        let base = self.refine.then(|| {
+            let mut r = self.recipe.clone();
+            // The refine prompt/verifier work over the camera's embedded
+            // preview, where the base look is already IN the pixels — leaking
+            // the canvas base_curve into the prompt would double-apply it in
+            // the verifier's render. Msg::Analyzed stamps it back afterwards.
+            r.base_curve = Vec::new();
+            r
+        });
         self.spawn_worker(
             move || {
                 // Config is reloaded in-thread (cheap) so we don't need it to be Clone.
@@ -3024,7 +3113,16 @@ impl AutoshopApp {
                                         break;
                                     }
                                 }
-                                found.unwrap_or_default()
+                                // No saved develop → export what the canvas
+                                // WOULD show: neutral + the photo's camera-
+                                // matched base look (one extra develop per
+                                // photo; without it the batch export of an
+                                // unedited RAW comes out on the dark base
+                                // while its open canvas shows the bright one).
+                                found.unwrap_or_else(|| EditRecipe {
+                                    base_curve: autoshop::pipeline::photo_base_knots(p),
+                                    ..Default::default()
+                                })
                             };
                             let out = autoshop::pipeline::default_out(p, "developed", &ext);
                             autoshop::pipeline::ensure_parent(&out)?;
@@ -3250,12 +3348,16 @@ impl AutoshopApp {
         // leaving `saved_recipe` behind kept a false "● unsaved" lit for
         // edits that were already on disk.
         self.pasted_open = None;
-        if let Some(open) = &self.src_path
-            && targets.iter().any(|t| t == open)
+        if let Some(open) = self.src_path.clone()
+            && targets.iter().any(|t| t == &open)
         {
-            self.recipe = recipe.clone();
+            // Same base_curve rule the worker applies to every target below,
+            // mirrored here so `pasted_open` equals the bytes the worker
+            // writes and the ● baseline can advance on success.
+            let live = paste_recipe_for(&open, &recipe);
+            self.recipe = live.clone();
             self.dirty = true;
-            self.pasted_open = Some((open.clone(), recipe.clone()));
+            self.pasted_open = Some((open, live));
         }
         let lang = self.lang; // localise the UI status AND the worker's result strings
         self.busy = true;
@@ -3271,9 +3373,13 @@ impl AutoshopApp {
                     let mut errs: Vec<String> = Vec::new();
                     for path in &targets {
                         let step = || -> anyhow::Result<bool> {
-                            autoshop::pipeline::write_recipe(path, &recipe, None)?;
+                            // Per-target base-look resolution (paste_recipe_for):
+                            // paste copies the user edit, never the source
+                            // photo's camera calibration over a saved one.
+                            let r = paste_recipe_for(path, &recipe);
+                            autoshop::pipeline::write_recipe(path, &r, None)?;
                             if autoshop::decode::is_raw(path) {
-                                autoshop::pipeline::write_xmp(path, &recipe)?;
+                                autoshop::pipeline::write_xmp(path, &r)?;
                                 return Ok(true);
                             }
                             Ok(false)
@@ -3332,11 +3438,11 @@ impl AutoshopApp {
                     // open.
                     let keep = std::mem::take(&mut self.keep_recipe);
                     match *boxed {
-                    Ok(base) => {
+                    Ok((base, knots)) => {
                         self.busy = false;
                         if let Some(p) = self.src_path.clone() {
                             let edge = self.preview_edge.clamp(640, 8192);
-                            self.remember_base(&p, edge, &base);
+                            self.remember_base(&p, edge, &base, &knots);
                         }
                         if keep {
                             // Preview-resolution re-decode: the SOURCE pixels just
@@ -3396,10 +3502,19 @@ impl AutoshopApp {
                             let mut restored: Option<&'static str> = None;
                             let mut open_note: Option<String> = None;
                             let mut recipe = EditRecipe::default();
+                            // Whether to stamp this photo's camera-matched base
+                            // look onto the recipe: yes for fresh opens and
+                            // XMP-only restores (Lightroom tuned those against
+                            // its own camera-profile base — the bright base is
+                            // the closer rendering); NO for recipe.json, which
+                            // keeps its saved curve verbatim so legacy develops
+                            // render exactly as they were tuned.
+                            let mut stamp = true;
                             match saved {
                                 SavedDevelop::Restored(r, kind) => {
                                     recipe = r;
                                     restored = Some(kind);
+                                    stamp = kind.starts_with("XMP");
                                 }
                                 SavedDevelop::Unreadable { err, fallback } => {
                                     // A damaged / newer-build recipe.json must
@@ -3410,6 +3525,7 @@ impl AutoshopApp {
                                     if let Some((r, kind)) = fallback {
                                         recipe = r;
                                         restored = Some(kind);
+                                        stamp = kind.starts_with("XMP");
                                     }
                                     open_note = Some(trf(
                                         lang,
@@ -3424,6 +3540,9 @@ impl AutoshopApp {
                                     );
                                 }
                                 SavedDevelop::Nothing => {}
+                            }
+                            if stamp && !knots.is_empty() {
+                                recipe.base_curve = knots.clone();
                             }
                             // The saved develop is the ● baseline; a canvas
                             // stashed when the user navigated away THIS session
@@ -3526,7 +3645,23 @@ impl AutoshopApp {
                 Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
                 Msg::Analyzed(boxed) => match *boxed {
                     Ok((recipe, verdict)) => {
-                        self.recipe = recipe;
+                        // The recipe arrives with its base_curve already
+                        // stamped by produce_recipe (saved-curve-first, else a
+                        // fresh estimate) — the single authority all three
+                        // surfaces share; the canvas must not override it.
+                        // One exception, canvas-side only: a BAKED variant
+                        // (Generated / retouched base) already carries the
+                        // camera look in its pixels, so developing it through
+                        // the RAW's curve would cook the tone twice — the
+                        // canvas copy drops the curve; the persist below still
+                        // writes the full stamped recipe (it is the RAW's
+                        // saved develop, and reopening lands on the source).
+                        let stamped = recipe;
+                        let mut canvas = stamped.clone();
+                        if self.active_variant().is_some_and(|v| v.base.is_some()) {
+                            canvas.base_curve = Vec::new();
+                        }
+                        self.recipe = canvas;
                         // Wholesale replacement: disarm index-carrying tools +
                         // refresh rationale, THEN install the fresh verdict.
                         self.resync_recipe_display();
@@ -3542,7 +3677,9 @@ impl AutoshopApp {
                             // The backup gate comes FIRST: if the existing save
                             // cannot be snapshotted, it is not overwritten —
                             // the analyze result stays on the canvas only.
-                            Some(p) => match autoshop::store::backup_saved_develop(&p, Some(&self.recipe)) {
+                            // Persist `stamped`, not the canvas copy: the
+                            // sidecar is the RAW's develop and keeps its curve.
+                            Some(p) => match autoshop::store::backup_saved_develop(&p, Some(&stamped)) {
                                 Err(e) => {
                                     let t = trf(
                                         lang,
@@ -3558,10 +3695,10 @@ impl AutoshopApp {
                                     // lands, reopening restores it regardless
                                     // of the XMP — so the ● baseline follows
                                     // it even when the XMP half fails.
-                                    match autoshop::pipeline::write_recipe(&p, &self.recipe, None) {
+                                    match autoshop::pipeline::write_recipe(&p, &stamped, None) {
                                         Ok(_) => {
                                             self.edited_badge.clear();
-                                            self.saved_recipe = self.recipe.clone();
+                                            self.saved_recipe = stamped.clone();
                                             self.nav_stash.remove(&p);
                                             if backed.is_some() {
                                                 self.refresh_versions();
@@ -3576,7 +3713,7 @@ impl AutoshopApp {
                                             };
                                             if autoshop::decode::is_raw(&p)
                                                 && let Err(e) =
-                                                    autoshop::pipeline::write_xmp(&p, &self.recipe)
+                                                    autoshop::pipeline::write_xmp(&p, &stamped)
                                             {
                                                 let t = trf(
                                                     lang,
@@ -6641,7 +6778,8 @@ impl eframe::App for AutoshopApp {
         // save-all / discard / cancel; the guard re-checks on the way out, so
         // both quit buttons work by making the state genuinely clean.
         if ctx.input(|i| i.viewport().close_requested()) {
-            let unsaved_open = self.src_path.is_some() && self.recipe != self.saved_recipe;
+            let unsaved_open =
+                self.src_path.is_some() && dirty_vs(&self.recipe, &self.saved_recipe);
             if unsaved_open || !self.nav_stash.is_empty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm_quit = true;
@@ -6852,7 +6990,12 @@ impl eframe::App for AutoshopApp {
                     .on_hover_text(tr(lang, "Clear every slider back to neutral (one undo brings it back)"))
                     .clicked()
                 {
-                    self.recipe = EditRecipe::default();
+                    // Reset clears the USER edit, not the photo's calibration:
+                    // the camera-matched base look survives, so "neutral" stays
+                    // the same starting point a fresh open shows — not the
+                    // darker scene-referred develop.
+                    let base_curve = std::mem::take(&mut self.recipe.base_curve);
+                    self.recipe = EditRecipe { base_curve, ..EditRecipe::default() };
                     self.region = None;
                     self.dirty = true;
                     // The old AI rationale/verdict describe the recipe Reset
@@ -7000,10 +7143,11 @@ impl eframe::App for AutoshopApp {
                 if self.busy {
                     ui.spinner();
                 }
-                // The unsaved marker: canvas differs from the saved develop.
+                // The unsaved marker: canvas differs from the saved develop
+                // (base_curve excluded — calibration is not an edit, dirty_vs).
                 // It sits BEFORE the status text so a long message can never
                 // push it out of view.
-                if self.src_path.is_some() && self.recipe != self.saved_recipe {
+                if self.src_path.is_some() && dirty_vs(&self.recipe, &self.saved_recipe) {
                     ui.label(
                         egui::RichText::new(tr(self.lang, "● unsaved"))
                             .color(ui.visuals().warn_fg_color),
@@ -7706,16 +7850,19 @@ mod tests {
         // itself (the cache still works where metadata is unavailable).
         let mut app = AutoshopApp::default();
         let base = Arc::new(image::DynamicImage::new_rgb8(4, 3));
+        let knots: Vec<[f32; 2]> = vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]];
         let p = std::path::Path::new("D:/__autoshop_nonexistent__/x.ARW");
-        app.remember_base(p, 1280, &base);
-        assert!(app.cached_base(p, 1280).is_some(), "same path+edge hits");
+        app.remember_base(p, 1280, &base, &knots);
+        let hit = app.cached_base(p, 1280);
+        assert!(hit.is_some(), "same path+edge hits");
+        assert_eq!(hit.unwrap().1, knots, "base-look knots ride the cache entry");
         assert!(app.cached_base(p, 2560).is_none(), "edge is part of the key");
         // Filling past the cap evicts the least-recently-used entry.
         let others: Vec<std::path::PathBuf> = (0..BASE_CACHE_CAP)
             .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/{i}.ARW")))
             .collect();
         for o in &others {
-            app.remember_base(o, 1280, &base);
+            app.remember_base(o, 1280, &base, &[]);
         }
         assert!(app.cached_base(p, 1280).is_none(), "least-recent evicted at cap");
         assert!(app.cached_base(&others[1], 1280).is_some(), "newer entries survive");

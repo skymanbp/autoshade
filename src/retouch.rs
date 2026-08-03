@@ -420,9 +420,13 @@ fn strip_fence(s: &str) -> &str {
 /// painted mask), heal them on the developed pixels, and save a pixel master to
 /// `out`. Non-XMP by nature (pixel edits don't serialise to ACR).
 ///
-/// `full_res` heals the full-sensor develop (e.g. 61 MP) for a RAW; otherwise the
-/// embedded preview (fast). Detection runs on a downscaled JPEG — coordinates are
-/// normalised, so placement is resolution-independent.
+/// `full_res` heals the full-sensor develop (e.g. 61 MP) for a RAW; otherwise a
+/// ≤2048px thumbnail of the SAME develop. Both are the engine's own neutral
+/// develop — never the camera's baked 8-bit JPEG preview, which this used to
+/// heal: that swapped the canvas onto camera-curve pixels mid-session (visible
+/// brightness jump) and put every later slider/export on a different tone
+/// chain than before the heal. Detection runs on a downscaled JPEG —
+/// coordinates are normalised, so placement is resolution-independent.
 pub fn heal(
     cfg: &Config,
     src_path: &Path,
@@ -432,10 +436,12 @@ pub fn heal(
     out: &Path,
 ) -> Result<HealReport> {
     let is_raw = decode::is_raw(src_path);
-    let base = if full_res && is_raw {
-        crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None)?
+    let base = if is_raw {
+        let full =
+            crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None)?;
+        if full_res { full } else { full.thumbnail(2048, 2048) }
     } else {
-        decode::preview_only(src_path)?
+        decode::load_image(src_path)?
     };
     let mut rgb = base.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -494,10 +500,14 @@ pub fn clone_stamp(
     out: &Path,
 ) -> Result<HealReport> {
     let is_raw = decode::is_raw(src_path);
-    let base = if full_res && is_raw {
-        crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None)?
+    // Same base contract as `heal`: the engine's OWN neutral develop (full or
+    // ≤2048px), never the camera's baked preview — see the heal doc comment.
+    let base = if is_raw {
+        let full =
+            crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None)?;
+        if full_res { full } else { full.thumbnail(2048, 2048) }
     } else {
-        decode::preview_only(src_path)?
+        decode::load_image(src_path)?
     };
     let mut rgb = base.to_rgb8();
     let (w, h) = rgb.dimensions();

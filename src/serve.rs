@@ -388,6 +388,34 @@ fn api_image(request: &Request, state: &AppState, max_edge: u32) -> Result<Respo
     }
 }
 
+/// Fresh camera-matched base-look knots for the web's fresh-open and
+/// XMP-only paths — the SAME develop_base the panes already build (cached,
+/// so selecting a photo costs one demosaic total) CDF-matched against the
+/// camera's own embedded rendition. A saved recipe.json's curve is NEVER
+/// manufactured here: api_recipe serves those verbatim, legacy-empty included.
+fn fresh_base_knots(raw: &Path) -> Vec<[f32; 2]> {
+    if !decode::is_raw(raw) {
+        return Vec::new();
+    }
+    let camera = match decode::embedded_preview(raw) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            eprintln!("⚠ base look skipped: embedded preview of {} failed ({e})", raw.display());
+            return Vec::new();
+        }
+    };
+    match develop_base(raw) {
+        Ok(neutral) => render::camera_base_knots(&neutral, &camera),
+        Err(e) => {
+            // Disclosed, not silent — the pane render will fail loudly too,
+            // but a darker-than-GUI fresh open needs a traceable cause.
+            eprintln!("⚠ base look skipped: neutral develop of {} failed ({e})", raw.display());
+            Vec::new()
+        }
+    }
+}
+
 fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let raw = raw_for(request, state)?;
     // One-time, per-photo migration of pre-store ./out sidecars into the
@@ -419,12 +447,15 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     }
     // No recipe.json → fall back to the XMP sidecar, exactly like the GUI's
     // `read_saved_develop`: a foreign / neutral sidecar parses to a no-op recipe,
-    // and "restoring" that would only produce a misleading SAVED tag.
+    // and "restoring" that would only produce a misleading SAVED tag. An XMP
+    // was tuned in Lightroom over ITS camera-profile base, so it gets the
+    // photo's fresh base look — the same rule the GUI applies on open.
     for path in [pipeline::xmp_target(&raw), crate::store::legacy_xmp(&raw)] {
         if let Ok(text) = std::fs::read_to_string(&path) {
             let mut r = crate::xmp::xmp_to_recipe(&text);
             if !r.is_noop() {
                 r.clamp();
+                r.base_curve = fresh_base_knots(&raw);
                 return Ok(json_text(serde_json::to_string(&r)?));
             }
         }
@@ -434,7 +465,14 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     if let Some(err) = parse_err {
         return Ok(status_response(422, &format!("recipe.json is unreadable: {err}")));
     }
-    Ok(status_response(404, "no recipe yet"))
+    // Still 404 ("not analyzed yet" drives the client's fresh-open UI state),
+    // but the body carries the photo's camera-matched base look so the fresh
+    // web canvas starts as bright as a fresh GUI open instead of jumping
+    // only after the first Analyze.
+    let body = serde_json::json!({ "base_curve": fresh_base_knots(&raw) }).to_string();
+    let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+        .expect("static ASCII header");
+    Ok(Response::from_string(body).with_status_code(404).with_header(ct).boxed())
 }
 
 /// Style-library info for the UI's info box: is an index built, how many of the
@@ -616,8 +654,17 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // base = Some → refine the current edit; None → fresh proposal from original.
     let cfg = state.config();
     let style = req.style_strength.unwrap_or(cfg.style_strength);
+    // The analyze pipeline proposes/verifies over the camera's embedded
+    // preview, where the base look is already IN the pixels: strip the
+    // client's base_curve from the refine base (it would double-apply in the
+    // verifier's render). produce_recipe stamps the photo's own curve onto
+    // the result — the single authority for every surface.
+    let refine_base = req.base.clone().map(|mut b| {
+        b.base_curve = Vec::new();
+        b
+    });
     let (recipe, verdict) =
-        pipeline::produce_recipe(&raw, &cfg, false, guidance, req.base.as_ref(), style)?;
+        pipeline::produce_recipe(&raw, &cfg, false, guidance, refine_base.as_ref(), style)?;
     // Analyze is a PROGRAMMATIC writer: it may not destroy an explicit save
     // without a `v<N>` snapshot — the same contract the GUI enforces. A backup
     // that FAILS (locked / unreadable existing save) means we must not write at

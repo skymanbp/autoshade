@@ -19,6 +19,50 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **相机基调批次：打开 RAW 不再暗 + 修饰不再切换像素源（2026-08-02，用户
+  拍板"根治: 基调+统一"）**——用户报"每次加载 raw 都很暗，点 AI 修瑕疵就恢复
+  正常亮度"。根因两层：①中性显影无任何相机基调（rawler 线性→sRGB，真机定标
+  比机内 JPEG 暗 +0.63~+1.42 EV，且形状是 S 曲线非单一增益——中间调动 ~3×
+  于趾部）；②heal/clone/生成填充非全分辨率基图曾是**相机内嵌 JPEG**，修完
+  InPlace 烘焙进画布 = 像素源切换假装"恢复亮度"，且后续编辑/导出落在 8-bit
+  相机曲线像素上。方案（[src/recipe.rs](../src/recipe.rs) `base_curve` +
+  [src/render.rs](../src/render.rs)）：
+  1. **recipe.base_curve 携带式相机基调曲线**（引擎专用，不进 XMP）：分位数
+     锚点 luma-CDF 匹配（x=Q_neutral(p), y=Q_camera(p)，p 网格止于 0.98，
+     (0,0)/(1,1) 钉扎；两侧对称 ≤1024px 缩略+全像素 1024-bin 直方图；同 bin
+     分位数均值合并；近恒等→空）。`build_tone_lut` 把它复合在用户色调**之下**
+     （final(x)=user(base(x))，LR 的 profile-then-sliders 次序）。**旧存档
+     缺字段→空曲线→逐字节按旧样渲染**（硬契约）；fit 产物有意不带曲线（自洽
+     完整解）；is_noop/●判定（新 `dirty_vs`）忽略曲线——校准非编辑。
+  2. **盖戳权威 = pipeline::produce_recipe**（saved-first：有 recipe.json 用
+     其曲线原样含 legacy 空，否则 photo_base_knots 新估计）——GUI/web/CLI 三端
+     同一权威；GUI 开照（新照+仅 XMP 恢复盖戳，recipe.json 原样）、web 404/
+     XMP 路径带节点（fresh_base_knots 复用 develop_base 缓存）、粘贴每目标
+     解析（烘焙目标清空/有存档用其曲线/否则承源）、GUI 批量渲染无存档 RAW 补
+     戳、GUI/web Reset 保画布曲线、烘焙变体上 Analyze 画布剥曲线（持久化仍全）。
+  3. **修饰基图统一**：heal/clone_stamp/生成填充 RAW 基图一律引擎中性显影
+     （full_res 全尺寸，否则 ≤2048px 缩略）——修完与画布同色调链，亮度跳变
+     根治。代价：非全分辨率修饰也要 demosaic（clone 从即时变数秒）——已记录。
+  4. **decode::embedded_preview**：相机自带渲染三级提取（preview→thumbnail→
+     full_image）。rawler 0.7.2 源码验证：ARW 解码器**只实现 full_image**
+     （JPEGInterchangeFormat 内嵌全尺寸 JPEG 提取，绝非 develop；默认实现
+     Ok(None)）——A7RIV 全靠第三级；decode.rs 两处"full raw render"旧注释
+     已纠正。
+  5. 审查：对抗工作流 26 代理（4 维度 find + 逐条对抗 verify）22 findings
+     （14 confirmed 含 2 BLOCKER：估计器直方图空洞→~30 级色调断层/暗片高光
+     整段钉白（已用真实代码复现）、中性清存后 ● 永久点亮、CLI 写方 recipe
+     永久钉暗、粘贴无 is_raw 门等）+ Codex 复审 5 条（烘焙变体双重上调、web
+     新照暗突变、步进混叠、同 x 取低偏置、双 develop 成本）——全部修复或记录。
+  6. 有据取舍：analyze-after-fit 继承 fit 的空曲线（saved-first 一致性优先）；
+     auto/batch/GUI 批量对无存档 RAW 多付一次 develop（正确性优先，已披露
+     warning）；web retouch 面板残差；Reset 在变体上保画布曲线语义。
+  验证：**118 lib + 9 gui** 全绿（+5 新测试：复合/端点钉扎、空洞无平台无钉白、
+  尖峰均值合并、旧档序列化/is_noop/clamp、LRU 载荷）+ 常驻真机探针
+  `probe_real_raw_base_look`（AUTOSHOP_PROBE_RAW 门控：DSC08530.ARW median
+  中性 0.326 → 带基调 **0.497** vs 相机预览 **0.495**）；clippy 0；i18n 374
+  键 0/0/0。真机验收点：打开任意新 RAW 应即近相机 JPEG 观感；点修瑕疵前后
+  亮度不再跳；旧已保存显影观感不变；Reset 不再变暗。
+
 - **修饰(images/edits)超时预算重校准（2026-08-02）**——用户真机报
   「修饰失败: transport: …/images/edits: Network Error: timed out reading
   response」。根因：直连 api.openai.com（image_provider=api，非 8317 桥）

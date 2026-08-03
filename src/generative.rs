@@ -13,12 +13,12 @@
 //!   * **Aspect-correct enum fallback** — 1536×1024 / 1024×1536 / 1024×1024 by
 //!     orientation instead of squashing every photo into a 1:1 square.
 //!   * **Configurable quality tier** (`low|medium|high|auto`, default `high`).
-//!   * **`retouch` composites back onto the source's native preview** — only the
+//!   * **`retouch` composites back onto the engine's own develop** — only the
 //!     masked (inpainted) region carries generative pixels; the rest keeps the
-//!     original pixels, with a feathered seam. "Native" here is whatever
-//!     [`decode::preview_only`] yields: the camera's EMBEDDED preview for a RAW
-//!     (e.g. ~1616×1080 on a Sony A7RIV — NOT the full sensor), or the actual
-//!     full image for an already-baked PNG/TIFF.
+//!     base pixels, with a feathered seam. For a RAW the base is the neutral
+//!     develop (≤2048px, or the full sensor with `full_res`) — never the
+//!     camera's baked 8-bit preview, so the master stays on the same tone
+//!     chain as the canvas; a baked PNG/TIFF is its own base.
 //!
 //! `reimagine` = full-frame restyle (no mask) → still a generative re-render at
 //! the chosen size, so it stays a low-res experiment / preview, NOT a master.
@@ -88,12 +88,14 @@ pub fn reimagine(
 /// (alpha=0) pixels mark the region to regenerate. The generative result is
 /// composited back over the base so only the masked region is re-rendered.
 ///
-/// The base is [`decode::preview_only`] by default — for a RAW that is the
-/// camera's embedded preview (e.g. ~1616×1080 on Sony), not the full sensor.
-/// Set `full_res` to instead composite onto the full-sensor develop (e.g. 61 MP)
-/// so the untouched area keeps native resolution; this is slow and the
-/// regenerated patch is upscaled. For a baked PNG/TIFF the base is already the
-/// full image, so `full_res` changes nothing.
+/// For a RAW the base is the engine's OWN neutral develop — a ≤2048px
+/// thumbnail by default, the full sensor (e.g. 61 MP) with `full_res` so the
+/// untouched area keeps native resolution (slow; the regenerated patch is
+/// upscaled). It is deliberately NOT the camera's baked 8-bit preview, which
+/// this used to composite onto: that swapped the canvas onto camera-curve
+/// pixels mid-session and put later edits/exports on a different tone chain
+/// (see `retouch::heal`). For a baked PNG/TIFF the base is the full image
+/// either way, so `full_res` changes nothing.
 pub fn retouch(
     cfg: &Config,
     raw_path: &Path,
@@ -103,16 +105,13 @@ pub fn retouch(
     full_res: bool,
     out: &Path,
 ) -> Result<()> {
-    // Base to composite onto. Default = the source preview (fast; for a RAW that
-    // is the camera's embedded preview, ~1.6 MP). `full_res` renders the full
-    // sensor through the develop engine (e.g. 61 MP) so the untouched area keeps
-    // native resolution — slow, and only the small masked patch is generative
-    // (upscaled). Baked PNG/TIFF are already full-res, so the flag is a no-op there.
     let raw = decode::is_raw(raw_path);
-    let base = if full_res && raw {
-        crate::render::render_to_image(raw_path, &crate::recipe::EditRecipe::default(), None)?
+    let base = if raw {
+        let full =
+            crate::render::render_to_image(raw_path, &crate::recipe::EditRecipe::default(), None)?;
+        if full_res { full } else { full.thumbnail(2048, 2048) }
     } else {
-        decode::preview_only(raw_path)?
+        decode::load_image(raw_path)?
     };
     let (bw, bh) = base.dimensions();
     // A generative tile larger than the base is pointless (it only gets downscaled
