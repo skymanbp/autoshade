@@ -217,7 +217,7 @@
         <div class="hint">Export writes to ./out. XMP + recipe go to the develop store; XMP only for RAW.</div>
       </div>
       <div class="panel fill-panel" style="margin-top:14px">
-        <h3>Generative Fill · 实验</h3>
+        <h3>Generative Fill <span class="sub">· experimental</span></h3>
         <div class="row" style="margin-top:0">
           <label class="chk" title="Paint over the area to regenerate. While on, box-select is paused."><input type="checkbox" class="fill-toggle" /> Paint mask</label>
           <label class="chk">Brush <input type="range" class="fill-brush" min="8" max="140" step="2" value="44" style="width:90px" /></label>
@@ -236,10 +236,10 @@
         <div class="hint">Paint the region, write what belongs there, then Remove/Fill. Only the painted area is regenerated; the rest is kept. Default composites onto the source preview (fast); Full-res keeps the untouched area at native resolution (slow, RAW only). Saved to ./out. Needs OPENAI_API_KEY (gpt-image), ~15-40s.</div>
       </div>
       <div class="panel heal-panel" style="margin-top:14px">
-        <h3>修图 · 去瑕疵 Heal（像素）</h3>
+        <h3>Heal <span class="sub">· pixel retouch</span></h3>
         <div class="hint" style="margin-top:0">Direct pixel retouch — removes dust / blemishes / specks by healing from SURROUNDING REAL pixels. Retouch, <b>not</b> generative (invents nothing). Saved to ./out.</div>
         <div class="row">
-          <button class="heal-auto" type="button" title="AI finds small defects and heals them from surrounding pixels">✦ AI 去瑕疵 (auto)</button>
+          <button class="heal-auto" type="button" title="AI finds small defects and heals them from surrounding pixels">✦ AI spot heal (auto)</button>
           <button class="secondary heal-painted" type="button" title="Heal the area you painted with the Paint-mask brush above">Heal painted area</button>
           <label class="chk" title="Heal the full-sensor develop instead of the preview (slow, RAW only)."><input type="checkbox" class="heal-fullres" /> Full-res</label>
         </div>
@@ -255,7 +255,7 @@
     <p class="modal-note">Saved locally to <code id="settings-file">autoshop.local.json</code> in your per-user Autoshop folder (never in a repo). Keys stay on this machine — the server is 127.0.0.1 only. Applies to the next Analyze.</p>
 
     <section class="settings-sec">
-      <h3>分析 / Analysis — the verifier</h3>
+      <h3>Analysis — the verifier</h3>
       <div class="srow">
         <label>Provider</label>
         <label class="chk"><input type="radio" name="an-provider" value="oauth" /> OAuth (Claude CLI)</label>
@@ -267,7 +267,7 @@
     </section>
 
     <section class="settings-sec">
-      <h3>图像 / Image — the vision proposer</h3>
+      <h3>Image — the vision proposer</h3>
       <div class="srow">
         <label>Provider</label>
         <label class="chk"><input type="radio" name="im-provider" value="api" checked /> API (OpenAI-compatible)</label>
@@ -687,6 +687,19 @@ async function selectPhoto(id, stem, el) {
     loadErr = "could not read the saved recipe: " + (e.message || e);
   }
   if (loaded) {
+    // The saved recipe is served verbatim (a legacy save deliberately carries
+    // an EMPTY base_curve) — but Reset means "the fresh-open look" (the GUI's
+    // photo_knots rule, d1f6986), so the photo's own fresh knots are fetched
+    // separately for it. Failure just leaves Reset preserving the curve.
+    try {
+      const fr = await fetch(`/api/fresh-base?id=${id}`);
+      if (seq !== selectSeq) return;
+      if (fr.ok) {
+        const f = await fr.json();
+        if (f && Array.isArray(f.base_curve)) freshCurve = f.base_curve;
+      }
+    } catch (_) { /* older server without /api/fresh-base */ }
+    if (seq !== selectSeq) return;
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), loaded);
     $(".verdict").innerHTML = '<span class="tag saved">SAVED</span> Loaded a previously-saved recipe. Re-run Analyze for a live verdict.';
     showRationale();
@@ -695,6 +708,9 @@ async function selectPhoto(id, stem, el) {
     if (freshCurve && freshCurve.length) state.recipe.base_curve = freshCurve;
     $(".verdict").textContent = loadErr ? loadErr : "Not analyzed yet.";
   }
+  // Kept for Reset: this photo's fresh camera-matched base knots (null when
+  // unavailable — non-RAW, no embedded preview, or an older server).
+  state.freshCurve = (freshCurve && freshCurve.length) ? freshCurve : null;
   // Build the controls now that state.recipe is known, then populate them.
   buildSliders(main.querySelector(".sliders"));
   buildWb(main.querySelector(".sliders"));
@@ -720,9 +736,9 @@ async function selectPhoto(id, stem, el) {
         ? `<b>Style reference library:</b> <i>not built yet</i> — the Style slider needs an index of YOUR past edits.`
         : `<b>Style reference library:</b> ${s.total} of your edits indexed${s.source_dir?` from <code>${escapeHtml(s.source_dir)}</code>`:""}.${s.index_file?`<div class="scenes">Index file: <code>${escapeHtml(s.index_file)}</code></div>`:""}<div class="scenes">Scenes it knows: ${(s.scenes||[]).map(x=>`${escapeHtml(x.tag)} ×${x.n}`).join("  ·  ") || "—"}</div>`;
       pop.innerHTML = `<h4>Library</h4>
-        <b>原图库 / Working folder:</b> <code>${escapeHtml(d.working_dir||"—")}</code> · ${d.working_count||0} source(s)<br>
-        <b>成片库 / Output:</b> <code>${escapeHtml(d.out_dir||"./out")}</code> — renders / heals / exports land here<br>
-        <b>显影库 / Develop store:</b> <code>${escapeHtml(d.store_dir||"—")}</code> — recipes / XMP / versions live here<br><br>
+        <b>Working folder:</b> <code>${escapeHtml(d.working_dir||"—")}</code> · ${d.working_count||0} source(s)<br>
+        <b>Output:</b> <code>${escapeHtml(d.out_dir||"./out")}</code> — renders / heals / exports land here<br>
+        <b>Develop store:</b> <code>${escapeHtml(d.store_dir||"—")}</code> — recipes / XMP / versions live here<br><br>
         ${styleHtml}
         <div class="srow" style="margin-top:8px; gap:6px; flex-wrap:nowrap">
           <input class="sinput sb-dir" placeholder="Your library folder (RAW + .xmp pairs)…" style="font-size:11px" />
@@ -759,10 +775,12 @@ async function selectPhoto(id, stem, el) {
     selBox.hidden = true; e.preventDefault();
   };
   main.querySelector(".analyze").onclick = analyze;
-  // Reset clears the USER edit, not the photo's calibration: base_curve is the
-  // camera-matched base look Analyze stamped — dropping it would darken the
-  // pane back to the scene-referred develop (the GUI Reset preserves it too).
-  main.querySelector(".reset").onclick = ()=>{ const bc = state.recipe && state.recipe.base_curve; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = bc; state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
+  // Reset = the fresh-open look (the GUI's photo_knots rule, d1f6986):
+  // sliders neutral ON the photo's own camera-matched base. A legacy save's
+  // deliberately-empty curve must NOT survive Reset — "preserve the canvas
+  // curve" kept those photos dark. Fallback when fresh knots are unavailable
+  // (non-RAW / older server): preserve the current curve, the old behaviour.
+  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const bc = (state.freshCurve && state.freshCurve.length) ? state.freshCurve : cur; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
   main.querySelector(".savexmp").onclick = saveXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;
@@ -840,7 +858,7 @@ async function selectPhoto(id, stem, el) {
       mctx.putImageData(md, 0, 0); mask = m.toDataURL("image/png");
     }
     const fullRes = main.querySelector(".heal-fullres").checked;
-    setStatus(fullRes ? "healing (full-res render)… (slow)" : (useMask ? "healing painted area…" : "AI 去瑕疵中… (~10-30s)"));
+    setStatus(fullRes ? "healing (full-res render)… (slow)" : (useMask ? "healing painted area…" : "AI spot heal… (~10-30s)"));
     const btnA = main.querySelector(".heal-auto"), btnP = main.querySelector(".heal-painted");
     btnA.disabled = true; btnP.disabled = true;
     try {

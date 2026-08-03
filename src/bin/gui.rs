@@ -621,10 +621,14 @@ struct AutoshopApp {
     guidance: String, // free-text direction for the AI ("warmer, moodier")
     refine: bool,     // adjust the CURRENT recipe vs propose from scratch
     save_jpeg: bool,  // export/download as JPEG instead of 16-bit TIFF
-    // --- undo / redo (recipe snapshots; a drag is one step, committed on release) ---
-    committed: EditRecipe,        // current history head (last committed state)
-    undo_stack: Vec<EditRecipe>,  // prior states, most recent last
-    redo_stack: Vec<EditRecipe>,  // states undone away (cleared on a new edit)
+    // --- undo / redo (a drag is one step, committed on release). Each step
+    // carries the recipe AND the active variant's pixel identity (base Arc +
+    // origin), so a baked pixel retouch (heal / clone / generative fill) is
+    // one undoable step instead of a point of no return. Arc clones share the
+    // allocation — only a retouch introduces a new raster into history.
+    committed: UndoStep,        // current history head (last committed state)
+    undo_stack: Vec<UndoStep>,  // prior states, most recent last
+    redo_stack: Vec<UndoStep>,  // states undone away (cleared on a new edit)
     // --- unsaved-edit protection ---
     // What the sidecar last held for the open photo (neutral when none): the
     // canvas differing from it is the "● unsaved" condition. Navigation stashes
@@ -640,6 +644,10 @@ struct AutoshopApp {
     // "reset" always means the fresh-open look — including on a photo whose
     // legacy save carries no curve and therefore opened dark.
     photo_knots: Vec<[f32; 2]>,
+    // The base_curve baked into `before_tex`. The Before pane mirrors the
+    // canvas recipe's calibration (Reset / paste / restore can change it), so
+    // a mismatch triggers a cheap rebuild in `update`.
+    before_curve: Vec<[f32; 2]>,
     // The title-bar ✕ was intercepted with unsaved edits: show the in-app
     // save-all / discard / cancel layer until the user decides.
     confirm_quit: bool,
@@ -748,6 +756,31 @@ struct AutoshopApp {
     preview_edge: u32,                     // working-preview long edge: 1280 fluid / 2560 / 4096 detail
     // --- recipe versions (gap batch G): ./out/<stem>.v<N>.recipe.json ---
     versions: Vec<u32>,                    // snapshot numbers found for the open photo (sorted)
+}
+
+/// One undo/redo step: the recipe plus the active variant's pixel identity.
+/// A baked pixel retouch (heal / clone / generative fill) swaps the variant's
+/// base + origin outside the recipe — carrying them here makes Ctrl+Z walk
+/// back through retouches too. History is per-variant (reset on switch), so a
+/// step's pixels always belong to the variant it was recorded on; the base is
+/// compared by `Arc::ptr_eq`, never by pixels.
+#[derive(Clone, Default)]
+struct UndoStep {
+    recipe: EditRecipe,
+    base: Option<Arc<image::DynamicImage>>,
+    origin: Option<PathBuf>,
+}
+
+impl UndoStep {
+    /// Same pixel identity? (Arc pointer + origin path — cheap, exact.)
+    fn same_pixels(&self, other: &UndoStep) -> bool {
+        let base_eq = match (&self.base, &other.base) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        base_eq && self.origin == other.origin
+    }
 }
 
 /// One rendition in the variant strip — a Lightroom-style virtual copy /
@@ -866,7 +899,7 @@ impl Default for AutoshopApp {
             guidance: String::new(),
             refine: false,
             save_jpeg: false,
-            committed: EditRecipe::default(),
+            committed: UndoStep::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             save_denoise: false,
@@ -890,6 +923,7 @@ impl Default for AutoshopApp {
             nav_stash: HashMap::new(),
             pasted_open: None,
             photo_knots: Vec::new(),
+            before_curve: Vec::new(),
             confirm_quit: false,
             mask_name_buf: None,
             gallery_scroll_to: None,
@@ -1049,29 +1083,34 @@ impl AutoshopApp {
     }
 }
 
-/// 64-bin RGB+luma histogram of the already-packed preview. The old GUI path
-/// called `DynamicImage::to_rgb8()` independently for histogram, clipping and
-/// texture staging; one worker-side RGB8 buffer now feeds all three consumers.
+/// 256-bin RGB+luma histogram of the already-packed preview (one bin per
+/// 8-bit code value, Lightroom-grade resolution). One worker-side RGB8 buffer
+/// feeds histogram, clipping and texture staging alike.
+///
+/// All four channels share ONE vertical scale (the global max), the way
+/// Lightroom draws it — per-channel normalisation made relative bar heights
+/// meaningless (a channel holding 200 pixels drew as tall as one holding two
+/// million, so a colour cast read as balanced).
 fn compute_histogram_rgb(rgb: &image::RgbImage) -> Vec<[f32; 4]> {
-    const BINS: usize = 64;
+    const BINS: usize = 256;
     let mut counts = vec![[0u32; 4]; BINS];
     for px in rgb.pixels() {
         let (r, g, b) = (px[0] as usize, px[1] as usize, px[2] as usize);
         let luma = (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32) as usize;
-        counts[r * BINS / 256][0] += 1;
-        counts[g * BINS / 256][1] += 1;
-        counts[b * BINS / 256][2] += 1;
-        counts[(luma * BINS / 256).min(BINS - 1)][3] += 1;
+        counts[r][0] += 1;
+        counts[g][1] += 1;
+        counts[b][2] += 1;
+        counts[luma.min(BINS - 1)][3] += 1;
     }
-    let mut max = [1u32; 4];
+    let mut max = 1u32;
     for bins in &counts {
-        for ch in 0..4 {
-            max[ch] = max[ch].max(bins[ch]);
+        for &v in bins {
+            max = max.max(v);
         }
     }
     counts
         .iter()
-        .map(|bins| std::array::from_fn(|ch| bins[ch] as f32 / max[ch] as f32))
+        .map(|bins| std::array::from_fn(|ch| bins[ch] as f32 / max as f32))
         .collect()
 }
 
@@ -1117,11 +1156,15 @@ fn build_preview(
     // into_rgb8 MOVES the buffer in the common no-geometry case (develop_preview
     // returns ImageRgb8) — to_rgb8() deep-copied ~3.3 MB per tick at 1280.
     let rgb = after.into_rgb8();
-    // Histogram + clipping are judged on EXPORT pixels: the export applies
-    // `recipe.crop` normalised on this same post-distortion/straighten frame
-    // (render.rs — distortion → straighten → crop), so statistics over the
-    // crop sub-rect here match what actually ships. The preview image itself
-    // stays full-frame on purpose (immediate whole-frame slider feedback).
+    // Histogram + clipping share the export's CROP: `recipe.crop` is
+    // normalised on this same post-distortion/straighten frame (render.rs —
+    // distortion → straighten → crop), so the statistics cover exactly the
+    // region that ships. The pixel VALUES, however, are the 8-bit preview at
+    // working resolution, not the 16-bit full-res export — downscaling can
+    // average a small blown specular below the clip threshold (recorded
+    // deferral; export-exact statistics need the full-res pipeline). The
+    // preview image itself stays full-frame on purpose (immediate whole-frame
+    // slider feedback).
     let crop_px = recipe.crop.map(|c| {
         let (w, h) = (rgb.width() as f32, rgb.height() as f32);
         let x0 = (c.left.clamp(0.0, 1.0) * w) as u32;
@@ -1543,6 +1586,25 @@ impl AutoshopApp {
         self.active_variant().is_some_and(|v| v.kind == VariantKind::Generated)
     }
 
+    /// Load the Before texture: `base` with `curve` (a camera-matched base
+    /// look) applied. Lightroom's "Before" is the profile-applied default
+    /// render, not the linear negative — without the curve, Before sat
+    /// 0.6–1.4 EV under After's own starting point and every compare
+    /// exaggerated the edit. Baked rasters pass an empty curve (their pixels
+    /// already carry the look).
+    fn set_before(&mut self, ctx: &egui::Context, base: &image::DynamicImage, curve: &[[f32; 2]]) {
+        let img = if curve.is_empty() {
+            to_color_image(base)
+        } else {
+            to_color_image(&autoshop::render::develop_preview(
+                base,
+                &EditRecipe { base_curve: curve.to_vec(), ..Default::default() },
+            ))
+        };
+        self.before_tex = Some(ctx.load_texture("before", img, egui::TextureOptions::LINEAR));
+        self.before_curve = curve.to_vec();
+    }
+
     /// Make `self.active`'s recipe + base pixels the live working state and
     /// rebuild the before texture. Per-variant transient state (undo history,
     /// local selection, view) restarts — like a soft re-open; what persists is
@@ -1553,14 +1615,14 @@ impl AutoshopApp {
         self.rationale = self.recipe.rationale.clone();
         // Base pixels: the variant's own baked raster, else the shared source
         // neutral (Original / Fitted re-develop the same negative).
+        let baked = v.base.is_some();
         let base = v.base.clone().or_else(|| self.source_preview.clone());
         if let Some(base) = base {
             let (mw, mh) = base.dimensions();
-            self.before_tex = Some(ctx.load_texture(
-                "before",
-                to_color_image(&base),
-                egui::TextureOptions::LINEAR,
-            ));
+            // Source variants compare against the canvas recipe's own base
+            // calibration (empty for legacy / fit recipes — deliberate).
+            let curve = if baked { Vec::new() } else { self.recipe.base_curve.clone() };
+            self.set_before(ctx, &base, &curve);
             self.base_preview = Some(base);
             // A fresh transparent paint mask sized to THIS base (a generated
             // raster and the source neutral can differ in dimensions).
@@ -1773,24 +1835,37 @@ impl AutoshopApp {
         );
     }
 
-    /// Reset undo history — call when a brand-new photo opens (you can't undo
-    /// across photos). `committed` becomes the current head.
+    /// The live working state as an [`UndoStep`]: current recipe + the active
+    /// variant's pixel identity. Arc/path clones only — never pixel copies.
+    fn current_step(&self) -> UndoStep {
+        UndoStep {
+            recipe: self.recipe.clone(),
+            base: self.active_variant().and_then(|v| v.base.clone()),
+            origin: self.active_variant().and_then(|v| v.origin.clone()),
+        }
+    }
+
+    /// Reset undo history — call when a brand-new photo opens or the active
+    /// variant changes (you can't undo across either). `committed` becomes the
+    /// current head.
     fn reset_history(&mut self) {
-        self.committed = self.recipe.clone();
+        self.committed = self.current_step();
         self.undo_stack.clear();
         self.redo_stack.clear();
     }
 
-    /// Commit the current recipe as ONE undo step once the edit gesture settles
+    /// Commit the current state as ONE undo step once the edit gesture settles
     /// (pointer released) — dragging a slider is one step, not one per frame.
-    /// Programmatic edits (Analyze, Reset) also land here on the next frame.
+    /// Programmatic edits (Analyze, Reset) and baked pixel retouches (the
+    /// variant base swap) also land here on the next frame.
     fn commit_if_settled(&mut self, ctx: &egui::Context) {
-        if self.recipe != self.committed && !ctx.input(|i| i.pointer.any_down()) {
-            self.undo_stack.push(self.committed.clone());
+        let cur = self.current_step();
+        let differs = cur.recipe != self.committed.recipe || !cur.same_pixels(&self.committed);
+        if differs && !ctx.input(|i| i.pointer.any_down()) {
+            self.undo_stack.push(std::mem::replace(&mut self.committed, cur));
             if self.undo_stack.len() > 100 {
                 self.undo_stack.remove(0); // cap history memory
             }
-            self.committed = self.recipe.clone();
             self.redo_stack.clear();
         }
     }
@@ -1810,23 +1885,59 @@ impl AutoshopApp {
         self.mask_name_buf = None; // stale (index, text) must not cross-commit
     }
 
-    fn undo(&mut self) {
+    /// Apply a history step: recipe always; the active variant's pixels only
+    /// when the step's identity differs (so plain slider undos stay pixel-free
+    /// and O(1)). A restored `base: None` reverts a retouched source variant
+    /// to the shared source neutral.
+    fn apply_step(&mut self, step: UndoStep, ctx: &egui::Context) {
+        let pixels_differ = !step.same_pixels(&self.committed);
+        self.committed = step.clone();
+        self.recipe = step.recipe;
+        if pixels_differ {
+            if let Some(v) = self.variants.get_mut(self.active) {
+                v.base = step.base;
+                v.origin = step.origin;
+            }
+            self.refresh_active_pixels(ctx);
+        }
+        self.dirty = true;
+        self.resync_recipe_display();
+    }
+
+    /// Rebuild the pixel-derived per-variant state after the active variant's
+    /// base changed under the same variant (retouch undo/redo): before pane,
+    /// paint canvas, overlay reference and the retained frame all described
+    /// the old raster. History is deliberately NOT touched here.
+    fn refresh_active_pixels(&mut self, ctx: &egui::Context) {
+        let Some(v) = self.variants.get(self.active) else { return };
+        let baked = v.base.is_some();
+        let base = v.base.clone().or_else(|| self.source_preview.clone());
+        if let Some(base) = base {
+            let (mw, mh) = base.dimensions();
+            let curve = if baked { Vec::new() } else { self.recipe.base_curve.clone() };
+            self.set_before(ctx, &base, &curve);
+            self.base_preview = Some(base);
+            self.mask_paint = Some(image::RgbaImage::new(mw, mh));
+            self.mask_tex = None;
+            self.mask_dirty = false;
+            self.paint_last = None;
+        }
+        self.overlay_ref = None;
+        self.overlay_stale = true;
+        self.last_rgb = None;
+    }
+
+    fn undo(&mut self, ctx: &egui::Context) {
         if let Some(prev) = self.undo_stack.pop() {
             self.redo_stack.push(self.committed.clone());
-            self.committed = prev.clone();
-            self.recipe = prev;
-            self.dirty = true;
-            self.resync_recipe_display();
+            self.apply_step(prev, ctx);
         }
     }
 
-    fn redo(&mut self) {
+    fn redo(&mut self, ctx: &egui::Context) {
         if let Some(next) = self.redo_stack.pop() {
             self.undo_stack.push(self.committed.clone());
-            self.committed = next.clone();
-            self.recipe = next;
-            self.dirty = true;
-            self.resync_recipe_display();
+            self.apply_step(next, ctx);
         }
     }
 
@@ -2571,10 +2682,11 @@ impl AutoshopApp {
         (dims, self.recipe.straighten_deg, self.recipe.lens_distortion)
     }
 
-    /// Draw the live histogram (R/G/B filled, luma outline) — the tone readout a
-    /// photo editor is expected to have. Sqrt-scaled so shadow detail reads.
-    /// The corner triangles are LR's clipping indicators: lit when the extreme
-    /// bin holds pixels; clicking either toggles the on-image J overlay.
+    /// Draw the live histogram (R/G/B filled, luma outline; one bin per 8-bit
+    /// code value on ONE shared vertical scale) — the tone readout a photo
+    /// editor is expected to have. Sqrt-scaled so shadow detail reads.
+    /// The corner triangles are LR's clipping indicators: lit when pixels sit
+    /// at the J-overlay thresholds (≤1 / ≥254); clicking toggles that overlay.
     fn histogram_ui(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         let Some(hist) = &self.histogram else { return };
@@ -2644,9 +2756,22 @@ impl AutoshopApp {
                 .join("+")
         };
         let mut toggle = false;
+        // The triangles judge the SAME thresholds as the J overlay (≤1 / ≥254):
+        // with one bin per code value that is the two extreme bins summed. The
+        // old 64-bin "extreme bin" spanned code values 0-3 / 252-255, so the
+        // warning lit on near-clipped pixels the overlay never marked.
+        let edge2 = |a: &[f32; 4], b: &[f32; 4]| -> [f32; 4] {
+            std::array::from_fn(|ch| a[ch] + b[ch])
+        };
+        let second = hist.get(1).unwrap_or(&hist[0]);
+        let shadow = edge2(&hist[0], second);
+        let highlight = edge2(
+            &hist[hist.len() - 1],
+            hist.get(hist.len().wrapping_sub(2)).unwrap_or(&hist[hist.len() - 1]),
+        );
         for (right, bins, what) in [
-            (false, &hist[0], "shadow crush"),
-            (true, &hist[hist.len() - 1], "highlight clip"),
+            (false, &shadow, "shadow crush"),
+            (true, &highlight, "highlight clip"),
         ] {
             let s = 10.0;
             let x0 = if right { rect.max.x - s - 4.0 } else { rect.min.x + 4.0 };
@@ -3467,11 +3592,8 @@ impl AutoshopApp {
                             let active_source =
                                 self.active_variant().is_none_or(|v| v.base.is_none());
                             if active_source {
-                                self.before_tex = Some(ctx.load_texture(
-                                    "before",
-                                    to_color_image(&base),
-                                    egui::TextureOptions::LINEAR,
-                                ));
+                                let curve = self.recipe.base_curve.clone();
+                                self.set_before(ctx, &base, &curve);
                                 self.mask_paint = Some(image::RgbaImage::new(mw, mh));
                                 self.mask_tex = None;
                                 self.mask_dirty = false;
@@ -3497,11 +3619,9 @@ impl AutoshopApp {
                             // — the gallery badge already promises "● edited",
                             // so opening must honour it — neutral otherwise.
                             let (mw, mh) = base.dimensions();
-                            self.before_tex = Some(ctx.load_texture(
-                                "before",
-                                to_color_image(&base),
-                                egui::TextureOptions::LINEAR,
-                            ));
+                            // before_tex is built AFTER the recipe is settled
+                            // below — the Before pane carries the canvas
+                            // recipe's own base_curve.
                             self.source_preview = Some(base.clone());
                             self.base_preview = Some(base);
                             let saved = self
@@ -3591,6 +3711,14 @@ impl AutoshopApp {
                                 thumb: None,
                             }];
                             self.active = 0;
+                            // Before = this photo's starting point under the
+                            // canvas recipe's own base calibration: stamped
+                            // fresh opens compare bright, legacy saves compare
+                            // as originally tuned.
+                            if let Some(b) = self.base_preview.clone() {
+                                let curve = self.recipe.base_curve.clone();
+                                self.set_before(ctx, &b, &curve);
+                            }
                             // A fresh, fully-transparent paint mask sized to the preview.
                             self.mask_paint = Some(image::RgbaImage::new(mw, mh));
                             self.mask_tex = None;
@@ -3934,11 +4062,9 @@ impl AutoshopApp {
                                     v.base = Some(img.clone());
                                     v.origin = Some(saved);
                                 }
-                                self.before_tex = Some(ctx.load_texture(
-                                    "before",
-                                    to_color_image(&img),
-                                    egui::TextureOptions::LINEAR,
-                                ));
+                                // A baked (retouched) base already carries the
+                                // camera look in its pixels — no curve.
+                                self.set_before(ctx, &img, &[]);
                                 // New baked base ⇒ the cached masks-cleared
                                 // reference develop no longer matches it.
                                 self.overlay_ref = None;
@@ -4871,6 +4997,37 @@ impl AutoshopApp {
                         changed = true;
                     }
                 });
+                // Radial geometry: edge feather + inside/outside flip — both
+                // engine-rendered, but neither had a control before (placement
+                // hardcodes feather 0.5; only an XMP import or the AI could
+                // ever change either).
+                if let MaskGeometry::Radial { feather, flipped, .. } =
+                    &mut self.recipe.masks[i].mask
+                {
+                    let mut geo_ch = false;
+                    ui.horizontal(|ui| {
+                        geo_ch |= Self::slider(
+                            ui,
+                            lang,
+                            tr(lang, "Edge feather"),
+                            feather,
+                            0.0,
+                            1.0,
+                            0.5,
+                        );
+                        geo_ch |= ui
+                            .checkbox(flipped, tr(lang, "Flip"))
+                            .on_hover_text(tr(
+                                lang,
+                                "Swap which side of the ellipse the adjustment affects (composes with Invert)",
+                            ))
+                            .changed();
+                    });
+                    if geo_ch {
+                        self.overlay_stale = true;
+                        changed = true;
+                    }
+                }
                 // --- Range Mask（LR 范围蒙版）: refines WHERE the geometry applies —
                 // final weight = geometry × range, live in preview + export + XMP.
                 {
@@ -6849,8 +7006,8 @@ impl eframe::App for AutoshopApp {
                     do_cheatsheet = true;
                 }
             });
-            if do_undo { self.undo(); }
-            if do_redo { self.redo(); }
+            if do_undo { self.undo(ctx); }
+            if do_redo { self.redo(ctx); }
             if do_cheatsheet {
                 self.show_shortcuts = !self.show_shortcuts;
             }
@@ -7041,14 +7198,16 @@ impl eframe::App for AutoshopApp {
                     .on_hover_text("Ctrl+Z")
                     .clicked()
                 {
-                    self.undo();
+                    let ctx = ui.ctx().clone();
+                    self.undo(&ctx);
                 }
                 if ui
                     .add_enabled(ready && !self.redo_stack.is_empty(), egui::Button::new(tr(lang, "↷ Redo")))
                     .on_hover_text("Ctrl+Y")
                     .clicked()
                 {
-                    self.redo();
+                    let ctx = ui.ctx().clone();
+                    self.redo(&ctx);
                 }
                 ui.separator();
                 ui.label(tr(lang, "Style")).on_hover_text(
@@ -7235,6 +7394,19 @@ impl eframe::App for AutoshopApp {
         // further edits only set `dirty`; the completion handler discards a stale
         // frame and this block re-dispatches the newest recipe next tick, so
         // fast drags coalesce to the worker's throughput without a render storm.
+        // The Before pane mirrors the canvas recipe's base_curve (calibration,
+        // not an edit — the ● logic ignores it, but the compare must not):
+        // Reset re-stamping a legacy photo, a paste, or a restore would
+        // otherwise leave the compare against a stale starting point. One
+        // cheap LUT-only develop, and only when the curve actually changed.
+        if self.src_path.is_some()
+            && self.active_variant().is_none_or(|v| v.base.is_none())
+            && self.recipe.base_curve != self.before_curve
+            && let Some(b) = self.base_preview.clone()
+        {
+            let curve = self.recipe.base_curve.clone();
+            self.set_before(ctx, &b, &curve);
+        }
         // A held-still pointer still needs a repaint to receive the result.
         if self.dirty && !self.develop_inflight {
             self.start_redevelop();

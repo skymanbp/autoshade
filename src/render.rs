@@ -585,12 +585,23 @@ fn apply_develop(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
         });
     }
     // 4) noise reduction — BEFORE sharpening (the order that matters most).
+    //    Radius stays pixel-scale by design (V2 spec §4d: noise grain lives at
+    //    sensor-pixel scale) — so NR judged on a downscaled preview reads
+    //    stronger than the full-res export delivers; a known perception gap.
     if r.noise_reduction > 0.0 {
         noise_reduce_luma(data, w, h, r.noise_reduction / 100.0);
     }
-    // 5) sharpening — small-radius unsharp mask.
+    // 5) sharpening — small-radius unsharp mask. Radius follows the V2 spec
+    //    σ = clamp(0.0008·min(w,h), 0.7, 2.0) (docs/V2_PLAN.md §4c) instead of
+    //    a hard-coded 1 px: one slider value used to mean structurally
+    //    different sharpening at 1280px preview vs a 61 MP export. Three box
+    //    passes of radius r ≈ Gaussian σ of √(r(r+1)), so σ rounds to the
+    //    box radius directly (preview ≤1536px → 1, larger frames cap at 2 —
+    //    clarity already scales with resolution the same way).
     if r.sharpening > 0.0 {
-        unsharp_luma(data, w, h, 1, r.sharpening / 100.0, false);
+        let sigma = (0.0008 * w.min(h) as f32).clamp(0.7, 2.0);
+        let radius = (sigma.round() as usize).max(1);
+        unsharp_luma(data, w, h, radius, r.sharpening / 100.0, false);
     }
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
@@ -852,12 +863,12 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // see `MaskGeometry::Radial` in recipe.rs. Nothing in the repo fixes its
         // scale or sign (the advisor schema declares a bare number; docs/
         // V2_PLAN.md §7 item 1 lists the radial ranges as unverified; every
-        // radial in the reference Lightroom sidecars carries Roundness="0"), and
-        // the sibling `feather` shows the cost of guessing: Lightroom writes it
-        // 0..100 and xmp.rs imports it raw, so the clamp below already reads an
-        // imported feather of 72 as fully feathered. Test
-        // radial_roundness_is_a_documented_no_op pins this no-op until a real
-        // sidecar with a non-zero roundness fixes the mapping.
+        // radial in the reference Lightroom sidecars carries Roundness="0").
+        // The sibling `feather` HAD the same guessing bug — Lightroom writes it
+        // 0..100 and xmp.rs used to import the value raw, so Feather="72"
+        // clamped to fully feathered; both XMP directions now convert on the
+        // boundary (xmp.rs). Test radial_roundness_is_a_documented_no_op pins
+        // the roundness no-op until a real sidecar fixes the mapping.
         MaskGeometry::Radial { top, left, bottom, right, feather, roundness: _, flipped } => {
             let cx = (left + right) / 2.0;
             let cy = (top + bottom) / 2.0;
@@ -1643,6 +1654,18 @@ pub fn curve_lut(points: &[crate::recipe::CurvePoint]) -> Vec<f32> {
         .map(|p| (p.input as f32 / 255.0, p.output as f32 / 255.0))
         .collect();
     pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Pin the endpoints Lightroom-style: a curve that places no point of its
+    // own AT an end keeps (0,0)/(1,1) authoritative there. Without the pins,
+    // interp's flat clamp beyond the first/last point turns a single mid-curve
+    // click into a constant image and flattens everything past any inner
+    // endpoint into crushed/blown bands. A user (or AI) point at exactly
+    // x=0 / x=1 still overrides the pin — lifted blacks stay expressible.
+    if pts[0].0 > 0.0 {
+        pts.insert(0, (0.0, 0.0));
+    }
+    if pts[pts.len() - 1].0 < 1.0 {
+        pts.push((1.0, 1.0));
+    }
     (0..256).map(|i| interp(&pts, i as f32 / 255.0)).collect()
 }
 
@@ -3615,6 +3638,35 @@ mod tests {
         let p = data[0];
         assert!(p[0] > 0.15, "red channel lifted: {p:?}");
         assert!(p[1] < 0.02 && p[2] < 0.02, "green/blue untouched: {p:?}");
+    }
+
+    #[test]
+    fn curve_lut_pins_missing_endpoints_but_keeps_explicit_ones() {
+        use crate::recipe::CurvePoint;
+        // One mid-curve click must NOT flatten the image to a constant: the
+        // missing (0,0)/(1,1) endpoints are pinned, so the LUT stays a real
+        // ramp through the clicked point.
+        let one = curve_lut(&[CurvePoint { input: 128, output: 128 }]);
+        assert!(one[0].abs() < 1e-6 && (one[255] - 1.0).abs() < 1e-6, "ends pinned");
+        assert!((one[128] - 128.0 / 255.0).abs() < 1e-2, "clicked point honoured");
+        assert!(one[64] > 0.1 && one[64] < 0.4, "shadows still a ramp, not clamped flat");
+        assert!(one[192] > 0.6 && one[192] < 0.9, "highlights still a ramp");
+
+        // Two inner points: everything outside them ramps to the pins instead
+        // of freezing into crushed/blown bands.
+        let two = curve_lut(&[
+            CurvePoint { input: 64, output: 64 },
+            CurvePoint { input: 192, output: 192 },
+        ]);
+        assert!(two[32] > 0.05 && two[32] < 0.2, "below-first ramps from (0,0)");
+        assert!(two[224] > 0.8 && two[224] < 0.95, "above-last ramps to (1,1)");
+
+        // An explicit endpoint stays authoritative — lifted blacks survive.
+        let lifted = curve_lut(&[
+            CurvePoint { input: 0, output: 40 },
+            CurvePoint { input: 255, output: 255 },
+        ]);
+        assert!((lifted[0] - 40.0 / 255.0).abs() < 1e-3, "explicit (0,40) wins over the pin");
     }
 
     /// Manual, machine-relative regression probe for the GUI's engine hot path.

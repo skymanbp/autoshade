@@ -104,10 +104,14 @@ fn ai_tone_curve_points(r: &EditRecipe) -> Vec<(f32, f32)> {
 }
 
 /// Build a 256-entry [0..255]→[0..255] LUT from tone-curve control points
-/// (piecewise-linear, clamped at the ends). Identity if fewer than 2 points.
+/// (piecewise-linear). Identity when empty. Endpoints are pinned to
+/// (0,0)/(255,255) unless the curve places its own point at an end — the same
+/// rule as `render::curve_lut`, so the judge scores the curve the engine
+/// actually renders (an unpinned copy would report e.g. a black lift the
+/// pinned render no longer produces).
 fn curve_lut(points: &[(f32, f32)]) -> [f32; 256] {
     let mut lut = [0f32; 256];
-    if points.len() < 2 {
+    if points.is_empty() {
         for (i, v) in lut.iter_mut().enumerate() {
             *v = i as f32;
         }
@@ -115,6 +119,12 @@ fn curve_lut(points: &[(f32, f32)]) -> [f32; 256] {
     }
     let mut pts = points.to_vec();
     pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    if pts[0].0 > 0.0 {
+        pts.insert(0, (0.0, 0.0));
+    }
+    if pts[pts.len() - 1].0 < 255.0 {
+        pts.push((255.0, 255.0));
+    }
     for (i, v) in lut.iter_mut().enumerate() {
         *v = interp255(&pts, i as f32);
     }

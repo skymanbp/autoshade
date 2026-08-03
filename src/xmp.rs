@@ -71,10 +71,17 @@ fn mask_geom_xml(g: &MaskGeometry) -> Option<(&'static str, String)> {
         )),
         MaskGeometry::Radial { top, left, bottom, right, feather, roundness, flipped } => Some((
             "Mask/CircularGradient",
-            format!(
-                " crs:Top=\"{top}\" crs:Left=\"{left}\" crs:Bottom=\"{bottom}\" crs:Right=\"{right}\" \
-crs:Feather=\"{feather}\" crs:Roundness=\"{roundness}\" crs:Flipped=\"{flipped}\""
-            ),
+            {
+                // Lightroom's crs:Feather lives on a 0..100 scale (reference
+                // sidecars carry integers like 50 / 72); the engine's is 0..1.
+                // The old writer emitted the raw 0..1 value, which Lightroom
+                // read as a nearly hard edge — convert on the boundary.
+                let lr_feather = (feather.clamp(0.0, 1.0) * 100.0).round();
+                format!(
+                    " crs:Top=\"{top}\" crs:Left=\"{left}\" crs:Bottom=\"{bottom}\" crs:Right=\"{right}\" \
+crs:Feather=\"{lr_feather}\" crs:Roundness=\"{roundness}\" crs:Flipped=\"{flipped}\""
+                )
+            },
         )),
         MaskGeometry::Bitmap { .. } => None,
     }
@@ -475,13 +482,22 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         )
     } else if let Some(p) = seg.find("crs:What=\"Mask/CircularGradient\"") {
         let g = &seg[p..];
+        // Lightroom's Feather is 0..100 (reference sidecars: 50 / 72 …); the
+        // engine's is 0..1. The old reader took the value raw, so every LR
+        // radial with Feather ≥ 1 clamped to fully feathered. Values ≤ 1.0
+        // pass through verbatim — that range is what OUR old writer emitted
+        // (breaking every legacy own sidecar to fix a genuine LR "Feather=1",
+        // i.e. 1%, is the wrong trade; the corner case is documented here).
+        let feather_raw = crs_f32(g, "Feather")?;
+        let feather =
+            if feather_raw > 1.0 { feather_raw / 100.0 } else { feather_raw };
         (
             MaskGeometry::Radial {
                 top: crs_f32(g, "Top")?,
                 left: crs_f32(g, "Left")?,
                 bottom: crs_f32(g, "Bottom")?,
                 right: crs_f32(g, "Right")?,
-                feather: crs_f32(g, "Feather")?,
+                feather,
                 roundness: crs_f32(g, "Roundness")?,
                 flipped: crs_str(g, "Flipped") == Some("true"),
             },
@@ -682,9 +698,25 @@ mod tests {
         assert!(xmp.contains(r#"crs:LocalShadows2012="0.2""#)); // 20 / 100
         assert!(xmp.contains(r#"crs:MaskInverted="true""#));
         assert!(xmp.contains(r#"crs:ZeroX="0.5""#));
-        assert!(xmp.contains(r#"crs:Feather="0.5""#));
+        // Feather crosses the boundary on Lightroom's 0..100 scale (engine 0.5
+        // → crs 50) — the old writer's raw "0.5" read in LR as a hard edge.
+        assert!(xmp.contains(r#"crs:Feather="50""#));
         // unset masks ⇒ no mask block (v1-compatible)
         assert!(!recipe_to_xmp(&EditRecipe::default()).contains("MaskGroupBasedCorrections"));
+    }
+
+    #[test]
+    fn radial_feather_converts_both_ways_and_keeps_legacy_own_scale() {
+        // LR-style integer feather imports onto the engine's 0..1 scale…
+        let li = r#"crs:What="Mask/CircularGradient" crs:Top="0.2" crs:Left="0.2" crs:Bottom="0.8" crs:Right="0.8" crs:Feather="72" crs:Roundness="0" crs:Flipped="false""#;
+        let m = parse_one_correction(li).expect("radial parses");
+        let MaskGeometry::Radial { feather, .. } = m.mask else { panic!("radial") };
+        assert!((feather - 0.72).abs() < 1e-6, "LR 72 → 0.72, got {feather}");
+        // …while a legacy own-writer value (≤ 1.0) passes through verbatim.
+        let legacy = li.replace(r#"crs:Feather="72""#, r#"crs:Feather="0.4""#);
+        let m = parse_one_correction(&legacy).expect("legacy radial parses");
+        let MaskGeometry::Radial { feather, .. } = m.mask else { panic!("radial") };
+        assert!((feather - 0.4).abs() < 1e-6, "legacy 0.4 stays 0.4, got {feather}");
     }
 
     #[test]

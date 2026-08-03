@@ -105,6 +105,7 @@ fn handle(mut request: Request, state: &AppState) -> Result<()> {
         (false, "/api/thumb") => api_image(&request, state, 256),
         (false, "/api/preview") => api_image(&request, state, PREVIEW_EDGE),
         (false, "/api/recipe") => api_recipe(&request, state),
+        (false, "/api/fresh-base") => api_fresh_base(&request, state),
         (false, "/api/style-info") => api_style_info(state),
         (true, "/api/style-build") => api_style_build(&mut request),
         (false, "/api/settings") => api_settings_get(state),
@@ -473,6 +474,17 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static ASCII header");
     Ok(Response::from_string(body).with_status_code(404).with_header(ct).boxed())
+}
+
+/// The photo's FRESH camera-matched base-look knots, regardless of any saved
+/// recipe — the web client's Reset needs them to mean "the fresh-open look"
+/// (the GUI's `photo_knots` rule): a legacy save deliberately carries an
+/// empty curve, and preserving that on Reset kept the photo dark. Cheap after
+/// the first call — `fresh_base_knots` reuses the cached `develop_base`.
+fn api_fresh_base(request: &Request, state: &AppState) -> Result<ResponseBox> {
+    let raw = raw_for(request, state)?;
+    let body = serde_json::json!({ "base_curve": fresh_base_knots(&raw) }).to_string();
+    Ok(json_text(body))
 }
 
 /// Style-library info for the UI's info box: is an index built, how many of the
