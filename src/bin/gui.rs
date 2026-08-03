@@ -117,6 +117,18 @@ const THUMB_H: f32 = 40.0;
 const GALLERY_ROW_H: f32 = 50.0; // fixed row height for ScrollArea::show_rows
 const MAX_THUMB_INFLIGHT: usize = 6; // cap concurrent thumbnail decodes
 const HSL_BANDS: [&str; 8] = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"];
+// Representative swatch per HSL band (row markers in the mixer — approximate
+// band-centre hues, display-only; the engine's band maths lives in render.rs).
+const HSL_SWATCH: [egui::Color32; 8] = [
+    egui::Color32::from_rgb(224, 72, 60),  // Red
+    egui::Color32::from_rgb(224, 141, 60), // Orange
+    egui::Color32::from_rgb(224, 211, 60), // Yellow
+    egui::Color32::from_rgb(76, 191, 90),  // Green
+    egui::Color32::from_rgb(60, 200, 200), // Aqua
+    egui::Color32::from_rgb(76, 120, 224), // Blue
+    egui::Color32::from_rgb(142, 90, 217), // Purple
+    egui::Color32::from_rgb(208, 82, 184), // Magenta
+];
 const GRADE_REGIONS: [&str; 4] = ["shadow", "midtone", "highlight", "global"];
 
 // Two-tier colour rule (deliberate, not drift):
@@ -616,7 +628,7 @@ struct AutoshopApp {
     verdict: Option<String>,
     rationale: String,
     style_strength: f32,
-    hsl_band: usize,
+    hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance
     grade_region: usize,
     guidance: String, // free-text direction for the AI ("warmer, moodier")
     refine: bool,     // adjust the CURRENT recipe vs propose from scratch
@@ -664,6 +676,10 @@ struct AutoshopApp {
     zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
     show_settings: bool,    // the Settings window is open
     show_shortcuts: bool,   // the keyboard cheat-sheet window is open (F1 / ? / ⌨)
+    // Tab hides both side panels (the LR grammar) for an edge-to-edge canvas.
+    // Session-only on purpose: relaunching with an invisible library reads as
+    // a broken app, so the state never persists.
+    panels_hidden: bool,
     settings: SettingsForm, // editable buffers for that window
     lang: Lang,             // UI language: English skeleton / Chinese overlay (i18n.rs)
     // --- library / gallery ---
@@ -718,7 +734,10 @@ struct AutoshopApp {
     // --- crop tool ---
     crop_mode: bool,                       // the crop overlay is active on the After image
     crop_aspect: usize,                    // index into CROP_ASPECTS
-    crop_drag: Option<(u8, egui::Pos2, [f32; 4])>, // (handle, drag start, crop at start)
+    // (handle, drag start, crop at start, straighten° at start). Handles:
+    // 0-3 corners, 4 move-inside, 5-8 edge midpoints (T/B/L/R), 9 = drag
+    // OUTSIDE the box → rotate-straighten (the LR gesture).
+    crop_drag: Option<(u8, egui::Pos2, [f32; 4], f32)>,
     mask_drag: Option<(u8, (f32, f32))>, // on-image mask knob drag: (handle, last pos in ORIG norm)
     // --- manual local adjustments (masks) ---
     sel_mask: Option<usize>,               // selected recipe.masks index (overlay + sliders)
@@ -756,6 +775,18 @@ struct AutoshopApp {
     preview_edge: u32,                     // working-preview long edge: 1280 fluid / 2560 / 4096 detail
     // --- recipe versions (gap batch G): ./out/<stem>.v<N>.recipe.json ---
     versions: Vec<u32>,                    // snapshot numbers found for the open photo (sorted)
+}
+
+/// Slider feel classes — Lightroom's stepping grammar. `Int`: whole-number
+/// domains (the ±100 family, 0..150, hue °); `Fine`: sub-unit precision
+/// (Straighten °); `Frac`: small fractional domains (EV, 0..1 amounts);
+/// `LogK`: the log-scaled Temp (K) track.
+#[derive(Copy, Clone)]
+enum SliderFeel {
+    Int,
+    Fine,
+    Frac,
+    LogK,
 }
 
 /// One undo/redo step: the recipe plus the active variant's pixel identity.
@@ -836,12 +867,16 @@ enum MaskKind {
 // Display names are English skeleton keys (localised via `tr` at the render
 // site); the ratio values are language-neutral. "1:1"…"9:16" have no ZH entry
 // and fall back to themselves in both languages.
-const CROP_ASPECTS: [(&str, Option<f32>); 7] = [
+const CROP_ASPECTS: [(&str, Option<f32>); 11] = [
     ("Free", None),
     ("Original", Some(0.0)),
     ("1:1", Some(1.0)),
     ("3:2", Some(1.5)),
     ("2:3", Some(2.0 / 3.0)),
+    ("4:3", Some(4.0 / 3.0)),
+    ("3:4", Some(3.0 / 4.0)),
+    ("5:4", Some(1.25)),
+    ("4:5", Some(0.8)),
     ("16:9", Some(16.0 / 9.0)),
     ("9:16", Some(9.0 / 16.0)),
 ];
@@ -894,7 +929,7 @@ impl Default for AutoshopApp {
             verdict: None,
             rationale: String::new(),
             style_strength: 0.30,
-            hsl_band: 0,
+            hsl_tab: 0,
             grade_region: 0,
             guidance: String::new(),
             refine: false,
@@ -906,6 +941,7 @@ impl Default for AutoshopApp {
             zoned_fit: true,
             show_settings: false,
             show_shortcuts: false,
+            panels_hidden: false,
             settings: SettingsForm::default(),
             // English is the default / skeleton language; a persisted pref
             // (restored in `new`) overrides this on launch.
@@ -4230,8 +4266,12 @@ impl AutoshopApp {
     }
 
     /// One labelled slider; double-click resets to `default` (the Lightroom
-    /// gesture). Returns true if the value changed this frame. Callers pass an
-    /// already-translated `label`; `lang` is only needed for the reset hover.
+    /// gesture), hover + ↑/↓ nudges by a domain-appropriate step (Shift ×10 —
+    /// LR's arrow grammar; ←/→ stay library navigation). Returns true if the
+    /// value changed this frame. Callers pass an already-translated `label`.
+    /// Whole-number domains (range ≥ 20: the ±100 family, 0..150, hue °) snap
+    /// to integers while dragging, like Lightroom — the web UI already had to
+    /// work around raw floats ("13.4849996…" overflowing its value box).
     fn slider(
         ui: &mut egui::Ui,
         lang: Lang,
@@ -4241,7 +4281,23 @@ impl AutoshopApp {
         max: f32,
         default: f32,
     ) -> bool {
-        Self::slider_impl(ui, lang, label, value, min, max, default, false)
+        let feel =
+            if max - min >= 20.0 { SliderFeel::Int } else { SliderFeel::Frac };
+        Self::slider_impl(ui, lang, label, value, min, max, default, feel)
+    }
+
+    /// Sub-unit precision variant (Straighten °): the whole-number snap of the
+    /// wide-range class would destroy 0.1° levelling on a ±45 track.
+    fn slider_fine(
+        ui: &mut egui::Ui,
+        lang: Lang,
+        label: &str,
+        value: &mut f32,
+        min: f32,
+        max: f32,
+        default: f32,
+    ) -> bool {
+        Self::slider_impl(ui, lang, label, value, min, max, default, SliderFeel::Fine)
     }
 
     /// Log-scaled variant for values whose useful band is a small fraction of
@@ -4257,10 +4313,10 @@ impl AutoshopApp {
         max: f32,
         default: f32,
     ) -> bool {
-        Self::slider_impl(ui, lang, label, value, min, max, default, true)
+        Self::slider_impl(ui, lang, label, value, min, max, default, SliderFeel::LogK)
     }
 
-    #[allow(clippy::too_many_arguments)] // private impl detail shared by two thin public shapes
+    #[allow(clippy::too_many_arguments)] // private impl detail shared by three thin public shapes
     fn slider_impl(
         ui: &mut egui::Ui,
         lang: Lang,
@@ -4269,16 +4325,55 @@ impl AutoshopApp {
         min: f32,
         max: f32,
         default: f32,
-        logarithmic: bool,
+        feel: SliderFeel,
     ) -> bool {
+        let range = max - min;
+        // (drag snap, ↑/↓ nudge, shown decimals) per feel class. Frac keeps
+        // EV at 0.1-arrow / 0.01-drag and 0..1 amounts at 0.01 / 0.001; LogK's
+        // nudge is ~1% of the current Kelvin (≈55 K at 5500) — a fixed step
+        // would be sub-pixel at one end of a log track and huge at the other.
+        let (snap, nudge, decimals) = match feel {
+            SliderFeel::Int => (1.0, 1.0, 0),
+            SliderFeel::Fine => (0.1, 0.1, 1),
+            SliderFeel::Frac => ((range / 1000.0).max(0.001), range / 100.0, 2),
+            SliderFeel::LogK => (1.0, ((*value).abs() * 0.01).max(1.0).round(), 0),
+        };
         let resp = ui
-            .add(egui::Slider::new(value, min..=max).logarithmic(logarithmic).text(label))
-            .on_hover_text(tr(lang, "double-click resets"));
+            .add(
+                egui::Slider::new(value, min..=max)
+                    .logarithmic(matches!(feel, SliderFeel::LogK))
+                    .step_by(snap as f64)
+                    .fixed_decimals(decimals)
+                    .text(label),
+            )
+            .on_hover_text(tr(lang, "double-click resets · hover + ↑/↓ nudges (Shift ×10)"));
         if resp.double_clicked() && *value != default {
             *value = default;
             return true;
         }
-        resp.changed()
+        let mut changed = resp.changed();
+        // The nudge is gated on "no widget owns the keyboard", so arrows typed
+        // into a text field can never double-apply here.
+        if resp.hovered() && ui.memory(|m| m.focused().is_none()) {
+            let shift = ui.input(|i| i.modifiers.shift);
+            let (up, down) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                        || i.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowUp),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                        || i.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowDown),
+                )
+            });
+            if up != down {
+                let step = nudge * if shift { 10.0 } else { 1.0 };
+                let next = (*value + if up { step } else { -step }).clamp(min, max);
+                if next != *value {
+                    *value = next;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// Left-most panel: the working-folder thumbnail gallery. Only visible rows
@@ -4627,25 +4722,36 @@ impl AutoshopApp {
             .id_salt("sec_hsl")
             .default_open(false)
             .show(ui, |ui| {
+                // LR's mixer layout: pick ONE property (Hue / Saturation /
+                // Luminance) and see all 8 bands at once. The old band picker
+                // showed one band at a time — every other band's state was
+                // invisible, the opposite of what a mixer is for.
                 ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("hsl_band")
-                        .selected_text(tr(lang, HSL_BANDS[self.hsl_band]))
-                        .show_ui(ui, |ui| {
-                            for (i, name) in HSL_BANDS.iter().enumerate() {
-                                ui.selectable_value(&mut self.hsl_band, i, tr(lang, name));
-                            }
-                        });
+                    for (i, name) in ["Hue", "Saturation", "Luminance"].iter().enumerate() {
+                        if ui.selectable_label(self.hsl_tab == i, tr(lang, name)).clicked() {
+                            self.hsl_tab = i;
+                        }
+                    }
                     if ui.small_button(tr(lang, "↺ reset all")).clicked() {
                         self.recipe.hsl = Hsl::default();
                         changed = true;
                     }
                 });
-                let b = self.hsl_band;
-                changed |= Self::slider(ui, lang, tr(lang, "Hue"), &mut self.recipe.hsl.hue[b], -100.0, 100.0, 0.0);
-                changed |=
-                    Self::slider(ui, lang, tr(lang, "Saturation"), &mut self.recipe.hsl.saturation[b], -100.0, 100.0, 0.0);
-                changed |=
-                    Self::slider(ui, lang, tr(lang, "Luminance"), &mut self.recipe.hsl.luminance[b], -100.0, 100.0, 0.0);
+                let tab = self.hsl_tab;
+                for (b, name) in HSL_BANDS.iter().enumerate() {
+                    let v = match tab {
+                        0 => &mut self.recipe.hsl.hue[b],
+                        1 => &mut self.recipe.hsl.saturation[b],
+                        _ => &mut self.recipe.hsl.luminance[b],
+                    };
+                    ui.horizontal(|ui| {
+                        // Band swatch so rows scan like LR's mixer.
+                        let (rect, _) = ui
+                            .allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 2.0, HSL_SWATCH[b]);
+                        changed |= Self::slider(ui, lang, tr(lang, name), v, -100.0, 100.0, 0.0);
+                    });
+                }
             });
 
         egui::CollapsingHeader::new(section_title(tr(lang, "Color Grading"), grade_active))
@@ -4725,8 +4831,9 @@ impl AutoshopApp {
                     }
                 });
                 // Straighten: rotate + auto-crop (engine rotate_straighten);
-                // the preview shows exactly the export geometry.
-                changed |= Self::slider(
+                // the preview shows exactly the export geometry. Fine class:
+                // levelling needs 0.1°, not the wide-range integer snap.
+                changed |= Self::slider_fine(
                     ui,
                     lang,
                     tr(lang, "Straighten (°)"),
@@ -4737,7 +4844,7 @@ impl AutoshopApp {
                 );
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Once in, drag the corner handles / move the crop box on the image; preview, export and XMP all match. Straighten auto-crops the black corners.",
+                        "Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box to rotate-straighten; preview, export and XMP all match. Straighten auto-crops the black corners.",
                     ))
                     .weak()
                     .small(),
@@ -5291,7 +5398,7 @@ impl AutoshopApp {
         let hint = if comparing {
             tr(lang, "Before (source) — release B to return to editing")
         } else if self.crop_mode {
-            tr(lang, "Crop — drag the handles to adjust, drag inside to move")
+            tr(lang, "Crop — drag corners/edges to resize, inside to move, outside to rotate")
         } else if self.placing_mask.is_some() {
             tr(lang, "Local adjustment — drag on the image to draw the gradient area")
         } else if self.wb_picking {
@@ -5834,8 +5941,9 @@ impl AutoshopApp {
         // this handler only owns the gesture.)
     }
 
-    /// The interactive crop overlay: darkened surround, thirds grid, four
-    /// corner handles (aspect-constrained) and move-inside. The crop lives in
+    /// The interactive crop overlay: darkened surround, thirds grid, corner +
+    /// edge handles (aspect-constrained), move-inside, and drag OUTSIDE the
+    /// box to rotate-straighten (the LR gesture set). The crop lives in
     /// `recipe.crop` (full-frame normalized) — exactly what the export render
     /// and the XMP already apply, so the tool adds no new data path.
     fn handle_crop(
@@ -5857,23 +5965,32 @@ impl AutoshopApp {
             .1
             .map(|r| if r == 0.0 { tex_size.x / tex_size.y.max(1.0) } else { r });
 
-        // Handle order: 0=TL 1=TR 2=BL 3=BR, 4=move (inside).
+        // Handle order: 0=TL 1=TR 2=BL 3=BR, 4=move (inside), 5=T 6=B 7=L 8=R
+        // edge midpoints, 9=rotate (anywhere outside the box).
         const HIT: f32 = 12.0; // handle pick radius, px — shared by drag + cursor
-        let corner_pos = |c: &[f32; 4], k: u8| match k {
+        let handle_pos = |c: &[f32; 4], k: u8| match k {
             0 => xf.to_screen(c[0], c[1]),
             1 => xf.to_screen(c[2], c[1]),
             2 => xf.to_screen(c[0], c[3]),
-            _ => xf.to_screen(c[2], c[3]),
+            3 => xf.to_screen(c[2], c[3]),
+            5 => xf.to_screen((c[0] + c[2]) / 2.0, c[1]),
+            6 => xf.to_screen((c[0] + c[2]) / 2.0, c[3]),
+            7 => xf.to_screen(c[0], (c[1] + c[3]) / 2.0),
+            _ => xf.to_screen(c[2], (c[1] + c[3]) / 2.0),
         };
+        // Corners win over edges on a tiny box (checked first); inside = move;
+        // anywhere else on the canvas = rotate-straighten, so the pick is
+        // total — implicit pan is already suppressed while crop is armed.
         let pick_handle = |c: &[f32; 4], p: egui::Pos2| {
-            (0..4)
-                .find(|&k| corner_pos(c, k).distance(p) <= HIT)
+            (0u8..4)
+                .chain(5u8..9)
+                .find(|&k| handle_pos(c, k).distance(p) <= HIT)
                 .or_else(|| {
                     let r = egui::Rect::from_min_max(
                         xf.to_screen(c[0], c[1]),
                         xf.to_screen(c[2], c[3]),
                     );
-                    r.contains(p).then_some(4)
+                    Some(if r.contains(p) { 4 } else { 9 })
                 })
         };
         // A stranded grab (Esc mid-drag, or leaving/re-entering crop mode)
@@ -5888,64 +6005,126 @@ impl AutoshopApp {
             // of travel, and a fast corner grab has already left the handle.
             let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
             if let Some(h) = pick_handle(&cur, origin) {
-                self.crop_drag = Some((h, p, cur));
+                self.crop_drag = Some((h, p, cur, self.recipe.straighten_deg));
             }
         }
         if resp.dragged()
-            && let (Some((h, start, orig)), Some(p)) = (self.crop_drag, resp.interact_pointer_pos())
+            && let (Some((h, start, orig, deg0)), Some(p)) =
+                (self.crop_drag, resp.interact_pointer_pos())
         {
-            let (sn, pn) = (xf.to_norm(start), xf.to_norm(p));
-            let (dx, dy) = (pn.0 - sn.0, pn.1 - sn.1);
-            let c: [f32; 4];
-            if h == 4 {
-                // Move: shift, clamped so the rect stays inside the frame.
-                let (w, hg) = (orig[2] - orig[0], orig[3] - orig[1]);
-                let nl = (orig[0] + dx).clamp(0.0, 1.0 - w);
-                let nt = (orig[1] + dy).clamp(0.0, 1.0 - hg);
-                c = [nl, nt, nl + w, nt + hg];
-            } else {
-                // Corner: drag it, anchored at the opposite corner.
-                let (ax, ay) = match h {
-                    0 => (orig[2], orig[3]),
-                    1 => (orig[0], orig[3]),
-                    2 => (orig[2], orig[1]),
-                    _ => (orig[0], orig[1]),
-                };
-                let mut x = (match h {
-                    0 | 2 => orig[0] + dx,
-                    _ => orig[2] + dx,
-                })
-                .clamp(0.0, 1.0);
-                let mut y = (match h {
-                    0 | 1 => orig[1] + dy,
-                    _ => orig[3] + dy,
-                })
-                .clamp(0.0, 1.0);
-                if let Some(r_px) = aspect {
-                    // Width drives; height follows the pixel ratio; if the
-                    // derived height leaves the frame, shrink both to fit.
-                    let top_corner = h == 0 || h == 1;
-                    let mut w_n = (x - ax).abs();
-                    let mut h_n = w_n * tex_size.x / (r_px * tex_size.y.max(1.0));
-                    let room = if top_corner { ay } else { 1.0 - ay };
-                    if h_n > room {
-                        h_n = room;
-                        w_n = h_n * r_px * tex_size.y / tex_size.x.max(1.0);
-                    }
-                    x = if x >= ax { ax + w_n } else { ax - w_n };
-                    y = if top_corner { ay - h_n } else { ay + h_n };
-                }
-                c = [x.min(ax), y.min(ay), x.max(ax), y.max(ay)];
-            }
-            if c[2] - c[0] >= 0.05 && c[3] - c[1] >= 0.05 {
-                let next = Some(Crop { left: c[0], top: c[1], right: c[2], bottom: c[3] });
-                // The crop IS a develop input: build_preview restricts the
-                // histogram + clipping to it, so a crop change that never sets
-                // `dirty` leaves both describing the OLD crop until some
-                // unrelated slider is touched.
-                if self.recipe.crop != next {
-                    self.recipe.crop = next;
+            if h == 9 {
+                // Rotate-straighten: drag outside the box (LR). Angle around
+                // the box centre, screen space — y-down atan2 makes clockwise
+                // positive, matching the engine's clockwise straighten °; the
+                // image turns WITH the drag. The box mapping is unaffected
+                // mid-drag (recipe.crop lives in the post-rotation view frame).
+                let a = xf.to_screen(orig[0], orig[1]);
+                let b = xf.to_screen(orig[2], orig[3]);
+                let centre = egui::pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+                let ang = |q: egui::Pos2| (q.y - centre.y).atan2(q.x - centre.x);
+                let next = (deg0 + (ang(p) - ang(start)).to_degrees()).clamp(-45.0, 45.0);
+                if self.recipe.straighten_deg != next {
+                    self.recipe.straighten_deg = next;
                     self.dirty = true;
+                }
+            } else {
+                let (sn, pn) = (xf.to_norm(start), xf.to_norm(p));
+                let (dx, dy) = (pn.0 - sn.0, pn.1 - sn.1);
+                // The preset is a PIXEL w/h ratio; geometry below works in
+                // normalised view space, so convert once.
+                let ratio_n =
+                    aspect.map(|r_px| r_px * tex_size.y.max(1.0) / tex_size.x.max(1.0));
+                let c: [f32; 4] = if h == 4 {
+                    // Move: shift, clamped so the rect stays inside the frame.
+                    let (w, hg) = (orig[2] - orig[0], orig[3] - orig[1]);
+                    let nl = (orig[0] + dx).clamp(0.0, 1.0 - w);
+                    let nt = (orig[1] + dy).clamp(0.0, 1.0 - hg);
+                    [nl, nt, nl + w, nt + hg]
+                } else if h == 5 || h == 6 {
+                    // Top/bottom edge: anchored at the opposite edge. Free
+                    // aspect moves only this edge; a fixed aspect rederives
+                    // the width centred on the box's vertical axis (the LR
+                    // edge behaviour), shrinking to stay in frame.
+                    let ay = if h == 5 { orig[3] } else { orig[1] };
+                    let y = (if h == 5 { orig[1] } else { orig[3] } + dy).clamp(0.0, 1.0);
+                    let mut h_n = (y - ay).abs();
+                    let (mut l, mut r) = (orig[0], orig[2]);
+                    if let Some(rn) = ratio_n {
+                        let cx = (orig[0] + orig[2]) / 2.0;
+                        let mut w_n = h_n * rn;
+                        let room = 2.0 * cx.min(1.0 - cx);
+                        if w_n > room {
+                            w_n = room;
+                            h_n = w_n / rn;
+                        }
+                        l = cx - w_n / 2.0;
+                        r = cx + w_n / 2.0;
+                    }
+                    let y = if h == 5 { ay - h_n } else { ay + h_n };
+                    [l, y.min(ay), r, y.max(ay)]
+                } else if h == 7 || h == 8 {
+                    // Left/right edge — the transpose of the above.
+                    let ax = if h == 7 { orig[2] } else { orig[0] };
+                    let x = (if h == 7 { orig[0] } else { orig[2] } + dx).clamp(0.0, 1.0);
+                    let mut w_n = (x - ax).abs();
+                    let (mut t, mut b) = (orig[1], orig[3]);
+                    if let Some(rn) = ratio_n {
+                        let cy = (orig[1] + orig[3]) / 2.0;
+                        let mut h_n = w_n / rn;
+                        let room = 2.0 * cy.min(1.0 - cy);
+                        if h_n > room {
+                            h_n = room;
+                            w_n = h_n * rn;
+                        }
+                        t = cy - h_n / 2.0;
+                        b = cy + h_n / 2.0;
+                    }
+                    let x = if h == 7 { ax - w_n } else { ax + w_n };
+                    [x.min(ax), t, x.max(ax), b]
+                } else {
+                    // Corner: drag it, anchored at the opposite corner.
+                    let (ax, ay) = match h {
+                        0 => (orig[2], orig[3]),
+                        1 => (orig[0], orig[3]),
+                        2 => (orig[2], orig[1]),
+                        _ => (orig[0], orig[1]),
+                    };
+                    let mut x = (match h {
+                        0 | 2 => orig[0] + dx,
+                        _ => orig[2] + dx,
+                    })
+                    .clamp(0.0, 1.0);
+                    let mut y = (match h {
+                        0 | 1 => orig[1] + dy,
+                        _ => orig[3] + dy,
+                    })
+                    .clamp(0.0, 1.0);
+                    if let Some(rn) = ratio_n {
+                        // Width drives; height follows the ratio; if the
+                        // derived height leaves the frame, shrink both to fit.
+                        let top_corner = h == 0 || h == 1;
+                        let mut w_n = (x - ax).abs();
+                        let mut h_n = w_n / rn;
+                        let room = if top_corner { ay } else { 1.0 - ay };
+                        if h_n > room {
+                            h_n = room;
+                            w_n = h_n * rn;
+                        }
+                        x = if x >= ax { ax + w_n } else { ax - w_n };
+                        y = if top_corner { ay - h_n } else { ay + h_n };
+                    }
+                    [x.min(ax), y.min(ay), x.max(ax), y.max(ay)]
+                };
+                if c[2] - c[0] >= 0.05 && c[3] - c[1] >= 0.05 {
+                    let next = Some(Crop { left: c[0], top: c[1], right: c[2], bottom: c[3] });
+                    // The crop IS a develop input: build_preview restricts the
+                    // histogram + clipping to it, so a crop change that never
+                    // sets `dirty` leaves both describing the OLD crop until
+                    // some unrelated slider is touched.
+                    if self.recipe.crop != next {
+                        self.recipe.crop = next;
+                        self.dirty = true;
+                    }
                 }
             }
         }
@@ -5971,7 +6150,10 @@ impl AutoshopApp {
             ui.ctx().set_cursor_icon(match h {
                 0 | 3 => egui::CursorIcon::ResizeNwSe, // TL/BR diagonal
                 1 | 2 => egui::CursorIcon::ResizeNeSw, // TR/BL diagonal
-                _ => egui::CursorIcon::Move,           // inside: move the window
+                5 | 6 => egui::CursorIcon::ResizeVertical, // top/bottom edge
+                7 | 8 => egui::CursorIcon::ResizeHorizontal, // left/right edge
+                4 => egui::CursorIcon::Move,           // inside: move the window
+                _ => egui::CursorIcon::Grab,           // outside: rotate-straighten
             });
         }
 
@@ -6006,7 +6188,17 @@ impl AutoshopApp {
         p.rect_stroke(r, 0.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
         for k in 0..4u8 {
             p.rect_filled(
-                egui::Rect::from_center_size(corner_pos(&c, k), egui::vec2(9.0, 9.0)),
+                egui::Rect::from_center_size(handle_pos(&c, k), egui::vec2(9.0, 9.0)),
+                1.0,
+                egui::Color32::WHITE,
+            );
+        }
+        // Edge midpoints as slim pills, so the affordance reads as "this edge"
+        // rather than a fifth corner.
+        for k in [5u8, 6, 7, 8] {
+            let sz = if k <= 6 { egui::vec2(15.0, 5.0) } else { egui::vec2(5.0, 15.0) };
+            p.rect_filled(
+                egui::Rect::from_center_size(handle_pos(&c, k), sz),
                 1.0,
                 egui::Color32::WHITE,
             );
@@ -6998,13 +7190,18 @@ impl eframe::App for AutoshopApp {
         // Global shortcuts. Skip while a widget is focused so the Direction text
         // field keeps its own text editing / undo. Ctrl+Z/Y = undo/redo,
         // Ctrl+O = open, Ctrl+E = export, Ctrl+S = save XMP, ←/→ = walk the
-        // gallery — the keyboard grammar of every desktop photo editor.
+        // gallery, R = crop, [ ] = brush size, Tab = hide the side panels —
+        // the keyboard grammar of every desktop photo editor.
         if ctx.memory(|m| m.focused()).is_none() {
             let (mut do_undo, mut do_redo, mut do_open, mut do_export, mut do_xmp) =
                 (false, false, false, false, false);
             let (mut do_escape, mut do_overlay, mut do_clip) = (false, false, false);
-            let mut do_cheatsheet = false;
+            let (mut do_cheatsheet, mut do_crop, mut do_panels) = (false, false, false);
             let mut nav: i32 = 0;
+            let mut brush_delta: f32 = 0.0;
+            // [ / ] belong to the active brush tool; when none is armed the
+            // keys stay unconsumed (free for egui / future bindings).
+            let brush_tool = self.paint_mode || self.clone_mode;
             ctx.input_mut(|i| {
                 if i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z) { do_redo = true; }
                 if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y) { do_redo = true; }
@@ -7017,6 +7214,12 @@ impl eframe::App for AutoshopApp {
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) { do_escape = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::O) { do_overlay = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::J) { do_clip = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::R) { do_crop = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) { do_panels = true; }
+                if brush_tool {
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::OpenBracket) { brush_delta = -4.0; }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::CloseBracket) { brush_delta = 4.0; }
+                }
                 // F1 / ? — the cheat-sheet (Shift+/ produces ? on most layouts).
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::F1)
                     || i.consume_key(egui::Modifiers::NONE, egui::Key::Questionmark)
@@ -7027,6 +7230,24 @@ impl eframe::App for AutoshopApp {
             });
             if do_undo { self.undo(ctx); }
             if do_redo { self.redo(ctx); }
+            // R mirrors the crop button exactly (incl. the one-tool-at-a-time
+            // disarms); no photo → nothing to crop.
+            if do_crop && self.src_path.is_some() {
+                self.crop_mode = !self.crop_mode;
+                if self.crop_mode {
+                    self.paint_mode = false;
+                    self.placing_mask = None;
+                    self.wb_picking = false;
+                    self.range_picking = None;
+                    self.clone_mode = false;
+                }
+            }
+            if do_panels {
+                self.panels_hidden = !self.panels_hidden;
+            }
+            if brush_delta != 0.0 {
+                self.brush = (self.brush + brush_delta).clamp(4.0, 80.0);
+            }
             if do_cheatsheet {
                 self.show_shortcuts = !self.show_shortcuts;
             }
@@ -7386,24 +7607,28 @@ impl eframe::App for AutoshopApp {
                 });
         }
 
-        // Left-most: the library gallery (folder browse + thumbnails).
-        egui::SidePanel::left("gallery").default_width(240.0).show(ctx, |ui| {
-            self.gallery_panel(ui);
-        });
-
-        egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if self.src_path.is_some() {
-                    self.develop_panel(ui);
-                    self.retouch_panel(ui);
-                    // Verdict + rationale moved to the TOP of develop_panel
-                    // ("AI verdict" section) — the output of the headline
-                    // feature no longer hides below every adjustment section.
-                } else {
-                    ui.label(tr(self.lang, "No photo open."));
-                }
+        // Left-most: the library gallery (folder browse + thumbnails), then
+        // the develop controls. Tab collapses both for an edge-to-edge canvas
+        // (LR's panel-hiding grammar); all state lives on, only layout skips.
+        if !self.panels_hidden {
+            egui::SidePanel::left("gallery").default_width(240.0).show(ctx, |ui| {
+                self.gallery_panel(ui);
             });
-        });
+
+            egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if self.src_path.is_some() {
+                        self.develop_panel(ui);
+                        self.retouch_panel(ui);
+                        // Verdict + rationale moved to the TOP of develop_panel
+                        // ("AI verdict" section) — the output of the headline
+                        // feature no longer hides below every adjustment section.
+                    } else {
+                        ui.label(tr(self.lang, "No photo open."));
+                    }
+                });
+            });
+        }
 
         // Re-develop AFTER the controls are read (so this frame reflects edits).
         // The preview build runs on a SINGLE background worker (latest wins), so
@@ -7555,12 +7780,16 @@ impl eframe::App for AutoshopApp {
                     // Runtime table (not `const`): the ZH column is resolved by
                     // `tr` at draw time. ASCII key combos + "Fit ↔ 1:1" carry no
                     // natural-language words, so they stay literal.
-                    let rows: [(&str, &str); 18] = [
+                    let rows: [(&str, &str); 22] = [
                         ("Ctrl+O", tr(lang, "Open photo")),
                         ("Ctrl+E", tr(lang, "Export → ./out")),
                         ("Ctrl+S", tr(lang, "Save XMP sidecar")),
                         ("Ctrl+Z / Ctrl+Y", tr(lang, "Undo / Redo")),
                         ("← / →", tr(lang, "Step through the library")),
+                        ("R", tr(lang, "Enter / exit crop")),
+                        ("[ / ]", tr(lang, "Brush size (paint / clone armed)")),
+                        ("Tab", tr(lang, "Hide / show the side panels")),
+                        (tr(lang, "Hover a slider + ↑/↓"), tr(lang, "Nudge its value (Shift ×10)")),
                         (tr(lang, "B (hold)"), tr(lang, "Compare original")),
                         ("O", tr(lang, "Toggle mask overlay")),
                         ("J", tr(lang, "Toggle clipping warning")),

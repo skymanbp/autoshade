@@ -192,7 +192,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Develop · shared slider helper ───────────────────────────────────────
     // NOT 归零: five sliders reset to a non-zero default (Temp 5500, Blending/
     // Midpoint 50, Lum. high 1.0, Feather 0.1) — matches 重置为默认值 in F1.
-    ("double-click resets", "双击恢复默认值 / double-click reset"),
+    ("double-click resets · hover + ↑/↓ nudges (Shift ×10)",
+        "双击恢复默认值 · 悬停按 ↑/↓ 微调（Shift ×10）"),
 
     // ── Develop · panel + Tone & WB ──────────────────────────────────────────
     ("Develop", "显影 · Develop"),
@@ -250,8 +251,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Crop", "裁剪 · Crop"),
     ("⛶ Enter crop", "⛶ 进入裁剪"),
     ("Straighten (°)", "拉直 (°)"),
-    ("Once in, drag the corner handles / move the crop box on the image; preview, export and XMP all match. Straighten auto-crops the black corners.",
-        "进入后，在图上拖角柄 / 移动裁剪框；预览、导出与 XMP 三者一致。拉直会自动裁掉黑边。"),
+    ("Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box to rotate-straighten; preview, export and XMP all match. Straighten auto-crops the black corners.",
+        "进入后（R）：拖角/边把手调整大小、框内拖动移动、框外拖动旋转拉直；预览、导出与 XMP 三者一致。拉直会自动裁掉黑边。"),
     ("Lens", "镜头 · Lens"),
     ("Vignette", "暗角"),
     ("Midpoint", "中点"),
@@ -342,7 +343,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Canvas · mode hints + zoom / clip / preview-edge (after_view) ────────
     ("Before (source) — release B to return to editing", "Before (source) — 松开 B 回到编辑"),
-    ("Crop — drag the handles to adjust, drag inside to move", "裁剪 — 拖角柄调整，框内拖动移动"),
+    ("Crop — drag corners/edges to resize, inside to move, outside to rotate",
+        "裁剪 — 拖角/边把手调整，框内拖动移动，框外拖动旋转拉直"),
     ("Local adjustment — drag on the image to draw the gradient area", "局部调整 — 在图上拖拽画出渐变范围"),
     ("WB eyedropper — click a spot that should be neutral grey/white", "WB 吸管 — 点击应为中性灰/白的位置"),
     ("Colour range — click the colour to pick in the image", "颜色范围 — 点击图中要选取的颜色"),
@@ -596,6 +598,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Save XMP sidecar", "保存 XMP sidecar"),
     ("Undo / Redo", "撤销 / 重做"),
     ("Step through the library", "图库走图"),
+    ("Enter / exit crop", "进入 / 退出裁剪"),
+    ("Brush size (paint / clone armed)", "笔刷大小（画笔 / 克隆已启用时）"),
+    ("Hide / show the side panels", "隐藏 / 显示侧栏"),
+    ("Hover a slider + ↑/↓", "悬停滑杆 + ↑/↓"),
+    ("Nudge its value (Shift ×10)", "微调数值（Shift ×10）"),
     ("B (hold)", "B（按住）"),
     ("Compare original", "对比原图"),
     ("Toggle mask overlay", "蒙版覆盖层开关"),
