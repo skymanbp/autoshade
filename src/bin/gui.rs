@@ -2199,12 +2199,15 @@ impl AutoshopApp {
         let mut cancel = false;
         // The global shortcut block is gated off while this layer is up, so
         // the promised keyboard grammar is honoured HERE: Esc = the safe
-        // escape, Enter = the safe default (save everything).
+        // escape (always), Enter = the safe default (save everything) — but
+        // only while NO button holds keyboard focus, or Enter on a focused
+        // Cancel/Discard would fire Save instead of the focused control.
+        let widget_focused = ctx.memory(|m| m.focused()).is_some();
         ctx.input_mut(|i| {
             if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
                 cancel = true;
             }
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+            if !widget_focused && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
                 save_quit = true;
             }
         });
@@ -5620,6 +5623,8 @@ impl AutoshopApp {
             .id_salt("sec_export")
             .default_open(false)
             .show(ui, |ui| {
+                // One setting per row: two label+combo pairs in a non-wrapping
+                // horizontal overflowed the 320px panel in Chinese.
                 ui.horizontal(|ui| {
                     ui.label(tr(lang, "Format"));
                     egui::ComboBox::from_id_salt("save_fmt")
@@ -5628,6 +5633,8 @@ impl AutoshopApp {
                             ui.selectable_value(&mut self.save_jpeg, false, tr(lang, "16-bit TIFF"));
                             ui.selectable_value(&mut self.save_jpeg, true, "JPEG");
                         });
+                });
+                ui.horizontal(|ui| {
                     ui.label(tr(lang, "Long edge"));
                     egui::ComboBox::from_id_salt("exp_long_edge")
                         .selected_text(if self.exp_long_edge == 0 {
@@ -7886,21 +7893,10 @@ impl eframe::App for AutoshopApp {
                 if self.busy {
                     ui.spinner();
                 }
-                // Live batch-render progress. Lives HERE with the spinner —
-                // its old home at the START of the toolbar shifted every
-                // control right by ~160px exactly while the user was waiting.
-                if let Some((done, total)) = self.batch_progress {
-                    ui.add(
-                        egui::ProgressBar::new(done as f32 / total.max(1) as f32)
-                            .desired_width(150.0)
-                            .text(trf(self.lang, "Batch {done}/{total}",
-                                &[("done", &done.to_string()), ("total", &total.to_string())])),
-                    );
-                }
                 // The unsaved marker: canvas differs from the saved develop
                 // (base_curve excluded — calibration is not an edit, dirty_vs).
-                // It sits BEFORE the status text so a long message can never
-                // push it out of view.
+                // It sits FIRST — before the batch bar and the status text —
+                // so neither can ever push it out of view at narrow widths.
                 if self.src_path.is_some() && dirty_vs(&self.recipe, &self.saved_recipe) {
                     ui.label(
                         egui::RichText::new(tr(self.lang, "● unsaved"))
@@ -7910,6 +7906,17 @@ impl eframe::App for AutoshopApp {
                         self.lang,
                         "Edits differ from your saved develop — Ctrl+S saves; switching photos keeps them for this session only",
                     ));
+                }
+                // Live batch-render progress, beside the spinner (its old home
+                // at the START of the toolbar shifted every control right by
+                // ~160px exactly while the user was waiting).
+                if let Some((done, total)) = self.batch_progress {
+                    ui.add(
+                        egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                            .desired_width(150.0)
+                            .text(trf(self.lang, "Batch {done}/{total}",
+                                &[("done", &done.to_string()), ("total", &total.to_string())])),
+                    );
                 }
                 // Long messages (paths, batch reports) must clip, not blow the
                 // panel wide; the full text is one hover away.

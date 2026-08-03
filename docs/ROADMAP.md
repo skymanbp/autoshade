@@ -65,8 +65,13 @@
      Title Case（Shadows/Midtones/Highlights/Global）、"＋ Radial"→
      "＋ Radial gradient"、🖊→⎘ 图章双钮同形。
   i18n：+40 新键 −26 死键（审计 407 调用点 0 漏译/0 漂移/0 重复）。
-  验证：**124 lib + 9 gui** 全绿、clippy --all-targets 0、双 exe（gui
-  34957187 / cli 26875258 未变——纯 GUI）。真机验收点：工具栏一行放下；
+  Codex 只读复审 3 条**全修**（其余检查项全 clean，含 python 块交换无
+  丢码、resync 全禁武装的四个调用点逐一判定安全、放置按钮互切正确）：
+  ①退出层 Enter 全局吞键会盖过持焦的 Cancel/Discard→仅无控件持焦时触发；
+  ②Export 节 Format+Long edge 同行两组合框中文下溢出 320px 面板→一行
+  一项；③状态栏批量进度条排在 ● unsaved 前会在窄窗把标记挤出→标记
+  最前。验证：**124 lib + 9 gui** 全绿、clippy --all-targets 0、终版
+  gui exe 34957433（cli 26875258 字节不变——纯 GUI）。真机验收点：工具栏一行放下；
   导出设置在 Export 节且按钮 hover 显摘要；AI 三件在 AI 区；节序 LR 化；
   武装任何工具有 ACCENT 提示+Esc 可退；退出确认层 Esc/Enter 可用。
   记录未做（盘点在案）：变体条重构/状态栏上下文组/WB Temp 常驻/版本
