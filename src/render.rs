@@ -2286,6 +2286,127 @@ fn lens_geom_factor(rn: f32, dist_knots: &[f32], s_p: f32, k: f32, s: f32) -> f3
     f1 * f2
 }
 
+/// The base image `camera_base_knots` should be fed for a photo whose canvas
+/// starts from a stamped lens profile: the neutral develop with the profile
+/// VIGNETTE applied (the camera JPEG the estimator matches against already
+/// contains that correction — estimating on the uncorrected neutral bakes
+/// the corner lift into the global curve a second time). Pre-thumbnailed to
+/// the estimator's own working size, so the extra develop pass is a LUT walk
+/// over ≤1 MP, not the full frame. Geometry is skipped on purpose: it moves
+/// pixels, not their luma histogram.
+pub fn estimation_base(
+    neutral: &DynamicImage,
+    lens: &crate::recipe::LensProfile,
+) -> DynamicImage {
+    let small = if neutral.width().max(neutral.height()) > 1024 {
+        neutral.thumbnail(1024, 1024)
+    } else {
+        neutral.clone()
+    };
+    if !lens.vignette_active() {
+        return small;
+    }
+    let vig_only = EditRecipe {
+        lens_profile: crate::recipe::LensProfile {
+            vignette: lens.vignette.clone(),
+            vignette_on: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    develop_preview(&small, &vig_only)
+}
+
+/// Bilinear sample of an RGBA8 buffer; out-of-frame reads are TRANSPARENT —
+/// an overlay raster must vanish where the remap leaves the source, not
+/// smear its edge pixels (the RGB16 paths clamp instead, correct for photos).
+fn sample_bilinear_rgba8(src: &image::RgbaImage, x: f32, y: f32) -> image::Rgba<u8> {
+    let (w, h) = (src.width() as i32, src.height() as i32);
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let px = |xi: i32, yi: i32| -> [f32; 4] {
+        if xi < 0 || yi < 0 || xi >= w || yi >= h {
+            [0.0; 4]
+        } else {
+            let p = src.get_pixel(xi as u32, yi as u32).0;
+            [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32]
+        }
+    };
+    let (a, b, c, d) = (px(x0, y0), px(x0 + 1, y0), px(x0, y0 + 1), px(x0 + 1, y0 + 1));
+    let mut o = [0u8; 4];
+    for i in 0..4 {
+        let top = a[i] * (1.0 - fx) + b[i] * fx;
+        let bot = c[i] * (1.0 - fx) + d[i] * fx;
+        o[i] = (top * (1.0 - fy) + bot * fy).round().clamp(0.0, 255.0) as u8;
+    }
+    image::Rgba(o)
+}
+
+/// Alpha-preserving twin of [`apply_lens_geometry`] for UI overlay rasters
+/// (the paint canvas): the RGB16 photo path flattens transparency to opaque,
+/// which turned the whole canvas into a red wash the moment any geometry was
+/// active. Green map only — an overlay needs no chromatic refinement.
+pub fn apply_lens_geometry_rgba(
+    src: &image::RgbaImage,
+    profile: &crate::recipe::LensProfile,
+    amount: f32,
+) -> image::RgbaImage {
+    let dist_on = profile.distortion_on && !profile.distortion.is_empty();
+    if !dist_on && amount.abs() < 1e-3 {
+        return src.clone();
+    }
+    let (w, h) = (src.width() as f32, src.height() as f32);
+    let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
+    let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
+    let s_p = if dist_on { profile_fill_scale(&profile.distortion, (w, h)) } else { 1.0 };
+    let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
+    let (cx, cy) = ((w - 1.0) * 0.5, (h - 1.0) * 0.5);
+    let ow = src.width() as usize;
+    let mut out = image::RgbaImage::new(src.width(), src.height());
+    let obuf: &mut [u8] = &mut out;
+    obuf.par_chunks_mut(ow * 4).enumerate().for_each(|(y, orow)| {
+        let dy = y as f32 - cy;
+        for x in 0..ow {
+            let dx = x as f32 - cx;
+            let rn = ((dx * dx + dy * dy).sqrt() / rr).clamp(0.0, 1.0);
+            let f = lens_geom_factor(rn, dist_knots, s_p, k, s);
+            orow[x * 4..x * 4 + 4]
+                .copy_from_slice(&sample_bilinear_rgba8(src, cx + dx * f, cy + dy * f).0);
+        }
+    });
+    out
+}
+
+/// Alpha-preserving twin of [`rotate_straighten`] for UI overlay rasters —
+/// same inverse rotation matrix and inscribed-crop output size.
+pub fn rotate_straighten_rgba(src: &image::RgbaImage, deg: f32) -> image::RgbaImage {
+    if deg.abs() < 1e-3 {
+        return src.clone();
+    }
+    let (w, h) = (src.width() as f32, src.height() as f32);
+    let (cw, ch) = inscribed_dims(w, h, deg);
+    let (ow, oh) = ((cw.floor() as u32).max(1), (ch.floor() as u32).max(1));
+    let rad = deg.to_radians();
+    let (s, c) = (rad.sin(), rad.cos());
+    let (cx_src, cy_src) = ((w - 1.0) * 0.5, (h - 1.0) * 0.5);
+    let (cx_dst, cy_dst) = ((ow as f32 - 1.0) * 0.5, (oh as f32 - 1.0) * 0.5);
+    let ow_px = ow as usize;
+    let mut out = image::RgbaImage::new(ow, oh);
+    let obuf: &mut [u8] = &mut out;
+    obuf.par_chunks_mut(ow_px * 4).enumerate().for_each(|(y, orow)| {
+        let dy = y as f32 - cy_dst;
+        for x in 0..ow_px {
+            let dx = x as f32 - cx_dst;
+            let sx = cx_src + c * dx + s * dy;
+            let sy = cy_src - s * dx + c * dy;
+            orow[x * 4..x * 4 + 4].copy_from_slice(&sample_bilinear_rgba8(src, sx, sy).0);
+        }
+    });
+    out
+}
+
 /// Corrected-frame normalised point → ORIGINAL-frame normalised point through
 /// the COMPOSED geometry (profile distortion + manual amount — the green map;
 /// CA is a render-only chromatic refinement the GUI never needs). Falls back

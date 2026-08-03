@@ -258,7 +258,12 @@ pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
         }
     };
     match crate::render::render_to_image(raw, &EditRecipe::default(), None) {
-        Ok(neutral) => crate::render::camera_base_knots(&neutral, &camera),
+        Ok(neutral) => {
+            // Estimate on the profile-vignette-corrected neutral — the same
+            // base a stamped canvas starts from (see render::estimation_base).
+            let est = crate::render::estimation_base(&neutral, &fresh_lens_profile(raw));
+            crate::render::camera_base_knots(&est, &camera)
+        }
         Err(e) => {
             // Disclosed, not silent: the caller's own render will surface the
             // same failure loudly, but the resulting darker-than-canvas output

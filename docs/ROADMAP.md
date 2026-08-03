@@ -56,8 +56,18 @@
      面上不漂移；ensure_mask_tex 变换键含 profile 开关。
   验证：**124 lib（+4：lensmeta 真值/序列化契约/引擎复合与往返/LRU 载
   荷）+ 9 gui** 全绿、clippy --all-targets 0、i18n 390 键 0/0/0、真机
-  lensmeta 探针 PASS（16 节点×3）、双 exe（gui 34913095 / cli
-  26852437）。真机验收点：开新 ARW 畸变/暗角/CA 即校正（对比机内 JPEG
+  lensmeta 探针 PASS（16 节点×3）。Codex 只读复审 5 条**全修**：①web
+  预览从不做几何（旧账——手动畸变/拉直也从未进 web 预览面板）→
+  api_develop 补齐引擎几何链（镜头几何→拉直，不裁剪与 GUI 预览同策）；
+  ②画笔覆盖层经 RGB16 路径 **alpha 被打平**（拉直旧账，profile 默认开
+  使其必现：整画布红纱）→ 新 `apply_lens_geometry_rgba` /
+  `rotate_straighten_rgba` 保 alpha 双胞胎（框外采样=透明）；③变换键
+  粒度 geometry_active 布尔无法区分畸变/CA 组合→键改 profile 畸变
+  专项布尔（CA 不移动覆盖层）；④基调估计在未校正中性上匹配已校正的
+  机内 JPEG=角落提亮被全局曲线二次吸收→新 `render::estimation_base`
+  （暗角校正后 ≤1MP 中性）统一 GUI/pipeline/serve 三处估计基准；
+  ⑤is_as_stamped 只查 ca_r——半损档（有红无蓝）误判为盖戳态→改查
+  CA 数据对。终版双 exe（gui 34936997 / cli 26875258）。真机验收点：开新 ARW 畸变/暗角/CA 即校正（对比机内 JPEG
   构图应一致）；Lens 面板三开关即时生效；旧存档观感不变；蒙版在开校正
   后的画面上位置正确。未做（记录）：非 Sony 机型（Fuji 0xf00b 等）、
   去紫边 de-fringe、lensfun 数据库路线（Sony 元数据已覆盖用户全部机

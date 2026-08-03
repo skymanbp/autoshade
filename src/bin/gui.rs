@@ -1556,22 +1556,25 @@ impl AutoshopApp {
                             None,
                         )?;
                         let thumb = full.thumbnail(edge, edge);
-                        // Camera-matched base look: CDF-match the neutral
-                        // develop against the camera's own rendition. From
-                        // the FULL render, not `thumb` — the estimator
-                        // normalises both sides itself, so the stamped curve
-                        // no longer depends on the preview-px dropdown. A RAW
-                        // with no embedded preview (or a decode hiccup) just
-                        // opens without a base look — never an open failure.
-                        let knots = match autoshop::decode::embedded_preview(&path) {
-                            Ok(Some(cam)) => {
-                                autoshop::render::camera_base_knots(&full, &cam)
-                            }
-                            _ => Vec::new(),
-                        };
                         // In-camera lens profile (Sony 0x70xx): one cheap TIFF
                         // parse, stamped all-available-on (the user default).
                         let lens = autoshop::pipeline::fresh_lens_profile(&path);
+                        // Camera-matched base look: CDF-match the neutral
+                        // develop against the camera's own rendition — with
+                        // the profile VIGNETTE applied first: the camera JPEG
+                        // already contains that correction, and matching the
+                        // uncorrected neutral would bake the corner lift into
+                        // the global curve a second time. Geometry moves
+                        // pixels, not their histogram — skipped on purpose.
+                        // A RAW with no embedded preview (or a decode hiccup)
+                        // just opens without a base look — never a failure.
+                        let knots = match autoshop::decode::embedded_preview(&path) {
+                            Ok(Some(cam)) => {
+                                let est = autoshop::render::estimation_base(&full, &lens);
+                                autoshop::render::camera_base_knots(&est, &cam)
+                            }
+                            _ => Vec::new(),
+                        };
                         (thumb, knots, lens)
                     } else {
                         (
@@ -6475,27 +6478,32 @@ impl AutoshopApp {
         // overlay must go through the SAME remap or every stroke displays
         // offset under a straightened view. Rebuild when the transform moved,
         // not only when the canvas was painted.
-        // The profile toggle is part of the transform key: switching profile
-        // distortion on/off must re-blit the canvas (data only changes per
-        // photo, and opening a photo resets the texture anyway).
-        let profile_geom = self.recipe.lens_profile.geometry_active();
-        let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion, profile_geom);
+        // The overlay's remap depends on the PROFILE DISTORTION toggle (CA
+        // never moves an overlay), so it joins the transform key: switching
+        // it must re-blit the canvas (knot data only changes per photo, and
+        // opening a photo resets the texture anyway).
+        let profile_dist = self.recipe.lens_profile.distortion_on
+            && !self.recipe.lens_profile.distortion.is_empty();
+        let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion, profile_dist);
         let stale_xform = self.mask_tex.is_some() && self.mask_tex_xform != xform_now;
         if self.mask_dirty || stale_xform {
             if let Some(m) = &self.mask_paint {
                 let ci = if xform_now != (0.0, 0.0, false) {
-                    let mut img = image::DynamicImage::ImageRgba8(m.clone());
-                    if xform_now.1 != 0.0 || profile_geom {
-                        img = autoshop::render::apply_lens_geometry(
+                    // Alpha-preserving RGBA twins: the RGB16 photo paths
+                    // flatten transparency to opaque, which turned the whole
+                    // canvas into a red wash under any active geometry.
+                    let mut img = m.clone();
+                    if xform_now.1 != 0.0 || profile_dist {
+                        img = autoshop::render::apply_lens_geometry_rgba(
                             &img,
                             &self.recipe.lens_profile,
                             xform_now.1,
                         );
                     }
                     if xform_now.0 != 0.0 {
-                        img = autoshop::render::rotate_straighten(&img, xform_now.0);
+                        img = autoshop::render::rotate_straighten_rgba(&img, xform_now.0);
                     }
-                    let rgba = img.to_rgba8();
+                    let rgba = img;
                     egui::ColorImage::from_rgba_unmultiplied(
                         [rgba.width() as usize, rgba.height() as usize],
                         rgba.as_raw(),

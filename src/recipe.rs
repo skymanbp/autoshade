@@ -209,11 +209,14 @@ impl LensProfile {
     /// as-stamped profile as calibration-not-an-edit, while any user toggle
     /// AWAY from the stamp counts as an edit and survives saves.
     pub fn is_as_stamped(&self) -> bool {
-        // Each toggle must equal "data present" (clippy's != form of a
-        // boolean-equality with a negation).
+        // Each toggle must equal "data present" (the != form is clippy's
+        // spelling of a boolean-equality with a negation). CA needs the PAIR:
+        // a half-damaged file (red knots without blue) renders no CA, so its
+        // ca_on=true is NOT the stamped state and must read as an edit.
+        let ca_present = !self.ca_r.is_empty() && !self.ca_b.is_empty();
         self.vignette_on != self.vignette.is_empty()
             && self.distortion_on != self.distortion.is_empty()
-            && self.ca_on != self.ca_r.is_empty()
+            && self.ca_on == ca_present
     }
     /// Defensive ranges for hand-edited files: knot counts capped, vignette
     /// gains and radius factors held to physically plausible bands (the real

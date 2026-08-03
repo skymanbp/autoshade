@@ -407,7 +407,12 @@ fn fresh_base_knots(raw: &Path) -> Vec<[f32; 2]> {
         }
     };
     match develop_base(raw) {
-        Ok(neutral) => render::camera_base_knots(&neutral, &camera),
+        Ok(neutral) => {
+            // Same contract as the GUI/pipeline estimators: match against the
+            // profile-vignette-corrected neutral (render::estimation_base).
+            let est = render::estimation_base(&neutral, &pipeline::fresh_lens_profile(raw));
+            render::camera_base_knots(&est, &camera)
+        }
         Err(e) => {
             // Disclosed, not silent — the pane render will fail loudly too,
             // but a darker-than-GUI fresh open needs a traceable cause.
@@ -726,7 +731,18 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Same decode source as `api_export` below — see `develop_base`.
     let preview = develop_base(&raw)?;
-    let after = render::develop_preview(&preview, &req.recipe);
+    let mut after = render::develop_preview(&preview, &req.recipe);
+    // Geometry, mirroring the GUI preview chain (lens geometry → straighten;
+    // the frame stays uncropped for whole-frame slider feedback, same policy).
+    // The web pane previously skipped ALL of it — a recipe with distortion or
+    // straighten previewed one framing and exported another.
+    if req.recipe.lens_profile.geometry_active() || req.recipe.lens_distortion != 0.0 {
+        after =
+            render::apply_lens_geometry(&after, &req.recipe.lens_profile, req.recipe.lens_distortion);
+    }
+    if req.recipe.straighten_deg != 0.0 {
+        after = render::rotate_straighten(&after, req.recipe.straighten_deg);
+    }
     jpeg_response(&after)
 }
 
