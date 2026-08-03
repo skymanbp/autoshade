@@ -38,6 +38,13 @@ use crate::{decode, pipeline};
 
 const BOUNDARY: &str = "----autoshopBoundaryX7MA4YWxkTrZu0gW";
 
+/// Overall HTTP deadline for one `images/edits` POST. gpt-image-2 at quality
+/// `high` with a near-8 MP flexible size legitimately runs for several minutes;
+/// the previous 300 s budget (calibrated for the 1-1.5 MP gpt-image-1 era)
+/// fired mid-generation on real requests. `AUTOSHOP_HTTP_TIMEOUT_SECS` still
+/// overrides this for outlier deployments (see `advisor::post_with_timeout`).
+const IMAGES_EDIT_TIMEOUT_SECS: u64 = 600;
+
 /// Full-frame generative restyle (the user's experiment). `fidelity` = "high"
 /// keeps it recognizably the same photo; "low" gives the model free rein.
 /// `quality` is the output tier (low|medium|high|auto).
@@ -375,14 +382,15 @@ fn call_images_edit(
             sizes.enum_size
         };
         let body = build_body(include_fidelity, size);
-        // 300 s: image generation legitimately takes 60-120 s+ (more through a
-        // local subscription bridge); each retry in this loop re-posts, so
-        // every attempt gets its own full budget.
-        let resp =
-            crate::advisor::post_with_timeout(&url, std::time::Duration::from_secs(300))
-                .set("Authorization", &format!("Bearer {key}"))
-                .set("Content-Type", &format!("multipart/form-data; boundary={BOUNDARY}"))
-                .send_bytes(&body);
+        // Each retry in this loop re-posts, so every attempt gets its own full
+        // budget (see IMAGES_EDIT_TIMEOUT_SECS for the calibration rationale).
+        let resp = crate::advisor::post_with_timeout(
+            &url,
+            std::time::Duration::from_secs(IMAGES_EDIT_TIMEOUT_SECS),
+        )
+        .set("Authorization", &format!("Bearer {key}"))
+        .set("Content-Type", &format!("multipart/form-data; boundary={BOUNDARY}"))
+        .send_bytes(&body);
         match resp {
             Ok(r) => {
                 break (r.into_json().context("parse image API response")?, size.to_string())
@@ -408,7 +416,20 @@ fn call_images_edit(
                 }
                 return Err(anyhow!("image API {code}: {b}"));
             }
-            Err(ureq::Error::Transport(t)) => return Err(anyhow!("transport: {t}")),
+            Err(ureq::Error::Transport(t)) => {
+                let mut msg = format!("transport: {t}");
+                // A read timeout here usually means the generation outran the
+                // deadline, not a dead network — say so, with the actual knobs.
+                if msg.contains("timed out") {
+                    msg.push_str(&format!(
+                        " (hit the HTTP deadline, default {IMAGES_EDIT_TIMEOUT_SECS}s — \
+                         large/high-quality generations can run longer; raise \
+                         AUTOSHOP_HTTP_TIMEOUT_SECS, or lower AUTOSHOP_IMAGE_QUALITY / \
+                         AUTOSHOP_IMAGE_MAX_PX to speed the call up)"
+                    ));
+                }
+                return Err(anyhow!(msg));
+            }
         }
     };
 

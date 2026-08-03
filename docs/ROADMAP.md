@@ -19,6 +19,21 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **修饰(images/edits)超时预算重校准（2026-08-02）**——用户真机报
+  「修饰失败: transport: …/images/edits: Network Error: timed out reading
+  response」。根因：直连 api.openai.com（image_provider=api，非 8317 桥）
+  跑 gpt-image-2 + quality=high + 像素预算默认 8 294 400（API 上限），
+  生成时长超过 [src/generative.rs](../src/generative.rs) 里按 gpt-image-1
+  时代（60-120s）校准的 300s 总预算——正常成功中的请求被客户端掐断。
+  修复：预算常量化 `IMAGES_EDIT_TIMEOUT_SECS = 600`（每次 400-重试各享
+  全额），transport 报错含 "timed out" 时附加可操作提示（默认时限数值 +
+  `AUTOSHOP_HTTP_TIMEOUT_SECS` 覆盖 / 降 `AUTOSHOP_IMAGE_QUALITY` /
+  `AUTOSHOP_IMAGE_MAX_PX` 提速）。诊断副产物（环境事实，未改代码）：
+  中央 `%LOCALAPPDATA%/autoshop/autoshop.local.json` 尚不存在，实际生效
+  的是 cwd 回退的 `D:/Projects/Autoshop/autoshop.local.json`（设计内：
+  下次在设置 UI 保存即写中央文件）；OPENAI_API_KEY 现存在于 .env 与
+  用户级环境变量。
+
 - **第二轮 debug + UI 打磨批次（2026-07-25，已提交未发布——待真机验收）**
   ——用户令"再进行一遍debug+UI前端打磨"（中途不弹窗）。方法：6 维度工作流
   （store 集成/GUI 状态机/GUI 打磨/web/双语文案/跨端契约）+ 按维度对抗验证
