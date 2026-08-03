@@ -448,7 +448,12 @@ fn call_images_edit(
                 // bare substring can blame the wrong knob when the message
                 // merely MENTIONS another parameter (e.g. a size error whose
                 // text says "for streaming requests"). Substrings stay as the
-                // fallback for bridges that omit `param`.
+                // fallback for bridges that omit `param` — EXCEPT for
+                // `stream`, where only a quoted mention counts (a proxy's
+                // "upstream error" must not trigger the fallback; see
+                // advisor::error_blames_param), and only on a 400-class
+                // status (a 401/429/5xx mentioning a parameter is not a
+                // capability signal).
                 let param = serde_json::from_str::<serde_json::Value>(&b)
                     .ok()
                     .and_then(|v| v.get("error")?.get("param")?.as_str().map(str::to_owned));
@@ -456,8 +461,13 @@ fn call_images_edit(
                     Some(p) => p == name,
                     None => b.contains(name),
                 };
+                let negotiable = (400..=422).contains(&code);
                 // Each guard flips its own flag, so each retry fires at most once.
-                if use_stream && (blames("stream") || blames("partial_images")) {
+                if negotiable
+                    && use_stream
+                    && (crate::advisor::error_blames_param(&b, "stream")
+                        || blames("partial_images"))
+                {
                     eprintln!(
                         "  note: {} rejected streaming — retrying as one blocking call \
                          ({IMAGES_EDIT_TIMEOUT_SECS}s deadline)",
@@ -538,68 +548,41 @@ fn extract_b64(value: &serde_json::Value) -> Option<&str> {
 /// Drain an image SSE stream: log partial-image events (the liveness signal),
 /// fail loudly on an `error` event, and return the final `*.completed` JSON
 /// payload. Matches on the event-type SUFFIX so both the `image_edit.*` and
-/// `image_generation.*` families parse.
-///
-/// Framing follows the SSE contract: an event's payload may span SEVERAL
-/// `data:` lines, joined with `\n`, and ends at a blank line (or EOF for an
-/// unterminated final event) — parsing per-line would silently drop a split
-/// completed event. Comment/`event:`/`id:` lines and the `[DONE]` sentinel
-/// carry no payload; a payload that isn't JSON is skipped at its event
-/// boundary (the end-of-stream error stays loud if nothing completes).
+/// `image_generation.*` families parse. Framing (multi-line `data:` payloads,
+/// event boundaries, EOF flush, `[DONE]`) lives in the shared
+/// `advisor::for_each_sse_json` — one SSE implementation for every stream.
 fn read_sse_image(r: impl std::io::Read) -> Result<serde_json::Value> {
-    use std::io::BufRead;
+    use std::ops::ControlFlow::{Break, Continue};
     // Hard sanity ceiling: even four full-size base64 frames of an ~8 MP PNG
     // (3 partials + the final) fit in well under 256 MiB. Beyond this the
-    // stream is broken or hostile; the cap also bounds the per-line String
-    // growth below instead of letting one endless line eat all memory.
+    // stream is broken or hostile; the cap also bounds the framer's per-line
+    // String growth instead of letting one endless line eat all memory.
     const STREAM_CAP: u64 = 512 * 1024 * 1024;
-    let mut lines = std::io::BufReader::new(r.take(STREAM_CAP)).lines();
     let mut partials = 0u32;
-    let mut event_data = String::new();
-    loop {
-        let line = lines.next().transpose().context("read image stream")?;
-        let flush = match &line {
-            None => true,                      // EOF flushes an unterminated event
-            Some(l) if l.is_empty() => true,   // blank line = event boundary
-            Some(l) => {
-                if let Some(data) = l.strip_prefix("data:") {
-                    let data = data.trim();
-                    if data != "[DONE]" {
-                        if !event_data.is_empty() {
-                            event_data.push('\n');
-                        }
-                        event_data.push_str(data);
-                    }
-                }
-                false // event:/id:/comment lines never end the event
-            }
-        };
-        if flush && !event_data.is_empty() {
-            let payload = std::mem::take(&mut event_data);
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                if v.get("error").is_some()
-                    || v.get("type").and_then(|t| t.as_str()) == Some("error")
-                {
-                    return Err(anyhow!("image stream error: {v}"));
-                }
-                let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if ty.ends_with(".partial_image") {
-                    partials += 1;
-                    eprintln!(
-                        "  … streaming: partial image {partials} received (generation alive)"
-                    );
-                } else if ty.ends_with(".completed") {
-                    return Ok(v);
-                }
-            }
+    let mut completed: Option<serde_json::Value> = None;
+    let mut failure: Option<String> = None;
+    crate::advisor::for_each_sse_json(r, STREAM_CAP, |v| {
+        if v.get("error").is_some() || v.get("type").and_then(|t| t.as_str()) == Some("error") {
+            failure = Some(v.to_string());
+            return Break(());
         }
-        if line.is_none() {
-            break;
+        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if ty.ends_with(".partial_image") {
+            partials += 1;
+            eprintln!("  … streaming: partial image {partials} received (generation alive)");
+        } else if ty.ends_with(".completed") {
+            completed = Some(v);
+            return Break(());
         }
+        Continue(())
+    })
+    .context("read image stream")?;
+    if let Some(f) = failure {
+        return Err(anyhow!("image stream error: {f}"));
     }
-    Err(anyhow!(
-        "image stream ended without a completed event ({partials} partial(s) received)"
-    ))
+    completed.ok_or_else(|| {
+        anyhow!("image stream ended without a completed event ({partials} partial(s) received)")
+    })
 }
 
 #[cfg(test)]

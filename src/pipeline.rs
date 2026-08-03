@@ -173,13 +173,25 @@ pub fn produce_recipe(
     // global sliders toward similar past edits. Capped at 60% so even max
     // strength never fully overrides the AI's scene-specific proposal.
     if let Some((_, targets)) = &style {
-        let blended = style_strength > 0.0 && !targets.is_empty();
+        let pre_blend = recipe.clone();
         crate::style::blend_toward(&mut recipe, targets, style_strength.clamp(0.0, 1.0) * 0.6);
         recipe.clamp();
-        // The blend mutated the recipe AFTER the verdict, so the verdict above is
-        // stale. Re-verify the FINAL recipe so the returned verdict honestly
-        // reflects what will actually be applied (not the pre-blend proposal).
-        if blended {
+        // The blend mutates the recipe AFTER the rationale was written and
+        // AFTER the verdict above. When it actually changed something (a pull
+        // toward targets the recipe already matches is a no-op — claiming a
+        // pull then would be its own honesty bug), disclose it in the
+        // rationale — the derivation numbers must not silently contradict the
+        // final sliders (a real verifier flagged exactly that on a heuristic
+        // fallback whose "exposure +0.0EV" text sat next to blended
+        // -0.06EV/-20/+4 values) — then re-verify the FINAL recipe so the
+        // returned verdict honestly reflects what will actually be applied.
+        if recipe != pre_blend {
+            recipe.rationale.push_str(&format!(
+                " [style distillation then pulled the global sliders toward this user's past \
+                 edits (effective strength {:.0}%) — final values can differ from the \
+                 derivation above]",
+                style_strength.clamp(0.0, 1.0) * 0.6 * 100.0
+            ));
             verdict = verifier.verify(&recipe, meta, hist)?;
         }
     }

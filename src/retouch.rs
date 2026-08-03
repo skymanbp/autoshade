@@ -344,34 +344,17 @@ If the photo is clean, return an empty list.";
     // Same latency class as the analyze proposer (high-detail image + strict
     // schema on /responses) — and previously a BARE `ureq::post` with no
     // deadline at all: a stalled endpoint parked the retouch worker forever,
-    // and `busy` gates every GUI action. Shares the propose budget and the
-    // AUTOSHOP_HTTP_TIMEOUT_SECS override.
-    let resp = crate::advisor::post_with_timeout(
+    // and `busy` gates every GUI action. Streaming-first via the shared
+    // helper: the propose budget bounds SILENCE, not healthy generation time,
+    // and AUTOSHOP_HTTP_TIMEOUT_SECS still overrides.
+    let value: serde_json::Value = crate::advisor::post_ai_json(
         &url,
-        std::time::Duration::from_secs(crate::advisor::PROPOSE_TIMEOUT_SECS),
+        key,
+        body,
+        crate::advisor::PROPOSE_TIMEOUT_SECS,
+        crate::advisor::SseFamily::Responses,
     )
-    .set("Authorization", &format!("Bearer {key}"))
-    .set("Content-Type", "application/json")
-    .send_json(body);
-
-    let value: serde_json::Value = match resp {
-        Ok(r) => r.into_json().context("parse vision response")?,
-        Err(ureq::Error::Status(code, r)) => {
-            return Err(anyhow!("vision API {code}: {}", r.into_string().unwrap_or_default()))
-        }
-        Err(ureq::Error::Transport(t)) => {
-            let mut msg = format!("transport: {t}");
-            // A read timeout usually means the model outran the deadline, not
-            // a dead network — say so, with the knob (generative.rs pattern).
-            if msg.contains("timed out") {
-                msg.push_str(&format!(
-                    " (hit the HTTP deadline, default {}s — raise AUTOSHOP_HTTP_TIMEOUT_SECS)",
-                    crate::advisor::PROPOSE_TIMEOUT_SECS
-                ));
-            }
-            return Err(anyhow!(msg));
-        }
-    };
+    .map_err(|e| anyhow!("vision API: {e}"))?;
 
     let text = extract_text(&value)
         .ok_or_else(|| anyhow!("no structured output in vision response (shape mismatch)"))?;

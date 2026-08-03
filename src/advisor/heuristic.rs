@@ -72,6 +72,14 @@ impl Advisor for HeuristicProposer {
         r.vibrance = 8.0;
         r.clarity = 4.0;
 
+        r.confidence = 0.4;
+        r.clamp();
+        r.temper(); // same taste guardrail as the AI path
+
+        // Rationale formatted AFTER clamp+temper: both can move the very
+        // numbers it quotes (temper soft-caps recovery strength), and a
+        // rationale that contradicts the recipe's own values reads as a bug —
+        // a real verifier run flagged exactly that mismatch.
         let why = match &self.fallback_reason {
             Some(e) => format!("AI vision unavailable: {e}"),
             None => "no AI vision; OPENAI_API_KEY unset".to_string(),
@@ -81,9 +89,54 @@ impl Advisor for HeuristicProposer {
              clip black/white={:.1}%/{:.1}% → exposure {:+.1}EV, highlights {:.0}, shadows {:.0}.",
             hist.clip_black_pct, hist.clip_white_pct, r.exposure_ev, r.highlights, r.shadows,
         );
-        r.confidence = 0.4;
-        r.clamp();
-        r.temper(); // same taste guardrail as the AI path
         Ok(r)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rationale_quotes_the_tempered_numbers() {
+        // 12% white clip drives highlights to the -70 recovery cap; temper's
+        // soft-cap then reshapes that to exactly -60 (knee 50, ceil 70,
+        // excess 20 → 50 + 20·20/40). The rationale must quote the FINAL
+        // value — a real verifier flagged a rationale/recipe mismatch on
+        // exactly this stale-rationale path.
+        let mut luma = vec![0u32; 256];
+        luma[128] = 1000;
+        let hist = Histogram {
+            luma,
+            r: vec![0; 256],
+            g: vec![0; 256],
+            b: vec![0; 256],
+            clip_black_pct: 0.0,
+            clip_white_pct: 12.0,
+            sample_pixels: 1000,
+        };
+        let meta = Meta {
+            make: String::new(),
+            model: String::new(),
+            lens: None,
+            iso: None,
+            shutter: None,
+            aperture: None,
+            focal_length_mm: None,
+            exposure_bias_ev: None,
+            date_time: None,
+            width: 0,
+            height: 0,
+            as_shot_wb_coeffs: [1.0; 4],
+        };
+        let r = HeuristicProposer::default()
+            .propose(&Preview { jpeg: Vec::new() }, &meta, &hist, None, None, None)
+            .unwrap();
+        assert_eq!(r.highlights, -60.0, "temper soft-cap expectation drifted");
+        assert!(
+            r.rationale.contains("highlights -60"),
+            "rationale must quote the tempered value: {}",
+            r.rationale
+        );
     }
 }

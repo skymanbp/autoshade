@@ -19,6 +19,40 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **全 AI 调用流式化 + rationale 失实修复（2026-08-03，已提交未推送）**——
+  真机第三次撞总死线：/responses 提案（推理级视觉模型）跑穿 360s →
+  回退启发式基线 → 真机验证器判 Revise 并点名"rationale 与数字不符
+  （说 +0.0EV/0/0，配方是 -0.06EV/-20/+4）"。两个根因两治：
+  - **超时类**（v0.14.2 images/edits 方案泛化到全部文本 AI 调用）：
+    advisor::post_ai_json 统一入口——注入 stream:true 走
+    post_with_stall_timeout（预算=静默上限，下限 STREAM_STALL_FLOOR=600s，
+    因推理期可合法静默）；Responses 族对未设 reasoning 的请求加
+    `reasoning:{summary:"auto"}`（SDK 实证参数+
+    response.reasoning_summary_text.delta 事件）——推理期间有真心跳；
+    协商降级各至多一次（400..=422 且 error.param 实指才降：先摘要后
+    stream，拒 stream 回退阻塞+原总死线）；Content-Type 分派容忍
+    收下 stream 却回 JSON 的桥。四个调用点收编：propose（openai.rs）、
+    describe_style、api 验证器（openai_verify.rs, Chat 族按 index==0 选
+    choice 拼 delta 重组阻塞形状）、detect_spots（retouch.rs）。
+    共享 SSE 分帧器 for_each_sse_json 下沉 advisor（generative.rs
+    read_sse_image 重基于它——全库单一分帧实现）；error_blames_param
+    结构化归因（param 优先，无 param 只认带引号提及——"upstream
+    error" 不再误触发降级，generative 的 stream 守卫同步加固+状态码门）。
+  - **rationale 失实类**：heuristic.rs rationale 移到 clamp+temper 之后
+    （temper 软压会改所引数字：-70→-60 有测试钉死）；pipeline.rs 风格
+    蒸馏真改动了配方才在 rationale 追加披露行并重验（无变化=不披露
+    不重验——反向失实也堵住）。真机判词三条的归因：置信 0.4/过保守
+    = 启发式回退的正常面貌（流式修复后 AI 视觉应能跑完，回退变罕见）；
+    数字不符 = 上述两处失实，已根治。
+  - Codex 只读复审 4 条全处置：#1 静默推理间隙→摘要流+600s 下限；
+    #2 "upstream"子串误伤→error_blames_param+状态码门；#3 choices
+    位置≠身份→index==0 选择；#4 无变化也披露→pre_blend 比对门。
+  基线 134 lib（+5：SSE chat 重组含 index 路由/Responses completed/失败
+  事件三例/error_blames_param 五例/heuristic tempered rationale）+ 9 gui，
+  clippy --all-targets 0。真机验收点：分析不再"Heuristic baseline
+  (…timed out…)"回退（长推理提案能跑完）；若真回退，rationale 数字与
+  配方一致；风格蒸馏参与时 rationale 尾部有披露行。
+
 - **v0.14.2 RELEASED（2026-08-03）**——内容 = 修饰流式化批（e729e6b，
   下条）。发版细节见 git tag v0.14.2 与 GitHub Release 页。
 

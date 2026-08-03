@@ -181,6 +181,288 @@ pub(crate) fn post_with_stall_timeout(url: &str, stall: std::time::Duration) -> 
         .post(url)
 }
 
+/// [`transport_error`]'s streaming sibling: on the stall path a read timeout
+/// means the server went SILENT (healthy calls keep streaming events), not
+/// that some total budget was exceeded — say that, with the knob.
+pub(crate) fn stall_transport_error(t: &ureq::Transport, stall_secs: u64) -> AdvisorError {
+    let mut msg = t.to_string();
+    if msg.contains("timed out") {
+        msg.push_str(&format!(
+            " (no stream activity for {stall_secs}s — the server or a proxy stopped sending; \
+             healthy calls stream events and are not time-capped. Raise \
+             AUTOSHOP_HTTP_TIMEOUT_SECS if a proxy buffers server-sent events)"
+        ));
+    }
+    AdvisorError::Transport(msg)
+}
+
+/// SSE framing core, shared by every streaming AI consumer (the text calls
+/// below and generative.rs's image stream). Follows the SSE contract: an
+/// event's payload may span SEVERAL `data:` lines joined with `\n` and ends at
+/// a blank line (or EOF for an unterminated final event); comment/`event:`/
+/// `id:` lines and the `[DONE]` sentinel carry no payload; a payload that
+/// isn't JSON is skipped at its event boundary. `cap` bounds the total bytes
+/// read (and therefore the single-line String growth) against a broken or
+/// hostile endless stream. Each complete JSON payload is handed to `on_json`;
+/// `Break` stops draining early.
+pub(crate) fn for_each_sse_json(
+    r: impl std::io::Read,
+    cap: u64,
+    mut on_json: impl FnMut(serde_json::Value) -> std::ops::ControlFlow<()>,
+) -> std::io::Result<()> {
+    use std::io::BufRead;
+    let mut lines = std::io::BufReader::new(r.take(cap)).lines();
+    let mut event_data = String::new();
+    loop {
+        let line = match lines.next() {
+            Some(l) => Some(l?),
+            None => None,
+        };
+        let flush = match &line {
+            None => true,                    // EOF flushes an unterminated event
+            Some(l) if l.is_empty() => true, // blank line = event boundary
+            Some(l) => {
+                if let Some(data) = l.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data != "[DONE]" {
+                        if !event_data.is_empty() {
+                            event_data.push('\n');
+                        }
+                        event_data.push_str(data);
+                    }
+                }
+                false // event:/id:/comment lines never end the event
+            }
+        };
+        if flush && !event_data.is_empty() {
+            let payload = std::mem::take(&mut event_data);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload)
+                && let std::ops::ControlFlow::Break(()) = on_json(v)
+            {
+                return Ok(());
+            }
+        }
+        if line.is_none() {
+            return Ok(());
+        }
+    }
+}
+
+/// Which OpenAI-compatible endpoint family a streaming call talks to — the
+/// SSE assembly differs: the Responses API's terminal `response.completed`
+/// event carries the full blocking-shape object, while Chat Completions
+/// streams token deltas the client must reassemble into the blocking shape.
+#[derive(Clone, Copy)]
+pub(crate) enum SseFamily {
+    Responses,
+    Chat,
+}
+
+/// Streaming stall floor. Reasoning-class models can be SILENT on the wire
+/// while they think: /responses emits `response.created` immediately but no
+/// further events until reasoning ends — unless a reasoning-summary stream is
+/// granted (requested below, but droppable in negotiation) — and chat models
+/// are quiet before their first token. The silence budget must cover the
+/// longest healthy quiet phase, not just network jitter, so per-call budgets
+/// below this floor bound only the blocking fallback (the 600 s number is the
+/// images/edits stall precedent). `AUTOSHOP_HTTP_TIMEOUT_SECS` overrides.
+pub(crate) const STREAM_STALL_FLOOR_SECS: u64 = 600;
+
+/// Does this HTTP error body blame the named request parameter? Structured
+/// `error.param` wins when present (exact, or a dotted child like
+/// `reasoning.summary`); when absent — or JSON null — only a QUOTED mention
+/// of the name counts: a bare substring match would let a proxy's
+/// "upstream error" blame `stream`.
+pub(crate) fn error_blames_param(body: &str, name: &str) -> bool {
+    let param = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.get("param")?.as_str().map(str::to_owned));
+    match param.as_deref() {
+        Some(p) => p == name || p.starts_with(&format!("{name}.")),
+        None => body.contains(&format!("'{name}'")) || body.contains(&format!("\"{name}\"")),
+    }
+}
+
+/// POST a JSON body to an OpenAI-compatible AI endpoint, STREAMING-FIRST.
+///
+/// `stream: true` is injected so a healthy long call keeps proving liveness
+/// through SSE events and runs under an INACTIVITY deadline (floored at
+/// [`STREAM_STALL_FLOOR_SECS`]) — the budget bounds SILENCE, not total
+/// duration. This is the images/edits lesson (generative.rs) applied to the
+/// text calls: reasoning-class models outran every fixed overall deadline we
+/// calibrated (120→360 s on /responses, then 360 s again on a real propose),
+/// and the next escalation would just be a slower copy of the same bug. On
+/// the Responses family a `reasoning: {summary: "auto"}` stream is also
+/// requested (when the caller didn't set `reasoning` itself) so the model
+/// keeps emitting summary deltas WHILE it reasons — liveness through the
+/// otherwise-silent phase.
+///
+/// Negotiation (each flag drops at most once, on a 400-class status whose
+/// error actually blames that parameter — see [`error_blames_param`]):
+/// `reasoning` (models without summaries) → retry streaming without it;
+/// `stream` (thin OpenAI-compatible bridges) → retry ONCE as a blocking call
+/// under `budget_secs` as an OVERALL deadline. A server that accepts `stream`
+/// but answers plain JSON is handled by Content-Type dispatch. Returns the
+/// endpoint's BLOCKING response shape either way.
+pub(crate) fn post_ai_json(
+    url: &str,
+    key: &str,
+    body: serde_json::Value,
+    budget_secs: u64,
+    family: SseFamily,
+) -> Result<serde_json::Value, AdvisorError> {
+    let mut use_stream = true;
+    let mut use_summary =
+        matches!(family, SseFamily::Responses) && body.get("reasoning").is_none();
+    loop {
+        // Rebuild from the caller's body each attempt — dropping a negotiated
+        // flag must not leave the other attempt's keys behind.
+        let mut attempt = body.clone();
+        if use_stream {
+            attempt["stream"] = serde_json::Value::Bool(true);
+            if use_summary {
+                attempt["reasoning"] = serde_json::json!({"summary": "auto"});
+            }
+        }
+        let req = if use_stream {
+            post_with_stall_timeout(
+                url,
+                std::time::Duration::from_secs(budget_secs.max(STREAM_STALL_FLOOR_SECS)),
+            )
+        } else {
+            post_with_timeout(url, std::time::Duration::from_secs(budget_secs))
+        };
+        let resp = req
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Content-Type", "application/json")
+            .send_json(&attempt);
+        match resp {
+            Ok(r) => {
+                // Dispatch on what actually came back, not on what was asked.
+                if r.content_type().eq_ignore_ascii_case("text/event-stream") {
+                    return assemble_sse(r.into_reader(), family);
+                }
+                return r.into_json().map_err(|e| AdvisorError::Transport(e.to_string()));
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                let b = r.into_string().unwrap_or_default();
+                // Only 400-class statuses negotiate: a 401/429/5xx that
+                // happens to mention a parameter is not a capability signal.
+                let negotiable = (400..=422).contains(&code);
+                if negotiable && use_stream && use_summary && error_blames_param(&b, "reasoning") {
+                    eprintln!(
+                        "  note: endpoint rejected the reasoning-summary stream — retrying \
+                         without it (silent reasoning phases then count against the stall budget)"
+                    );
+                    use_summary = false;
+                    continue;
+                }
+                if negotiable && use_stream && error_blames_param(&b, "stream") {
+                    eprintln!(
+                        "  note: endpoint rejected streaming — retrying as one blocking call \
+                         ({budget_secs}s deadline)"
+                    );
+                    use_stream = false;
+                    continue;
+                }
+                return Err(AdvisorError::Http { status: code, body: b });
+            }
+            Err(ureq::Error::Transport(t)) => {
+                return Err(if use_stream {
+                    stall_transport_error(&t, budget_secs.max(STREAM_STALL_FLOOR_SECS))
+                } else {
+                    transport_error(&t, budget_secs)
+                });
+            }
+        }
+    }
+}
+
+/// Reassemble a streamed AI response into the endpoint's BLOCKING shape, so
+/// every caller's existing parsing stays untouched. Fails loudly on error /
+/// failed / incomplete events and on a stream that ends without a result.
+fn assemble_sse(
+    r: impl std::io::Read,
+    family: SseFamily,
+) -> Result<serde_json::Value, AdvisorError> {
+    use std::ops::ControlFlow::{Break, Continue};
+    // A strict-schema recipe or verdict is a few KB; token deltas at most
+    // double-count the final text. 64 MiB is far above any legitimate payload
+    // and far below a runaway.
+    const CAP: u64 = 64 * 1024 * 1024;
+    match family {
+        SseFamily::Responses => {
+            let mut out: Option<serde_json::Value> = None;
+            let mut failure: Option<String> = None;
+            for_each_sse_json(r, CAP, |v| {
+                if v.get("error").is_some()
+                    || v.get("type").and_then(serde_json::Value::as_str) == Some("error")
+                {
+                    failure = Some(v.to_string());
+                    return Break(());
+                }
+                match v.get("type").and_then(serde_json::Value::as_str).unwrap_or("") {
+                    "response.completed" => {
+                        out = v.get("response").cloned();
+                        Break(())
+                    }
+                    ty @ ("response.failed" | "response.incomplete") => {
+                        failure = Some(format!("{ty}: {v}"));
+                        Break(())
+                    }
+                    _ => Continue(()),
+                }
+            })
+            .map_err(|e| AdvisorError::Transport(format!("read AI stream: {e}")))?;
+            if let Some(f) = failure {
+                return Err(AdvisorError::Transport(format!("AI stream error: {f}")));
+            }
+            out.ok_or_else(|| {
+                AdvisorError::Transport("AI stream ended without response.completed".into())
+            })
+        }
+        SseFamily::Chat => {
+            let mut text = String::new();
+            let mut failure: Option<String> = None;
+            for_each_sse_json(r, CAP, |v| {
+                if v.get("error").is_some() {
+                    failure = Some(v.to_string());
+                    return Break(());
+                }
+                // Select the choice whose "index" is 0 (missing index = 0):
+                // we never request n>1, but a bridge chunk may order or thin
+                // its choices array arbitrarily — array position is not
+                // choice identity.
+                if let Some(delta) = v
+                    .get("choices")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|arr| {
+                        arr.iter().find(|c| {
+                            c.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0) == 0
+                        })
+                    })
+                    .and_then(|c| c.get("delta"))
+                    .and_then(|d| d.get("content"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    text.push_str(delta);
+                }
+                Continue(())
+            })
+            .map_err(|e| AdvisorError::Transport(format!("read AI stream: {e}")))?;
+            if let Some(f) = failure {
+                return Err(AdvisorError::Transport(format!("AI stream error: {f}")));
+            }
+            if text.is_empty() {
+                return Err(AdvisorError::Transport(
+                    "chat stream ended without any content deltas".into(),
+                ));
+            }
+            Ok(serde_json::json!({"choices": [{"message": {"content": text}}]}))
+        }
+    }
+}
+
 /// Compact, prompt-friendly histogram summary (the full 4×256 bins are too
 /// large and noisy to put in a prompt). Reports clipping, mean luma, and a
 /// 16-bucket luma distribution as percentages.
@@ -315,5 +597,73 @@ mod tests {
         let two = r#"example {"a":1} then answer {"decision":"accept"}"#;
         assert_eq!(balanced_objects(two), vec![r#"{"a":1}"#, r#"{"decision":"accept"}"#]);
         assert!(balanced_objects("no json here").is_empty());
+    }
+
+    #[test]
+    fn sse_chat_stream_reassembles_the_blocking_shape() {
+        // Includes a chunk whose ARRAY position 0 is a different choice index —
+        // choice identity is the "index" field, not array position — and a
+        // usage-style chunk with an empty choices array.
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":1,\"delta\":{\"content\":\"WRONG\"}},\
+{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"total_tokens\":5}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let v = assemble_sse(body.as_bytes(), SseFamily::Chat).unwrap();
+        assert_eq!(v["choices"][0]["message"]["content"], "Hello");
+    }
+
+    #[test]
+    fn error_blames_param_prefers_structured_and_rejects_bare_substrings() {
+        // Structured param wins.
+        assert!(error_blames_param(r#"{"error":{"param":"stream","message":"x"}}"#, "stream"));
+        // A structured param naming ANOTHER knob must not blame this one even
+        // if the message mentions it.
+        assert!(!error_blames_param(
+            r#"{"error":{"param":"size","message":"not valid for streaming requests"}}"#,
+            "stream"
+        ));
+        // param null → only a QUOTED mention counts…
+        assert!(error_blames_param(
+            r#"{"error":{"param":null,"message":"Unknown parameter: 'stream'."}}"#,
+            "stream"
+        ));
+        // …so a proxy's "upstream error" can never blame `stream`.
+        assert!(!error_blames_param("502 upstream error: connection reset", "stream"));
+        // Dotted children match their root parameter.
+        assert!(error_blames_param(
+            r#"{"error":{"param":"reasoning.summary","message":"unsupported"}}"#,
+            "reasoning"
+        ));
+    }
+
+    #[test]
+    fn sse_responses_stream_returns_the_completed_response_object() {
+        let body = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial tokens\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"content\":\
+[{\"type\":\"output_text\",\"text\":\"FINAL\"}]}]}}\n\n",
+        );
+        let v = assemble_sse(body.as_bytes(), SseFamily::Responses).unwrap();
+        assert_eq!(v["output"][0]["content"][0]["text"], "FINAL");
+    }
+
+    #[test]
+    fn sse_streams_fail_loudly_on_failure_and_on_no_result() {
+        let failed =
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n";
+        let err = assemble_sse(failed.as_bytes(), SseFamily::Responses).unwrap_err().to_string();
+        assert!(err.contains("boom"), "{err}");
+        let no_result = "data: {\"type\":\"response.created\",\"response\":{}}\n\n";
+        let err = assemble_sse(no_result.as_bytes(), SseFamily::Responses).unwrap_err().to_string();
+        assert!(err.contains("without response.completed"), "{err}");
+        let empty_chat = "data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\ndata: [DONE]\n\n";
+        let err = assemble_sse(empty_chat.as_bytes(), SseFamily::Chat).unwrap_err().to_string();
+        assert!(err.contains("without any content"), "{err}");
     }
 }

@@ -142,26 +142,17 @@ follow it closely): ");
 
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
         // A high-detail image + strict structured output is the slowest text
-        // call in the app (the codex bridge adds its own hop) — budget class
-        // rationale at the const (a real 120 s deadline killed healthy calls).
-        let resp = super::post_with_timeout(
+        // call in the app (the codex bridge adds its own hop). Streaming-first:
+        // the budget bounds SILENCE, not healthy generation time — a real 360 s
+        // OVERALL deadline killed a healthy reasoning-class propose (see
+        // post_ai_json for the full rationale and the blocking fallback).
+        let value: Value = super::post_ai_json(
             &url,
-            std::time::Duration::from_secs(super::PROPOSE_TIMEOUT_SECS),
-        )
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Content-Type", "application/json")
-        .send_json(body);
-
-        let value: Value = match resp {
-            Ok(r) => r.into_json().map_err(|e| AdvisorError::Transport(e.to_string()))?,
-            Err(ureq::Error::Status(code, r)) => {
-                let body = r.into_string().unwrap_or_default();
-                return Err(AdvisorError::Http { status: code, body });
-            }
-            Err(ureq::Error::Transport(t)) => {
-                return Err(super::transport_error(&t, super::PROPOSE_TIMEOUT_SECS))
-            }
-        };
+            key,
+            body,
+            super::PROPOSE_TIMEOUT_SECS,
+            super::SseFamily::Responses,
+        )?;
 
         let recipe_json = extract_output_text(&value).ok_or_else(|| AdvisorError::Transport(
             "could not locate structured output in OpenAI response (shape mismatch — see openai.rs)".into(),
@@ -216,24 +207,15 @@ so the same prompt can restyle ANY other photograph. Output ONLY the prompt text
     });
 
     let url = format!("{}/responses", cfg.openai_base_url.trim_end_matches('/'));
-    // Two low-detail images, short prose out — budget class at the const.
-    let resp = super::post_with_timeout(
+    // Two low-detail images, short prose out — streaming-first like the
+    // proposer; the budget bounds silence, not healthy generation time.
+    let value: Value = super::post_ai_json(
         &url,
-        std::time::Duration::from_secs(super::STYLE_TIMEOUT_SECS),
-    )
-    .set("Authorization", &format!("Bearer {key}"))
-    .set("Content-Type", "application/json")
-    .send_json(body);
-    let value: Value = match resp {
-        Ok(r) => r.into_json().map_err(|e| AdvisorError::Transport(e.to_string()))?,
-        Err(ureq::Error::Status(code, r)) => {
-            let body = r.into_string().unwrap_or_default();
-            return Err(AdvisorError::Http { status: code, body });
-        }
-        Err(ureq::Error::Transport(t)) => {
-            return Err(super::transport_error(&t, super::STYLE_TIMEOUT_SECS))
-        }
-    };
+        key,
+        body,
+        super::STYLE_TIMEOUT_SECS,
+        super::SseFamily::Responses,
+    )?;
     let text = extract_output_text(&value).ok_or_else(|| {
         AdvisorError::Transport("could not locate output text in OpenAI response".into())
     })?;
