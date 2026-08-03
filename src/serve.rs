@@ -916,7 +916,14 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         std::process::id(),
         DL_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    render::render_to_file(&raw, &req.recipe, &tmp, denoise_opts(&req, &state.config()).as_ref(), None)?;
+    // A failed render must not leave a multi-hundred-MB partial file to sit
+    // in %TEMP% until the next server start's sweep.
+    if let Err(e) =
+        render::render_to_file(&raw, &req.recipe, &tmp, denoise_opts(&req, &state.config()).as_ref(), None)
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     // STREAM the file instead of fs::read-ing it whole: a 61 MP 16-bit TIFF
     // is ~366 MB — materialising it as a Vec on top of the renderer's own
     // buffers was the server's single biggest peak-memory hazard. The temp

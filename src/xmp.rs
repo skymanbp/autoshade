@@ -22,11 +22,16 @@ fn signed(v: f32) -> String {
 }
 
 fn xml_escape(s: &str) -> String {
-    // Strip XML-1.0-forbidden control characters FIRST (an AI rationale or a
-    // pasted mask name can carry them; escaped or not, they make the whole
-    // sidecar unparsable) — tab/newline/CR are the legal exceptions.
+    // Strip XML-1.0-forbidden characters FIRST (an AI rationale or a pasted
+    // mask name can carry them; escaped or not, they make the whole sidecar
+    // unparsable): control chars except tab/newline/CR, plus the non-character
+    // code points U+FFFE/U+FFFF, which are equally illegal in XML 1.0 but are
+    // NOT `char::is_control`.
     s.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+        .filter(|c| {
+            (!c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+                && !matches!(c, '\u{FFFE}' | '\u{FFFF}')
+        })
         .collect::<String>()
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -236,7 +241,11 @@ pub fn recipe_to_xmp(r: &EditRecipe) -> String {
     attr(&mut a, "ProcessVersion", "15.4");
 
     // White balance: an explicit temperature means Custom WB; otherwise leave
-    // it As Shot and only carry a tint if non-neutral.
+    // it As Shot and only carry a tint if non-neutral. KNOWN LOSSY EDGE: a
+    // tint-only edit under "As Shot" may be ignored by Lightroom (As Shot
+    // re-reads camera metadata), but we cannot honestly emit "Custom" without
+    // knowing the camera's as-shot Kelvin — the XMP is the lossy interop by
+    // contract; recipe.json carries the tint losslessly.
     if let Some(k) = r.temperature_k {
         attr(&mut a, "WhiteBalance", "Custom");
         attr(&mut a, "Temperature", &(k.round() as i64).to_string());

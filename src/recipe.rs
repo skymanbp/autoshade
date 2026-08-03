@@ -640,6 +640,23 @@ impl EditRecipe {
             // Range mask invariants: everything in 0..=1, and the luminance
             // trapezoid non-decreasing (lo_outer ≤ lo ≤ hi ≤ hi_outer) so the
             // render's ramps and ACR's LumRange both stay well-formed.
+            // Non-finite values first (hand-edited/foreign JSON): a NaN
+            // luminance bound would PANIC f32::clamp below (its min ≤ max
+            // assert sees NaN as the max), and a NaN colour reference feeds
+            // NaN weights into the render — drop the range entirely, the same
+            // policy as a NaN crop.
+            let range_finite = match &m.range {
+                Some(RangeMask::Luminance { lo_outer, lo, hi, hi_outer }) => {
+                    lo_outer.is_finite() && lo.is_finite() && hi.is_finite() && hi_outer.is_finite()
+                }
+                Some(RangeMask::Color { r, g, b, amount, px, py }) => {
+                    [r, g, b, amount, px, py].iter().all(|v| v.is_finite())
+                }
+                None => true,
+            };
+            if !range_finite {
+                m.range = None;
+            }
             match &mut m.range {
                 Some(RangeMask::Luminance { lo_outer, lo, hi, hi_outer }) => {
                     let a = lo.clamp(0.0, 1.0);
@@ -755,6 +772,33 @@ mod tests {
         };
         r.clamp();
         assert_eq!(r.crop, None);
+        // A NaN luminance range bound used to PANIC clamp() outright
+        // (f32::clamp's min ≤ max assert saw NaN as the max) — it must drop
+        // the range, same policy as the crop. A NaN colour reference drops too.
+        let mut r = EditRecipe::default();
+        r.masks.push(LocalAdjustment {
+            range: Some(RangeMask::Luminance {
+                lo_outer: 0.0,
+                lo: f32::NAN,
+                hi: 0.8,
+                hi_outer: 1.0,
+            }),
+            ..Default::default()
+        });
+        r.masks.push(LocalAdjustment {
+            range: Some(RangeMask::Color {
+                r: f32::NAN,
+                g: 0.5,
+                b: 0.5,
+                amount: 0.5,
+                px: 0.5,
+                py: 0.5,
+            }),
+            ..Default::default()
+        });
+        r.clamp();
+        assert_eq!(r.masks[0].range, None, "NaN luminance bound drops the range");
+        assert_eq!(r.masks[1].range, None, "NaN colour reference drops the range");
     }
 
     #[test]

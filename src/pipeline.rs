@@ -385,11 +385,20 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
         let mut n = PathBuf::new();
         for c in p.components() {
             match c {
-                Component::ParentDir => {
-                    if !n.pop() {
-                        n.push("..");
+                Component::ParentDir => match n.components().next_back() {
+                    Some(Component::Normal(_)) => {
+                        n.pop();
                     }
-                }
+                    Some(Component::RootDir | Component::Prefix(_)) => {
+                        // The root's parent IS the root: "D:/../lib" folds to
+                        // "D:/lib" exactly as the filesystem resolves it.
+                        // Popping the root here used to yield the
+                        // drive-relative "D:lib", which dodged every
+                        // starts_with check below and let a crafted path
+                        // write into the protected library.
+                    }
+                    _ => n.push(".."),
+                },
                 Component::CurDir => {}
                 other => n.push(other.as_os_str()),
             }
@@ -480,12 +489,18 @@ pub fn find_sources(dir: &Path) -> Result<Vec<PathBuf>> {
                 matches!(x.to_ascii_lowercase().as_str(), "png" | "tif" | "tiff" | "jpg" | "jpeg")
             })
     }
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) -> std::io::Result<()> {
+        // A directory-symlink cycle would recurse forever (entry_is_dir
+        // deliberately follows dir symlinks); 64 levels is beyond any real
+        // photo library, so the cap only ever trips on a cycle.
+        if depth > 64 {
+            return Ok(());
+        }
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let p = entry.path();
             if entry_is_dir(&entry)? {
-                walk(&p, out)?;
+                walk(&p, out, depth + 1)?;
             } else if is_source(&p) {
                 out.push(p);
             }
@@ -493,7 +508,7 @@ pub fn find_sources(dir: &Path) -> Result<Vec<PathBuf>> {
         Ok(())
     }
     let mut out = Vec::new();
-    walk(dir, &mut out).with_context(|| format!("scan {}", dir.display()))?;
+    walk(dir, &mut out, 0).with_context(|| format!("scan {}", dir.display()))?;
     out.sort();
     Ok(out)
 }
@@ -520,6 +535,15 @@ mod tests {
         let out_src = Path::new("out/DSC0001.preview.jpg");
         let out_dst = Path::new("out/DSC0001.matched.json");
         assert!(guard_readonly(out_dst, out_src).is_ok(), "our ./out is always writable");
+        // A `..` bumping against the ROOT must fold like the filesystem does
+        // ("D:/../Photography" = "D:/Photography") — popping the root used to
+        // produce the drive-relative "D:Photography", which dodged every
+        // starts_with check and slipped a library write past the guard.
+        let root_dodge = Path::new("D:/../Photography/Raw/2024/Trip/DSC0001.x.tif");
+        assert!(
+            guard_readonly(root_dodge, raw).is_err(),
+            "a root-level .. must not bypass the library guard"
+        );
     }
 
     /// find_raws must accept EVERY format decode::is_raw does (one definition of

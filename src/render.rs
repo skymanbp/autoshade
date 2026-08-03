@@ -835,7 +835,21 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
             wgt * amount
         };
 
+        // An adjustment whose tone/sat/colour stages are ALL identity blends
+        // each pixel with itself — skip the full-frame scan (a real cost at
+        // 61 MP for an NR-only or freshly parked mask); the NR pass below
+        // still runs on its own gate.
+        let tone_identity = m.exposure_ev == 0.0
+            && m.contrast == 0.0
+            && m.highlights == 0.0
+            && m.shadows == 0.0
+            && m.whites == 0.0
+            && m.blacks == 0.0
+            && m.saturation == 0.0
+            && colour_luts.is_none();
+
         // --- tone + saturation pass (rows independent → parallel) ---
+        if !tone_identity {
         data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             for (x, out_px) in row.iter_mut().enumerate() {
                 let mut wgt = weight_at(x, y);
@@ -873,6 +887,7 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
                 }
             }
         });
+        }
 
         // --- local noise reduction pass (only where the mask covers) ---
         let nr = (m.noise_reduction / 100.0).clamp(0.0, 1.0);
@@ -2023,14 +2038,16 @@ fn downscale_f32(
     h: usize,
     max_edge: u32,
 ) -> (Vec<[f32; 3]>, usize, usize) {
-    let edge = max_edge.max(1) as usize;
-    if w.max(h) <= edge || w == 0 || h == 0 {
+    // Clamped ONCE and used for the thumbnail too — passing a raw 0 through
+    // to `thumbnail(0, 0)` would produce a zero-dimensional working image.
+    let edge = max_edge.max(1);
+    if w.max(h) <= edge as usize || w == 0 || h == 0 {
         return (data, w, h);
     }
     let flat: Vec<f32> = bytemuck::cast_vec(data);
     let img = ImageBuffer::<Rgb<f32>, Vec<f32>>::from_raw(w as u32, h as u32, flat)
         .expect("downscale_f32: buffer size matches dims");
-    let scaled = match DynamicImage::ImageRgb32F(img).thumbnail(max_edge, max_edge) {
+    let scaled = match DynamicImage::ImageRgb32F(img).thumbnail(edge, edge) {
         DynamicImage::ImageRgb32F(b) => b, // resize keeps the variant
         other => other.to_rgb32f(),
     };
@@ -2267,6 +2284,11 @@ pub fn undistort_norm(nx: f32, ny: f32, dims: (f32, f32), amount: f32) -> (f32, 
 /// pixel has an in-frame source sample. Identity when the amount rounds to 0.
 pub fn apply_lens_distortion(img: &DynamicImage, amount: f32) -> DynamicImage {
     if amount.abs() < 1e-3 {
+        return img.clone();
+    }
+    // Degenerate input: par_chunks_mut(0) panics on a zero-size chunk — the
+    // same guard apply_lens_geometry carries; an empty frame maps to itself.
+    if img.width() == 0 || img.height() == 0 {
         return img.clone();
     }
     // Borrow an already-16-bit source (same policy as rotate_straighten).

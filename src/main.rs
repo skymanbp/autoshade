@@ -680,17 +680,19 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
 fn process_one(raw: &Path, cfg: &Config, render_master: bool) -> Result<Verdict> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
     let (recipe, verdict) = produce_recipe(raw, cfg, false, None, None, cfg.style_strength)?;
-    // XMP first, recipe LAST: `has_develop` (the batch resume filter) keys on
-    // the recipe file, so the completion marker must be the FINAL write — the
-    // old order marked a photo done, then a failed XMP/render left it both
-    // "failed" in this run AND skipped by every later resume.
-    write_xmp(raw, &recipe)?;
-    write_recipe(raw, &recipe, None)?;
+    // Every fallible product BEFORE the completion markers, and the recipe
+    // LAST of all: `has_develop` (the batch resume filter) keys on the
+    // sidecars, so any failure after they land would leave a photo both
+    // "failed" in this run AND skipped by every later resume. The render is
+    // idempotent, so a crash after it but before the sidecars simply
+    // re-renders on retry.
     if render_master {
         let out = default_out(raw, "developed", "tif"); // 16-bit master
         ensure_parent(&out)?;
         render::render_to_file(raw, &recipe, &out, None, None)?;
     }
+    write_xmp(raw, &recipe)?;
+    write_recipe(raw, &recipe, None)?;
     Ok(verdict)
 }
 

@@ -484,19 +484,33 @@ fn assemble_sse(
                 // we never request n>1, but a bridge chunk may order or thin
                 // its choices array arbitrarily — array position is not
                 // choice identity.
-                if let Some(delta) = v
+                let choice = v
                     .get("choices")
                     .and_then(serde_json::Value::as_array)
                     .and_then(|arr| {
                         arr.iter().find(|c| {
                             c.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0) == 0
                         })
-                    })
-                    .and_then(|c| c.get("delta"))
-                    .and_then(|d| d.get("content"))
-                    .and_then(serde_json::Value::as_str)
-                {
-                    text.push_str(delta);
+                    });
+                if let Some(c) = choice {
+                    // A non-"stop" finish (length / content_filter) means the
+                    // text was TRUNCATED — surfacing that beats handing the
+                    // partial JSON downstream, whose parse error would blame
+                    // the wrong thing.
+                    if let Some(fr) = c.get("finish_reason").and_then(serde_json::Value::as_str)
+                        && fr != "stop"
+                    {
+                        failure =
+                            Some(format!("chat stream finished with reason '{fr}' — output truncated"));
+                        return Break(());
+                    }
+                    if let Some(delta) = c
+                        .get("delta")
+                        .and_then(|d| d.get("content"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        text.push_str(delta);
+                    }
                 }
                 Continue(())
             })

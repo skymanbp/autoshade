@@ -138,17 +138,35 @@ pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::write(&tmp, serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)?)?;
+    let mut retired = false;
     if target.exists() {
         let bak = dir.join("pixels.json.bak");
         let _ = std::fs::remove_file(&bak);
         std::fs::rename(&target, &bak)?;
+        retired = true;
     }
-    std::fs::rename(&tmp, &target)
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        // The publish failed AFTER the old file was retired — put it back so
+        // the previous linkage stays the live one, not a .bak orphan.
+        if retired {
+            let _ = std::fs::rename(dir.join("pixels.json.bak"), &target);
+        }
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Forget the baked pixel source (the develop went back to parametric-only).
-pub fn clear_pixel_source(src: &Path) {
-    let _ = std::fs::remove_file(pixel_source_path(src));
+/// A file already missing IS the desired end state; any OTHER failure must
+/// reach the caller — a surviving pixels.json silently resurrects an obsolete
+/// retouched canvas on the next open.
+pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(pixel_source_path(src)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// The photo's recorded baked pixel source, if it still resolves on disk:
@@ -358,7 +376,9 @@ pub fn backup_saved_develop(
         }
     }
     let dev = develop_dir(src);
-    let n = list_versions(src).last().copied().unwrap_or(0) + 1;
+    // saturating: a (hand-crafted) v4294967295 snapshot must not wrap the
+    // next number back onto an existing low version and overwrite it.
+    let n = list_versions(src).last().copied().unwrap_or(0).saturating_add(1);
     let dst = version_target(src, n);
     match parsed {
         Some(mut r) => {

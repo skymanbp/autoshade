@@ -79,8 +79,10 @@ pub struct HealReport {
 // --- the deterministic heal engine -----------------------------------------
 
 /// Apply every spot to `img` in place, healing from surrounding real pixels.
-/// Donors are read from a snapshot of the ORIGINAL image, so spots are
-/// order-independent and never read a half-written region.
+/// Donors AND blend bases are read from a snapshot of the ORIGINAL image, so
+/// no spot ever reads a half-written region and each spot's output is a pure
+/// function of the source. Where spots OVERLAP, the later spot's result wins
+/// (deliberate last-writer rule — not order-independent in the overlap).
 pub fn heal_image(img: &mut RgbImage, spots: &[HealSpot]) {
     if spots.is_empty() {
         return;
@@ -474,8 +476,23 @@ pub fn heal(
     let mut spots: Vec<HealSpot> = Vec::new();
     let mut rationale = String::new();
     if auto_detect {
-        let small = image::DynamicImage::ImageRgb8(rgb.clone())
-            .resize(1568, 1568, image::imageops::FilterType::Triangle);
+        // Aspect-preserving downscale straight off the borrowed buffer — the
+        // old DynamicImage wrap cloned the ENTIRE frame (a ~183 MB transient
+        // on a 61 MP full-res heal) just to make a ≤1568px detection JPEG.
+        let (dw, dh) = {
+            let s = 1568.0 / w.max(h).max(1) as f32;
+            if s >= 1.0 {
+                (w, h)
+            } else {
+                (((w as f32 * s).round() as u32).max(1), ((h as f32 * s).round() as u32).max(1))
+            }
+        };
+        let small = image::DynamicImage::ImageRgb8(image::imageops::resize(
+            &rgb,
+            dw,
+            dh,
+            image::imageops::FilterType::Triangle,
+        ));
         let mut jpeg = Vec::new();
         small
             .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)

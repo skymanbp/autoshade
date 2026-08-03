@@ -235,7 +235,7 @@
           <label class="chk" title="Composite onto the full-sensor develop (e.g. 61MP) so the untouched area keeps native resolution. Slow (renders the full RAW); the removed patch is upscaled. RAW only."><input type="checkbox" class="fill-fullres" /> Full-res</label>
           <button class="fill-run" type="button">Remove / Fill</button>
         </div>
-        <div class="hint">Paint the region, write what belongs there, then Remove/Fill. Only the painted area is regenerated; the rest is kept. Default composites onto the source preview (fast); Full-res keeps the untouched area at native resolution (slow, RAW only). Saved to ./out. Needs OPENAI_API_KEY (gpt-image), ~15-40s.</div>
+        <div class="hint">Paint the region, write what belongs there, then Remove/Fill. Only the painted area is regenerated; the rest is kept. Default composites onto the source preview (fast); Full-res keeps the untouched area at native resolution (slow, RAW only). Saved to ./out. Needs an image API key (OPENAI_API_KEY or the key saved in Settings; gpt-image) — high quality can run minutes.</div>
       </div>
       <div class="panel heal-panel" style="margin-top:14px">
         <h3>Heal <span class="sub">· pixel retouch</span></h3>
@@ -486,6 +486,11 @@ async function uploadFiles(files) {
 $("#open-files").onclick = () => $("#file-input").click();
 $("#file-input").onchange = e => { if (e.target.files.length) uploadFiles([...e.target.files]); e.target.value = ""; };
 
+// Any async handler that rejects (transport error, JSON parse) surfaces here
+// instead of leaving a permanent "…ing" status line and a console-only error.
+window.addEventListener("unhandledrejection", e => {
+  setStatus("request failed: " + (e.reason && e.reason.message || e.reason || "network error"));
+});
 let dragDepth = 0;
 window.addEventListener("dragenter", e => { e.preventDefault(); if (dragDepth++ === 0) document.body.classList.add("dragging"); });
 window.addEventListener("dragover", e => { e.preventDefault(); });
@@ -781,6 +786,7 @@ async function selectPhoto(id, stem, el) {
           if (!rr.ok) { sbBuild.textContent = "failed"; sbBuild.disabled = false; setStatus("style index: " + (await rr.text() || "build failed")); return; }
           const j = await rr.json();
           sbBuild.textContent = `built ${j.total} ✓`;
+          sbBuild.disabled = false;
           setStatus(`style index built: ${j.total} edits from ${j.source_dir}`);
         } catch (e) { sbBuild.textContent = "error"; sbBuild.disabled = false; }
       };
@@ -854,11 +860,17 @@ async function selectPhoto(id, stem, el) {
     const fullRes = main.querySelector(".fill-fullres").checked;
     const btn = main.querySelector(".fill-run"); btn.disabled = true;
     setStatus(fullRes ? "generative fill (full-res render)… (slow, can take minutes)" : "generative fill via gpt-image… (~15-40s)");
+    // The answer belongs to THIS photo/selection generation: navigating away
+    // must not let a late fill overwrite the new pane (A→B, or A→B→A which
+    // reuses the same id — selectSeq disambiguates that too).
+    const reqId = state.id, reqSeq = selectSeq;
     try {
       const r = await fetch("/api/retouch", {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ id: state.id, prompt, mask, quality, full_res: fullRes })});
+        body: JSON.stringify({ id: reqId, prompt, mask, quality, full_res: fullRes })});
+      if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("fill for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
       if (!r.ok) { setStatus("fill failed: " + await r.text()); return; }
       const blob = await r.blob();
+      if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("fill for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
       setAfterSrc(afterImg, blob);
       fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r);
@@ -883,11 +895,14 @@ async function selectPhoto(id, stem, el) {
     setStatus(fullRes ? "healing (full-res render)… (slow)" : (useMask ? "healing painted area…" : "AI spot heal… (~10-30s)"));
     const btnA = main.querySelector(".heal-auto"), btnP = main.querySelector(".heal-painted");
     btnA.disabled = true; btnP.disabled = true;
+    const reqId = state.id, reqSeq = selectSeq;
     try {
       const r = await fetch("/api/heal", {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ id: state.id, mask, auto: !useMask, full_res: fullRes })});
+        body: JSON.stringify({ id: reqId, mask, auto: !useMask, full_res: fullRes })});
+      if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("heal for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
       if (!r.ok) { setStatus("heal failed: " + await r.text()); return; }
       const blob = await r.blob();
+      if (reqId !== state.id || reqSeq !== selectSeq) { setStatus("heal for another photo finished — its ./out master is saved; reopen that photo to see it"); return; }
       setAfterSrc(afterImg, blob);
       if (useMask) fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r), n = r.headers.get("X-Heal-Spots");
@@ -931,7 +946,7 @@ async function analyze() {
   // selected when it lands — corrupting that photo's recipe on screen, and a
   // later Save would write it into the wrong photo's develop dir (same guard
   // renderAfter uses).
-  const id = state.id;
+  const id = state.id, reqSeq = selectSeq;
   // Careful promise: a stale answer may also have gone UNSAVED (backup-gate
   // refusal), in which case reopening restores the OLD save — so say the
   // result was discarded rather than promising it back.
@@ -948,14 +963,14 @@ async function analyze() {
       body.view = state.recipe;
     }
     const r = await fetch("/api/analyze", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
-    if (id !== state.id) { stale(); return; }
+    if (id !== state.id || reqSeq !== selectSeq) { stale(); return; }
     if (!r.ok) {
       const msg = await r.text();
-      if (id !== state.id) { stale(); return; }
+      if (id !== state.id || reqSeq !== selectSeq) { stale(); return; }
       setStatus("analyze failed: " + msg); return;
     }
     const data = await r.json();
-    if (id !== state.id) { stale(); return; }
+    if (id !== state.id || reqSeq !== selectSeq) { stale(); return; }
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), data.recipe);
     syncSliders(); showVerdict(data.verdict); showRationale();
     pushHistory(state.recipe); renderAfter();

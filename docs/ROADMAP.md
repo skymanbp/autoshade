@@ -19,6 +19,59 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **第二轮 32 路 gpt-5.6-sol 舰队复审 + 修复批 & 死代码清查（2026-08-03，
+  用户令"再开32路…确保项目实现完美"+"清理一轮死代码（多次确认）"）**——
+  fleet32b（契约头补全清批新设计）32/32 成功，115 findings
+  （13H/45M/25L/28UX/4info，43.5万 in/8.7万 out tokens），逐条三裁：
+  - **HIGH 6 修**：批量导出改从 pixels.json 母版渲染（配方叠其上——批量
+    导不再丢修饰）；Ctrl+S 次序重排（像素身份先于徽章/基线/暂存推进，
+    pixels 写失败保留 stash）；恢复路径 Generated 剥 base_curve/lens_profile
+    （生成像素自带观感，防双重烹调）+ 两处复活的"母版自带相机观感"撒谎
+    注释改中性显影真相；Analyze 落库同步写/清 pixels.json（+镜像字段）；
+    `unique_out` 改 create_new 原子认领（取消后重跑不再同名互写）+
+    off-by-one（tag-1000）修 + GUI 临时蒙版名加原子计数（pid 撞名）；
+    main.rs process_one 改 render→XMP→recipe（完成标记真正最后落——
+    render 失败不再被 resume 永久跳过）。
+  - **MEDIUM/LOW 实修**：guard_readonly 根部 `..` 折叠修（"D:/../图库"
+    弹掉 RootDir 得盘相对路径绕过守卫——+测试）；recipe.clamp 亮度范围
+    NaN 界会 panic f32::clamp 断言→非有限整体丢弃（+测试）；Chat SSE
+    finish_reason≠stop 截断显式报错；find_sources 符号链接环 64 层深度
+    帽；下载渲染失败即时清 tmp；write_pixel_source 终发失败还原 .bak +
+    clear_pixel_source 改 Result 三端处理 + backup 版本号 saturating；
+    heal 检测缩图免整幅克隆（61MP 全幅 heal 省 ~183MB 瞬态）；heal 重叠
+    斑点 last-wins 注释改真话；xml_escape 补 U+FFFE/FFFF；XMP tint-only
+    As-Shot 有损边注释在案；apply_masks 全恒等调整跳过整幅扫描；
+    apply_lens_distortion 零尺寸守卫；downscale_f32 0 边夹取（自伤修）；
+    模型列表供应商切回 API 自动还原 stock URL。
+  - **UX 实修**：●未保存涵盖像素身份（pixels_on_disk 镜像，逐帧零磁盘
+    IO）+悬停文案；Tint 滑杆随 Custom WB 门控；四处 Full-res 勾选 RAW-
+    only 门控；GUI region 框四角映射（旋转下两对角框错/近退化）；定比角
+    把手横向余量夹取；文案真相批（设置保存说明/两处忙碌文案改"✕ 取消
+    可停"/Save develop 悬停含母版链接，i18n 双侧 422 键 0/0）。
+  - **web 实修**：fill/heal 结果带 (id, selectSeq) 双守卫（A→B→A 同 id
+    也不串台）；analyze 守卫补 seq；unhandledrejection 全局兜底（传输失
+    败不再永挂"…ing"状态）；fill 提示 OPENAI_API_KEY 必需说法改真相；
+    风格索引 build 成功后按钮复活。
+  - **驳回/在案**（证据）：NoopOnly 弃校准=d1f6986 设计；fit 不走
+    produce_recipe=在案设计；heal/clone 中性基图=b1c f7ce 契约；迁移
+    TOCTOU/非UTF8键/中断残留=v0.13 取舍；CLI heal 固定名=交付物语义；
+    404|422 协商=v0.14.3 裁定（含结构化归因门）；600s 下限 env 旋钮语义；
+    claude 验证器 output() 双管并读无死锁（std 语义）；crop_imm 截断；
+    批量 3 线程池=v0.11 设计；茶隼级微项（trf 占位符注入/同 mtime 缓存
+    陈旧）record。**立项（UX/内存遗留）**：export_mask_png UI 线程编码
+    （8192 卡顿）；几何中笔划降采样重映射；窄面板换行批（曲线 160px/
+    蒙版工具条/反推行/状态栏●溢出）；AI region 覆盖框几何映射显示；
+    Before 缺镜头校正对比；px 重解码烘焙变体文案；flex_size 独立取整可
+    破 3:1；segment.py float32 全幅蒙版；denoise sidecar 不可中断+
+    torch.hub 代码未钉版本（供应链注记）。
+  - **死代码清查（用户令，五角度多重确认）**：①编译器 warning-clean=
+    私有/pub(crate) 零死代码 ②163 个 lib pub 项全库交叉引用零未引用
+    ③Cargo 18/18 依赖在用 ④web 46 个 JS 定义零死 + i18n 450 条目零孤儿
+    （28 条经常量表间接存活逐一核实）⑤python 11 个 def 零死。结论=**无
+    可删项**（本会话唯一转死的 composite_region 已即时 cfg(test) 处理）。
+  基线 137 lib + 9 gui（NaN 范围/根部 `..` 两用例并入既有测试），clippy
+  双零，i18n 422 调用点 450 条目 0/0，web JS node --check 通过。
+
 - **在案后续工作全清批（2026-08-03，用户令"把所有后续工作推完"）**——
   此前三个 backlog 池（v0.14.1 内存专项 4 项 + v0.14.2 待办 2 项 +
   32 路舰队立项 7 项）一次性全部落地：
