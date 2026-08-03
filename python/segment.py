@@ -76,12 +76,18 @@ def sky_mask(img_path: str):
     with torch.no_grad():
         inputs = processor(images=img, return_tensors="pt")
         logits = model(**inputs).logits  # (1, n_classes, h/4, w/4)
-        up = torch.nn.functional.interpolate(
-            logits, size=(img.height, img.width), mode="bilinear", align_corners=False
-        )
-        probs = up.softmax(dim=1)[0]
+        # Softmax over classes at the MODEL's resolution, then upsample ONLY
+        # the sky channel. The old order upsampled all ~150 class planes to
+        # the full input first — on a 61 MP frame that is ~36 GB of float32
+        # before the softmax doubles it. One low-res softmax + a single-plane
+        # bilinear upsample is visually identical for a soft alpha mask.
+        probs_lo = logits.softmax(dim=1)
+        sky_lo = probs_lo[:, int(sky_ids[0]) : int(sky_ids[0]) + 1]
+        sky = torch.nn.functional.interpolate(
+            sky_lo, size=(img.height, img.width), mode="bilinear", align_corners=False
+        )[0, 0]
 
-    m = probs[int(sky_ids[0])].numpy()
+    m = sky.numpy()
     m = (m * 255.0).clip(0, 255).astype(np.uint8)
     return Image.fromarray(m, mode="L")
 

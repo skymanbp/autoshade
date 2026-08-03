@@ -397,7 +397,7 @@ async function loadList(offset) {
     div.className = "thumb"; div.dataset.id = it.id;
     if (it.id === state.id) div.classList.add("sel");   // keep the open photo highlighted across pages
     div.innerHTML = `<img loading="lazy" src="/api/thumb?id=${it.id}"/>
-      <div><div class="name">${it.stem}</div>
+      <div><div class="name">${escapeHtml(it.stem)}</div>
         <div class="tags">${it.baked?'<span class="pill">PNG/TIFF</span>':''}${it.analyzed?'<span class="badge">● edited</span>':''}</div>
       </div>`;
     div.onclick = () => selectPhoto(it.id, it.stem, div);
@@ -887,12 +887,16 @@ function showVerdict(v) {
   const el = $(".verdict");
   if (!v) { el.textContent = "Not analyzed yet."; return; }
   const reasons = (v.reasons||[]).map(x=>`<li>${escapeHtml(x)}</li>`).join("");
-  el.innerHTML = `<span class="tag ${v.decision}">${v.decision.toUpperCase()}</span><ul>${reasons}</ul>`;
+  // The decision lands in a CLASS ATTRIBUTE — whitelist it instead of trusting
+  // whatever string the AI round-trip produced.
+  const dec = /^[a-z]+$/i.test(v.decision||"") ? v.decision : "revise";
+  el.innerHTML = `<span class="tag ${dec}">${escapeHtml(dec.toUpperCase())}</span><ul>${reasons}</ul>`;
 }
 function showRationale() {
   $(".rationale").textContent = state.recipe.rationale ? `“${state.recipe.rationale}” (confidence ${state.recipe.confidence})` : "";
 }
-function escapeHtml(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+// Quotes included: this escaper is also used inside attribute values.
+function escapeHtml(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 // The saved-master path travels percent-encoded (a header value is ASCII-only,
 // and a non-ASCII photo name used to make the server fail to build the header).
 function outPath(r) {

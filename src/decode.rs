@@ -197,7 +197,10 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
             .fnumber
             .as_ref()
             .map(ratio)
-            .or_else(|| exif.aperture_value.as_ref().map(ratio)),
+            // ApertureValue is an APEX Av, not an f-number: N = 2^(Av/2)
+            // (Av 4 ⇒ f/4, Av 5 ⇒ f/5.7). Feeding it raw overstated fast
+            // lenses in metadata + the AI prompt whenever FNumber was absent.
+            .or_else(|| exif.aperture_value.as_ref().map(|v| (ratio(v) / 2.0).exp2())),
         focal_length_mm: exif.focal_length.as_ref().map(ratio),
         exposure_bias_ev: exif.exposure_bias.as_ref().map(sratio),
         date_time: exif.date_time_original.clone(),

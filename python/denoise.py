@@ -57,7 +57,9 @@ def _download(url, dest):
     import requests
 
     log(f"downloading {os.path.basename(dest)} ...")
-    tmp = dest + ".part"
+    # Unique temp per process: two first-time runs racing on ONE ".part"
+    # truncated each other and could publish a corrupted download.
+    tmp = f"{dest}.{os.getpid()}.part"
     with requests.get(url, stream=True, timeout=60) as r:
         r.raise_for_status()
         total = int(r.headers.get("Content-Length", 0))
@@ -154,6 +156,10 @@ def denoise(model, img, device, tile=512, overlap=32, fp16=False):
     """img: float32 HxWx3 in [0,1]. Returns denoised float32 HxWx3 in [0,1]."""
     import torch
 
+    # Guard the tiling maths: overlap >= tile turns the step into 1px
+    # (millions of forward passes) and edge windows of mismatched sizes.
+    tile = max(64, int(tile))
+    overlap = int(np.clip(overlap, 0, tile // 2))
     h, w, _ = img.shape
     acc = np.zeros((h, w, 3), dtype=np.float32)
     wsum = np.zeros((h, w, 1), dtype=np.float32)
@@ -214,8 +220,16 @@ def main():
         raise SystemExit(f"cannot read image: {args.input}")
     if raw.ndim == 2:
         raw = cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR)
+    # Preserve alpha through the round-trip instead of silently dropping it.
+    alpha = None
     if raw.shape[2] == 4:
+        alpha = raw[:, :, 3].copy()
         raw = raw[:, :, :3]
+    # Only 8/16-bit integer data is supported: a float TIFF interpreted as
+    # 8-bit would be destroyed, so refuse loudly (the Rust bridge always
+    # hands over u8/u16).
+    if raw.dtype not in (np.uint8, np.uint16):
+        raise SystemExit(f"unsupported pixel dtype {raw.dtype} (only uint8/uint16)")
     is16 = raw.dtype == np.uint16
     maxv = 65535.0 if is16 else 255.0
     rgb = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB).astype(np.float32) / maxv
@@ -230,6 +244,8 @@ def main():
 
     out = np.clip(den * maxv + 0.5, 0, maxv).astype(np.uint16 if is16 else np.uint8)
     out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+    if alpha is not None:
+        out = np.dstack([out, alpha])
     ok = cv2.imwrite(args.output, out)
     if not ok:
         raise SystemExit(f"cannot write image: {args.output}")

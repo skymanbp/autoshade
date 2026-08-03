@@ -349,20 +349,35 @@ fn rollback_frozen_rasters(dev: &Path, n: u32) {
 
 /// Delete snapshot `n`: its recipe file plus any `v<n>.*` frozen rasters.
 pub fn delete_version(src: &Path, n: u32) -> std::io::Result<()> {
-    std::fs::remove_file(version_target(src, n))?;
+    // Sweep the frozen rasters FIRST, recipe LAST: with the old order a
+    // raster-removal failure was silently discarded after the recipe was
+    // already gone, and a retry returned early on the missing recipe —
+    // stranding potentially large frozen bitmaps forever. Now a failed
+    // raster removal is reported and the version stays retryable.
     let prefix = format!("v{n}.");
+    let recipe_name = version_target(src, n)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut first_err: Option<std::io::Error> = None;
     if let Ok(dir) = std::fs::read_dir(develop_dir(src)) {
         for e in dir.flatten() {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
-            // The recipe file itself is already gone; this sweeps the frozen
-            // rasters ("v3.mask-zone-sky.png"). The dot terminator keeps
-            // "v3." from matching "v30.recipe.json".
-            if name.starts_with(&prefix) {
-                let _ = std::fs::remove_file(e.path());
+            // The dot terminator keeps "v3." from matching "v30.recipe.json".
+            if name.starts_with(&prefix)
+                && name != recipe_name
+                && let Err(err) = std::fs::remove_file(e.path())
+                && first_err.is_none()
+            {
+                first_err = Some(err);
             }
         }
     }
+    if let Some(err) = first_err {
+        return Err(err);
+    }
+    std::fs::remove_file(version_target(src, n))?;
     Ok(())
 }
 

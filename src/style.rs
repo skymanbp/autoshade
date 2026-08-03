@@ -224,8 +224,15 @@ impl StyleIndex {
             );
         }
         pipeline::ensure_parent(path)?;
-        std::fs::write(path, serde_json::to_string(self)?)
-            .with_context(|| format!("write style index {}", path.display()))?;
+        // Publish atomically (tmp + rename): fs::write truncates in place, so
+        // a disk-full/interrupt mid-write left the previous good index as a
+        // corrupt partial file — the empty-index guard above can't catch that.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string(self)?)
+            .with_context(|| format!("write style index {}", tmp.display()))?;
+        let _ = std::fs::remove_file(path); // Windows rename can't replace
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("publish style index {}", path.display()))?;
         Ok(())
     }
 

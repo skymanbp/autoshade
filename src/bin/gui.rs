@@ -199,6 +199,12 @@ struct OverlayKey {
     reference_recipe: Option<EditRecipe>,
     straighten_deg: f32,
     lens_distortion: f32,
+    // The coverage warp also depends on the PROFILE geometry toggles —
+    // without them in the key, flipping profile Distortion/CA reused a wash
+    // warped under the previous state (knot data only changes per photo,
+    // which `base` already keys).
+    profile_dist_on: bool,
+    profile_ca_on: bool,
 }
 
 /// Messages from worker threads back to the UI. The large payloads are boxed so
@@ -770,6 +776,10 @@ struct AutoshopApp {
     // --- batch recipe copy / paste ---
     multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
+    // WHICH photo the clipboard came from: pasting back onto that photo may
+    // keep its bitmap masks (the rasters are its own); every other target
+    // gets them stripped.
+    copied_from: Option<PathBuf>,
     paste_geometry: bool,                  // keep crop/straighten when pasting
     // --- WB eyedropper ---
     wb_picking: bool,                      // next image click samples a neutral point
@@ -1021,6 +1031,7 @@ impl Default for AutoshopApp {
             curve_drag: None,
             multi_sel: HashSet::new(),
             copied: None,
+            copied_from: None,
             paste_geometry: false,
             wb_picking: false,
             range_picking: None,
@@ -2757,6 +2768,7 @@ impl AutoshopApp {
         pre.straighten_deg = 0.0;
         pre.lens_distortion = 0.0;
         pre.crop = None;
+        let lp = &self.recipe.lens_profile;
         let key = OverlayKey {
             base: Arc::as_ptr(base) as usize,
             target: i,
@@ -2767,6 +2779,8 @@ impl AutoshopApp {
             reference_recipe: mask.range.is_some().then(|| pre.clone()),
             straighten_deg: self.recipe.straighten_deg,
             lens_distortion: self.recipe.lens_distortion,
+            profile_dist_on: lp.distortion_on && !lp.distortion.is_empty(),
+            profile_ca_on: lp.ca_on && !lp.ca_r.is_empty() && !lp.ca_b.is_empty(),
         };
         if self.overlay_key.as_ref() == Some(&key) && self.mask_overlay_tex.is_some() {
             return;
@@ -3656,26 +3670,33 @@ impl AutoshopApp {
             recipe.straighten_deg = 0.0;
         }
         // Bitmap masks reference per-photo rasters keyed to the SOURCE stem —
-        // pasted onto another photo they point at the wrong file (and classic
+        // pasted onto ANOTHER photo they point at the wrong file (and classic
         // XMP cannot carry them, so recipe.json and .xmp would disagree).
-        // Strip them, visibly.
+        // Strip them for foreign targets, visibly — but the photo the
+        // clipboard CAME FROM keeps its own masks (pasting back onto itself
+        // used to silently destroy valid AI selections).
+        let recipe_full = recipe.clone();
+        let copied_from = self.copied_from.clone();
         let n_bitmap = recipe
             .masks
             .iter()
             .filter(|m| matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }))
             .count();
+        let has_foreign_target = targets.iter().any(|t| Some(t) != copied_from.as_ref());
         if n_bitmap > 0 {
             recipe
                 .masks
                 .retain(|m| !matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }));
-            self.toast(
-                ToastKind::Error,
-                trf(
-                    self.lang,
-                    "{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
-                    &[("n", &n_bitmap.to_string())],
-                ),
-            );
+            if has_foreign_target {
+                self.toast(
+                    ToastKind::Error,
+                    trf(
+                        self.lang,
+                        "{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
+                        &[("n", &n_bitmap.to_string())],
+                    ),
+                );
+            }
         }
         // If the open photo is one of the targets, take the paste live in the
         // editor too (undo-able through the usual committed-snapshot step).
@@ -3690,9 +3711,13 @@ impl AutoshopApp {
             // Same base_curve rule the worker applies to every target below,
             // mirrored here so `pasted_open` equals the bytes the worker
             // writes and the ● baseline can advance on success.
-            let live = paste_recipe_for(&open, &recipe);
+            let chosen = if Some(&open) == copied_from.as_ref() { &recipe_full } else { &recipe };
+            let live = paste_recipe_for(&open, chosen);
             self.recipe = live.clone();
             self.dirty = true;
+            // Wholesale recipe replacement: disarm index-carrying tools and
+            // refresh derived display, like every other whole-swap path.
+            self.resync_recipe_display();
             self.pasted_open = Some((open, live));
         }
         let lang = self.lang; // localise the UI status AND the worker's result strings
@@ -3711,8 +3736,11 @@ impl AutoshopApp {
                         let step = || -> anyhow::Result<bool> {
                             // Per-target base-look resolution (paste_recipe_for):
                             // paste copies the user edit, never the source
-                            // photo's camera calibration over a saved one.
-                            let r = paste_recipe_for(path, &recipe);
+                            // photo's camera calibration over a saved one. The
+                            // clipboard's own photo keeps its bitmap masks.
+                            let chosen =
+                                if Some(path) == copied_from.as_ref() { &recipe_full } else { &recipe };
+                            let r = paste_recipe_for(path, chosen);
                             autoshop::pipeline::write_recipe(path, &r, None)?;
                             if autoshop::decode::is_raw(path) {
                                 autoshop::pipeline::write_xmp(path, &r)?;
@@ -4573,6 +4601,7 @@ impl AutoshopApp {
                     .clicked()
                 {
                     self.copied = Some(self.recipe.clone());
+                    self.copied_from = self.src_path.clone();
                     self.status = tr(lang, "Recipe copied — Ctrl+click to pick several, then “Paste to selected”").to_string();
                 }
             });
@@ -5045,7 +5074,10 @@ impl AutoshopApp {
                             .on_hover_text(tr(lang, "Per-channel radius correction: removes red/blue colour fringing at edges"))
                             .changed()
                         {
-                            if lp.ca_on && lp.ca_r.is_empty() {
+                            if lp.ca_on && (lp.ca_r.is_empty() || lp.ca_b.is_empty()) {
+                                // Refill the PAIR: a saved recipe holding only
+                                // ca_r would otherwise enable CA that renders
+                                // nothing (geometry_active needs both).
                                 lp.ca_r = photo.ca_r.clone();
                                 lp.ca_b = photo.ca_b.clone();
                             }
@@ -5432,6 +5464,11 @@ impl AutoshopApp {
                 }
                 // --- Range Mask（LR 范围蒙版）: refines WHERE the geometry applies —
                 // final weight = geometry × range, live in preview + export + XMP.
+                // `changed` is watched across the whole block: range edits are
+                // COVERAGE edits, so the red overlay must rebuild too — only
+                // the geometry controls used to set overlay_stale, leaving the
+                // wash stale against the new range until an unrelated toggle.
+                let range_changed_before = changed;
                 {
                     let cur = match &self.recipe.masks[i].range {
                         None => 0usize,
@@ -5510,6 +5547,9 @@ impl AutoshopApp {
                             self.status = tr(lang, "Colour range: click the colour to pick in the image").into();
                         }
                     }
+                }
+                if changed && !range_changed_before {
+                    self.overlay_stale = true; // range IS coverage — rebuild the wash
                 }
                 let m = &mut self.recipe.masks[i];
                 changed |= Self::slider(ui, lang, tr(lang, "Amount"), &mut m.amount, 0.0, 1.0, 1.0);
@@ -7696,9 +7736,14 @@ impl eframe::App for AutoshopApp {
         }
 
         // Drag & drop: dropping a photo opens it, a folder opens the library.
-        let dropped: Vec<PathBuf> = ctx.input(|i| {
-            i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect()
-        });
+        // Ignored entirely while the quit-confirm layer is up — a drop must
+        // not mutate the very state the user is deciding whether to save
+        // (the shortcut block is gated on the same condition).
+        let dropped: Vec<PathBuf> = if self.confirm_quit {
+            Vec::new()
+        } else {
+            ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect())
+        };
         let n_dropped = dropped.len();
         if let Some(p) = dropped.into_iter().next() {
             if self.busy {

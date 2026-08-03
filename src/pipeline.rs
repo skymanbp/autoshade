@@ -293,9 +293,21 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     let tmp = out.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&on_disk)?)
         .with_context(|| format!("write recipe {}", tmp.display()))?;
-    let _ = std::fs::remove_file(&out);
-    std::fs::rename(&tmp, &out)
-        .with_context(|| format!("publish recipe {}", out.display()))?;
+    // Retire the old file to .bak instead of deleting it (Windows rename
+    // cannot replace): if the publish rename then fails (AV lock, racing
+    // writer), the authoritative recipe is RESTORED, not lost. On success
+    // the .bak is dropped.
+    let bak = out.with_extension("json.bak");
+    let had_old = std::fs::rename(&out, &bak).is_ok();
+    if let Err(e) = std::fs::rename(&tmp, &out) {
+        if had_old {
+            let _ = std::fs::rename(&bak, &out);
+        }
+        return Err(e).with_context(|| format!("publish recipe {}", out.display()));
+    }
+    if had_old {
+        let _ = std::fs::remove_file(&bak);
+    }
     if out == crate::store::recipe_target(raw) {
         crate::store::note_source(raw); // breadcrumb for the hashed store dir
     }

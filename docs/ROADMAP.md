@@ -19,6 +19,45 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **64 路 gpt-5.6-sol 舰队审查 + 修复批（2026-08-03，已提交未推送）**——
+  用户令"派遣64路并行gpt 5.6 sol进行代码检查"。执行：/v1/models 实证
+  gpt-5.6-sol 存在→代码库切 64 审查单元（gui 19 片/render 9 片/其余按行
+  数成组，±30 行上下文+项目契约头）→8 并发扇出（in 442,720/out 117,184
+  tokens）→**64/64 成功，152 findings（13H/79M/49L/11info）**→本席逐条
+  对抗核实（高危 13 条全判：7 实 6 驳，驳回依据=契约/egui API/已录取舍；
+  中危抽样亲读）。修复落地（本批）：
+  1. **web XSS**：图库 stem 经 escapeHtml；verdict decision 白名单入
+     class 属性；escapeHtml 补引号转义。
+  2. **XMP 注释消毒**：rationale 的 "--"/尾 "-" 换 U+2011（含 -- 的
+     rationale 曾使整个边车 XML 非法）。
+  3. **APEX 光圈**：FNumber 缺失时 ApertureValue 按 2^(Av/2) 换算（原
+     直接当 f 值）。
+  4. **serve**：下载改文件流式响应（原 fs::read 整个 ~366MB TIFF 进内
+     存）；上传 500MB 上限（原无界 read_to_end）+ 同名避让 "name (2)"
+     （原静默覆盖）；StyleIndex::save 原子发布（tmp+rename）。
+  5. **GUI**：范围蒙版任何改动即刷覆盖层（原只有几何控件刷）；
+     OverlayKey 补 profile 畸变/CA 开关（原切开关复用旧 warp）；粘贴带
+     出处（copied_from）——贴回剪贴板来源照片保留其位图蒙版（原自贴也
+     被剥）+ 打开照片粘贴后 resync；拖放受 confirm_quit 门；CA 回填查
+     数据对（有红无蓝时也回填）。
+  6. **杂项**：write_recipe 旧档改 .bak 退位+失败回滚（原删旧后 rename
+     失败即丢权威档）；claude 验证器子进程 300s 硬预算+杀死+可
+     AUTOSHOP_HTTP_TIMEOUT_SECS 覆盖（原 output() 可永久挂起）；
+     delete_version 先扫栅格后删配方（原栅格删除失败被吞且不可重试）。
+  7. **python 边车**：segment.py 先低分辨率 softmax 选天空通道再单通道
+     上采样（原 ~150 类全上采样，61MP 下 ~36GB 必 OOM）；denoise.py
+     拒绝 float 输入（原静默按 8-bit 毁图）+ alpha 保留 + tile/overlap
+     守卫 + .part 下载临时名带 pid（并发竞态）。
+  经读码**驳回不修**（除高危 6 条外）：HSL schema minItems（OpenAI
+  strict 模式不支持会 400，代码注释已录）；config 空串键（Settings UI
+  契约=空即保留）；eval 锐化 ×1.5（与 xmp ×2/3 互逆，正确）；egui
+  drag_delta 累加（API 为本帧增量）；undo 24GB（基图为预览分辨率）。
+  **记录为内存专项待办（未做）**：非全分辨率修饰先全幅显影再缩
+  （render 加 max_edge 参数）；生成合成全幅多缓冲分块化；位图蒙版缓存
+  改字节预算；开照全幅驻留优化。验证：**124 lib + 9 gui** 全绿、clippy
+  --all-targets 0、i18n 407 键 0/0/0、双 exe（gui 34967155 / cli
+  26888658）。
+
 - **v0.14.0 RELEASED（2026-08-03）**——自 v0.13.0 后的全部 15 提交：
   修饰超时 600s（8f62b8a）、相机基调批次（b1cf7ce）、Reset=刚打开状态
   （d1f6986）、LR 对标缺陷修复批（f0f96b4+c604477）、分析链超时重校准

@@ -86,7 +86,34 @@ impl Advisor for ClaudeProvider {
         cmd.current_dir(std::env::temp_dir());
         // Don't flash a console window when the windowed GUI spawns this CLI child.
         crate::hide_child_console(&mut cmd);
-        let output = cmd.output()?;
+        // A hung `claude` child (network stall inside the CLI) used to block
+        // the analysis worker FOREVER — `output()` has no deadline, while
+        // every HTTP advisor path carries one. Spawn + poll with a hard
+        // budget (same env override as the HTTP paths); on expiry the child
+        // is killed and the error says exactly what happened.
+        let budget = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300u64);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let start = std::time::Instant::now();
+        let output = loop {
+            match child.try_wait()? {
+                Some(_) => break child.wait_with_output()?,
+                None if start.elapsed().as_secs() >= budget => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(AdvisorError::ClaudeError(format!(
+                        "claude verifier timed out after {budget}s and was killed \
+                         (raise AUTOSHOP_HTTP_TIMEOUT_SECS if your runs are legitimately slower)"
+                    )));
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(200)),
+            }
+        };
 
         // The CLI envelope; we only need these fields (serde ignores the rest).
         #[derive(serde::Deserialize)]

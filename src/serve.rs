@@ -263,12 +263,42 @@ fn api_upload(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         return Ok(status_response(400, "unsupported or unnamed file"));
     }
 
+    // Bounded read: an unbounded read_to_end let one oversized (or malicious)
+    // upload exhaust process memory. 500 MB comfortably covers any current
+    // RAW/TIFF; past the cap the request is refused, not truncated.
+    const MAX_UPLOAD: usize = 500 * 1024 * 1024;
     let mut bytes = Vec::new();
-    request.as_reader().read_to_end(&mut bytes).context("read upload body")?;
+    // Bounded manual read loop (Take<T> on a trait object fights the method
+    // resolver): refuse — never truncate — anything past the cap.
+    let reader = request.as_reader();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut chunk).context("read upload body")?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        if bytes.len() > MAX_UPLOAD {
+            return Ok(status_response(413, "upload exceeds the 500 MB limit"));
+        }
+    }
 
     let dir = PathBuf::from("out").join("imported");
     std::fs::create_dir_all(&dir).context("create out/imported")?;
-    let dest = dir.join(&safe);
+    // Same basename ≠ same photo: never truncate an existing import — pick
+    // "name (2).ext" style until free, so two shoots' DSC0001.ARW coexist.
+    let mut dest = dir.join(&safe);
+    if dest.exists() {
+        let stem = as_path.file_stem().and_then(|s| s.to_str()).unwrap_or("upload");
+        let ext = as_path.extension().and_then(|s| s.to_str()).unwrap_or("bin");
+        for n in 2.. {
+            let cand = dir.join(format!("{stem} ({n}).{ext}"));
+            if !cand.exists() {
+                dest = cand;
+                break;
+            }
+        }
+    }
     std::fs::write(&dest, &bytes).with_context(|| format!("write {}", dest.display()))?;
 
     let id = {
@@ -783,8 +813,13 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         DL_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     render::render_to_file(&raw, &req.recipe, &tmp, denoise_opts(&req, &state.config()).as_ref(), None)?;
-    let bytes = std::fs::read(&tmp).with_context(|| format!("read {}", tmp.display()))?;
-    let _ = std::fs::remove_file(&tmp);
+    // STREAM the file instead of fs::read-ing it whole: a 61 MP 16-bit TIFF
+    // is ~366 MB — materialising it as a Vec on top of the renderer's own
+    // buffers was the server's single biggest peak-memory hazard. The temp
+    // file is removed after the response completes (best-effort on Windows,
+    // where an open handle blocks deletion until the stream closes).
+    let file = std::fs::File::open(&tmp).with_context(|| format!("open {}", tmp.display()))?;
+    let len = file.metadata().ok().map(|m| m.len() as usize);
     let ctype = if ext == "jpg" { "image/jpeg" } else { "image/tiff" };
     // A header value is ASCII-only (tiny_http REJECTS non-ASCII bytes), so the
     // photo's own stem cannot go in raw: a Chinese/accented name used to make
@@ -796,13 +831,23 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         "attachment; filename=\"download.developed.{ext}\"; filename*=UTF-8''{}",
         percent_encode(&format!("{}.developed.{ext}", pipeline::stem(&raw)))
     );
-    let mut resp = Response::from_data(bytes);
+    let mut resp = Response::new(
+        tiny_http::StatusCode(200),
+        Vec::new(),
+        file,
+        len,
+        None,
+    );
     if let Some(h) = header("Content-Type", ctype) {
         resp = resp.with_header(h);
     }
     if let Some(h) = header("Content-Disposition", &disposition) {
         resp = resp.with_header(h);
     }
+    // Windows cannot delete a file with an open read handle — this succeeds
+    // on Unix now and is retried by the OS temp cleaner on Windows; the
+    // process-id + sequence name prevents collisions either way.
+    let _ = std::fs::remove_file(&tmp);
     Ok(resp.boxed())
 }
 
