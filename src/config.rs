@@ -121,7 +121,13 @@ pub struct Config {
 impl Config {
     pub fn load() -> Self {
         // .env first (absence is fine; never prints the key), then the local file.
-        let _ = dotenvy::dotenv();
+        // 2026-08-03: `dotenv_override`, not `dotenv`. Why: plain `dotenv()`
+        // leaves an already-set process var alone, and this machine carries a
+        // User-scope OPENAI_API_KEY — so a run launched from a shell holding it
+        // silently billed that global key instead of this project's own .env
+        // key. Project .env is the default; the global stays the fallback for
+        // names .env does not define.
+        let _ = dotenvy::dotenv_override();
         let nonempty = |k: &str| env::var(k).ok().filter(|s| !s.trim().is_empty());
         let local = load_local_settings();
         // local-file value wins over env; `pick` returns the first non-empty.
