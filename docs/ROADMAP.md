@@ -19,6 +19,13 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **v0.14.0 RELEASED（2026-08-03）**——自 v0.13.0 后的全部 15 提交：
+  修饰超时 600s（8f62b8a）、相机基调批次（b1cf7ce）、Reset=刚打开状态
+  （d1f6986）、LR 对标缺陷修复批（f0f96b4+c604477）、分析链超时重校准
+  （c111ed0）、手感批（12611db+1807631）、自动镜头校正（d54de4b+
+  debde8f）、GUI UX 批（b8ff358+7d823eb）+ 各批 ROADMAP 文档提交。
+  发版细节（tag、资产字节）见 git tag v0.14.0 与 GitHub Release 页。
+
 - **GUI 信息架构打磨批（UX batch，2026-08-03，已提交未推送）**——用户报
   "GUI 还是有些乱"，4 区域 UX 盘点工作流（toolbar/develop-panel/retouch-
   tools/visual-consistency，44.8 万 tokens，~80 项分级 findings 全带行号）
