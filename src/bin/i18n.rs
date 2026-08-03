@@ -540,7 +540,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("write what should fill the painted area", "写下涂抹区域该填入什么"),
     ("paint the area to remove/fill first (tick Paint mask)", "先涂抹要移除/填充的区域（勾选「涂抹蒙版」）"),
     ("generative fill (full-res render)… (slow, minutes)", "生成填充（全分辨率渲染）…（慢，数分钟）"),
-    ("generative fill via gpt-image… (~15-40s)", "gpt-image 生成填充中…（约 15-40 秒）"),
+    ("generative fill via gpt-image… (streams progress; high quality can run minutes)",
+        "gpt-image 生成填充中…（流式进行；高质量可能需要数分钟）"),
     ("filled → {path} (updated current variant)", "已填充 → {path}（更新当前变体）"),
     ("tick Paint mask and paint the spots, then Heal painted area",
         "勾选「涂抹蒙版」并涂抹瑕疵，再「修复涂抹区域」"),
@@ -555,8 +556,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Cloned {n} spot(s) → {path}", "克隆 {n} 处 → {path}"),
 
     // ── Status bar · reimagine / reverse-fit / style prompt ──────────────────
-    ("AI generating… (gpt-image, ~15–60s; hi-res input needs a full-frame develop first)",
-        "AI 生成出片中…（gpt-image，约 15–60 秒；高分辨率输入需先全幅显影）"),
+    ("AI generating… (gpt-image streams progress; high quality can run minutes; hi-res input needs a full-frame develop first)",
+        "AI 生成出片中…（gpt-image 流式进行；高质量可能需要数分钟；高分辨率输入需先全幅显影）"),
     ("「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
         "已生成「AI 生成」变体 → {path} · 可继续微调或「反推配方」"),
     ("Reverse-fitting… (statistical fit + sky segmentation; first run downloads the model)",

@@ -38,12 +38,32 @@ use crate::{decode, pipeline};
 
 const BOUNDARY: &str = "----autoshopBoundaryX7MA4YWxkTrZu0gW";
 
-/// Overall HTTP deadline for one `images/edits` POST. gpt-image-2 at quality
-/// `high` with a near-8 MP flexible size legitimately runs for several minutes;
-/// the previous 300 s budget (calibrated for the 1-1.5 MP gpt-image-1 era)
-/// fired mid-generation on real requests. `AUTOSHOP_HTTP_TIMEOUT_SECS` still
-/// overrides this for outlier deployments (see `advisor::post_with_timeout`).
+/// Overall HTTP deadline for one BLOCKING `images/edits` POST — the fallback
+/// used only when the model/bridge rejects streaming. gpt-image-2 at quality
+/// `high` with a near-8 MP flexible size legitimately runs for several
+/// minutes; the previous 300 s budget (calibrated for the 1-1.5 MP
+/// gpt-image-1 era) fired mid-generation on real requests, and a real
+/// quality=high request then outran 600 s too — which is why the PRIMARY path
+/// is now streaming under a stall deadline (below) instead of a third
+/// recalibration. `AUTOSHOP_HTTP_TIMEOUT_SECS` still overrides
+/// (see `advisor::post_with_timeout`).
 const IMAGES_EDIT_TIMEOUT_SECS: u64 = 600;
+
+/// Inactivity (stall) deadline for a STREAMING `images/edits` POST — the
+/// primary path. The request asks for `partial_images` progress frames, so a
+/// healthy server proves liveness at roughly each generation quarter and the
+/// longest silent gap in a healthy run is ~total/4: a 600 s stall budget
+/// admits ~40-minute generations, while a dead endpoint still fails within
+/// the same 600 s the old TOTAL deadline gave (GUI soft-lock protection is
+/// unchanged). `AUTOSHOP_HTTP_TIMEOUT_SECS` overrides
+/// (see `advisor::post_with_stall_timeout`).
+const IMAGES_EDIT_STALL_SECS: u64 = 600;
+
+/// Partial frames requested per stream — the liveness cadence. 3 is the API
+/// maximum (`partial_images` must be 0–3, per the published request schema);
+/// each partial costs a small extra fee, negligible next to losing a finished
+/// multi-minute generation to a timeout.
+const IMAGES_EDIT_PARTIALS: u32 = 3;
 
 /// Full-frame generative restyle (the user's experiment). `fidelity` = "high"
 /// keeps it recognizably the same photo; "low" gives the model free rein.
@@ -332,8 +352,14 @@ fn part_file(buf: &mut Vec<u8>, name: &str, filename: &str, bytes: &[u8]) {
 }
 
 /// POST /images/edits, negotiating capability drift instead of hard-coding a
-/// model list. Two parameters are droppable, each at most once, on the API's own
-/// 400 for *that specific parameter*:
+/// model list. Three request features are droppable, each at most once, on the
+/// API's own 400 for *that specific parameter*:
+///   * STREAMING (`stream` + `partial_images`) — the liveness channel: partial
+///     frames keep proving the server is working, so the call runs under an
+///     INACTIVITY deadline ([`IMAGES_EDIT_STALL_SECS`]) and a healthy long
+///     generation is never killed mid-run. Models/bridges without image
+///     streaming reject the parameter; the retry falls back to one blocking
+///     POST under the legacy overall deadline.
 ///   * `input_fidelity` — a gpt-image-1.x knob; newer models (gpt-image-2)
 ///     reject it (`invalid_input_fidelity_model`).
 ///   * the FLEXIBLE `size` — a gpt-image-2 capability; older models reject a
@@ -354,7 +380,7 @@ fn call_images_edit(
         .as_ref()
         .ok_or_else(|| anyhow!("OPENAI_API_KEY not set — generative editing needs the OpenAI API"))?;
 
-    let build_body = |include_fidelity: bool, size: &str| -> Vec<u8> {
+    let build_body = |include_fidelity: bool, size: &str, stream: bool| -> Vec<u8> {
         let mut body = Vec::new();
         part_text(&mut body, "model", &cfg.openai_image_model);
         part_text(&mut body, "prompt", prompt);
@@ -363,6 +389,10 @@ fn call_images_edit(
         }
         part_text(&mut body, "size", size);
         part_text(&mut body, "quality", quality);
+        if stream {
+            part_text(&mut body, "stream", "true");
+            part_text(&mut body, "partial_images", &IMAGES_EDIT_PARTIALS.to_string());
+        }
         part_file(&mut body, "image", "image.png", image_png);
         if let Some(m) = mask_png {
             part_file(&mut body, "mask", "mask.png", m);
@@ -374,30 +404,69 @@ fn call_images_edit(
     let url = format!("{}/images/edits", cfg.openai_base_url.trim_end_matches('/'));
     let mut include_fidelity = true;
     let mut use_flexible = sizes.flexible.is_some();
+    let mut use_stream = true;
     let (value, used_size): (serde_json::Value, String) = loop {
         let size = if use_flexible {
             sizes.flexible.as_deref().unwrap_or(sizes.enum_size)
         } else {
             sizes.enum_size
         };
-        let body = build_body(include_fidelity, size);
+        let body = build_body(include_fidelity, size, use_stream);
         // Each retry in this loop re-posts, so every attempt gets its own full
-        // budget (see IMAGES_EDIT_TIMEOUT_SECS for the calibration rationale).
-        let resp = crate::advisor::post_with_timeout(
-            &url,
-            std::time::Duration::from_secs(IMAGES_EDIT_TIMEOUT_SECS),
-        )
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Content-Type", &format!("multipart/form-data; boundary={BOUNDARY}"))
-        .send_bytes(&body);
+        // budget. Streaming runs under an inactivity deadline (liveness is
+        // observable); the blocking fallback keeps the overall deadline, the
+        // only stall protection left when the server sends nothing until done.
+        let req = if use_stream {
+            crate::advisor::post_with_stall_timeout(
+                &url,
+                std::time::Duration::from_secs(IMAGES_EDIT_STALL_SECS),
+            )
+        } else {
+            crate::advisor::post_with_timeout(
+                &url,
+                std::time::Duration::from_secs(IMAGES_EDIT_TIMEOUT_SECS),
+            )
+        };
+        let resp = req
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Content-Type", &format!("multipart/form-data; boundary={BOUNDARY}"))
+            .send_bytes(&body);
         match resp {
             Ok(r) => {
-                break (r.into_json().context("parse image API response")?, size.to_string())
+                // A server may accept `stream` yet answer with plain JSON —
+                // dispatch on what actually came back, not on what was asked.
+                let v = if r.content_type().eq_ignore_ascii_case("text/event-stream") {
+                    read_sse_image(r.into_reader())?
+                } else {
+                    r.into_json().context("parse image API response")?
+                };
+                break (v, size.to_string());
             }
             Err(ureq::Error::Status(code, r)) => {
                 let b = r.into_string().unwrap_or_default();
+                // Prefer the API's structured `error.param` when present — a
+                // bare substring can blame the wrong knob when the message
+                // merely MENTIONS another parameter (e.g. a size error whose
+                // text says "for streaming requests"). Substrings stay as the
+                // fallback for bridges that omit `param`.
+                let param = serde_json::from_str::<serde_json::Value>(&b)
+                    .ok()
+                    .and_then(|v| v.get("error")?.get("param")?.as_str().map(str::to_owned));
+                let blames = |name: &str| match param.as_deref() {
+                    Some(p) => p == name,
+                    None => b.contains(name),
+                };
                 // Each guard flips its own flag, so each retry fires at most once.
-                if include_fidelity && b.contains("input_fidelity") {
+                if use_stream && (blames("stream") || blames("partial_images")) {
+                    eprintln!(
+                        "  note: {} rejected streaming — retrying as one blocking call \
+                         ({IMAGES_EDIT_TIMEOUT_SECS}s deadline)",
+                        cfg.openai_image_model
+                    );
+                    use_stream = false;
+                    continue;
+                }
+                if include_fidelity && blames("input_fidelity") {
                     eprintln!(
                         "  note: {} rejected input_fidelity — retrying without it",
                         cfg.openai_image_model
@@ -405,7 +474,7 @@ fn call_images_edit(
                     include_fidelity = false;
                     continue;
                 }
-                if use_flexible && b.contains("size") {
+                if use_flexible && blames("size") {
                     eprintln!(
                         "  note: {} rejected flexible size {size} — falling back to {}",
                         cfg.openai_image_model, sizes.enum_size
@@ -417,15 +486,26 @@ fn call_images_edit(
             }
             Err(ureq::Error::Transport(t)) => {
                 let mut msg = format!("transport: {t}");
-                // A read timeout here usually means the generation outran the
-                // deadline, not a dead network — say so, with the actual knobs.
+                // A read timeout means different things per mode: streaming =
+                // the server went SILENT (healthy runs keep sending partials);
+                // blocking = the generation outran the overall deadline.
                 if msg.contains("timed out") {
-                    msg.push_str(&format!(
-                        " (hit the HTTP deadline, default {IMAGES_EDIT_TIMEOUT_SECS}s — \
-                         large/high-quality generations can run longer; raise \
-                         AUTOSHOP_HTTP_TIMEOUT_SECS, or lower AUTOSHOP_IMAGE_QUALITY / \
-                         AUTOSHOP_IMAGE_MAX_PX to speed the call up)"
-                    ));
+                    if use_stream {
+                        msg.push_str(&format!(
+                            " (no stream activity for {IMAGES_EDIT_STALL_SECS}s — the server or a \
+                             proxy stopped sending; healthy generations stream partial images and \
+                             are not time-capped. Raise AUTOSHOP_HTTP_TIMEOUT_SECS if a proxy \
+                             buffers server-sent events, or lower AUTOSHOP_IMAGE_QUALITY / \
+                             AUTOSHOP_IMAGE_MAX_PX)"
+                        ));
+                    } else {
+                        msg.push_str(&format!(
+                            " (hit the HTTP deadline, default {IMAGES_EDIT_TIMEOUT_SECS}s — \
+                             large/high-quality generations can run longer; raise \
+                             AUTOSHOP_HTTP_TIMEOUT_SECS, or lower AUTOSHOP_IMAGE_QUALITY / \
+                             AUTOSHOP_IMAGE_MAX_PX to speed the call up)"
+                        ));
+                    }
                 }
                 return Err(anyhow!(msg));
             }
@@ -435,16 +515,91 @@ fn call_images_edit(
     if let Some(u) = value.get("usage") {
         eprintln!("  usage: {u}");
     }
-    let b64 = value
-        .get("data")
-        .and_then(|d| d.get(0))
-        .and_then(|x| x.get("b64_json"))
-        .and_then(|s| s.as_str())
-        .ok_or_else(|| anyhow!("no data[0].b64_json in response: {value}"))?;
+    let b64 = extract_b64(&value)
+        .ok_or_else(|| anyhow!("no image payload (b64_json) in response: {value}"))?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .context("decode b64_json")?;
     Ok((bytes, used_size))
+}
+
+/// The image payload lives at `data[0].b64_json` in a blocking JSON response
+/// but at the TOP level of a streaming `*.completed` event (verified against
+/// the published response schemas) — accept both shapes.
+fn extract_b64(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("data")
+        .and_then(|d| d.get(0))
+        .and_then(|x| x.get("b64_json"))
+        .or_else(|| value.get("b64_json"))
+        .and_then(|s| s.as_str())
+}
+
+/// Drain an image SSE stream: log partial-image events (the liveness signal),
+/// fail loudly on an `error` event, and return the final `*.completed` JSON
+/// payload. Matches on the event-type SUFFIX so both the `image_edit.*` and
+/// `image_generation.*` families parse.
+///
+/// Framing follows the SSE contract: an event's payload may span SEVERAL
+/// `data:` lines, joined with `\n`, and ends at a blank line (or EOF for an
+/// unterminated final event) — parsing per-line would silently drop a split
+/// completed event. Comment/`event:`/`id:` lines and the `[DONE]` sentinel
+/// carry no payload; a payload that isn't JSON is skipped at its event
+/// boundary (the end-of-stream error stays loud if nothing completes).
+fn read_sse_image(r: impl std::io::Read) -> Result<serde_json::Value> {
+    use std::io::BufRead;
+    // Hard sanity ceiling: even four full-size base64 frames of an ~8 MP PNG
+    // (3 partials + the final) fit in well under 256 MiB. Beyond this the
+    // stream is broken or hostile; the cap also bounds the per-line String
+    // growth below instead of letting one endless line eat all memory.
+    const STREAM_CAP: u64 = 512 * 1024 * 1024;
+    let mut lines = std::io::BufReader::new(r.take(STREAM_CAP)).lines();
+    let mut partials = 0u32;
+    let mut event_data = String::new();
+    loop {
+        let line = lines.next().transpose().context("read image stream")?;
+        let flush = match &line {
+            None => true,                      // EOF flushes an unterminated event
+            Some(l) if l.is_empty() => true,   // blank line = event boundary
+            Some(l) => {
+                if let Some(data) = l.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data != "[DONE]" {
+                        if !event_data.is_empty() {
+                            event_data.push('\n');
+                        }
+                        event_data.push_str(data);
+                    }
+                }
+                false // event:/id:/comment lines never end the event
+            }
+        };
+        if flush && !event_data.is_empty() {
+            let payload = std::mem::take(&mut event_data);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                if v.get("error").is_some()
+                    || v.get("type").and_then(|t| t.as_str()) == Some("error")
+                {
+                    return Err(anyhow!("image stream error: {v}"));
+                }
+                let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if ty.ends_with(".partial_image") {
+                    partials += 1;
+                    eprintln!(
+                        "  … streaming: partial image {partials} received (generation alive)"
+                    );
+                } else if ty.ends_with(".completed") {
+                    return Ok(v);
+                }
+            }
+        }
+        if line.is_none() {
+            break;
+        }
+    }
+    Err(anyhow!(
+        "image stream ended without a completed event ({partials} partial(s) received)"
+    ))
 }
 
 #[cfg(test)]
@@ -531,5 +686,67 @@ mod tests {
         let out = composite_region(&base, &gen_img, &mask, 3);
         let mid = out.get_pixel(w / 2, 0)[0];
         assert!(mid > 0 && mid < 255, "seam pixel should feather to gray, got {mid}");
+    }
+
+    #[test]
+    fn sse_stream_returns_completed_event_skipping_noise() {
+        // Comments, event: lines, CRLF endings, non-JSON payloads and partial
+        // frames must all be tolerated; the completed event's JSON comes back.
+        let body = concat!(
+            ": keep-alive comment\r\n",
+            "event: image_edit.partial_image\r\n",
+            "data: {\"type\":\"image_edit.partial_image\",\"b64_json\":\"AAAA\",\"partial_image_index\":0}\r\n",
+            "\r\n",
+            "data: not-json\n",
+            "\n",
+            "data: [DONE]\n",
+            "\n",
+            "event: image_edit.completed\n",
+            "data: {\"type\":\"image_edit.completed\",\"b64_json\":\"QUJD\",\"usage\":{\"total_tokens\":7}}\n",
+            "\n",
+        );
+        let v = read_sse_image(body.as_bytes()).unwrap();
+        assert_eq!(extract_b64(&v), Some("QUJD"));
+        assert_eq!(v["usage"]["total_tokens"], 7);
+    }
+
+    #[test]
+    fn sse_multi_line_data_frames_join_per_spec_and_eof_flushes() {
+        // SSE allows one event's payload to arrive as several data: lines the
+        // consumer must join with \n — a split completed event must still
+        // parse. This body also ends WITHOUT a trailing blank line, so the
+        // final event is flushed by EOF, not by a boundary.
+        let body = concat!(
+            "data: {\"type\":\"image_edit.completed\",\n",
+            "data:  \"b64_json\":\"QUJD\"}\n",
+        );
+        let v = read_sse_image(body.as_bytes()).unwrap();
+        assert_eq!(extract_b64(&v), Some("QUJD"));
+    }
+
+    #[test]
+    fn sse_stream_error_event_fails_loudly() {
+        let body = "data: {\"type\":\"error\",\"error\":{\"message\":\"boom\"}}\n\n";
+        let err = read_sse_image(body.as_bytes()).unwrap_err().to_string();
+        assert!(err.contains("boom"), "{err}");
+    }
+
+    #[test]
+    fn sse_stream_without_completed_event_fails_with_partial_count() {
+        let body = "data: {\"type\":\"image_edit.partial_image\",\"b64_json\":\"AAAA\"}\n\n";
+        let err = read_sse_image(body.as_bytes()).unwrap_err().to_string();
+        assert!(err.contains("without a completed event"), "{err}");
+        assert!(err.contains("1 partial"), "{err}");
+    }
+
+    #[test]
+    fn extract_b64_accepts_both_response_shapes() {
+        // Blocking JSON: payload nested under data[0].
+        let blocking = serde_json::json!({"data": [{"b64_json": "Zm9v"}]});
+        assert_eq!(extract_b64(&blocking), Some("Zm9v"));
+        // Streaming completed event: payload at the top level.
+        let streamed = serde_json::json!({"type": "image_edit.completed", "b64_json": "YmFy"});
+        assert_eq!(extract_b64(&streamed), Some("YmFy"));
+        assert_eq!(extract_b64(&serde_json::json!({"ok": true})), None);
     }
 }

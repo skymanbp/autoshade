@@ -154,6 +154,33 @@ pub(crate) fn post_with_timeout(url: &str, overall: std::time::Duration) -> ureq
         .post(url)
 }
 
+/// POST builder with an INACTIVITY (stall) deadline instead of an overall one —
+/// for STREAMING endpoints whose healthy service time is unbounded but whose
+/// liveness is observable (SSE events keep arriving while the server works).
+/// A fixed overall deadline is the wrong tool there: it kills healthy long
+/// generations exactly as reliably as dead connections (the images/edits
+/// 300→600 s history). Here every socket read — waiting for the response
+/// headers or for the next stream chunk — must complete within `stall`, while
+/// a stream that keeps sending can run indefinitely. Verified against the
+/// ureq 2.12.1 sources: with no overall deadline set, the header wait uses
+/// `timeout_read` (stream.rs:436) and body reads re-arm it (response.rs:364)
+/// until the connection returns to the pool. `AUTOSHOP_HTTP_TIMEOUT_SECS`
+/// overrides this too — one knob for every AI deadline; on a streaming call it
+/// bounds SILENCE, not total duration.
+pub(crate) fn post_with_stall_timeout(url: &str, stall: std::time::Duration) -> ureq::Request {
+    let stall = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(stall);
+    ureq::builder()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(stall)
+        .timeout_write(stall)
+        .build()
+        .post(url)
+}
+
 /// Compact, prompt-friendly histogram summary (the full 4×256 bins are too
 /// large and noisy to put in a prompt). Reports clipping, mean luma, and a
 /// 16-bucket luma distribution as percentages.

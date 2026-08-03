@@ -19,6 +19,44 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **修饰流式化——images/edits 超时根治（2026-08-03，已提交未推送）**——
+  真机第二次撞 images/edits 总死线（300→600s 重校准后，gpt-image-2
+  quality=high ~8MP 仍超时）。根因 = 固定总死线对服务时长无上界的同步生成
+  端点本质不适配：同一把刀同时杀健康长生成与僵死连接。根治 = **活性与时长
+  分离**：
+  - `advisor::post_with_stall_timeout`（src/advisor/mod.rs）：只设
+    timeout_read/timeout_write（默认 600s）、不设总死线——每次 socket 读
+    （等响应头/等下一分片）限时，健康长流无时长上限；语义对 ureq 2.12.1
+    源码实证（stream.rs:436 无总死线时响应头等待用 timeout_read；
+    response.rs:364 body 读重设同值直至连接回池）。
+    AUTOSHOP_HTTP_TIMEOUT_SECS 仍统一覆盖（流式下=静默上限，非总时长）。
+  - `call_images_edit`（src/generative.rs）：首选 `stream=true` +
+    `partial_images=3`（对 openai-python SDK 类型定义实证：参数存在、取值
+    0–3；事件 image_edit.partial_image / image_edit.completed，b64_json 与
+    usage 在事件**顶层**）；按响应 Content-Type 分派（text/event-stream →
+    SSE 解析，否则原 JSON 路径——服务器收下 stream 却回 JSON 也不会错解）；
+    400 拒 stream/partial_images 时按本文件既有协商模式回退一次阻塞
+    POST + 600s 总死线（IMAGES_EDIT_TIMEOUT_SECS 降为回退路径）。
+  - SSE 解析按规范分帧：多行 `data:` 以 \n 拼接、空行=事件边界、EOF 冲刷
+    未终结事件、[DONE] 哨兵忽略、512 MiB 流量上限防无界单行吃内存；error
+    事件即刻报错；流收尾无 completed 时报错含已收分片数。partial 分片在
+    stderr 打心跳行（"partial image N received"）。
+  - 400 参数归因优先结构化 `error.param`（子串匹配仅作无 param 桥的回退）
+    ——避免 size 报错文案含 "streaming" 字样时错怪 stream 参数。
+  - GUI 状态文案两处 "~15-40s"/"~15–60s" 改为流式+分钟级真相（i18n 双侧
+    字节同步）。
+  - Codex 只读复审 7 条处置：#2 SSE 分帧 / #3 内存上限 / #4 参数归因已修；
+    #1 涓滴字节可无限续命 = 不活超时语义的接受面（自配 API 端点不设恶意
+    威胁模型；DNS 解析不可中断为 ureq 2.12.1 既有性质，旧总死线路径同样
+    如此，无回归）；#5 三旗全拒最多 4 次 POST = 单调协商成本，接受；
+    #7 GUI busy 在健康长跑期间无界禁用按钮且无取消途径 → 立项待办。
+  - **待办（未做，用户点单再做）**：GUI 生成/修饰 worker 取消按钮（busy
+    期间可中止流式连接）；分片进度透出 GUI 状态栏（当前仅 stderr）。
+  基线 129 lib（+5：SSE 分帧×3、双形提取、EOF 冲刷并入）+ 9 gui，clippy
+  --all-targets 0，i18n 407 调用点 dup/漂移 0。真机验收点：修饰/AI 生成在
+  quality=high 大图上不再 ~10 分钟超时（console 见分片心跳行）；僵死代理
+  仍在 ~600s 静默后报错，且报文说明是"流静默"而非总死线。
+
 - **v0.14.1 RELEASED（2026-08-03）**——内容 = 64 路舰队审查修复批
   （7a061f4，下条）。发版细节见 git tag v0.14.1 与 GitHub Release 页。
 

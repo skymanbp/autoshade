@@ -6884,7 +6884,7 @@ impl AutoshopApp {
         self.status = if self.fill_fullres {
             tr(lang, "generative fill (full-res render)… (slow, minutes)").into()
         } else {
-            tr(lang, "generative fill via gpt-image… (~15-40s)").into()
+            tr(lang, "generative fill via gpt-image… (streams progress; high quality can run minutes)").into()
         };
         let quality = ["high", "medium", "low"][self.fill_quality.min(2)].to_string();
         let full_res = self.fill_fullres;
@@ -7084,7 +7084,7 @@ impl AutoshopApp {
         self.busy = true;
         let lang = self.lang;
         self.status =
-            tr(lang, "AI generating… (gpt-image, ~15–60s; hi-res input needs a full-frame develop first)").into();
+            tr(lang, "AI generating… (gpt-image streams progress; high quality can run minutes; hi-res input needs a full-frame develop first)").into();
         let edge = self.preview_edge.clamp(640, 8192);
         self.spawn_worker(
             move || {
