@@ -386,6 +386,18 @@ const PAGE = 200;          // gallery page size (a folder can hold thousands)
 let pageOffset = 0;        // current page's first GLOBAL index
 let listSeq = 0;           // latest-wins: rapid Prev/Next answers race
 
+// The last recipe this photo was LOADED or SAVED with — the web's equivalent
+// of the desktop's saved baseline. Slider work lives only in the browser
+// until Save, so without this a thumbnail click silently destroyed it.
+let savedRecipe = null;
+function markSaved() {
+  savedRecipe = state.recipe ? JSON.stringify(state.recipe) : null;
+}
+function hasUnsavedEdits() {
+  return state.id != null && savedRecipe !== null
+    && state.recipe != null && JSON.stringify(state.recipe) !== savedRecipe;
+}
+
 // Every /api request carries the gallery GENERATION the UI's ids came from.
 // A request built before a folder switch would otherwise resolve its index
 // against the new folder's table and save onto an unrelated photo; the server
@@ -582,6 +594,16 @@ async function uploadFiles(files) {
 
 $("#open-files").onclick = () => $("#file-input").click();
 $("#file-input").onchange = e => { if (e.target.files.length) uploadFiles([...e.target.files]); e.target.value = ""; };
+
+// A reload or tab close discards browser-only edits just as thoroughly as a
+// thumbnail click. Browsers show their own generic wording here; the point is
+// that the user gets a chance at all.
+window.addEventListener("beforeunload", e => {
+  if (hasUnsavedEdits()) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
 
 // Any async handler that rejects (transport error, JSON parse) surfaces here
 // instead of leaving a permanent "…ing" status line and a console-only error.
@@ -782,6 +804,13 @@ async function renderAfter() {
 // pixels — and the next Save would then write it to the wrong develop dir.
 let selectSeq = 0;
 async function selectPhoto(id, stem, el) {
+  // ASK before discarding. Everything below — the history reset, the recipe
+  // swap — is irreversible for work that was never saved, and this surface
+  // has nowhere to stash it the way the desktop app does.
+  if (hasUnsavedEdits() && id !== state.id
+      && !confirm("This photo has edits that were never saved.\n\nThey exist only in this browser — switching photos discards them.\n\nSwitch anyway?")) {
+    return;
+  }
   const seq = ++selectSeq;
   ++afterSeq;   // A→B→A: an in-flight preview for the FIRST A still matches id+seq
   // A pending slider-debounce timer would fire DURING the awaits below with a
@@ -839,10 +868,12 @@ async function selectPhoto(id, stem, el) {
     } catch (_) { /* older server without /api/fresh-base */ }
     if (seq !== selectSeq) return;
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), loaded);
+    markSaved(); // this IS the saved state until the user edits it
     $(".verdict").innerHTML = '<span class="tag saved">SAVED</span> Loaded a previously-saved recipe. Re-run Analyze for a live verdict.';
     showRationale();
   } else {
     state.recipe = structuredClone(DEFAULT_RECIPE);
+    markSaved(); // a fresh (unedited) photo: neutral IS its saved state
     if (freshCurve && freshCurve.length) state.recipe.base_curve = freshCurve;
     if (freshLens) state.recipe.lens_profile = freshLens;
     $(".verdict").textContent = loadErr ? loadErr : "Not analyzed yet.";
@@ -1170,6 +1201,7 @@ async function saveXmp() {
     // my edits") and answers "cleared …".
     if (!r.ok) { setStatus("save failed: " + body); return; }
     setStatus(body.startsWith("cleared") ? "saved edits cleared" : ("xmp + recipe saved → " + body));
+    markSaved(); // what is on disk now matches the canvas
     loadList();   // the ● edited badge just appeared / disappeared
   } finally { if (btn) btn.disabled = false; }
 }
