@@ -511,10 +511,17 @@ async function setWorkingDir() {
   }
   if (seq !== dirSeq) return;   // a newer switch owns the pane
   if (!r.ok) {
-    const msg = await r.text();
+    // The body read must not escape the recovery: headers can arrive and the
+    // connection then die mid-body — an uncaught r.text() rejection left the
+    // pane stranded again (the exact hole this branch exists to close).
+    let msg;
+    try { msg = await r.text(); } catch (e) { msg = (e && e.message) || "connection lost"; }
     if (seq !== dirSeq) return;
     setStatus("open folder failed: " + msg);
-    // Same recovery as the transport branch: the server kept its folder.
+    // Same recovery as the transport branch. On a 409 another window owns a
+    // NEWER switch — this render shows the pre-swap folder and that window's
+    // swap will supersede it (multi-window reality; ids are generation-
+    // guarded server-side, so a stale click fails loudly, never cross-wires).
     await loadList(0);
     return;
   }
