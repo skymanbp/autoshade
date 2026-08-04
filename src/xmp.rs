@@ -423,11 +423,33 @@ pub fn recipe_to_xmp(r: &EditRecipe) -> String {
 /// the document (a foreign sidecar's comment could claim our provenance) —
 /// and this boolean decides whether an As-Shot tint imports as a real edit.
 fn is_autoshop_sidecar(xmp: &str) -> bool {
-    // rfind: a comment containing a forged start tag precedes the real
-    // packet — the LAST occurrence is the actual document element (full
-    // comment-aware XML parsing is out of scope; this check only gates the
-    // As-Shot tint import).
-    let Some(tag_start) = xmp.rfind("<x:xmpmeta") else { return false };
+    // COMMENT-AWARE scan for the first real `<x:xmpmeta` start tag: a plain
+    // find lost to a forged tag in a LEADING comment, rfind to one in a
+    // TRAILING comment. One pass skipping `<!-- … -->` spans settles both
+    // (full XML parsing stays out of scope; this only gates the As-Shot
+    // tint import).
+    let bytes = xmp.as_bytes();
+    let mut i = 0usize;
+    let mut tag_start: Option<usize> = None;
+    while i < bytes.len() {
+        if xmp[i..].starts_with("<!--") {
+            match xmp[i + 4..].find("-->") {
+                Some(end) => i += 4 + end + 3,
+                None => break, // unterminated comment: nothing real follows
+            }
+        } else if xmp[i..].starts_with("<x:xmpmeta") {
+            tag_start = Some(i);
+            break;
+        } else {
+            // Jump to the next '<' (or end) — byte-wise, so multi-byte UTF-8
+            // content is skipped safely.
+            match xmp[i + 1..].find('<') {
+                Some(off) => i += 1 + off,
+                None => break,
+            }
+        }
+    }
+    let Some(tag_start) = tag_start else { return false };
     let tag = &xmp[tag_start..];
     let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
     let mut rest = tag;

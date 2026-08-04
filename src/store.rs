@@ -766,7 +766,9 @@ fn copy_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    let _ = std::fs::remove_file(to); // make room (Windows rename cannot replace)
+    // NO pre-remove: fs::rename REPLACES an existing destination on Windows
+    // too (MOVEFILE_REPLACE_EXISTING semantics — verified empirically); the
+    // old remove-then-rename left a gap in which `to` did not exist at all.
     if let Err(e) = std::fs::rename(&tmp, to) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -774,35 +776,86 @@ fn copy_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `fs::rename`, falling back to atomic copy+delete: ./out and the store root
-/// are routinely on DIFFERENT volumes (project on D:, %LOCALAPPDATA% on C:),
-/// where rename fails with a cross-device error.
-fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    if std::fs::rename(from, to).is_ok() {
-        return Ok(());
-    }
-    copy_atomic(from, to)?;
-    std::fs::remove_file(from)
+/// Private staging name beside `to` (pid+seq — a FIXED name would let two
+/// processes truncate each other's staging file).
+fn sibling_tmp(to: &Path) -> PathBuf {
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut name = to.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    to.with_file_name(name)
 }
 
-/// [`move_file`] that never CLOBBERS an existing destination: the migration's
-/// old check-then-move let a central artifact created between the check and
-/// the rename (a concurrent save) be replaced by OLDER legacy bytes. The
-/// destination is claimed with create_new; `AlreadyExists` reports false
-/// (someone else owns it — exactly the "already migrated" outcome), any move
-/// failure removes the claim.
-fn move_file_no_clobber(from: &Path, to: &Path) -> std::io::Result<bool> {
+/// Publish `tmp` at `to` WITHOUT ever replacing another writer's file.
+/// `fs::rename` REPLACES an existing destination on every platform (verified
+/// empirically on Windows), so the previous create_new claim + rename kept a
+/// claim→rename window in which a concurrent save landing on `to` was
+/// silently overwritten. `fs::hard_link` is the one std primitive with true
+/// no-replace semantics (fails `AlreadyExists`); `tmp` sits in `to`'s own
+/// directory, so the link never crosses volumes. Filesystems without hard
+/// links (exFAT) fall back to the claim + rename dance with that documented
+/// microsecond residual. `tmp` is consumed on every path. Ok(true) =
+/// published, Ok(false) = someone else owns `to`.
+fn publish_no_clobber(tmp: &Path, to: &Path) -> std::io::Result<bool> {
+    match std::fs::hard_link(tmp, to) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(tmp);
+            return Ok(true);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(tmp);
+            return Ok(false);
+        }
+        Err(_) => {} // no hard-link support here — claim fallback below
+    }
     match std::fs::OpenOptions::new().write(true).create_new(true).open(to) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(tmp);
+            return Ok(false);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(tmp);
+            return Err(e);
+        }
     }
-    match move_file(from, to) {
+    match std::fs::rename(tmp, to) {
         Ok(()) => Ok(true),
         Err(e) => {
-            let _ = std::fs::remove_file(to); // release the claim
+            let _ = std::fs::remove_file(tmp);
+            // Release the claim ONLY while it is still our empty placeholder:
+            // a concurrent save may have replaced it, and a blind removal
+            // here deleted that newer file. (The len==0 re-check has its own
+            // tiny window — but only on no-hardlink filesystems, after a
+            // failed rename, against a same-instant save: accepted.)
+            if std::fs::metadata(to).map(|m| m.len() == 0).unwrap_or(false) {
+                let _ = std::fs::remove_file(to);
+            }
             Err(e)
         }
+    }
+}
+
+/// Move that never CLOBBERS an existing destination: stage a full copy
+/// beside `to` (copying also covers the routine cross-volume case — project
+/// on D:, %LOCALAPPDATA% on C:), then [`publish_no_clobber`] it. `Ok(false)`
+/// = someone else owns `to` — exactly the "already migrated" outcome. The
+/// source is deleted best-effort only AFTER the copy landed; a survivor is
+/// the accepted copy-skip residue, never data loss.
+fn move_file_no_clobber(from: &Path, to: &Path) -> std::io::Result<bool> {
+    let tmp = sibling_tmp(to);
+    if let Err(e) = std::fs::copy(from, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if publish_no_clobber(&tmp, to)? {
+        let _ = std::fs::remove_file(from);
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -912,8 +965,15 @@ pub fn migrate_legacy_from_many(legacy_out: &Path, photos: &[PathBuf]) -> usize 
 /// memoized caller keep a FAILED photo retryable instead of silencing it for
 /// the process lifetime.
 fn migrate_legacy_in(root: &Path, legacy_out: &Path, src: &Path) -> (bool, bool) {
-    if !legacy_out.is_dir() {
-        return (false, false); // cheap gate — most calls find nothing legacy at all
+    // Cheap gate — most calls find nothing legacy at all. Triage instead of
+    // `is_dir()`: that folded an INACCESSIBLE directory (AV lock, offline
+    // volume) into "nothing legacy", and the caller's process memo then
+    // silenced the photo for the whole session.
+    match std::fs::metadata(legacy_out) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return (false, false), // exists but is not a directory
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (false, false),
+        Err(_) => return (false, true), // inaccessible — retryable failure
     }
     let stem = crate::pipeline::stem(src);
     let vprefix = format!("{stem}.v");
@@ -997,9 +1057,12 @@ fn migrate_legacy_jobs(
         let ok = if is_recipe {
             migrate_one_recipe(&from, &to, stem, &dev, legacy_out)
         } else {
-            // false = destination appeared meanwhile (owned by a newer
-            // writer) — that is the desired outcome, not a failure.
-            move_file_no_clobber(&from, &to).unwrap_or(false) || to.exists()
+            // Ok(false) = destination owned by a newer writer — the desired
+            // outcome, not a failure. (The previous `|| to.exists()` also
+            // blessed OUR OWN claim residue after a move+cleanup double
+            // failure — an empty file then shadowed the intact legacy
+            // artifact as a "successfully migrated" one.)
+            move_file_no_clobber(&from, &to).is_ok()
         };
         moved |= ok;
         failed |= !ok;
@@ -1014,20 +1077,28 @@ fn migrate_legacy_jobs(
 /// Failure-ordering contract (a migration must never make things WORSE than
 /// not migrating): rasters are STAGED as copies first, the rewritten recipe is
 /// published next, and the legacy originals are deleted only after the recipe
-/// landed. Any earlier failure rolls the staged copies back and leaves every
-/// legacy file byte-identical — the read fallbacks keep serving it.
+/// landed. Any earlier failure leaves every legacy file byte-identical — the
+/// read fallbacks keep serving it. Staged central copies are NOT rolled back:
+/// they are identical-content derivations a concurrent migration may already
+/// reference (rolling them back deleted the winner's bitmap).
 fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(from) else { return false };
     let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text) else {
         // Unparsable (interrupted write / newer schema): move byte-for-byte so
-        // the read path can keep reporting it loudly as Unreadable. Claimed:
-        // a central recipe appearing meanwhile must not be clobbered.
-        return move_file_no_clobber(from, to).unwrap_or(false) || to.exists();
+        // the read path can keep reporting it loudly as Unreadable. Ok(false)
+        // = a central owner exists — success, not failure (see the
+        // migrate_legacy_jobs caller for why `|| to.exists()` was wrong).
+        return move_file_no_clobber(from, to).is_ok();
     };
     let raster_prefix = format!("{stem}.");
-    // (legacy raster to delete on success — None for a bystander source that
-    //  must be preserved, staged central copy to roll back on failure)
-    let mut staged: Vec<(Option<PathBuf>, PathBuf)> = Vec::new();
+    // Legacy rasters (inside the migrated root only) to delete once the
+    // recipe publish lands. Deliberately NOT a rollback list: a staged
+    // central raster is an identical-content derivation of the legacy bytes,
+    // and a concurrent migration may already have ADOPTED it into its own
+    // published recipe — rolling it back deleted the winner's bitmap.
+    // Unreferenced survivors fall under the accepted superseded-raster
+    // boundary.
+    let mut legacy_rasters: Vec<PathBuf> = Vec::new();
     for m in &mut r.masks {
         if let MaskGeometry::Bitmap { path } = &mut m.mask {
             let mut p = PathBuf::from(path.as_str());
@@ -1050,83 +1121,73 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
                 p = cand;
             }
             let dest = dev.join(&bare);
-            // Atomic claim instead of exists-then-copy: two processes staging
-            // the same raster raced, and the loser's rollback then deleted
-            // the winner's central copy. AlreadyExists = already migrated.
-            let claimed = match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&dest)
-            {
-                Ok(_) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
-                Err(_) => false,
-            };
-            if !claimed {
-                if dest.exists() {
-                    *path = bare; // already migrated by an earlier file
+            if dest.exists() {
+                *path = bare; // already migrated by an earlier file / process
+                continue;
+            }
+            if !p.exists() {
+                // Keep the old reference — the engine's missing-raster
+                // contract reports it.
+                continue;
+            }
+            // Stage a private full copy, then hard-link-publish (see
+            // publish_no_clobber): the old create_new claim exposed a 0-byte
+            // dest between claim and copy, and its rollback could delete a
+            // raster a concurrent migration had already adopted.
+            let tmp = sibling_tmp(&dest);
+            if std::fs::copy(&p, &tmp).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+                continue; // keep the old reference
+            }
+            // On Err the old reference is kept — the engine's missing-raster
+            // contract reports it.
+            if let Ok(published) = publish_no_clobber(&tmp, &dest) {
+                if published {
+                    // Only a source inside the root BEING MIGRATED may be
+                    // deleted on success: the cwd-relative fallback can
+                    // name a bystander file from an UNRELATED context
+                    // (same stem, different photo) — that one is copied,
+                    // never deleted.
+                    let ours = std::path::absolute(&p)
+                        .ok()
+                        .zip(std::path::absolute(legacy_out).ok())
+                        .is_some_and(|(ap, al)| ap.starts_with(al));
+                    if ours {
+                        legacy_rasters.push(p.clone());
+                    }
                 }
-                // claim failed for another reason: keep the old reference —
-                // the engine's missing-raster contract reports it.
-            } else if p.exists() && copy_atomic(&p, &dest).is_ok() {
-                // Only a source inside the root BEING MIGRATED may be deleted
-                // on success: the cwd-relative fallback can name a bystander
-                // file from an UNRELATED context (same stem, different
-                // photo) — that one is copied, never deleted.
-                let ours = std::path::absolute(&p)
-                    .ok()
-                    .zip(std::path::absolute(legacy_out).ok())
-                    .is_some_and(|(ap, al)| ap.starts_with(al));
-                staged.push((ours.then(|| p.clone()), dest));
+                // Published OR adopted (an identical-content copy landed
+                // meanwhile): the central raster is in place either way.
                 *path = bare;
-            } else {
-                // Claimed but the source vanished / copy failed: release the
-                // 0-byte claim and keep the old reference (the engine's
-                // missing-raster contract reports it).
-                let _ = std::fs::remove_file(&dest);
             }
         }
     }
-    // Publish the rewritten recipe: pid+seq tmp (a FIXED name let two
-    // processes truncate each other's staging file), then rename over a
-    // create_new CLAIM of `to` — a central recipe created meanwhile (a
-    // concurrent save) must never be replaced by older legacy bytes.
-    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let publish = (|| -> Option<()> {
+    // Publish the rewritten recipe via the hard-link no-clobber publisher: a
+    // central recipe created meanwhile (a concurrent save) must never be
+    // replaced by older legacy bytes. The previous create_new claim + rename
+    // still overwrote a save landing inside the claim→rename window, and its
+    // failure cleanup deleted the claim blindly even after a save had
+    // replaced it.
+    let published = (|| -> Option<()> {
         let json = serde_json::to_string_pretty(&r).ok()?;
-        let tmp = to.with_extension(format!(
-            "json.tmp.{}.{}",
-            std::process::id(),
-            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::write(&tmp, json).ok()?;
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(to) {
-            Ok(_) => {}
-            Err(_) => {
-                // AlreadyExists (newer central owner) or any claim failure:
-                // do not publish over it.
-                let _ = std::fs::remove_file(&tmp);
-                return None;
-            }
-        }
-        if std::fs::rename(&tmp, to).is_err() {
+        let tmp = sibling_tmp(to);
+        if std::fs::write(&tmp, &json).is_err() {
             let _ = std::fs::remove_file(&tmp);
-            let _ = std::fs::remove_file(to); // release the claim
             return None;
         }
-        Some(())
+        matches!(publish_no_clobber(&tmp, to), Ok(true)).then_some(())
     })();
-    if publish.is_none() {
-        for (_, dest) in &staged {
-            let _ = std::fs::remove_file(dest); // roll back — legacy stays whole
-        }
+    if published.is_none() {
+        // Deliberately NO raster rollback (see legacy_rasters above): every
+        // legacy file is still byte-identical and keeps serving via the read
+        // fallbacks, while the staged central rasters stay as harmless
+        // identical-content copies a concurrent migration may already
+        // reference.
         return false;
     }
     let _ = std::fs::remove_file(from);
-    for (legacy, _) in &staged {
-        if let Some(legacy) = legacy {
-            let _ = std::fs::remove_file(legacy);
-        }
+    for legacy in &legacy_rasters {
+        let _ = std::fs::remove_file(legacy);
     }
     true
 }
@@ -1135,6 +1196,64 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
 mod tests {
     use super::*;
     use crate::recipe::LocalAdjustment;
+
+    #[test]
+    fn publish_no_clobber_never_replaces_an_owner() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-pnc-owner");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let to = dir.join("recipe.json");
+        std::fs::write(&to, b"newer save").unwrap();
+        let tmp = sibling_tmp(&to);
+        std::fs::write(&tmp, b"older legacy").unwrap();
+        assert!(!publish_no_clobber(&tmp, &to).unwrap(), "owner must win");
+        assert_eq!(std::fs::read(&to).unwrap(), b"newer save");
+        assert!(!tmp.exists(), "tmp must be consumed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publish_no_clobber_lands_on_a_fresh_destination() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-pnc-fresh");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let to = dir.join("recipe.json");
+        let tmp = sibling_tmp(&to);
+        std::fs::write(&tmp, b"payload").unwrap();
+        assert!(publish_no_clobber(&tmp, &to).unwrap());
+        assert_eq!(std::fs::read(&to).unwrap(), b"payload");
+        assert!(!tmp.exists(), "tmp must be consumed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_no_clobber_adopts_owner_and_keeps_the_source() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-mnc-adopt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("legacy.xmp");
+        let to = dir.join("central.xmp");
+        std::fs::write(&from, b"legacy").unwrap();
+        std::fs::write(&to, b"newer").unwrap();
+        assert!(!move_file_no_clobber(&from, &to).unwrap());
+        assert_eq!(std::fs::read(&to).unwrap(), b"newer", "owner intact");
+        assert!(from.exists(), "adoption must not consume the source");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_gate_treats_a_nondirectory_as_empty_not_failure() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-gate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let not_a_dir = dir.join("out"); // exists, but is a FILE
+        std::fs::write(&not_a_dir, b"x").unwrap();
+        let (moved, failed) =
+            migrate_legacy_in(&dir.join("root"), &not_a_dir, Path::new("D:/x/photo.arw"));
+        assert!(!moved);
+        assert!(!failed, "a non-directory is 'nothing legacy', not a retryable failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn photo_key_disambiguates_same_stem_different_folder() {

@@ -848,20 +848,22 @@ fn region_to_original(
         return unmapped;
     }
     let Some(dims) = source_dims(raw) else { return unmapped };
-    // Corners + edge MIDPOINTS: lens distortion is nonlinear, and a box
-    // spanning the frame midline maps its edge centres farther than either
-    // corner — a 4-corner bound clipped part of the selection.
-    let (mx, my) = ((g.left + g.right) * 0.5, (g.top + g.bottom) * 0.5);
-    let corners = [
-        (g.left, g.top),
-        (g.right, g.top),
-        (g.left, g.bottom),
-        (g.right, g.bottom),
-        (mx, g.top),
-        (mx, g.bottom),
-        (g.left, my),
-        (g.right, my),
-    ];
+    // Densely sampled edges (9 points per side): lens distortion is
+    // nonlinear, and an ASYMMETRIC box's mapped extremum can sit between a
+    // corner and the midpoint — corners+midpoints alone still clipped part
+    // of the selection. Still a sampled bound (documented approximation),
+    // but the residual is sub-percent at ±100 manual distortion.
+    let mut corners: Vec<(f32, f32)> = Vec::with_capacity(36);
+    const K: u32 = 8;
+    for i in 0..=K {
+        let f = i as f32 / K as f32;
+        let x = g.left + f * (g.right - g.left);
+        let y = g.top + f * (g.bottom - g.top);
+        corners.push((x, g.top));
+        corners.push((x, g.bottom));
+        corners.push((g.left, y));
+        corners.push((g.right, y));
+    }
     let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for (vx, vy) in corners {
         let (ox, oy) = render::view_to_original_norm(
@@ -997,7 +999,13 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let region_guidance = req.region.as_ref().map(|g| {
         let view = req.view.as_ref().or(req.base.as_ref());
         let mapped_view = view_for_mapping(&raw, view);
-        let (l, t, r, b) = region_to_original(g, mapped_view.as_ref(), &raw);
+        // Dims of the DISPLAYED source: with a saved master the canvas shows
+        // the master (possibly a different aspect than the RAW) — mapping
+        // through the RAW's dims displaced every box/mask.
+        let display_src = crate::store::read_pixel_source(&raw)
+            .map(|(m, _)| m)
+            .unwrap_or_else(|| raw.clone());
+        let (l, t, r, b) = region_to_original(g, mapped_view.as_ref(), &display_src);
         format!(
             "The user SELECTED a target region (normalized 0..1 frame coords): left={l:.3} top={t:.3} \
              right={r:.3} bottom={b:.3}. Apply the direction ONLY to that region — emit a mask covering \
@@ -1324,9 +1332,11 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         .map(|(m, _)| m)
         .unwrap_or_else(|| raw.clone());
     // The mask was painted over the DISPLAYED (post-geometry) preview —
-    // un-warp it into the source frame the retouch engine works in.
+    // un-warp it into the source frame the retouch engine works in, using
+    // the DISPLAYED source's dims (the master, not the RAW: their aspects
+    // can differ and the engine consumes the master).
     let mask_bytes =
-        unwarp_mask(&mask_bytes, view_for_mapping(&raw, req.view.as_ref()).as_ref(), &raw)
+        unwarp_mask(&mask_bytes, view_for_mapping(&raw, req.view.as_ref()).as_ref(), &src)
             .unwrap_or(mask_bytes);
     // generative::retouch takes a mask FILE path, so stage the PNG in a temp file.
     let mask_tmp = std::env::temp_dir().join(format!(
@@ -1410,11 +1420,14 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             match base64::engine::general_purpose::STANDARD.decode(b64) {
                 Ok(bytes) => {
                     // Same un-warp as api_retouch (see there) — through the
-                    // mapping view (generated lens strip included).
+                    // mapping view AND the displayed source's dims.
+                    let display_src = crate::store::read_pixel_source(&raw)
+                        .map(|(m, _)| m)
+                        .unwrap_or_else(|| raw.clone());
                     let bytes = unwarp_mask(
                         &bytes,
                         view_for_mapping(&raw, req.view.as_ref()).as_ref(),
-                        &raw,
+                        &display_src,
                     )
                     .unwrap_or(bytes);
                     let t = std::env::temp_dir().join(format!(

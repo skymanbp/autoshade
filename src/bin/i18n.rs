@@ -667,8 +667,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("fetched {n} models ({chat} chat · {img} image)",
         "已拉取 {n} 个模型（{chat} 对话 · {img} 图像）"),
     ("fetch failed: {err}", "拉取失败：{err}"),
-    (" · zoned sky pass skipped to protect the saved raster (the fit ran globally)",
-        " · 已跳过天空分区（保护已保存的栅格），本次为全局拟合"),
+    // (the " · zoned sky pass skipped …" fit note died with the R6 move of
+    //  the zoned/fit gate to persist time — key removed with its call site)
     // ── UX batch (toolbar slim-down · AI section · Export section · tools) ──
     ("AI", "AI"),
     ("AI Analyze", "AI 分析"),
@@ -731,8 +731,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Enter · save every listed develop, then quit", "Enter · 保存列出的全部显影后退出"),
     ("Quit WITHOUT saving — these edits are gone for good", "不保存直接退出——这些编辑将永久丢失"),
     // --- round-3 audit batch (new / reworded user-facing strings) ------------
-    ("Save version failed: version namespace exhausted",
-        "保存版本失败：版本号已用尽"),
+    // ("Save version failed: version namespace exhausted" folded into the
+    //  parametrized "Save version failed: {err}" key — stale twin removed)
     ("no photos found in this folder", "此文件夹中没有找到照片"),
     ("AI「{what}」mask refreshed — the existing mask now uses the new selection (its sliders still apply)",
         "AI「{what}」蒙版已刷新——原有蒙版改用新的选区（其滑杆设置仍然生效）"),

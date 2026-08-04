@@ -392,6 +392,10 @@ async function loadList(offset) {
   // so a retry via Next skipped a page and Prev drifted.
   const at = offset != null ? Math.max(0, offset) : pageOffset;
   const seq = ++listSeq;
+  // Folder generation captured at START: a pager click during a folder
+  // switch starts a FRESH listSeq that the one-time setdir bump cannot
+  // invalidate — its old-folder rows would render over the cleared grid.
+  const dseq = typeof dirSeq === "number" ? dirSeq : 0;
   let r, data;
   try {
     r = await fetch(`/api/list?offset=${at}&limit=${PAGE}`);
@@ -403,6 +407,7 @@ async function loadList(offset) {
     return;
   }
   if (seq !== listSeq) return false;   // superseded by a newer page request
+  if (typeof dirSeq === "number" && dseq !== dirSeq) return false; // folder switched mid-flight
   pageOffset = at;               // this response owns the pane — commit now
   const grid = $("#grid");
   // Reflect the authoritative working folder in the field (unless the user is typing).
@@ -485,6 +490,9 @@ async function setWorkingDir() {
   // against the NEW server table).
   ++selectSeq; ++afterSeq; ++listSeq; clearTimeout(afterTimer);
   $("#grid").innerHTML = "";
+  // No pager during the switch: a Next/Prev click would START a fresh
+  // old-folder list request the seq bumps above cannot see.
+  $("#pagebar").hidden = true;
   history = []; hi = -1; updateUndo();   // stale undo would re-apply the OLD photo's recipe
   $("#main").innerHTML = '<p style="color:var(--muted)">Select a photo on the left, or import more above.</p>';
   setStatus("opening folder…");

@@ -365,7 +365,21 @@ fn same_path(a: &Path, b: &Path) -> bool {
             &std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()),
         ))
     };
-    n(a) == n(b)
+    let (na, nb) = (n(a), n(b));
+    if na == nb {
+        return true;
+    }
+    // Canonicalization fixes casing only for the EXISTING ancestor chain —
+    // absent tail components come back spelled verbatim. On Windows a
+    // case-flipped absent leaf ("Recipe.json" for a first, not-yet-written
+    // recipe.json) still names the same future file (NTFS is
+    // case-insensitive), and classifying it as redirected bypassed the
+    // backup gate. Folding case can only widen equality toward the SAFE
+    // side: canonical treatment means the gate applies.
+    if cfg!(windows) {
+        return na.to_string_lossy().to_lowercase() == nb.to_string_lossy().to_lowercase();
+    }
+    false
 }
 
 fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style: Option<f32>) -> Result<()> {
@@ -785,4 +799,22 @@ fn sparkline(bins: &[u32]) -> String {
             BLOCKS[idx.min(BLOCKS.len() - 1)]
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn same_path_folds_case_of_an_absent_leaf() {
+        let dir = std::env::temp_dir().join("autoshop-cli-same-path-case");
+        let _ = std::fs::create_dir_all(&dir);
+        // The leaf does NOT exist — only the ancestor chain canonicalizes, so
+        // equality must come from the case fold, not from canonicalize.
+        assert!(same_path(&dir.join("recipe.json"), &dir.join("Recipe.json")));
+        // A genuinely different absent leaf must stay different.
+        assert!(!same_path(&dir.join("recipe.json"), &dir.join("other.json")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
