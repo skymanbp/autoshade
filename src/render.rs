@@ -484,7 +484,6 @@ fn space_primaries(space: ExportColorSpace) -> [[f32; 2]; 3] {
     }
 }
 
-/// cam→space by the DNG white-preservation rule: space→cam =
 /// The camera's AS-SHOT white balance as absolute chromaticity: (CCT Kelvin,
 /// tint in the recipe's ±100 scale). Metadata-only rawler decode (`dummy` —
 /// no pixel data, no demosaic; wb_coeffs and the colour matrix come from the
@@ -576,6 +575,7 @@ fn planck_uv1960(t: f32) -> (f32, f32) {
     (u, v)
 }
 
+/// cam→space by the DNG white-preservation rule: space→cam =
 /// xyz2cam · M(space→XYZ) with each row normalised to sum 1 (a
 /// white-balanced grey then maps to the SAME grey in every space), inverted.
 fn camera_to_space_matrix(xyz2cam: &[[f32; 3]; 3], space: ExportColorSpace) -> [[f32; 3]; 3] {
@@ -821,10 +821,17 @@ pub fn render_to_file(
             wr.flush().with_context(|| format!("flush {}", out.display()))?;
         }
         // Unknown extensions keep the generic 16-bit save (no ICC tag, so the
-        // pixels above were deliberately left in sRGB).
-        _ => img
-            .save(&staged)
-            .with_context(|| format!("save render {}", out.display()))?,
+        // pixels above were deliberately left in sRGB). `save` infers the
+        // format from the EXTENSION, and the staged name ends in the temp
+        // sequence number — so the format has to come from the real target
+        // instead, or every such export failed with "the file extension `.7`
+        // was not recognized" naming a path the user never typed (R12).
+        _ => {
+            let fmt = image::ImageFormat::from_path(out)
+                .with_context(|| format!("unsupported output format {}", out.display()))?;
+            img.save_with_format(&staged, fmt)
+                .with_context(|| format!("save render {}", out.display()))?
+        }
     }
         Ok(())
     })();
@@ -1074,15 +1081,19 @@ fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
 
     // Airlight: histogram of the linear min-channel over ≤ ~262k strided
     // samples (resolution-stable), P99, clamped away from black so a frame
-    // with no bright region cannot produce a degenerate divisor. The
-    // lattice is SHEARED — each row's sampling phase advances by one — so
-    // every column residue class is visited regardless of gcd(stride, w).
-    // A flat step_by lattice phase-locked to column parity (shifting a
-    // periodic frame one pixel flipped the airlight between the 0.10 floor
-    // and the bright bin, and preview disagreed with export — U14). The
-    // first fix bumped the stride to the next coprime, but on a width with
-    // many small odd factors that collapsed the sample count to a fraction
-    // of the budget (Codex batch 40); shearing keeps the count exact.
+    // with no bright region cannot produce a degenerate divisor.
+    //
+    // Each row's sampling phase comes from a HASH of the row index, not from
+    // the row index itself. Two weaker schemes failed first: a flat
+    // `step_by(stride)` phase-locked to column parity (a one-pixel shift of a
+    // striped frame flipped the airlight between the 0.10 floor and the
+    // bright bin, U14), and a +1-per-row shear fixed that but still locked to
+    // a DIAGONAL of the same period — with stride 2 it samples exactly the
+    // pixels where x ≡ y (mod 2), i.e. one checkerboard phase (R12). A
+    // hashed phase is deterministic (same frame → same estimate, preview and
+    // export agree) yet correlates with no small period, so a periodic frame
+    // contributes every phase to the histogram. The stride needs no parity
+    // or coprimality, so the sample count stays exactly the budget.
     let mut hist = [0u32; 1024];
     let mut n = 0u32;
     let stride = (data.len() / 262_144).max(1);
@@ -1096,7 +1107,11 @@ fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
     } else {
         // stride > 1 implies len ≥ 524288, so w ≥ 1 and chunks(w) is safe.
         for (y, row) in data.chunks(w).enumerate() {
-            row.iter().skip(y % stride).step_by(stride).for_each(&mut add);
+            // splitmix-style multiply-shift: cheap, deterministic, and its
+            // low bits do not follow the row index.
+            let phase =
+                (((y as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33) as usize) % stride;
+            row.iter().skip(phase).step_by(stride).for_each(&mut add);
         }
     }
     let mut acc = 0u32;
@@ -1146,6 +1161,9 @@ fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
 /// path renders those). Mask coords are normalised so this works at any
 /// resolution.
 fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
+    if w == 0 || h == 0 {
+        return; // both passes below chunk by w; rayon asserts chunk_size != 0
+    }
     for m in &r.masks {
         let local = EditRecipe {
             exposure_ev: m.exposure_ev,
@@ -1716,7 +1734,10 @@ pub(crate) fn wb_gains(as_shot_k: f32, target_k: f32, tint: f32) -> [f32; 3] {
 /// `LocalAdjustment::temperature`) — to the target Kelvin the shared
 /// [`wb_gains`] model expects: a linear shift in MIRED (1e6/K, the unit
 /// photographic conversion gels are specified in, ~perceptually uniform for
-/// WB) around the same 5500 K anchor the global stage uses. Full scale ±100
+/// WB) around a FIXED 5500 K anchor. (The global stage anchored there too
+/// until batch 29 taught it the photo's stamped as-shot Kelvin; a local
+/// slider is a relative gel, so it keeps the fixed anchor and the two
+/// deliberately differ — R12.) Full scale ±100
 /// ⇒ ∓80 mired (≈ half a CTO/CTB gel): +100 → ~9823 K (warmer — matching
 /// wb_gains' "higher target K = warmer" convention), −100 → ~3820 K. Both
 /// endpoints sit inside kelvin_to_rgb's 1000–40000 K validity. ACR's exact
@@ -2553,23 +2574,56 @@ fn downscale_f32(
     h: usize,
     max_edge: u32,
 ) -> (Vec<[f32; 3]>, usize, usize) {
-    // Clamped ONCE and used for the thumbnail too — passing a raw 0 through
-    // to `thumbnail(0, 0)` would produce a zero-dimensional working image.
+    // Clamped ONCE and used for the bin ratios too — a raw 0 would produce a
+    // zero-dimensional working image.
     let edge = max_edge.max(1);
     if w.max(h) <= edge as usize || w == 0 || h == 0 {
         return (data, w, h);
     }
-    let flat: Vec<f32> = bytemuck::cast_vec(data);
-    let img = ImageBuffer::<Rgb<f32>, Vec<f32>>::from_raw(w as u32, h as u32, flat)
-        .expect("downscale_f32: buffer size matches dims");
-    let scaled = match DynamicImage::ImageRgb32F(img).thumbnail(edge, edge) {
-        DynamicImage::ImageRgb32F(b) => b, // resize keeps the variant
-        other => other.to_rgb32f(),
-    };
-    let (nw, nh) = scaled.dimensions();
-    let data: Vec<[f32; 3]> = bytemuck::try_cast_vec(scaled.into_raw())
-        .unwrap_or_else(|(_, v)| v.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect());
-    (data, nw as usize, nh as usize)
+    // The averaging is hand-rolled because `image::imageops::thumbnail` adds
+    // an INTEGER rounding term before dividing: `(sum + n/2) / n`. For u8/u16
+    // that is round-to-nearest; for f32 (whose `Enlargeable::Larger` is f64)
+    // `n/2` stays a float, so every channel of every capped frame came back
+    // exactly +0.5 too bright — GUI previews, retouch/generative bases, the
+    // web preview and the camera-base-curve estimate all washed to white
+    // (R12; exports pass max_edge = None and were never affected).
+    // The BIN GEOMETRY below is a faithful replica of that function (the same
+    // aspect-preserving output dims and the same ceil-based windows), so the
+    // orientation behaviour the canary test pins is unchanged — only the bias
+    // is gone. Downscale-only means both ratios are ≥ 1, so every window
+    // holds at least one source pixel and the fractional-edge cases of the
+    // original cannot arise.
+    let ratio = (edge as f64 / w as f64).min(edge as f64 / h as f64);
+    let nw = ((w as f64 * ratio).round() as usize).max(1).min(w);
+    let nh = ((h as f64 * ratio).round() as usize).max(1).min(h);
+    let (x_ratio, y_ratio) = (w as f32 / nw as f32, h as f32 / nh as f32);
+    let mut out = vec![[0.0f32; 3]; nw * nh];
+    out.par_chunks_mut(nw).enumerate().for_each(|(oy, row)| {
+        let bottomf = oy as f32 * y_ratio;
+        let bottom = (bottomf.ceil() as usize).min(h - 1);
+        let top = ((bottomf + y_ratio).ceil() as usize).clamp(bottom + 1, h);
+        for (ox, px) in row.iter_mut().enumerate() {
+            let leftf = ox as f32 * x_ratio;
+            let left = (leftf.ceil() as usize).min(w - 1);
+            let right = ((leftf + x_ratio).ceil() as usize).clamp(left + 1, w);
+            // f64 accumulation: a 61 MP frame capped to 1280 sums ~2800
+            // samples per output pixel, where f32 addition would drift.
+            let mut sum = [0.0f64; 3];
+            for y in bottom..top {
+                for x in left..right {
+                    let p = &data[y * w + x];
+                    for c in 0..3 {
+                        sum[c] += p[c] as f64;
+                    }
+                }
+            }
+            let n = ((top - bottom) * (right - left)) as f64;
+            for c in 0..3 {
+                px[c] = (sum[c] / n) as f32;
+            }
+        }
+    });
+    (out, nw, nh)
 }
 
 /// The largest axis-aligned rectangle (same aspect freedom as Lightroom's
@@ -3534,11 +3588,12 @@ mod tests {
 
     #[test]
     fn develop_survives_a_zero_size_frame() {
-        // The vignette passes were the last unguarded par_chunks_mut(w)
-        // sites of the family (straighten/distortion/lens-geometry/downscale
-        // all early-return on zero dims) — rayon asserts chunk_size != 0
-        // even on an empty slice, so a 0×0 frame with any vignette active
-        // panicked instead of rendering nothing (U14).
+        // rayon asserts chunk_size != 0 even on an EMPTY slice, so every
+        // `par_chunks_mut(w)` in the develop needs a zero-dim guard. Batch 40
+        // guarded the two vignette passes and claimed they were the last of
+        // the family; `apply_masks` in fact had two more (its tone pass and
+        // its local-NR pass), so this recipe carries a MASK as well — the
+        // case that still panicked (R12).
         let img = DynamicImage::ImageRgb8(image::RgbImage::new(0, 0));
         let r = EditRecipe {
             lens_vignette: 60.0,
@@ -3547,6 +3602,13 @@ mod tests {
                 vignette_on: true,
                 ..Default::default()
             },
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.0, full_x: 1.0, full_y: 1.0 },
+                amount: 1.0,
+                exposure_ev: 1.0,
+                noise_reduction: 50.0,
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let out = develop_preview(&img, &r);
@@ -4943,6 +5005,40 @@ mod tests {
     }
 
     #[test]
+    fn downscale_f32_is_an_unbiased_average() {
+        // The working-resolution cap must not shift LEVELS. A flat field must
+        // survive exactly, and a gradient's mean must be preserved: every GUI
+        // preview, every retouch base and the camera-base-curve estimation all
+        // run through this path, so a per-pixel offset here would wash out the
+        // whole application (R12).
+        let (w, h) = (97usize, 61usize);
+        let flat: Vec<[f32; 3]> = vec![[0.25, 0.5, 0.75]; w * h];
+        let (small, sw, sh) = downscale_f32(flat, w, h, 40);
+        assert!(sw <= 40 && sh <= 40, "capped to {sw}x{sh}");
+        for p in &small {
+            for (c, want) in [0.25f32, 0.5, 0.75].iter().enumerate() {
+                assert!(
+                    (p[c] - want).abs() < 1e-4,
+                    "flat field must survive the cap unchanged: {p:?}"
+                );
+            }
+        }
+        let ramp: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let v = (i % w) as f32 / (w - 1) as f32;
+                [v; 3]
+            })
+            .collect();
+        let mean_in = ramp.iter().map(|p| p[0] as f64).sum::<f64>() / (w * h) as f64;
+        let (small, sw, sh) = downscale_f32(ramp, w, h, 40);
+        let mean_out = small.iter().map(|p| p[0] as f64).sum::<f64>() / (sw * sh) as f64;
+        assert!(
+            (mean_out - mean_in).abs() < 0.02,
+            "the cap must preserve the mean level: {mean_in} -> {mean_out}"
+        );
+    }
+
+    #[test]
     fn mask_coverage_reports_the_engine_weight() {
         use crate::recipe::{LocalAdjustment, MaskGeometry, RangeMask};
         // (a) A top→bottom linear gradient over a flat grey reference: zero at
@@ -5267,34 +5363,47 @@ mod tests {
     }
 
     #[test]
-    fn dehaze_airlight_does_not_phase_lock_to_column_parity() {
-        // 1024×512 = 524288 px → the raw stride would be 2: alternating
-        // dark/bright COLUMNS then fed the histogram exactly one parity, and
-        // shifting the frame one pixel flipped the airlight from the 0.10
-        // floor to the bright bin — preview and export disagreed on any
-        // frame whose width shared a factor with the stride (U14). The
-        // coprime stride must make both phases agree.
+    fn dehaze_airlight_does_not_phase_lock_to_any_small_period() {
+        // 1024×512 = 524288 px → stride 2, i.e. the sampler sees half the
+        // frame. Two periodic frames caught two different lock-ups: COLUMN
+        // stripes locked a flat `step_by` sampler to one parity (U14), and a
+        // CHECKERBOARD locks a +1-per-row shear to one diagonal phase (R12).
+        // In both cases a one-pixel shift flipped the estimated airlight
+        // between the 0.10 floor and the bright bin, so preview and export
+        // disagreed on the same photo.
+        //
+        // The probe must be a BRIGHT pixel: for a dark one the model's
+        // b = a·(1−t) = K·s·min cancels the airlight almost exactly (the two
+        // estimates differ by ~4e-4 there, so a dark probe would have passed
+        // with the broken sampler — R12).
         let (w, h) = (1024usize, 512usize);
-        let frame = |phase: usize| -> Vec<[f32; 3]> {
-            (0..w * h)
-                .map(|i| {
-                    let v = if (i % w + phase).is_multiple_of(2) { 0.05 } else { 0.85 };
-                    [v, v, v]
-                })
-                .collect()
-        };
-        let mut a = frame(0);
-        let mut b = frame(1);
-        apply_dehaze(&mut a, w, 50.0);
-        apply_dehaze(&mut b, w, 50.0);
-        // Compare value-to-value, not index-to-index: the frames are
-        // one-pixel-shifted copies, so the same INPUT value must map to the
-        // same output in both.
-        let (pa, pb) = (a[0][0], b[1][0]); // both were 0.05 before develop
-        assert!(
-            (pa - pb).abs() < 1e-3,
-            "airlight phase-locked to column parity: {pa} vs {pb}"
-        );
+        let stripes = |phase: usize, i: usize| (i % w + phase).is_multiple_of(2);
+        let checker = |phase: usize, i: usize| ((i % w) + (i / w) + phase).is_multiple_of(2);
+        for (name, pattern) in [
+            ("columns", &stripes as &dyn Fn(usize, usize) -> bool),
+            ("checkerboard", &checker as &dyn Fn(usize, usize) -> bool),
+        ] {
+            let frame = |phase: usize| -> Vec<[f32; 3]> {
+                (0..w * h)
+                    .map(|i| {
+                        let v = if pattern(phase, i) { 0.05 } else { 0.85 };
+                        [v, v, v]
+                    })
+                    .collect()
+            };
+            let mut a = frame(0);
+            let mut b = frame(1);
+            apply_dehaze(&mut a, w, 50.0);
+            apply_dehaze(&mut b, w, 50.0);
+            // Value-to-value: the frames are one-pixel-shifted copies, so the
+            // same INPUT value must map to the same output in both. Index 1
+            // of `a` and index 0 of `b` were both the BRIGHT 0.85.
+            let (pa, pb) = (a[1][0], b[0][0]);
+            assert!(
+                (pa - pb).abs() < 1e-3,
+                "{name}: airlight phase-locked to the pattern: {pa} vs {pb}"
+            );
+        }
     }
 
     #[test]
