@@ -467,11 +467,24 @@ pub fn render_to_file(
     if space != ExportColorSpace::Srgb {
         img = convert_export_color_space(img, space);
     }
+    // STAGE, then publish. `File::create` truncates the delivery path, so an
+    // encode that failed half-way (disk full, a killed process) left a partial
+    // file sitting at the name the user was told to hand over, and a repeat
+    // export destroyed the previous deliverable before knowing the new one
+    // would even encode. Every other artifact in this app stages and renames;
+    // the one the photographer actually delivers was the exception.
+    let staged = out.with_extension(format!(
+        "{ext}.tmp.{}.{}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ));
     let create = |p: &Path| {
         std::fs::File::create(p)
             .map(std::io::BufWriter::new)
             .with_context(|| format!("create {}", p.display()))
     };
+    // The encode writes to `staged`; `out` stays untouched until it succeeds.
+    let encoded = (|| -> Result<()> {
     // Every buffered arm FLUSHES explicitly before success: BufWriter's
     // drop-time flush SWALLOWS its error, so a full disk could report a
     // successful export over a truncated file.
@@ -480,7 +493,7 @@ pub fn render_to_file(
         "jpg" | "jpeg" => {
             // JPEG is 8-bit only — downconvert from 16-bit.
             let rgb8 = img.to_rgb8();
-            let mut wr = create(out)?;
+            let mut wr = create(&staged)?;
             let mut enc =
                 image::codecs::jpeg::JpegEncoder::new_with_quality(&mut wr, opts.jpeg_quality.clamp(1, 100));
             tag_icc(&mut enc, space);
@@ -489,7 +502,7 @@ pub fn render_to_file(
             wr.flush().with_context(|| format!("flush {}", out.display()))?;
         }
         "tif" | "tiff" => {
-            let mut wr = create(out)?;
+            let mut wr = create(&staged)?;
             let mut enc = image::codecs::tiff::TiffEncoder::new(&mut wr);
             tag_icc(&mut enc, space);
             img.write_with_encoder(enc)
@@ -497,7 +510,7 @@ pub fn render_to_file(
             wr.flush().with_context(|| format!("flush {}", out.display()))?;
         }
         "png" => {
-            let mut wr = create(out)?;
+            let mut wr = create(&staged)?;
             let mut enc = image::codecs::png::PngEncoder::new(&mut wr);
             tag_icc(&mut enc, space);
             img.write_with_encoder(enc)
@@ -507,8 +520,20 @@ pub fn render_to_file(
         // Unknown extensions keep the generic 16-bit save (no ICC tag, so the
         // pixels above were deliberately left in sRGB).
         _ => img
-            .save(out)
+            .save(&staged)
             .with_context(|| format!("save render {}", out.display()))?,
+    }
+        Ok(())
+    })();
+    if let Err(e) = encoded {
+        let _ = std::fs::remove_file(&staged); // never leave a partial behind
+        return Err(e);
+    }
+    // fs::rename REPLACES the destination on every platform we support, so the
+    // previous deliverable survives right up to the instant the new one lands.
+    if let Err(e) = std::fs::rename(&staged, out) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e).with_context(|| format!("publish {}", out.display()));
     }
     Ok((w, h))
 }
@@ -3030,6 +3055,32 @@ mod tests {
             (mb - mc).abs() < 0.06,
             "base-curved render should sit near the camera preview: based={mb:.3} camera={mc:.3}"
         );
+    }
+
+    #[test]
+    fn export_publishes_atomically_and_leaves_no_staging_file() {
+        let dir = std::env::temp_dir().join("autoshop-export-atomic");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.png");
+        DynamicImage::ImageRgb8(image::RgbImage::new(4, 3)).save(&src).unwrap();
+        let out = dir.join("shot.developed.png");
+        let r = EditRecipe::default();
+        render_to_file(&src, &r, &out, None, None).unwrap();
+        assert!(out.exists(), "the deliverable must be published");
+        // The staged copy is consumed on EVERY path — a leftover would mean a
+        // partial file could survive beside a delivery.
+        let residue: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(residue.is_empty(), "staging residue left behind: {residue:?}");
+        // A re-export replaces it in place, still with no residue.
+        render_to_file(&src, &r, &out, None, None).unwrap();
+        assert!(out.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

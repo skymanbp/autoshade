@@ -525,7 +525,16 @@ fn auto_cmd(
         verdict.decision,
         // Bit depth follows the chosen extension — claiming "16-bit" for a
         // requested .jpg was a lie the line above explicitly disclaims.
-        match out.extension().and_then(|e| e.to_str()) {
+        // LOWERCASED first: the renderer matches the extension
+        // case-insensitively, so `-o shot.JPG` encoded an 8-bit JPEG while
+        // this banner announced a 16-bit TIFF — the one line the photographer
+        // reads to know what they are getting.
+        match out
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
             Some("jpg" | "jpeg") => "8-bit JPEG",
             Some("png") => "16-bit PNG",
             _ => "16-bit TIFF",
