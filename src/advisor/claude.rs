@@ -105,6 +105,9 @@ impl Advisor for ClaudeProvider {
         let budget = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
+            // 0 would kill the child on arrival — same guard as the HTTP
+            // builders' zero filter.
+            .filter(|s: &u64| *s > 0)
             .unwrap_or(300u64);
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());

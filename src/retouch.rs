@@ -514,6 +514,7 @@ pub fn heal(
 
     let mut spots: Vec<HealSpot> = Vec::new();
     let mut rationale = String::new();
+    let mut detect_failed = false;
     if auto_detect {
         // ≤1568px detection JPEG. `resize` allocates only the TARGET buffer
         // (the old path cloned the full frame first); a source already ≤1568
@@ -538,6 +539,7 @@ pub fn heal(
                 if manual_mask.is_none() {
                     return Err(e);
                 }
+                detect_failed = true;
                 eprintln!("⚠ AI spot-detection failed ({e}); healing the painted mask only.");
                 // stderr is invisible from the GUI — carry the disclosure in
                 // the report too.
@@ -554,15 +556,24 @@ pub fn heal(
     if spots.is_empty() {
         // Writing (and linking) a byte-identical zero-spot master helps
         // nobody — and after an AI failure it silently masked the failure as
-        // success. Say what happened instead.
-        anyhow::bail!(
-            "nothing to heal: {}",
-            if manual_mask.is_some() {
-                "the painted mask selected no area (and AI detection added nothing)"
+        // success. Name what ACTUALLY happened per input: the old text
+        // claimed "AI detection added nothing" even when detection never ran
+        // (--no-auto) or when it FAILED outright.
+        let mut parts: Vec<&str> = Vec::new();
+        if manual_mask.is_some() {
+            parts.push("the painted mask selected no area");
+        }
+        if auto_detect {
+            parts.push(if detect_failed {
+                "AI spot-detection failed (see the warning above)"
             } else {
                 "AI detection found no spots"
-            }
-        );
+            });
+        }
+        if parts.is_empty() {
+            parts.push("no mask was given and AI detection was off");
+        }
+        anyhow::bail!("nothing to heal: {}", parts.join("; "));
     }
 
     let n = spots.len();

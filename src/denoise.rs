@@ -48,8 +48,13 @@ impl DenoiseOpts {
     }
 }
 
-/// Denoise a full-resolution sRGB buffer (`[0,1]` per channel) in place by
-/// round-tripping it through the sidecar as a 16-bit TIFF.
+/// Denoise a full-resolution working buffer (sRGB-ENCODED values, nominally
+/// `[0,1]` per channel) in place by round-tripping it through the sidecar as
+/// a 16-bit PNG (see `temp_path` for why PNG, not TIFF). Boundary, disclosed:
+/// the pack clamps to [0,1], so wide-gamut base colours carried as
+/// out-of-range values do not survive an AI-denoise round trip — a denoised
+/// export of such a photo clips those colours toward sRGB (recorded with the
+/// single-working-space item).
 pub fn denoise_buffer(opts: &DenoiseOpts, data: &mut [[f32; 3]], w: usize, h: usize) -> Result<()> {
     if data.len() != w * h {
         bail!("denoise_buffer: buffer {} != {}x{}", data.len(), w, h);
@@ -57,7 +62,7 @@ pub fn denoise_buffer(opts: &DenoiseOpts, data: &mut [[f32; 3]], w: usize, h: us
     let tmp_in = temp_path("autoshop_dn_in");
     let tmp_out = temp_path("autoshop_dn_out");
 
-    // pack [f32;3] -> 16-bit RGB TIFF
+    // pack [f32;3] -> 16-bit RGB PNG (see temp_path) — clamps to [0,1]
     let mut buf16: Vec<u16> = Vec::with_capacity(w * h * 3);
     for px in data.iter() {
         buf16.push(to_u16(px[0]));

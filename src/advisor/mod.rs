@@ -69,6 +69,8 @@ pub enum AdvisorError {
     Http { status: u16, body: String },
     #[error("http transport: {0}")]
     Transport(String),
+    #[error("the AI reported failure: {0}")]
+    ModelFailure(String),
     #[error("advisor '{0}' does not serve this role")]
     Unsupported(&'static str),
 }
@@ -145,6 +147,9 @@ pub(crate) fn post_with_timeout(url: &str, overall: std::time::Duration) -> ureq
     let overall = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
+        // 0 would arm an instant deadline and kill every call on arrival —
+        // same guard as the stall builder below.
+        .filter(|s: &u64| *s > 0)
         .map(std::time::Duration::from_secs)
         .unwrap_or(overall);
     ureq::builder()
@@ -167,15 +172,22 @@ pub(crate) fn post_with_timeout(url: &str, overall: std::time::Duration) -> ureq
 /// until the connection returns to the pool. `AUTOSHOP_HTTP_TIMEOUT_SECS`
 /// overrides this too — one knob for every AI deadline; on a streaming call it
 /// bounds SILENCE, not total duration.
-pub(crate) fn post_with_stall_timeout(url: &str, stall: std::time::Duration) -> ureq::Request {
-    let stall = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
+/// The effective inactivity budget after the `AUTOSHOP_HTTP_TIMEOUT_SECS`
+/// override — factored out so error messages report the SAME number the
+/// socket was actually armed with (the old messages printed the pre-override
+/// default, misdiagnosing which side gave up). 0 is refused: it would arm an
+/// instant read timeout and kill every call on arrival — an explicit low
+/// override is the user's call, zero is not.
+pub(crate) fn effective_stall_secs(default_secs: u64) -> u64 {
+    std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        // 0 would arm an instant read timeout and kill every call on
-        // arrival — an explicit low override is the user's call, zero is not.
         .filter(|s: &u64| *s > 0)
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(stall);
+        .unwrap_or(default_secs)
+}
+
+pub(crate) fn post_with_stall_timeout(url: &str, stall: std::time::Duration) -> ureq::Request {
+    let stall = std::time::Duration::from_secs(effective_stall_secs(stall.as_secs()));
     ureq::builder()
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout_read(stall)
@@ -200,8 +212,7 @@ pub(crate) fn stall_transport_error(
         if elapsed_secs + 30 < stall_secs {
             msg.push_str(&format!(
                 " (failed after {elapsed_secs}s — well before the {stall_secs}s stall budget, so \
-                 this is a connection/handshake/proxy failure, not a slow model; it was already \
-                 retried once)"
+                 this is a connection/handshake/proxy failure, not a slow model)"
             ));
         } else {
             msg.push_str(&format!(
@@ -391,52 +402,42 @@ pub(crate) fn post_ai_json(
             Ok(r) => {
                 // Dispatch on what actually came back, not on what was asked.
                 if r.content_type().eq_ignore_ascii_case("text/event-stream") {
-                    let res = assemble_sse(r.into_reader(), family);
-                    // A mid-stream READ failure this early is the same
-                    // connection blip the pre-response retry absorbs — the
-                    // stream died, not the model. Genuine model failures
-                    // (error / response.failed events) are NOT retried:
-                    // re-posting those would re-bill a real failure.
-                    if let Err(AdvisorError::Transport(msg)) = &res
-                        && msg.starts_with("read AI stream:")
-                        && !transport_retried
-                        && started.elapsed().as_secs() < TRANSPORT_RETRY_UNDER_SECS
-                    {
-                        transport_retried = true;
-                        eprintln!("  note: {msg} — retrying once (connection blip, not model time)");
-                        continue;
-                    }
-                    return res;
+                    // NO automatic re-POST past a 2xx: the endpoint accepted
+                    // the request, so generation (and billing) started
+                    // server-side — a mid-stream read failure kills the
+                    // CONNECTION, not the charge, and the old <30 s retry
+                    // re-billed exactly the calls that died early. The
+                    // pre-response transport arm below still absorbs blips
+                    // that never produced a response.
+                    return assemble_sse(r.into_reader(), family).map_err(|e| match e {
+                        AdvisorError::Transport(msg) if msg.starts_with("read AI stream:") => {
+                            AdvisorError::Transport(format!(
+                                "{msg} — the request was accepted (2xx) and may already be \
+                                 billed, so it is not re-posted automatically; re-run to retry"
+                            ))
+                        }
+                        other => other,
+                    });
                 }
-                // A body-READ failure on the blocking path is the same
-                // connection-blip class as the pre-response and SSE cases —
-                // it used to bypass the one-time retry entirely.
-                //
-                // A body-PARSE failure is NOT. `into_json` reports it as
-                // InvalidData, and it means the endpoint ANSWERED — it
-                // accepted the request, did the work and billed for it, then
-                // sent something we could not read. Re-posting a
-                // non-idempotent paid call there buys a second charge for a
-                // request that already succeeded on their side. Surface it.
+                // NO re-POST on the blocking path either — read OR parse: a
+                // 2xx means the endpoint accepted the request, did the work
+                // and billed for it; whether the body then failed to ARRIVE
+                // (read error) or failed to PARSE (InvalidData), re-posting
+                // buys a second charge for a request that already succeeded
+                // on their side. (The old code retried the read case within
+                // 30 s — exactly the double-billing window.)
                 match r.into_json() {
                     Ok(v) => return Ok(v),
                     Err(e) => {
-                        let parse_failure = e.kind() == std::io::ErrorKind::InvalidData;
-                        let msg = if parse_failure {
+                        let msg = if e.kind() == std::io::ErrorKind::InvalidData {
                             format!("the AI endpoint answered with unreadable JSON: {e}")
                         } else {
-                            format!("read AI response body: {e}")
+                            format!(
+                                "read AI response body: {e} — the request was accepted (2xx) \
+                                 and may already be billed, so it is not re-posted \
+                                 automatically; re-run to retry"
+                            )
                         };
-                        if !parse_failure
-                            && !transport_retried
-                            && started.elapsed().as_secs() < TRANSPORT_RETRY_UNDER_SECS
-                        {
-                            transport_retried = true;
-                            eprintln!(
-                                "  note: {msg} — retrying once (connection blip, not model time)"
-                            );
-                            continue;
-                        }
                         return Err(AdvisorError::Transport(msg));
                     }
                 }
@@ -480,7 +481,11 @@ pub(crate) fn post_ai_json(
                     continue;
                 }
                 return Err(if use_stream {
-                    stall_transport_error(&t, budget_secs.max(STREAM_STALL_FLOOR_SECS), elapsed)
+                    stall_transport_error(
+                        &t,
+                        effective_stall_secs(budget_secs.max(STREAM_STALL_FLOOR_SECS)),
+                        elapsed,
+                    )
                 } else {
                     transport_error(&t, budget_secs)
                 });
@@ -526,7 +531,10 @@ fn assemble_sse(
             })
             .map_err(|e| AdvisorError::Transport(format!("read AI stream: {e}")))?;
             if let Some(f) = failure {
-                return Err(AdvisorError::Transport(format!("AI stream error: {f}")));
+                // A failure EVENT is the model/service reporting failure —
+                // not a transport problem: classifying it as Transport made
+                // every consumer's messaging blame the network.
+                return Err(AdvisorError::ModelFailure(format!("AI stream error: {f}")));
             }
             out.ok_or_else(|| {
                 AdvisorError::Transport("AI stream ended without response.completed".into())
@@ -593,7 +601,10 @@ fn assemble_sse(
                 }
             }
             if let Some(f) = failure {
-                return Err(AdvisorError::Transport(format!("AI stream error: {f}")));
+                // A failure EVENT is the model/service reporting failure —
+                // not a transport problem: classifying it as Transport made
+                // every consumer's messaging blame the network.
+                return Err(AdvisorError::ModelFailure(format!("AI stream error: {f}")));
             }
             if text.is_empty() {
                 return Err(AdvisorError::Transport(

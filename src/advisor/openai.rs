@@ -4,11 +4,11 @@
 //! return our recipe shape, and sends the preview as a base64 `input_image`
 //! (request shape per `docs/M1_PLAN.md` §3).
 //!
-//! ⚠️ UNTESTED against the live API — no `OPENAI_API_KEY` was available at build
-//! time, so the request/response shapes are written from the documented API but
-//! not yet round-tripped. `propose` returns [`AdvisorError::Missing`] until a key
-//! is configured; the first real call must be validated (and likely tweaked)
-//! against OpenAI's current Responses API.
+//! Validated against the live Responses API in production since v0.14 (strict
+//! `json_schema` structured output + base64 `input_image`; the streaming /
+//! negotiation history lives in `advisor::post_ai_json`). `propose` returns
+//! [`AdvisorError::Missing`] when no key is configured — the pipeline then
+//! falls back to the heuristic baseline.
 
 use base64::Engine;
 use serde_json::{json, Value};

@@ -37,7 +37,18 @@ pub fn produce_recipe(
     // the direction so GPT adjusts that edit rather than proposing from scratch.
     // Absent a base, behaviour is unchanged — a fresh proposal from the original.
     let refine_owned: Option<String> = base.map(|b| {
-        let base_json = serde_json::to_string(b).unwrap_or_default();
+        // The AI proposes/verifies over the camera's embedded preview, where
+        // the base look AND the lens corrections are already IN the pixels —
+        // strip both from the copy woven into the prompt (either would
+        // double-apply in the verifier's render). The strip lives HERE, not
+        // in the callers: `base` must keep the user's REAL profile so
+        // carry_over_unrepresentable below can preserve unsaved lens toggles
+        // (pre-stripped callers made every Refine revert them to the saved
+        // profile).
+        let mut stripped = b.clone();
+        stripped.base_curve = Vec::new();
+        stripped.lens_profile = Default::default();
+        let base_json = serde_json::to_string(&stripped).unwrap_or_default();
         format!(
             "REFINE the photographer's CURRENT edit instead of starting over — keep its choices and \
              change only what this direction implies. CURRENT EDIT (EditRecipe JSON): {base_json}. \
@@ -99,6 +110,16 @@ pub fn produce_recipe(
         }
         match openai.propose(&preview, meta, hist, ref_str, guidance, None) {
             Ok(r) => (r, true),
+            Err(e) if base.is_some() => {
+                // REFINE means "adjust MY edit": the heuristic fallback
+                // proposes from scratch and cannot see the base, so falling
+                // back here REPLACED the user's current edit with a generic
+                // baseline — and an Accept verdict then auto-saved it. A
+                // failed refine fails loudly; the edit on screen stays as it
+                // was.
+                return Err(anyhow::Error::from(e)
+                    .context("the AI refine failed — your current edit is unchanged"));
+            }
             Err(e) => {
                 eprintln!("⚠ GPT proposer failed ({e})\n  → falling back to the heuristic baseline.");
                 // Hand the REAL cause to the heuristic: this stderr line is
@@ -197,7 +218,19 @@ pub fn produce_recipe(
                  derivation above]",
                 style_strength.clamp(0.0, 1.0) * 0.6 * 100.0
             ));
-            verdict = verifier.verify(&recipe, meta, hist)?;
+            // Degrade like the revision loop above: a transient verifier
+            // failure at this LAST step used to error out the whole call,
+            // discarding the paid, already-verified proposal. Keep the pair
+            // and disclose which recipe the verdict describes.
+            match verifier.verify(&recipe, meta, hist) {
+                Ok(v) => verdict = v,
+                Err(e) => {
+                    recipe.rationale.push_str(&format!(
+                        " [re-verification after style distillation failed ({e}) — the verdict \
+                         above describes the PRE-distillation recipe]"
+                    ));
+                }
+            }
         }
     }
     // Base look, stamped in ONE place for every surface: the proposal and the
@@ -272,6 +305,16 @@ pub(crate) fn carry_over_unrepresentable(recipe: &mut EditRecipe, base: &EditRec
     recipe.lens_distortion = base.lens_distortion;
     recipe.lens_vignette = base.lens_vignette;
     recipe.lens_vignette_mid = base.lens_vignette_mid;
+    // The lens PROFILE (with the user's toggles) rides too — but only when
+    // the base actually carries one: a refine caller that still pre-strips
+    // it to Default is sending a sentinel, never "the user turned everything
+    // off" (a real profile keeps its in-camera data vectors even with every
+    // toggle off, and a data-less photo's profile equals Default on both
+    // sides). Without this, Refine reverted unsaved lens toggles to the
+    // saved profile stamped above.
+    if base.lens_profile != Default::default() {
+        recipe.lens_profile = base.lens_profile.clone();
+    }
     recipe.clamp(); // the size caps still apply after re-attaching
 }
 
@@ -696,6 +739,11 @@ mod guard_tests {
             lens_distortion: -8.0,
             lens_vignette: 30.0,
             lens_vignette_mid: 40.0,
+            lens_profile: crate::recipe::LensProfile {
+                distortion: vec![1.0, 1.001, 1.002],
+                distortion_on: false, // the user's UNSAVED toggle-off
+                ..Default::default()
+            },
             ..Default::default()
         };
         // What the model can return: parametric masks only, lens fields absent
@@ -719,6 +767,18 @@ mod guard_tests {
         assert_eq!(proposed.lens_distortion, -8.0, "manual lens correction kept");
         assert_eq!(proposed.lens_vignette, 30.0);
         assert_eq!(proposed.lens_vignette_mid, 40.0);
+        assert_eq!(
+            proposed.lens_profile, base.lens_profile,
+            "the profile (with the user's unsaved toggles) must survive Refine"
+        );
+        // A STRIPPED-SENTINEL base (Default profile) must NOT overwrite the
+        // stamped profile with emptiness.
+        let mut stamped = EditRecipe::default();
+        stamped.lens_profile.vignette = vec![1.0, 0.9];
+        stamped.lens_profile.vignette_on = true;
+        carry_over_unrepresentable(&mut stamped, &EditRecipe::default());
+        assert!(stamped.lens_profile.vignette_on, "sentinel base leaves the stamp alone");
+        assert!(!stamped.lens_profile.vignette.is_empty());
         // The model's own proposal is still there, after the carried one.
         assert!(matches!(proposed.masks[1].mask, MaskGeometry::Linear { .. }));
     }
@@ -870,27 +930,78 @@ fn entry_is_dir(entry: &std::fs::DirEntry) -> std::io::Result<bool> {
 /// left `batch`, `eval` and `style-index` blind to libraries the GUI and web
 /// open fine.
 pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) -> std::io::Result<()> {
-        // Same directory-symlink-cycle cap as `find_sources`: entry_is_dir
-        // deliberately follows dir links, so an uncapped walk recurses until
-        // the OS errors or the stack dies.
+    walk_photos(dir, decode::is_raw)
+}
+
+/// The shared scanner behind [`find_raws`] / [`find_sources`].
+///
+/// Cycle-proof by IDENTITY, not just depth: `entry_is_dir` deliberately
+/// follows directory symlinks/junctions, and a link back into an ancestor
+/// re-enters the same directory under a NEW spelling — the old depth cap
+/// turned that into every RAW appearing up to 64× (batch then analyzed AND
+/// BILLED each occurrence). Every directory is entered once per canonical
+/// identity, and found files are deduped by canonical identity too (a file
+/// symlink is the same photo). Resilient per entry: one unreadable
+/// SUBDIRECTORY (AV lock, permissions) warns and is skipped instead of
+/// aborting the whole scan — only an unreadable ROOT is a real failure. The
+/// depth cap stays as a backstop for canonicalize-failing paths.
+fn walk_photos(root: &Path, pred: fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
+    fn walk(
+        dir: &Path,
+        pred: fn(&Path) -> bool,
+        out: &mut Vec<PathBuf>,
+        visited: &mut std::collections::HashSet<PathBuf>,
+        depth: u32,
+        is_root: bool,
+    ) -> std::io::Result<()> {
+        if let Ok(c) = std::fs::canonicalize(dir)
+            && !visited.insert(c)
+        {
+            return Ok(()); // already scanned through another spelling
+        }
         if depth > 64 {
             return Ok(());
         }
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) if !is_root => {
+                eprintln!("⚠ skipping unreadable folder {} ({e})", dir.display());
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        for entry in rd {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("⚠ skipping unreadable entry under {} ({e})", dir.display());
+                    continue;
+                }
+            };
             let p = entry.path();
-            if entry_is_dir(&entry)? {
-                walk(&p, out, depth + 1)?;
-            } else if decode::is_raw(&p) {
-                out.push(p);
+            match entry_is_dir(&entry) {
+                Ok(true) => walk(&p, pred, out, visited, depth + 1, false)?,
+                Ok(false) => {
+                    if pred(&p) {
+                        out.push(p);
+                    }
+                }
+                Err(e) => eprintln!("⚠ skipping unreadable entry {} ({e})", p.display()),
             }
         }
         Ok(())
     }
     let mut out = Vec::new();
-    walk(dir, &mut out, 0).with_context(|| format!("scan {}", dir.display()))?;
+    let mut visited = std::collections::HashSet::new();
+    walk(root, pred, &mut out, &mut visited, 0, true)
+        .with_context(|| format!("scan {}", root.display()))?;
     out.sort();
+    // Canonical-identity dedupe (first occurrence in sorted order wins): two
+    // spellings of one file — a file symlink beside its target, or paths via
+    // different directory links — are ONE photo, and each duplicate used to
+    // bill its own analysis in batch.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
     Ok(out)
 }
 
@@ -906,28 +1017,7 @@ pub fn is_source(p: &Path) -> bool {
 /// Like [`find_raws`] but also includes already-baked images (PNG/TIFF/JPEG), so
 /// the web UI can browse and edit LR/PS-denoised exports alongside RAWs. Sorted.
 pub fn find_sources(dir: &Path) -> Result<Vec<PathBuf>> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) -> std::io::Result<()> {
-        // A directory-symlink cycle would recurse forever (entry_is_dir
-        // deliberately follows dir symlinks); 64 levels is beyond any real
-        // photo library, so the cap only ever trips on a cycle.
-        if depth > 64 {
-            return Ok(());
-        }
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let p = entry.path();
-            if entry_is_dir(&entry)? {
-                walk(&p, out, depth + 1)?;
-            } else if is_source(&p) {
-                out.push(p);
-            }
-        }
-        Ok(())
-    }
-    let mut out = Vec::new();
-    walk(dir, &mut out, 0).with_context(|| format!("scan {}", dir.display()))?;
-    out.sort();
-    Ok(out)
+    walk_photos(dir, is_source)
 }
 
 #[cfg(test)]
@@ -992,6 +1082,28 @@ mod tests {
             "find_raws must see every RAW format (case-insensitive, recursive) and no baked/sidecar files"
         );
         assert!(found.iter().all(|p| decode::is_raw(p)), "one RAW predicate, app-wide");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn photo_scan_survives_a_directory_link_cycle_and_finds_each_raw_once() {
+        let dir = std::env::temp_dir().join("autoshop-scan-cycle");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.arw"), b"raw").unwrap();
+        // A directory link back to its own parent — the classic cycle. Link
+        // creation needs privilege on stock Windows (Developer Mode grants
+        // it); when unavailable the cycle arm is honestly skipped and the
+        // plain scan still verifies.
+        #[cfg(windows)]
+        let link = std::os::windows::fs::symlink_dir(&dir, dir.join("loop"));
+        #[cfg(not(windows))]
+        let link = std::os::unix::fs::symlink(&dir, dir.join("loop"));
+        let found = find_raws(&dir).expect("scan");
+        assert_eq!(found.len(), 1, "one RAW, found ONCE — never once per traversal: {found:?}");
+        if link.is_err() {
+            eprintln!("note: symlink unavailable — the cycle arm was not exercised");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

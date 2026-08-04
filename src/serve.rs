@@ -1378,16 +1378,12 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // whole AI chain blocking every settings save.
     let cfg = state.config().clone();
     let style = req.style_strength.unwrap_or(cfg.style_strength);
-    // The analyze pipeline proposes/verifies over the camera's embedded
-    // preview, where the base look AND the lens corrections are already IN
-    // the pixels: strip both from the refine base (either would double-apply
-    // in the verifier's render). produce_recipe stamps the photo's own back
-    // onto the result — the single authority for every surface.
-    let refine_base = req.base.clone().map(|mut b| {
-        b.base_curve = Vec::new();
-        b.lens_profile = Default::default();
-        b
-    });
+    // produce_recipe itself strips the base look + lens profile from the
+    // PROMPT copy (they are already IN the embedded preview's pixels) and
+    // needs the UNSTRIPPED base so carry_over_unrepresentable can keep the
+    // user's unsaved lens toggles — pre-stripping here made every web Refine
+    // revert them to the saved profile.
+    let refine_base = req.base.clone();
     let (recipe, verdict) =
         pipeline::produce_recipe(&raw, &cfg, false, guidance, refine_base.as_ref(), style)?;
     // A non-Accept verdict may not auto-save (user decision): the verifier

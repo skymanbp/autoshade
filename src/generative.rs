@@ -163,7 +163,22 @@ pub fn reimagine(
         return Err(anyhow!("cancelled by user"));
     }
     pipeline::ensure_parent(out)?;
-    std::fs::write(out, result).with_context(|| format!("write {}", out.display()))?;
+    // Stage + rename over the claimed name (the batch-13 export rule): a
+    // crash mid-write must never leave a PARTIAL image wearing a name
+    // pixels.json or a browser session may already reference.
+    let tmp = out.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ));
+    if let Err(e) = std::fs::write(&tmp, &result) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("write {}", tmp.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, out) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("publish {}", out.display()));
+    }
     println!("generative -> {} ({used}, generative re-render)", out.display());
     Ok(())
 }
@@ -251,19 +266,45 @@ pub fn retouch(
         .context("decode generative result")?
         .resize_exact(bw, bh, FilterType::Lanczos3)
         .to_rgba8();
+    // Cancel checkpoints through the composite: at 61 MP the decode/weight/
+    // blend stages take seconds each, and a cancel arriving during them was
+    // ignored — the abandoned result then landed in ./out anyway.
+    if cancelled() {
+        return Err(anyhow!("cancelled by user"));
+    }
     let feather = ((bw.min(bh) as usize) / 100).clamp(2, 64); // ~1% of short side, capped
     let weight = {
         let mask_full = mask_img.resize_exact(bw, bh, FilterType::Nearest).to_rgba8();
         let w: Vec<f32> = mask_full.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
         if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
     };
+    if cancelled() {
+        return Err(anyhow!("cancelled by user"));
+    }
     composite_in_place(&mut composite, &gen_img, &weight);
     drop(gen_img);
+    if cancelled() {
+        return Err(anyhow!("cancelled by user"));
+    }
 
     pipeline::ensure_parent(out)?;
-    composite
-        .save(out)
-        .with_context(|| format!("write {}", out.display()))?;
+    // Stage + rename over the claimed name — same rule as reimagine. The
+    // staged name cannot carry the real extension, so the format comes from
+    // the TARGET path explicitly (PNG for every claimed ./out master).
+    let tmp = out.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ));
+    let fmt = image::ImageFormat::from_path(out).unwrap_or(image::ImageFormat::Png);
+    if let Err(e) = composite.save_with_format(&tmp, fmt) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("write {}", tmp.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, out) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("publish {}", out.display()));
+    }
     println!("generative fill -> {} ({bw}x{bh}, composite)", out.display());
     Ok(())
 }
@@ -557,33 +598,27 @@ fn call_images_edit(
                 match read {
                     Ok(v) => break (v, size.to_string()),
                     Err(e) => {
-                        // Body-read failures are the same connection-blip
-                        // class as the send-phase ones below — they used to
-                        // bypass the one-time retry via `?`. Only the
-                        // TRANSPORT-flavoured contexts retry: a model failure
-                        // event or a user cancel must not re-post (re-bills).
-                        // Attribution reads the OUTERMOST context only
-                        // (Display, not the {:#} chain): a provider MESSAGE
-                        // deeper in the chain containing these phrases used
-                        // to classify a model failure as transport and
-                        // re-bill it. Transport reads surface as exactly
-                        // "read image stream" / "parse image API response";
-                        // model failures top out as "image stream error: …"
-                        // and cancels as "cancelled by user".
-                        let s = format!("{e:#}");
+                        // NO re-POST past a 2xx: the endpoint accepted the
+                        // request, so the generation (billed PER IMAGE) is
+                        // already running or finished server-side — whether
+                        // the body then failed to arrive (read) or to parse,
+                        // a re-post buys a second image. The old retry did
+                        // exactly that, and even used the advisor's 30 s
+                        // text window rather than this module's own 3 s
+                        // pre-response rule. Only the pre-response transport
+                        // arm below may retry. Attribution reads the
+                        // OUTERMOST context only (Display, not {:#}): model
+                        // failures top out as "image stream error: …" and
+                        // cancels as "cancelled by user" — both pass through
+                        // with their own messages.
                         let top = e.to_string();
-                        let transportish = top.starts_with("read image stream")
-                            || top.starts_with("parse image API response");
-                        if transportish
-                            && !transport_retried
-                            && started.elapsed().as_secs()
-                                < crate::advisor::TRANSPORT_RETRY_UNDER_SECS
+                        if top.starts_with("read image stream")
+                            || top.starts_with("parse image API response")
                         {
-                            transport_retried = true;
-                            eprintln!(
-                                "  note: {s} — retrying once (connection blip, not generation time)"
-                            );
-                            continue;
+                            return Err(e.context(
+                                "the request was accepted (2xx) and may already be billed — \
+                                 not re-posting automatically; run the operation again to retry",
+                            ));
                         }
                         return Err(e);
                     }
@@ -663,12 +698,15 @@ fn call_images_edit(
                 // MEASURED elapsed time tells connection failures apart from
                 // real stalls (both surface as "timed out reading response").
                 if msg.contains("timed out") {
-                    if use_stream && elapsed + 30 < IMAGES_EDIT_STALL_SECS {
+                    // The EFFECTIVE stall (env override included) — blaming
+                    // the default budget the user had overridden misdiagnosed
+                    // which side gave up.
+                    let stall = crate::advisor::effective_stall_secs(IMAGES_EDIT_STALL_SECS);
+                    if use_stream && elapsed + 30 < stall {
                         msg.push_str(&format!(
-                            " (failed after {elapsed}s — well before the \
-                             {IMAGES_EDIT_STALL_SECS}s stall budget, so this is a \
-                             connection/handshake/proxy failure, not a slow generation; it was \
-                             already retried once)"
+                            " (failed after {elapsed}s — well before the {stall}s stall \
+                             budget, so this is a connection/handshake/proxy failure, not a \
+                             slow generation)"
                         ));
                     } else if use_stream {
                         msg.push_str(&format!(

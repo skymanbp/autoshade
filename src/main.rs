@@ -512,15 +512,15 @@ fn auto_cmd(
     denoise_model: Option<String>,
 ) -> Result<()> {
     let cfg = Config::load();
-    let style = style.unwrap_or(cfg.style_strength);
-    let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
-    // Validate the render target BEFORE touching the saved develop: a refused
-    // -o used to be rejected only after the canonical overwrite — the command
-    // reported failure yet had already changed the save.
+    // Validate the render target BEFORE the PAID AI call (and before touching
+    // the saved develop): a refused -o used to be rejected only after the
+    // analysis had already been billed.
     // Default to a 16-bit TIFF master (highest fidelity); pass -o foo.jpg for a
     // smaller 8-bit file.
     let out = out.unwrap_or_else(|| default_out(raw, "developed", "tif"));
     pipeline::guard_readonly(&out, raw)?;
+    let style = style.unwrap_or(cfg.style_strength);
+    let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
     let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
     if accepted {
         // Same backup gate as analyze: `auto` is a programmatic canonical writer.
@@ -681,7 +681,11 @@ fn match_cmd(
     // colour gains, mask roles are recipe-only) — without this, `match --zoned`
     // produced a full fit that no surface able to render it could ever load.
     let canonical = autoshop::store::recipe_target(raw);
-    if canonical != recipe_path {
+    // same_path, not string equality: a case-flipped / junction-aliased -o
+    // naming the canonical file already wrote it above — writing it a second
+    // time (and printing "overwrites any earlier develop") was the string
+    // comparison's misclassification.
+    if !same_path(&canonical, &recipe_path) {
         pipeline::guard_readonly(&canonical, raw)?;
         // BOTH fit flavours gate here, immediately before the write — the
         // old pre-fit zoned snapshot left the entire segmentation as a race
@@ -896,26 +900,49 @@ fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Ver
     // cross-surface rule is "the recipe write alone decides the saved state";
     // the old xmp-first order could crash into an XMP-only marker that
     // suppressed every retry while the authoritative recipe never landed.
+    // Sidecar persistence, shared by the success path and the failed-render
+    // path below: once the verdict is Accept, the PAID analysis must land.
+    let persist = |recipe: &EditRecipe| -> Result<()> {
+        // Backup gate, same as every surface: cheap Ok(None) in the batch's
+        // usual no-develop-yet case, and a save created mid-batch by another
+        // process can no longer be silently destroyed.
+        if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(recipe)) {
+            anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
+        }
+        write_recipe(raw, recipe, None)?;
+        // The recipe write ALONE decides the saved state (cross-surface rule):
+        // failing the photo here made the batch report it failed while the
+        // resume filter — which sees recipe.json — permanently skipped it.
+        if let Err(e) = write_xmp(raw, recipe) {
+            eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e}");
+        }
+        Ok(())
+    };
     if let Some(out) = render_to {
         // 16-bit master at the batch-claimed name — claimed up front by the
         // caller so same-stem photos in one batch each keep a deliverable
         // and worker scheduling cannot reorder the names.
         ensure_parent(out)?;
-        render::render_to_file(raw, &recipe, out, None, None)?;
+        if let Err(e) = render::render_to_file(raw, &recipe, out, None, None) {
+            // A render failure must not discard the PAID, verified analysis:
+            // with sidecars-last ordering the photo stayed pending and a
+            // re-run RE-BILLED it. Persist the develop first — it is
+            // independent of the render — then fail the photo loudly; the
+            // deliverable re-renders FREE via `autoshop apply`. (A crash
+            // mid-render still re-attempts everything: nothing landed.)
+            return match persist(&recipe) {
+                Ok(()) => Err(e).context(
+                    "render failed — the develop WAS saved; re-render it free with \
+                     `autoshop apply` (this photo is no longer pending)",
+                ),
+                Err(pe) => Err(e).context(format!(
+                    "render failed, and saving the develop also failed ({pe:#}) — \
+                     the photo stays pending"
+                )),
+            };
+        }
     }
-    // Backup gate, same as every surface: cheap Ok(None) in the batch's
-    // usual no-develop-yet case, and a save created mid-batch by another
-    // process can no longer be silently destroyed.
-    if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
-        anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
-    }
-    write_recipe(raw, &recipe, None)?;
-    // The recipe write ALONE decides the saved state (cross-surface rule):
-    // failing the photo here made the batch report it failed while the
-    // resume filter — which sees recipe.json — permanently skipped it.
-    if let Err(e) = write_xmp(raw, &recipe) {
-        eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e}");
-    }
+    persist(&recipe)?;
     Ok(verdict)
 }
 

@@ -184,7 +184,20 @@ impl Config {
         // silently billed that global key instead of this project's own .env
         // key. Project .env is the default; the global stays the fallback for
         // names .env does not define.
-        let _ = dotenvy::dotenv_override();
+        // ONCE per process: dotenv_override mutates the process environment
+        // (env::set_var), which is unsound to run concurrently with env reads
+        // on non-Windows — and Config::load() is called from request/worker
+        // threads (the web Settings hot-reload rebuilds the config). The
+        // first load happens on the main thread before any worker exists;
+        // later reloads reuse the already-applied environment. Recorded
+        // residuals, behaviour otherwise unchanged: the cwd-upward .env
+        // search (a run from another checkout's subtree adopts that tree's
+        // .env), and a .env edited mid-session now applies on the next
+        // launch rather than on the next settings save.
+        static DOTENV_ONCE: std::sync::Once = std::sync::Once::new();
+        DOTENV_ONCE.call_once(|| {
+            let _ = dotenvy::dotenv_override();
+        });
         let nonempty = |k: &str| env::var(k).ok().filter(|s| !s.trim().is_empty());
         let local = load_local_settings();
         // local-file value wins over env; `pick` returns the first non-empty.
