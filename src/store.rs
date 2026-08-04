@@ -156,21 +156,21 @@ pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io
     // name (the web server threads requests), and the old file is RETIRED to
     // .bak rather than deleted before the rename — a crash in the window
     // then leaves the previous linkage recoverable beside the photo, never
-    // nothing at all (Windows rename cannot replace an existing target).
-    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // nothing at all.
     let target = pixel_source_path(src);
     let tmp = dir.join(format!(
         "pixels.json.tmp.{}.{}",
         std::process::id(),
-        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        next_tmp_seq()
     ));
     std::fs::write(&tmp, serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)?)?;
     let mut retired = false;
     if target.exists() {
         let bak = dir.join("pixels.json.bak");
-        // Make room (Windows rename cannot replace). Losing an OLD .bak to a
-        // concurrent writer is last-writer-wins by design — the same stance
-        // recipe.json documents for its shared .bak.
+        // Belt-and-braces clear (fs::rename would replace it anyway — see
+        // next_tmp_seq's probe note). Losing an OLD .bak to a concurrent
+        // writer is last-writer-wins by design — the same stance recipe.json
+        // documents for its shared .bak.
         let _ = std::fs::remove_file(&bak);
         match std::fs::rename(&target, &bak) {
             Ok(()) => retired = true,
@@ -468,14 +468,14 @@ pub fn backup_saved_develop(
     // let two processes select the same n and silently replace each other's
     // snapshot; the claim also embeds the vMAX refusal.
     let (n, dst) = claim_version(src)?;
-    // Per-process AND per-call tmp name: GUI + web server are separate
-    // PROCESSES backing up the same photo — a shared fixed tmp path lets the
-    // two writes interleave into corrupt JSON before either rename runs.
-    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Per-process AND per-call tmp name from the ONE shared counter (see
+    // next_tmp_seq): GUI + web server are separate PROCESSES backing up the
+    // same photo, and per-SITE counters let two same-process writers mint
+    // the identical name.
     let tmp = dst.with_extension(format!(
         "json.tmp.{}.{}",
         std::process::id(),
-        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        next_tmp_seq()
     ));
     match parsed {
         Some(mut r) => {
@@ -588,8 +588,7 @@ fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
     }
     derived.lens_profile = crate::pipeline::fresh_lens_profile(src);
     let (n, dst) = claim_version(src)?;
-    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = || TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let seq = next_tmp_seq; // ONE shared process-wide counter (see next_tmp_seq)
     let publish = |dst: &Path, bytes: &[u8], seq: u64| -> std::io::Result<()> {
         let tmp = dst.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
         if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dst)) {
@@ -754,14 +753,7 @@ pub fn note_source(src: &Path) {
 /// migration/backup existence checks would then trust as a completed artifact
 /// forever. Clobbers an existing `to` (callers gate on their own semantics).
 fn copy_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
-    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut name = to.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(format!(
-        ".tmp.{}.{}",
-        std::process::id(),
-        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let tmp = to.with_file_name(name);
+    let tmp = sibling_tmp(to);
     if let Err(e) = std::fs::copy(from, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -776,16 +768,24 @@ fn copy_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Private staging name beside `to` (pid+seq — a FIXED name would let two
-/// processes truncate each other's staging file).
-fn sibling_tmp(to: &Path) -> PathBuf {
+/// Process-wide sequence for temporary-file names. EVERY tmp minter that
+/// emits into the shared `<name>.tmp.<pid>.<seq>` lexical namespace must
+/// draw from this ONE counter: independent per-site counters (each starting
+/// at 0) let two SAME-process writers — e.g. a version backup racing a
+/// legacy-migration publish over the same v<N>.recipe.json — mint the SAME
+/// tmp path and truncate each other's staged bytes before rename. (Probe
+/// note: fs::rename DOES replace an existing file on Windows — verified
+/// empirically — which is exactly why a corrupted tmp gets published.)
+pub(crate) fn next_tmp_seq() -> u64 {
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Private staging name beside `to` (pid + the shared process-wide seq — a
+/// FIXED name would let two processes truncate each other's staging file).
+fn sibling_tmp(to: &Path) -> PathBuf {
     let mut name = to.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(format!(
-        ".tmp.{}.{}",
-        std::process::id(),
-        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    name.push(format!(".tmp.{}.{}", std::process::id(), next_tmp_seq()));
     to.with_file_name(name)
 }
 
@@ -1196,6 +1196,17 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
 mod tests {
     use super::*;
     use crate::recipe::LocalAdjustment;
+
+    #[test]
+    fn tmp_names_are_process_unique_across_minters() {
+        // The collision class R8 closed: every minter shares next_tmp_seq,
+        // so no two tmp names for the same target can ever coincide.
+        let t = Path::new("D:/x/v1.recipe.json");
+        assert_ne!(sibling_tmp(t), sibling_tmp(t));
+        let a = next_tmp_seq();
+        let b = next_tmp_seq();
+        assert!(b > a, "strictly monotone within the process");
+    }
 
     #[test]
     fn publish_no_clobber_never_replaces_an_owner() {

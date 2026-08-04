@@ -344,29 +344,32 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     }
     // Publish via tmp+rename rather than truncating the AUTHORITATIVE file in
     // place: a crash mid-write used to leave a half-written recipe.json (loud
-    // Unreadable, but the develop was gone). Windows rename cannot replace an
-    // existing destination, so the old file is retired first — worst case is a
-    // briefly missing file with the intact .tmp beside it, never corrupt JSON.
-    // Per-process AND per-call tmp name: a GUI and a web server saving the
-    // same photo used to share one fixed .tmp — and the web server threads
-    // REQUESTS, so two same-process saves need the counter too. (.bak stays
-    // shared — the retire/restore pair below is last-writer-wins by design;
-    // one photo has one interactive writer in practice.)
-    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Unreadable, but the develop was gone). The old file is retired to .bak
+    // first for CRASH RECOVERY (fs::rename does replace an existing file on
+    // Windows — verified empirically) — worst case is a briefly missing file
+    // with the intact .tmp beside it, never corrupt JSON.
+    // Per-process AND per-call tmp name from the ONE shared store counter
+    // (see store::next_tmp_seq): a GUI and a web server saving the same
+    // photo used to share one fixed .tmp, the web server threads REQUESTS,
+    // and a same-process migration publish mints into the SAME
+    // `.json.tmp.<pid>.<seq>` namespace — every site must share one counter.
+    // (.bak stays shared — the retire/restore pair below is
+    // last-writer-wins by design; one photo has one interactive writer in
+    // practice.)
     let tmp = out.with_extension(format!(
         "json.tmp.{}.{}",
         std::process::id(),
-        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        crate::store::next_tmp_seq()
     ));
     std::fs::write(&tmp, serde_json::to_string_pretty(&on_disk)?)
         .with_context(|| format!("write recipe {}", tmp.display()))?;
-    // Retire the old file to .bak instead of deleting it (Windows rename
-    // cannot replace): if the publish rename then fails (AV lock, racing
-    // writer), the authoritative recipe is RESTORED, not lost. On success
-    // the .bak is dropped. A STALE .bak (crash in that window) is cleared
-    // first — Windows rename cannot replace it either, so it used to wedge
-    // every later save: retire fails, had_old reads false, and the publish
-    // then fails forever on the still-present target.
+    // Retire the old file to .bak instead of deleting it: if the publish
+    // rename then fails (AV lock, racing writer), the authoritative recipe
+    // is RESTORED, not lost. On success the .bak is dropped. A STALE .bak
+    // (crash in that window) is cleared first — belt-and-braces so the
+    // retire can never trip over an undeletable leftover and wedge every
+    // later save (retire fails, had_old reads false, the publish then fails
+    // on the still-present target).
     let bak = out.with_extension("json.bak");
     if out.exists() {
         // Clearing a stale .bak is safe ONLY while the live target exists —

@@ -437,7 +437,15 @@ fn is_autoshop_sidecar(xmp: &str) -> bool {
                 Some(end) => i += 4 + end + 3,
                 None => break, // unterminated comment: nothing real follows
             }
-        } else if xmp[i..].starts_with("<x:xmpmeta") {
+        } else if let Some(rest) = xmp[i..].strip_prefix("<x:xmpmeta")
+            && rest
+                .bytes()
+                .next()
+                .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/'))
+        {
+            // Name-boundary check: without it a preceding wrapper whose
+            // element name merely STARTS with x:xmpmeta (`<x:xmpmetadata
+            // x:xmptk="Autoshop">`) was accepted as the document tag.
             tag_start = Some(i);
             break;
         } else {

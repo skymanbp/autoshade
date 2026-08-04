@@ -374,8 +374,12 @@ fn same_path(a: &Path, b: &Path) -> bool {
     // case-flipped absent leaf ("Recipe.json" for a first, not-yet-written
     // recipe.json) still names the same future file (NTFS is
     // case-insensitive), and classifying it as redirected bypassed the
-    // backup gate. Folding case can only widen equality toward the SAFE
-    // side: canonical treatment means the gate applies.
+    // backup gate. Folding case widens equality toward the safe side —
+    // canonical treatment means the gate applies — EXCEPT inside an NTFS
+    // dir with per-directory case sensitivity enabled (WSL-created,
+    // exotic), where two genuinely distinct case-variant leaves conflate:
+    // accepted trade-off, since default-insensitive NTFS is the case that
+    // bypassed the gate.
     if cfg!(windows) {
         return na.to_string_lossy().to_lowercase() == nb.to_string_lossy().to_lowercase();
     }

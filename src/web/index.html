@@ -496,9 +496,28 @@ async function setWorkingDir() {
   history = []; hi = -1; updateUndo();   // stale undo would re-apply the OLD photo's recipe
   $("#main").innerHTML = '<p style="color:var(--muted)">Select a photo on the left, or import more above.</p>';
   setStatus("opening folder…");
-  const r = await fetch("/api/setdir", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({path})});
+  let r;
+  try {
+    r = await fetch("/api/setdir", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({path})});
+  } catch (e) {
+    // Transport failure: the switch DIDN'T happen server-side — the server
+    // still serves the PREVIOUS folder. Re-render it so the pane (grid
+    // cleared, pager hidden above) is not stranded blank until the next
+    // successful switch.
+    if (seq !== dirSeq) return;
+    setStatus("open folder failed: " + ((e && e.message) || e || "network error"));
+    await loadList(0);
+    return;
+  }
   if (seq !== dirSeq) return;   // a newer switch owns the pane
-  if (!r.ok) { setStatus("open folder failed: " + await r.text()); return; }
+  if (!r.ok) {
+    const msg = await r.text();
+    if (seq !== dirSeq) return;
+    setStatus("open folder failed: " + msg);
+    // Same recovery as the transport branch: the server kept its folder.
+    await loadList(0);
+    return;
+  }
   const d = await r.json();
   if (seq !== dirSeq) return;
   const rendered = await loadList(0);   // a new folder starts at page 1
