@@ -216,7 +216,13 @@ pub fn retouch(
     // The composite below needs only 8-bit pixels — take that form NOW and
     // let the 16-bit master go, so the minutes-long model call holds the
     // ~240 MB composite buffer instead of the ~366 MB master, and the
-    // post-call peak loses a full 16-bit frame (A7).
+    // post-call peak loses a full 16-bit frame (A7). A cancel that already
+    // arrived is honoured BEFORE paying the conversion; an immediately
+    // failing call (bad key, rejected request) does pay this sub-second
+    // pass first — accepted against the minutes-scale win (Codex batch-35).
+    if cancelled() {
+        return Err(anyhow!("cancelled by user"));
+    }
     let mut composite = base.to_rgba8();
     drop(base);
 

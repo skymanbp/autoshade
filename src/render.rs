@@ -4686,8 +4686,10 @@ mod tests {
             .fold(0.0f32, f32::max);
         assert!(
             max0 > 0.1,
-            "cap-then-orient now matches orient-then-cap (max ch0 diff {max0}) — \
-             the A7 cap-before-orientation memory optimisation became available"
+            "thumbnail's binning no longer diverges grossly under Transpose \
+             (max ch0 diff {max0}) — re-run the full 8-orientation probe before \
+             concluding the A7 cap-before-orientation swap is available; a \
+             smaller-but-NONZERO divergence still forbids it"
         );
     }
 
