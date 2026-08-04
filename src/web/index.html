@@ -37,6 +37,7 @@
   .grid .ghead { color:var(--muted); font-size:11px; padding:4px 6px 8px; text-transform:uppercase; letter-spacing:.05em; }
   .thumb { display:flex; gap:8px; padding:6px; border-radius:6px; cursor:pointer; align-items:center; }
   .thumb:hover { background:var(--panel); }
+  .thumb:focus-visible { background:var(--panel); outline:2px solid var(--accent); outline-offset:-2px; }
   .thumb.sel { background:#26417a; }
   .thumb img { width:60px; height:42px; object-fit:cover; background:#000; border-radius:3px; flex:none; }
   .thumb .name { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -50,6 +51,7 @@
   .ba figcaption { color:var(--muted); font-size:12px; margin-bottom:4px; }
   .ba img { width:100%; border-radius:6px; background:#000; display:block; }
   .after-wrap { position:relative; cursor:crosshair; }
+  .after-wrap:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   .sel-box { position:absolute; border:2px dashed var(--accent); background:rgba(76,139,245,.18); pointer-events:none; border-radius:3px; }
   .fill-canvas { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; touch-action:none; border-radius:6px; }
   .fill-panel .row { margin-top:8px; }
@@ -68,6 +70,7 @@
   .slider { display:grid; grid-template-columns:92px 1fr 46px; gap:8px; align-items:center; margin:5px 0; }
   .slider label { font-size:12px; }
   .slider input[type=range] { width:100%; }
+  .wb-temp-row input[type=number] { width:100%; background:#101113; color:var(--fg); border:1px solid var(--line); border-radius:4px; font-size:11px; padding:2px 4px; }
 
   /* Narrow windows: the fixed 280px sidebar + 320px control column need
      ~648px minimum — below that the columns stack instead of clipping
@@ -165,7 +168,7 @@
     <figure><figcaption>Before (source)</figcaption><img class="before" /></figure>
     <figure>
       <figcaption>After (edit) — drag a box to target a region, or paint a mask for Generative Fill</figcaption>
-      <div class="after-wrap"><img class="after" draggable="false" /><div class="sel-box" hidden></div><canvas class="fill-canvas" hidden></canvas></div>
+      <div class="after-wrap" tabindex="0"><img class="after" draggable="false" /><div class="sel-box" hidden></div><canvas class="fill-canvas" hidden></canvas></div>
     </figure>
   </div>
 
@@ -353,11 +356,19 @@ const $ = s => document.querySelector(s);
 const setStatus = t => { $("#status").textContent = t || ""; };
 
 // --- undo / redo -----------------------------------------------------------
-function resetHistory(recipe) { history = [structuredClone(recipe)]; hi = 0; updateUndo(); }
+// Entries pair {recipe, master}: the fill/heal session master is as much of
+// the canvas as the sliders are — a fill absent from history could never be
+// undone, and Ctrl+Z right after one silently reverted an older slider
+// snapshot instead (D13).
+function resetHistory(recipe) {
+  history = [{ recipe: structuredClone(recipe), master: state.sessionMaster ?? null }];
+  hi = 0; updateUndo();
+}
 function pushHistory(recipe) {
-  if (hi >= 0 && JSON.stringify(history[hi]) === JSON.stringify(recipe)) return; // no-op
+  const entry = { recipe: structuredClone(recipe), master: state.sessionMaster ?? null };
+  if (hi >= 0 && JSON.stringify(history[hi]) === JSON.stringify(entry)) return; // no-op
   history = history.slice(0, hi + 1);
-  history.push(structuredClone(recipe));
+  history.push(entry);
   hi = history.length - 1;
   updateUndo();
 }
@@ -368,7 +379,9 @@ function updateUndo() {
 function undo() { if (hi > 0) { hi--; applyHistory(); } }
 function redo() { if (hi < history.length - 1) { hi++; applyHistory(); } }
 function applyHistory() {
-  state.recipe = structuredClone(history[hi]);
+  const h = history[hi];
+  state.recipe = structuredClone(h.recipe);
+  state.sessionMaster = h.master;
   syncSliders(); renderAfter(); updateUndo();
   setStatus(`history ${hi + 1}/${history.length}`);
 }
@@ -381,12 +394,23 @@ document.addEventListener("keydown", e => {
   // Non-text inputs (the sliders, checkboxes) have no native undo to protect —
   // and they hold focus right after a drag, which is exactly when Ctrl+Z is
   // wanted — so only editable text bails out.
+  // A modal owns the keyboard while it is up: Ctrl+Z on a Settings radio or
+  // button must not undo the photo hidden behind the overlay (D13). The
+  // modal's own listener handles Esc / Tab.
+  const sm = document.getElementById("settings-modal");
+  if (sm && !sm.hidden) return;
   const t = e.target, NON_TEXT = ["range","checkbox","radio","button","submit","reset","file","color"];
   const typing = t && (t.isContentEditable || t.tagName === "TEXTAREA" ||
     (t.tagName === "INPUT" && !NON_TEXT.includes((t.type || "text").toLowerCase())));
   if (typing) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    // Ctrl+S means "save my edit", not "save the page" — Save XMP was
+    // click-only (D13).
+    e.preventDefault();
+    if (state.id !== null && state.recipe) saveXmp();
+  }
 });
 
 // --- gallery + import ------------------------------------------------------
@@ -465,12 +489,18 @@ async function loadList(offset) {
   for (const it of data.items) {
     const div = document.createElement("div");
     div.className = "thumb"; div.dataset.id = it.id;
+    // Keyboard + AT reachable (D13): focusable with a button role, and
+    // Enter/Space activate like a click (Space must not scroll the pane).
+    div.tabIndex = 0;
+    div.setAttribute("role", "button");
+    div.setAttribute("aria-label", it.stem);
     if (it.id === state.id) div.classList.add("sel");   // keep the open photo highlighted across pages
     div.innerHTML = `<img loading="lazy" src="/api/thumb?id=${it.id}"/>
       <div><div class="name">${escapeHtml(it.stem)}</div>
         <div class="tags">${it.baked?'<span class="pill">PNG/TIFF</span>':''}${it.analyzed?'<span class="badge">● edited</span>':''}</div>
       </div>`;
     div.onclick = () => selectPhoto(it.id, it.stem, div);
+    div.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); div.click(); } };
     grid.appendChild(div);
   }
   grid.scrollTop = 0;
@@ -641,11 +671,19 @@ function buildSliders(container) {
     const row = document.createElement("div");
     row.className = "slider";
     row.innerHTML = `<label>${label}</label>
-      <input type="range" min="${min}" max="${max}" step="${step}" data-key="${key}"/>
+      <input type="range" aria-label="${label}" min="${min}" max="${max}" step="${step}" data-key="${key}"/>
       <span class="val"></span>`;
     const input = row.querySelector("input");
-    input.oninput = () => { state.recipe[key] = parseFloat(input.value); row.querySelector(".val").textContent = fmtVal(input.value, step); scheduleAfter(); };
+    input.oninput = () => { state.recipe[key] = parseFloat(input.value); row.querySelector(".val").textContent = fmtVal(input.value, step); input.setAttribute("aria-valuetext", fmtVal(input.value, step)); scheduleAfter(); };
     input.onchange = () => pushHistory(state.recipe); // commit to history on release
+    // LR's double-click-resets gesture, mirrored from the GUI slider (D13).
+    input.ondblclick = () => {
+      const d = DEFAULT_RECIPE[key] ?? 0;
+      if ((state.recipe[key] ?? 0) === d) return;
+      input.value = d; state.recipe[key] = d;
+      row.querySelector(".val").textContent = fmtVal(d, step);
+      pushHistory(state.recipe); renderAfter();
+    };
     container.appendChild(row);
   }
 }
@@ -655,47 +693,82 @@ function syncSliders() {
     const k = input.dataset.key;
     input.value = state.recipe[k] ?? 0;
     input.parentElement.querySelector(".val").textContent = fmtVal(state.recipe[k] ?? 0, parseFloat(input.step));
+    input.setAttribute("aria-valuetext", fmtVal(state.recipe[k] ?? 0, parseFloat(input.step)));
   });
   syncWb(); syncHsl(); syncGrade();
 }
 
 // --- white balance (temperature_k is nullable = as-shot) -------------------
+// Log-position ⇄ Kelvin for the Temp track (mirrors gui.rs SliderFeel::LogK):
+// a linear 2000–40000 track put the 4000–8000 K band nearly every photo
+// lives in on a few px, so normal mouse travel jumped hundreds of Kelvin
+// (D13). The range input works in 0..1000 log positions; Kelvin lives only
+// in the recipe and the editable number box.
+const K_MIN = 2000, K_MAX = 40000;
+const posToK = p => Math.round(K_MIN * Math.pow(K_MAX / K_MIN, (+p || 0) / 1000));
+const kToPos = k => Math.round(1000 * Math.log((+k || K_MIN) / K_MIN) / Math.log(K_MAX / K_MIN));
 function buildWb(panel) {
   const row = document.createElement("div");
   row.className = "slider wb-temp-row";
   row.innerHTML = `<label>Temp (K)</label>
-    <input type="range" class="wb-temp" min="2000" max="40000" step="50"/>
-    <span class="val wb-temp-val"></span>`;
+    <input type="range" class="wb-temp" aria-label="Temp (K)" min="0" max="1000" step="1"/>
+    <input type="number" class="val wb-temp-val" aria-label="Temp (Kelvin)" min="2000" max="40000" step="10" disabled/>`;
   const chk = document.createElement("label");
   chk.className = "chk wb-custom";
   chk.innerHTML = `<input type="checkbox" class="wb-custom-on"/> Custom white balance (off = as-shot)`;
   panel.querySelector("h3").after(row, chk);
   const temp = row.querySelector(".wb-temp"), on = chk.querySelector(".wb-custom-on");
+  const num = row.querySelector(".wb-temp-val");
   temp.oninput = () => {
     if (!on.checked) return;
-    state.recipe.temperature_k = parseFloat(temp.value);
-    row.querySelector(".wb-temp-val").textContent = Math.round(temp.value);
+    state.recipe.temperature_k = posToK(temp.value);
+    num.value = state.recipe.temperature_k;
     scheduleAfter();
   };
   temp.onchange = () => pushHistory(state.recipe);
+  // Double-click = back to the as-shot anchor (the GUI slider's default).
+  temp.ondblclick = () => {
+    if (!on.checked) return;
+    state.recipe.temperature_k = Math.round(state.recipe.as_shot_k || 5500);
+    syncWb(); pushHistory(state.recipe); scheduleAfter();
+  };
+  num.onchange = () => {
+    if (!on.checked) return;
+    const k = clampv(Math.round(+num.value || 0), 2000, 40000);
+    state.recipe.temperature_k = k;
+    syncWb(); pushHistory(state.recipe); scheduleAfter();
+  };
   on.onchange = () => {
-    if (on.checked) { if (state.recipe.temperature_k == null) temp.value = state.recipe.as_shot_k || 5500; state.recipe.temperature_k = parseFloat(temp.value); }
-    else state.recipe.temperature_k = null;
+    if (on.checked) {
+      if (state.recipe.temperature_k == null)
+        state.recipe.temperature_k = Math.round(state.recipe.as_shot_k || 5500);
+    } else {
+      state.recipe.temperature_k = null;
+    }
     syncWb(); scheduleAfter(); pushHistory(state.recipe);
   };
 }
 function syncWb() {
   const temp = document.querySelector(".wb-temp"), on = document.querySelector(".wb-custom-on");
   if (!temp || !on) return;
+  const num = document.querySelector(".wb-temp-val");
   const k = state.recipe.temperature_k;
   on.checked = k != null;
   temp.disabled = k == null;
-  temp.value = k != null ? k : (state.recipe.as_shot_k || 5500);
+  num.disabled = k == null;
+  temp.value = kToPos(k != null ? k : (state.recipe.as_shot_k || 5500));
   // "as-shot", matching the checkbox's own words — "auto" is a materially
-  // different claim when the camera used a manual WB or a preset.
-  document.querySelector(".wb-temp-val").textContent = k != null ? Math.round(k)
-    : (state.recipe.as_shot_k && state.recipe.as_shot_tint != null
-        ? "as-shot ≈ " + Math.round(state.recipe.as_shot_k) + " K" : "as-shot");
+  // different claim when the camera used a manual WB or a preset. While
+  // custom WB is on the box is editable Kelvin; while off, the caption
+  // rides in the placeholder (both halves required — see the GUI rule).
+  if (k != null) {
+    num.value = Math.round(k);
+    num.placeholder = "";
+  } else {
+    num.value = "";
+    num.placeholder = (state.recipe.as_shot_k && state.recipe.as_shot_tint != null
+        ? "≈" + Math.round(state.recipe.as_shot_k) + " K" : "as-shot");
+  }
 }
 
 // --- HSL colour mixer (8 bands × hue/sat/lum) ------------------------------
@@ -705,10 +778,16 @@ function buildHsl(panel) {
   panel.querySelectorAll(".slider").forEach(e=>e.remove());
   for (const [axis,label] of HSL_AXES) {
     const row = document.createElement("div"); row.className = "slider hsl-slider";
-    row.innerHTML = `<label>${label}</label><input type="range" min="-100" max="100" step="1" data-axis="${axis}"/><span class="val"></span>`;
+    row.innerHTML = `<label>${label}</label><input type="range" aria-label="${label}" min="-100" max="100" step="1" data-axis="${axis}"/><span class="val"></span>`;
     const input = row.querySelector("input");
     input.oninput = () => { const b=+sel.value; (state.recipe.hsl ||= newHsl())[axis][b]=parseFloat(input.value); row.querySelector(".val").textContent=Math.round(input.value); scheduleAfter(); };
     input.onchange = () => pushHistory(state.recipe);
+    input.ondblclick = () => {
+      const b = +sel.value;
+      if (((state.recipe.hsl ||= newHsl())[axis][b] ?? 0) === 0) return;
+      state.recipe.hsl[axis][b] = 0;
+      syncHsl(); pushHistory(state.recipe); renderAfter();
+    };
     panel.appendChild(row);
   }
   sel.onchange = syncHsl;
@@ -739,10 +818,16 @@ function buildGrade(panel) {
   panel.querySelectorAll(".slider").forEach(e=>e.remove());
   const mk = (label, attr, min, max) => {
     const row = document.createElement("div"); row.className = "slider grade-slider"; row.dataset.attr = attr;
-    row.innerHTML = `<label>${label}</label><input type="range" min="${min}" max="${max}" step="1"/><span class="val"></span>`;
+    row.innerHTML = `<label>${label}</label><input type="range" aria-label="${label}" min="${min}" max="${max}" step="1"/><span class="val"></span>`;
     const input = row.querySelector("input");
     input.oninput = () => { (state.recipe.color_grade ||= newGrade())[gradeKey(attr)] = parseFloat(input.value); row.querySelector(".val").textContent = Math.round(input.value); scheduleAfter(); };
     input.onchange = () => pushHistory(state.recipe);
+    input.ondblclick = () => {
+      const d = newGrade()[gradeKey(attr)] ?? 0; // blending's default is 50, not 0
+      if (((state.recipe.color_grade ||= newGrade())[gradeKey(attr)] ?? d) === d) return;
+      state.recipe.color_grade[gradeKey(attr)] = d;
+      syncGrade(); pushHistory(state.recipe); renderAfter();
+    };
     panel.appendChild(row);
   };
   mk("Hue","hue",0,360); mk("Saturation","sat",0,100); mk("Luminance","lum",-100,100);
@@ -992,6 +1077,47 @@ async function selectPhoto(id, stem, el) {
     drag = { wrap, box: selBox, x0: e.clientX - rect.left, y0: e.clientY - rect.top };
     selBox.hidden = true; e.preventDefault();
   };
+  // Keyboard region path (D13): Tab focuses the After image, arrows place /
+  // move a selection (Shift = resize its bottom-right corner), Enter reads
+  // it back, Esc clears. Mask PAINTING stays pointer-only — a freeform
+  // stroke has no honest key grammar — but region-targeted Analyze is fully
+  // keyboard-reachable.
+  wrap.onkeydown = e => {
+    if (!main.querySelector(".fill-canvas").hidden) return; // painting owns the canvas
+    const K = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    if (e.key === "Escape") {
+      e.preventDefault();
+      state.region = null; selBox.hidden = true; setStatus("");
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (state.region) {
+        const g = state.region;
+        setStatus(`region set ${Math.round((g.right-g.left)*100)}×${Math.round((g.bottom-g.top)*100)}% — type a direction, then Analyze`);
+      }
+      return;
+    }
+    if (!K[e.key]) return;
+    e.preventDefault();
+    const [dx, dy] = K[e.key], s = 0.02;
+    // Start from the current region, else a centred quarter-frame box.
+    let g = state.region || { left: 0.375, top: 0.375, right: 0.625, bottom: 0.625 };
+    if (e.shiftKey) {
+      g = { left: g.left, top: g.top,
+            right: clampv(g.right + dx * s, g.left + 0.04, 1),
+            bottom: clampv(g.bottom + dy * s, g.top + 0.04, 1) };
+    } else {
+      const w = g.right - g.left, h = g.bottom - g.top;
+      const l = clampv(g.left + dx * s, 0, 1 - w), t = clampv(g.top + dy * s, 0, 1 - h);
+      g = { left: l, top: t, right: l + w, bottom: t + h };
+    }
+    state.region = g;
+    selBox.hidden = false;
+    selBox.style.left = (g.left * 100) + "%"; selBox.style.top = (g.top * 100) + "%";
+    selBox.style.width = ((g.right - g.left) * 100) + "%"; selBox.style.height = ((g.bottom - g.top) * 100) + "%";
+    setStatus(`region ${Math.round((g.right-g.left)*100)}×${Math.round((g.bottom-g.top)*100)}% — Enter to confirm, Esc to clear`);
+  };
   main.querySelector(".analyze").onclick = analyze;
   // Reset = the fresh-open look (the GUI's photo_knots rule, d1f6986):
   // sliders neutral ON the photo's own camera-matched base. A legacy save's
@@ -1095,7 +1221,7 @@ async function selectPhoto(id, stem, el) {
       // to restart from the persisted source and silently discard the
       // first), and the preview re-renders the RECIPE over it — the raw
       // master blob above is a neutral develop, not what the canvas shows.
-      if (saved) { state.sessionMaster = saved; renderAfter(); }
+      if (saved) { state.sessionMaster = saved; pushHistory(state.recipe); renderAfter(); }
       setStatus("filled" + (saved ? " → " + saved : "") + " (in ./out; Save records it for reopening)");
     } catch (e) {
       // Without this, a transport rejection skipped the stale checks and the
@@ -1144,8 +1270,9 @@ async function selectPhoto(id, stem, el) {
       setAfterSrc(afterImg, blob);
       if (useMask) fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r), n = r.headers.get("X-Heal-Spots");
-      // Same chain + recipe-composited re-render as fill (see there).
-      if (saved) { state.sessionMaster = saved; renderAfter(); }
+      // Same chain + recipe-composited re-render as fill (see there); the
+      // heal joins history so Ctrl+Z can step back over it (D13).
+      if (saved) { state.sessionMaster = saved; pushHistory(state.recipe); renderAfter(); }
       // A rationale can disclose a partial outcome (e.g. AI detection failed,
       // only the painted mask healed) — surface it, don't imply full success.
       let why = r.headers.get("X-Heal-Rationale");
@@ -1354,13 +1481,38 @@ const anApiVisible = on => document.querySelectorAll(".an-api").forEach(e => e.s
 document.querySelectorAll('input[name="an-provider"]').forEach(r =>
   r.onchange = () => anApiVisible(document.querySelector('input[name="an-provider"]:checked').value === "api"));
 $("#settings-btn").onclick = openSettings;
-$("#settings-close").onclick = () => settingsModal.hidden = true;
-settingsModal.onclick = e => { if (e.target === settingsModal) settingsModal.hidden = true; };
+$("#settings-close").onclick = closeSettings;
+settingsModal.onclick = e => { if (e.target === settingsModal) closeSettings(); };
+// Keyboard modality (D13): Esc closes, Tab cycles INSIDE the dialog instead
+// of walking the page behind the overlay. Costs nothing while hidden — the
+// listener only sees events when focus is inside, which openSettings
+// guarantees by focusing the ✕ button.
+let settingsOpener = null;
+function closeSettings() {
+  settingsModal.hidden = true;
+  if (settingsOpener && settingsOpener.focus) settingsOpener.focus();
+  settingsOpener = null;
+}
+settingsModal.addEventListener("keydown", e => {
+  if (e.key === "Escape") { e.preventDefault(); closeSettings(); return; }
+  if (e.key !== "Tab") return;
+  const f = settingsModal.querySelectorAll("button, input:not([disabled]), select");
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 
 const SETTINGS_FIELDS = ["#an-model", "#an-base", "#an-key", "#im-model", "#im-base", "#im-gen", "#im-key"];
 let settingsSeq = 0;
 async function openSettings() {
   settingsModal.hidden = false;
+  // Focus lands INSIDE the dialog (D13): it used to stay on the opener
+  // button behind the overlay, so Tab walked the hidden page and the
+  // modal's Esc handler never saw a key.
+  settingsOpener = document.activeElement;
+  const cl = $("#settings-close");
+  if (cl) cl.focus();
   // Gate the form while the load is in flight: the async populate used to
   // silently overwrite anything the user had already started typing (and a
   // re-open mid-load could double-populate) — disabled fields + a sequence
