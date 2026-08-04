@@ -1476,9 +1476,10 @@ pub(crate) fn sample_gray_norm(b: &image::GrayImage, nx: f32, ny: f32) -> f32 {
 /// inversion × amount × range, evaluated with the SAME primitives
 /// `apply_masks` uses (`mask_weight` / `range_weight`), so the overlay the
 /// GUI paints is the weight the render actually applies. `reference`
-/// supplies the pixels the range mask is judged on — pass a masks-cleared
-/// develop for the closest match to render semantics (the same source the
-/// range sampler uses). Output is an 8-bit map at the reference's size
+/// supplies the pixels the range mask is judged on — pass the develop as it
+/// stands when THIS mask runs (its PREFIX: earlier masks applied, matching
+/// apply_masks' sequential stacking; the GUI's overlay and range sampler
+/// both do). Output is an 8-bit map at the reference's size
 /// (255 = full effect), in the ORIGINAL frame like every mask.
 pub fn mask_coverage(
     m: &crate::recipe::LocalAdjustment,

@@ -186,8 +186,9 @@ struct PreviewDone {
 
 /// Coverage-cache identity. Local effect sliders (Exposure/Temp/Saturation/
 /// color_gains) are intentionally absent: they change pixels INSIDE a mask,
-/// never its coverage. A Range Mask includes the masks-cleared reference recipe
-/// because its weight is judged on those developed pixels.
+/// never its coverage. A Range Mask includes its PREFIX reference recipe
+/// (earlier masks applied — the engine's stacking rule) because its weight
+/// is judged on those developed pixels.
 #[derive(Clone, PartialEq)]
 struct OverlayKey {
     base: usize,
@@ -719,6 +720,10 @@ struct AutoshopApp {
     // --- region box-select (local-edit target on the After image) ---
     region: Option<[f32; 4]>,                      // normalized [left, top, right, bottom]
     region_drag: Option<(egui::Pos2, egui::Pos2)>, // transient drag (start, current) in screen px
+    // What a lone click just cleared, kept for one double-click window: the
+    // second release of a Fit↔1:1 double-click restores it — the pair's
+    // FIRST release already ran the plain-click clear (M18).
+    region_restore: Option<([f32; 4], Instant)>,
     // --- retouch: mask painting + generative fill + heal ---
     paint_mode: bool,                      // brush-paint a mask (pauses box-select)
     brush: f32,                            // brush radius in After-image display px
@@ -902,6 +907,23 @@ struct StashEntry {
     base: Option<Arc<image::DynamicImage>>,
     origin: Option<PathBuf>,
     generated: bool,
+    /// The rest of the variant strip (everything but the active variant),
+    /// so navigation restores the WHOLE session: a dirty BACKGROUND variant
+    /// used to die silently on nav (H4) — the quit dialog discloses that
+    /// loss honestly because quitting has nothing to restore into, but
+    /// navigation does: this session's stash.
+    others: Vec<StashedVariant>,
+    /// Where the active variant sat in the strip (`others` = strip minus it).
+    active_pos: usize,
+}
+
+/// One background variant in a [`StashEntry`] — thumb-less (textures do not
+/// survive a photo switch; they rebuild on the first develop after restore).
+struct StashedVariant {
+    kind: VariantKind,
+    recipe: EditRecipe,
+    base: Option<Arc<image::DynamicImage>>,
+    origin: Option<PathBuf>,
 }
 
 /// One rendition in the variant strip — a Lightroom-style virtual copy /
@@ -1063,6 +1085,7 @@ impl Default for AutoshopApp {
             gallery_scroll_to: None,
             region: None,
             region_drag: None,
+            region_restore: None,
             paint_mode: false,
             brush: 30.0,
             mask_paint: None,
@@ -1312,6 +1335,33 @@ fn clipping_overlay_rgb(rgb: &image::RgbImage) -> egui::ColorImage {
         }
     }
     egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba)
+}
+
+/// The clipping layer with the crop's blanking applied — outside the crop
+/// nothing exports, so warnings there are noise. Shared by the J fast path
+/// and the mid-flight-toggle fallback; the worker build (build_preview)
+/// applies the same blanking with its own crop_px (it feeds the histogram
+/// too). The fast paths used to skip the blanking and contradict the
+/// worker's layer within one session (L18).
+fn clipping_overlay_for(
+    rgb: &image::RgbImage,
+    crop: Option<autoshop::recipe::Crop>,
+) -> egui::ColorImage {
+    let mut overlay = clipping_overlay_rgb(rgb);
+    let Some(c) = crop else { return overlay };
+    let (w, h) = (rgb.width() as f32, rgb.height() as f32);
+    let x0 = (c.left.clamp(0.0, 1.0) * w) as u32;
+    let y0 = (c.top.clamp(0.0, 1.0) * h) as u32;
+    let x1 = ((c.right.clamp(0.0, 1.0) * w) as u32).max(x0 + 1).min(rgb.width());
+    let y1 = ((c.bottom.clamp(0.0, 1.0) * h) as u32).max(y0 + 1).min(rgb.height());
+    let transparent = egui::Color32::TRANSPARENT;
+    for (i, px) in overlay.pixels.iter_mut().enumerate() {
+        let (cx, cy) = (i as u32 % overlay.size[0] as u32, i as u32 / overlay.size[0] as u32);
+        if cx < x0 || cx >= x1 || cy < y0 || cy >= y1 {
+            *px = transparent;
+        }
+    }
+    overlay
 }
 
 /// Pure CPU preview build, safe to run off the egui thread. It deliberately
@@ -1776,10 +1826,19 @@ fn clear_saved_develop(path: &std::path::Path) -> std::io::Result<bool> {
             }
         }
     }
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(removed),
+    if let Some(e) = first_err {
+        return Err(e);
     }
+    // Stamp the clear's moment so the newest-intent rule can rank it against
+    // the Lightroom sidecar beside the RAW (store::lightroom_sidecar): the
+    // projection the user once copied there — no longer byte-matchable after
+    // this clear deleted our store copies — used to resurrect the cleared
+    // edits on the very next open (M22). Best-effort: without the marker the
+    // only cost is that old behaviour.
+    if let Err(e) = autoshop::store::mark_develop_cleared(path) {
+        eprintln!("⚠ could not stamp the cleared marker: {e}");
+    }
+    Ok(removed)
 }
 
 /// The pointer's press origin via a Response (`handle_paint` has no `ui`).
@@ -1834,6 +1893,10 @@ impl AutoshopApp {
         // snapshots the recipe — a thumbnail click / Ctrl+O / arrow-key nav
         // with the name box focused silently stashed the OLD name (U10).
         self.commit_mask_name_buf();
+        // …and the buffer itself dies with the photo: carried across, a
+        // same-index mask on the NEXT photo skipped the reseed and the box
+        // showed the previous photo's name text (M15).
+        self.mask_name_buf = None;
         // The mid-open window marker (see confirm_quit_layer): src_path is
         // re-pointed below while recipe/saved_recipe still describe the old
         // photo; cleared in BOTH Msg::Opened arms.
@@ -1861,7 +1924,25 @@ impl AutoshopApp {
             // restore, so a flag drift is as unsaved as a path drift.
             let pixels_unsaved = autoshop::store::read_pixel_source(&old)
                 != origin.clone().map(|o| (o, self.active_is_generated()));
-            if dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved {
+            // Background variants count too (H4): their unsaved work has no
+            // sidecar to survive in, and the strip used to collapse to the
+            // active canvas alone on navigation.
+            let background_dirty = self.inactive_dirty_variants() > 0;
+            if dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved || background_dirty
+            {
+                let others: Vec<StashedVariant> = self
+                    .variants
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != self.active)
+                    .map(|(_, v)| StashedVariant {
+                        kind: v.kind,
+                        recipe: v.recipe.clone(),
+                        base: v.base.clone(),
+                        origin: v.origin.clone(),
+                    })
+                    .collect();
+                let active_pos = self.active.min(others.len());
                 self.nav_stash.insert(
                     old,
                     StashEntry {
@@ -1869,6 +1950,8 @@ impl AutoshopApp {
                         base: self.active_variant().and_then(|v| v.base.clone()),
                         origin,
                         generated: self.active_is_generated(),
+                        others,
+                        active_pos,
                     },
                 );
             }
@@ -2136,6 +2219,9 @@ impl AutoshopApp {
         self.region = None;
         self.region_drag = None;
         self.sel_mask = None;
+        // Same boundary rule as open_path: the rename buffer belongs to the
+        // variant it was typed on (M15).
+        self.mask_name_buf = None;
         self.overlay_ref = None;
         self.overlay_stale = true;
         self.last_rgb = None; // the retained frame belongs to the OLD variant
@@ -2231,6 +2317,12 @@ impl AutoshopApp {
         self.sel_mask = self.sel_mask.and_then(&f);
         self.range_picking = self.range_picking.and_then(&f);
         self.placing_mask = self.placing_mask.take().map(|(k, r)| (k, r.and_then(&f)));
+        // The pending-rename buffer is index-carrying too: after a delete /
+        // reorder its seed-guard (name-at-seed must still match) correctly
+        // refused to cross-commit — but the SAME mask at its new index then
+        // failed the match as well, and the typed rename silently died.
+        self.mask_name_buf =
+            self.mask_name_buf.take().and_then(|(j, o, b)| Some((f(j)?, o, b)));
     }
 
     /// Rescan the photo's develop dir for version snapshots (cached in
@@ -2244,6 +2336,9 @@ impl AutoshopApp {
 
     /// Save the CURRENT develop as the next numbered version snapshot.
     fn save_version(&mut self) {
+        // A typed-but-uncommitted mask rename belongs in the snapshot —
+        // every persistence entry point flushes it (the U10 rule; L27).
+        self.commit_mask_name_buf();
         let lang = self.lang;
         let Some(src) = self.src_path.clone() else { return };
         // ATOMICALLY reserved number (store::claim_version): disk-list+1
@@ -2442,6 +2537,10 @@ impl AutoshopApp {
         self.crop_drag = None;
         self.mask_drag = None;
         self.paint_last = None;
+        // A preset change armed for the crop tool must die with it — the
+        // flag survived Esc / Done / a hold-B detour and rewrote the box as
+        // a surprise on the next crop entry (CX5-4).
+        self.crop_aspect_pending = false;
     }
 
     /// Any canvas tool armed? (the once-hand-written OR list)
@@ -2481,6 +2580,10 @@ impl AutoshopApp {
         // freshly restored recipe on the very next drag frame.
         self.disarm_tools();
         self.mask_name_buf = None; // stale (index, text) must not cross-commit
+        // A curve-point drag in flight when the recipe is swapped (Ctrl+Z
+        // mid-drag) kept mutating point i of the RESTORED curve on the next
+        // drag frame (M17).
+        self.curve_drag = None;
         // A wholesale recipe swap can shrink the mask list — an out-of-range
         // selection must not linger (every consumer bounds-checks, but the
         // panel would silently deselect anyway; do it deterministically).
@@ -3310,7 +3413,13 @@ impl AutoshopApp {
         // is still accepted — its stale decision used to blank the layer under
         // a lit ▲ (or resurrect a ghost layer after J-off).
         let clip = if self.show_clipping {
-            Some(frame.clipping.unwrap_or_else(|| clipping_overlay_rgb(&frame.rgb)))
+            // Crop-blanked like the worker path — the J-mid-flight fallback
+            // used to warn outside the crop while the worker's layer did not.
+            Some(
+                frame
+                    .clipping
+                    .unwrap_or_else(|| clipping_overlay_for(&frame.rgb, frame.recipe.crop)),
+            )
         } else {
             None
         };
@@ -3353,7 +3462,7 @@ impl AutoshopApp {
         }
         match &self.last_rgb {
             Some(rgb) => {
-                let clip = clipping_overlay_rgb(rgb);
+                let clip = clipping_overlay_for(rgb, self.recipe.crop);
                 if let Some(tex) = &mut self.clip_tex {
                     tex.set(clip, egui::TextureOptions::NEAREST);
                 } else {
@@ -3368,8 +3477,9 @@ impl AutoshopApp {
     /// (Re)build the translucent red coverage layer for the active mask. A
     /// coverage key prevents local effect sliders from rebuilding this full-
     /// frame raster: Exposure/Temp/Saturation change WHAT happens inside the
-    /// mask, not WHERE it applies. Range masks include their masks-cleared
-    /// reference recipe because their coverage genuinely depends on pixels.
+    /// mask, not WHERE it applies. Range masks include their PREFIX
+    /// reference recipe (earlier masks applied — the engine's own stacking
+    /// rule) because their coverage genuinely depends on pixels.
     fn refresh_mask_overlay(&mut self, ctx: &egui::Context) {
         if !self.show_mask_overlay {
             self.mask_overlay_tex = None;
@@ -3393,7 +3503,12 @@ impl AutoshopApp {
         };
         let mask = self.recipe.masks[i].clone();
         let mut pre = self.recipe.clone();
-        pre.masks.clear();
+        // The PREFIX (masks before this one), not masks-cleared: the engine
+        // evaluates a Range Mask on the pixel as it stands when THIS mask
+        // runs — masks stack sequentially, so a later mask's range sees
+        // earlier masks' output (render.rs apply_masks). A cleared reference
+        // judged mask 2's range on pixels mask 0/1 had already moved (CX5-6).
+        pre.masks.truncate(i);
         // Geometry runs after develop, so it is not part of a Range Mask's
         // masks-cleared pixel reference. Keep it separately in OverlayKey.
         pre.straighten_deg = 0.0;
@@ -3872,14 +3987,12 @@ impl AutoshopApp {
             }
         };
         let base = refine.then(|| {
-            let mut r = self.recipe.clone();
-            // The refine prompt/verifier work over the camera's embedded
-            // preview, where the base look AND the lens corrections are
-            // already IN the pixels — leaking either into the prompt would
-            // double-apply them. Msg::Analyzed stamps both back afterwards.
-            r.base_curve = Vec::new();
-            r.lens_profile = Default::default();
-            r
+            // UNSTRIPPED: produce_recipe strips the base look + lens profile
+            // from its PROMPT copy itself now, and carry_over_unrepresentable
+            // needs the user's REAL profile to preserve unsaved lens toggles
+            // — the pre-strip here made Refine revert them to the saved
+            // profile (the same defect the web caller had, fixed in B48).
+            self.recipe.clone()
         });
         self.spawn_worker(
             move || {
@@ -4852,6 +4965,8 @@ impl AutoshopApp {
                                 self.toast(ToastKind::Error, t);
                             }
                             let mut pixels: Option<BakedBase> = baked;
+                            let mut stash_others: Vec<StashedVariant> = Vec::new();
+                            let mut stash_active_pos = 0usize;
                             if let Some(st) =
                                 self.src_path.as_ref().and_then(|p| self.nav_stash.remove(p))
                             {
@@ -4860,6 +4975,8 @@ impl AutoshopApp {
                                     (Some(b), Some(o)) => Some((b, o, st.generated)),
                                     _ => None,
                                 };
+                                stash_others = st.others;
+                                stash_active_pos = st.active_pos;
                                 from_stash = true;
                             }
                             self.recipe = recipe.clone();
@@ -4939,6 +5056,27 @@ impl AutoshopApp {
                                 self.base_preview = Some(bimg);
                                 self.mask_paint = Some(image::RgbaImage::new(bw, bh));
                             }
+                            // Restore the BACKGROUND variants the stash
+                            // carried (H4): the strip used to collapse to
+                            // the active canvas alone, silently dropping
+                            // every other variant's unsaved work.
+                            if from_stash && !stash_others.is_empty() {
+                                let active_v = self.variants.remove(0);
+                                let mut strip: Vec<Variant> = stash_others
+                                    .drain(..)
+                                    .map(|sv| Variant {
+                                        kind: sv.kind,
+                                        recipe: sv.recipe,
+                                        base: sv.base,
+                                        origin: sv.origin,
+                                        thumb: None,
+                                    })
+                                    .collect();
+                                let pos = stash_active_pos.min(strip.len());
+                                strip.insert(pos, active_v);
+                                self.variants = strip;
+                                self.active = pos;
+                            }
                             self.last_rgb = None; // retained frame was the old photo's
                             self.reset_history(); // a new photo starts a fresh undo history
                             self.region = None; // and a fresh local-edit selection
@@ -4947,6 +5085,10 @@ impl AutoshopApp {
                             self.zoom = 1.0;
                             self.pan = egui::vec2(0.5, 0.5);
                             self.disarm_tools();
+                            // The \-latch is per-photo transient state:
+                            // carried across an open, the new photo arrived
+                            // with every tool locked out (M21).
+                            self.before_latch = false;
                             self.sel_mask = None;
                             self.overlay_ref = None; // the reference develop belongs to ONE base
                             self.overlay_stale = true;
@@ -5003,6 +5145,15 @@ impl AutoshopApp {
                             self.before_tex = None;
                             self.after_tex = None;
                             self.selected = None;
+                        } else if let Some(p) = self.src_path.clone() {
+                            // A preview-res re-decode failed: the photo (and
+                            // its live canvas) is untouched — consume the
+                            // stash entry the same-path open_path call just
+                            // wrote, exactly like the successful keep branch.
+                            // Left behind, an undo-to-clean before the next
+                            // navigation resurrected these pre-undo edits on
+                            // the way back (CX4-4).
+                            self.nav_stash.remove(&p);
                         }
                     }
                 }},
@@ -5010,9 +5161,13 @@ impl AutoshopApp {
                 Msg::Analyzed(boxed) => match *boxed {
                     Ok((recipe, verdict)) => {
                         // Sliders stay live while Analyze runs (10-30 s):
-                        // commit any mid-flight edit as its own undo step NOW,
-                        // or the wholesale install below folds it into the
-                        // pre-analyze step and Ctrl+Z skips it.
+                        // flush a rename typed during the wait (the resync
+                        // below clears the buffer — unflushed, the rename
+                        // died with it, M16), then commit any mid-flight
+                        // edit as its own undo step NOW, or the wholesale
+                        // install below folds it into the pre-analyze step
+                        // and Ctrl+Z skips it.
+                        self.commit_mask_name_buf();
                         self.commit_now();
                         let accepted =
                             verdict.decision == autoshop::advisor::Decision::Accept;
@@ -5331,13 +5486,22 @@ impl AutoshopApp {
                     // inflight count was already discarded when the folder changed).
                     if generation == self.gallery_gen {
                         self.thumb_inflight = self.thumb_inflight.saturating_sub(1);
-                        if let Ok(im) = *img {
-                            let tex = ctx.load_texture(
-                                format!("thumb{idx}"),
-                                to_color_image(&im),
-                                egui::TextureOptions::LINEAR,
-                            );
-                            self.thumbs.insert(idx, tex);
+                        match *img {
+                            Ok(im) => {
+                                let tex = ctx.load_texture(
+                                    format!("thumb{idx}"),
+                                    to_color_image(&im),
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.thumbs.insert(idx, tex);
+                            }
+                            Err(_) => {
+                                // Drop the queued marker so a scroll-back
+                                // retries: one transient decode failure (AV
+                                // lock, slow share) used to blank the row for
+                                // the rest of the session (L25).
+                                self.thumb_requested.remove(&idx);
+                            }
                         }
                     }
                 }
@@ -5718,6 +5882,9 @@ impl AutoshopApp {
                     .on_hover_text(tr(lang, "Copy every develop setting from the current photo"))
                     .clicked()
                 {
+                    // Flush a pending mask rename first — the clipboard must
+                    // carry the name the user sees in the box (U10; CX5-9).
+                    self.commit_mask_name_buf();
                     self.copied = Some(self.recipe.clone());
                     self.copied_from = self.src_path.clone();
                     self.status = tr(lang, "Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”").to_string();
@@ -7039,7 +7206,12 @@ impl AutoshopApp {
         // armed-tool hint names its exit (Esc), and the placement hint speaks
         // the armed KIND's language instead of calling a radial a gradient.
         let hint = if comparing {
-            tr(lang, "Before (source) — release B to return to editing")
+            if self.before_latch {
+                // The latch came from \ — "release B" was a lie there (M21).
+                tr(lang, "Before (source) — press \\ again (or Esc) to return to editing")
+            } else {
+                tr(lang, "Before (source) — release B to return to editing")
+            }
         } else if self.crop_mode {
             tr(lang, "Crop — drag corners/edges to resize, inside to move, outside to rotate · Esc to exit")
         } else if let Some((kind, _)) = self.placing_mask {
@@ -7159,6 +7331,15 @@ impl AutoshopApp {
             } else {
                 // Same physical-pixel 1:1 target as the button above.
                 self.zoom = (vis_px.x / (disp.x * ppp)).clamp(1.0, 12.0);
+            }
+            // The pair's FIRST release cleared the AI region through the
+            // plain-click path — a double-click means "toggle zoom", so put
+            // it back. Bounded window: a much later double-click elsewhere
+            // must not resurrect a long-cleared region (M18).
+            if let Some((r, t)) = self.region_restore.take()
+                && t.elapsed() < Duration::from_millis(600)
+            {
+                self.region = Some(r);
             }
         }
 
@@ -7410,15 +7591,17 @@ impl AutoshopApp {
         let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
         let smp = {
             let Some(base) = self.base_preview.clone() else { return };
-            // The masks-cleared reference, built EXACTLY like the coverage
-            // overlay's (geometry fields stripped — develop_preview has no
-            // geometry stage, they'd only break the cache key) and SHARING
-            // its cache: with the overlay on, a click costs a 5×5 read
-            // instead of a full preview develop on the UI thread (the
-            // 100-300 ms freeze class at 2560/4096 working previews) — and
-            // a miss here pre-warms the overlay's next rebuild.
+            // The PREFIX reference (masks before this one — the engine
+            // evaluates a range on the pixel as it stands when THIS mask
+            // runs), built EXACTLY like the coverage overlay's (geometry
+            // fields stripped — develop_preview has no geometry stage,
+            // they'd only break the cache key) and SHARING its cache: with
+            // the overlay on, a click costs a 5×5 read instead of a full
+            // preview develop on the UI thread — and a miss here pre-warms
+            // the overlay's next rebuild. A masks-CLEARED reference judged
+            // mask 2's range on pixels mask 0/1 had already moved (CX5-6).
             let mut pre = self.recipe.clone();
-            pre.masks.clear();
+            pre.masks.truncate(mi);
             pre.straighten_deg = 0.0;
             pre.lens_distortion = 0.0;
             pre.crop = None;
@@ -7651,7 +7834,10 @@ impl AutoshopApp {
                 }
             }
         } else if resp.clicked() {
-            self.region = None; // a plain click clears the region
+            // Remember what this click cleared: if it turns out to be the
+            // first half of a Fit↔1:1 double-click, after_view restores it
+            // (M18 — zooming must not eat the AI region).
+            self.region_restore = self.region.take().map(|r| (r, Instant::now()));
         }
         // (Drawing lives in after_view so the box shows under every tool —
         // this handler only owns the gesture.)
@@ -7671,6 +7857,12 @@ impl AutoshopApp {
     ) {
         use autoshop::recipe::Crop;
         // Pixel aspect ratio (w/h) requested by the preset; "原始" resolves here.
+        // `tex_size` is the CURRENT after texture: right after a straighten
+        // change with the develop still in flight it can be one frame stale,
+        // and a preset applied in that instant derives against the previous
+        // frame's dims (recorded residual, CX5-5 — recomputing inscribed
+        // dims here would duplicate the engine's geometry; the next
+        // interaction re-derives correctly).
         let aspect = CROP_ASPECTS[self.crop_aspect.min(CROP_ASPECTS.len() - 1)]
             .1
             .map(|r| if r == 0.0 { tex_size.x / tex_size.y.max(1.0) } else { r });
@@ -7744,15 +7936,23 @@ impl AutoshopApp {
                     );
                     // A box flush with the canvas (a fresh full-frame crop)
                     // has no outside — the promised rotate-straighten gesture
-                    // was unreachable. Flush edges donate an inner band to
-                    // rotate instead; moving a full-frame box is a no-op
-                    // anyway (D13).
+                    // was unreachable. Only a FULLY flush box donates inner
+                    // bands (moving it is a no-op anyway, D13); a box merely
+                    // touching ONE canvas edge still has real outside to
+                    // rotate from, and per-edge donation turned a move near
+                    // that edge into a surprise rotate (M20).
                     const BAND: f32 = 16.0;
                     let mut inner = r.intersect(xf.rect);
-                    if r.min.x <= xf.rect.min.x + 1.0 { inner.min.x += BAND; }
-                    if r.min.y <= xf.rect.min.y + 1.0 { inner.min.y += BAND; }
-                    if r.max.x >= xf.rect.max.x - 1.0 { inner.max.x -= BAND; }
-                    if r.max.y >= xf.rect.max.y - 1.0 { inner.max.y -= BAND; }
+                    let full_frame = r.min.x <= xf.rect.min.x + 1.0
+                        && r.min.y <= xf.rect.min.y + 1.0
+                        && r.max.x >= xf.rect.max.x - 1.0
+                        && r.max.y >= xf.rect.max.y - 1.0;
+                    if full_frame {
+                        inner.min.x += BAND;
+                        inner.min.y += BAND;
+                        inner.max.x -= BAND;
+                        inner.max.y -= BAND;
+                    }
                     Some(if inner.contains(p) { 4 } else { 9 })
                 })
         };
@@ -7946,8 +8146,14 @@ impl AutoshopApp {
 
         // --- overlay: darkened surround + thirds + handles --------------------
         let p = ui.painter_at(xf.rect);
-        let r = egui::Rect::from_min_max(xf.to_screen(c[0], c[1]), xf.to_screen(c[2], c[3]))
-            .intersect(xf.rect);
+        // The TRUE box for guides + border (the painter clips): computing
+        // the thirds on the viewport-intersected rect drew them at thirds of
+        // the VISIBLE PORTION whenever zoom pushed part of the box
+        // off-screen (CX5-8). The shading keeps the intersected rect — its
+        // job is exactly the visible surround.
+        let r_full =
+            egui::Rect::from_min_max(xf.to_screen(c[0], c[1]), xf.to_screen(c[2], c[3]));
+        let r = r_full.intersect(xf.rect);
         let dark = egui::Color32::from_black_alpha(140);
         let full = xf.rect;
         for shade in [
@@ -7969,15 +8175,21 @@ impl AutoshopApp {
         let grid = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70));
         for &t in guide {
             p.line_segment(
-                [egui::pos2(r.min.x + t * r.width(), r.min.y), egui::pos2(r.min.x + t * r.width(), r.max.y)],
+                [
+                    egui::pos2(r_full.min.x + t * r_full.width(), r_full.min.y),
+                    egui::pos2(r_full.min.x + t * r_full.width(), r_full.max.y),
+                ],
                 grid,
             );
             p.line_segment(
-                [egui::pos2(r.min.x, r.min.y + t * r.height()), egui::pos2(r.max.x, r.min.y + t * r.height())],
+                [
+                    egui::pos2(r_full.min.x, r_full.min.y + t * r_full.height()),
+                    egui::pos2(r_full.max.x, r_full.min.y + t * r_full.height()),
+                ],
                 grid,
             );
         }
-        p.rect_stroke(r, 0.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        p.rect_stroke(r_full, 0.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
         for k in 0..4u8 {
             p.rect_filled(
                 egui::Rect::from_center_size(handle_pos(&c, k), egui::vec2(9.0, 9.0)),
@@ -9475,15 +9687,27 @@ impl eframe::App for AutoshopApp {
         // \ / Y = compare, [ ] = brush size, Tab = hide the side panels —
         // the keyboard grammar of every desktop photo editor.
         let transient_open = self.show_settings || self.show_shortcuts;
-        if !self.confirm_quit
-            && transient_open
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        {
-            // Cheat-sheet first — it is the topmost transient.
-            if self.show_shortcuts {
-                self.show_shortcuts = false;
-            } else {
-                self.show_settings = false;
+        if !self.confirm_quit && transient_open {
+            let sheet_open = self.show_shortcuts;
+            let (esc, sheet_key) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                    // F1 / ? stay live while the sheet is open — they are its
+                    // advertised toggle, and the focused-none tier below is
+                    // skipped entirely while a transient is up (L19).
+                    sheet_open
+                        && (i.consume_key(egui::Modifiers::NONE, egui::Key::F1)
+                            || i.consume_key(egui::Modifiers::NONE, egui::Key::Questionmark)
+                            || i.consume_key(egui::Modifiers::SHIFT, egui::Key::Questionmark)),
+                )
+            });
+            if esc || sheet_key {
+                // Cheat-sheet first — it is the topmost transient.
+                if self.show_shortcuts {
+                    self.show_shortcuts = false;
+                } else {
+                    self.show_settings = false;
+                }
             }
         }
         if !self.confirm_quit && !transient_open {
@@ -9596,15 +9820,16 @@ impl eframe::App for AutoshopApp {
                 self.crop_drag = None;
                 self.crop_mode = false;
             }
-            if crop_nudge != (0.0, 0.0) {
+            if crop_nudge != (0.0, 0.0)
+                && let Some(c) = self.recipe.crop
+            {
                 // Keyboard twin of the move drag (D13): 0.5% of the frame per
                 // press (Shift ×10 via the multiplier above), clamped
-                // in-frame; a full-frame box has no room and stays put.
-                let c0 = self
-                    .recipe
-                    .crop
-                    .map(|c| [c.left, c.top, c.right, c.bottom])
-                    .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+                // in-frame; a full-frame box has no room and stays put — and
+                // NO box at all is a no-op: materialising an identity crop
+                // from None lit a false ● and stamped HasCrop into the next
+                // XMP (M19).
+                let c0 = [c.left, c.top, c.right, c.bottom];
                 let (w, h) = (c0[2] - c0[0], c0[3] - c0[1]);
                 let nl = (c0[0] + crop_nudge.0 * 0.005).clamp(0.0, 1.0 - w);
                 let nt = (c0[1] + crop_nudge.1 * 0.005).clamp(0.0, 1.0 - h);
@@ -9682,11 +9907,16 @@ impl eframe::App for AutoshopApp {
             // Esc leaves whatever on-image tool is active (the universal
             // editor exit) — the transient windows own their Esc in the
             // pre-tier above; painted canvases/samples stay for resuming.
-            if do_escape && (self.tool_armed() || self.region_drag.is_some()) {
+            if do_escape
+                && (self.tool_armed() || self.region_drag.is_some() || self.before_latch)
+            {
                 // disarm_tools also kills the transient gesture anchors — a
                 // grab or stroke surviving Esc used to hijack the next drag.
+                // The \-latched Before view exits here too: it locks every
+                // tool out, and Esc is the universal way back (M21).
                 self.disarm_tools();
                 self.region_drag = None;
+                self.before_latch = false;
                 self.status = tr(self.lang, "Exited the current tool (Esc)").into();
             }
             if do_overlay {
@@ -10698,11 +10928,16 @@ mod tests {
         assert!(!app.develop_inflight, "inflight cleared on completion");
 
         // Build a frame for the CURRENT recipe, then move the recipe on before
-        // it "arrives": the stale frame must be discarded (counter unchanged).
+        // it "arrives": the stale frame must be discarded (counter unchanged)
+        // AND the pending edit re-armed. `dirty` is cleared first — it was
+        // still true from the swallowed dispatch above, so the re-arm
+        // assertion used to be vacuously satisfiable (L26).
         let stale = build_preview(base, app.recipe.clone(), false);
         app.recipe.masks[0].exposure_ev = 1.9; // user kept dragging
+        app.dirty = false;
         app.finish_redevelop(&ctx, Ok(stale));
         assert_eq!(app.develop_count, 1, "stale frame (recipe moved) discarded");
+        assert!(app.dirty, "a discarded stale frame re-arms the pending edit");
 
         std::fs::remove_file(&mask_path).ok();
     }
@@ -10751,6 +10986,59 @@ mod tests {
             "save_xmp itself must flush the pending rename"
         );
 
+        std::fs::remove_file(&mask_path).ok();
+    }
+
+    #[test]
+    fn navigation_stash_restores_background_variants() {
+        // H4: a dirty BACKGROUND variant must survive nav-away-and-back —
+        // the stash used to carry only the active canvas, so the strip
+        // collapsed and the background variant's unsaved work died.
+        let (mut app, mask_path) = app_with_masked_photo("h4stash");
+        let ctx = egui::Context::default();
+        let gen_base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
+        app.variants.push(Variant {
+            kind: VariantKind::Generated,
+            recipe: EditRecipe { contrast: 33.0, ..Default::default() },
+            base: Some(gen_base),
+            origin: Some(PathBuf::from("out/_h4_gen.png")),
+            thumb: None,
+        });
+        app.saved_recipe = app.recipe.clone(); // active canvas clean
+        let old = PathBuf::from("D:/__autoshop_h4__/a.ARW");
+        app.src_path = Some(old.clone());
+        assert_eq!(app.inactive_dirty_variants(), 1, "premise: background dirty");
+        // Navigate away — the stash snapshot is written synchronously.
+        app.open_path(PathBuf::from("D:/__autoshop_h4__/b.ARW"));
+        {
+            let st = app.nav_stash.get(&old).expect("background work must stash the strip");
+            assert_eq!(st.others.len(), 1);
+            assert!(matches!(st.others[0].kind, VariantKind::Generated));
+        }
+        // Drain the (failing) decode of the nav target so its Err cannot
+        // interleave with the synthetic return below.
+        for _ in 0..200 {
+            app.poll_workers(&ctx);
+            if !app.busy {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!app.busy, "the failed decode of the nav target must land");
+        // Return: simulate the Opened result for the original photo.
+        app.src_path = Some(old.clone());
+        let base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((base, Vec::new(), Default::default(), None, None)))))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.variants.len(), 2, "the background variant survives the round trip");
+        assert!(
+            app.variants
+                .iter()
+                .any(|v| v.kind == VariantKind::Generated && v.recipe.contrast == 33.0),
+            "…with its unsaved recipe intact"
+        );
         std::fs::remove_file(&mask_path).ok();
     }
 

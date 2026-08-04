@@ -567,14 +567,29 @@ pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
             return LrSidecar::None;
         }
     }
+    // An explicit CLEAR (Reset + save, in the GUI or the web) is newest
+    // intent too: its marker competes by mtime like any store file. Without
+    // it, the projection the user once copied beside the RAW — no longer
+    // byte-matchable above once the clear deleted our store copies — was
+    // reborn as a "foreign Lightroom edit" and resurrected the cleared
+    // develop on the very next open. The LIBRARY stays untouched (deleting
+    // or rewriting the user's own sidecar would break the read-only
+    // contract), and a Lightroom edit made AFTER the clear still wins.
+    let cleared_t = std::fs::metadata(develop_dir(src).join("cleared.txt"))
+        .and_then(|m| m.modified())
+        .ok();
+    let lr_t = std::fs::metadata(&lr).and_then(|m| m.modified()).ok();
     if !has_develop(src) {
-        return LrSidecar::Only(text);
+        return match (lr_t, cleared_t) {
+            (Some(l), Some(cl)) if l <= cl => LrSidecar::None,
+            _ => LrSidecar::Only(text),
+        };
     }
     let store_t = [recipe_target(src), xmp_target(src), legacy_recipe(src), legacy_xmp(src)]
         .iter()
         .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-        .max();
-    let lr_t = std::fs::metadata(&lr).and_then(|m| m.modified()).ok();
+        .max()
+        .max(cleared_t);
     match (lr_t, store_t) {
         (Some(l), Some(s)) if l > s => LrSidecar::NewerThanStore(text),
         // has_develop said a store exists, yet none of its files answers a
@@ -582,6 +597,20 @@ pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
         (Some(_), None) => LrSidecar::NewerThanStore(text),
         _ => LrSidecar::OlderThanStore,
     }
+}
+
+/// Stamp "this develop was explicitly CLEARED now": the newest-intent rule
+/// ranks the marker's mtime against the Lightroom sidecar beside the RAW
+/// (see [`lightroom_sidecar`]), so a projection the user once copied there
+/// cannot resurrect edits that were just cleared. Never counted by
+/// [`has_develop`]; rewritten in place — only the mtime matters.
+pub fn mark_develop_cleared(src: &Path) -> std::io::Result<()> {
+    let dir = develop_dir(src);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("cleared.txt"),
+        b"develop cleared by an explicit neutral save\n",
+    )
 }
 
 /// Snapshot numbers present in the photo's develop dir, sorted ascending.
@@ -1617,6 +1646,44 @@ mod tests {
         assert!(live.contains("1.0"), "live file must win: {live}");
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_cleared_develop_outranks_the_stale_copied_projection() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join("autoshop-store-test-cleared");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_cleared_probe.arw");
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        // The user's stale copied projection beside the RAW; the store holds
+        // NOTHING (the clear deleted it) — this used to read as a foreign
+        // Lightroom edit and resurrect the cleared develop.
+        let lr = dir.join("_store_cleared_probe.xmp");
+        std::fs::write(
+            &lr,
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() }),
+        )
+        .unwrap();
+        mark_develop_cleared(&raw).unwrap();
+        let set = |p: &Path, t: SystemTime| {
+            std::fs::OpenOptions::new().write(true).open(p).unwrap().set_modified(t).unwrap();
+        };
+        let now = SystemTime::now();
+        set(&lr, now - Duration::from_secs(3600)); // sidecar predates the clear
+        assert!(
+            matches!(lightroom_sidecar(&raw), LrSidecar::None),
+            "a sidecar older than the clear must NOT resurrect the develop"
+        );
+        // A Lightroom edit made AFTER the clear is newest intent — it wins.
+        set(&lr, now + Duration::from_secs(3600));
+        assert!(
+            matches!(lightroom_sidecar(&raw), LrSidecar::Only(_)),
+            "a post-clear Lightroom edit still restores"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]

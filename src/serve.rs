@@ -1759,7 +1759,15 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             }
         }
         return match first_err {
-            None => Ok(text_response("cleared — saved edits removed")),
+            None => {
+                // Same newest-intent marker as the GUI's clear (M22) — the
+                // copied projection beside the RAW must not resurrect the
+                // edits this clear just removed (store::mark_develop_cleared).
+                if let Err(e) = crate::store::mark_develop_cleared(&raw) {
+                    eprintln!("⚠ could not stamp the cleared marker: {e}");
+                }
+                Ok(text_response("cleared — saved edits removed"))
+            }
             Some(e) => {
                 Ok(status_response(500, &format!("could not clear the saved edits: {e}")))
             }

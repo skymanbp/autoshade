@@ -349,6 +349,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Canvas · mode hints + zoom / clip / preview-edge (after_view) ────────
     ("Before (source) — release B to return to editing", "Before (source) — 松开 B 回到编辑"),
+    ("Before (source) — press \\ again (or Esc) to return to editing",
+        "Before (source) — 再按一次 \\（或 Esc）回到编辑"),
     ("After — drag a box = local AI · scroll to zoom · space/middle-drag to pan · hold B to compare",
         "After — 拖框=局部AI · 滚轮缩放 · 空格/中键平移 · 按住B对比"),
     ("Preview pixels 1:1 (double-click the image to toggle)", "预览像素 1:1（双击图片可切换）"),
