@@ -838,11 +838,11 @@ async function selectPhoto(id, stem, el) {
   // A damaged / unreachable recipe must still leave a WORKING panel: fall back
   // to the neutral recipe and show the server's reason, instead of throwing out
   // of selectPhoto and leaving an empty control column with no explanation.
-  let loaded = null, loadErr = null, freshCurve = null, freshLens = null;
+  let loaded = null, loadedFrom = null, loadErr = null, freshCurve = null, freshLens = null;
   try {
     const rr = await fetch(`/api/recipe?id=${id}`);
     if (seq !== selectSeq) return;
-    if (rr.ok) loaded = await rr.json();
+    if (rr.ok) { loaded = await rr.json(); loadedFrom = rr.headers.get("X-Recipe-Source"); }
     else if (rr.status === 404) {
       // "Not analyzed yet" — but the 404 body carries the photo's camera-
       // matched base look AND its in-camera lens profile, so a fresh open
@@ -876,7 +876,12 @@ async function selectPhoto(id, stem, el) {
     if (seq !== selectSeq) return;
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), loaded);
     markSaved(); // this IS the saved state until the user edits it
-    $(".verdict").innerHTML = '<span class="tag saved">SAVED</span> Loaded a previously-saved recipe. Re-run Analyze for a live verdict.';
+    // Which file answered matters: a Lightroom sidecar beside the RAW that
+    // is newer than the saved develop wins the restore (newest intent), and
+    // the user deserves to know they are looking at their LIGHTROOM edit.
+    $(".verdict").innerHTML = loadedFrom === "lightroom-sidecar"
+      ? '<span class="tag saved">SAVED</span> Loaded the Lightroom sidecar beside the RAW (its edits are newest). Saving adopts it as the develop.'
+      : '<span class="tag saved">SAVED</span> Loaded a previously-saved recipe. Re-run Analyze for a live verdict.';
     showRationale();
   } else {
     state.recipe = structuredClone(DEFAULT_RECIPE);

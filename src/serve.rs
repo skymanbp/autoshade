@@ -698,6 +698,28 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // One-time, per-photo migration of pre-store ./out sidecars into the
     // central develop dir (no-op when nothing legacy remains).
     crate::store::migrate_legacy(&raw);
+    // The sidecar BESIDE the RAW is the one file Lightroom itself writes —
+    // newest intent wins, the same contract as the GUI's read_saved_develop
+    // (store::lightroom_sidecar: our own copied projection is skipped, ties
+    // go to the store). The header says where the recipe came from; the BODY
+    // stays a pure EditRecipe — clients post recipes back to /api/develop,
+    // where an unknown field is a 422.
+    match crate::store::lightroom_sidecar(&raw) {
+        crate::store::LrSidecar::NewerThanStore(text) | crate::store::LrSidecar::Only(text) => {
+            let mut r = crate::xmp::xmp_to_recipe(&text);
+            if !r.is_noop() {
+                r.clamp();
+                // Same stamp rule as the XMP fallback below: Lightroom tuned
+                // this file over its own profile-corrected base.
+                r.base_curve = fresh_base_knots(&raw);
+                r.lens_profile = pipeline::fresh_lens_profile(&raw);
+                let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
+                    .expect("static ASCII header");
+                return Ok(json_text(serde_json::to_string(&r)?).with_header(h));
+            }
+        }
+        _ => {}
+    }
     // Central first; then any legacy file a failed migration left behind.
     let mut parse_err: Option<String> = None;
     for path in [crate::store::recipe_target(&raw), crate::store::legacy_recipe(&raw)] {

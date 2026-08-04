@@ -1537,6 +1537,30 @@ enum SavedDevelop {
 /// says which file actually answered.
 fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
     autoshop::store::migrate_legacy(src);
+    // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
+    // Newest intent wins (store::lightroom_sidecar): a sidecar Lightroom
+    // touched after our last save outranks the stored develop — it used to
+    // be ignored entirely, so Lightroom edits silently lost to older
+    // Autoshop saves. Our own copied projection is recognised and skipped;
+    // the store copy stays untouched until the user actually saves.
+    let lr = match autoshop::store::lightroom_sidecar(src) {
+        autoshop::store::LrSidecar::NewerThanStore(t) => {
+            Some((t, "XMP (Lightroom sidecar — newer than the saved develop; Ctrl+S adopts it)"))
+        }
+        autoshop::store::LrSidecar::Only(t) => {
+            Some((t, "XMP (Lightroom sidecar beside the RAW)"))
+        }
+        _ => None,
+    };
+    if let Some((text, kind)) = lr {
+        let mut r = autoshop::xmp::xmp_to_recipe(&text);
+        // Neutral / foreign content restores nothing — the store answers
+        // exactly as before.
+        if !r.is_noop() {
+            r.clamp();
+            return SavedDevelop::Restored(r, kind);
+        }
+    }
     let mut any = false;
     let mut parse_err: Option<String> = None;
     let mut restored: Option<(EditRecipe, &'static str)> = None;
@@ -10322,6 +10346,53 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&dev2);
+    }
+
+    #[test]
+    fn read_saved_develop_lets_a_newer_lightroom_sidecar_win() {
+        let dir = std::env::temp_dir().join("autoshop-gui-lr-sidecar");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("_gui_lr_probe.ARW");
+        std::fs::write(&src, b"raw").unwrap();
+        let dev = autoshop::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        // The stored develop (older).
+        let saved = EditRecipe { exposure_ev: 0.5, ..Default::default() };
+        std::fs::write(
+            autoshop::store::recipe_target(&src),
+            serde_json::to_string(&saved).unwrap(),
+        )
+        .unwrap();
+        // Lightroom's own sidecar beside the RAW, stamped NEWER (set, not
+        // slept for).
+        let lr = dir.join("_gui_lr_probe.xmp");
+        std::fs::write(
+            &lr,
+            autoshop::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() }),
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(&src) else {
+            panic!("a newer Lightroom sidecar must restore");
+        };
+        assert_eq!(r.contrast, 33.0, "the newer Lightroom edit wins over the stored develop");
+        assert!(kind.starts_with("XMP"), "stamped like every XMP restore: {kind}");
+        assert!(kind.contains("Lightroom"), "the source is disclosed: {kind}");
+        // The store copy is untouched — only an explicit save adopts it.
+        let kept: EditRecipe = serde_json::from_str(
+            &std::fs::read_to_string(autoshop::store::recipe_target(&src)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(kept.exposure_ev, 0.5);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]

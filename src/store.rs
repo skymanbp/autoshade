@@ -455,6 +455,61 @@ pub fn has_develop(src: &Path) -> bool {
         || legacy_xmp(src).exists()
 }
 
+/// What the Lightroom sidecar BESIDE the RAW (`<dir>/<stem>.xmp`) means for
+/// this photo's restore. That file is the one place LIGHTROOM itself writes,
+/// and until this existed no restore surface looked at it — edits made in
+/// Lightroom were silently outranked by an older stored develop. Newest
+/// intent wins:
+///   * byte-identical to our own projection → it is our copied export, not a
+///     Lightroom edit (`None`; the app itself tells users to copy the XMP
+///     beside the RAW);
+///   * no stored develop at all → the sidecar IS the develop (`Only`);
+///   * modified after every stored develop file → Lightroom's edit is the
+///     newest intent (`NewerThanStore`);
+///   * otherwise the store is newer — the user's Autoshop work outranks the
+///     older Lightroom pass (`OlderThanStore`).
+///
+/// Read-only: the store copy is never touched here — only an explicit save
+/// adopts the Lightroom edit as the develop.
+pub enum LrSidecar {
+    None,
+    Only(String),
+    NewerThanStore(String),
+    OlderThanStore,
+}
+
+pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
+    // Only camera RAWs have a Lightroom-sidecar convention; a baked
+    // PNG/TIFF's neighbouring .xmp (if any) is not ours to interpret.
+    if !crate::decode::is_raw(src) {
+        return LrSidecar::None;
+    }
+    let lr = src.with_extension("xmp");
+    let Ok(text) = std::fs::read_to_string(&lr) else {
+        return LrSidecar::None;
+    };
+    for ours in [xmp_target(src), legacy_xmp(src)] {
+        if std::fs::read_to_string(&ours).is_ok_and(|t| t == text) {
+            return LrSidecar::None;
+        }
+    }
+    if !has_develop(src) {
+        return LrSidecar::Only(text);
+    }
+    let store_t = [recipe_target(src), xmp_target(src), legacy_recipe(src), legacy_xmp(src)]
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max();
+    let lr_t = std::fs::metadata(&lr).and_then(|m| m.modified()).ok();
+    match (lr_t, store_t) {
+        (Some(l), Some(s)) if l > s => LrSidecar::NewerThanStore(text),
+        // has_develop said a store exists, yet none of its files answers a
+        // stat — trust the sidecar, the one file that demonstrably can.
+        (Some(_), None) => LrSidecar::NewerThanStore(text),
+        _ => LrSidecar::OlderThanStore,
+    }
+}
+
 /// Snapshot numbers present in the photo's develop dir, sorted ascending.
 pub fn list_versions(src: &Path) -> Vec<u32> {
     let mut out = Vec::new();
@@ -1336,6 +1391,67 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
 mod tests {
     use super::*;
     use crate::recipe::LocalAdjustment;
+
+    #[test]
+    fn lightroom_sidecar_newest_intent_wins() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join("autoshop-store-test-lr-sidecar");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_lr_probe.arw"); // never read — only its neighbours are
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+
+        // No sidecar at all → None.
+        assert!(matches!(lightroom_sidecar(&raw), LrSidecar::None), "no file");
+
+        // A sidecar and NO stored develop → the sidecar IS the develop.
+        let lr = dir.join("_store_lr_probe.xmp");
+        let lr_v1 =
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() });
+        std::fs::write(&lr, &lr_v1).unwrap();
+        assert!(matches!(lightroom_sidecar(&raw), LrSidecar::Only(_)), "only");
+
+        // Our own projection copied beside the RAW is NOT a Lightroom edit.
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(xmp_target(&raw), &lr_v1).unwrap();
+        assert!(matches!(lightroom_sidecar(&raw), LrSidecar::None), "our own copy");
+
+        // A DIFFERENT sidecar, OLDER than the store → the store wins. Times
+        // are SET, not slept for — deterministic on any filesystem.
+        std::fs::write(
+            recipe_target(&raw),
+            serde_json::to_string(&EditRecipe::default()).unwrap(),
+        )
+        .unwrap();
+        let lr_v2 =
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: -30.0, ..Default::default() });
+        std::fs::write(&lr, &lr_v2).unwrap();
+        let set = |p: &Path, t: SystemTime| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        let now = SystemTime::now();
+        set(&lr, now - Duration::from_secs(7200));
+        assert!(
+            matches!(lightroom_sidecar(&raw), LrSidecar::OlderThanStore),
+            "the store is newer — Autoshop work outranks the older Lightroom pass"
+        );
+
+        // …and NEWER than the store → Lightroom's edit is the newest intent.
+        set(&lr, now + Duration::from_secs(7200));
+        let LrSidecar::NewerThanStore(text) = lightroom_sidecar(&raw) else {
+            panic!("a newer Lightroom sidecar must win the restore");
+        };
+        assert_eq!(text, lr_v2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
 
     #[test]
     fn detach_rasters_frees_a_loaded_version_from_its_snapshot() {
