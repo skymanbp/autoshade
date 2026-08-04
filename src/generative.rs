@@ -213,6 +213,13 @@ pub fn retouch(
         .with_context(|| format!("open mask {}", mask_path.display()))?;
     let mask_png = encode_png(&mask_img.resize_exact(sw, sh, FilterType::Nearest))?;
 
+    // The composite below needs only 8-bit pixels — take that form NOW and
+    // let the 16-bit master go, so the minutes-long model call holds the
+    // ~240 MB composite buffer instead of the ~366 MB master, and the
+    // post-call peak loses a full 16-bit frame (A7).
+    let mut composite = base.to_rgba8();
+    drop(base);
+
     println!(
         "⚠ EXPERIMENTAL generative fill via {} ({}, quality={quality}, base={bw}x{bh} {}; composite)",
         cfg.openai_image_model,
@@ -230,9 +237,10 @@ pub fn retouch(
     // tile to base dimensions; the user's mask (alpha=0 = regenerate) becomes the
     // blend weight, feathered for a soft seam. Buffer LIFETIMES are staged so
     // a 61 MP full-res fill never holds every plane at once (the old
-    // one-expression flow peaked ~1.8 GB; this stays under half of that):
-    // the full-res mask exists only long enough to become the weight plane,
-    // and the 16-bit base drops as soon as its 8-bit composite copy exists.
+    // one-expression flow peaked ~1.8 GB; the staged flow halved that, and
+    // dropping the 16-bit master BEFORE the model call — see above — takes
+    // another full frame off this peak): the full-res mask exists only long
+    // enough to become the weight plane.
     let gen_img = image::load_from_memory(&result)
         .context("decode generative result")?
         .resize_exact(bw, bh, FilterType::Lanczos3)
@@ -243,8 +251,6 @@ pub fn retouch(
         let w: Vec<f32> = mask_full.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
         if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
     };
-    let mut composite = base.to_rgba8();
-    drop(base); // the 16-bit master (366 MB at 61 MP) is no longer needed
     composite_in_place(&mut composite, &gen_img, &weight);
     drop(gen_img);
 

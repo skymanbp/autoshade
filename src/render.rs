@@ -89,16 +89,22 @@ pub fn render_to_image_in(
     max_edge: Option<u32>,
     working: ExportColorSpace,
 ) -> Result<DynamicImage> {
-    let src = RawSource::new(raw_path)
-        .with_context(|| format!("open RAW {}", raw_path.display()))?;
-    let decoder =
-        get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", raw_path.display()))?;
-    let params = RawDecodeParams { image_index: 0 };
-
-    // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
-    let rawimage = decoder
-        .raw_image(&src, &params, false)
-        .map_err(|e| anyhow!("raw_image: {e}"))?;
+    // Decode scope: the RawSource holds the entire RAW file in memory
+    // (~60–120 MB for a 61 MP lossless ARW), and neither it nor the decoder
+    // outlives the sensor read — so the file bytes drop HERE instead of
+    // sitting under the whole ~720 MB-per-plane develop chain below (A7
+    // buffer-lifetime queue).
+    let rawimage = {
+        let src = RawSource::new(raw_path)
+            .with_context(|| format!("open RAW {}", raw_path.display()))?;
+        let decoder =
+            get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", raw_path.display()))?;
+        let params = RawDecodeParams { image_index: 0 };
+        // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
+        decoder
+            .raw_image(&src, &params, false)
+            .map_err(|e| anyhow!("raw_image: {e}"))?
+    };
     let orientation = rawimage.orientation;
 
     let wide = working != ExportColorSpace::Srgb;
@@ -114,6 +120,23 @@ pub fn render_to_image_in(
     let inter = dev
         .develop_intermediate(&rawimage)
         .map_err(|e| anyhow!("develop: {e}"))?;
+    // The wide path still needs the sensor container's calibration metadata —
+    // copy it out now, so the mosaic itself can go before the float chain.
+    let calibration = if wide {
+        let xyz2cam = camera_matrix(&rawimage)?;
+        let wb = if rawimage.wb_coeffs[0].is_nan() {
+            [1.0, 1.0, 1.0]
+        } else {
+            [rawimage.wb_coeffs[0], rawimage.wb_coeffs[1], rawimage.wb_coeffs[2]]
+        };
+        Some((xyz2cam, wb))
+    } else {
+        None
+    };
+    // The demosaiced float frame owns everything the pipeline needs from here
+    // on; the ~120 MB u16 sensor mosaic would otherwise survive to the end of
+    // the function, under denoise/tone/pack/geometry (A7).
+    drop(rawimage);
     let rgb = match inter {
         Intermediate::ThreeColor(c) => c,
         Intermediate::Monochrome(_) => bail!("monochrome RAW not supported by render v1"),
@@ -123,13 +146,7 @@ pub fn render_to_image_in(
     // sRGB path: sRGB-gamma ~[0,1] straight from rawler (owned, no copy).
     // Wide path: camera-native LINEAR until the calibrate below.
     let mut data: Vec<[f32; 3]> = rgb.data;
-    if wide {
-        let xyz2cam = camera_matrix(&rawimage)?;
-        let wb = if rawimage.wb_coeffs[0].is_nan() {
-            [1.0, 1.0, 1.0]
-        } else {
-            [rawimage.wb_coeffs[0], rawimage.wb_coeffs[1], rawimage.wb_coeffs[2]]
-        };
+    if let Some((xyz2cam, wb)) = calibration {
         calibrate_camera_buffer(&mut data, &xyz2cam, wb, working);
     }
     let data = data;
@@ -140,6 +157,16 @@ pub fn render_to_image_in(
     // end — as this pipeline once did — made portrait RAWs apply crop and
     // straighten in the wrong axis vs the un-oriented GUI preview (the decode
     // side now orients too, see decode.rs). Identity for landscape shots.
+    //
+    // The A7 queue asked whether the cap below could run BEFORE orientation
+    // (a capped portrait render would then orient a preview-sized buffer
+    // instead of paying a second ~720 MB full-res frame for the rotation).
+    // Probed and REJECTED: `image::thumbnail`'s integer binning is not
+    // orientation-equivariant — cap-then-orient diverged from this order by
+    // one source pixel under flips/90/270 and by up to 0.48 on a smooth
+    // [0,1] gradient under Transpose/Transverse (measured on a 97×61 frame,
+    // edge 40). The portrait-preview rotation transient is the accepted
+    // price of preview pixels that match the export path exactly.
     let (data, w, h) = orient_f32(data, w, h, orientation);
     // Working-resolution cap: downscale-then-develop, the same order the GUI
     // preview path uses — masks/sharpen/geometry are resolution-normalised.
@@ -224,6 +251,9 @@ pub fn render_baked_to_image(
         .par_chunks(3)
         .map(|p| [p[0] as f32 / 65535.0, p[1] as f32 / 65535.0, p[2] as f32 / 65535.0])
         .collect();
+    // The 16-bit staging copy (~366 MB at 61 MP) is fully transcribed into
+    // `data` — freed here rather than after the whole develop below (A7).
+    drop(rgb);
 
     if let Some(opts) = denoise {
         println!("AI denoise ({}) on {}x{} ...", opts.model, w, h);
@@ -711,6 +741,9 @@ pub fn render_to_file(
             .par_chunks(3)
             .map(|p| [p[0] as f32 / 65535.0, p[1] as f32 / 65535.0, p[2] as f32 / 65535.0])
             .collect();
+        // `data` carries the pixels now — the u16 source (~366 MB at 61 MP)
+        // must not sit under the unsharp + repack below (A7).
+        drop(rgb);
         unsharp_luma(&mut data, w, h, 1, (opts.sharpen / 100.0).clamp(0.0, 1.0), false);
         let mut buf: Vec<u16> = vec![0u16; w * h * 3];
         buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
@@ -1543,8 +1576,13 @@ fn blur_plane(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
     if radius == 0 || w == 0 || h == 0 {
         return src.to_vec();
     }
-    let mut buf = src.to_vec();
-    for _ in 0..3 {
+    // The first pass reads the caller's plane directly — the old
+    // `src.to_vec()` seed was a full extra plane (~240 MB at 61 MP) copied
+    // only to be replaced by the first horizontal pass (A7). Bit-identical:
+    // that pass reads exactly the same values either way.
+    let mut buf = box_blur_h(src, w, h, radius);
+    buf = box_blur_v(&buf, w, h, radius);
+    for _ in 0..2 {
         buf = box_blur_h(&buf, w, h, radius);
         buf = box_blur_v(&buf, w, h, radius);
     }
@@ -2450,11 +2488,14 @@ fn orient_f32(
     (data, ow as usize, oh as usize)
 }
 
-/// Downscale the oriented f32 buffer to fit `max_edge` (triangle-filtered,
-/// aspect preserved; the same zero-copy [f32;3]⇄f32 casts as [`orient_f32`]).
-/// No-op when the frame already fits. Backs `render_to_image`'s working-
-/// resolution cap: developing 61 MP only to thumbnail the result wasted a
-/// ~1.5 GB transient chain on every preview-resolution retouch base.
+/// Downscale the oriented f32 buffer to fit `max_edge` (aspect preserved;
+/// the same zero-copy [f32;3]⇄f32 casts as [`orient_f32`]). It must be the
+/// ORIENTED buffer: `thumbnail`'s integer binning is not
+/// orientation-equivariant, so capping in the sensor frame would change
+/// preview pixels (see the probe note in `render_to_image_in`). No-op when
+/// the frame already fits. Backs `render_to_image`'s working-resolution
+/// cap: developing 61 MP only to thumbnail the result wasted a ~1.5 GB
+/// transient chain on every preview-resolution retouch base.
 fn downscale_f32(
     data: Vec<[f32; 3]>,
     w: usize,
@@ -4608,6 +4649,46 @@ mod tests {
         assert_eq!((w, h), (2, 3), "90° swaps dimensions");
         assert_eq!(rot[1], [1.0, 0.5, 0.25], "top-left → top-right under clockwise 90°");
         assert_eq!(rot[0], [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn thumbnail_binning_is_not_orientation_equivariant() {
+        // The probe behind the A7 decision to keep the working-resolution
+        // cap AFTER orientation (see `render_to_image_in`): if capping in
+        // the sensor frame were equivalent, a capped portrait render could
+        // skip a ~720 MB full-res rotation. It is not — `thumbnail`'s
+        // integer binning diverges under axis-swapping orientations (0.48
+        // on a smooth [0,1] gradient here; flips/90/270 err by one source
+        // pixel). If this test ever FAILS, the image crate's resampler
+        // became equivariant and that memory optimisation is back on the
+        // table — it is a canary, not a defect report.
+        let (w, h) = (97usize, 61usize);
+        let data: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                [x as f32 / w as f32, y as f32 / h as f32, 0.0]
+            })
+            .collect();
+        let o = Orientation::Transpose;
+        let (a, aw, ah) = {
+            let (d, dw, dh) = orient_f32(data.clone(), w, h, o);
+            downscale_f32(d, dw, dh, 40)
+        };
+        let (b, bw, bh) = {
+            let (d, dw, dh) = downscale_f32(data, w, h, 40);
+            orient_f32(d, dw, dh, o)
+        };
+        assert_eq!((aw, ah), (bw, bh), "dims DO agree — only the sampling differs");
+        let max0 = a
+            .iter()
+            .zip(&b)
+            .map(|(p, q)| (p[0] - q[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max0 > 0.1,
+            "cap-then-orient now matches orient-then-cap (max ch0 diff {max0}) — \
+             the A7 cap-before-orientation memory optimisation became available"
+        );
     }
 
     #[test]
