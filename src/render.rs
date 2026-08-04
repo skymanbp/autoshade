@@ -3080,6 +3080,29 @@ mod tests {
         // A re-export replaces it in place, still with no residue.
         render_to_file(&src, &r, &out, None, None).unwrap();
         assert!(out.exists());
+
+        // THE ATOMICITY PROPERTY, not just its absence of litter: a FAILED
+        // export must leave the previous deliverable untouched. Everything
+        // above would pass just as well if the encoder wrote straight to the
+        // destination, so without this the test named a guarantee it never
+        // exercised. An unknown extension fails inside the generic
+        // `img.save` arm, after staging and before publishing.
+        let keeper = dir.join("keeper.unknownext");
+        std::fs::write(&keeper, b"a previous deliverable").unwrap();
+        let err = render_to_file(&src, &r, &keeper, None, None);
+        assert!(err.is_err(), "an unknown extension must fail the export");
+        assert_eq!(
+            std::fs::read(&keeper).unwrap(),
+            b"a previous deliverable",
+            "a failed export must not touch the file it was going to replace"
+        );
+        let residue: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(residue.is_empty(), "a failed export must clean its staging file: {residue:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3828,6 +3851,19 @@ mod tests {
                     (bx - nx).abs() < 3e-3 && (by - ny).abs() < 3e-3,
                     "roundtrip deg={deg} amt={amt}: ({nx},{ny}) → ({ox},{oy}) → ({bx},{by})"
                 );
+                // A round trip alone proves only that the two maps invert
+                // EACH OTHER: replace both with the identity and every
+                // assertion above still passes while masks, brush strokes and
+                // region boxes quietly stop tracking the displayed geometry.
+                // So also require that active geometry actually MOVES an
+                // off-centre point. (The frame centre is a fixed point of
+                // both rotation and radial distortion — it is excluded.)
+                if (deg != 0.0 || amt != 0.0) && (nx, ny) != (0.5, 0.5) {
+                    assert!(
+                        (ox - nx).abs() > 1e-4 || (oy - ny).abs() > 1e-4,
+                        "deg={deg} amt={amt} left ({nx},{ny}) unmoved — the map is inert"
+                    );
+                }
             }
         }
     }
