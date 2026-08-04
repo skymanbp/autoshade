@@ -501,9 +501,12 @@ pub(crate) fn wb_to_kelvin_tint(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3]) -> Option
     }
     let n = (x - 0.3320) / d;
     let cct = 449.0 * n * n * n + 3525.0 * n * n + 6823.3 * n + 5520.33;
-    // Outside any plausible illuminant band the METADATA is junk, not a hot
-    // light source: refuse rather than clamp a nonsense anchor into range.
-    if !cct.is_finite() || !(1000.0..=50_000.0).contains(&cct) {
+    // McCamy + Krystek's mutual comfort zone (McCamy degrades toward the
+    // extremes; Krystek's stated fit ends at 15000 K). Every WB a camera
+    // plausibly meters — tungsten 2500 K through deep blue shade ~12000 K —
+    // lives well inside. Outside it the METADATA is junk: refuse, keeping
+    // the legacy unknown anchor, rather than stamp a wrong absolute label.
+    if !cct.is_finite() || !(1667.0..=15_000.0).contains(&cct) {
         return None;
     }
     let (u, v) = uv1960(x, y);
@@ -511,7 +514,11 @@ pub(crate) fn wb_to_kelvin_tint(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3]) -> Option
     let dist = ((u - up).powi(2) + (v - vp).powi(2)).sqrt();
     let duv = if v >= vp { dist } else { -dist };
     let tint = (duv * 3000.0).clamp(-100.0, 100.0);
-    Some((cct.clamp(2000.0, 40000.0), tint))
+    // Whole-Kelvin quantisation AT THE SOURCE: the XMP serialises integer
+    // Kelvin, so a fractional anchor would round-trip as a target a fraction
+    // off the anchor — a shift where none was intended (and below ~2500 K
+    // one that escapes apply_wb's 1e-3 neutral short-circuit).
+    Some((cct.clamp(2000.0, 40000.0).round(), tint))
 }
 
 /// CIE 1960 (u, v) from chromaticity (x, y) — the space Duv is defined in.

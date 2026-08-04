@@ -713,9 +713,14 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 // this file over its own profile-corrected base.
                 r.base_curve = fresh_base_knots(&raw);
                 r.lens_profile = pipeline::fresh_lens_profile(&raw);
-                let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
-                r.as_shot_k = ask;
-                r.as_shot_tint = ast;
+                // Stamp-if-None: an old-era Autoshop projection arrives with
+                // the 5500 anchor PINNED by xmp_to_recipe (its Kelvin was
+                // tuned relative) — overwriting the pin would reinterpret it.
+                if r.as_shot_k.is_none() {
+                    let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
+                    r.as_shot_k = ask;
+                    r.as_shot_tint = ast;
+                }
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
                     .expect("static ASCII header");
                 return Ok(json_text(serde_json::to_string(&r)?).with_header(h));
@@ -781,9 +786,12 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 // Same stamp rule as the GUI's XMP-only restore: Lightroom
                 // tuned this file over its own profile-corrected base.
                 r.lens_profile = pipeline::fresh_lens_profile(&raw);
-                let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
-                r.as_shot_k = ask;
-                r.as_shot_tint = ast;
+                // Stamp-if-None — same era rule as the sidecar branch above.
+                if r.as_shot_k.is_none() {
+                    let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
+                    r.as_shot_k = ask;
+                    r.as_shot_tint = ast;
+                }
                 return Ok(json_text(serde_json::to_string(&r)?));
             }
         }

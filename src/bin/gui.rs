@@ -2293,6 +2293,11 @@ impl AutoshopApp {
                 if self.active_is_generated() {
                     r.base_curve = Vec::new();
                     r.lens_profile = Default::default();
+                    // The anchor too: its pixels carry a BAKED white balance,
+                    // so an absolute-Kelvin claim over them would be false —
+                    // generated canvases keep the relative 5500 model.
+                    r.as_shot_k = None;
+                    r.as_shot_tint = None;
                 }
                 self.recipe = r;
                 self.resync_recipe_display();
@@ -2788,12 +2793,14 @@ impl AutoshopApp {
                 // saved-first source produce_recipe uses.
                 let mut disk = r.clone();
                 if pix.as_ref().is_some_and(|(_, g)| *g) {
-                    // ONE snapshot for both halves — two independent reads
-                    // could pair an old curve with a new profile if another
+                    // ONE snapshot for all three halves — independent reads
+                    // could pair an OLD curve with a NEW profile if another
                     // surface published between them.
-                    let (bc, lp) = autoshop::pipeline::photo_calibration(p);
+                    let (bc, lp, (ask, ast)) = autoshop::pipeline::photo_calibration(p);
                     disk.base_curve = bc;
                     disk.lens_profile = lp;
+                    disk.as_shot_k = ask;
+                    disk.as_shot_tint = ast;
                 }
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
                 let res = autoshop::pipeline::write_recipe(p, &disk, None).and_then(|_| {
@@ -4122,6 +4129,10 @@ impl AutoshopApp {
                                 // (the same strip rule the canvas applies).
                                 recipe.base_curve = Vec::new();
                                 recipe.lens_profile = Default::default();
+                                // The anchor follows the strip rule: baked
+                                // pixels carry their WB (relative model).
+                                recipe.as_shot_k = None;
+                                recipe.as_shot_tint = None;
                             }
                             let src = pix.map(|(m, _)| m).unwrap_or_else(|| p.clone());
                             autoshop::render::render_to_file(&src, &recipe, &out, None, Some(&export))?;
@@ -4416,6 +4427,9 @@ impl AutoshopApp {
             if self.active_is_generated() {
                 live.base_curve = Vec::new();
                 live.lens_profile = Default::default();
+                // Anchor follows the strip rule (baked WB → relative model).
+                live.as_shot_k = None;
+                live.as_shot_tint = None;
             }
             self.recipe = live.clone();
             self.dirty = true;
@@ -4688,15 +4702,18 @@ impl AutoshopApp {
                                 // lens profile (all-available-on); a saved
                                 // recipe.json keeps its own verbatim.
                                 recipe.lens_profile = lens.clone();
-                                // Third calibration half, same rule: the
-                                // as-shot WB anchor (a saved recipe.json owns
-                                // its stamp — or its legacy None — verbatim).
-                                let (ask, ast) = match as_shot {
-                                    Some((k, t)) => (Some(k), Some(t)),
-                                    None => (None, None),
-                                };
-                                recipe.as_shot_k = ask;
-                                recipe.as_shot_tint = ast;
+                                // Third calibration half, same rule — plus
+                                // stamp-if-None: an old-era Autoshop XMP
+                                // restore arrives with the 5500 anchor PINNED
+                                // by xmp_to_recipe (its Kelvin was tuned
+                                // relative); overwriting the pin would
+                                // reinterpret the saved look.
+                                if recipe.as_shot_k.is_none()
+                                    && let Some((k, t)) = as_shot
+                                {
+                                    recipe.as_shot_k = Some(k);
+                                    recipe.as_shot_tint = Some(t);
+                                }
                             } else if !stamp
                                 && recipe.base_curve.is_empty()
                                 && !knots.is_empty()
@@ -4808,6 +4825,8 @@ impl AutoshopApp {
                                 if generated {
                                     self.recipe.base_curve = Vec::new();
                                     self.recipe.lens_profile = Default::default();
+                                    self.recipe.as_shot_k = None;
+                                    self.recipe.as_shot_tint = None;
                                     if let Some(v) = self.variants.get_mut(0) {
                                         v.recipe = self.recipe.clone();
                                     }
@@ -4820,6 +4839,8 @@ impl AutoshopApp {
                                     // opened.
                                     self.saved_recipe.base_curve = Vec::new();
                                     self.saved_recipe.lens_profile = Default::default();
+                                    self.saved_recipe.as_shot_k = None;
+                                    self.saved_recipe.as_shot_tint = None;
                                 }
                                 // Before under the canvas recipe's own curve:
                                 // empty for a Generated master (stripped just
@@ -4930,6 +4951,9 @@ impl AutoshopApp {
                         if self.active_is_generated() {
                             canvas.base_curve = Vec::new();
                             canvas.lens_profile = Default::default();
+                            // Anchor follows the strip rule (baked WB).
+                            canvas.as_shot_k = None;
+                            canvas.as_shot_tint = None;
                         }
                         self.recipe = canvas;
                         // Wholesale replacement: disarm index-carrying tools +
@@ -5935,16 +5959,16 @@ impl AutoshopApp {
                         }
                     }
                 });
-                if let Some(k) = self.recipe.as_shot_k {
+                if let (Some(k), Some(t)) = (self.recipe.as_shot_k, self.recipe.as_shot_tint) {
                     // The camera's own WB in absolute terms — the reference
-                    // the Temp slider is anchored on for this photo.
+                    // the Temp slider is anchored on for this photo. BOTH
+                    // halves required: the era pin (anchor 5500, tint None)
+                    // knows the anchor but NOT the camera, and showing it as
+                    // "as shot" would be a false claim.
                     ui.weak(trf(
                         lang,
                         "as shot ≈ {k} K · tint {t}",
-                        &[
-                            ("k", &format!("{k:.0}")),
-                            ("t", &format!("{:+.0}", self.recipe.as_shot_tint.unwrap_or(0.0))),
-                        ],
+                        &[("k", &format!("{k:.0}")), ("t", &format!("{t:+.0}"))],
                     ));
                 }
                 // Double-click reset lands on the as-shot Kelvin when stamped
@@ -9507,12 +9531,12 @@ impl eframe::App for AutoshopApp {
                     // already carry the corrections — none re-applied).
                     let lens_profile =
                         if generated { Default::default() } else { self.photo_lens.clone() };
-                    // The as-shot anchor is per-photo calibration too — kept
-                    // even on a Generated canvas: it only shapes FUTURE Temp
-                    // moves, and with no Kelvin edit it changes nothing.
+                    // The as-shot anchor follows the SAME generated strip:
+                    // baked pixels carry their WB, so an absolute-Kelvin
+                    // claim over them would be false.
                     let (as_shot_k, as_shot_tint) = match self.photo_as_shot {
-                        Some((k, t)) => (Some(k), Some(t)),
-                        None => (None, None),
+                        Some((k, t)) if !generated => (Some(k), Some(t)),
+                        _ => (None, None),
                     };
                     self.recipe = EditRecipe {
                         base_curve,

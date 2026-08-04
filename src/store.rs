@@ -776,12 +776,16 @@ fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
         derived.base_curve = crate::pipeline::photo_base_knots(src);
     }
     derived.lens_profile = crate::pipeline::fresh_lens_profile(src);
-    // Third calibration half: the XMP never carries the engine-only anchor,
-    // and a Lightroom Temperature is ABSOLUTE — anchoring the derived recipe
-    // at the camera's real as-shot renders it closer to Lightroom's intent.
-    let (ask, ast) = crate::pipeline::fresh_as_shot_wb(src);
-    derived.as_shot_k = ask;
-    derived.as_shot_tint = ast;
+    // Third calibration half: a foreign (Lightroom) Temperature is ABSOLUTE
+    // — anchoring the derived recipe at the camera's real as-shot renders it
+    // closer to Lightroom's intent. Stamp-if-None: an old-era AUTOSHOP
+    // projection arrives with the 5500 anchor PINNED by xmp_to_recipe (its
+    // Kelvin was tuned relative) and must keep rendering as tuned.
+    if derived.as_shot_k.is_none() {
+        let (ask, ast) = crate::pipeline::fresh_as_shot_wb(src);
+        derived.as_shot_k = ask;
+        derived.as_shot_tint = ast;
+    }
     let (n, dst) = claim_version(src)?;
     let seq = next_tmp_seq; // ONE shared process-wide counter (see next_tmp_seq)
     let publish = |dst: &Path, bytes: &[u8], seq: u64| -> std::io::Result<()> {

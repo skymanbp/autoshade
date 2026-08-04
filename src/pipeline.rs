@@ -299,14 +299,20 @@ pub fn photo_base_curve(raw: &Path) -> Vec<[f32; 2]> {
     }
 }
 
-/// BOTH calibration halves from ONE saved-recipe snapshot: two independent
+/// The three per-photo calibration halves a programmatic writer stamps:
+/// base curve, lens profile, and the as-shot WB anchor pair
+/// (`as_shot_k`, `as_shot_tint`).
+pub type PhotoCalibration =
+    (Vec<[f32; 2]>, crate::recipe::LensProfile, (Option<f32>, Option<f32>));
+
+/// ALL THREE calibration halves from ONE saved-recipe snapshot: independent
 /// [`photo_base_curve`] + [`photo_lens_profile`] reads could pair an OLD
 /// curve with a NEW profile when a concurrent publish lands between them
 /// (the same single-snapshot rule `produce_recipe` follows).
-pub fn photo_calibration(raw: &Path) -> (Vec<[f32; 2]>, crate::recipe::LensProfile) {
+pub fn photo_calibration(raw: &Path) -> PhotoCalibration {
     match saved_recipe_snapshot(raw) {
-        Some(r) => (r.base_curve, r.lens_profile),
-        None => (photo_base_knots(raw), fresh_lens_profile(raw)),
+        Some(r) => (r.base_curve, r.lens_profile, (r.as_shot_k, r.as_shot_tint)),
+        None => (photo_base_knots(raw), fresh_lens_profile(raw), fresh_as_shot_wb(raw)),
     }
 }
 

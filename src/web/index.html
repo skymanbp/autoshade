@@ -694,7 +694,8 @@ function syncWb() {
   // "as-shot", matching the checkbox's own words — "auto" is a materially
   // different claim when the camera used a manual WB or a preset.
   document.querySelector(".wb-temp-val").textContent = k != null ? Math.round(k)
-    : (state.recipe.as_shot_k ? "as-shot ≈ " + Math.round(state.recipe.as_shot_k) + " K" : "as-shot");
+    : (state.recipe.as_shot_k && state.recipe.as_shot_tint != null
+        ? "as-shot ≈ " + Math.round(state.recipe.as_shot_k) + " K" : "as-shot");
 }
 
 // --- HSL colour mixer (8 bands × hue/sat/lum) ------------------------------
