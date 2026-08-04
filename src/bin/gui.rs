@@ -671,6 +671,9 @@ struct AutoshopApp {
     // This photo's in-camera lens profile (open worker) — the twin of
     // photo_knots: Reset re-stamps it, legacy toggles re-enable from it.
     photo_lens: autoshop::recipe::LensProfile,
+    // This photo's as-shot WB anchor (open worker) — the third calibration
+    // half: Reset re-stamps it, the Temp slider and eyedropper anchor on it.
+    photo_as_shot: Option<(f32, f32)>,
     // The base_curve baked into `before_tex`. The Before pane mirrors the
     // canvas recipe's calibration (Reset / paste / restore can change it), so
     // a mismatch triggers a cheap rebuild in `update`.
@@ -1048,6 +1051,7 @@ impl Default for AutoshopApp {
             pasted_open: None,
             photo_knots: Vec::new(),
             photo_lens: Default::default(),
+            photo_as_shot: None,
             before_curve: Vec::new(),
             confirm_quit: false,
             mask_name_buf: None,
@@ -1500,9 +1504,15 @@ fn pixel_identity(path: &std::path::Path) -> PixelIdentity {
 type BakedBase = (Arc<image::DynamicImage>, PathBuf, bool);
 /// A decoded preview base + the photo's camera-matched base-look knots
 /// (`render::camera_base_knots`; empty = no base look) + its in-camera lens
-/// profile (`pipeline::fresh_lens_profile`; default = none available).
-type OpenedBase =
-    (Arc<image::DynamicImage>, Vec<[f32; 2]>, autoshop::recipe::LensProfile, Option<BakedBase>);
+/// profile (`pipeline::fresh_lens_profile`; default = none available) + its
+/// as-shot WB anchor (`render::as_shot_wb`; None = unknown → 5500 K).
+type OpenedBase = (
+    Arc<image::DynamicImage>,
+    Vec<[f32; 2]>,
+    autoshop::recipe::LensProfile,
+    Option<(f32, f32)>,
+    Option<BakedBase>,
+);
 
 /// How many decoded preview bases to keep for instant photo revisits (~3.3 MB
 /// each at the default 1280 edge; culling flips between neighbours constantly).
@@ -1657,11 +1667,18 @@ fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
 ///     curve, which must keep rendering exactly as it was tuned;
 ///   * a RAW with no saved develop inherits the source's curve (same-camera
 ///     S curves — far closer than the dark base).
+///
+/// `as_shot_k`/`as_shot_tint` follow the lens-profile rule: per-photo
+/// calibration (auto-WB varies shot to shot), re-resolved for the target —
+/// never inherited from the source photo.
 fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe {
     let mut r = pasted.clone();
     if !autoshop::decode::is_raw(target) {
         r.base_curve = Vec::new();
         r.lens_profile = Default::default();
+        // A baked image carries no camera WB metadata to anchor on.
+        r.as_shot_k = None;
+        r.as_shot_tint = None;
         return r;
     }
     for p in [
@@ -1675,6 +1692,10 @@ fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe
                     // A saved develop owns its profile verbatim — including any
                     // user toggle and the legacy default-off.
                     r.lens_profile = saved.lens_profile;
+                    // …and its as-shot anchor (or its legacy None) verbatim:
+                    // the SOURCE photo's anchor is a different exposure.
+                    r.as_shot_k = saved.as_shot_k;
+                    r.as_shot_tint = saved.as_shot_tint;
                     return r;
                 }
                 // The file that answered is DAMAGED: stop here and fall to the
@@ -1691,6 +1712,9 @@ fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe
     // a different lens/focal — re-derive the target's own, stamped default-on
     // (paste transfers EDITS; the profile is per-photo calibration).
     r.lens_profile = autoshop::pipeline::fresh_lens_profile(target);
+    let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(target);
+    r.as_shot_k = ask;
+    r.as_shot_tint = ast;
     r
 }
 
@@ -1842,7 +1866,7 @@ impl AutoshopApp {
                 // you push tone/clarity. Baked images (PNG/TIFF/JPEG) are their own
                 // source. Demosaic is slow, so this runs off the UI thread.
                 let res = (|| -> anyhow::Result<OpenedBase> {
-                    let (thumb, knots, lens) = if autoshop::decode::is_raw(&path) {
+                    let (thumb, knots, lens, as_shot) = if autoshop::decode::is_raw(&path) {
                         // Developed AT the working edge (the cap runs before
                         // tone/geometry): opening a 61 MP RAW no longer keeps
                         // a full-resolution develop resident just to be
@@ -1857,6 +1881,10 @@ impl AutoshopApp {
                         // In-camera lens profile (Sony 0x70xx): one cheap TIFF
                         // parse, stamped all-available-on (the user default).
                         let lens = autoshop::pipeline::fresh_lens_profile(&path);
+                        // As-shot WB anchor: one metadata-only decode (no
+                        // demosaic) — the Temp slider then speaks absolute
+                        // Kelvin for this photo.
+                        let as_shot = autoshop::render::as_shot_wb(&path);
                         // Camera-matched base look: CDF-match the neutral
                         // develop against the camera's own rendition — with
                         // the profile VIGNETTE applied first: the camera JPEG
@@ -1883,12 +1911,13 @@ impl AutoshopApp {
                         } else {
                             full
                         };
-                        (thumb, knots, lens)
+                        (thumb, knots, lens, as_shot)
                     } else {
                         (
                             autoshop::decode::load_image(&path)?.thumbnail(edge, edge),
                             Vec::new(),
                             Default::default(),
+                            None,
                         )
                     };
                     // The saved develop's baked pixel master (in-place heal /
@@ -1916,7 +1945,7 @@ impl AutoshopApp {
                     );
                     // Arc once here so every downstream sharer (variants, the
                     // preview worker) is an O(1) refcount bump, not a deep copy.
-                    Ok((Arc::new(thumb), knots, lens, baked))
+                    Ok((Arc::new(thumb), knots, lens, as_shot, baked))
                 })();
                 Msg::Opened(Box::new(res))
             },
@@ -4495,17 +4524,18 @@ impl AutoshopApp {
                     let keep = std::mem::take(&mut self.keep_recipe);
                     self.open_in_flight = false; // both arms: the transition ended
                     match *boxed {
-                    Ok((base, knots, lens, baked)) => {
+                    Ok((base, knots, lens, as_shot, baked)) => {
                         self.busy = false;
                         if let Some(p) = self.src_path.clone() {
                             let edge = self.preview_edge.clamp(640, 8192);
-                            self.remember_base(&p, edge, &(base.clone(), knots.clone(), lens.clone(), baked.clone()));
+                            self.remember_base(&p, edge, &(base.clone(), knots.clone(), lens.clone(), as_shot, baked.clone()));
                         }
                         // Kept for Reset: "reset" = the fresh-open look, so it
                         // needs this photo's knots even when the restored
                         // recipe (legacy save) deliberately carries none.
                         self.photo_knots = knots.clone();
                         self.photo_lens = lens.clone();
+                        self.photo_as_shot = as_shot;
                         if keep {
                             // Preview-resolution re-decode: the SOURCE pixels just
                             // changed resolution — keep the whole variant set,
@@ -4658,6 +4688,15 @@ impl AutoshopApp {
                                 // lens profile (all-available-on); a saved
                                 // recipe.json keeps its own verbatim.
                                 recipe.lens_profile = lens.clone();
+                                // Third calibration half, same rule: the
+                                // as-shot WB anchor (a saved recipe.json owns
+                                // its stamp — or its legacy None — verbatim).
+                                let (ask, ast) = match as_shot {
+                                    Some((k, t)) => (Some(k), Some(t)),
+                                    None => (None, None),
+                                };
+                                recipe.as_shot_k = ask;
+                                recipe.as_shot_tint = ast;
                             } else if !stamp
                                 && recipe.base_curve.is_empty()
                                 && !knots.is_empty()
@@ -5867,7 +5906,11 @@ impl AutoshopApp {
                     let mut custom_wb =
                         self.recipe.temperature_k.is_some() || self.recipe.tint != 0.0;
                     if ui.checkbox(&mut custom_wb, tr(lang, "Custom white balance (off = as-shot)")).changed() {
-                        self.recipe.temperature_k = if custom_wb { Some(5500.0) } else { None };
+                        // Arm AT the as-shot anchor when stamped: checking
+                        // the box must not shift the image — the slider then
+                        // starts from the camera's real Kelvin, not 5500.
+                        self.recipe.temperature_k =
+                            if custom_wb { Some(self.recipe.as_shot_k.unwrap_or(5500.0)) } else { None };
                         if !custom_wb {
                             // "As-shot" is the WHOLE white balance: a custom
                             // Tint surviving the un-check kept a WB edit
@@ -5892,8 +5935,23 @@ impl AutoshopApp {
                         }
                     }
                 });
+                if let Some(k) = self.recipe.as_shot_k {
+                    // The camera's own WB in absolute terms — the reference
+                    // the Temp slider is anchored on for this photo.
+                    ui.weak(trf(
+                        lang,
+                        "as shot ≈ {k} K · tint {t}",
+                        &[
+                            ("k", &format!("{k:.0}")),
+                            ("t", &format!("{:+.0}", self.recipe.as_shot_tint.unwrap_or(0.0))),
+                        ],
+                    ));
+                }
+                // Double-click reset lands on the as-shot Kelvin when stamped
+                // (the honest "no shift" position), 5500 for legacy recipes.
+                let anchor_k = self.recipe.as_shot_k.unwrap_or(5500.0);
                 if let Some(mut k) = self.recipe.temperature_k
-                    && Self::slider_log(ui, lang, tr(lang, "Temp (K)"), &mut k, 2000.0, 40000.0, 5500.0)
+                    && Self::slider_log(ui, lang, tr(lang, "Temp (K)"), &mut k, 2000.0, 40000.0, anchor_k)
                 {
                     self.recipe.temperature_k = Some(k);
                     changed = true;
@@ -7145,8 +7203,9 @@ impl AutoshopApp {
     }
 
     /// WB eyedropper: click a pixel that SHOULD be neutral and the engine's
-    /// inverse solver (`render::solve_wb_from_neutral` — the same 5500 K
-    /// anchored forward model the render applies) turns it into Temp + Tint.
+    /// inverse solver (`render::solve_wb_from_neutral` — the same forward
+    /// model the render applies, anchored at this photo's stamped as-shot
+    /// Kelvin, or the legacy 5500 K) turns it into Temp + Tint.
     /// Samples a 5×5 mean of the SOURCE preview: WB runs before develop, so
     /// the solve must see pre-develop pixels, not the current edit.
     fn handle_wb_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
@@ -7188,7 +7247,10 @@ impl AutoshopApp {
             }
             [acc[0] / n, acc[1] / n, acc[2] / n]
         };
-        let (k, tint) = autoshop::render::solve_wb_from_neutral(px);
+        let (k, tint) = autoshop::render::solve_wb_from_neutral(
+            px,
+            self.recipe.as_shot_k.unwrap_or(5500.0),
+        );
         self.recipe.temperature_k = Some(k);
         self.recipe.tint = tint;
         self.wb_picking = false;
@@ -9445,7 +9507,20 @@ impl eframe::App for AutoshopApp {
                     // already carry the corrections — none re-applied).
                     let lens_profile =
                         if generated { Default::default() } else { self.photo_lens.clone() };
-                    self.recipe = EditRecipe { base_curve, lens_profile, ..EditRecipe::default() };
+                    // The as-shot anchor is per-photo calibration too — kept
+                    // even on a Generated canvas: it only shapes FUTURE Temp
+                    // moves, and with no Kelvin edit it changes nothing.
+                    let (as_shot_k, as_shot_tint) = match self.photo_as_shot {
+                        Some((k, t)) => (Some(k), Some(t)),
+                        None => (None, None),
+                    };
+                    self.recipe = EditRecipe {
+                        base_curve,
+                        lens_profile,
+                        as_shot_k,
+                        as_shot_tint,
+                        ..EditRecipe::default()
+                    };
                     self.region = None;
                     self.dirty = true;
                     // The old AI rationale/verdict describe the recipe Reset
@@ -10408,19 +10483,20 @@ mod tests {
             ..Default::default()
         };
         let p = std::path::Path::new("D:/__autoshop_nonexistent__/x.ARW");
-        app.remember_base(p, 1280, &(base.clone(), knots.clone(), lens.clone(), None));
+        app.remember_base(p, 1280, &(base.clone(), knots.clone(), lens.clone(), Some((4830.0, 6.0)), None));
         let hit = app.cached_base(p, 1280);
         assert!(hit.is_some(), "same path+edge hits");
         let hit = hit.unwrap();
         assert_eq!(hit.1, knots, "base-look knots ride the cache entry");
         assert_eq!(hit.2, lens, "the lens profile rides the cache entry too");
+        assert_eq!(hit.3, Some((4830.0, 6.0)), "the as-shot anchor rides the cache entry too");
         assert!(app.cached_base(p, 2560).is_none(), "edge is part of the key");
         // Filling past the cap evicts the least-recently-used entry.
         let others: Vec<std::path::PathBuf> = (0..BASE_CACHE_CAP)
             .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/{i}.ARW")))
             .collect();
         for o in &others {
-            app.remember_base(o, 1280, &(base.clone(), Vec::new(), Default::default(), None));
+            app.remember_base(o, 1280, &(base.clone(), Vec::new(), Default::default(), None, None));
         }
         assert!(app.cached_base(p, 1280).is_none(), "least-recent evicted at cap");
         assert!(app.cached_base(&others[1], 1280).is_some(), "newer entries survive");

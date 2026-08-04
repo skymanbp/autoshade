@@ -216,10 +216,18 @@ pub fn produce_recipe(
         Some(saved) => {
             recipe.base_curve = saved.base_curve;
             recipe.lens_profile = saved.lens_profile;
+            // The as-shot WB anchor is the third calibration half — same
+            // saved-first rule (a legacy save keeps None → the 5500 K anchor
+            // → byte-identical rendering of its tuned Kelvin).
+            recipe.as_shot_k = saved.as_shot_k;
+            recipe.as_shot_tint = saved.as_shot_tint;
         }
         None => {
             recipe.base_curve = photo_base_knots(raw);
             recipe.lens_profile = fresh_lens_profile(raw);
+            let (ask, ast) = fresh_as_shot_wb(raw);
+            recipe.as_shot_k = ask;
+            recipe.as_shot_tint = ast;
         }
     }
     // REFINE means "adjust MY edit", so it must not delete work the model was
@@ -323,6 +331,17 @@ pub fn fresh_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
     p.distortion_on = !p.distortion.is_empty();
     p.ca_on = !p.ca_r.is_empty() && !p.ca_b.is_empty();
     p
+}
+
+/// Fresh as-shot WB anchor for `raw` — the camera's absolute Kelvin + tint
+/// from its own metadata (`render::as_shot_wb`; metadata-only decode, no
+/// demosaic). `(None, None)` when unavailable (non-RAW, no colour matrix,
+/// damaged coefficients): the engine then keeps its historical 5500 K anchor.
+pub fn fresh_as_shot_wb(raw: &Path) -> (Option<f32>, Option<f32>) {
+    match crate::render::as_shot_wb(raw) {
+        Some((k, t)) => (Some(k), Some(t)),
+        None => (None, None),
+    }
 }
 
 /// Fresh camera-matched base-look estimate for `raw`: a neutral develop

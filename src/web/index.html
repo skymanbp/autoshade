@@ -337,7 +337,8 @@ const newGrade = () => ({
 });
 const DEFAULT_RECIPE = {
   version:1, exposure_ev:0, contrast:0, highlights:0, shadows:0, whites:0, blacks:0,
-  temperature_k:null, tint:0, vibrance:0, saturation:0, clarity:0, dehaze:0,
+  temperature_k:null, tint:0, as_shot_k:null, as_shot_tint:null,
+  vibrance:0, saturation:0, clarity:0, dehaze:0,
   hsl:newHsl(), color_grade:newGrade(),
   sharpening:0, noise_reduction:0, straighten_deg:0, crop:null,
   tone_curve:[], red_curve:[], green_curve:[], blue_curve:[],
@@ -678,7 +679,7 @@ function buildWb(panel) {
   };
   temp.onchange = () => pushHistory(state.recipe);
   on.onchange = () => {
-    if (on.checked) { if (state.recipe.temperature_k == null) temp.value = 5500; state.recipe.temperature_k = parseFloat(temp.value); }
+    if (on.checked) { if (state.recipe.temperature_k == null) temp.value = state.recipe.as_shot_k || 5500; state.recipe.temperature_k = parseFloat(temp.value); }
     else state.recipe.temperature_k = null;
     syncWb(); scheduleAfter(); pushHistory(state.recipe);
   };
@@ -689,10 +690,11 @@ function syncWb() {
   const k = state.recipe.temperature_k;
   on.checked = k != null;
   temp.disabled = k == null;
-  temp.value = k != null ? k : 5500;
+  temp.value = k != null ? k : (state.recipe.as_shot_k || 5500);
   // "as-shot", matching the checkbox's own words — "auto" is a materially
   // different claim when the camera used a manual WB or a preset.
-  document.querySelector(".wb-temp-val").textContent = k != null ? Math.round(k) : "as-shot";
+  document.querySelector(".wb-temp-val").textContent = k != null ? Math.round(k)
+    : (state.recipe.as_shot_k ? "as-shot ≈ " + Math.round(state.recipe.as_shot_k) + " K" : "as-shot");
 }
 
 // --- HSL colour mixer (8 bands × hue/sat/lum) ------------------------------
@@ -839,7 +841,8 @@ async function selectPhoto(id, stem, el) {
   // A damaged / unreachable recipe must still leave a WORKING panel: fall back
   // to the neutral recipe and show the server's reason, instead of throwing out
   // of selectPhoto and leaving an empty control column with no explanation.
-  let loaded = null, loadedFrom = null, loadErr = null, freshCurve = null, freshLens = null;
+  let loaded = null, loadedFrom = null, loadErr = null, freshCurve = null, freshLens = null,
+      freshAsShot = null;
   try {
     const rr = await fetch(`/api/recipe?id=${id}`);
     if (seq !== selectSeq) return;
@@ -852,6 +855,8 @@ async function selectPhoto(id, stem, el) {
         const fresh = await rr.json();
         if (fresh && Array.isArray(fresh.base_curve)) freshCurve = fresh.base_curve;
         if (fresh && fresh.lens_profile) freshLens = fresh.lens_profile;
+        if (fresh && fresh.as_shot_k != null)
+          freshAsShot = { k: fresh.as_shot_k, t: (fresh.as_shot_tint != null ? fresh.as_shot_tint : null) };
       } catch (_) { /* older server: plain-text 404 */ }
     }
     else loadErr = (await rr.text()) || `HTTP ${rr.status}`;
@@ -872,6 +877,8 @@ async function selectPhoto(id, stem, el) {
         const f = await fr.json();
         if (f && Array.isArray(f.base_curve)) freshCurve = f.base_curve;
         if (f && f.lens_profile) freshLens = f.lens_profile;
+        if (f && f.as_shot_k != null)
+          freshAsShot = { k: f.as_shot_k, t: (f.as_shot_tint != null ? f.as_shot_tint : null) };
       }
     } catch (_) { /* older server without /api/fresh-base */ }
     if (seq !== selectSeq) return;
@@ -889,12 +896,14 @@ async function selectPhoto(id, stem, el) {
     markSaved(); // a fresh (unedited) photo: neutral IS its saved state
     if (freshCurve && freshCurve.length) state.recipe.base_curve = freshCurve;
     if (freshLens) state.recipe.lens_profile = freshLens;
+    if (freshAsShot) { state.recipe.as_shot_k = freshAsShot.k; state.recipe.as_shot_tint = freshAsShot.t; }
     $(".verdict").textContent = loadErr ? loadErr : "Not analyzed yet.";
   }
   // Kept for Reset: this photo's fresh camera-matched calibration (null when
   // unavailable — non-RAW, no metadata, or an older server).
   state.freshCurve = (freshCurve && freshCurve.length) ? freshCurve : null;
   state.freshLens = freshLens || null;
+  state.freshAsShot = freshAsShot;
   // Build the controls now that state.recipe is known, then populate them.
   buildSliders(main.querySelector(".sliders"));
   buildWb(main.querySelector(".sliders"));
@@ -965,7 +974,7 @@ async function selectPhoto(id, stem, el) {
   // deliberately-empty curve must NOT survive Reset — "preserve the canvas
   // curve" kept those photos dark. Fallback when fresh knots are unavailable
   // (non-RAW / older server): preserve the current curve, the old behaviour.
-  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const bc = (state.freshCurve && state.freshCurve.length) ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (lp) state.recipe.lens_profile = structuredClone(lp); state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
+  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const bc = (state.freshCurve && state.freshCurve.length) ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
   main.querySelector(".savexmp").onclick = saveXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;

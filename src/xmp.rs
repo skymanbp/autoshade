@@ -244,13 +244,19 @@ fn owned_attrs(r: &EditRecipe) -> String {
     attr(&mut a, "Version", "15.5.1");
     attr(&mut a, "ProcessVersion", "15.4");
 
-    // White balance: an explicit temperature means Custom WB; otherwise leave
-    // it As Shot and only carry a tint if non-neutral. KNOWN LOSSY EDGE: a
-    // tint-only edit under "As Shot" may be ignored by Lightroom (As Shot
-    // re-reads camera metadata), but we cannot honestly emit "Custom" without
-    // knowing the camera's as-shot Kelvin — the XMP is the lossy interop by
-    // contract; recipe.json carries the tint losslessly.
-    if let Some(k) = r.temperature_k {
+    // White balance: an explicit temperature means Custom WB — and
+    // Temperature is ABSOLUTE Kelvin in both models now that the engine
+    // anchors at the stamped as-shot (`as_shot_k`), so the number finally
+    // means the same thing to Lightroom. A tint-only edit on a STAMPED photo
+    // emits Custom pinned AT the as-shot Kelvin (exactly what Lightroom
+    // itself writes for a tint-only move): under "As Shot" Lightroom may
+    // re-read camera metadata and ignore the Tint attribute entirely — the
+    // old documented lossy edge, closed wherever the engine knows the K.
+    // A LEGACY recipe (no stamp) keeps the old honest fallback: "As Shot"
+    // plus the tint, still disclosed as lossy; recipe.json carries the tint
+    // losslessly either way.
+    let wb_kelvin = r.temperature_k.or(if r.tint != 0.0 { r.as_shot_k } else { None });
+    if let Some(k) = wb_kelvin {
         attr(&mut a, "WhiteBalance", "Custom");
         attr(&mut a, "Temperature", &(k.round() as i64).to_string());
         attr(&mut a, "Tint", &signed(r.tint));
@@ -1274,6 +1280,29 @@ mod tests {
         assert!(xmp.contains("<rdf:li>0, 0</rdf:li>"));
         // rationale is XML-escaped in the comment
         assert!(xmp.contains("&lt;test&gt;"));
+    }
+
+    #[test]
+    fn tint_only_edit_on_a_stamped_photo_pins_custom_at_as_shot() {
+        // Stamped photo, tint-only: Custom AT the as-shot Kelvin — Lightroom
+        // then applies the Tint instead of ignoring it under "As Shot".
+        let r = EditRecipe { tint: 15.0, as_shot_k: Some(4820.0), ..Default::default() };
+        let xmp = recipe_to_xmp(&r);
+        assert!(xmp.contains(r#"crs:WhiteBalance="Custom""#), "{xmp}");
+        assert!(xmp.contains(r#"crs:Temperature="4820""#), "{xmp}");
+        assert!(xmp.contains(r#"crs:Tint="+15""#), "{xmp}");
+        // Round trip: the import reads Custom back as an absolute target ==
+        // the stamp, which the anchored engine renders as "no Kelvin shift".
+        let back = xmp_to_recipe(&xmp);
+        assert_eq!(back.temperature_k, Some(4820.0));
+        assert_eq!(back.tint, 15.0);
+        // A legacy recipe (no stamp) keeps the old honest fallback.
+        let legacy = EditRecipe { tint: 15.0, ..Default::default() };
+        let xmp = recipe_to_xmp(&legacy);
+        assert!(xmp.contains(r#"crs:WhiteBalance="As Shot""#), "{xmp}");
+        assert!(xmp.contains(r#"crs:Tint="+15""#), "{xmp}");
+        // The engine-only stamp itself NEVER appears in a sidecar.
+        assert!(!xmp.contains("as_shot"), "{xmp}");
     }
 
     #[test]

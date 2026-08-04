@@ -43,6 +43,18 @@ pub struct EditRecipe {
     pub temperature_k: Option<f32>,
     /// Green/magenta tint, -100..=100. 0 = neutral.
     pub tint: f32,
+    /// ENGINE-ONLY as-shot anchor (never in XMP): the camera's own white
+    /// balance as an ABSOLUTE Kelvin CCT, derived from the RAW's WB
+    /// coefficients through the camera colour matrix (`render::as_shot_wb`).
+    /// Stamped like `base_curve`/`lens_profile` — fresh opens get it, a saved
+    /// recipe.json owns its value verbatim. `None` = unknown → the engine
+    /// keeps its historical 5500 K anchor, so legacy archives render
+    /// byte-identically.
+    pub as_shot_k: Option<f32>,
+    /// The as-shot green/magenta companion, in the recipe's own tint scale
+    /// (display + XMP honesty only — `tint` stays a RELATIVE shift from
+    /// as-shot, so the engine never feeds this to `wb_gains`).
+    pub as_shot_tint: Option<f32>,
 
     // --- Colour / presence --------------------------------------------------
     /// -100..=100, protects already-saturated colours.
@@ -148,6 +160,8 @@ impl Default for EditRecipe {
             blacks: 0.0,
             temperature_k: None,
             tint: 0.0,
+            as_shot_k: None,
+            as_shot_tint: None,
             vibrance: 0.0,
             saturation: 0.0,
             clarity: 0.0,
@@ -642,6 +656,17 @@ impl EditRecipe {
             // of range) — corrupt WB goes back to as-shot.
             _ => None,
         };
+        // The as-shot anchor obeys the same band (one source of truth with
+        // the engine's blackbody fit); corrupt values fall back to "unknown"
+        // = the historical 5500 K anchor, never a nonsense anchor.
+        self.as_shot_k = match self.as_shot_k {
+            Some(k) if k.is_finite() => Some(k.clamp(2000.0, 40000.0)),
+            _ => None,
+        };
+        self.as_shot_tint = match self.as_shot_tint {
+            Some(t) if t.is_finite() => Some(t.clamp(-100.0, 100.0)),
+            _ => None,
+        };
         // Base-look knots are luma coordinates — anything outside [0,1] is
         // corrupt input (monotonisation is the LUT builder's job, values here).
         // A non-finite knot survives f32::clamp: drop it outright.
@@ -845,6 +870,10 @@ impl EditRecipe {
                 rationale: String::new(),
                 confidence: 0.0,
                 base_curve: Vec::new(),
+                // The as-shot WB anchor is the same kind of stamped
+                // calibration — a fresh-open stamp must still count as no-op.
+                as_shot_k: None,
+                as_shot_tint: None,
                 lens_profile: if self.lens_profile.is_as_stamped() {
                     LensProfile::default()
                 } else {
@@ -999,6 +1028,33 @@ mod tests {
         };
         wild.clamp();
         assert_eq!(wild.base_curve, vec![[0.0, 1.0], [0.5, 0.7]]);
+    }
+
+    #[test]
+    fn as_shot_anchor_is_calibration_not_an_edit() {
+        // Legacy JSON (no as-shot fields) deserialises to None — the engine
+        // then keeps its historical 5500 K anchor, byte-identical.
+        let legacy: EditRecipe = serde_json::from_str(r#"{"exposure_ev":0.5}"#).unwrap();
+        assert_eq!((legacy.as_shot_k, legacy.as_shot_tint), (None, None));
+        // A stamped-but-untouched recipe is still a no-op (fresh opens stay
+        // neutral), and the stamp survives the JSON round trip.
+        let stamped = EditRecipe {
+            as_shot_k: Some(4830.0),
+            as_shot_tint: Some(6.0),
+            ..Default::default()
+        };
+        assert!(stamped.is_noop(), "an as-shot stamp must stay a no-op");
+        let back: EditRecipe =
+            serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+        assert_eq!((back.as_shot_k, back.as_shot_tint), (Some(4830.0), Some(6.0)));
+        // clamp() sanitises: NaN → unknown, out-of-band → the legal band.
+        let mut wild = EditRecipe {
+            as_shot_k: Some(f32::NAN),
+            as_shot_tint: Some(900.0),
+            ..Default::default()
+        };
+        wild.clamp();
+        assert_eq!((wild.as_shot_k, wild.as_shot_tint), (None, Some(100.0)));
     }
 
     #[test]

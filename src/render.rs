@@ -207,9 +207,10 @@ pub fn render_to_image_in(
 
 /// Develop an already-baked image (the "PNG source" mode: edit an LR/PS-denoised
 /// export). Runs the SAME pipeline as the RAW engine on the loaded pixels — no
-/// demosaic, and white balance is the same relative 5500 K-anchored shift the
-/// RAW path uses (a baked sRGB image carries no raw WB coefficients, but the
-/// anchor model never needed them — it's a relative move either way).
+/// demosaic, and white balance uses the same anchored shift the RAW path
+/// uses — the anchor rides IN the recipe (`as_shot_k` when stamped, the
+/// 5500 K default otherwise), so a baked sRGB image needs no raw WB
+/// coefficients of its own.
 /// Optional AI denoise runs first; output is 16-bit.
 pub fn render_baked_to_image(
     img: &DynamicImage,
@@ -451,6 +452,90 @@ fn space_primaries(space: ExportColorSpace) -> [[f32; 2]; 3] {
 }
 
 /// cam→space by the DNG white-preservation rule: space→cam =
+/// The camera's AS-SHOT white balance as absolute chromaticity: (CCT Kelvin,
+/// tint in the recipe's ±100 scale). Metadata-only rawler decode (`dummy` —
+/// no pixel data, no demosaic; wb_coeffs and the colour matrix come from the
+/// file/camera definition either way, verified in rawler 0.7.2 arw.rs:184 +
+/// rawimage.rs:390), then [`wb_to_kelvin_tint`]. `None` when the file is not
+/// a RAW, has no colour matrix, or carries damaged coefficients — callers
+/// keep the engine's historical 5500 K anchor.
+pub fn as_shot_wb(raw_path: &Path) -> Option<(f32, f32)> {
+    if !crate::decode::is_raw(raw_path) {
+        return None;
+    }
+    let src = RawSource::new(raw_path).ok()?;
+    let decoder = get_decoder(&src).ok()?;
+    let rawimage = decoder.raw_image(&src, &RawDecodeParams { image_index: 0 }, true).ok()?;
+    let xyz2cam = camera_matrix(&rawimage).ok()?;
+    let wb = rawimage.wb_coeffs;
+    wb_to_kelvin_tint(&xyz2cam, [wb[0], wb[1], wb[2]])
+}
+
+/// (CCT, tint) of the scene illuminant implied by camera WB gains. The gains
+/// NEUTRALISE the illuminant, so the illuminant's camera-space colour is
+/// their reciprocal; through the camera matrix that becomes XYZ → (x, y) →
+/// McCamy's cubic CCT approximation [verified: McCamy 1992,
+/// n=(x−0.3320)/(0.1858−y), CCT=449n³+3525n²+6823.3n+5520.33 — reproduces
+/// illuminant A at 2856 K and D65 at 6504 K, pinned by test] and a Duv-based
+/// tint: the signed CIE-1960 distance from the Planckian locus (Krystek 1985
+/// rational fits; above the locus = green), mapped at 3000 tint units per
+/// Duv — the scale that lands D65 (Duv ≈ +0.0032) on ≈ +10, ACR's own
+/// Daylight-preset tint, which pins both sign and magnitude. ACR's exact
+/// model is proprietary — this is a documented approximation (the
+/// `local_temp_to_kelvin` stance) used for anchoring and display, never for
+/// pixel math.
+pub(crate) fn wb_to_kelvin_tint(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3]) -> Option<(f32, f32)> {
+    if wb.iter().any(|c| !c.is_finite() || *c <= 0.0) {
+        return None;
+    }
+    let neutral = [1.0 / wb[0], 1.0 / wb[1], 1.0 / wb[2]];
+    let xyz = mat_vec3(&inv3(xyz2cam), &neutral);
+    let sum = xyz[0] + xyz[1] + xyz[2];
+    if !sum.is_finite() || sum <= 0.0 {
+        return None;
+    }
+    let (x, y) = (xyz[0] / sum, xyz[1] / sum);
+    let d = 0.1858 - y;
+    if d.abs() < 1e-6 {
+        return None; // McCamy's pole — no real illuminant lives there
+    }
+    let n = (x - 0.3320) / d;
+    let cct = 449.0 * n * n * n + 3525.0 * n * n + 6823.3 * n + 5520.33;
+    // Outside any plausible illuminant band the METADATA is junk, not a hot
+    // light source: refuse rather than clamp a nonsense anchor into range.
+    if !cct.is_finite() || !(1000.0..=50_000.0).contains(&cct) {
+        return None;
+    }
+    let (u, v) = uv1960(x, y);
+    let (up, vp) = planck_uv1960(cct);
+    let dist = ((u - up).powi(2) + (v - vp).powi(2)).sqrt();
+    let duv = if v >= vp { dist } else { -dist };
+    let tint = (duv * 3000.0).clamp(-100.0, 100.0);
+    Some((cct.clamp(2000.0, 40000.0), tint))
+}
+
+/// CIE 1960 (u, v) from chromaticity (x, y) — the space Duv is defined in.
+fn uv1960(x: f32, y: f32) -> (f32, f32) {
+    let den = -2.0 * x + 12.0 * y + 3.0;
+    (4.0 * x / den, 6.0 * y / den)
+}
+
+/// Planckian locus in CIE 1960 (u, v): Krystek 1985 rational approximation
+/// (stated fit range 1000–15000 K; beyond that it extrapolates smoothly —
+/// acceptable for a tint DISPLAY value, and daylight lives well inside).
+// The literals are Krystek's PUBLISHED coefficients verbatim — truncating to
+// f32-representable digits parses to the same bits but breaks checkability
+// against the source.
+#[allow(clippy::excessive_precision)]
+fn planck_uv1960(t: f32) -> (f32, f32) {
+    let t2 = t * t;
+    let u = (0.860_117_757 + 1.541_182_54e-4 * t + 1.286_412_12e-7 * t2)
+        / (1.0 + 8.424_202_35e-4 * t + 7.081_451_63e-7 * t2);
+    let v = (0.317_398_726 + 4.228_062_45e-5 * t + 4.204_816_91e-8 * t2)
+        / (1.0 - 2.897_418_16e-5 * t + 1.614_560_53e-7 * t2);
+    (u, v)
+}
+
 /// xyz2cam · M(space→XYZ) with each row normalised to sum 1 (a
 /// white-balanced grey then maps to the SAME grey in every space), inverted.
 fn camera_to_space_matrix(xyz2cam: &[[f32; 3]; 3], space: ExportColorSpace) -> [[f32; 3]; 3] {
@@ -1562,42 +1647,49 @@ fn apply_wb(data: &mut [[f32; 3]], as_shot_k: f32, target_k: f32, tint: f32) {
 }
 
 /// The ONE recipe→WB stage, shared by the full-res render, the baked-image
-/// render and the UI preview so they can never disagree. The buffer is assumed
-/// to be at as-shot WB, anchored at 5500 K (daylight) and shifted toward the
-/// target — a direction-correct relative approximation (a precise as-shot-K
-/// needs the camera colour matrix; future upgrade). `temperature_k = None`
-/// only means "no Kelvin shift" — tint still applies on its own, matching the
-/// recipe contract (tint 0 = neutral) and what the GUI slider promises.
+/// render and the UI preview so they can never disagree. The buffer arrives
+/// at as-shot WB; the shift is anchored at the photo's STAMPED as-shot
+/// Kelvin (`as_shot_k`, engine-only — [`as_shot_wb`]), so `temperature_k`
+/// finally speaks ABSOLUTE Kelvin: target == as-shot is a true no-op, and
+/// the number agrees with what Lightroom shows for the same XMP. A legacy
+/// recipe (`None`) keeps the historical 5500 K daylight anchor —
+/// byte-identical rendering of every old archive. `temperature_k = None`
+/// only means "no Kelvin shift" (the target IS the anchor) — tint still
+/// applies on its own, matching the recipe contract (tint 0 = neutral) and
+/// what the GUI slider promises.
 fn apply_recipe_wb(data: &mut [[f32; 3]], r: &EditRecipe) {
     if r.temperature_k.is_some() || r.tint != 0.0 {
-        apply_wb(data, 5500.0, r.temperature_k.unwrap_or(5500.0), r.tint);
+        let anchor = r.as_shot_k.unwrap_or(5500.0);
+        apply_wb(data, anchor, r.temperature_k.unwrap_or(anchor), r.tint);
     }
 }
 
 /// Inverse white balance — the WB eyedropper's solver. Given an sRGB pixel the
 /// user says SHOULD be neutral, find the (target Kelvin, tint) whose
-/// [`wb_gains`] neutralise it, using the exact forward model (same 5500 K
-/// as-shot anchor) the render then applies. Target K is scanned on a log grid
-/// (400 steps over the recipe's legal 2000–40000 K) to equalise the red/blue
-/// channels; tint then falls analytically out of the green residual
+/// [`wb_gains`] neutralise it, using the exact forward model the render then
+/// applies — anchored at `as_shot_k` (the photo's stamped as-shot Kelvin, or
+/// the legacy 5500 K), so the solved Kelvin lands in the same absolute scale
+/// the Temp slider now speaks. Target K is scanned on a log grid (400 steps
+/// over the recipe's legal 2000–40000 K) to equalise the red/blue channels;
+/// tint then falls analytically out of the green residual
 /// (gg = 1 − 0.20·tint/100). Returns (kelvin, tint clamped to ±100).
-pub fn solve_wb_from_neutral(px: [f32; 3]) -> (f32, f32) {
+pub fn solve_wb_from_neutral(px: [f32; 3], as_shot_k: f32) -> (f32, f32) {
     let lr = srgb_to_linear(px[0]).max(1e-5);
     let lg = srgb_to_linear(px[1]).max(1e-5);
     let lb = srgb_to_linear(px[2]).max(1e-5);
     const N: usize = 400;
     let (lo, hi) = ((2000.0f32).ln(), (40000.0f32).ln());
-    let mut best = (5500.0f32, f32::INFINITY);
+    let mut best = (as_shot_k, f32::INFINITY);
     for i in 0..=N {
         let k = (lo + (hi - lo) * i as f32 / N as f32).exp();
-        let g = wb_gains(5500.0, k, 0.0);
+        let g = wb_gains(as_shot_k, k, 0.0);
         let e = (lr * g[0] - lb * g[2]).abs();
         if e < best.1 {
             best = (k, e);
         }
     }
     let k = best.0;
-    let g = wb_gains(5500.0, k, 0.0);
+    let g = wb_gains(as_shot_k, k, 0.0);
     // Green gain that lands green on the (now equal) red/blue level → tint.
     // Bounded to the gg range tint can actually express (tint ±100 ⇒ gg 0.8–1.2).
     let level = 0.5 * (lr * g[0] + lb * g[2]);
@@ -3970,7 +4062,7 @@ mod tests {
                 linear_to_srgb(l / g0[1]),
                 linear_to_srgb(l / g0[2]),
             ];
-            let (k, tint) = solve_wb_from_neutral(cast);
+            let (k, tint) = solve_wb_from_neutral(cast, 5500.0);
             let g = wb_gains(5500.0, k, tint);
             let out = [
                 srgb_to_linear(cast[0]) * g[0],
@@ -3987,8 +4079,63 @@ mod tests {
             );
         }
         // An already-neutral pixel solves to ~as-shot, ~zero tint.
-        let (k, tint) = solve_wb_from_neutral([0.5, 0.5, 0.5]);
+        let (k, tint) = solve_wb_from_neutral([0.5, 0.5, 0.5], 5500.0);
         assert!((k - 5500.0).abs() < 300.0 && tint.abs() < 2.0, "neutral → ({k:.0},{tint:.1})");
+    }
+
+    #[test]
+    fn as_shot_math_lands_on_canonical_illuminants() {
+        // Identity camera matrix ⇒ camera space IS XYZ; the WB gains
+        // neutralise the illuminant, so wb = 1/XYZ reconstructs it exactly.
+        let id = [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        // D65 (X 0.95047, Y 1, Z 1.08883): McCamy ⇒ ~6504 K, and D65 sits
+        // Duv ≈ +0.0032 ABOVE the Planckian locus ⇒ tint ≈ +10 — ACR's own
+        // Daylight-preset tint, which pins the sign convention AND the scale.
+        let (k, t) = wb_to_kelvin_tint(&id, [1.0 / 0.95047, 1.0, 1.0 / 1.08883]).unwrap();
+        assert!((6400.0..=6600.0).contains(&k), "D65 → {k:.0} K");
+        assert!((5.0..=15.0).contains(&t), "D65 → tint {t:+.1}");
+        // Illuminant A (X 1.09850, Z 0.35585) lies ON the locus: ~2856 K, ~0.
+        let (k, t) = wb_to_kelvin_tint(&id, [1.0 / 1.0985, 1.0, 1.0 / 0.35585]).unwrap();
+        assert!((2790.0..=2920.0).contains(&k), "A → {k:.0} K");
+        assert!(t.abs() < 6.0, "A → tint {t:+.1}");
+        // Damaged coefficients refuse instead of anchoring nonsense.
+        assert_eq!(wb_to_kelvin_tint(&id, [f32::NAN, 1.0, 1.0]), None);
+        assert_eq!(wb_to_kelvin_tint(&id, [0.0, 1.0, 1.0]), None);
+    }
+
+    #[test]
+    fn stamped_as_shot_anchor_moves_only_kelvin_edits() {
+        // tint-only renders identically stamped or legacy — the tint gain
+        // never depends on the anchor — so no old archive can move.
+        let grey = [[0.5f32, 0.5, 0.5]; 4];
+        let mut legacy_px = grey;
+        apply_recipe_wb(&mut legacy_px, &EditRecipe { tint: 20.0, ..Default::default() });
+        let mut stamped_px = grey;
+        apply_recipe_wb(
+            &mut stamped_px,
+            &EditRecipe { tint: 20.0, as_shot_k: Some(4000.0), ..Default::default() },
+        );
+        assert_eq!(legacy_px, stamped_px, "tint-only must ignore the anchor");
+        // An ABSOLUTE target equal to the stamped as-shot is a true no-op —
+        // the honest semantic the 5500-anchored model could not express…
+        let mut at_as_shot = grey;
+        apply_recipe_wb(
+            &mut at_as_shot,
+            &EditRecipe {
+                temperature_k: Some(4000.0),
+                as_shot_k: Some(4000.0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(at_as_shot, grey, "target == as-shot must not shift");
+        // …while a LEGACY recipe with the same numbers still takes its tuned
+        // 5500-anchored shift, byte-identical to the old engine.
+        let mut legacy_shift = grey;
+        apply_recipe_wb(
+            &mut legacy_shift,
+            &EditRecipe { temperature_k: Some(4000.0), ..Default::default() },
+        );
+        assert_ne!(legacy_shift, grey, "legacy 5500-anchored shift still applies");
     }
 
     #[test]

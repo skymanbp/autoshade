@@ -713,6 +713,9 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 // this file over its own profile-corrected base.
                 r.base_curve = fresh_base_knots(&raw);
                 r.lens_profile = pipeline::fresh_lens_profile(&raw);
+                let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
+                r.as_shot_k = ask;
+                r.as_shot_tint = ast;
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
                     .expect("static ASCII header");
                 return Ok(json_text(serde_json::to_string(&r)?).with_header(h));
@@ -778,6 +781,9 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 // Same stamp rule as the GUI's XMP-only restore: Lightroom
                 // tuned this file over its own profile-corrected base.
                 r.lens_profile = pipeline::fresh_lens_profile(&raw);
+                let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
+                r.as_shot_k = ask;
+                r.as_shot_tint = ast;
                 return Ok(json_text(serde_json::to_string(&r)?));
             }
         }
@@ -791,9 +797,12 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // but the body carries the photo's camera-matched base look so the fresh
     // web canvas starts as bright as a fresh GUI open instead of jumping
     // only after the first Analyze.
+    let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
     let body = serde_json::json!({
         "base_curve": fresh_base_knots(&raw),
         "lens_profile": pipeline::fresh_lens_profile(&raw),
+        "as_shot_k": ask,
+        "as_shot_tint": ast,
     })
     .to_string();
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
@@ -808,9 +817,12 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
 /// the first call — `fresh_base_knots` reuses the cached `develop_base`.
 fn api_fresh_base(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let raw = raw_for(request, state)?;
+    let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
     let body = serde_json::json!({
         "base_curve": fresh_base_knots(&raw),
         "lens_profile": pipeline::fresh_lens_profile(&raw),
+        "as_shot_k": ask,
+        "as_shot_tint": ast,
     })
     .to_string();
     Ok(json_text(body))
