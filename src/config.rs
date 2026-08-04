@@ -72,11 +72,28 @@ pub fn save_local_settings(s: &LocalSettings) -> std::io::Result<PathBuf> {
     // same process (the web server serializes via its own lock, but this fn
     // is shared by GUI and CLI too — cheap defence in depth).
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = p.with_extension(format!(
-        "json.tmp{}-{}",
-        std::process::id(),
-        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    // A recycled PID can meet a crashed predecessor's stale tmp — create_new
+    // then errors; take the next sequence instead of failing the save
+    // (bounded: 16 tries, then surface the error).
+    let mut tmp = std::path::PathBuf::new();
+    let mut claimed = false;
+    for _ in 0..16 {
+        tmp = p.with_extension(format!(
+            "json.tmp{}-{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(_) => {
+                claimed = true;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Missing parent dir etc. — the write below reports it.
+            Err(_) => break,
+        }
+    }
+    let _ = claimed;
     // The file carries API keys: keep it out of other local users' reach.
     // Windows AppData is per-user already; on Unix, CREATE the file 0600 —
     // a chmod after the write left a world-readable window (and a silently

@@ -249,6 +249,17 @@ pub fn photo_base_curve(raw: &Path) -> Vec<[f32; 2]> {
     }
 }
 
+/// BOTH calibration halves from ONE saved-recipe snapshot: two independent
+/// [`photo_base_curve`] + [`photo_lens_profile`] reads could pair an OLD
+/// curve with a NEW profile when a concurrent publish lands between them
+/// (the same single-snapshot rule `produce_recipe` follows).
+pub fn photo_calibration(raw: &Path) -> (Vec<[f32; 2]>, crate::recipe::LensProfile) {
+    match saved_recipe_snapshot(raw) {
+        Some(r) => (r.base_curve, r.lens_profile),
+        None => (photo_base_knots(raw), fresh_lens_profile(raw)),
+    }
+}
+
 /// The lens profile a programmatic writer must carry for `raw` — the same
 /// saved-first rule as [`photo_base_curve`]: an existing recipe.json owns its
 /// profile verbatim (including the legacy default-off, and any user toggle),
@@ -436,37 +447,41 @@ pub fn xmp_target(raw: &Path) -> PathBuf {
 /// previously exported preview) — the rule protects the photo LIBRARY, not our
 /// own output areas. A folder that merely happens to be NAMED "out" inside the
 /// library is still refused.
+/// Fold `.`/`..` LEXICALLY (no filesystem access — the target may not exist
+/// yet). Shared by [`guard_readonly`] and the CLI's canonical-path equality
+/// check (`-o` spelled with `dir/../` segments must still classify as the
+/// canonical file). See the RootDir note inside for the drive-relative trap.
+pub fn normalize_lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut n = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => match n.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    n.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {
+                    // The root's parent IS the root: "D:/../lib" folds to
+                    // "D:/lib" exactly as the filesystem resolves it.
+                    // Popping the root would yield drive-relative "D:lib",
+                    // which dodges starts_with checks.
+                }
+                _ => n.push(".."),
+            },
+            Component::CurDir => {}
+            other => n.push(other.as_os_str()),
+        }
+    }
+    n
+}
+
 pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     use std::path::absolute;
     // Fold `.`/`..` LEXICALLY (no filesystem access — the target may not
     // exist yet): `std::path::absolute` keeps `..` segments, so a path like
     // "out/../<library>/x.tif" used to START WITH ./out for the allow-check
     // while the filesystem resolved it INTO the protected library.
-    fn normalize(p: &Path) -> PathBuf {
-        use std::path::Component;
-        let mut n = PathBuf::new();
-        for c in p.components() {
-            match c {
-                Component::ParentDir => match n.components().next_back() {
-                    Some(Component::Normal(_)) => {
-                        n.pop();
-                    }
-                    Some(Component::RootDir | Component::Prefix(_)) => {
-                        // The root's parent IS the root: "D:/../lib" folds to
-                        // "D:/lib" exactly as the filesystem resolves it.
-                        // Popping the root here used to yield the
-                        // drive-relative "D:lib", which dodged every
-                        // starts_with check below and let a crafted path
-                        // write into the protected library.
-                    }
-                    _ => n.push(".."),
-                },
-                Component::CurDir => {}
-                other => n.push(other.as_os_str()),
-            }
-        }
-        n
-    }
+    let normalize = normalize_lexical; // extracted for the CLI's same_path
     // Canonicalize the deepest EXISTING ancestor, then re-attach the
     // not-yet-created tail: a junction / subst / symlink alias or a
     // case-flipped spelling ("d:\photography" for "D:\Photography" — NTFS is

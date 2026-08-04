@@ -43,6 +43,11 @@ struct AppState {
     /// Config behind a lock so the Settings panel can hot-reload it (POST
     /// /api/settings rewrites the local file, then swaps in a fresh `Config`).
     cfg: RwLock<Config>,
+    /// Folder-switch generation: each /api/setdir claims the next number
+    /// BEFORE scanning and only installs its result while still current —
+    /// without this, a SLOW scan of folder A finishing after a fast scan of
+    /// folder B silently swapped the server back to A under B's UI.
+    dir_gen: std::sync::atomic::AtomicU64,
 }
 
 impl AppState {
@@ -71,6 +76,7 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
         dir: RwLock::new(dir.to_path_buf()),
         raws: RwLock::new(raws),
         cfg: RwLock::new(Config::load()),
+        dir_gen: std::sync::atomic::AtomicU64::new(0),
     });
     let addr = format!("127.0.0.1:{port}");
     let server = Server::http(&addr).map_err(|e| anyhow!("start server on {addr}: {e}"))?;
@@ -238,6 +244,11 @@ fn api_setdir(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     if !p.is_dir() {
         return Ok(status_response(400, &format!("not a folder: {cleaned}")));
     }
+    // Claim a generation BEFORE the (possibly slow) scan; install only while
+    // still the newest request. SeqCst: the claim and the install check must
+    // be totally ordered across request threads.
+    use std::sync::atomic::Ordering;
+    let claimed_gen = state.dir_gen.fetch_add(1, Ordering::SeqCst) + 1;
     let found = pipeline::find_sources(&p)?;
     let total = found.len();
     {
@@ -246,6 +257,11 @@ fn api_setdir(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // permanently mismatching the list and its folder.
         let mut raws = state.raws.write().map_err(|_| anyhow!("lock poisoned"))?;
         let mut dir = state.dir.write().map_err(|_| anyhow!("lock poisoned"))?;
+        if state.dir_gen.load(Ordering::SeqCst) != claimed_gen {
+            // A newer switch already claimed the state (or will momentarily):
+            // this stale scan must not overwrite it.
+            return Ok(status_response(409, "superseded by a newer folder switch"));
+        }
         *raws = found;
         *dir = p.clone();
     }
@@ -832,7 +848,20 @@ fn region_to_original(
         return unmapped;
     }
     let Some(dims) = source_dims(raw) else { return unmapped };
-    let corners = [(g.left, g.top), (g.right, g.top), (g.left, g.bottom), (g.right, g.bottom)];
+    // Corners + edge MIDPOINTS: lens distortion is nonlinear, and a box
+    // spanning the frame midline maps its edge centres farther than either
+    // corner — a 4-corner bound clipped part of the selection.
+    let (mx, my) = ((g.left + g.right) * 0.5, (g.top + g.bottom) * 0.5);
+    let corners = [
+        (g.left, g.top),
+        (g.right, g.top),
+        (g.left, g.bottom),
+        (g.right, g.bottom),
+        (mx, g.top),
+        (mx, g.bottom),
+        (g.left, my),
+        (g.right, my),
+    ];
     let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for (vx, vy) in corners {
         let (ox, oy) = render::view_to_original_norm(
@@ -849,6 +878,19 @@ fn region_to_original(
         b = b.max(oy);
     }
     (l, t, r, b)
+}
+
+/// The viewing recipe used for REGION/MASK inverse mapping. For a photo whose
+/// persisted master is GENERATED, the render path strips lens_profile (the
+/// look lives in the pixels) — so the DISPLAYED frame never had the profile
+/// geometry applied, and mapping a box/mask through it would land off target.
+/// Mirrors render_source's strip on the mapping side.
+fn view_for_mapping(raw: &Path, view: Option<&EditRecipe>) -> Option<EditRecipe> {
+    let mut v = view?.clone();
+    if crate::store::read_pixel_source(raw).is_some_and(|(_, generated)| generated) {
+        v.lens_profile = Default::default();
+    }
+    Some(v)
 }
 
 /// Does this viewing recipe transform the displayed frame (straighten / lens
@@ -917,7 +959,29 @@ fn source_dims(raw: &Path) -> Option<(f32, f32)> {
         let img = decode::embedded_preview(raw).ok()??;
         Some((img.width() as f32, img.height() as f32))
     } else {
-        image::image_dimensions(raw).ok().map(|(w, h)| (w as f32, h as f32))
+        // ORIENTED dims: load_image applies the EXIF orientation, so the
+        // canvas is portrait for an orientation-6 JPEG while the raw header
+        // reports landscape — the geometry maps then used the wrong aspect.
+        // Header-only read (into_decoder decodes no pixels).
+        use image::ImageDecoder as _;
+        let mut dec = image::ImageReader::open(raw)
+            .ok()?
+            .with_guessed_format()
+            .ok()?
+            .into_decoder()
+            .ok()?;
+        let (w, h) = dec.dimensions();
+        let o = dec
+            .orientation()
+            .unwrap_or(image::metadata::Orientation::NoTransforms);
+        let swap = matches!(
+            o,
+            image::metadata::Orientation::Rotate90
+                | image::metadata::Orientation::Rotate270
+                | image::metadata::Orientation::Rotate90FlipH
+                | image::metadata::Orientation::Rotate270FlipH
+        );
+        Some(if swap { (h as f32, w as f32) } else { (w as f32, h as f32) })
     }
 }
 
@@ -932,7 +996,8 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // active geometry offsets the mask from what the user boxed.
     let region_guidance = req.region.as_ref().map(|g| {
         let view = req.view.as_ref().or(req.base.as_ref());
-        let (l, t, r, b) = region_to_original(g, view, &raw);
+        let mapped_view = view_for_mapping(&raw, view);
+        let (l, t, r, b) = region_to_original(g, mapped_view.as_ref(), &raw);
         format!(
             "The user SELECTED a target region (normalized 0..1 frame coords): left={l:.3} top={t:.3} \
              right={r:.3} bottom={b:.3}. Apply the direction ONLY to that region — emit a mask covering \
@@ -1251,10 +1316,18 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(b) => b,
         Err(e) => return Ok(status_response(400, &format!("bad mask base64: {e}"))),
     };
+    // Retouch the photo's RENDER INPUT — the persisted pixels.json master
+    // when one exists — not the original raw: filling on a GUI-saved heal /
+    // Generated master used to rebuild from the un-retouched source and
+    // silently discard the prior baked work (api_develop's rule).
+    let src = crate::store::read_pixel_source(&raw)
+        .map(|(m, _)| m)
+        .unwrap_or_else(|| raw.clone());
     // The mask was painted over the DISPLAYED (post-geometry) preview —
     // un-warp it into the source frame the retouch engine works in.
     let mask_bytes =
-        unwarp_mask(&mask_bytes, req.view.as_ref(), &raw).unwrap_or(mask_bytes);
+        unwarp_mask(&mask_bytes, view_for_mapping(&raw, req.view.as_ref()).as_ref(), &raw)
+            .unwrap_or(mask_bytes);
     // generative::retouch takes a mask FILE path, so stage the PNG in a temp file.
     let mask_tmp = std::env::temp_dir().join(format!(
         "autoshop_mask_{}_{}.png",
@@ -1275,7 +1348,7 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let cfg = state.config().clone();
     let quality = req.quality.unwrap_or_else(|| cfg.openai_image_quality.clone());
     let result =
-        crate::generative::retouch(&cfg, &raw, &mask_tmp, &req.prompt, &quality, req.full_res, &out);
+        crate::generative::retouch(&cfg, &src, &mask_tmp, &req.prompt, &quality, req.full_res, &out);
     let _ = std::fs::remove_file(&mask_tmp);
     match result {
         Ok(()) => {
@@ -1336,9 +1409,14 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             let b64 = m.rsplit(',').next().unwrap_or(m).trim();
             match base64::engine::general_purpose::STANDARD.decode(b64) {
                 Ok(bytes) => {
-                    // Same un-warp as api_retouch (see there).
-                    let bytes =
-                        unwarp_mask(&bytes, req.view.as_ref(), &raw).unwrap_or(bytes);
+                    // Same un-warp as api_retouch (see there) — through the
+                    // mapping view (generated lens strip included).
+                    let bytes = unwarp_mask(
+                        &bytes,
+                        view_for_mapping(&raw, req.view.as_ref()).as_ref(),
+                        &raw,
+                    )
+                    .unwrap_or(bytes);
                     let t = std::env::temp_dir().join(format!(
                         "autoshop_heal_{}_{}.png",
                         std::process::id(),
@@ -1359,7 +1437,11 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         return Ok(status_response(500, "no free heal output name (999 in ./out)"));
     };
     let cfg = state.config().clone();
-    let result = crate::retouch::heal(&cfg, &raw, mask_tmp.as_deref(), req.auto, req.full_res, &out);
+    // Same master-input rule as api_retouch (see there).
+    let src = crate::store::read_pixel_source(&raw)
+        .map(|(m, _)| m)
+        .unwrap_or_else(|| raw.clone());
+    let result = crate::retouch::heal(&cfg, &src, mask_tmp.as_deref(), req.auto, req.full_res, &out);
     if let Some(t) = &mask_tmp {
         let _ = std::fs::remove_file(t);
     }

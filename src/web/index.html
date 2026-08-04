@@ -480,7 +480,10 @@ async function setWorkingDir() {
   // during that window would hit an unrelated photo in the new folder.
   const seq = ++dirSeq;
   state.id = null; state.stem = null; state.recipe = null;
-  ++selectSeq; ++afterSeq; clearTimeout(afterTimer);
+  // listSeq too: an in-flight OLD /api/list response would re-render the
+  // old folder's thumbnails after this clear (their ids then resolve
+  // against the NEW server table).
+  ++selectSeq; ++afterSeq; ++listSeq; clearTimeout(afterTimer);
   $("#grid").innerHTML = "";
   history = []; hi = -1; updateUndo();   // stale undo would re-apply the OLD photo's recipe
   $("#main").innerHTML = '<p style="color:var(--muted)">Select a photo on the left, or import more above.</p>';
@@ -490,7 +493,10 @@ async function setWorkingDir() {
   if (!r.ok) { setStatus("open folder failed: " + await r.text()); return; }
   const d = await r.json();
   if (seq !== dirSeq) return;
-  await loadList(0);   // a new folder starts at page 1
+  const rendered = await loadList(0);   // a new folder starts at page 1
+  // A newer switch may have superseded us during that await — its status
+  // (and its list) own the pane now.
+  if (seq !== dirSeq || !rendered) return;
   setStatus(`working folder: ${d.dir} · ${d.total} source${d.total===1?"":"s"}`);
 }
 $("#dir-set").onclick = setWorkingDir;

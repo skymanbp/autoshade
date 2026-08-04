@@ -423,7 +423,11 @@ pub fn recipe_to_xmp(r: &EditRecipe) -> String {
 /// the document (a foreign sidecar's comment could claim our provenance) —
 /// and this boolean decides whether an As-Shot tint imports as a real edit.
 fn is_autoshop_sidecar(xmp: &str) -> bool {
-    let Some(tag_start) = xmp.find("<x:xmpmeta") else { return false };
+    // rfind: a comment containing a forged start tag precedes the real
+    // packet — the LAST occurrence is the actual document element (full
+    // comment-aware XML parsing is out of scope; this check only gates the
+    // As-Shot tint import).
+    let Some(tag_start) = xmp.rfind("<x:xmpmeta") else { return false };
     let tag = &xmp[tag_start..];
     let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
     let mut rest = tag;

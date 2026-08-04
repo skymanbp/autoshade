@@ -27,6 +27,9 @@ const WEIGHTS: [f32; NDIM] = [
 ];
 /// Slider keys shown as the reference (crs key → label). Tint/Saturation/Dehaze
 /// were added in index v2 so the style blend captures the user's colour habits.
+/// Bump when the FEATURE semantics change (v3: display-frame Meta dims).
+const CURRENT_INDEX_VERSION: u32 = 3;
+
 const REF_KEYS: [(&str, &str); 12] = [
     ("Exposure2012", "exposure"),
     ("Contrast2012", "contrast"),
@@ -224,7 +227,7 @@ impl StyleIndex {
         // Record where this index was built from, for UI provenance / other users.
         let source_dir = std::path::absolute(dir).map(|p| p.display().to_string()).ok();
         // v2: exemplars now carry tint/saturation/dehaze + tone-curve shape.
-        Ok(StyleIndex { version: 2, mean, std, exemplars, source_dir })
+        Ok(StyleIndex { version: CURRENT_INDEX_VERSION, mean, std, exemplars, source_dir })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -271,7 +274,19 @@ impl StyleIndex {
     pub fn load(path: &Path) -> Result<StyleIndex> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read style index {}", path.display()))?;
-        Ok(serde_json::from_str(&text)?)
+        let idx: StyleIndex = serde_json::from_str(&text)?;
+        // Version gate: v3 = display-frame Meta dims (the portrait feature).
+        // An older index recorded portrait RAWs as landscape — serving it
+        // silently would bias every retrieval until a manual rebuild.
+        if idx.version != CURRENT_INDEX_VERSION {
+            anyhow::bail!(
+                "style index {} is version {} (current {}) — rebuild it: autoshop style-index <dir>",
+                path.display(),
+                idx.version,
+                CURRENT_INDEX_VERSION
+            );
+        }
+        Ok(idx)
     }
 
     /// k nearest exemplars to (meta,hist), excluding `exclude_stem` (the query
@@ -489,7 +504,7 @@ mod tests {
             curve: Some([6.0, 20.0]),
         };
         let idx = StyleIndex {
-            version: 2,
+            version: CURRENT_INDEX_VERSION,
             mean: vec![0.0; NDIM],
             std: vec![1.0; NDIM],
             exemplars: vec![],

@@ -248,16 +248,16 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
             .fnumber
             .as_ref()
             .map(ratio)
+            // An INVALID FNumber (0-denominator → 0.0, or non-finite) must
+            // fall through to the Av fallback, not suppress it: filtering
+            // only at the end let f/0 shadow a perfectly valid ApertureValue.
+            .filter(|v| v.is_finite() && *v > 0.0)
             // ApertureValue is an APEX Av, not an f-number: N = 2^(Av/2)
             // (Av 4 ⇒ f/4, Av 5 ⇒ f/5.7). Feeding it raw overstated fast
             // lenses in metadata + the AI prompt whenever FNumber was absent.
             .or_else(|| exif.aperture_value.as_ref().map(|v| (ratio(v) / 2.0).exp2()))
-            // A malformed rational (0-denominator NaN, huge Av → exp2 = ∞)
-            // must not enter Meta — serde_json refuses non-finite floats
-            // (same rule as the WB coeffs below). Zero-DENOMINATOR rationals
-            // resolve to 0.0 and slip past the finite filter, but f/0 and
-            // 0 mm are physically impossible — reject those too. A 0 EV bias
-            // is legitimate (the common case) and stays.
+            // Same physical-validity rule for the fallback (huge Av → ∞;
+            // serde_json refuses non-finite floats — the WB-coeff rule).
             .filter(|v| v.is_finite() && *v > 0.0),
         focal_length_mm: exif
             .focal_length

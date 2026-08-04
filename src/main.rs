@@ -357,9 +357,15 @@ fn decode_cmd(raw: &Path, out: Option<PathBuf>) -> Result<()> {
 /// canonical-vs-`-o` decision must not depend on how the path was spelled.
 fn same_path(a: &Path, b: &Path) -> bool {
     let n = |p: &Path| {
-        std::fs::canonicalize(p)
-            .or_else(|_| std::path::absolute(p))
-            .unwrap_or_else(|_| p.to_path_buf())
+        // canonicalize (exists → true casing/aliases), else absolute + a
+        // LEXICAL `..` fold: plain absolute() keeps ".." segments, so a
+        // canonical path spelled "dir/../recipe.json" classified as
+        // redirected and bypassed the backup gate.
+        std::fs::canonicalize(p).unwrap_or_else(|_| {
+            pipeline::normalize_lexical(
+                &std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()),
+            )
+        })
     };
     n(a) == n(b)
 }
@@ -523,7 +529,10 @@ fn denoise_cmd(
         println!("denoised -> {} ({} x {})", out.display(), w, h);
     } else {
         println!("denoising image {} ...", input.display());
-        denoise::denoise_file(&opts, input, &out)?;
+        // denoise_active routes baked sources through the oriented
+        // load_image working copy — the direct denoise_file path let OpenCV
+        // ignore EXIF rotation and drop the tag (permanently sideways out).
+        denoise::denoise_active(&opts, input, true, &out)?;
         println!("denoised -> {}", out.display());
     }
     Ok(())

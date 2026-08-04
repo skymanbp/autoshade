@@ -994,14 +994,18 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
     // `None` too — it used to bypass the cache entirely and re-open + re-warn
     // every refresh; the identity flips to Some the moment the file appears,
     // which misses and loads it.
-    type Key = Option<(std::time::SystemTime, u64)>;
+    // Outer None = file MISSING; inner None = mtime unavailable on this
+    // filesystem (a distinct, existing-file identity — collapsing the two
+    // made a formerly missing mask that appears mtime-less keep hitting the
+    // cached negative forever).
+    type Key = Option<(Option<std::time::SystemTime>, u64)>;
     type Cache = Mutex<std::collections::HashMap<String, (Key, Option<Arc<image::GrayImage>>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let MaskGeometry::Bitmap { path } = g else { return None };
     let cache = CACHE.get_or_init(Default::default);
     let ident: Key = std::fs::metadata(path)
         .ok()
-        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+        .map(|m| (m.modified().ok(), m.len()));
     {
         // No user code runs under the lock, so poisoning is not reachable —
         // recover anyway rather than turning a past panic into a new one.

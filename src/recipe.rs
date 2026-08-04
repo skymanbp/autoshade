@@ -361,6 +361,20 @@ impl ColorGrade {
         // Non-finite → the field's NEUTRAL (blending's is 50): clamp and
         // rem_euclid both pass NaN straight through (see Hsl::clamp).
         let fin = |v: f32, neutral: f32| if v.is_finite() { v } else { neutral };
+        // A corrupt HUE makes the whole wheel meaningless — zeroing the hue
+        // alone turned "NaN hue + sat 50" into a saturated RED grade; the
+        // corrupt-component-goes-INERT rule needs the paired sat zeroed too.
+        for (h, sat) in [
+            (&mut self.shadow_hue, &mut self.shadow_sat),
+            (&mut self.midtone_hue, &mut self.midtone_sat),
+            (&mut self.highlight_hue, &mut self.highlight_sat),
+            (&mut self.global_hue, &mut self.global_sat),
+        ] {
+            if !h.is_finite() {
+                *h = 0.0;
+                *sat = 0.0;
+            }
+        }
         for h in [&mut self.shadow_hue, &mut self.midtone_hue, &mut self.highlight_hue, &mut self.global_hue] {
             *h = fin(*h, 0.0).rem_euclid(360.0);
         }

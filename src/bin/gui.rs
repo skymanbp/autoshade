@@ -1407,6 +1407,10 @@ fn thumb_cache_file(src: &std::path::Path) -> Option<PathBuf> {
     let meta = std::fs::metadata(src).ok()?;
     let dir = autoshop::store::store_root().join("thumbs");
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Decoder-generation salt: bump when decode semantics change what a
+    // thumb LOOKS like (v2 = EXIF orientation applied to baked images) — an
+    // unchanged file otherwise keeps serving its stale sideways thumbnail.
+    2u32.hash(&mut h);
     std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf()).hash(&mut h);
     meta.modified().ok().hash(&mut h);
     meta.len().hash(&mut h);
@@ -1678,6 +1682,19 @@ fn ui_press_origin(resp: &egui::Response) -> Option<egui::Pos2> {
 /// run created.
 fn mask_family(bare: &str) -> &str {
     let stem = bare.strip_suffix(".png").unwrap_or(bare);
+    // A version-frozen raster ("v3.mask-sky") is the same family — a recipe
+    // loaded from a version snapshot references frozen names, and a rerun
+    // must still repoint that mask instead of appending a duplicate.
+    let stem = match stem.split_once('.') {
+        Some((v, rest))
+            if v.len() > 1
+                && v.starts_with('v')
+                && v[1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            rest
+        }
+        _ => stem,
+    };
     match stem.rsplit_once('-') {
         Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
         _ => stem,
@@ -2088,22 +2105,25 @@ impl AutoshopApp {
     fn save_version(&mut self) {
         let lang = self.lang;
         let Some(src) = self.src_path.clone() else { return };
-        // Number from DISK, not the cached list: the auto-backup writes v<N>
-        // through the same counter, and a failure path that skipped
-        // refresh_versions used to let this button compute the same N and
-        // overwrite the only remaining copy of a backed-up save.
-        let last = autoshop::store::list_versions(&src).last().copied();
-        if last == Some(u32::MAX) {
-            // Same refusal as the lib's backup gate: m + 1 would overflow
-            // (panic under overflow checks, or wrap to v0 and overwrite an
-            // existing unconventional snapshot).
-            let t = tr(lang, "Save version failed: version namespace exhausted");
-            self.status = t.into();
-            self.toast(ToastKind::Error, t);
-            return;
+        // ATOMICALLY reserved number (store::claim_version): disk-list+1
+        // raced the auto-backup (and the web/CLI) to the same N — the later
+        // publish silently replaced the earlier snapshot.
+        let (n, vpath) = match autoshop::store::claim_version(&src) {
+            Ok(v) => v,
+            Err(e) => {
+                let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t);
+                return;
+            }
+        };
+        let res = autoshop::pipeline::write_recipe(&src, &self.recipe, Some(vpath.clone()));
+        if res.is_err() {
+            // Release the claimed 0-byte slot — an empty version must not
+            // pollute the list after a failed write.
+            let _ = std::fs::remove_file(&vpath);
         }
-        let n = last.map_or(1, |m| m + 1);
-        match autoshop::pipeline::write_recipe(&src, &self.recipe, Some(Self::version_path(&src, n))) {
+        match res {
             Ok(p) => {
                 self.refresh_versions();
                 self.status = trf(
@@ -2613,9 +2633,14 @@ impl AutoshopApp {
                 // saved-first source produce_recipe uses.
                 let mut disk = r.clone();
                 if pix.as_ref().is_some_and(|(_, g)| *g) {
-                    disk.base_curve = autoshop::pipeline::photo_base_curve(p);
-                    disk.lens_profile = autoshop::pipeline::photo_lens_profile(p);
+                    // ONE snapshot for both halves — two independent reads
+                    // could pair an old curve with a new profile if another
+                    // surface published between them.
+                    let (bc, lp) = autoshop::pipeline::photo_calibration(p);
+                    disk.base_curve = bc;
+                    disk.lens_profile = lp;
                 }
+                let generated = pix.as_ref().is_some_and(|(_, g)| *g);
                 let res = autoshop::pipeline::write_recipe(p, &disk, None).and_then(|_| {
                     // The baked-pixels link saves/clears with the recipe —
                     // the same pairing Ctrl+S writes.
@@ -2624,7 +2649,12 @@ impl AutoshopApp {
                         None => autoshop::store::clear_pixel_source(p),
                     }
                     .map_err(anyhow::Error::from)?;
-                    if autoshop::decode::is_raw(p) {
+                    // NO XMP for a generated entry — Ctrl+S refuses those for
+                    // the same reason: the look lives in baked pixels no
+                    // parametric sidecar can reproduce, and writing one here
+                    // overwrote a real Lightroom sidecar with a lie. The
+                    // recipe + pixels pair alone restores faithfully.
+                    if autoshop::decode::is_raw(p) && !generated {
                         autoshop::pipeline::write_xmp(p, &disk).map(|_| ())
                     } else {
                         Ok(())
@@ -3759,7 +3789,13 @@ impl AutoshopApp {
                     let mask = autoshop::store::claim_raster(&src, &format!("mask-{target}"))?;
                     let run = autoshop::segment::segment_file(&opts, &tmp, &mask);
                     let _ = std::fs::remove_file(&tmp);
-                    run?;
+                    if let Err(e) = run {
+                        // Release the claimed name: a failed run leaves its
+                        // create_new 0-byte slot (segment.py publishes
+                        // atomically, so an error means nothing real landed).
+                        let _ = std::fs::remove_file(&mask);
+                        return Err(e);
+                    }
                     // English label into the recipe (stable data), not `disp`.
                     Ok((label.to_string(), mask))
                 })();
@@ -4315,6 +4351,14 @@ impl AutoshopApp {
                             // source-based active variant develops from; a
                             // baked-raster variant keeps its own pixels.
                             let (mw, mh) = base.dimensions();
+                            // Consume the stash entry the same-path open_path
+                            // call just wrote: the KEEP branch preserves the
+                            // live canvas in place, so the entry is a stale
+                            // duplicate — after an undo-to-clean it would
+                            // resurrect the pre-undo edits on the next return.
+                            if let Some(p) = self.src_path.clone() {
+                                self.nav_stash.remove(&p);
+                            }
                             self.source_preview = Some(base.clone());
                             let active_source =
                                 self.active_variant().is_none_or(|v| v.base.is_none());

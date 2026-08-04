@@ -568,7 +568,10 @@ fn residual_channel_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]], ch: usize) -> Vec<
     // genuine narrow-band shift (0.30-0.40 → 0.40-0.50) fell BETWEEN the
     // knots and was suppressed entirely.
     let mut max_dev = 0.0f32;
-    for &q in &[0.1f32, 0.25, 0.5, 0.75, 0.9] {
+    // Down to the 2nd/98th percentile — the P_CLIP band the curve itself
+    // preserves: a 5% cluster shift left every 10-90 quantile untouched and
+    // was suppressed. Identical distributions still read 0 everywhere.
+    for &q in &[0.02f32, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.98] {
         let xc = quantile(&c_cdf, q);
         let xt = quantile(&t_cdf, q);
         max_dev = max_dev.max((xt - xc).abs());
