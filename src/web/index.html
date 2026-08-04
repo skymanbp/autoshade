@@ -402,7 +402,7 @@ async function loadList(offset) {
     if (seq === listSeq) throw e;
     return;
   }
-  if (seq !== listSeq) return;   // superseded by a newer page request
+  if (seq !== listSeq) return false;   // superseded by a newer page request
   pageOffset = at;               // this response owns the pane — commit now
   const grid = $("#grid");
   // Reflect the authoritative working folder in the field (unless the user is typing).
@@ -430,6 +430,7 @@ async function loadList(offset) {
     grid.appendChild(div);
   }
   grid.scrollTop = 0;
+  return true;   // this response rendered — callers may act on its ids
 }
 $("#page-prev").onclick = () => loadList(pageOffset - PAGE);
 $("#page-next").onclick = () => loadList(pageOffset + PAGE);
@@ -438,9 +439,12 @@ $("#page-next").onclick = () => loadList(pageOffset + PAGE);
 // by id — never by finding+clicking its thumbnail (it may sit on another page).
 // `stem` comes from the upload response, else the thumb, else a harmless fallback.
 async function revealNew(firstId, firstStem) {
-  if (firstId != null) pageOffset = Math.floor(firstId / PAGE) * PAGE;
-  await loadList(pageOffset);
-  if (firstId == null) return;
+  // Act ONLY when our list request actually rendered: a superseded/failed
+  // refresh means the ids may belong to a replaced folder (and pageOffset
+  // is committed by loadList itself now, on success only).
+  const at = firstId != null ? Math.floor(firstId / PAGE) * PAGE : pageOffset;
+  const rendered = await loadList(at);
+  if (!rendered || firstId == null) return;
   const el = document.querySelector(`.thumb[data-id="${firstId}"]`);
   if (el) el.scrollIntoView({block:"center"});
   const stem = firstStem || el?.querySelector(".name")?.textContent || "photo";
@@ -457,7 +461,7 @@ $("#import-btn").onclick = async () => {
     if (!r.ok) { setStatus("import failed: " + await r.text()); return; }
     const d = await r.json();
     $("#import-path").value = "";
-    if (d.added > 0) { setStatus(`imported ${d.added} (total ${d.total})`); revealNew(d.total - d.added); }
+    if (d.added > 0) { setStatus(`imported ${d.added} (total ${d.total})`); revealNew(d.first_id != null ? d.first_id : d.total - d.added); }
     else setStatus(`already in the gallery (total ${d.total})`);
   } catch (e) { setStatus("import failed: " + (e.message || e)); }
 };
@@ -466,21 +470,26 @@ $("#import-path").addEventListener("keydown", e => { if (e.key === "Enter") $("#
 // Switch the working directory: re-scan a folder server-side and REPLACE the
 // gallery (path-based, like Import; a browser can't give a local server a picked
 // folder's real disk path). The current folder is echoed into the field on load.
+let dirSeq = 0;   // latest-wins for folder switches (slow scan vs fast scan)
 async function setWorkingDir() {
   const path = $("#dir-path").value.trim().replace(/^"+|"+$/g, "").trim();
   if (!path) { setStatus("paste a folder path to open"); return; }
-  setStatus("opening folder…");
-  const r = await fetch("/api/setdir", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({path})});
-  if (!r.ok) { setStatus("open folder failed: " + await r.text()); return; }
-  const d = await r.json();
+  // The user COMMITTED to switching: kill the old pane and every old-folder
+  // generation BEFORE the request — the server swaps its folder-relative id
+  // table while this is in flight, and an old-pane Save/Analyze/Fill click
+  // during that window would hit an unrelated photo in the new folder.
+  const seq = ++dirSeq;
   state.id = null; state.stem = null; state.recipe = null;
-  // Ids are folder-relative: EVERYTHING keyed to the old folder must die NOW —
-  // an in-flight selectPhoto (stale seq) and the old grid's thumbnail
-  // callbacks would otherwise resolve old ids against the NEW folder.
   ++selectSeq; ++afterSeq; clearTimeout(afterTimer);
   $("#grid").innerHTML = "";
   history = []; hi = -1; updateUndo();   // stale undo would re-apply the OLD photo's recipe
   $("#main").innerHTML = '<p style="color:var(--muted)">Select a photo on the left, or import more above.</p>';
+  setStatus("opening folder…");
+  const r = await fetch("/api/setdir", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({path})});
+  if (seq !== dirSeq) return;   // a newer switch owns the pane
+  if (!r.ok) { setStatus("open folder failed: " + await r.text()); return; }
+  const d = await r.json();
+  if (seq !== dirSeq) return;
   await loadList(0);   // a new folder starts at page 1
   setStatus(`working folder: ${d.dir} · ${d.total} source${d.total===1?"":"s"}`);
 }
@@ -716,6 +725,10 @@ async function selectPhoto(id, stem, el) {
   // A pending slider-debounce timer would fire DURING the awaits below with a
   // FRESH afterSeq — rendering the OLD photo's recipe under the NEW id.
   clearTimeout(afterTimer);
+  // The old photo's undo history dies NOW, not after the awaits: Ctrl+Z in
+  // the gap could apply (and render) the previous photo's snapshot under the
+  // NEW id. resetHistory re-seeds once the new recipe lands.
+  history = []; hi = -1; updateUndo();
   document.querySelectorAll(".thumb").forEach(t=>t.classList.remove("sel"));
   if (el) el.classList.add("sel");
   state.id = id; state.stem = stem;
@@ -923,7 +936,7 @@ async function selectPhoto(id, stem, el) {
     const reqId = state.id, reqSeq = selectSeq;
     try {
       const r = await fetch("/api/retouch", {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ id: reqId, prompt, mask, quality, full_res: fullRes })});
+        body: JSON.stringify({ id: reqId, prompt, mask, quality, full_res: fullRes, view: state.recipe })});
       // r.ok FIRST: a failed request saved NOTHING — the stale-path message
       // used to promise a ./out master that never existed.
       if (!r.ok) {
@@ -939,6 +952,11 @@ async function selectPhoto(id, stem, el) {
       fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r);
       setStatus("filled" + (saved ? " → " + saved : "") + " (saved to ./out; separate from the develop recipe)");
+    } catch (e) {
+      // Without this, a transport rejection skipped the stale checks and the
+      // GLOBAL handler stamped a generic failure over the NEW photo's status.
+      const stale = reqId !== state.id || reqSeq !== selectSeq;
+      setStatus((stale ? "fill for another photo failed: " : "fill failed: ") + (e.message || e));
     } finally { retouchBusy = false; btn.disabled = false; hA.disabled = false; hP.disabled = false; }
   };
 
@@ -966,7 +984,7 @@ async function selectPhoto(id, stem, el) {
     const reqId = state.id, reqSeq = selectSeq;
     try {
       const r = await fetch("/api/heal", {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ id: reqId, mask, auto: !useMask, full_res: fullRes })});
+        body: JSON.stringify({ id: reqId, mask, auto: !useMask, full_res: fullRes, view: state.recipe })});
       // r.ok FIRST — a failed heal saved nothing (see the fill handler).
       if (!r.ok) {
         const t = await r.text();
@@ -980,7 +998,15 @@ async function selectPhoto(id, stem, el) {
       setAfterSrc(afterImg, blob);
       if (useMask) fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r), n = r.headers.get("X-Heal-Spots");
-      setStatus(`healed ${n || "?"} spot(s)${saved ? " → " + saved : ""} (saved to ./out; pixel retouch, not the develop recipe)`);
+      // A rationale can disclose a partial outcome (e.g. AI detection failed,
+      // only the painted mask healed) — surface it, don't imply full success.
+      let why = r.headers.get("X-Heal-Rationale");
+      if (why) { try { why = decodeURIComponent(why); } catch (e) { /* show raw */ } }
+      setStatus(`healed ${n || "?"} spot(s)${saved ? " → " + saved : ""}${why ? " · " + why : ""} (saved to ./out; pixel retouch, not the develop recipe)`);
+    } catch (e) {
+      // Same stale-aware catch as fill (see there).
+      const stale = reqId !== state.id || reqSeq !== selectSeq;
+      setStatus((stale ? "heal for another photo failed: " : "heal failed: ") + (e.message || e));
     } finally { retouchBusy = false; btnA.disabled = false; btnP.disabled = false; btnF.disabled = false; }
   }
   main.querySelector(".heal-auto").onclick = () => runHeal(false);
@@ -1009,7 +1035,10 @@ function outPath(r) {
   try { return decodeURIComponent(v); } catch (e) { return v; }
 }
 
+let analyzeBusy = false;   // pane recreation resurrects the button — gate globally
 async function analyze() {
+  if (analyzeBusy) { setStatus("an analysis is already running — wait for it to finish"); return; }
+  analyzeBusy = true;
   const gi = document.querySelector(".guidance");
   const guidance = gi && gi.value.trim() ? gi.value.trim() : null;
   const refine = document.querySelector(".refine")?.checked || false;
@@ -1058,7 +1087,7 @@ async function analyze() {
     }
     else setStatus("done" + (data.backed_up != null ? ` · previous save backed up as v${data.backed_up}` : ""));
     loadList();   // the ● edited badge changes when analyze saves
-  } finally { btn.disabled = false; }
+  } finally { analyzeBusy = false; btn.disabled = false; }
 }
 
 async function saveXmp() {
@@ -1089,7 +1118,10 @@ function saveBody() {
   return { id: state.id, recipe: state.recipe, denoise: dn, format };
 }
 
+let exportBusy = false;   // per-pane buttons are resurrected by reselecting — gate globally
 async function exportFull() {
+  if (exportBusy) { setStatus("an export/download is already running — wait for it to finish"); return; }
+  exportBusy = true;
   const dn = document.querySelector(".denoise-toggle")?.checked;
   setStatus(dn ? "rendering + AI denoise… (GPU, can take minutes)" : "rendering full-resolution… (slow)");
   const btn = $(".export"); btn.disabled = true;
@@ -1097,10 +1129,12 @@ async function exportFull() {
     const r = await fetch("/api/export", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(saveBody())});
     const body = await r.text();
     setStatus(r.ok ? ("exported → " + body) : ("export failed: " + body));
-  } finally { btn.disabled = false; }
+  } finally { exportBusy = false; btn.disabled = false; }
 }
 
 async function downloadFull() {
+  if (exportBusy) { setStatus("an export/download is already running — wait for it to finish"); return; }
+  exportBusy = true;
   const fmt = document.querySelector(".save-format")?.value || "tif";
   const stem = state.stem;   // snapshot: switching photos mid-render must not rename the file
   setStatus("rendering for download…");
@@ -1119,7 +1153,7 @@ async function downloadFull() {
     // window to actually start the save, then free it.
     setTimeout(() => URL.revokeObjectURL(url), 60000);
     setStatus("downloaded");
-  } finally { btn.disabled = false; }
+  } finally { exportBusy = false; btn.disabled = false; }
 }
 
 // Region box-select on the After image (Phase 3): drag a box to anchor a local
@@ -1194,8 +1228,10 @@ async function openSettings() {
 }
 
 $("#settings-save").onclick = async () => {
+  const provider = document.querySelector('input[name="an-provider"]:checked');
+  if (!provider) { $("#settings-status").textContent = "still loading — try again in a moment"; return; }
   const body = {
-    analysis_provider: document.querySelector('input[name="an-provider"]:checked').value,
+    analysis_provider: provider.value,
     analysis_model: $("#an-model").value.trim(),
     analysis_base_url: $("#an-base").value.trim(),
     analysis_api_key: $("#an-key").value,          // blank ⇒ keep current

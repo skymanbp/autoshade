@@ -273,6 +273,7 @@ fn api_import(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     };
 
     let mut added = 0usize;
+    let mut first_id: Option<usize> = None;
     {
         let mut raws = state.raws.write().map_err(|_| anyhow!("lock poisoned"))?;
         // Set-based dedupe: the old linear `contains` per candidate was
@@ -283,11 +284,18 @@ fn api_import(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         for np in found {
             if existing.insert(np.clone()) {
                 raws.push(np);
+                if first_id.is_none() {
+                    first_id = Some(raws.len() - 1);
+                }
                 added += 1;
             }
         }
     }
-    Ok(json_response(&json!({ "added": added, "total": state.count() })))
+    // first_id is authoritative — the client used to INFER it as
+    // total − added, which a concurrent import/upload could shift.
+    Ok(json_response(
+        &json!({ "added": added, "total": state.count(), "first_id": first_id }),
+    ))
 }
 
 /// Accept dropped/picked file BYTES, save under ./out/imported, and add it to the
@@ -531,6 +539,12 @@ fn fresh_base_knots(raw: &Path) -> Vec<[f32; 2]> {
 
 fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let raw = raw_for(request, state)?;
+    // Under SAVE_LOCK: migration MUTATES the central store, and racing a
+    // concurrent /api/xmp neutral-clear could republish the legacy recipe
+    // right after the clear deleted both homes — resurrecting the cleared
+    // edit. The lock also keeps the read below coherent with any in-flight
+    // save.
+    let _save = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // One-time, per-photo migration of pre-store ./out sidecars into the
     // central develop dir (no-op when nothing legacy remains).
     crate::store::migrate_legacy(&raw);
@@ -791,16 +805,22 @@ struct RetouchReq {
     /// preview. Slow; the regenerated patch is upscaled. RAW only.
     #[serde(default)]
     full_res: bool,
+    /// The canvas recipe the mask was painted OVER (straighten / lens
+    /// geometry): the server un-warps the mask into the source frame with it.
+    /// Absent = no mapping (older clients / no geometry).
+    #[serde(default)]
+    view: Option<EditRecipe>,
 }
 
-/// Map a dragged region from the DISPLAYED After frame (post lens geometry,
-/// straighten and user crop) back into the ORIGINAL frame. Un-crop first
-/// (recipe.crop lives in the view frame), then the engine's shared
-/// view→original map per corner; the bounding box of the mapped corners is the
-/// honest axis-aligned target (same policy as the GUI's radial display map).
-/// Identity when the viewing recipe has no geometry; if the source dims can't
-/// be read the box passes through unmapped (the pre-fix behaviour) rather than
-/// failing the analyze.
+/// Map a dragged region from the DISPLAYED After frame back into the ORIGINAL
+/// frame via the engine's shared view→original map per corner; the bounding
+/// box of the mapped corners is the honest axis-aligned target (same policy
+/// as the GUI's radial display map). The web preview renders lens geometry +
+/// straighten but deliberately NOT the crop (api_develop: whole-frame slider
+/// feedback, the GUI's policy) — the old un-crop step here assumed a cropped
+/// view and shifted every box whenever a crop was active. Identity when the
+/// viewing recipe has no geometry; if the source dims can't be read the box
+/// passes through unmapped rather than failing the analyze.
 fn region_to_original(
     g: &Region,
     view: Option<&EditRecipe>,
@@ -808,24 +828,16 @@ fn region_to_original(
 ) -> (f32, f32, f32, f32) {
     let unmapped = (g.left, g.top, g.right, g.bottom);
     let Some(rec) = view else { return unmapped };
-    let lens_on = rec.lens_distortion != 0.0
-        || (rec.lens_profile.distortion_on && !rec.lens_profile.distortion.is_empty());
-    if rec.crop.is_none() && rec.straighten_deg == 0.0 && !lens_on {
+    if !view_geometry_active(rec) {
         return unmapped;
     }
     let Some(dims) = source_dims(raw) else { return unmapped };
-    let (cl, ct, cr, cb) = rec
-        .crop
-        .as_ref()
-        .map_or((0.0, 0.0, 1.0, 1.0), |c| (c.left, c.top, c.right, c.bottom));
     let corners = [(g.left, g.top), (g.right, g.top), (g.left, g.bottom), (g.right, g.bottom)];
     let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for (vx, vy) in corners {
-        let sx = cl + vx * (cr - cl);
-        let sy = ct + vy * (cb - ct);
         let (ox, oy) = render::view_to_original_norm(
-            sx,
-            sy,
+            vx,
+            vy,
             dims,
             rec.straighten_deg,
             &rec.lens_profile,
@@ -837,6 +849,63 @@ fn region_to_original(
         b = b.max(oy);
     }
     (l, t, r, b)
+}
+
+/// Does this viewing recipe transform the displayed frame (straighten / lens
+/// geometry)? Crop deliberately excluded — the web preview never crops.
+fn view_geometry_active(rec: &EditRecipe) -> bool {
+    rec.straighten_deg != 0.0
+        || rec.lens_distortion != 0.0
+        || (rec.lens_profile.distortion_on && !rec.lens_profile.distortion.is_empty())
+}
+
+/// Un-warp a browser-painted mask from the DISPLAYED (post-geometry) frame
+/// into the SOURCE frame: out(p) = in(original_to_view_norm(p)), so the
+/// painted area lands on the pixels the user actually saw. The retouch
+/// engine consumes normalized mask coordinates, so the raster keeps its own
+/// resolution. Returns None (use the mask as-is) when the view carries no
+/// geometry or anything fails — the pre-fix behaviour, never an error.
+fn unwarp_mask(bytes: &[u8], view: Option<&EditRecipe>, raw: &Path) -> Option<Vec<u8>> {
+    let rec = view?;
+    if !view_geometry_active(rec) {
+        return None;
+    }
+    let dims = source_dims(raw)?;
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut out = image::RgbaImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let (vx, vy) = render::original_to_view_norm(
+                (x as f32 + 0.5) / w as f32,
+                (y as f32 + 0.5) / h as f32,
+                dims,
+                rec.straighten_deg,
+                &rec.lens_profile,
+                rec.lens_distortion,
+            );
+            // Outside the displayed frame = the user could not paint there =
+            // unpainted (opaque, "keep"). Nearest-neighbour is enough — the
+            // consumers threshold alpha.
+            let px = if (0.0..1.0).contains(&vx) && (0.0..1.0).contains(&vy) {
+                *img.get_pixel(
+                    ((vx * w as f32) as u32).min(w - 1),
+                    ((vy * h as f32) as u32).min(h - 1),
+                )
+            } else {
+                image::Rgba([0, 0, 0, 255])
+            };
+            out.put_pixel(x, y, px);
+        }
+    }
+    let mut buf = Vec::new();
+    image::DynamicImage::ImageRgba8(out)
+        .write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
+        .ok()?;
+    Some(buf)
 }
 
 /// Dims of the oriented source frame — only the ASPECT matters to the
@@ -854,7 +923,7 @@ fn source_dims(raw: &Path) -> Option<(f32, f32)> {
 
 fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let req: AnalyzeReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     // A dragged region anchors the edit: fold its coords into the direction so the
     // AI places a mask over exactly that box (reuses the Phase-2 area→mask prompt).
     // The box was dragged on the DISPLAYED preview (post lens/straighten/crop);
@@ -926,14 +995,34 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     }
 }
 
+/// The photo's RENDER INPUT: the persisted pixels.json master when the store
+/// records one (a GUI-saved heal/denoise/reimagine — the web used to silently
+/// render the un-retouched source while the GUI showed the master), else the
+/// photo itself. A GENERATED master carries the look in its pixels, so the
+/// recipe drops base_curve + lens_profile (the same strip rule every GUI
+/// render path applies).
+fn render_source(raw: &Path, recipe: &mut EditRecipe) -> PathBuf {
+    match crate::store::read_pixel_source(raw) {
+        Some((m, generated)) => {
+            if generated {
+                recipe.base_curve = Vec::new();
+                recipe.lens_profile = Default::default();
+            }
+            m
+        }
+        None => raw.to_path_buf(),
+    }
+}
+
 fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let mut req: DevelopReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     // Store recipes reference rasters by bare name (api_recipe serves them
     // verbatim) — anchor them to the photo's develop dir before rendering.
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Same decode source as `api_export` below — see `develop_base`.
-    let preview = develop_base(&raw)?;
+    let src = render_source(&raw, &mut req.recipe);
+    let preview = develop_base(&src)?;
     let mut after = render::develop_preview(&preview, &req.recipe);
     // Geometry, mirroring the GUI preview chain (lens geometry → straighten;
     // the frame stays uncropped for whole-frame slider feedback, same policy).
@@ -965,11 +1054,34 @@ fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
 /// Export to ./out (the library stays read-only). Returns the written path.
 fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let mut req: DevelopReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
+    let src = render_source(&raw, &mut req.recipe);
     let out = pipeline::default_out(&raw, "developed", fmt_ext(&req));
     pipeline::ensure_parent(&out)?;
-    render::render_to_file(&raw, &req.recipe, &out, denoise_opts(&req, &state.config()).as_ref(), None)?;
+    // Config SNAPSHOT: the read guard held across a multi-minute render
+    // blocked every settings save (same rule as api_retouch/api_heal).
+    let cfg = state.config().clone();
+    // Render into a unique sibling, then rename: two concurrent exports of
+    // the same photo/format used to interleave encoders into ONE fixed path.
+    // The tmp keeps the real ".jpg"/".tif" suffix — the encoder picks its
+    // format from the extension.
+    let ext = fmt_ext(&req);
+    let tmp = out.with_file_name(format!(
+        "{}.developed.{}-{}.{ext}",
+        pipeline::stem(&raw),
+        std::process::id(),
+        DL_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    if let Err(e) = render::render_to_file(&src, &req.recipe, &tmp, denoise_opts(&req, &cfg).as_ref(), None)
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &out) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("publish export {}", out.display()));
+    }
     Ok(text_response(&out.display().to_string()))
 }
 
@@ -977,8 +1089,11 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 /// leaving a copy in ./out. Renders to a temp file, then streams + deletes it.
 fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let mut req: DevelopReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!("bad id"))?;
+    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
+    let src = render_source(&raw, &mut req.recipe);
+    // Config SNAPSHOT — see api_export.
+    let cfg = state.config().clone();
     let ext = fmt_ext(&req);
     let tmp = std::env::temp_dir().join(format!(
         "autoshop_dl_{}_{}.{ext}",
@@ -988,7 +1103,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     // A failed render must not leave a multi-hundred-MB partial file to sit
     // in %TEMP% until the next server start's sweep.
     if let Err(e) =
-        render::render_to_file(&raw, &req.recipe, &tmp, denoise_opts(&req, &state.config()).as_ref(), None)
+        render::render_to_file(&src, &req.recipe, &tmp, denoise_opts(&req, &cfg).as_ref(), None)
     {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -1136,6 +1251,10 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(b) => b,
         Err(e) => return Ok(status_response(400, &format!("bad mask base64: {e}"))),
     };
+    // The mask was painted over the DISPLAYED (post-geometry) preview —
+    // un-warp it into the source frame the retouch engine works in.
+    let mask_bytes =
+        unwarp_mask(&mask_bytes, req.view.as_ref(), &raw).unwrap_or(mask_bytes);
     // generative::retouch takes a mask FILE path, so stage the PNG in a temp file.
     let mask_tmp = std::env::temp_dir().join(format!(
         "autoshop_mask_{}_{}.png",
@@ -1170,7 +1289,15 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // used to kill Fill on any non-ASCII filename). The UI decodes it.
             Ok(image_with_path(buf, &out))
         }
-        Err(e) => Ok(status_response(500, &format!("retouch failed: {e}"))),
+        Err(e) => {
+            // Release the atomically claimed name when nothing real landed
+            // (0-byte placeholder) — failed runs used to consume the 999-name
+            // cap; a non-empty partial stays for diagnosis (GUI rule).
+            if std::fs::metadata(&out).is_ok_and(|m| m.len() == 0) {
+                let _ = std::fs::remove_file(&out);
+            }
+            Ok(status_response(500, &format!("retouch failed: {e}")))
+        }
     }
 }
 
@@ -1185,6 +1312,9 @@ struct HealReq {
     auto: bool,
     #[serde(default)]
     full_res: bool,
+    /// See RetouchReq.view — the mask's viewing geometry for un-warping.
+    #[serde(default)]
+    view: Option<EditRecipe>,
 }
 fn default_true() -> bool {
     true
@@ -1206,6 +1336,9 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             let b64 = m.rsplit(',').next().unwrap_or(m).trim();
             match base64::engine::general_purpose::STANDARD.decode(b64) {
                 Ok(bytes) => {
+                    // Same un-warp as api_retouch (see there).
+                    let bytes =
+                        unwarp_mask(&bytes, req.view.as_ref(), &raw).unwrap_or(bytes);
                     let t = std::env::temp_dir().join(format!(
                         "autoshop_heal_{}_{}.png",
                         std::process::id(),
@@ -1242,9 +1375,24 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             if let Some(h) = header("X-Heal-Spots", &rep.spots.to_string()) {
                 resp = resp.with_header(h);
             }
+            // The rationale can disclose a partial outcome (e.g. "AI
+            // spot-detection failed; healed the painted mask only") —
+            // dropping it reported unqualified success. Percent-encoded:
+            // header values are ASCII-only.
+            if !rep.rationale.is_empty()
+                && let Some(h) = header("X-Heal-Rationale", &percent_encode(&rep.rationale))
+            {
+                resp = resp.with_header(h);
+            }
             Ok(resp)
         }
-        Err(e) => Ok(status_response(500, &format!("heal failed: {e}"))),
+        Err(e) => {
+            // Same 0-byte claim release as api_retouch.
+            if std::fs::metadata(&out).is_ok_and(|m| m.len() == 0) {
+                let _ = std::fs::remove_file(&out);
+            }
+            Ok(status_response(500, &format!("heal failed: {e}")))
+        }
     }
 }
 
@@ -1276,8 +1424,14 @@ fn api_settings_get(state: &AppState) -> Result<ResponseBox> {
 /// Persist provider/model/key changes to the gitignored local file, then
 /// hot-reload the running config. Blank key fields are left unchanged (the GET
 /// side never reveals existing keys, so the UI sends a key only when it changes).
+/// Serializes the settings read-modify-write cycle: two concurrent POSTs
+/// each loading the same old file and changing different fields silently
+/// lost whichever save landed first.
+static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn api_settings_post(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let inc: LocalSettings = read_json(request)?;
+    let _settings = SETTINGS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mut cur = crate::config::load_local_settings();
     // Non-secret fields: take whatever the UI sent (empty ⇒ falls back to default).
     if inc.analysis_provider.is_some() {

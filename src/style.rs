@@ -246,12 +246,20 @@ impl StyleIndex {
         // Publish atomically (tmp + rename): fs::write truncates in place, so
         // a disk-full/interrupt mid-write left the previous good index as a
         // corrupt partial file — the empty-index guard above can't catch that.
-        // pid-unique tmp: a FIXED tmp name let two concurrent builders (GUI +
-        // CLI) truncate each other's staging file and publish a torn index.
-        let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
+        // pid+seq-unique tmp: a pid-only name still collided between two
+        // concurrent builders in the SAME process (the web server's threads),
+        // and a FIXED name let cross-process builders truncate each other.
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "json.tmp{}-{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::write(&tmp, serde_json::to_string(self)?)
             .with_context(|| format!("write style index {}", tmp.display()))?;
-        let _ = std::fs::remove_file(path); // pre-clear helps AV-locked Windows renames
+        // NO pre-remove: rename replaces the destination on Windows too, and
+        // deleting first meant a failed rename (or a crash between the two)
+        // had already destroyed the last good index.
         if let Err(e) = std::fs::rename(&tmp, path) {
             let _ = std::fs::remove_file(&tmp); // don't leak the staging file
             return Err(e)

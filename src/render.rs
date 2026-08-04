@@ -986,25 +986,28 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
 /// inert instead of killing the develop).
 fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>> {
     use std::sync::{Arc, Mutex, OnceLock};
-    // Keyed by (mtime, size): mtime alone misses a same-length-of-time
-    // overwrite on coarse-timestamp filesystems (the thumb cache already
-    // carries size for the same reason). `None` payload = the file at this
-    // identity FAILED to decode — cached so the warning fires once, not on
-    // every slider tick (the fn doc promises exactly that).
-    type Key = (std::time::SystemTime, u64);
+    // Keyed by Option<(mtime, size)>: mtime alone misses a same-length-of-
+    // time overwrite on coarse-timestamp filesystems (the thumb cache already
+    // carries size for the same reason). `None` payload = FAILED to decode —
+    // cached so the warning fires once, not on every slider tick. The
+    // identity itself is an Option: a MISSING file (no metadata) caches under
+    // `None` too — it used to bypass the cache entirely and re-open + re-warn
+    // every refresh; the identity flips to Some the moment the file appears,
+    // which misses and loads it.
+    type Key = Option<(std::time::SystemTime, u64)>;
     type Cache = Mutex<std::collections::HashMap<String, (Key, Option<Arc<image::GrayImage>>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let MaskGeometry::Bitmap { path } = g else { return None };
     let cache = CACHE.get_or_init(Default::default);
-    let ident: Option<Key> = std::fs::metadata(path)
+    let ident: Key = std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
-    if let Some(t) = ident {
+    {
         // No user code runs under the lock, so poisoning is not reachable —
         // recover anyway rather than turning a past panic into a new one.
         let map = cache.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((cached_t, img)) = map.get(path.as_str())
-            && *cached_t == t
+            && *cached_t == ident
         {
             return img.clone();
         }
@@ -1016,7 +1019,7 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
             None
         }
     };
-    if let Some(t) = ident {
+    {
         let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
         // A recipe holds a handful of masks — a rare hard reset beats
         // LRU bookkeeping on this hot path. Budgeted in BYTES as well
@@ -1029,7 +1032,7 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
         if map.len() > 16 || held + incoming > MASK_CACHE_BUDGET_BYTES {
             map.clear();
         }
-        map.insert(path.clone(), (t, decoded.clone()));
+        map.insert(path.clone(), (ident, decoded.clone()));
     }
     decoded
 }
@@ -1125,7 +1128,10 @@ pub fn range_weight(rm: &RangeMask, px: &[f32; 3]) -> f32 {
             // Documented: very dark pixels have no reliable chroma and get
             // weight 0 — clamping instead let a black pixel match a black
             // reference at full weight through arbitrary 1e-4/1e-4 ratios.
-            if luma601(px) < 1e-4 {
+            // The REFERENCE is held to the same rule: flooring a near-black
+            // reference and normalising it made it read as ordinary grey and
+            // select bright neutral regions at full weight.
+            if luma601(px) < 1e-4 || luma601(&[*r, *g, *b]) < 1e-4 {
                 return 0.0;
             }
             let rl = luma601(&[*r, *g, *b]).max(1e-4);

@@ -282,10 +282,11 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         // Entered when EITHER side has a real curve: gating on the user's
         // alone made an AI-only curve invisible to the metric (an identity
         // user curve is a valid comparison baseline — curve_lut of no points
-        // is the identity LUT).
+        // is the identity LUT). ANY point counts: even a one-point curve
+        // renders (pinned endpoints), so `>= 2` still hid real curves.
         let user_curve = parse_tone_curve(&xmp_text, "ToneCurvePV2012");
         let ai_curve = ai_tone_curve_points(&ai);
-        if user_curve.len() >= 2 || ai_curve.len() >= 2 {
+        if !user_curve.is_empty() || !ai_curve.is_empty() {
             let ulut = curve_lut(&user_curve);
             let alut = curve_lut(&ai_curve);
             curve_n += 1;

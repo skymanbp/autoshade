@@ -262,9 +262,25 @@ def main():
     out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
     if alpha is not None:
         out = np.dstack([out, alpha])
-    ok = cv2.imwrite(args.output, out)
-    if not ok:
-        raise SystemExit(f"cannot write image: {args.output}")
+    # tmp + os.replace: a direct imwrite could leave a NONZERO partial file
+    # on interruption — which the caller deliberately preserves as "evidence"
+    # while it also occupies the atomically claimed artifact name. The tmp
+    # keeps the real extension so cv2 picks the right encoder.
+    root, ext = os.path.splitext(args.output)
+    tmp = f"{root}.{os.getpid()}.part{ext}"
+    try:
+        ok = cv2.imwrite(tmp, out)
+        if not ok:
+            raise SystemExit(f"cannot write image: {tmp}")
+        os.replace(tmp, args.output)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                # why: best-effort cleanup on the error path — the original
+                # write exception is already propagating.
+                pass
     log(f"wrote {args.output} ({'16-bit' if is16 else '8-bit'})")
 
 

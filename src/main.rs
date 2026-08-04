@@ -352,6 +352,18 @@ fn decode_cmd(raw: &Path, out: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Same file? canonicalize when it exists (kills case/alias spellings — the
+/// dangerous overwrite case implies existence), else lexical absolute. The
+/// canonical-vs-`-o` decision must not depend on how the path was spelled.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let n = |p: &Path| {
+        std::fs::canonicalize(p)
+            .or_else(|_| std::path::absolute(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    n(a) == n(b)
+}
+
 fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style: Option<f32>) -> Result<()> {
     let cfg = Config::load();
     if let Some(o) = &out {
@@ -362,8 +374,12 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     let style = style.unwrap_or(cfg.style_strength);
     let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
-    // so one develop never splits across two folders.
-    let redirected = out.is_some();
+    // so one develop never splits across two folders. `-o` POINTING AT the
+    // canonical path IS a canonical write — out.is_some() alone let that
+    // spelling skip the backup gate and drop the XMP beside it as
+    // recipe.xmp instead of the canonical <stem>.xmp.
+    let redirected =
+        out.as_ref().is_some_and(|o| !same_path(o, &autoshop::store::recipe_target(raw)));
     // The v<N> backup gate (store.rs "any surface" contract): a programmatic
     // canonical overwrite snapshots an existing explicit save first and is
     // REFUSED when the snapshot fails — the GUI and web already do this; the
@@ -423,6 +439,9 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     if let Some(base) = recipe_path.parent() {
         autoshop::store::resolve_mask_paths(&mut recipe, base);
     }
+    // Untrusted input, like any other recipe source: an enormous finite
+    // exposure (hand-edited JSON) otherwise reaches powf unbounded.
+    recipe.clamp();
     let recipe = recipe;
     pipeline::guard_readonly(out, raw)?;
     ensure_parent(out)?;
@@ -444,16 +463,18 @@ fn auto_cmd(
     let cfg = Config::load();
     let style = style.unwrap_or(cfg.style_strength);
     let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
+    // Validate the render target BEFORE touching the saved develop: a refused
+    // -o used to be rejected only after the canonical overwrite — the command
+    // reported failure yet had already changed the save.
+    // Default to a 16-bit TIFF master (highest fidelity); pass -o foo.jpg for a
+    // smaller 8-bit file.
+    let out = out.unwrap_or_else(|| default_out(raw, "developed", "tif"));
+    pipeline::guard_readonly(&out, raw)?;
     // Same backup gate as analyze: `auto` is a programmatic canonical writer.
     if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
     write_recipe(raw, &recipe, None)?;
-
-    // Default to a 16-bit TIFF master (highest fidelity); pass -o foo.jpg for a
-    // smaller 8-bit file.
-    let out = out.unwrap_or_else(|| default_out(raw, "developed", "tif"));
-    pipeline::guard_readonly(&out, raw)?;
     ensure_parent(&out)?;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
@@ -534,15 +555,16 @@ fn match_cmd(
         // be written together.
         let cfg = Config::load();
         let seg = autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
-        let mask = autoshop::store::claim_raster(raw, "mask-zone-sky")?;
-        pipeline::guard_readonly(&mask, raw)?;
-        // Snapshot up front — this is the zoned path's programmatic-overwrite
-        // gate for the canonical recipe write below (the plain fit gates at
-        // the write site instead). The store gate is copy-based precisely so
-        // it can run ahead of the operation — store.rs doc.
+        // Snapshot BEFORE claiming the raster name — a gate refusal used to
+        // leave a freshly created empty mask-zone-sky* claim behind on every
+        // attempt. This is the zoned path's programmatic-overwrite gate for
+        // the canonical recipe write below (the plain fit gates at the write
+        // site instead); copy-based, so it can run ahead — store.rs doc.
         if let Err(e) = autoshop::store::backup_saved_develop(raw, None) {
             anyhow::bail!("refusing zoned match: backing up the saved develop failed ({e})");
         }
+        let mask = autoshop::store::claim_raster(raw, "mask-zone-sky")?;
+        pipeline::guard_readonly(&mask, raw)?;
         println!("  zoned: segmenting the sky in both images (local python sidecar) …");
         autoshop::fit_zoned::fit_recipe_zoned(&src, &tgt, &seg, &mask)
     } else {
@@ -557,6 +579,16 @@ fn match_cmd(
 
     let out = out.unwrap_or_else(|| default_out(raw, "matched", "json"));
     pipeline::guard_readonly(&out, raw)?;
+    // `-o` spelled AS the canonical path is a canonical overwrite: the
+    // canonical branch below then SKIPS (recipe_path == canonical), so its
+    // gate must run HERE, before the first write destroys the save. The
+    // zoned path already snapshotted pre-fit.
+    if !zoned
+        && same_path(&out, &autoshop::store::recipe_target(raw))
+        && let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&rep.recipe))
+    {
+        anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
+    }
     let recipe_path = write_recipe(raw, &rep.recipe, Some(out))?;
     println!("recipe -> {}", recipe_path.display());
     // ALSO write the canonical sidecar. The store's recipe.json is the ONLY
@@ -730,7 +762,12 @@ fn process_one(raw: &Path, cfg: &Config, render_master: bool) -> Result<Verdict>
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
     write_recipe(raw, &recipe, None)?;
-    write_xmp(raw, &recipe)?;
+    // The recipe write ALONE decides the saved state (cross-surface rule):
+    // failing the photo here made the batch report it failed while the
+    // resume filter — which sees recipe.json — permanently skipped it.
+    if let Err(e) = write_xmp(raw, &recipe) {
+        eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e}");
+    }
     Ok(verdict)
 }
 

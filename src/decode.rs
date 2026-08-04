@@ -120,6 +120,18 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
         .with_context(|| format!("probe image {}", path.display()))?
         .into_decoder()
         .with_context(|| format!("decode image {}", path.display()))?;
+    // into_decoder enforces the DIMENSION limits but skips decode()'s
+    // total_bytes reservation — without this check max_alloc never bounded
+    // the OUTPUT buffer (a 65536² 16-bit RGBA header passes the dimension
+    // gate yet decodes to ~32 GiB).
+    let need = decoder.total_bytes();
+    const MAX_ALLOC: u64 = 4 * 1024 * 1024 * 1024;
+    if need > MAX_ALLOC {
+        anyhow::bail!(
+            "image {} decodes to {need} bytes — over the {MAX_ALLOC}-byte ceiling",
+            path.display()
+        );
+    }
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
@@ -242,9 +254,16 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
             .or_else(|| exif.aperture_value.as_ref().map(|v| (ratio(v) / 2.0).exp2()))
             // A malformed rational (0-denominator NaN, huge Av → exp2 = ∞)
             // must not enter Meta — serde_json refuses non-finite floats
-            // (same rule as the WB coeffs below).
-            .filter(|v| v.is_finite()),
-        focal_length_mm: exif.focal_length.as_ref().map(ratio).filter(|v| v.is_finite()),
+            // (same rule as the WB coeffs below). Zero-DENOMINATOR rationals
+            // resolve to 0.0 and slip past the finite filter, but f/0 and
+            // 0 mm are physically impossible — reject those too. A 0 EV bias
+            // is legitimate (the common case) and stays.
+            .filter(|v| v.is_finite() && *v > 0.0),
+        focal_length_mm: exif
+            .focal_length
+            .as_ref()
+            .map(ratio)
+            .filter(|v| v.is_finite() && *v > 0.0),
         exposure_bias_ev: exif.exposure_bias.as_ref().map(sratio).filter(|v| v.is_finite()),
         date_time: exif.date_time_original.clone(),
         // DISPLAY-frame dims, agreeing with the oriented preview below:

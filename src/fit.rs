@@ -560,21 +560,27 @@ fn residual_channel_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]], ch: usize) -> Vec<
     let c_cdf = channel_cdf(cur, ch);
     let t_cdf = channel_cdf(tgt, ch);
     const XS: [f32; 5] = [0.0, 0.25, 0.50, 0.75, 1.0];
+    // The keep/skip decision is judged at the SOURCE DISTRIBUTION's own
+    // quantiles — |Q_t(q) − Q_c(q)| — where the pixel mass actually sits.
+    // Judging at the fixed intensity knots had two failure modes: identical
+    // low-dynamic-range channels tripped the gate on their clipped endpoint
+    // samples (emitting a non-identity curve through real pixels), and a
+    // genuine narrow-band shift (0.30-0.40 → 0.40-0.50) fell BETWEEN the
+    // knots and was suppressed entirely.
     let mut max_dev = 0.0f32;
+    for &q in &[0.1f32, 0.25, 0.5, 0.75, 0.9] {
+        let xc = quantile(&c_cdf, q);
+        let xt = quantile(&t_cdf, q);
+        max_dev = max_dev.max((xt - xc).abs());
+    }
+    if max_dev < 0.012 {
+        return Vec::new();
+    }
     let mut pts: Vec<CurvePoint> = Vec::with_capacity(XS.len());
     let (mut prev_in, mut prev_out) = (-1i32, 0i32);
     for &x in &XS {
         let f = cdf_at(&c_cdf, x);
         let y = quantile(&t_cdf, f.clamp(P_CLIP, 1.0 - P_CLIP)).clamp(0.0, 1.0);
-        // Deviation is judged only where PIXEL MASS actually sits (F interior):
-        // a low-dynamic-range channel identical on both sides used to trip the
-        // gate purely on its clipped endpoint samples (x=0 mapping to the
-        // distribution's floor) and emit a non-identity curve through real
-        // pixel values. The endpoint control points still anchor the curve
-        // whenever an interior deviation keeps it.
-        if (P_CLIP..=1.0 - P_CLIP).contains(&f) {
-            max_dev = max_dev.max((y - x).abs());
-        }
         let input = (x * 255.0).round() as i32;
         let output = ((y * 255.0).round() as i32).max(prev_out);
         if input <= prev_in {
@@ -583,11 +589,7 @@ fn residual_channel_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]], ch: usize) -> Vec<
         pts.push(CurvePoint { input: input as u8, output: output as u8 });
         (prev_in, prev_out) = (input, output);
     }
-    if max_dev < 0.012 {
-        Vec::new()
-    } else {
-        pts
-    }
+    pts
 }
 
 /// The set of 15°-hue bins FOREIGN to the target: farther than

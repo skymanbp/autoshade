@@ -224,6 +224,9 @@ impl LensProfile {
     pub fn clamp(&mut self) {
         for v in [&mut self.vignette, &mut self.distortion, &mut self.ca_r, &mut self.ca_b] {
             v.truncate(32);
+            // A non-finite knot survives f32::clamp and poisons the whole
+            // correction spline — drop it (the base_curve knot rule).
+            v.retain(|k| k.is_finite());
         }
         for g in self.vignette.iter_mut() {
             *g = g.clamp(0.25, 4.0);
@@ -288,11 +291,14 @@ impl Hsl {
         self.hue.iter().chain(&self.saturation).chain(&self.luminance).all(|&v| v == 0.0)
     }
 
-    /// Clamp every band to the documented -100..=100 range.
+    /// Clamp every band to the documented -100..=100 range. Non-finite
+    /// (foreign XMP text like HueAdjustmentRed="NaN") collapses to neutral 0:
+    /// f32::clamp KEEPS NaN, which would poison the render arithmetic and
+    /// later serialise as null into an unreadable recipe.
     pub fn clamp(&mut self) {
         for arr in [&mut self.hue, &mut self.saturation, &mut self.luminance] {
             for v in arr.iter_mut() {
-                *v = v.clamp(-100.0, 100.0);
+                *v = if v.is_finite() { v.clamp(-100.0, 100.0) } else { 0.0 };
             }
         }
     }
@@ -352,17 +358,20 @@ impl ColorGrade {
     /// Clamp every wheel to its documented range (hue 0..360, sat 0..100, lum/balance
     /// -100..100, blending 0..100).
     pub fn clamp(&mut self) {
+        // Non-finite → the field's NEUTRAL (blending's is 50): clamp and
+        // rem_euclid both pass NaN straight through (see Hsl::clamp).
+        let fin = |v: f32, neutral: f32| if v.is_finite() { v } else { neutral };
         for h in [&mut self.shadow_hue, &mut self.midtone_hue, &mut self.highlight_hue, &mut self.global_hue] {
-            *h = h.rem_euclid(360.0);
+            *h = fin(*h, 0.0).rem_euclid(360.0);
         }
         for s in [&mut self.shadow_sat, &mut self.midtone_sat, &mut self.highlight_sat, &mut self.global_sat] {
-            *s = s.clamp(0.0, 100.0);
+            *s = fin(*s, 0.0).clamp(0.0, 100.0);
         }
         for l in [&mut self.shadow_lum, &mut self.midtone_lum, &mut self.highlight_lum, &mut self.global_lum] {
-            *l = l.clamp(-100.0, 100.0);
+            *l = fin(*l, 0.0).clamp(-100.0, 100.0);
         }
-        self.blending = self.blending.clamp(0.0, 100.0);
-        self.balance = self.balance.clamp(-100.0, 100.0);
+        self.blending = fin(self.blending, 50.0).clamp(0.0, 100.0);
+        self.balance = fin(self.balance, 0.0).clamp(-100.0, 100.0);
     }
 }
 
@@ -628,6 +637,20 @@ impl EditRecipe {
                 }
             }
         }
+        // Mask GEOMETRY first: a non-finite coordinate (hand-edited or
+        // foreign input) makes mask_weight return NaN, which defeats the
+        // weight early-out and paints corrupt pixels — drop the whole mask,
+        // the same policy as a NaN crop (an unusable geometry has no
+        // sensible neutral to collapse to).
+        self.masks.retain(|m| match &m.mask {
+            MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+                [zero_x, zero_y, full_x, full_y].iter().all(|v| v.is_finite())
+            }
+            MaskGeometry::Radial { top, left, bottom, right, feather, roundness, .. } => {
+                [top, left, bottom, right, feather, roundness].iter().all(|v| v.is_finite())
+            }
+            MaskGeometry::Bitmap { .. } => true,
+        });
         // Clamp each local adjustment to the same UI ranges as the globals.
         for m in self.masks.iter_mut() {
             // Same finite-or-neutral closure as the globals: a NaN amount

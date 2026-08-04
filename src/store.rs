@@ -429,7 +429,14 @@ pub fn backup_saved_develop(
     let rj = recipe_target(src);
     let text = match std::fs::read_to_string(&rj) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // No recipe.json — but an XMP-ONLY develop (a Lightroom-authored
+            // sidecar, or a pre-recipe-era save) is STILL a save every reader
+            // honours (has_develop, the GUI/web restore fallbacks), and the
+            // programmatic write this call gates is paired with an XMP write
+            // that would destroy it. Snapshot it too.
+            return backup_xmp_only(src);
+        }
         // Unreadable ≠ absent (lock/permissions): refusing beats overwriting
         // a save we could not even look at.
         Err(e) => return Err(e),
@@ -499,6 +506,59 @@ pub fn backup_saved_develop(
             }
         }
     }
+    Ok(Some(n))
+}
+
+/// The XMP-only half of [`backup_saved_develop`]: no recipe.json, but a
+/// central (or not-yet-migrated legacy) XMP with real edits exists. Two
+/// artifacts per version: `v<n>.<stem>.xmp` — the LOSSLESS bytes — published
+/// first, then `v<n>.recipe.json` derived via `xmp_to_recipe` (clamped; XMP
+/// carries no bitmap masks, so no rasters to freeze) — published LAST because
+/// `list_versions` scans only `v<N>.recipe.json`: a crash between the two
+/// leaves no half-visible version. A neutral/foreign sidecar is not a save
+/// (the NoopOnly rule) and needs no snapshot.
+fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
+    let mut found: Option<String> = None;
+    for xp in [xmp_target(src), legacy_xmp(src)] {
+        match std::fs::read_to_string(&xp) {
+            Ok(t) => {
+                found = Some(t);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // Same refusal as the recipe path: unreadable ≠ absent.
+            Err(e) => return Err(e),
+        }
+    }
+    let Some(text) = found else { return Ok(None) };
+    let mut derived = crate::xmp::xmp_to_recipe(&text);
+    derived.clamp();
+    if derived.is_noop() {
+        return Ok(None);
+    }
+    let dev = develop_dir(src);
+    std::fs::create_dir_all(&dev)?;
+    let last = list_versions(src).last().copied();
+    if last == Some(u32::MAX) {
+        return Err(std::io::Error::other(
+            "version namespace exhausted (a v4294967295 snapshot exists)",
+        ));
+    }
+    let n = last.unwrap_or(0).saturating_add(1);
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = || TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let publish = |dst: &Path, bytes: &[u8], seq: u64| -> std::io::Result<()> {
+        let tmp = dst.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
+        if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dst)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        Ok(())
+    };
+    let stem = crate::pipeline::stem(src);
+    publish(&dev.join(format!("v{n}.{stem}.xmp")), text.as_bytes(), seq())?;
+    let json = serde_json::to_string_pretty(&derived).map_err(std::io::Error::other)?;
+    publish(&version_target(src, n), json.as_bytes(), seq())?;
     Ok(Some(n))
 }
 

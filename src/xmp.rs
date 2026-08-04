@@ -416,12 +416,17 @@ pub fn recipe_to_xmp(r: &EditRecipe) -> String {
 // reader is the recovery path when only an XMP exists.
 
 /// Autoshop provenance: an ATTRIBUTE-shaped `x:xmptk = "Autoshop"` /
-/// `x:xmptk='Autoshop'` match (either quote style, optional whitespace around
-/// `=`). The old raw-substring test both missed semantically identical XML
-/// spellings and matched the literal inside a comment — and this boolean
-/// decides whether an As-Shot tint imports as a real edit.
+/// `x:xmptk='Autoshop'` match (either quote style, optional whitespace
+/// around `=`), searched ONLY inside the `<x:xmpmeta …>` start tag — where
+/// the attribute actually lives. The old raw-substring test both missed
+/// semantically identical XML spellings and matched the literal anywhere in
+/// the document (a foreign sidecar's comment could claim our provenance) —
+/// and this boolean decides whether an As-Shot tint imports as a real edit.
 fn is_autoshop_sidecar(xmp: &str) -> bool {
-    let mut rest = xmp;
+    let Some(tag_start) = xmp.find("<x:xmpmeta") else { return false };
+    let tag = &xmp[tag_start..];
+    let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+    let mut rest = tag;
     while let Some(i) = rest.find("x:xmptk") {
         let after = rest[i + "x:xmptk".len()..].trim_start();
         if let Some(v) = after.strip_prefix('=') {
@@ -551,13 +556,14 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         //    XMP round-trip back as a 100% feather.
         // (A legacy sidecar holding EXACTLY 1.0 prints as "1" and now reads
         //  as 1% — the current writer's round-trip wins that corner.)
+        // Tested on the parsed VALUE (fractional ⇒ legacy 0..1), not the
+        // text: "5e-1" carries no '.' yet is 0.5 — a text-shape test sent
+        // it through /100.
         let feather_raw = crs_f32(g, "Feather")?;
-        let feather = if feather_raw > 1.0 {
+        let feather = if feather_raw > 1.0 || feather_raw == feather_raw.trunc() {
             feather_raw / 100.0
-        } else if crs_str(g, "Feather").is_some_and(|s| s.contains('.')) {
-            feather_raw
         } else {
-            feather_raw / 100.0
+            feather_raw
         };
         (
             MaskGeometry::Radial {

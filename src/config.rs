@@ -68,15 +68,34 @@ pub fn save_local_settings(s: &LocalSettings) -> std::io::Result<PathBuf> {
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = p.with_extension(format!("json.tmp{}", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_string_pretty(s).unwrap_or_default())?;
+    // pid+seq tmp: a pid-only name collided between concurrent saves in the
+    // same process (the web server serializes via its own lock, but this fn
+    // is shared by GUI and CLI too — cheap defence in depth).
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = p.with_extension(format!(
+        "json.tmp{}-{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     // The file carries API keys: keep it out of other local users' reach.
-    // Windows AppData is per-user already; on Unix the umask can default the
-    // new file to world-readable 0644.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    // Windows AppData is per-user already; on Unix, CREATE the file 0600 —
+    // a chmod after the write left a world-readable window (and a silently
+    // ignored chmod failure left it that way for good).
+    let write_tmp = || -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(serde_json::to_string_pretty(s).unwrap_or_default().as_bytes())
+    };
+    if let Err(e) = write_tmp() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     if let Err(e) = std::fs::rename(&tmp, &p) {
         let _ = std::fs::remove_file(&tmp);

@@ -152,7 +152,21 @@ pub fn denoise_active(
         let _ = std::fs::remove_file(&tmp);
         res
     } else {
-        denoise_file(opts, input, out)
+        // Baked sources go through load_image, NOT straight to the sidecar:
+        // cv2 ignores EXIF orientation (and imwrite drops the tag), so a
+        // portrait phone JPEG came back as a permanently sideways master.
+        // load_image applies the orientation; the working copy also honours
+        // the same full-or-≤2048 contract as the RAW arm.
+        let img = crate::decode::load_image(input)?;
+        let img = if full_res { img } else { img.thumbnail(2048, 2048) };
+        let tmp = temp_path("autoshop_denoise_base");
+        if let Err(e) = img.save(&tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e).with_context(|| format!("write denoise input {}", tmp.display()));
+        }
+        let res = denoise_file(opts, &tmp, out);
+        let _ = std::fs::remove_file(&tmp);
+        res
     }
 }
 

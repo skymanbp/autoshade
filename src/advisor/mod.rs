@@ -249,6 +249,7 @@ pub(crate) fn for_each_sse_json(
                 Ok(std::ops::ControlFlow::Break(()))
             )
         };
+    let mut first_seg = true;
     loop {
         seg.clear();
         let n = rd.read_until(b'\n', &mut seg)?;
@@ -256,6 +257,12 @@ pub(crate) fn for_each_sse_json(
             // EOF flushes an unterminated final event.
             flush_event(&mut event_data, &mut on_json);
             return Ok(());
+        }
+        // The event-stream spec permits ONE leading UTF-8 BOM — without
+        // stripping it the first line reads "\u{feff}data: …" and misses the
+        // data: prefix, silently dropping the stream's first event.
+        if std::mem::take(&mut first_seg) && seg.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            seg.drain(..3);
         }
         // The SSE spec permits CR, LF, or CRLF line terminators. read_until
         // frames LF and CRLF; CR-only lines arrive EMBEDDED in one segment
@@ -516,7 +523,7 @@ fn assemble_sse(
             // mid-generation) would hand partial JSON downstream — the same
             // strictness the Responses arm gets from response.completed.
             let mut finished = false;
-            for_each_sse_json(r, CAP, |v| {
+            let read = for_each_sse_json(r, CAP, |v| {
                 if v.get("error").is_some() {
                     failure = Some(v.to_string());
                     return Break(());
@@ -556,8 +563,18 @@ fn assemble_sse(
                     }
                 }
                 Continue(())
-            })
-            .map_err(|e| AdvisorError::Transport(format!("read AI stream: {e}")))?;
+            });
+            if let Err(e) = read {
+                // A read error AFTER the terminal finish_reason (the stream
+                // reset between the stop chunk and EOF/[DONE]) is a COMPLETED
+                // response: propagating it as transport let post_ai_json
+                // repost — and re-bill — the finished request. (The Responses
+                // arm can't hit this: response.completed Breaks out of the
+                // read loop immediately.)
+                if !(finished && failure.is_none() && !text.is_empty()) {
+                    return Err(AdvisorError::Transport(format!("read AI stream: {e}")));
+                }
+            }
             if let Some(f) = failure {
                 return Err(AdvisorError::Transport(format!("AI stream error: {f}")));
             }

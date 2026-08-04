@@ -151,6 +151,13 @@ pub fn reimagine(
         sizes.try_first(),
     );
     let (result, used) = call_images_edit(cfg, &png, None, prompt, fidelity, &sizes, quality)?;
+    if cancelled() {
+        // The epoch already discards the UI-side result — writing the
+        // artifact anyway left a persistent ./out master for an operation
+        // the user abandoned (and kept its claimed name occupied; the
+        // caller's 0-byte probe releases it once we bail here).
+        return Err(anyhow!("cancelled by user"));
+    }
     pipeline::ensure_parent(out)?;
     std::fs::write(out, result).with_context(|| format!("write {}", out.display()))?;
     println!("generative -> {} ({used}, generative re-render)", out.display());
@@ -539,9 +546,18 @@ fn call_images_edit(
                         // bypass the one-time retry via `?`. Only the
                         // TRANSPORT-flavoured contexts retry: a model failure
                         // event or a user cancel must not re-post (re-bills).
+                        // Attribution reads the OUTERMOST context only
+                        // (Display, not the {:#} chain): a provider MESSAGE
+                        // deeper in the chain containing these phrases used
+                        // to classify a model failure as transport and
+                        // re-bill it. Transport reads surface as exactly
+                        // "read image stream" / "parse image API response";
+                        // model failures top out as "image stream error: …"
+                        // and cancels as "cancelled by user".
                         let s = format!("{e:#}");
-                        let transportish = s.contains("read image stream")
-                            || s.contains("parse image API response");
+                        let top = e.to_string();
+                        let transportish = top.starts_with("read image stream")
+                            || top.starts_with("parse image API response");
                         if transportish
                             && !transport_retried
                             && started.elapsed().as_secs()
