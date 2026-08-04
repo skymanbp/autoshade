@@ -266,6 +266,30 @@ fn handle(mut request: Request, state: &AppState) -> Result<()> {
     request.respond(reply).map_err(Into::into)
 }
 
+/// Full-resolution work runs ONE AT A TIME.
+///
+/// The request gate in `serve` bounds how many requests are in flight, not
+/// how much memory they use: a single 61-megapixel export peaks near 1.7 GiB
+/// (decoded sensor + f32 develop buffer + the packed 16-bit frame + the lens
+/// geometry destination), so eight of them admitted together reach roughly
+/// 13.6 GiB before caches, request bodies and encoders — an out-of-memory
+/// kill on any ordinary machine. Preview-sized work (list, thumbnails,
+/// /api/develop at PREVIEW_EDGE) stays parallel; only the full-resolution
+/// RENDER paths queue here. One at a time is also what the user is waiting
+/// for anyway: they cannot look at two exports at once, and finishing the
+/// first sooner beats thrashing through both.
+///
+/// Deliberately NOT taken by /api/retouch and /api/heal. Their wall clock is
+/// dominated by a generative API call that can run for MINUTES, and holding
+/// this across the network would block every export for that entire time to
+/// solve a memory problem that exists only during their brief local
+/// compositing phase. Scoping a permit to that phase is the open follow-up;
+/// their peak is recorded with the other engine buffer-lifetime items.
+///
+/// Lock ORDER: taken at handler entry, before SAVE_LOCK. No path takes
+/// SAVE_LOCK first and then this, so the two cannot deadlock.
+static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Serializes the backup-gate + sidecar writes WITHIN this process: two
 /// threaded requests saving the same photo could interleave between
 /// `backup_saved_develop` and `write_recipe`, overwriting a save that never
@@ -1230,6 +1254,9 @@ fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
 
 /// Export to ./out (the library stays read-only). Returns the written path.
 fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    // Full-resolution work — see HEAVY. Held for the whole handler.
+    let _heavy = HEAVY.lock().unwrap_or_else(|p| p.into_inner());
+
     let mut req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     req.recipe.clamp(); // untrusted network input — see api_develop
@@ -1266,6 +1293,9 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 /// Render and stream the image back as a download (browser "Save As"), without
 /// leaving a copy in ./out. Renders to a temp file, then streams + deletes it.
 fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    // Full-resolution work — see HEAVY. Held for the whole handler.
+    let _heavy = HEAVY.lock().unwrap_or_else(|p| p.into_inner());
+
     let mut req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     req.recipe.clamp(); // untrusted network input — see api_develop
@@ -1419,6 +1449,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 /// writes the master to ./out. We return a resized JPEG of the result for inline
 /// display, with the saved master path in `X-Output-Path`. Needs OPENAI_API_KEY.
 fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+
     let req: RetouchReq = read_json(request)?;
     let raw = match state.at(req.id) {
         Some(r) => r,
@@ -1514,6 +1545,7 @@ fn default_true() -> bool {
 /// SURROUNDING REAL pixels (no generation). Saves a pixel master to ./out and
 /// returns a JPEG of the result for inline display, path in `X-Output-Path`.
 fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+
     let req: HealReq = read_json(request)?;
     let raw = match state.at(req.id) {
         Some(r) => r,
