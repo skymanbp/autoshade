@@ -49,6 +49,10 @@ const BOUNDARY: &str = "----autoshopBoundaryX7MA4YWxkTrZu0gW";
 /// (see `advisor::post_with_timeout`).
 const IMAGES_EDIT_TIMEOUT_SECS: u64 = 600;
 
+/// Retry an image edit only when the transport died this fast — see the
+/// retry site for why this is far below the advisor's equivalent.
+const IMAGE_TRANSPORT_RETRY_UNDER_SECS: u64 = 3;
+
 /// Inactivity (stall) deadline for a STREAMING `images/edits` POST — the
 /// primary path. The request asks for `partial_images` progress frames, so a
 /// healthy server proves liveness at roughly each generation quarter and the
@@ -623,9 +627,18 @@ fn call_images_edit(
             Err(ureq::Error::Transport(t)) => {
                 let elapsed = started.elapsed().as_secs();
                 // A fast transport failure is a connection blip, not
-                // generation time — retry once before surfacing (same policy
-                // as advisor::post_ai_json, same real-world failure mode).
-                if !transport_retried && elapsed < crate::advisor::TRANSPORT_RETRY_UNDER_SECS {
+                // generation time — retry once before surfacing (same
+                // real-world failure mode as advisor::post_ai_json).
+                //
+                // The window is MUCH tighter here than the advisor's 30 s:
+                // an image edit is NOT idempotent and is billed per
+                // generation. A socket that dies 25 s in was almost
+                // certainly accepted, with the provider already generating
+                // (and billing) — reposting then buys a second charge and a
+                // second image. Only a failure inside the connect/TLS/send
+                // phase, before the provider could have started work, is
+                // safe to repeat blindly.
+                if !transport_retried && elapsed < IMAGE_TRANSPORT_RETRY_UNDER_SECS {
                     transport_retried = true;
                     eprintln!(
                         "  note: transport failed after {elapsed}s ({t}) — retrying once \

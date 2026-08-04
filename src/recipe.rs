@@ -583,6 +583,35 @@ impl EditRecipe {
         // collapse to the neutral 0.0 instead, the same corrupt-component-
         // goes-inert rule the crop and range-mask guards below follow.
         let c = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0 };
+        // SIZE limits, not just value limits. Every field below is bounded,
+        // but a recipe is also a set of VECTORS, and a crafted one (hand-
+        // edited JSON, a hostile POST to the local web server) could carry
+        // thousands of masks or curve points: each active mask costs a
+        // full-frame pass and each curve is cloned + sorted per render, so
+        // the render thread can be monopolised without a single
+        // out-of-range number. The caps sit far above any real edit (the GUI
+        // offers a handful of masks; a tone curve has at most a few dozen
+        // points), so they can only ever truncate abuse.
+        const MAX_MASKS: usize = 64;
+        const MAX_CURVE_POINTS: usize = 256;
+        const MAX_BASE_KNOTS: usize = 256;
+        self.masks.truncate(MAX_MASKS);
+        self.base_curve.truncate(MAX_BASE_KNOTS);
+        for curve in [
+            &mut self.tone_curve,
+            &mut self.red_curve,
+            &mut self.green_curve,
+            &mut self.blue_curve,
+        ] {
+            curve.truncate(MAX_CURVE_POINTS);
+        }
+        // Base-curve knots are (x, y) in 0..1 and are composed UNDER the user
+        // curve — a non-finite or wild pair renders as a black/blown band.
+        self.base_curve.retain(|k| k[0].is_finite() && k[1].is_finite());
+        for k in self.base_curve.iter_mut() {
+            k[0] = k[0].clamp(0.0, 1.0);
+            k[1] = k[1].clamp(0.0, 1.0);
+        }
         self.exposure_ev = c(self.exposure_ev, -5.0, 5.0);
         self.contrast = c(self.contrast, -100.0, 100.0);
         self.highlights = c(self.highlights, -100.0, 100.0);
@@ -665,6 +694,33 @@ impl EditRecipe {
             }
             MaskGeometry::Bitmap { .. } => true,
         });
+        // Finite is NOT sufficient. Mask coordinates are NORMALISED (0..1
+        // over the frame, a little outside for handles dragged past the
+        // edge), and the engine squares differences: a legal-looking 1e30
+        // overflows to Inf, Inf/Inf yields NaN weights, and those pixels
+        // quantise to black. Bound the magnitude to the range the UI can
+        // actually produce.
+        const COORD_LIMIT: f32 = 8.0;
+        for m in self.masks.iter_mut() {
+            match &mut m.mask {
+                MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+                    for v in [zero_x, zero_y, full_x, full_y] {
+                        *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
+                    }
+                }
+                MaskGeometry::Radial { top, left, bottom, right, feather, roundness, .. } => {
+                    for v in [top, left, bottom, right] {
+                        *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
+                    }
+                    // feather/roundness are 0..1 fractions everywhere that
+                    // reads them (render, XMP); a stored 2.0 was a value the
+                    // engine silently treated as 1.0 but persistence kept.
+                    *feather = feather.clamp(0.0, 1.0);
+                    *roundness = roundness.clamp(0.0, 1.0);
+                }
+                MaskGeometry::Bitmap { .. } => {}
+            }
+        }
         // Clamp each local adjustment to the same UI ranges as the globals.
         for m in self.masks.iter_mut() {
             // Same finite-or-neutral closure as the globals: a NaN amount
@@ -801,6 +857,39 @@ impl EditRecipe {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clamp_bounds_sizes_and_coordinates_not_just_values() {
+        use super::*;
+        // A crafted recipe: absurd counts and finite-but-overflowing coords.
+        let mut r = EditRecipe {
+            masks: (0..500)
+                .map(|_| LocalAdjustment {
+                    mask: MaskGeometry::Linear {
+                        zero_x: 1e30,
+                        zero_y: -1e30,
+                        full_x: 1e30,
+                        full_y: 0.0,
+                    },
+                    ..Default::default()
+                })
+                .collect(),
+            tone_curve: (0..5000)
+                .map(|i| CurvePoint { input: (i % 256) as u8, output: 0 })
+                .collect(),
+            base_curve: (0..5000).map(|_| [5.0f32, -3.0]).collect(),
+            ..Default::default()
+        };
+        r.clamp();
+        assert!(r.masks.len() <= 64, "mask count uncapped: {}", r.masks.len());
+        assert!(r.tone_curve.len() <= 256, "curve uncapped: {}", r.tone_curve.len());
+        assert!(r.base_curve.len() <= 256, "base curve uncapped: {}", r.base_curve.len());
+        for k in &r.base_curve {
+            assert!((0.0..=1.0).contains(&k[0]) && (0.0..=1.0).contains(&k[1]), "knot {k:?}");
+        }
+        let MaskGeometry::Linear { zero_x, .. } = &r.masks[0].mask else { panic!() };
+        assert!(zero_x.abs() <= 8.0, "coordinate magnitude uncapped: {zero_x}");
+    }
+
     use super::*;
 
     #[test]

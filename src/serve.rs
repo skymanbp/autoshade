@@ -1191,6 +1191,11 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     // Store recipes reference rasters by bare name (api_recipe serves them
     // verbatim) — anchor them to the photo's develop dir before rendering.
+    // UNTRUSTED input, like any hand-edited recipe: clamp before it reaches
+    // the engine (the CLI's apply and the GUI both do this; the web path
+    // did not, so `exposure_ev: 1e30` went straight into powf and a
+    // thousand-mask body monopolised the render thread).
+    req.recipe.clamp();
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Same decode source as `api_export` below — see `develop_base`.
     let src = render_source(&raw, &mut req.recipe);
@@ -1227,6 +1232,7 @@ fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
 fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let mut req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
+    req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     let src = render_source(&raw, &mut req.recipe);
     let out = pipeline::default_out(&raw, "developed", fmt_ext(&req));
@@ -1262,6 +1268,7 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let mut req: DevelopReq = read_json(request)?;
     let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
+    req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     let src = render_source(&raw, &mut req.recipe);
     // Config SNAPSHOT — see api_export.
