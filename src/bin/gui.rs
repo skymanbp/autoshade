@@ -804,6 +804,12 @@ struct AutoshopApp {
     // remembers its own base + recipe), so an AI develop no longer "reverts"
     // when you touch a slider — you're editing that variant's own base.
     variants: Vec<Variant>,
+    /// The user answered "Discard & quit". The close guard must then stop
+    /// re-testing unsaved state: background variants cannot be rebaselined
+    /// (they have nowhere to be saved — that is why the guard exists), so
+    /// without this the guard cancelled the close and re-raised the dialog
+    /// every frame and the app could not be quit at all.
+    discard_requested: bool,
     active: usize,                         // index into `variants` (always valid once a photo is open)
     keep_recipe: bool,                     // one-shot: next Opened keeps recipe/variants (preview-res re-decode)
     open_in_flight: bool,                  // mid-open window: src_path re-pointed, Opened not yet processed
@@ -1090,6 +1096,7 @@ impl Default for AutoshopApp {
             gen_epoch: 0,
             gen_cancel: None,
             variants: Vec::new(),
+            discard_requested: false,
             active: 0,
             keep_recipe: false,
             open_in_flight: false,
@@ -2789,6 +2796,11 @@ impl AutoshopApp {
         } else if discard_quit {
             self.nav_stash.clear();
             self.saved_recipe = self.recipe.clone();
+            // The answer to the guard's question, recorded: these two lines
+            // clean the ACTIVE canvas, but a background variant's edits have
+            // nowhere to be saved, so nothing can make them "clean" — only
+            // the user's decision can end the question.
+            self.discard_requested = true;
             self.confirm_quit = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if cancel || !open {
@@ -9081,9 +9093,10 @@ impl eframe::App for AutoshopApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 let t = tr(self.lang, "An operation is still running — wait for it to finish, then close").to_string();
                 self.toast(ToastKind::Error, t);
-            } else if unsaved_open
-                || !self.nav_stash.is_empty()
-                || self.inactive_dirty_variants() > 0
+            } else if !self.discard_requested
+                && (unsaved_open
+                    || !self.nav_stash.is_empty()
+                    || self.inactive_dirty_variants() > 0)
             {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm_quit = true;
