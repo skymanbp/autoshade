@@ -3538,12 +3538,11 @@ mod tests {
         render_to_file(&src, &r, &out, None, None).unwrap();
         assert!(out.exists());
 
-        // THE ATOMICITY PROPERTY, not just its absence of litter: a FAILED
-        // export must leave the previous deliverable untouched. Everything
-        // above would pass just as well if the encoder wrote straight to the
-        // destination, so without this the test named a guarantee it never
-        // exercised. An unknown extension fails inside the generic
-        // `img.save` arm, after staging and before publishing.
+        // A PRE-STAGING failure: an unknown extension is rejected at format
+        // resolution before any file is created — the target must survive
+        // and no staging litter may appear. (The old comment claimed this
+        // failed "after staging"; it never did — the REAL post-staging case
+        // follows below, R12.)
         let keeper = dir.join("keeper.unknownext");
         std::fs::write(&keeper, b"a previous deliverable").unwrap();
         let err = render_to_file(&src, &r, &keeper, None, None);
@@ -3560,6 +3559,41 @@ mod tests {
             .filter(|n| n.contains(".tmp."))
             .collect();
         assert!(residue.is_empty(), "a failed export must clean its staging file: {residue:?}");
+
+        // THE ATOMICITY PROPERTY, exercised after staging actually began: a
+        // read-only target makes the PUBLISH rename fail on Windows, so the
+        // encode has succeeded and the staging file exists at the moment of
+        // failure — the previous deliverable must survive byte-for-byte and
+        // the staging file must be cleaned (R12; the old failure aborted
+        // before any file handle was opened, so atomicity was never tested).
+        #[cfg(windows)]
+        {
+            let ro = dir.join("keeper.png");
+            std::fs::write(&ro, b"a previous deliverable").unwrap();
+            let mut perm = std::fs::metadata(&ro).unwrap().permissions();
+            perm.set_readonly(true);
+            std::fs::set_permissions(&ro, perm.clone()).unwrap();
+            let err = render_to_file(&src, &r, &ro, None, None);
+            assert!(err.is_err(), "publishing over a read-only file must fail");
+            assert_eq!(
+                std::fs::read(&ro).unwrap(),
+                b"a previous deliverable",
+                "a failed PUBLISH must leave the previous deliverable untouched"
+            );
+            let residue: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.contains(".tmp."))
+                .collect();
+            assert!(residue.is_empty(), "publish failure must clean staging: {residue:?}");
+            // This whole block is #[cfg(windows)], so the lint's "world
+            // writable on Unix" concern cannot apply — we are only restoring
+            // writability so the temp dir can be removed.
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            std::fs::set_permissions(&ro, perm).unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3642,6 +3676,31 @@ mod tests {
             [0.5f32, 0.5, 0.5],
             "blending=100: the shadow wheel must not reach the midtone"
         );
+        // AMPLITUDE INVARIANCE on a fully-owned deep shadow: blending shapes
+        // the region SPLIT only, so a pixel every split assigns to the
+        // shadow wheel must grade the same at 0 / 50 / 100. An engine that
+        // additionally scaled the regional weights by any blending factor
+        // passes the two probes above (the deep probe only ran at 0, the
+        // midpoint at 100) but fails this sweep (R12). l = 0.02 sits below
+        // every sh_start; the b=100 ramp contributes only ~5e-3 of weight
+        // there, far under the mutation's 2x amplitude swing.
+        let mut sweep = Vec::new();
+        for b in [0.0f32, 50.0, 100.0] {
+            let mut px = [[0.02f32, 0.02, 0.02]];
+            apply_color_grade(
+                &mut px,
+                &ColorGrade { blending: b, shadow_sat: 100.0, shadow_hue: 210.0, ..Default::default() },
+            );
+            sweep.push(px[0]);
+        }
+        for pair in sweep.windows(2) {
+            for (a, b) in pair[0].iter().zip(&pair[1]) {
+                assert!(
+                    (a - b).abs() < 5e-3,
+                    "blending changed the shadow AMPLITUDE: {sweep:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4309,6 +4368,15 @@ mod tests {
             (corner - expect).abs() < 2e-3,
             "corner must follow the linear-light gain: {corner} vs {expect}"
         );
+        // Grey in, grey out: the gain applies to all three channels — every
+        // assertion above reads channel 0 only, so a red-only regression of
+        // the per-channel loop passed with a strong colour cast (R12).
+        for p in [&up[0], &up[2 * w + 2]] {
+            assert!(
+                (p[0] - p[1]).abs() < 1e-6 && (p[1] - p[2]).abs() < 1e-6,
+                "vignette must stay neutral on grey: {p:?}"
+            );
+        }
 
         let mut down = flat.clone();
         apply_vignette(&mut down, w, h, -60.0, 50.0);
@@ -4372,27 +4440,37 @@ mod tests {
             render_to_file(edge_p, &neutral, std::path::Path::new(name), None, Some(&opts)).unwrap();
             let px = image::open(name).unwrap().to_rgb8();
             let (w, h) = px.dimensions();
-            let energy: u64 = (0..h)
-                .flat_map(|y| (1..w).map(move |x| (x, y)))
-                .map(|(x, y)| (px[(x, y)][0] as i64 - px[(x - 1, y)][0] as i64).unsigned_abs())
-                .sum();
+            // Per channel: a red-only sharpen raised the summed energy too,
+            // so each channel gets its own comparison (R12).
+            let mut energy = [0u64; 3];
+            for y in 0..h {
+                for x in 1..w {
+                    for (c, e) in energy.iter_mut().enumerate() {
+                        *e += (px[(x, y)][c] as i64 - px[(x - 1, y)][c] as i64).unsigned_abs();
+                    }
+                }
+            }
             ((w, h), energy)
         };
         let (dim_flat, e_flat) = export(0.0, "out/_export_sharp0.png");
         let (dim_sharp, e_sharp) = export(100.0, "out/_export_sharp100.png");
         assert_eq!(dim_flat, dim_sharp, "only the sharpen knob differs");
-        assert!(
-            e_sharp > e_flat,
-            "output sharpening must raise edge energy: {e_sharp} vs {e_flat}"
-        );
+        for c in 0..3 {
+            assert!(
+                e_sharp[c] > e_flat[c],
+                "output sharpening must raise edge energy on channel {c}: {e_sharp:?} vs {e_flat:?}"
+            );
+        }
     }
 
     #[test]
     fn kelvin_to_rgb_warm_is_redder_than_cool() {
         let warm = kelvin_to_rgb(3000.0);
         let cool = kelvin_to_rgb(9000.0);
-        assert!(warm[0] >= cool[0], "warm red {} >= cool red {}", warm[0], cool[0]);
-        assert!(warm[2] <= cool[2], "warm blue {} <= cool blue {}", warm[2], cool[2]);
+        // STRICT: a kelvin_to_rgb that ignored its argument satisfied the
+        // old >= / <= forms (R12).
+        assert!(warm[0] > cool[0], "warm red {} > cool red {}", warm[0], cool[0]);
+        assert!(warm[2] < cool[2], "warm blue {} < cool blue {}", warm[2], cool[2]);
     }
 
     #[test]
@@ -4537,10 +4615,20 @@ mod tests {
 
     #[test]
     fn straighten_rotation_geometry_and_direction() {
-        // (a) 0° is the identity (dims + pixels untouched).
-        let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(40, 30, image::Rgb([200, 10, 10])));
+        // (a) 0° is the identity (dims + pixels untouched). A non-uniform
+        // frame and a byte comparison: the old uniform frame + dims-only
+        // check passed even if the zero-angle branch returned cleared or
+        // arbitrary pixels (R12).
+        let img = DynamicImage::ImageRgb8(RgbImage::from_fn(40, 30, |x, y| {
+            image::Rgb([(x * 6) as u8, (y * 8) as u8, ((x + y) % 256) as u8])
+        }));
         let same = rotate_straighten(&img, 0.0);
         assert_eq!((same.width(), same.height()), (40, 30));
+        assert_eq!(
+            same.to_rgb8().as_raw(),
+            img.to_rgb8().as_raw(),
+            "0° must return the pixels untouched"
+        );
 
         // (b) inscribed_dims: identity at 0°, symmetric in ±θ, strictly smaller
         // than the frame for any real tilt.
@@ -4983,10 +5071,13 @@ mod tests {
                 .flat_map(|(p, q)| (0..3).map(move |c| (p[c] - q[c]).abs()))
                 .fold(0.0f32, f32::max)
         };
-        for o in [Orientation::Normal, Orientation::Transpose] {
-            let d = diff(o);
-            assert!(d <= 1e-6, "{o:?} must commute exactly, diff {d}");
-        }
+        // Normal is excluded: orient_f32 is a passthrough there, so both
+        // sides of the comparison would be the SAME call on equal inputs —
+        // an assertion that cannot fail (R12). Transpose is the real
+        // content: a pure axis swap that must commute with the binning, and
+        // the arm that catches a quantizing flip (~0.5 here).
+        let d = diff(Orientation::Transpose);
+        assert!(d <= 1e-6, "Transpose must commute exactly, diff {d}");
         for o in [
             Orientation::HorizontalFlip,
             Orientation::VerticalFlip,
@@ -5093,6 +5184,23 @@ mod tests {
         let t = develop_preview(&grey, &tinted).to_rgb8();
         let q = t.get_pixel(0, 0);
         assert!(q[1] < 126, "positive (magenta) tint must cut green: {q:?}");
+
+        // EQUALITY with the shared stage, not just the right lean: a
+        // preview-specific WB with the wrong anchor or magnitude satisfied
+        // both directions above while preview and export visibly disagreed
+        // (R12). With a neutral develop the preview is exactly
+        // to_u8(apply_recipe_wb(pixels)).
+        for recipe in [&warm, &tinted] {
+            let mut manual = vec![[128.0f32 / 255.0; 3]; 4];
+            apply_recipe_wb(&mut manual, recipe);
+            let want = [to_u8(manual[0][0]), to_u8(manual[0][1]), to_u8(manual[0][2])];
+            let got = develop_preview(&grey, recipe).to_rgb8();
+            assert_eq!(
+                got.get_pixel(0, 0).0,
+                want,
+                "preview WB must be the shared apply_recipe_wb stage, exactly"
+            );
+        }
     }
 
     #[test]
@@ -5220,6 +5328,16 @@ mod tests {
         apply_develop(&mut data, w, h, &r);
         let after = data[6][0] - data[5][0];
         assert!(after > before, "edge step {after} should exceed {before}");
+        // The unsharp is a LUMA op scaling all channels by one ratio — a
+        // grey edge must stay grey. Every probe above reads channel 0, so a
+        // red-only sharpen (chromatic halos, unsharpened green/blue) passed
+        // (R12).
+        for p in [&data[5], &data[6]] {
+            assert!(
+                (p[0] - p[1]).abs() < 1e-6 && (p[1] - p[2]).abs() < 1e-6,
+                "sharpened grey must stay grey: {p:?}"
+            );
+        }
         for x in [0usize, 1, 10, 11] {
             let want = if x < 6 { 0.3 } else { 0.7 };
             assert!(
@@ -5430,6 +5548,26 @@ mod tests {
                 "blue pixel untouched on every channel: {blue:?}"
             );
         }
+        // EVERY band that is not red or one of its feathered neighbours
+        // (orange, magenta) is a control: the single blue probe above let a
+        // routing leak into yellow/green/aqua/purple pass (R12). Probe
+        // pixels are generated by the engine's own hue converter at each
+        // band's centre hue, saturated and mid-bright.
+        for (name, hue) in
+            [("yellow", 60.0f32), ("green", 120.0), ("aqua", 180.0), ("purple", 280.0)]
+        {
+            let (r0, g0, b0) = hsl_to_rgb(hue / 360.0, 0.7, 0.45);
+            let mut probe = vec![[r0, g0, b0]];
+            apply_hsl(&mut probe, &hsl);
+            for c in 0..3 {
+                assert!(
+                    (probe[0][c] - [r0, g0, b0][c]).abs() < 0.02,
+                    "red-band sat must not reach the {name} band: {:?} vs {:?}",
+                    probe[0],
+                    (r0, g0, b0)
+                );
+            }
+        }
     }
 
     #[test]
@@ -5499,16 +5637,27 @@ mod tests {
     #[test]
     fn rgb_curves_shape_each_channel_independently() {
         use crate::recipe::CurvePoint;
-        // A red curve lifting the black point brightens RED only, via the full pipeline.
-        let r = EditRecipe {
-            red_curve: vec![CurvePoint { input: 0, output: 60 }, CurvePoint { input: 255, output: 255 }],
-            ..Default::default()
-        };
-        let mut data = vec![[0.0_f32, 0.0, 0.0]];
-        apply_develop(&mut data, 1, 1, &r);
-        let p = data[0];
-        assert!(p[0] > 0.15, "red channel lifted: {p:?}");
-        assert!(p[1] < 0.02 && p[2] < 0.02, "green/blue untouched: {p:?}");
+        // Each per-channel curve lifts ITS channel only, via the full
+        // pipeline. Only the red curve used to be exercised — an engine that
+        // ignored green_curve/blue_curve entirely stayed green (R12).
+        let lift = || vec![
+            CurvePoint { input: 0, output: 60 },
+            CurvePoint { input: 255, output: 255 },
+        ];
+        let cases: [(&str, EditRecipe, usize); 3] = [
+            ("red", EditRecipe { red_curve: lift(), ..Default::default() }, 0),
+            ("green", EditRecipe { green_curve: lift(), ..Default::default() }, 1),
+            ("blue", EditRecipe { blue_curve: lift(), ..Default::default() }, 2),
+        ];
+        for (name, r, ch) in cases {
+            let mut data = vec![[0.0_f32, 0.0, 0.0]];
+            apply_develop(&mut data, 1, 1, &r);
+            let p = data[0];
+            assert!(p[ch] > 0.15, "{name} channel lifted: {p:?}");
+            for c in (0..3).filter(|c| *c != ch) {
+                assert!(p[c] < 0.02, "{name} curve must not move channel {c}: {p:?}");
+            }
+        }
     }
 
     #[test]
