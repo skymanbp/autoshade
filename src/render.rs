@@ -1771,14 +1771,19 @@ pub fn curve_lut(points: &[crate::recipe::CurvePoint]) -> Vec<f32> {
         .collect();
     pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     // Duplicate inputs (possible via a hand-edited / imported recipe; the GUI
-    // editor keeps inputs strictly increasing) resolve FIRST-point-wins: the
-    // sort is stable and `interp` returns on the first bracketing window.
+    // editor keeps inputs strictly increasing) resolve FIRST-point-wins —
+    // now actually, by DROPPING the later twins. Merely relying on the stable
+    // sort gave the first twin's output AT that code and the second twin's
+    // output one code later: a one-LUT-bin cliff that shows up as a hard
+    // contour line across a smooth gradient.
     // Pin the endpoints Lightroom-style: a curve that places no point of its
     // own AT an end keeps (0,0)/(1,1) authoritative there. Without the pins,
     // interp's flat clamp beyond the first/last point turns a single mid-curve
     // click into a constant image and flattens everything past any inner
     // endpoint into crushed/blown bands. A user (or AI) point at exactly
     // x=0 / x=1 still overrides the pin — lifted blacks stay expressible.
+    // Drop the later twins so first-point-wins is literally true.
+    pts.dedup_by(|b, a| (b.0 - a.0).abs() < 1e-6);
     if pts[0].0 > 0.0 {
         pts.insert(0, (0.0, 0.0));
     }
@@ -1973,17 +1978,32 @@ fn apply_color_grade(data: &mut [[f32; 3]], cg: &crate::recipe::ColorGrade) {
     if cg.is_neutral() {
         return;
     }
-    let blend = (cg.blending / 100.0).clamp(0.0, 1.0);
     // balance shifts the shadow/highlight midpoint: positive leans toward highlights.
     let mid = (0.5 - 0.25 * (cg.balance / 100.0)).clamp(0.05, 0.95);
+    // `blending` sets how much the tonal regions OVERLAP — the schema's own
+    // words (recipe.rs) and Lightroom's. It used to scale the regional
+    // AMPLITUDE instead, with two consequences: a legal Blending of 0 silently
+    // erased all three regional wheels (only the global wheel survived, which
+    // read as "grading is half broken"), and ACR's DEFAULT of 50 rendered
+    // every graded photo at half strength — so our render disagreed with the
+    // Lightroom render the XMP hands off, for essentially every graded photo.
+    // 100 reproduces the previous weights EXACTLY (ramps spanning mid..1 and
+    // 0..mid); lower values tighten the ramps around `mid` instead of fading
+    // the effect out.
+    let overlap = (cg.blending / 100.0).clamp(0.0, 1.0);
+    // A floor keeps the tightest split one smoothstep wide: a true step would
+    // band visibly on a smooth gradient.
+    const MIN_SPAN: f32 = 0.02;
+    let hi_end = (mid + ((1.0 - mid) * overlap).max(MIN_SPAN)).min(1.0);
+    let sh_start = (mid - (mid * overlap).max(MIN_SPAN)).max(0.0);
     data.par_iter_mut().for_each(|px| {
         let l = luma601(px);
-        let w_hi = smoothstep(mid, 1.0, l);
-        let w_sh = 1.0 - smoothstep(0.0, mid, l);
+        let w_hi = smoothstep(mid, hi_end, l);
+        let w_sh = 1.0 - smoothstep(sh_start, mid, l);
         let w_mid = (1.0 - w_hi - w_sh).clamp(0.0, 1.0);
-        apply_wheel(px, cg.shadow_hue, cg.shadow_sat, cg.shadow_lum, w_sh * blend);
-        apply_wheel(px, cg.midtone_hue, cg.midtone_sat, cg.midtone_lum, w_mid * blend);
-        apply_wheel(px, cg.highlight_hue, cg.highlight_sat, cg.highlight_lum, w_hi * blend);
+        apply_wheel(px, cg.shadow_hue, cg.shadow_sat, cg.shadow_lum, w_sh);
+        apply_wheel(px, cg.midtone_hue, cg.midtone_sat, cg.midtone_lum, w_mid);
+        apply_wheel(px, cg.highlight_hue, cg.highlight_sat, cg.highlight_lum, w_hi);
         apply_wheel(px, cg.global_hue, cg.global_sat, cg.global_lum, 1.0); // global: all tones
     });
 }
@@ -2994,6 +3014,49 @@ mod tests {
             (mb - mc).abs() < 0.06,
             "base-curved render should sit near the camera preview: based={mb:.3} camera={mc:.3}"
         );
+    }
+
+    #[test]
+    fn grading_blending_controls_overlap_not_amplitude() {
+        use crate::recipe::ColorGrade;
+        // A legal Blending of 0 used to zero every regional wheel. It must
+        // now still grade — only the region split gets tighter.
+        let mut cg = ColorGrade { blending: 0.0, shadow_sat: 100.0, shadow_hue: 210.0, ..Default::default() };
+        let mut dark = [[0.08f32, 0.08, 0.08]];
+        apply_color_grade(&mut dark, &cg);
+        assert!(
+            (dark[0][2] - dark[0][0]).abs() > 0.01,
+            "blending=0 must still apply the shadow wheel, got {:?}",
+            dark[0]
+        );
+        // And 100 must reproduce the historical weights exactly: at the
+        // midpoint the midtone wheel owns the pixel, shadows/highlights ~0.
+        cg.blending = 100.0;
+        let mut a = [[0.5f32, 0.5, 0.5]];
+        let mut b = a;
+        apply_color_grade(&mut a, &cg);
+        // Hand-computed reference for the previous formula at l = 0.5, mid =
+        // 0.5: w_sh = 1 - smoothstep(0, 0.5, 0.5) = 0 -> the shadow wheel is
+        // inert on a mid-grey pixel either way.
+        let mid_only = ColorGrade { blending: 100.0, shadow_sat: 100.0, shadow_hue: 210.0, ..Default::default() };
+        apply_color_grade(&mut b, &mid_only);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn duplicate_curve_points_do_not_cliff() {
+        use crate::recipe::CurvePoint;
+        // Two outputs at ONE input is not a function; the documented rule is
+        // first-point-wins, which must hold at the code AND just after it.
+        let lut = curve_lut(&[
+            CurvePoint { input: 0, output: 0 },
+            CurvePoint { input: 128, output: 200 },
+            CurvePoint { input: 128, output: 50 },
+            CurvePoint { input: 255, output: 255 },
+        ]);
+        let step = (lut[129] - lut[128]).abs();
+        assert!(step < 0.05, "one-bin cliff at the duplicate: {step} ({} -> {})", lut[128], lut[129]);
+        assert!(lut[128] > 0.7, "first point must win at the duplicate code: {}", lut[128]);
     }
 
     #[test]
