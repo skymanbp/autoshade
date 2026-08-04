@@ -1453,11 +1453,40 @@ fn save_thumb_cache(cache: &std::path::Path, thumb: &image::DynamicImage) {
     });
 }
 
-/// Decoded-base LRU key: source path + requested preview edge + file mtime +
-/// size (an on-disk change or a different resolution simply misses; size joins
-/// mtime like the thumbnail key — a same-mtime replacement is otherwise
-/// indistinguishable from the cached source).
-type BaseCacheKey = (PathBuf, u32, Option<(std::time::SystemTime, u64)>);
+/// A file's identity for cache purposes: mtime + size (size joins mtime like
+/// the thumbnail key — a same-mtime replacement is otherwise indistinguishable
+/// from the cached copy).
+type FileStamp = Option<(std::time::SystemTime, u64)>;
+/// The BAKED-PIXEL identity a cached base was decoded FOR: which master the
+/// develop resolved to, whether it was AI-generated, and that master's own
+/// stamp. `None` = a parametric-only develop (no pixels.json).
+type PixelIdentity = Option<(PathBuf, bool, FileStamp)>;
+/// Decoded-base LRU key: source path + requested preview edge + the source's
+/// stamp + the baked-pixel identity.
+///
+/// The last component is not optional bookkeeping. A develop's pixels can
+/// change while the SOURCE file never moves: reverse-fit clears pixels.json,
+/// a retouch writes a new master, a save drops the link. `forget_open_base()`
+/// exists to evict eagerly at those moments, but three separate review passes
+/// found the same class of bug — one call site that forgot it (reverse-fit),
+/// after which navigating away and back within the LRU resurrected the old
+/// generated master and rendered the new recipe on pixels it was never
+/// computed against. Putting the identity IN the key makes a stale hit
+/// impossible instead of merely unlikely.
+type BaseCacheKey = (PathBuf, u32, FileStamp, PixelIdentity);
+/// mtime + size of a file, or None when it cannot be stat'ed.
+fn file_stamp(path: &std::path::Path) -> FileStamp {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok().map(|t| (t, m.len())))
+}
+
+/// The develop's current baked-pixel identity (see [`BaseCacheKey`]). The
+/// master's own stamp is included so RE-BAKING to the same path still misses.
+fn pixel_identity(path: &std::path::Path) -> PixelIdentity {
+    let (master, generated) = autoshop::store::read_pixel_source(path)?;
+    let stamp = file_stamp(&master);
+    Some((master, generated, stamp))
+}
+
 /// A persisted baked master restored at open (store `pixels.json`): its
 /// preview-res pixels, the full-res path, and whether it is an AI-generated
 /// rendition (restores as a Generated variant — no parametric XMP).
@@ -1868,13 +1897,11 @@ impl AutoshopApp {
     /// (mtime `None`) matches itself, so the cache still works where mtime is
     /// unavailable — it just loses the staleness guard there.
     fn cached_base(&mut self, path: &std::path::Path, edge: u32) -> Option<OpenedBase> {
-        let mtime = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
-        let pos = self
-            .base_cache
-            .iter()
-            .position(|((p, e, t), _)| p == path && *e == edge && *t == mtime)?;
+        let mtime = file_stamp(path);
+        let pixels = pixel_identity(path);
+        let pos = self.base_cache.iter().position(|((p, e, t, px), _)| {
+            p == path && *e == edge && *t == mtime && *px == pixels
+        })?;
         let entry = self.base_cache.remove(pos);
         let hit = entry.1.clone();
         self.base_cache.push(entry);
@@ -1885,11 +1912,10 @@ impl AutoshopApp {
     /// combo is disabled while busy, so `preview_edge` still describes the
     /// decode that just completed.
     fn remember_base(&mut self, path: &std::path::Path, edge: u32, opened: &OpenedBase) {
-        let mtime = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
-        self.base_cache.retain(|((p, e, _), _)| !(p == path && *e == edge));
-        self.base_cache.push(((path.to_path_buf(), edge, mtime), opened.clone()));
+        let mtime = file_stamp(path);
+        let pixels = pixel_identity(path);
+        self.base_cache.retain(|((p, e, _, _), _)| !(p == path && *e == edge));
+        self.base_cache.push(((path.to_path_buf(), edge, mtime, pixels), opened.clone()));
         if self.base_cache.len() > BASE_CACHE_CAP {
             self.base_cache.remove(0); // least-recent first
         }
@@ -1901,7 +1927,7 @@ impl AutoshopApp {
     /// alone would happily serve a hit with stale baked pixels.
     fn forget_open_base(&mut self) {
         if let Some(p) = self.src_path.clone() {
-            self.base_cache.retain(|((q, _, _), _)| q != &p);
+            self.base_cache.retain(|((q, _, _, _), _)| q != &p);
         }
     }
 
@@ -8510,6 +8536,14 @@ impl AutoshopApp {
                                 // fit on baked pixels it was never computed
                                 // against. Pair the write like Ctrl+S does.
                                 if let Err(e) = autoshop::store::clear_pixel_source(p) {
+                                    // NOT fully persisted: the pair is what a
+                                    // reopen reads. Claiming success here
+                                    // advanced the baseline and dropped the
+                                    // stash, so the ● vanished while disk
+                                    // still linked the stale master — the user
+                                    // was told the work was safe when a cold
+                                    // reopen would render the wrong pixels.
+                                    persisted = false;
                                     note.push_str(&trf(
                                         lang,
                                         " · could not clear the old retouch-master link ({err}) — reopening may show the fit on retouched pixels; Ctrl+S repairs it",
