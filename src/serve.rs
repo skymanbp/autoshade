@@ -1004,7 +1004,10 @@ struct RetouchReq {
 /// project's ./out tree (where every fill/heal master lives). Anything else
 /// is a hard error — falling back silently would re-introduce the exact
 /// stealth loss this exists to fix.
-fn session_master(claim: Option<&str>) -> std::result::Result<Option<PathBuf>, String> {
+fn session_master(
+    claim: Option<&str>,
+    raw: &Path,
+) -> std::result::Result<Option<PathBuf>, String> {
     let Some(c) = claim else { return Ok(None) };
     if c.trim().is_empty() {
         return Ok(None);
@@ -1015,6 +1018,18 @@ fn session_master(claim: Option<&str>) -> std::result::Result<Option<PathBuf>, S
         .map_err(|e| format!("no ./out tree ({e}) — reselect the photo and retry"))?;
     if !canon.starts_with(&root) {
         return Err(format!("session master {c} is outside ./out — reselect the photo and retry"));
+    }
+    // The master must BELONG to this photo: every retouch master is named by
+    // its photo's stem (unique_out → default_out gives "<stem>.<tag>.png"),
+    // so a claim whose file name does not start with "<stem>." carries some
+    // OTHER photo's pixels — replaying it here would graft photo A's frame
+    // onto photo B's develop, and Save would persist that graft.
+    let stem = pipeline::stem(raw);
+    let name = canon.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if !name.starts_with(&format!("{stem}.")) {
+        return Err(format!(
+            "session master {c} does not belong to this photo — reselect the photo and retry"
+        ));
     }
     Ok(Some(canon))
 }
@@ -1300,7 +1315,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // persisted) overrides the persisted source; such masters are NEUTRAL
     // develops (InPlace), so the recipe — calibration included — renders on
     // top, no strip.
-    let src = match session_master(req.master.as_deref()) {
+    let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some(p)) => p,
         Ok(None) => render_source(&raw, &mut req.recipe),
         Err(msg) => return Ok(status_response(400, &msg)),
@@ -1345,7 +1360,7 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Session master wins here too (api_develop's rule) — the deliverable
     // must match the healed preview the user just approved.
-    let src = match session_master(req.master.as_deref()) {
+    let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some(p)) => p,
         Ok(None) => render_source(&raw, &mut req.recipe),
         Err(msg) => return Ok(status_response(400, &msg)),
@@ -1389,7 +1404,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Session master wins here too (api_develop's rule).
-    let src = match session_master(req.master.as_deref()) {
+    let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some(p)) => p,
         Ok(None) => render_source(&raw, &mut req.recipe),
         Err(msg) => return Ok(status_response(400, &msg)),
@@ -1482,6 +1497,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     // Same intra-process save serialization as api_analyze.
     let _save = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Resolve the session master FIRST: a rejected master must fail the save
+    // BEFORE the recipe commits, or the client baselines (markSaved) on a
+    // 200 whose pixels never landed — and a later navigation discards the
+    // only retouched canvas.
+    let master = match session_master(req.master.as_deref(), &raw) {
+        Ok(m) => m,
+        Err(msg) => return Ok(status_response(400, &msg)),
+    };
     // Reset-then-Save means "clear my edits", exactly as in the GUI's `save_xmp`:
     // writing a NEUTRAL pair would pin a permanent ● edited badge with no in-app
     // way to remove it (and the GUI then reports a no-op save on every open).
@@ -1531,18 +1554,13 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // reopen that follows "saved". Only ever WRITTEN here: an absent claim
     // must not clear a GUI-persisted master.
     let mut master_note = String::new();
-    match session_master(req.master.as_deref()) {
-        Ok(Some(p)) => {
-            if let Err(e) = crate::store::write_pixel_source(&raw, &p, false) {
-                master_note = format!(
-                    " — but recording the retouched master failed ({e}); reopening shows the un-retouched source"
-                );
-            }
-        }
-        Ok(None) => {}
-        Err(msg) => {
+    if let Some(p) = &master {
+        // Recipe already committed (the cross-surface rule); an I/O failure
+        // recording the pixels degrades to a disclosed warning, same as the
+        // GUI's pixels_ok path. Claim REJECTION was a 400 before any write.
+        if let Err(e) = crate::store::write_pixel_source(&raw, p, false) {
             master_note = format!(
-                " — but the session master was rejected ({msg}); reopening shows the un-retouched source"
+                " — but recording the retouched master failed ({e}); reopening shows the un-retouched source"
             );
         }
     }
@@ -1580,7 +1598,7 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // second operation restarted from the persisted master and silently
     // discarded the first, U30), else the persisted pixels.json master, else
     // the photo itself (api_develop's rule).
-    let src = match session_master(req.master.as_deref()) {
+    let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some(p)) => p,
         Ok(None) => crate::store::read_pixel_source(&raw)
             .map(|(m, _)| m)
@@ -1683,7 +1701,7 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                     // Same un-warp as api_retouch (see there) — through the
                     // mapping view AND the DISPLAYED source's dims, which is
                     // the session master when one is chained.
-                    let display_src = match session_master(req.master.as_deref()) {
+                    let display_src = match session_master(req.master.as_deref(), &raw) {
                         Ok(Some(p)) => p,
                         Ok(None) => crate::store::read_pixel_source(&raw)
                             .map(|(m, _)| m)
@@ -1718,7 +1736,7 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let cfg = state.config().clone();
     // Same master-input rule as api_retouch (see there): session master
     // first — a second heal must build ON the first, not beside it.
-    let src = match session_master(req.master.as_deref()) {
+    let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some(p)) => p,
         Ok(None) => crate::store::read_pixel_source(&raw)
             .map(|(m, _)| m)

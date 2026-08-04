@@ -487,8 +487,15 @@ fn calibrate_camera_buffer(
         let mut t = mat_vec3(&m, &v);
         let max = t[0].max(t[1]).max(t[2]);
         if max > 1.0 {
-            let eucl = ((t[0] * t[0] + t[1] * t[1] + t[2] * t[2]) / 3.0).sqrt();
-            t = t.map(|c| (c / max + eucl) / 2.0);
+            // Blown pixels take EXACTLY rawler's treatment, including its
+            // negative pre-clip: keeping negatives inside this formula let
+            // the positive euclidean term drag an out-of-gamut component
+            // back into gamut with a hue shift. Unblown pixels (the branch
+            // NOT taken) keep their negatives — the wide-gamut win lives
+            // there.
+            let t0 = t.map(|c| c.max(0.0));
+            let eucl = ((t0[0] * t0[0] + t0[1] * t0[1] + t0[2] * t0[2]) / 3.0).sqrt();
+            t = t0.map(|c| (c / max + eucl) / 2.0);
         }
         *px = [linear_to_srgb(t[0]), linear_to_srgb(t[1]), linear_to_srgb(t[2])];
     });

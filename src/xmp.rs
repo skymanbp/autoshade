@@ -582,23 +582,31 @@ fn refresh_rationale_comment(doc: String, r: &EditRecipe) -> String {
 /// Lightroom extras INSIDE individual mask items (LocalHue / LocalMoire /
 /// range-mask Invert flags, …) do not survive a re-save; parametric mask
 /// geometry does, via the normal recipe round-trip. Scalar crs properties
-/// in ELEMENT form (no known producer) are not de-duplicated.
+/// in ELEMENT form (no known producer) are not de-duplicated. Matching is
+/// by the CONVENTIONAL prefixes (`rdf:`, `crs:`) — a document binding the
+/// camera-raw namespace to another prefix (no known producer; Adobe and
+/// every interop tool use these) is judged unmergeable and regenerated,
+/// which is exactly the pre-merge behaviour.
 pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
     let desc_start = find_crs_description(existing)?;
     let (gt, self_closing) = scan_tag_end(existing, desc_start)?;
 
     // The opening tag: strip every owned crs attribute, then append ours.
+    // BOTH quote styles: single-quoted attributes are legal XML, and leaving
+    // one behind would duplicate the attribute we append.
     let mut tag = existing[desc_start..=gt].to_string();
     for key in owned_attr_keys() {
-        let pat = format!("crs:{key}=\"");
-        while let Some(p) = tag.find(&pat) {
-            let vstart = p + pat.len();
-            let vend = vstart + tag[vstart..].find('"')?;
-            let mut left = p;
-            while left > 0 && tag.as_bytes()[left - 1].is_ascii_whitespace() {
-                left -= 1;
+        for q in ['"', '\''] {
+            let pat = format!("crs:{key}={q}");
+            while let Some(p) = tag.find(&pat) {
+                let vstart = p + pat.len();
+                let vend = vstart + tag[vstart..].find(q)?;
+                let mut left = p;
+                while left > 0 && tag.as_bytes()[left - 1].is_ascii_whitespace() {
+                    left -= 1;
+                }
+                tag.replace_range(left..=vend, "");
             }
-            tag.replace_range(left..=vend, "");
         }
     }
     let closing_len = if self_closing { 2 } else { 1 };
@@ -1344,7 +1352,7 @@ mod tests {
     xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
     xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n\
     crs:Version=\"15.5.1\"\n\
-    crs:ProcessVersion=\"15.4\"\n\
+    crs:ProcessVersion='15.4'\n\
     crs:Texture=\"+20\"\n\
     crs:CameraProfile=\"Adobe Color\"\n\
     crs:LensProfileEnable=\"1\"\n\
@@ -1383,8 +1391,11 @@ mod tests {
         assert!(merged.contains("<crs:Look>"), "LR-only child elements survive");
         assert!(merged.contains("xmlns:dc="), "foreign namespaces survive");
         assert!(merged.starts_with("<?xpacket"), "the xpacket wrapper survives");
-        // Ours REPLACE, never duplicate.
+        // Ours REPLACE, never duplicate — including the single-quoted form
+        // (legal XML; leaving it would duplicate the attribute).
         assert_eq!(merged.matches("crs:Exposure2012=").count(), 1);
+        assert_eq!(merged.matches("crs:ProcessVersion=").count(), 1);
+        assert!(merged.contains("crs:ProcessVersion=\"15.4\""), "replaced in OUR form");
         assert!(merged.contains("crs:Exposure2012=\"0.25\""));
         assert_eq!(merged.matches("<crs:ToneCurvePV2012>").count(), 1);
         assert!(merged.contains("<rdf:li>0, 10</rdf:li>"), "OUR curve, not Lightroom's");
