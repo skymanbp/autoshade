@@ -52,11 +52,37 @@
     sRGB TRC（中性轴与 sRGB 渲染逐值一致，测试钉死）；AdobeRGB 编码时
     仅换 TRC。sRGB 输出逐字节不变；烘焙源仍走矩阵转换。真机验收点：
     P3 导出在广色域屏上比 sRGB 导出更饱和、LR 中读数一致。
-  - 终态：**36 提交未推送**；162 lib + 1 cli + 10 gui 双配置全绿；
-    clippy 双零；i18n 434/462/0/0；JS 解析过。待办：批28 WB 绝对开尔文
-    （设计入台账：as_shot_k/tint 盖戳字段 + McCamy CCT + 三端盖戳 +
-    5500 锚点替换，旧档 None=旧行为逐字节不变）→ A4 几何5 / A6 披露21 /
-    A7 缓冲7 / D13 键位23 / U14 弱测试。
+  - **批28 `947d15d`**：Codex 只读复审批22-27——8 条：4 修（HIGH 会话
+    母版未绑定照片可跨照片注入 → 名字必须以 `<stem>.` 开头；HIGH api_xmp
+    先提交后验证 → 母版先验后写、拒绝即 400；单引号属性剥除；宽色域高光
+    分支负值预剪=与 rawler 严格一致）/ 2 接受 / 2 驳回（有据）。
+  - **批29 `c88e4b4`**（用户决策①落地）：**Temp 滑杆改说绝对开尔文**——
+    `render::as_shot_wb`（元数据级 dummy 解码，免 demosaic；实证 rawler
+    dummy 仍带 wb_coeffs/矩阵）：cam_neutral=1/wb → inv(xyz2cam) → XYZ →
+    McCamy CCT + Krystek 轨迹 Duv tint（3000/Duv 标度——D65 的 +0.0032
+    正落 ACR Daylight 预设的 +10，符号与量级双钉死；D65→6504K、A→2856K
+    测试锁定）。recipe 增 engine-only `as_shot_k/as_shot_tint` 盖戳字段
+    （None=旧档→5500 锚→逐字节不变，测试钉死），saved-first 规则盖戳于
+    produce_recipe/GUI 开图/Reset/粘贴（按目标重解析）/serve 四处/store
+    派生快照。引擎锚定盖戳值（目标==as-shot=真无操作）；吸管解算带锚；
+    GUI 勾选自定义 WB 即落在 as-shot（不再跳 5500）、双击复位=as-shot、
+    "as shot ≈ N K" 标注；web 全镜像。XMP：盖戳照的仅-tint 编辑改写
+    Custom 钉在 as-shot K（关掉"LR 无视 As Shot 下的 Tint"披露缺陷）。
+  - **批30 `cdadd5e`**：Codex 复审批29——5 条：3 修 / 1 部分 / 1 接受。
+    HIGH=旧代 Autoshop 自产 XMP 的开尔文被重释为绝对值（四恢复面）→
+    根治：写方启用纪元标 `x:xmptk="Autoshop 2"`（合并时升级旧标），
+    `xmp_to_recipe` 对旧代 Autoshop 带温度文档**钉锚 5500**（"按 5500
+    调的"之诚实编码，tint 留 None=不冒充相机值、标注随之不显示），全部
+    盖戳点改**仅 None 才盖**；LR 外来 sidecar 不钉（其温度本就是绝对）。
+    MED=Generated 画布对烘焙像素冒充绝对 K → 锚纳入既有剥离规则（全部
+    剥离点+Reset；save-quit 由 `photo_calibration` 三元组一次快照回盖）。
+    LOW=锚在源头取整（XMP 整数往返正中锚点）；CCT 接受带收至 1667–15000K
+    （带外元数据=垃圾→锚保持未知而非错误绝对标签）。
+  - 终态：**40 提交未推送**；167 lib + 1 cli + 10 gui 双配置全绿；
+    clippy 双零；i18n 435/463/0/0；JS 解析过。真机验收点（WB 批）：
+    开 RAW 见"as shot ≈ 相机实拍 K"、勾自定义 WB 画面不跳、Temp 数值与
+    LR 同片读数同义、旧存档观感逐字节不变、旧 XMP-only 存档渲染不变。
+    待办：A4 几何5 / A6 披露21 / A7 缓冲7 / D13 键位23 / U14 弱测试。
 - **R11 三轴 64 路全面审查（2026-08-04，用户令"再跑一轮64路并行 gpt 5.6
   sol 最高推理等级审查，彻底排查代码/架构/设计缺陷"）**——收敛战役之后的
   再审，按用户三个词各成一轴切片：**代码 34 单元**（gui.rs 10 片 / render.rs
