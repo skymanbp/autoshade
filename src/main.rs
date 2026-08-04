@@ -357,15 +357,13 @@ fn decode_cmd(raw: &Path, out: Option<PathBuf>) -> Result<()> {
 /// canonical-vs-`-o` decision must not depend on how the path was spelled.
 fn same_path(a: &Path, b: &Path) -> bool {
     let n = |p: &Path| {
-        // canonicalize (exists → true casing/aliases), else absolute + a
-        // LEXICAL `..` fold: plain absolute() keeps ".." segments, so a
-        // canonical path spelled "dir/../recipe.json" classified as
-        // redirected and bypassed the backup gate.
-        std::fs::canonicalize(p).unwrap_or_else(|_| {
-            pipeline::normalize_lexical(
-                &std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()),
-            )
-        })
+        // Lexical `..` fold + deepest-existing-ancestor canonicalization:
+        // plain canonicalize fails when the LEAF is absent (an XMP-only save
+        // has no recipe.json yet), and a case-flipped or junction-aliased -o
+        // then classified as redirected and bypassed the backup gate.
+        pipeline::resolve_existing_pub(&pipeline::normalize_lexical(
+            &std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()),
+        ))
     };
     n(a) == n(b)
 }
@@ -564,14 +562,11 @@ fn match_cmd(
         // be written together.
         let cfg = Config::load();
         let seg = autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
-        // Snapshot BEFORE claiming the raster name — a gate refusal used to
-        // leave a freshly created empty mask-zone-sky* claim behind on every
-        // attempt. This is the zoned path's programmatic-overwrite gate for
-        // the canonical recipe write below (the plain fit gates at the write
-        // site instead); copy-based, so it can run ahead — store.rs doc.
-        if let Err(e) = autoshop::store::backup_saved_develop(raw, None) {
-            anyhow::bail!("refusing zoned match: backing up the saved develop failed ({e})");
-        }
+        // No pre-fit snapshot anymore: claimed unique rasters mean the fit
+        // touches nothing the saved develop references, and gating MINUTES
+        // before the write left a race window — a save landing during the
+        // segmentation was then overwritten unversioned. The canonical write
+        // below gates for the zoned path too, immediately before writing.
         let mask = autoshop::store::claim_raster(raw, "mask-zone-sky")?;
         pipeline::guard_readonly(&mask, raw)?;
         println!("  zoned: segmenting the sky in both images (local python sidecar) …");
@@ -590,10 +585,8 @@ fn match_cmd(
     pipeline::guard_readonly(&out, raw)?;
     // `-o` spelled AS the canonical path is a canonical overwrite: the
     // canonical branch below then SKIPS (recipe_path == canonical), so its
-    // gate must run HERE, before the first write destroys the save. The
-    // zoned path already snapshotted pre-fit.
-    if !zoned
-        && same_path(&out, &autoshop::store::recipe_target(raw))
+    // gate must run HERE, before the first write destroys the save.
+    if same_path(&out, &autoshop::store::recipe_target(raw))
         && let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&rep.recipe))
     {
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
@@ -608,11 +601,10 @@ fn match_cmd(
     let canonical = autoshop::store::recipe_target(raw);
     if canonical != recipe_path {
         pipeline::guard_readonly(&canonical, raw)?;
-        // The zoned path already snapshotted (pre-fit, above); the plain fit
-        // gates here like every other programmatic canonical writer.
-        if !zoned
-            && let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&rep.recipe))
-        {
+        // BOTH fit flavours gate here, immediately before the write — the
+        // old pre-fit zoned snapshot left the entire segmentation as a race
+        // window for a concurrent save.
+        if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&rep.recipe)) {
             anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
         }
         let p = write_recipe(raw, &rep.recipe, Some(canonical))?;

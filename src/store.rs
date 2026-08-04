@@ -632,7 +632,19 @@ pub fn snapshot_rasters(r: &mut EditRecipe, dev: &Path, n: u32) -> std::io::Resu
             let Some(name) = name.and_then(|x| x.to_str()) else { continue };
             let frozen_name = format!("v{n}.{name}");
             let live = dev.join(name);
-            if live.exists() {
+            // metadata triage, not exists(): a permission/transient error on
+            // an EXISTING raster read as "missing", the freeze was skipped,
+            // and the gate reported a faithful snapshot that never froze the
+            // raster the caller then overwrote.
+            let live_present = match std::fs::metadata(&live) {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    rollback_frozen_rasters(dev, n);
+                    return Err(e);
+                }
+            };
+            if live_present {
                 // `n` is guaranteed FRESH (backup_saved_develop refuses
                 // colliding numbers), so an existing v<n>.* file here is a
                 // crashed earlier attempt's leftover — possibly PARTIAL.
@@ -655,8 +667,9 @@ pub fn snapshot_rasters(r: &mut EditRecipe, dev: &Path, n: u32) -> std::io::Resu
 }
 
 /// Remove every `v<n>.*` frozen raster (backup rollback — the snapshot recipe
-/// itself is written only after all freezes succeed).
-fn rollback_frozen_rasters(dev: &Path, n: u32) {
+/// itself is written only after all freezes succeed). pub: the GUI's
+/// save_version freezes rasters through the same pair.
+pub fn rollback_frozen_rasters(dev: &Path, n: u32) {
     let prefix = format!("v{n}.");
     if let Ok(dir) = std::fs::read_dir(dev) {
         for e in dir.flatten() {
@@ -772,6 +785,27 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::remove_file(from)
 }
 
+/// [`move_file`] that never CLOBBERS an existing destination: the migration's
+/// old check-then-move let a central artifact created between the check and
+/// the rename (a concurrent save) be replaced by OLDER legacy bytes. The
+/// destination is claimed with create_new; `AlreadyExists` reports false
+/// (someone else owns it — exactly the "already migrated" outcome), any move
+/// failure removes the claim.
+fn move_file_no_clobber(from: &Path, to: &Path) -> std::io::Result<bool> {
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(to) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    match move_file(from, to) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            let _ = std::fs::remove_file(to); // release the claim
+            Err(e)
+        }
+    }
+}
+
 /// One-time, per-photo migration of legacy ./out sidecars into the central
 /// develop dir. Idempotent and best-effort per file: a file that cannot move
 /// stays where it was and the legacy read fallbacks keep serving it (nothing
@@ -884,19 +918,31 @@ fn migrate_legacy_in(root: &Path, legacy_out: &Path, src: &Path) -> (bool, bool)
     let stem = crate::pipeline::stem(src);
     let vprefix = format!("{stem}.v");
     let mut vjobs: Vec<(PathBuf, String)> = Vec::new();
-    if let Ok(dir) = std::fs::read_dir(legacy_out) {
-        for e in dir.flatten() {
-            let name = e.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if let Some(rest) = name.strip_prefix(&vprefix)
-                && let Some(nums) = rest.strip_suffix(".recipe.json")
-                && nums.parse::<u32>().is_ok()
-            {
-                vjobs.push((e.path(), format!("v{nums}.recipe.json")));
+    // A failed enumeration is a FAILED attempt, not an empty scan: reporting
+    // success here let the process memo mark the photo done and never retry
+    // the undiscovered legacy versions this session.
+    let mut scan_failed = false;
+    match std::fs::read_dir(legacy_out) {
+        Ok(dir) => {
+            for e in dir {
+                let Ok(e) = e else {
+                    scan_failed = true;
+                    continue;
+                };
+                let name = e.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if let Some(rest) = name.strip_prefix(&vprefix)
+                    && let Some(nums) = rest.strip_suffix(".recipe.json")
+                    && nums.parse::<u32>().is_ok()
+                {
+                    vjobs.push((e.path(), format!("v{nums}.recipe.json")));
+                }
             }
         }
+        Err(_) => scan_failed = true,
     }
-    migrate_legacy_jobs(root, legacy_out, src, &vjobs)
+    let (moved, failed) = migrate_legacy_jobs(root, legacy_out, src, &vjobs);
+    (moved, failed || scan_failed)
 }
 
 /// The per-photo migration body, with the version-snapshot scan factored OUT
@@ -944,12 +990,16 @@ fn migrate_legacy_jobs(
             // The central copy is the post-migration truth — never clobber it
             // with an older legacy file. The legacy file stays for the read
             // fallbacks (deleting user data it never copied would be worse).
+            // (The publishes below re-check ATOMICALLY via create_new claims;
+            // this early check just skips obvious work.)
             continue;
         }
         let ok = if is_recipe {
             migrate_one_recipe(&from, &to, stem, &dev, legacy_out)
         } else {
-            move_file(&from, &to).is_ok()
+            // false = destination appeared meanwhile (owned by a newer
+            // writer) — that is the desired outcome, not a failure.
+            move_file_no_clobber(&from, &to).unwrap_or(false) || to.exists()
         };
         moved |= ok;
         failed |= !ok;
@@ -970,8 +1020,9 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
     let Ok(text) = std::fs::read_to_string(from) else { return false };
     let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text) else {
         // Unparsable (interrupted write / newer schema): move byte-for-byte so
-        // the read path can keep reporting it loudly as Unreadable.
-        return move_file(from, to).is_ok();
+        // the read path can keep reporting it loudly as Unreadable. Claimed:
+        // a central recipe appearing meanwhile must not be clobbered.
+        return move_file_no_clobber(from, to).unwrap_or(false) || to.exists();
     };
     let raster_prefix = format!("{stem}.");
     // (legacy raster to delete on success — None for a bystander source that
@@ -999,8 +1050,24 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
                 p = cand;
             }
             let dest = dev.join(&bare);
-            if dest.exists() {
-                *path = bare; // already migrated by an earlier file
+            // Atomic claim instead of exists-then-copy: two processes staging
+            // the same raster raced, and the loser's rollback then deleted
+            // the winner's central copy. AlreadyExists = already migrated.
+            let claimed = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&dest)
+            {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(_) => false,
+            };
+            if !claimed {
+                if dest.exists() {
+                    *path = bare; // already migrated by an earlier file
+                }
+                // claim failed for another reason: keep the old reference —
+                // the engine's missing-raster contract reports it.
             } else if p.exists() && copy_atomic(&p, &dest).is_ok() {
                 // Only a source inside the root BEING MIGRATED may be deleted
                 // on success: the cwd-relative fallback can name a bystander
@@ -1012,19 +1079,43 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
                     .is_some_and(|(ap, al)| ap.starts_with(al));
                 staged.push((ours.then(|| p.clone()), dest));
                 *path = bare;
+            } else {
+                // Claimed but the source vanished / copy failed: release the
+                // 0-byte claim and keep the old reference (the engine's
+                // missing-raster contract reports it).
+                let _ = std::fs::remove_file(&dest);
             }
-            // Raster missing/uncopyable: keep the old reference — the engine's
-            // missing-raster contract (inert + warning) reports it.
         }
     }
-    // Publish the rewritten recipe via tmp+rename (`to` is known absent): a
-    // crash mid-write must not leave a half-written central recipe shadowing
-    // the intact legacy one.
-    let publish = serde_json::to_string_pretty(&r).ok().and_then(|json| {
-        let tmp = to.with_extension("json.tmp");
+    // Publish the rewritten recipe: pid+seq tmp (a FIXED name let two
+    // processes truncate each other's staging file), then rename over a
+    // create_new CLAIM of `to` — a central recipe created meanwhile (a
+    // concurrent save) must never be replaced by older legacy bytes.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let publish = (|| -> Option<()> {
+        let json = serde_json::to_string_pretty(&r).ok()?;
+        let tmp = to.with_extension(format!(
+            "json.tmp.{}.{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::write(&tmp, json).ok()?;
-        std::fs::rename(&tmp, to).ok()
-    });
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(to) {
+            Ok(_) => {}
+            Err(_) => {
+                // AlreadyExists (newer central owner) or any claim failure:
+                // do not publish over it.
+                let _ = std::fs::remove_file(&tmp);
+                return None;
+            }
+        }
+        if std::fs::rename(&tmp, to).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(to); // release the claim
+            return None;
+        }
+        Some(())
+    })();
     if publish.is_none() {
         for (_, dest) in &staged {
             let _ = std::fs::remove_file(dest); // roll back — legacy stays whole

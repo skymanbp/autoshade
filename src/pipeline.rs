@@ -368,7 +368,17 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // every later save: retire fails, had_old reads false, and the publish
     // then fails forever on the still-present target.
     let bak = out.with_extension("json.bak");
-    let _ = std::fs::remove_file(&bak);
+    if out.exists() {
+        // Clearing a stale .bak is safe ONLY while the live target exists —
+        // after a crashed publish whose restore ALSO failed, the .bak is the
+        // sole surviving copy of the previous develop, and the unconditional
+        // pre-clear deleted it forever.
+        let _ = std::fs::remove_file(&bak);
+    } else if bak.exists() {
+        // Orphaned survivor: put it back as the live file first — the retire
+        // below then re-bak's it through the normal recovery chain.
+        let _ = std::fs::rename(&bak, &out);
+    }
     let had_old = std::fs::rename(&out, &bak).is_ok();
     if let Err(e) = std::fs::rename(&tmp, &out) {
         // A failed restore must be SAID, not swallowed — the authoritative
@@ -475,6 +485,30 @@ pub fn normalize_lexical(p: &Path) -> PathBuf {
     n
 }
 
+/// Canonicalize the deepest EXISTING ancestor, then re-attach the
+/// not-yet-created tail: junction/subst/symlink aliases and case-flipped
+/// spellings resolve to the true on-disk form even when the LEAF is absent.
+/// Shared by [`guard_readonly`] and the CLI's canonical-path equality check.
+pub fn resolve_existing_pub(p: &Path) -> PathBuf {
+    let mut cur = p;
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(mut c) = std::fs::canonicalize(cur) {
+            for t in tail.iter().rev() {
+                c.push(t);
+            }
+            return c;
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(par), Some(name)) if !par.as_os_str().is_empty() => {
+                tail.push(name);
+                cur = par;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
 pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     use std::path::absolute;
     // Fold `.`/`..` LEXICALLY (no filesystem access — the target may not
@@ -489,25 +523,7 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     // while failing every lexical comparison below. Canonical paths carry the
     // TRUE on-disk casing and resolved links, and all sides go through the
     // same lens, so the \\?\ verbatim prefix cancels out.
-    fn resolve_existing(p: &Path) -> PathBuf {
-        let mut cur = p;
-        let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
-        loop {
-            if let Ok(mut c) = std::fs::canonicalize(cur) {
-                for t in tail.iter().rev() {
-                    c.push(t);
-                }
-                return c;
-            }
-            match (cur.parent(), cur.file_name()) {
-                (Some(par), Some(name)) if !par.as_os_str().is_empty() => {
-                    tail.push(name);
-                    cur = par;
-                }
-                _ => return p.to_path_buf(),
-            }
-        }
-    }
+    let resolve_existing = resolve_existing_pub; // extracted for same_path
     let (Ok(out_abs), Ok(raw_abs)) = (absolute(out), absolute(raw)) else {
         return Ok(());
     };

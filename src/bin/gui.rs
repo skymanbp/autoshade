@@ -2117,10 +2117,23 @@ impl AutoshopApp {
                 return;
             }
         };
-        let res = autoshop::pipeline::write_recipe(&src, &self.recipe, Some(vpath.clone()));
+        // Freeze referenced rasters under THIS version (the backup gate's
+        // pair): a version whose recipe pointed at another version's frozen
+        // raster (load v3 → save as v4) broke the moment v3 was deleted.
+        let dev = autoshop::store::develop_dir(&src);
+        let mut snap = self.recipe.clone();
+        if let Err(e) = autoshop::store::snapshot_rasters(&mut snap, &dev, n) {
+            let _ = std::fs::remove_file(&vpath); // release the claim
+            let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
+            return;
+        }
+        let res = autoshop::pipeline::write_recipe(&src, &snap, Some(vpath.clone()));
         if res.is_err() {
-            // Release the claimed 0-byte slot — an empty version must not
-            // pollute the list after a failed write.
+            // Release the claimed slot AND this call's frozen rasters — an
+            // empty version must not pollute the list after a failed write.
+            autoshop::store::rollback_frozen_rasters(&dev, n);
             let _ = std::fs::remove_file(&vpath);
         }
         match res {
@@ -8406,17 +8419,12 @@ impl AutoshopApp {
             move || {
                 let res = (|| -> anyhow::Result<(EditRecipe, String, bool)> {
                     let target = autoshop::decode::load_image(&tgt)?;
-                    // Snapshot the existing save up front (the zoned raster
-                    // now gets a fresh unique name per fit, so nothing below
-                    // can corrupt the old save either way). Copy semantics
-                    // make this safe even if the fit then fails (the working
-                    // recipe.json is untouched; at worst an extra snapshot
-                    // exists). `None` = unconditional: the fit result is not
-                    // known yet, and a fit is never a byte-identical rewrite.
-                    let backed = match &src_path {
-                        Some(p) => autoshop::store::backup_saved_develop(p, None),
-                        None => Ok(None),
-                    };
+                    // The gate runs at PERSIST time (below), not up front:
+                    // a pre-fit snapshot left the whole multi-minute
+                    // segmentation as a race window — an explicit save
+                    // landing during the fit was then overwritten
+                    // unversioned. (Claimed unique rasters already made the
+                    // fit itself harmless to the saved develop.)
                     // Zoned sky pass only when enabled AND the photo has a
                     // real path (the mask raster needs a home). The raster
                     // gets a FRESH unique name per fit (mask-zone-sky.png,
@@ -8456,6 +8464,10 @@ impl AutoshopApp {
                     }
                     let mut persisted = false;
                     if let Some(p) = &src_path {
+                        // Immediately before the write — the narrowest gate
+                        // window. Identical-content skip keeps this from
+                        // spamming versions on repeated fits.
+                        let backed = autoshop::store::backup_saved_develop(p, Some(&rep.recipe));
                         // Persist the fit losslessly: recipe.json carries the
                         // bitmap zone masks + recolour gains the XMP cannot,
                         // so reopening the photo restores the whole fit. The
