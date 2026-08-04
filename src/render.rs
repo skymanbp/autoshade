@@ -1281,7 +1281,23 @@ pub fn unreadable_mask_rasters(recipe: &EditRecipe) -> Vec<String> {
         .iter()
         .filter_map(|m| {
             let MaskGeometry::Bitmap { path } = &m.mask else { return None };
-            if m.amount == 0.0 || load_mask_bitmap(&m.mask).is_some() {
+            // The ENGINE's own activity rule (apply_masks): identity
+            // tone/sat + no local WB/recolour + no local NR renders nothing
+            // even with a healthy raster — local clarity/dehaze/texture are
+            // XMP-only. A PARKED mask (default amount 1, sliders neutral)
+            // whose raster is lost drops no edit and must not block export.
+            let engine_active = m.exposure_ev != 0.0
+                || m.contrast != 0.0
+                || m.highlights != 0.0
+                || m.shadows != 0.0
+                || m.whites != 0.0
+                || m.blacks != 0.0
+                || m.saturation != 0.0
+                || m.temperature != 0.0
+                || m.tint != 0.0
+                || m.noise_reduction != 0.0
+                || m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0]);
+            if m.amount == 0.0 || !engine_active || load_mask_bitmap(&m.mask).is_some() {
                 return None;
             }
             Some(if m.name.is_empty() { path.clone() } else { m.name.clone() })
@@ -4203,6 +4219,16 @@ mod tests {
         disabled.amount = 0.0;
         let r = EditRecipe { masks: vec![disabled], ..Default::default() };
         render_to_file(&src, &r, &out, None, None).expect("disabled mask exports fine");
+        // A PARKED mask (default amount 1, every adjustment neutral) renders
+        // nothing even with a healthy raster — its lost raster must not
+        // block the export either.
+        let parked = LocalAdjustment {
+            name: "parked".into(),
+            mask: MaskGeometry::Bitmap { path: dir.join("gone.png").display().to_string() },
+            ..Default::default()
+        };
+        let r = EditRecipe { masks: vec![parked], ..Default::default() };
+        render_to_file(&src, &r, &out, None, None).expect("engine-inert mask exports fine");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

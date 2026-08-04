@@ -856,6 +856,8 @@ async function selectPhoto(id, stem, el) {
       loadedWarn = rr.headers.get("X-Recipe-Warning");
     }
     else if (rr.status === 404) {
+      // A corrupt-only sidecar restores nothing (404) but must still warn.
+      loadedWarn = rr.headers.get("X-Recipe-Warning");
       // "Not analyzed yet" — but the 404 body carries the photo's camera-
       // matched base look AND its in-camera lens profile, so a fresh open
       // matches a fresh GUI open instead of changing after the first Analyze.
@@ -913,6 +915,13 @@ async function selectPhoto(id, stem, el) {
     if (freshLens) state.recipe.lens_profile = freshLens;
     if (freshAsShot) { state.recipe.as_shot_k = freshAsShot.k; state.recipe.as_shot_tint = freshAsShot.t; }
     $(".verdict").textContent = loadErr ? loadErr : "Not analyzed yet.";
+    if (loadedWarn) {
+      // Same XSS-safe pattern as the loaded branch: server text via textContent.
+      const w = document.createElement("div");
+      w.style.color = "#e0a84e";
+      w.textContent = "⚠ " + loadedWarn;
+      $(".verdict").appendChild(w);
+    }
   }
   // Kept for Reset: this photo's fresh camera-matched calibration (null when
   // unavailable — non-RAW, no metadata, or an older server).

@@ -286,12 +286,16 @@ pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<Path
             }
             Ok(master)
         }
-        None if has_pixel_source(raw) => Err(format!(
-            "the saved retouch master for {} could not be loaded - rendering would silently \
-             drop the retouch; open the photo for the cause, then re-save or clear the link \
-             with a parametric-only save",
-            crate::pipeline::stem(raw)
-        )),
+        // STATIC ASCII text, no stem: the message travels in an HTTP header,
+        // and a non-ASCII file name made Header::from_bytes fail — silently
+        // dropping the very warning this path exists to deliver. Callers
+        // that batch photos add their own per-photo prefix.
+        None if has_pixel_source(raw) => Err(
+            "the saved retouch master could not be loaded - rendering would silently drop \
+             the retouch; open the photo for the cause, then re-save or clear the link with \
+             a parametric-only save"
+                .to_string(),
+        ),
         None => Ok(raw.to_path_buf()),
     }
 }

@@ -1562,18 +1562,20 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         }
         _ => None,
     };
+    // A6 disclosure accumulator: unreadable numbers in ANY consulted XMP —
+    // including one whose ONLY edit is corrupt and therefore imports as a
+    // NO-OP. That file restores nothing, so a per-branch warning was
+    // discarded with it, and the next save overwrote the corrupt original
+    // in silence (Codex 32-#1).
+    let mut xmp_bad: Vec<String> = Vec::new();
     if let Some((text, kind)) = lr {
         let mut r = autoshop::xmp::xmp_to_recipe(&text);
+        xmp_bad = autoshop::xmp::unparsable_crs_numbers(&text);
         // Neutral / foreign content restores nothing — the store answers
         // exactly as before.
         if !r.is_noop() {
             r.clamp();
-            // A6 disclosure: numbers this XMP carries that do not parse
-            // imported as silent neutrals — the open handler says so.
-            return (
-                SavedDevelop::Restored(r, kind),
-                autoshop::xmp::unparsable_crs_numbers(&text),
-            );
+            return (SavedDevelop::Restored(r, kind), xmp_bad);
         }
     }
     let mut any = false;
@@ -1619,11 +1621,12 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         break;
     }
     if let Some((r, kind)) = restored {
-        // recipe.json restored: lossless, nothing to disclose.
+        // recipe.json restored: lossless truth — a corrupt number in the
+        // subordinate XMP is REPLACED by the next save's owned-attr merge,
+        // so there is nothing to disclose on this path.
         return (SavedDevelop::Restored(r, kind), Vec::new());
     }
     let mut fallback = None;
-    let mut fallback_warn = Vec::new();
     for (xp, kind) in [
         (autoshop::pipeline::xmp_target(src), "XMP"),
         (autoshop::store::legacy_xmp(src), "XMP (legacy ./out)"),
@@ -1640,22 +1643,28 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         };
         any = true;
         let mut r = autoshop::xmp::xmp_to_recipe(&text);
+        // Accumulated regardless of noop-ness (dedup vs the LR sidecar's
+        // list) — see the accumulator's contract above.
+        for k in autoshop::xmp::unparsable_crs_numbers(&text) {
+            if !xmp_bad.contains(&k) {
+                xmp_bad.push(k);
+            }
+        }
         // A foreign / neutral sidecar parses to a no-op recipe — "restoring"
         // it would only produce a misleading status line.
         if !r.is_noop() {
             r.clamp();
             fallback = Some((r, kind));
-            fallback_warn = autoshop::xmp::unparsable_crs_numbers(&text);
         }
         break; // same rule: the file that answered decides
     }
     if let Some(err) = parse_err {
-        return (SavedDevelop::Unreadable { err, fallback }, fallback_warn);
+        return (SavedDevelop::Unreadable { err, fallback }, xmp_bad);
     }
     match (fallback, any) {
-        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), fallback_warn),
-        (None, true) => (SavedDevelop::NoopOnly, Vec::new()),
-        (None, false) => (SavedDevelop::Nothing, Vec::new()),
+        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), xmp_bad),
+        (None, true) => (SavedDevelop::NoopOnly, xmp_bad),
+        (None, false) => (SavedDevelop::Nothing, xmp_bad),
     }
 }
 
@@ -10443,6 +10452,17 @@ mod tests {
             matches!(read_saved_develop(src).0, SavedDevelop::NoopOnly),
             "a no-op XMP must not claim a restore"
         );
+
+        // A sidecar whose ONLY edit is CORRUPT imports as a no-op — the
+        // disclosure list must still surface, or a later save silently
+        // overwrites the corrupt original (Codex batch-32 #1).
+        let doc = autoshop::xmp::recipe_to_xmp(&EditRecipe::default())
+            .replace("crs:Exposure2012=\"0.00\"", "crs:Exposure2012=\"broken\"");
+        assert!(doc.contains("broken"), "fixture: the corrupt attribute must exist");
+        std::fs::write(&xp, &doc).unwrap();
+        let (saved, warn) = read_saved_develop(src);
+        assert!(matches!(saved, SavedDevelop::NoopOnly), "corrupt-only still restores nothing");
+        assert!(warn.contains(&"Exposure2012".to_string()), "{warn:?}");
 
         // XMP with real edits → imported through the reverse crs mapping.
         let edited = EditRecipe { contrast: 22.0, ..Default::default() };

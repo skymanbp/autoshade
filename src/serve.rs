@@ -704,9 +704,15 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // go to the store). The header says where the recipe came from; the BODY
     // stays a pure EditRecipe — clients post recipes back to /api/develop,
     // where an unknown field is a 422.
+    // A6 disclosure survives a NO-OP import (Codex 32-#1): a sidecar whose
+    // only edit is corrupt parses to neutral, restores nothing — and the
+    // next save then overwrites it. The warning rides every answer below,
+    // the 404 "not analyzed yet" included.
+    let mut xmp_warn: Option<Header> = None;
     match crate::store::lightroom_sidecar(&raw) {
         crate::store::LrSidecar::NewerThanStore(text) | crate::store::LrSidecar::Only(text) => {
             let mut r = crate::xmp::xmp_to_recipe(&text);
+            xmp_warn = recipe_warning_header(&text);
             if !r.is_noop() {
                 r.clamp();
                 // Same stamp rule as the XMP fallback below: Lightroom tuned
@@ -724,7 +730,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
                     .expect("static ASCII header");
                 let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);
-                if let Some(w) = recipe_warning_header(&text) {
+                if let Some(w) = xmp_warn {
                     resp = resp.with_header(w);
                 }
                 return Ok(resp);
@@ -784,6 +790,11 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     for path in [pipeline::xmp_target(&raw), crate::store::legacy_xmp(&raw)] {
         if let Ok(text) = std::fs::read_to_string(&path) {
             let mut r = crate::xmp::xmp_to_recipe(&text);
+            // First consulted file wins the disclosure slot (GUI accumulates
+            // the same way) — set regardless of noop-ness.
+            if xmp_warn.is_none() {
+                xmp_warn = recipe_warning_header(&text);
+            }
             if !r.is_noop() {
                 r.clamp();
                 r.base_curve = fresh_base_knots(&raw);
@@ -797,7 +808,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_tint = ast;
                 }
                 let mut resp = json_text(serde_json::to_string(&r)?);
-                if let Some(w) = recipe_warning_header(&text) {
+                if let Some(w) = xmp_warn.take() {
                     resp = resp.with_header(w);
                 }
                 return Ok(resp);
@@ -823,7 +834,11 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     .to_string();
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static ASCII header");
-    Ok(Response::from_string(body).with_status_code(404).with_header(ct).boxed())
+    let mut resp = Response::from_string(body).with_status_code(404).with_header(ct);
+    if let Some(w) = xmp_warn {
+        resp = resp.with_header(w);
+    }
+    Ok(resp.boxed())
 }
 
 /// A6 disclosure header for XMP-derived recipes: numeric settings the import
