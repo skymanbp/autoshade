@@ -6345,8 +6345,12 @@ impl AutoshopApp {
                     // combo used to only arm the ratio for the NEXT handle
                     // drag, so the UI said 4:5 while preview/export kept the
                     // old shape (D13). Consumed in handle_crop, where the
-                    // view dims live.
-                    if self.crop_aspect != prev_aspect {
+                    // view dims live — and armed ONLY while the crop tool is
+                    // up: with the tool away the flag would survive until
+                    // some later session's crop entry and rewrite the box as
+                    // a surprise (Codex batch-38); tool-off keeps the old
+                    // arm-for-the-next-drag meaning.
+                    if self.crop_aspect != prev_aspect && self.crop_mode {
                         self.crop_aspect_pending = true;
                     }
                     if ui.button(tr(lang, "Clear crop")).clicked()
@@ -7021,7 +7025,7 @@ impl AutoshopApp {
             tr(lang, "Crop — drag corners/edges to resize, inside to move, outside to rotate · Esc to exit")
         } else if let Some((kind, _)) = self.placing_mask {
             match kind {
-                MaskKind::Linear => tr(lang, "Linear gradient — drag from the unaffected side to the fully-applied side · Esc to exit"),
+                MaskKind::Linear => tr(lang, "Linear gradient — drag from the fully-applied side to the unaffected side (Shift = axis lock) · Esc to exit"),
                 MaskKind::Radial => tr(lang, "Radial gradient — drag to draw an elliptical area · Esc to exit"),
             }
         } else if self.wb_picking {
@@ -7674,12 +7678,15 @@ impl AutoshopApp {
                 .min((2.0 * cy.min(1.0 - cy)) / h.max(1e-6))
                 .min(1.0);
             let (w, h) = (w * s, h * s);
-            let next = Some(Crop {
-                left: cx - w / 2.0,
-                top: cy - h / 2.0,
-                right: cx + w / 2.0,
-                bottom: cy + h / 2.0,
-            });
+            // The drag path refuses boxes under 0.05 a side — the preset
+            // path must not create what the handles could then never
+            // reproduce (Codex batch-38). Growing can shift the box off its
+            // centre at the frame edge, so the position re-clamps after.
+            let grow = (0.05_f32 / w.max(1e-6)).max(0.05_f32 / h.max(1e-6)).max(1.0);
+            let (w, h) = ((w * grow).min(1.0), (h * grow).min(1.0));
+            let left = (cx - w / 2.0).clamp(0.0, 1.0 - w);
+            let top = (cy - h / 2.0).clamp(0.0, 1.0 - h);
+            let next = Some(Crop { left, top, right: left + w, bottom: top + h });
             if self.recipe.crop != next {
                 self.recipe.crop = next;
                 self.dirty = true; // histogram/clipping follow the crop

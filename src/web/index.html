@@ -418,16 +418,20 @@ const PAGE = 200;          // gallery page size (a folder can hold thousands)
 let pageOffset = 0;        // current page's first GLOBAL index
 let listSeq = 0;           // latest-wins: rapid Prev/Next answers race
 
-// The last recipe this photo was LOADED or SAVED with — the web's equivalent
-// of the desktop's saved baseline. Slider work lives only in the browser
-// until Save, so without this a thumbnail click silently destroyed it.
+// The last {recipe, master} this photo was LOADED or SAVED with — the web's
+// equivalent of the desktop's saved baseline. Slider work AND the fill/heal
+// session-master link live only in the browser until Save: comparing the
+// recipe alone let a fill with untouched sliders vanish on a thumbnail
+// click with no warning (Codex batch-38).
 let savedRecipe = null;
+const baselineSnapshot = () =>
+  JSON.stringify({ recipe: state.recipe, master: state.sessionMaster ?? null });
 function markSaved() {
-  savedRecipe = state.recipe ? JSON.stringify(state.recipe) : null;
+  savedRecipe = state.recipe ? baselineSnapshot() : null;
 }
 function hasUnsavedEdits() {
   return state.id != null && savedRecipe !== null
-    && state.recipe != null && JSON.stringify(state.recipe) !== savedRecipe;
+    && state.recipe != null && baselineSnapshot() !== savedRecipe;
 }
 
 // Every /api request carries the gallery GENERATION the UI's ids came from.
@@ -704,6 +708,11 @@ function syncSliders() {
 // lives in on a few px, so normal mouse travel jumped hundreds of Kelvin
 // (D13). The range input works in 0..1000 log positions; Kelvin lives only
 // in the recipe and the editable number box.
+// 1001 track positions quantise Kelvin to ~0.3% steps (≈16 K at 5500) —
+// the RECIPE always keeps the exact value (the number box edits it
+// directly; syncWb only ever writes the track, never the recipe), so the
+// quantisation is display-side and a value only changes when the user
+// actually moves the slider (Codex batch-38).
 const K_MIN = 2000, K_MAX = 40000;
 const posToK = p => Math.round(K_MIN * Math.pow(K_MAX / K_MIN, (+p || 0) / 1000));
 const kToPos = k => Math.round(1000 * Math.log((+k || K_MIN) / K_MIN) / Math.log(K_MAX / K_MIN));
