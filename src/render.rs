@@ -1044,8 +1044,18 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
 /// Bilinear weight lookup in an 8-bit greyscale mask at normalised (nx, ny).
 pub(crate) fn sample_gray_norm(b: &image::GrayImage, nx: f32, ny: f32) -> f32 {
     let (w, h) = (b.width() as f32, b.height() as f32);
-    let sx = (nx.clamp(0.0, 1.0) * (w - 1.0)).max(0.0);
-    let sy = (ny.clamp(0.0, 1.0) * (h - 1.0)).max(0.0);
+    // EXTENT scaling (`* w`), not endpoint scaling (`* (w - 1)`): every
+    // producer normalises with `x / w` (apply_masks' weight_at and the overlay
+    // builder both say so in their own comments), so mapping onto 0..=size-1
+    // here was a DIFFERENT convention. A frame-sized mask then never reached
+    // its last row/column — a 2-wide mask holding [0,255] rendered [0, 0.5]
+    // instead of [0, 1] — and because the shortfall is one source pixel out of
+    // `w`, the same mask landed differently in a 1280 px preview than in a
+    // 9504 px export. With extent scaling and nx = x/w the sample index is
+    // exactly x for a same-size mask (no interpolation blur at all), and a
+    // smaller mask scales proportionally as intended.
+    let sx = (nx.clamp(0.0, 1.0) * w).max(0.0).min(w - 1.0);
+    let sy = (ny.clamp(0.0, 1.0) * h).max(0.0).min(h - 1.0);
     let x0 = sx.floor().min(w - 1.0);
     let y0 = sy.floor().min(h - 1.0);
     let x1 = (x0 + 1.0).min(w - 1.0);
@@ -2170,6 +2180,12 @@ pub fn rotate_straighten(img: &DynamicImage, deg: f32) -> DynamicImage {
     if deg.abs() < 1e-3 {
         return img.clone();
     }
+    // A zero-size frame has no geometry to rotate, and the inscribed-rect math
+    // below would hand the bilinear sampler an upper bound of -1 and panic.
+    // The lens resamplers already guard this; this one did not.
+    if img.width() == 0 || img.height() == 0 {
+        return img.clone();
+    }
     // Borrow an already-16-bit source instead of cloning it (the export path
     // arrives here as ImageRgb16 — to_rgb16() would copy ~366 MB at 61 MP).
     let owned;
@@ -3014,6 +3030,29 @@ mod tests {
             (mb - mc).abs() < 0.06,
             "base-curved render should sit near the camera preview: based={mb:.3} camera={mc:.3}"
         );
+    }
+
+    #[test]
+    fn bitmap_mask_sampling_matches_the_producers_convention() {
+        // Producers normalise with x / w; the sampler must agree, or a
+        // frame-sized mask loses its last row/column and its placement drifts
+        // with resolution.
+        let mut m = image::GrayImage::new(2, 1);
+        m.put_pixel(0, 0, image::Luma([0]));
+        m.put_pixel(1, 0, image::Luma([255]));
+        // The two pixel positions a 2-wide FRAME produces.
+        assert_eq!(sample_gray_norm(&m, 0.0 / 2.0, 0.0), 0.0);
+        assert_eq!(sample_gray_norm(&m, 1.0 / 2.0, 0.0), 1.0, "last texel must be reachable");
+        // Resolution independence: an 8-wide frame over the same 2-wide mask
+        // must still end at full coverage.
+        assert_eq!(sample_gray_norm(&m, 7.0 / 8.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn straighten_survives_a_zero_size_frame() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::new(0, 0));
+        let out = rotate_straighten(&img, 5.0);
+        assert_eq!((out.width(), out.height()), (0, 0));
     }
 
     #[test]
