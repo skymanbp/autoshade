@@ -19,6 +19,44 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **R11 后修复潮一（2026-08-04，用户四项拍板后开工）**——四项决策：成品
+  重名=批内避让+披露、非 Accept 判词不自动保存、宽色域=全链路根治、
+  WB=绝对开尔文（待做，设计已入台账）。落地六批（22-27，全部未推送）：
+  - **批22 `b02c28e`**：`pipeline::BatchNames` 批内认领——同批同 stem
+    成品自动 `<stem> (2)`（大小写折叠），GUI 摘要 + CLI 开跑前披露；CLI
+    在工人池启动前定名（调度不可再改名）。单张导出保持 stem 键不变。
+  - **批23 `dc17f23`**：非 Accept 判词全面不自动入档——GUI 停在画布
+    （● 亮、暂存/关窗守卫保护、Ctrl+S 保留）、web `saved:false`+警告且
+    客户端只在 `data.saved` 时基线化（顺带修掉已保存分析后的假"未保存"
+    确认）、CLI analyze/auto 门控（重定向 -o 照写；auto 仍出成品并打印
+    配方）、批量记 NotAccepted（留 pending，重跑会再计费——摘要明说）。
+  - **批24 `473d634`**：恢复链纳入 **RAW 旁的 Lightroom sidecar**
+    （`store::lightroom_sidecar`：最新意图胜出；我们自己拷出的投影按字节
+    识别并跳过；平手归 store；恢复绝不动 store 副本）。GUI kind 披露 +
+    web `X-Recipe-Source`。已知边界：图库 ● 徽章/批量 pending 仍只看 store。
+  - **批25 `59e9cbd`**：Save XMP 改**合并**——`merge_recipe_into_xmp`
+    只替换 Autoshop 拥有的 crs 属性/子块（引号感知标签扫描 + 深度计数
+    嵌套 Description——批3教训），LR 独有的 Texture/相机档案/Look/LR 镜头
+    块/外来命名空间/xpacket 全保留；不可安全拼接→整份重写（旧行为）。
+    边界：蒙版整块替换（LR 蒙版内部扩展字段不保留）。
+  - **批26 `ba11458`**（U30 三条）：heal 引擎按位深泛型（u8/u16，16 位
+    母版不再量化到 8 位）、alpha 拆出直通、母版暂存+改名发布；web 会话
+    母版链（`X-Output-Path` 回传 → heal/retouch/develop/export/download/
+    xmp 的 `master` 字段，必须 canonicalize 进 ./out 否则 400）——二次
+    修复不再丢首次、预览以配方重渲、Save 把会话母版记入 pixels.json。
+  - **批27 `c223af5`**（D10-1 根治）：**实证 rawler 在校准步就把超 sRGB
+    色域钳掉**（`map_3ch_to_rgb` → `clip_euclidean_norm_avg`）→ 宽色域
+    交付改为**直接在交付基色显影**：rawler 跳过 WB/Calibrate/SRgb 步，
+    自做 DNG 规范校准（行归一保白），负分量存活到最终 16 位打包才钳，
+    高光沿用 rawler 去饱和策略保持与 sRGB 渲染一致；工作转移曲线统一用
+    sRGB TRC（中性轴与 sRGB 渲染逐值一致，测试钉死）；AdobeRGB 编码时
+    仅换 TRC。sRGB 输出逐字节不变；烘焙源仍走矩阵转换。真机验收点：
+    P3 导出在广色域屏上比 sRGB 导出更饱和、LR 中读数一致。
+  - 终态：**36 提交未推送**；162 lib + 1 cli + 10 gui 双配置全绿；
+    clippy 双零；i18n 434/462/0/0；JS 解析过。待办：批28 WB 绝对开尔文
+    （设计入台账：as_shot_k/tint 盖戳字段 + McCamy CCT + 三端盖戳 +
+    5500 锚点替换，旧档 None=旧行为逐字节不变）→ A4 几何5 / A6 披露21 /
+    A7 缓冲7 / D13 键位23 / U14 弱测试。
 - **R11 三轴 64 路全面审查（2026-08-04，用户令"再跑一轮64路并行 gpt 5.6
   sol 最高推理等级审查，彻底排查代码/架构/设计缺陷"）**——收敛战役之后的
   再审，按用户三个词各成一轴切片：**代码 34 单元**（gui.rs 10 片 / render.rs
