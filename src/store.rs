@@ -254,16 +254,50 @@ pub fn render_source(raw: &Path, recipe: &mut EditRecipe) -> PathBuf {
 /// was gone. Restoring here makes every reader see the real last-known-good.
 /// Best-effort and idempotent: a live file always wins, and a failed rename
 /// simply leaves the situation as it was.
-pub fn recover_orphan_baks(src: &Path) {
+/// Returns `Ok(())` when nothing needed recovering or everything recovered,
+/// and `Err` naming the survivor when an orphan could NOT be restored — a
+/// locked or permission-denied `.bak` is an EXISTING save we cannot see, and
+/// callers that decide whether a save exists must refuse rather than treat it
+/// as absence (the same "unreadable is not absent" rule the backup gate
+/// applies to the recipe itself).
+pub fn recover_orphan_baks(src: &Path) -> std::io::Result<()> {
     let dev = develop_dir(src);
+    let mut failure: Option<std::io::Error> = None;
     for (live, bak) in [
         (recipe_target(src), dev.join("recipe.json.bak")),
         (pixel_source_path(src), dev.join("pixels.json.bak")),
     ] {
-        if !live.exists() && bak.exists() {
-            let _ = std::fs::rename(&bak, &live);
+        if !live.exists()
+            && bak.exists()
+            && let Err(e) = std::fs::rename(&bak, &live)
+        {
+            eprintln!(
+                "⚠ {} survives a crashed publish but could not be restored ({e})",
+                bak.display()
+            );
+            failure.get_or_insert(e);
         }
     }
+    match failure {
+        None => Ok(()),
+        Some(e) => Err(e),
+    }
+}
+
+/// Was a baked master ever RECORDED for this photo — regardless of whether it
+/// can still be honoured?
+///
+/// [`read_pixel_source`] answers `None` for BOTH "nothing recorded" and
+/// "recorded but unusable" (corrupt sidecar, deleted or moved master), so a
+/// caller that wants to WARN about a broken linkage cannot ask it twice: the
+/// second call returns None again and the warning never fires — which is
+/// exactly what happened to the GUI's failed-restore toast for the two
+/// commonest causes. This predicate answers the question that caller is
+/// really asking.
+pub fn has_pixel_source(src: &Path) -> bool {
+    let dev = develop_dir(src);
+    // The .bak counts: a crashed publish still means a master WAS recorded.
+    pixel_source_path(src).exists() || dev.join("pixels.json.bak").exists()
 }
 
 /// The photo's recorded baked pixel source, if it still resolves on disk:
@@ -274,8 +308,10 @@ pub fn recover_orphan_baks(src: &Path) {
 /// traceable instead of looking like data loss with no cause.
 pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
     // A crashed publish leaves the linkage only in pixels.json.bak — without
-    // this the canvas silently reverts to the un-retouched source.
-    recover_orphan_baks(src);
+    // this the canvas silently reverts to the un-retouched source. A FAILED
+    // recovery is already reported by the helper; this reader then degrades
+    // to "no master" exactly as it does for any unreadable sidecar.
+    let _ = recover_orphan_baks(src);
     let sidecar = pixel_source_path(src);
     let bytes = match std::fs::read(&sidecar) {
         Ok(b) => b,
@@ -480,8 +516,11 @@ pub fn backup_saved_develop(
     // fallbacks restore either, so overwriting the central slot unversioned
     // while a legacy develop still answered was silent destruction too.
     // A crashed publish's survivor is a save like any other — restore it
-    // before deciding what to snapshot, or the write below destroys it.
-    recover_orphan_baks(src);
+    // before deciding what to snapshot, or the write below destroys it. An
+    // orphan we could NOT restore is an existing save we cannot see: refusing
+    // beats overwriting it unversioned, the same stance as an unreadable
+    // recipe below.
+    recover_orphan_baks(src)?;
     let mut found: Option<(PathBuf, String)> = None;
     for rj in [recipe_target(src), legacy_recipe(src)] {
         match std::fs::read_to_string(&rj) {
@@ -942,8 +981,10 @@ fn move_file_no_clobber(from: &Path, to: &Path) -> std::io::Result<bool> {
 pub fn migrate_legacy(src: &Path) -> bool {
     // Ahead of the memo: this is the "touching this photo" hook every reader
     // (GUI read_saved_develop, web api_recipe) already calls, and a crashed
-    // publish must be repaired on EVERY touch, not once per process.
-    recover_orphan_baks(src);
+    // publish must be repaired on EVERY touch, not once per process. A failed
+    // recovery is reported by the helper and re-decided by the backup gate,
+    // which refuses to overwrite what it could not snapshot.
+    let _ = recover_orphan_baks(src);
     // Process-wide memo: a photo can only need migrating once per process, and
     // this runs on every photo open (UI thread) — without the memo a library
     // whose ./out holds thousands of exports pays a full directory enumeration
@@ -1280,12 +1321,18 @@ mod tests {
         std::fs::create_dir_all(&dev).unwrap();
         std::fs::write(dev.join("recipe.json.bak"), b"{\"exposure\":1.0}").unwrap();
         assert!(!recipe_target(&photo).exists(), "precondition: live file gone");
-        recover_orphan_baks(&photo);
+        recover_orphan_baks(&photo).expect("a restorable orphan must report success");
         assert!(recipe_target(&photo).exists(), "the survivor must be restored");
         assert!(!dev.join("recipe.json.bak").exists(), "and consumed");
         // A live file always wins: a second .bak must NOT clobber it.
         std::fs::write(dev.join("recipe.json.bak"), b"{\"exposure\":9.0}").unwrap();
-        recover_orphan_baks(&photo);
+        recover_orphan_baks(&photo).expect("a live file present is not a failure");
+        // A RECORDED master is visible even when unusable (the predicate the
+        // GUI warning needs — read_pixel_source cannot answer this).
+        assert!(!has_pixel_source(&photo), "no pixels sidecar yet");
+        std::fs::write(dev.join("pixels.json"), b"{ not json").unwrap();
+        assert!(has_pixel_source(&photo), "a corrupt sidecar still means RECORDED");
+        assert!(read_pixel_source(&photo).is_none(), "...while the reader honestly fails");
         let live = std::fs::read_to_string(recipe_target(&photo)).unwrap();
         assert!(live.contains("1.0"), "live file must win: {live}");
         let _ = std::fs::remove_dir_all(&dev);

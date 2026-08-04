@@ -4580,9 +4580,16 @@ impl AutoshopApp {
                             // there) — a desktop-launched GUI would otherwise
                             // show an apparently normal un-retouched open with
                             // no in-app trace.
+                            // has_pixel_source, NOT read_pixel_source: the
+                            // latter answers None for "nothing recorded" AND
+                            // for "recorded but broken", so asking it again
+                            // here made the toast unreachable for the two
+                            // commonest causes — a deleted/moved master and a
+                            // corrupt pixels.json. Those are precisely the
+                            // cases the user must be told about.
                             if baked.is_none()
                                 && let Some(p) = self.src_path.as_deref()
-                                && autoshop::store::read_pixel_source(p).is_some()
+                                && autoshop::store::has_pixel_source(p)
                             {
                                 let t = tr(
                                     lang,
