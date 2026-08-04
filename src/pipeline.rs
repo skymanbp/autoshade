@@ -561,7 +561,52 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
                 raw_dir.display()
             );
         }
+    // NEVER clobber an existing PHOTO outside our own output areas. The rule
+    // above guards only the RAW's OWN folder, so a SIBLING folder of the same
+    // library (D:/Photos/TripB while the RAW sits in D:/Photos/TripA) was
+    // fully writable and `-o` could destroy a library photo. We cannot know
+    // where the library ROOT is — there is no such setting — but we do not
+    // need to: outside ./out and the develop store (both allowed above,
+    // where overwriting OUR OWN deliverables is the point), refusing to
+    // replace an existing image file is stricter than any root guess and
+    // needs no configuration. Writing a NEW file elsewhere stays allowed:
+    // the user asked for that path, and nothing of theirs is lost.
+    if is_source(&out_abs) && out_abs.exists() {
+        anyhow::bail!(
+            "refusing to overwrite the existing photo {} — outputs must not replace photos \
+             outside ./out. Pick a new name, or write to ./out (the default).",
+            out_abs.display()
+        );
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn guard_refuses_to_overwrite_a_photo_in_a_sibling_library_folder() {
+        let base = std::env::temp_dir().join("autoshop-guard-sibling");
+        let (a, b) = (base.join("TripA"), base.join("TripB"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let raw = a.join("DSC1.arw");
+        let victim = b.join("DSC2.jpg");
+        std::fs::write(&raw, b"raw").unwrap();
+        std::fs::write(&victim, b"an existing library photo").unwrap();
+        // The pre-existing rule (same folder) still holds ...
+        assert!(guard_readonly(&a.join("out.tif"), &raw).is_err(), "own folder");
+        // ... and a SIBLING folder's existing photo is now protected too.
+        assert!(guard_readonly(&victim, &raw).is_err(), "sibling photo must be refused");
+        // A NEW file in that sibling folder stays allowed — nothing is lost.
+        assert!(guard_readonly(&b.join("brand-new.tif"), &raw).is_ok(), "new file allowed");
+        // A non-photo file is not ours to protect.
+        let notes = b.join("notes.txt");
+        std::fs::write(&notes, b"x").unwrap();
+        assert!(guard_readonly(&notes, &raw).is_ok(), "non-photo allowed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 /// `./out/<stem>.<kind>.<ext>` — outputs never go beside the source RAW.
@@ -623,15 +668,18 @@ pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// Does this path name a photo — a camera RAW or an already-baked raster?
+/// Shared by the gallery scan and by [`guard_readonly`]'s never-clobber rule.
+pub fn is_source(p: &Path) -> bool {
+    crate::decode::is_raw(p)
+        || p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+            matches!(x.to_ascii_lowercase().as_str(), "png" | "tif" | "tiff" | "jpg" | "jpeg")
+        })
+}
+
 /// Like [`find_raws`] but also includes already-baked images (PNG/TIFF/JPEG), so
 /// the web UI can browse and edit LR/PS-denoised exports alongside RAWs. Sorted.
 pub fn find_sources(dir: &Path) -> Result<Vec<PathBuf>> {
-    fn is_source(p: &Path) -> bool {
-        crate::decode::is_raw(p)
-            || p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
-                matches!(x.to_ascii_lowercase().as_str(), "png" | "tif" | "tiff" | "jpg" | "jpeg")
-            })
-    }
     fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) -> std::io::Result<()> {
         // A directory-symlink cycle would recurse forever (entry_is_dir
         // deliberately follows dir symlinks); 64 levels is beyond any real
