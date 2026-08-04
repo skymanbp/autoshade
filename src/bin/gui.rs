@@ -765,6 +765,9 @@ struct AutoshopApp {
     // --- crop tool ---
     crop_mode: bool,                       // the crop overlay is active on the After image
     crop_aspect: usize,                    // index into CROP_ASPECTS
+    crop_aspect_pending: bool,             // preset changed — re-derive the box in handle_crop
+    crop_grid: u8,                         // crop guide: 0 thirds · 1 golden · 2 off (O cycles, LR)
+    before_latch: bool,                    // \ latched the Before view (toggled twin of hold-B)
     // (handle, drag start, crop at start, straighten° at start). Handles:
     // 0-3 corners, 4 move-inside, 5-8 edge midpoints (T/B/L/R), 9 = drag
     // OUTSIDE the box → rotate-straighten (the LR gesture).
@@ -1081,6 +1084,9 @@ impl Default for AutoshopApp {
             pan: egui::vec2(0.5, 0.5),
             crop_mode: false,
             crop_aspect: 0,
+            crop_aspect_pending: false,
+            crop_grid: 0,
+            before_latch: false,
             crop_drag: None,
             mask_drag: None,
             sel_mask: None,
@@ -2674,7 +2680,8 @@ impl AutoshopApp {
         // the correct authority for that window. ONLY the open transition —
         // gating on plain `busy` let any background worker (Export…) empty
         // `pending`, and the empty-pending branch below then CLOSED the app,
-        // losing a sole live unsaved canvas (the dialog is not modal).
+        // losing a sole live unsaved canvas (background work still lands
+        // under the dialog — the scrim below blocks only pointer input).
         if !self.open_in_flight && let Some(p) = self.src_path.clone() {
             let origin = self.active_variant().and_then(|v| v.origin.clone());
             // The live canvas outranks its own stash entry WHOLESALE: displace
@@ -2718,8 +2725,21 @@ impl AutoshopApp {
                 save_quit = true;
             }
         });
+        // A modal owns the pointer as well as the keyboard (D13): the scrim
+        // swallows every click behind the dialog — sliders were still live
+        // during the save-or-discard decision — and dims the stakes into
+        // view. Background workers are unaffected (see open_in_flight above).
+        egui::Area::new(egui::Id::new("confirm_quit_scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::Pos2::ZERO)
+            .show(ctx, |ui| {
+                let r = ctx.screen_rect();
+                ui.allocate_response(r.size(), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(r, 0.0, egui::Color32::from_black_alpha(96));
+            });
         egui::Window::new(tr(lang, "● Unsaved edits"))
             .id(egui::Id::new("confirm_quit"))
+            .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -5591,13 +5611,17 @@ impl AutoshopApp {
         // (drag snap, ↑/↓ nudge, shown decimals) per feel class. Frac's snap
         // matches its 2 shown decimals exactly — egui's fixed_decimals ALSO
         // rounds the stored value (slider.rs), so a finer snap would silently
-        // lose to the display rounding. EV: 0.01-drag / 0.1-arrow. LogK's
+        // lose to the display rounding. The Frac NUDGE is floored at that
+        // same 0.01 grid: a finer step (range < 1) rounds back onto the
+        // current value below and the `next != *value` guard drops it —
+        // ArrowDown on the 0–0.5 Feather was a permanent no-op (D13).
+        // EV: 0.01-drag / 0.1-arrow. LogK's
         // nudge is ~1% of the current Kelvin (≈55 K at 5500) — a fixed step
         // would be sub-pixel at one end of a log track and huge at the other.
         let (snap, nudge, decimals) = match feel {
             SliderFeel::Int => (1.0, 1.0, 0usize),
             SliderFeel::Fine => (0.1, 0.1, 1),
-            SliderFeel::Frac => (0.01, range / 100.0, 2),
+            SliderFeel::Frac => (0.01, (range / 100.0).max(0.01), 2),
             SliderFeel::LogK => (1.0, ((*value).abs() * 0.01).max(1.0).round(), 0),
         };
         let resp = ui
@@ -6308,6 +6332,7 @@ impl AutoshopApp {
                         self.disarm_tools();
                         self.crop_mode = on;
                     }
+                    let prev_aspect = self.crop_aspect;
                     egui::ComboBox::from_id_salt("crop_aspect")
                         .selected_text(tr(lang, CROP_ASPECTS[self.crop_aspect].0))
                         .width(70.0)
@@ -6316,6 +6341,14 @@ impl AutoshopApp {
                                 ui.selectable_value(&mut self.crop_aspect, i, tr(lang, name));
                             }
                         });
+                    // LR applies a picked preset to the box IMMEDIATELY — the
+                    // combo used to only arm the ratio for the NEXT handle
+                    // drag, so the UI said 4:5 while preview/export kept the
+                    // old shape (D13). Consumed in handle_crop, where the
+                    // view dims live.
+                    if self.crop_aspect != prev_aspect {
+                        self.crop_aspect_pending = true;
+                    }
                     if ui.button(tr(lang, "Clear crop")).clicked()
                         && self.recipe.crop.take().is_some()
                     {
@@ -6338,7 +6371,7 @@ impl AutoshopApp {
                 );
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box to rotate-straighten; preview, export and XMP all match. Straighten auto-crops the black corners.",
+                        "Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box (or the canvas border while the box is full-frame) to rotate-straighten; arrows nudge the box, Enter commits; preview, export and XMP all match. Straighten auto-crops the black corners.",
                     ))
                     .weak()
                     .small(),
@@ -6361,11 +6394,11 @@ impl AutoshopApp {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let lin_armed = matches!(self.placing_mask, Some((MaskKind::Linear, None)));
-                if ui.selectable_label(lin_armed, tr(lang, "＋ Linear gradient")).on_hover_text(tr(lang, "Drag on the image: start = unaffected side, end = fully-applied side")).clicked() {
+                if ui.selectable_label(lin_armed, tr(lang, "＋ Linear gradient")).on_hover_text(tr(lang, "Drag on the image: start = fully-applied side, end = unaffected side (Shift = horizontal/vertical)")).clicked() {
                     self.disarm_tools();
                     if !lin_armed {
                         self.placing_mask = Some((MaskKind::Linear, None));
-                        self.status = tr(lang, "Drag on the image to draw a linear gradient (start unaffected → end fully applied)").into();
+                        self.status = tr(lang, "Drag on the image to draw a linear gradient (start fully applied → end unaffected; Shift = axis lock)").into();
                     }
                 }
                 let rad_armed = matches!(self.placing_mask, Some((MaskKind::Radial, None)));
@@ -7614,16 +7647,49 @@ impl AutoshopApp {
         tex_size: egui::Vec2,
     ) {
         use autoshop::recipe::Crop;
+        // Pixel aspect ratio (w/h) requested by the preset; "原始" resolves here.
+        let aspect = CROP_ASPECTS[self.crop_aspect.min(CROP_ASPECTS.len() - 1)]
+            .1
+            .map(|r| if r == 0.0 { tex_size.x / tex_size.y.max(1.0) } else { r });
+        // A preset picked in the panel re-derives the box NOW (LR applies the
+        // aspect immediately, D13): largest same-centre fit at the new
+        // ratio, shrunk to stay in frame. "Free" keeps the box untouched.
+        if std::mem::take(&mut self.crop_aspect_pending)
+            && let Some(r_px) = aspect
+        {
+            let rn = r_px * tex_size.y.max(1.0) / tex_size.x.max(1.0);
+            let c0 = self
+                .recipe
+                .crop
+                .map(|c| [c.left, c.top, c.right, c.bottom])
+                .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+            let (cx, cy) = ((c0[0] + c0[2]) / 2.0, (c0[1] + c0[3]) / 2.0);
+            let (mut w, mut h) = (c0[2] - c0[0], c0[3] - c0[1]);
+            if w / h.max(1e-6) > rn {
+                w = h * rn;
+            } else {
+                h = w / rn.max(1e-6);
+            }
+            let s = ((2.0 * cx.min(1.0 - cx)) / w.max(1e-6))
+                .min((2.0 * cy.min(1.0 - cy)) / h.max(1e-6))
+                .min(1.0);
+            let (w, h) = (w * s, h * s);
+            let next = Some(Crop {
+                left: cx - w / 2.0,
+                top: cy - h / 2.0,
+                right: cx + w / 2.0,
+                bottom: cy + h / 2.0,
+            });
+            if self.recipe.crop != next {
+                self.recipe.crop = next;
+                self.dirty = true; // histogram/clipping follow the crop
+            }
+        }
         let cur = self
             .recipe
             .crop
             .map(|c| [c.left, c.top, c.right, c.bottom])
             .unwrap_or([0.0, 0.0, 1.0, 1.0]);
-
-        // Pixel aspect ratio (w/h) requested by the preset; "原始" resolves here.
-        let aspect = CROP_ASPECTS[self.crop_aspect.min(CROP_ASPECTS.len() - 1)]
-            .1
-            .map(|r| if r == 0.0 { tex_size.x / tex_size.y.max(1.0) } else { r });
 
         // Handle order: 0=TL 1=TR 2=BL 3=BR, 4=move (inside), 5=T 6=B 7=L 8=R
         // edge midpoints, 9=rotate (anywhere outside the box).
@@ -7650,7 +7716,18 @@ impl AutoshopApp {
                         xf.to_screen(c[0], c[1]),
                         xf.to_screen(c[2], c[3]),
                     );
-                    Some(if r.contains(p) { 4 } else { 9 })
+                    // A box flush with the canvas (a fresh full-frame crop)
+                    // has no outside — the promised rotate-straighten gesture
+                    // was unreachable. Flush edges donate an inner band to
+                    // rotate instead; moving a full-frame box is a no-op
+                    // anyway (D13).
+                    const BAND: f32 = 16.0;
+                    let mut inner = r.intersect(xf.rect);
+                    if r.min.x <= xf.rect.min.x + 1.0 { inner.min.x += BAND; }
+                    if r.min.y <= xf.rect.min.y + 1.0 { inner.min.y += BAND; }
+                    if r.max.x >= xf.rect.max.x - 1.0 { inner.max.x -= BAND; }
+                    if r.max.y >= xf.rect.max.y - 1.0 { inner.max.y -= BAND; }
+                    Some(if inner.contains(p) { 4 } else { 9 })
                 })
         };
         // A stranded grab (Esc mid-drag, or leaving/re-entering crop mode)
@@ -7857,9 +7934,14 @@ impl AutoshopApp {
                 p.rect_filled(shade, 0.0, dark);
             }
         }
+        // O cycles the guide while cropping (LR): thirds → golden → off.
+        let guide: &[f32] = match self.crop_grid {
+            0 => &[1.0 / 3.0, 2.0 / 3.0],
+            1 => &[0.381_966, 0.618_034], // 1−1/φ and 1/φ
+            _ => &[],
+        };
         let grid = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70));
-        for i in 1..3 {
-            let t = i as f32 / 3.0;
+        for &t in guide {
             p.line_segment(
                 [egui::pos2(r.min.x + t * r.width(), r.min.y), egui::pos2(r.min.x + t * r.width(), r.max.y)],
                 grid,
@@ -7890,7 +7972,8 @@ impl AutoshopApp {
     }
 
     /// Place (or re-draw) a manual local-adjustment mask by dragging: the drag
-    /// vector defines a linear gradient (start = untouched side) or the
+    /// vector defines a linear gradient (press = full-strength side, LR's
+    /// direction; Shift = axis lock) or the
     /// bounding box of a radial. Commits into `recipe.masks` — the SAME field
     /// the AI writes, so render + XMP need nothing new.
     fn handle_place_mask(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
@@ -7913,17 +7996,29 @@ impl AutoshopApp {
         }
         let Some(sv) = self.place_start else { return };
         let Some(p) = resp.interact_pointer_pos() else { return };
-        let ev = xf.to_norm(p);
+        let mut ev = xf.to_norm(p);
+        // LR: Shift locks a linear gradient to horizontal / vertical.
+        // Snapped in VIEW space (what the user sees) — under straighten the
+        // original-frame vector is legitimately off-axis (D13).
+        if kind == MaskKind::Linear && ui.input(|i| i.modifiers.shift) {
+            if (ev.0 - sv.0).abs() >= (ev.1 - sv.1).abs() {
+                ev.1 = sv.1;
+            } else {
+                ev.0 = sv.0;
+            }
+        }
         let geom = match kind {
             MaskKind::Linear => {
                 // Endpoints map exactly — two points suffice for a gradient.
+                // LR anchors the FULL effect at the press and fades toward
+                // the release (D13): press = full side, release = zero side.
                 let s = view_norm_to_orig(sv.0, sv.1, dims, deg, &dist);
                 let e = view_norm_to_orig(ev.0, ev.1, dims, deg, &dist);
                 autoshop::recipe::MaskGeometry::Linear {
-                    zero_x: s.0,
-                    zero_y: s.1,
-                    full_x: e.0,
-                    full_y: e.1,
+                    zero_x: e.0,
+                    zero_y: e.1,
+                    full_x: s.0,
+                    full_y: s.1,
                 }
             }
             MaskKind::Radial => {
@@ -9332,23 +9427,42 @@ impl eframe::App for AutoshopApp {
         {
             ctx.memory_mut(|m| m.surrender_focus(id));
         }
-        // Global shortcuts, in TWO tiers (skip both while the quit-confirm
-        // layer is up — no key must mutate the very state the user is
-        // deciding whether to save):
+        // Global shortcuts, in THREE tiers (all skipped while the
+        // quit-confirm layer is up — no key must mutate the very state the
+        // user is deciding whether to save; the Settings / ⌨ windows are
+        // keyboard-modal too, D13):
+        //  * Esc while a transient window is up dismisses it.
         //  * Ctrl+O/E/S have no text-editing meaning, so they work even while
         //    a widget holds focus — focusing a prompt used to silently kill
         //    Save/Open/Export until the user clicked elsewhere.
         //  * Everything else (plain letters, arrows, Ctrl+Z/Y) stays gated on
         //    "no widget focused": typing must type, and a text field's own
         //    undo owns Ctrl+Z there.
-        // Ctrl+Z/Y = undo/redo, Ctrl+O = open, Ctrl+E = export, Ctrl+S =
-        // save XMP, ←/→ = walk the gallery, R = crop, [ ] = brush size,
-        // Tab = hide the side panels — the keyboard grammar of every desktop
-        // photo editor.
-        if !self.confirm_quit {
+        // Ctrl+Z/Y = undo/redo, Ctrl+O = open, Ctrl(+Shift)+E = export,
+        // Ctrl+S = save XMP, ←/→ = walk the gallery (crop armed: nudge the
+        // box), R = crop, Enter = commit crop, W/Q/K/M = LR tool keys,
+        // \ / Y = compare, [ ] = brush size, Tab = hide the side panels —
+        // the keyboard grammar of every desktop photo editor.
+        let transient_open = self.show_settings || self.show_shortcuts;
+        if !self.confirm_quit
+            && transient_open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            // Cheat-sheet first — it is the topmost transient.
+            if self.show_shortcuts {
+                self.show_shortcuts = false;
+            } else {
+                self.show_settings = false;
+            }
+        }
+        if !self.confirm_quit && !transient_open {
             let (mut do_open, mut do_export, mut do_xmp) = (false, false, false);
             ctx.input_mut(|i| {
                 if i.consume_key(egui::Modifiers::COMMAND, egui::Key::O) { do_open = true; }
+                // LR's export key is Ctrl+Shift+E — consumed FIRST (the
+                // exact-match consume would leave it dead behind plain
+                // Ctrl+E, which stays as the historical alias, D13).
+                if i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::E) { do_export = true; }
                 if i.consume_key(egui::Modifiers::COMMAND, egui::Key::E) { do_export = true; }
                 if i.consume_key(egui::Modifiers::COMMAND, egui::Key::S) { do_xmp = true; }
             });
@@ -9369,25 +9483,61 @@ impl eframe::App for AutoshopApp {
                 self.save_xmp();
             }
         }
-        if !self.confirm_quit && ctx.memory(|m| m.focused()).is_none() {
+        if !self.confirm_quit && !transient_open && ctx.memory(|m| m.focused()).is_none() {
             let (mut do_undo, mut do_redo) = (false, false);
             let (mut do_escape, mut do_overlay, mut do_clip) = (false, false, false);
             let (mut do_cheatsheet, mut do_crop, mut do_panels) = (false, false, false);
+            let (mut do_crop_commit, mut do_crop_grid) = (false, false);
+            let (mut do_wb, mut do_heal, mut do_brush) = (false, false, false);
+            let (mut do_linear, mut do_radial) = (false, false);
+            let (mut do_before, mut do_compare) = (false, false);
+            let mut crop_nudge = (0.0f32, 0.0f32);
             let mut nav: i32 = 0;
             let mut brush_delta: f32 = 0.0;
             // [ / ] belong to the active brush tool; when none is armed the
             // keys stay unconsumed (free for egui / future bindings).
             let brush_tool = self.paint_mode || self.clone_mode;
+            let crop_tool = self.crop_mode;
             ctx.input_mut(|i| {
                 if i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z) { do_redo = true; }
                 if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y) { do_redo = true; }
                 if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z) { do_undo = true; }
+                if crop_tool {
+                    // Crop owns the arrows while armed (keyboard-only
+                    // geometry, D13); gallery walking resumes on exit.
+                    let s = if i.modifiers.shift { 10.0 } else { 1.0 };
+                    for (key, dx, dy) in [
+                        (egui::Key::ArrowRight, 1.0, 0.0),
+                        (egui::Key::ArrowLeft, -1.0, 0.0),
+                        (egui::Key::ArrowDown, 0.0, 1.0),
+                        (egui::Key::ArrowUp, 0.0, -1.0),
+                    ] {
+                        if i.consume_key(egui::Modifiers::NONE, key)
+                            || i.consume_key(egui::Modifiers::SHIFT, key)
+                        {
+                            crop_nudge.0 += dx * s;
+                            crop_nudge.1 += dy * s;
+                        }
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) { do_crop_commit = true; }
+                }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) { nav = 1; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) { nav = -1; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) { do_escape = true; }
-                if i.consume_key(egui::Modifiers::NONE, egui::Key::O) { do_overlay = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::O) {
+                    if crop_tool { do_crop_grid = true; } else { do_overlay = true; }
+                }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::J) { do_clip = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::R) { do_crop = true; }
+                // LR tool keys (D13): W / Q / K and M / Shift+M (the Shift
+                // variant consumed first — exact match leaves it dead after).
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::W) { do_wb = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Q) { do_heal = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::K) { do_brush = true; }
+                if i.consume_key(egui::Modifiers::SHIFT, egui::Key::M) { do_radial = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::M) { do_linear = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Backslash) { do_before = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Y) { do_compare = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) { do_panels = true; }
                 if brush_tool {
                     if i.consume_key(egui::Modifiers::NONE, egui::Key::OpenBracket) { brush_delta = -4.0; }
@@ -9410,6 +9560,85 @@ impl eframe::App for AutoshopApp {
                 self.disarm_tools();
                 self.crop_mode = on;
             }
+            // Enter commits the crop (LR, D13): the box is already live in
+            // recipe.crop — committing is dropping the grab and disarming.
+            if do_crop_commit {
+                self.crop_drag = None;
+                self.crop_mode = false;
+            }
+            if crop_nudge != (0.0, 0.0) {
+                // Keyboard twin of the move drag (D13): 0.5% of the frame per
+                // press (Shift ×10 via the multiplier above), clamped
+                // in-frame; a full-frame box has no room and stays put.
+                let c0 = self
+                    .recipe
+                    .crop
+                    .map(|c| [c.left, c.top, c.right, c.bottom])
+                    .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+                let (w, h) = (c0[2] - c0[0], c0[3] - c0[1]);
+                let nl = (c0[0] + crop_nudge.0 * 0.005).clamp(0.0, 1.0 - w);
+                let nt = (c0[1] + crop_nudge.1 * 0.005).clamp(0.0, 1.0 - h);
+                let next = Some(autoshop::recipe::Crop {
+                    left: nl,
+                    top: nt,
+                    right: nl + w,
+                    bottom: nt + h,
+                });
+                if self.recipe.crop != next {
+                    self.recipe.crop = next;
+                    self.dirty = true; // histogram/clipping follow the crop
+                }
+            }
+            if do_crop_grid {
+                self.crop_grid = (self.crop_grid + 1) % 3;
+            }
+            // LR tool keys: each mirrors its own button exactly
+            // (disarm-then-arm; a second press exits the tool).
+            if do_wb && self.src_path.is_some() {
+                let on = !self.wb_picking;
+                self.disarm_tools();
+                self.wb_picking = on;
+                if on {
+                    self.status = tr(self.lang, "WB eyedropper: click a spot that should be neutral grey/white").into();
+                }
+            }
+            if do_heal && self.src_path.is_some() {
+                let on = !self.clone_mode;
+                self.disarm_tools();
+                self.clone_mode = on;
+            }
+            if do_brush && self.src_path.is_some() {
+                let on = !self.paint_mode;
+                self.disarm_tools();
+                self.paint_mode = on;
+            }
+            if do_linear && self.src_path.is_some() {
+                let armed = matches!(self.placing_mask, Some((MaskKind::Linear, None)));
+                self.disarm_tools();
+                if !armed {
+                    self.placing_mask = Some((MaskKind::Linear, None));
+                    self.status = tr(self.lang, "Drag on the image to draw a linear gradient (start fully applied → end unaffected; Shift = axis lock)").into();
+                }
+            }
+            if do_radial && self.src_path.is_some() {
+                let armed = matches!(self.placing_mask, Some((MaskKind::Radial, None)));
+                self.disarm_tools();
+                if !armed {
+                    self.placing_mask = Some((MaskKind::Radial, None));
+                    self.status = tr(self.lang, "Drag on the image to draw a radial (elliptical) area").into();
+                }
+            }
+            // \ latches the Before view, Y flips the comparison layout (LR).
+            if do_before {
+                self.before_latch = !self.before_latch;
+            }
+            if do_compare {
+                self.view_mode = if self.view_mode == ViewMode::SideBySide {
+                    ViewMode::AfterOnly
+                } else {
+                    ViewMode::SideBySide
+                };
+            }
             if do_panels {
                 self.panels_hidden = !self.panels_hidden;
                 self.defocus_next = true; // undo egui's Tab focus traversal next frame
@@ -9420,19 +9649,9 @@ impl eframe::App for AutoshopApp {
             if do_cheatsheet {
                 self.show_shortcuts = !self.show_shortcuts;
             }
-            // Esc closes an open cheat-sheet FIRST (the topmost transient),
-            // else leaves whatever on-image tool is active (the universal
-            // editor exit); painted canvases/samples stay for resuming.
-            if do_escape && self.show_shortcuts {
-                self.show_shortcuts = false;
-                do_escape = false;
-            }
-            // Settings is the next transient in the stack (the cheat-sheet's
-            // own hint promises Esc closes windows).
-            if do_escape && self.show_settings {
-                self.show_settings = false;
-                do_escape = false;
-            }
+            // Esc leaves whatever on-image tool is active (the universal
+            // editor exit) — the transient windows own their Esc in the
+            // pre-tier above; painted canvases/samples stay for resuming.
             if do_escape && (self.tool_armed() || self.region_drag.is_some()) {
                 // disarm_tools also kills the transient gesture anchors — a
                 // grab or stroke surviving Esc used to hijack the next drag.
@@ -9642,7 +9861,7 @@ impl eframe::App for AutoshopApp {
                     .add_enabled(ready, egui::Button::new(tr(lang, "Export")))
                     .on_hover_text(format!(
                         "{}\n{summary}",
-                        tr(lang, "Ctrl+E · full-resolution render to ./out (follows the current variant's pixels); settings in the Export section")
+                        tr(lang, "Ctrl+Shift+E · full-resolution render to ./out (follows the current variant's pixels); settings in the Export section")
                     ))
                     .clicked()
                 {
@@ -9870,10 +10089,12 @@ impl eframe::App for AutoshopApp {
             // so sizing here never changes their coordinate math.
             let avail = ui.available_size() - egui::vec2(0.0, 22.0); // room for the caption row
             // Hold B to flash the source in place — the Lightroom compare
-            // gesture. Focus-gated like every other shortcut: typing a "b"
-            // into Direction must not flash the Before mid-word.
-            let comparing = ctx.memory(|m| m.focused()).is_none()
-                && ctx.input(|i| i.key_down(egui::Key::B));
+            // gesture (\ latches it until pressed again, D13). Focus-gated
+            // like every other shortcut: typing a "b" into Direction must
+            // not flash the Before mid-word.
+            let comparing = self.before_latch
+                || (ctx.memory(|m| m.focused()).is_none()
+                    && ctx.input(|i| i.key_down(egui::Key::B)));
 
             match self.view_mode {
                 ViewMode::SideBySide => {
@@ -9945,18 +10166,26 @@ impl eframe::App for AutoshopApp {
                     // Runtime table (not `const`): the ZH column is resolved by
                     // `tr` at draw time. ASCII key combos + "Fit ↔ 1:1" carry no
                     // natural-language words, so they stay literal.
-                    let rows: [(&str, &str); 22] = [
-                        ("Ctrl+O", tr(lang, "Open photo")),
-                        ("Ctrl+E", tr(lang, "Export (settings in the Export section)")),
-                        ("Ctrl+S", tr(lang, "Save develop (recipe + XMP for RAW)")),
-                        ("Ctrl+Z / Ctrl+Y", tr(lang, "Undo / Redo")),
+                    let rows: [(&str, &str); 30] = [
+                        ("Ctrl/⌘+O", tr(lang, "Open photo")),
+                        ("Ctrl/⌘+Shift+E / Ctrl/⌘+E", tr(lang, "Export (settings in the Export section)")),
+                        ("Ctrl/⌘+S", tr(lang, "Save develop (recipe + XMP for RAW)")),
+                        ("Ctrl/⌘+Z / +Shift+Z / +Y", tr(lang, "Undo / Redo")),
                         ("← / →", tr(lang, "Step through the library")),
                         ("R", tr(lang, "Enter / exit crop")),
+                        ("Enter", tr(lang, "Commit the crop (exit the tool)")),
+                        ("W", tr(lang, "WB eyedropper")),
+                        ("Q", tr(lang, "Retouch stamp")),
+                        ("K", tr(lang, "Paint mask brush")),
+                        ("M / Shift+M", tr(lang, "Linear / radial gradient")),
+                        (tr(lang, "Shift (while drawing a gradient)"), tr(lang, "Lock to horizontal / vertical")),
                         ("[ / ]", tr(lang, "Brush size (paint / clone armed)")),
                         ("Tab", tr(lang, "Hide / show the side panels")),
                         (tr(lang, "Hover a slider + ↑/↓"), tr(lang, "Nudge its value (Shift ×10)")),
                         (tr(lang, "B (hold)"), tr(lang, "Compare original")),
-                        ("O", tr(lang, "Toggle mask overlay")),
+                        ("\\", tr(lang, "Before / after (toggle)")),
+                        ("Y", tr(lang, "Side-by-side ↔ single view")),
+                        ("O", tr(lang, "Toggle mask overlay (crop: cycle grid)")),
                         ("J", tr(lang, "Toggle clipping warning")),
                         ("Esc", tr(lang, "Exit tool / close this window")),
                         ("F1 / ?", tr(lang, "This cheat-sheet")),
@@ -9969,7 +10198,7 @@ impl eframe::App for AutoshopApp {
                         (tr(lang, "Curve: click / drag / drag-out"), tr(lang, "Add / move / delete point")),
                         (tr(lang, "Drag a mask handle"), tr(lang, "Reshape / move the selected mask")),
                     ];
-                    // Bounded + scrollable: the 22-row grid clipped its lower
+                    // Bounded + scrollable: the 30-row grid clipped its lower
                     // entries off short displays (the window is non-resizable
                     // and had no height limit, unlike the Settings window).
                     let max_h = (ctx.screen_rect().height() * 0.7).max(200.0);
