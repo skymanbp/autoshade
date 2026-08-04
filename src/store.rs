@@ -56,15 +56,25 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// Stable per-photo key: `<stem>-<16 hex>` from the photo's absolute path.
 /// The stem prefix keeps the store browsable; the hash disambiguates
 /// same-named photos in different folders. Windows paths are case-insensitive
-/// (NTFS), so the key hashes the lowercased path there — one file must never
-/// produce two keys just because it was opened as `D:\` once and `d:\` once.
+/// (NTFS), so BOTH halves fold case there — one file must never produce two
+/// keys just because it was opened as `D:\DSC001.ARW` once and
+/// `d:\dsc001.arw` once. (The hash folded from the start; the stem prefix
+/// did not, so the promise held only because NTFS resolves the two spellings
+/// to one directory anyway. That same resolution keeps every pre-fold store
+/// dir reachable under the folded key on the default root. A deliberately
+/// case-SENSITIVE data dir — an opt-in fsutil/WSL configuration — never had
+/// the one-key guarantee to begin with, and keeps any old mixed-case dirs
+/// as orphans; the store's stem-cased artifact names assume a
+/// case-insensitive root on Windows throughout.)
 pub fn photo_key(src: &Path) -> String {
     let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
     let mut s = abs.to_string_lossy().into_owned();
+    let mut stem = crate::pipeline::stem(src).to_string();
     if cfg!(windows) {
         s = s.to_lowercase();
+        stem = stem.to_lowercase();
     }
-    format!("{}-{:016x}", crate::pipeline::stem(src), fnv1a64(s.as_bytes()))
+    format!("{}-{:016x}", stem, fnv1a64(s.as_bytes()))
 }
 
 /// This photo's develop directory (not created here).
@@ -238,15 +248,26 @@ pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io
 }
 
 /// Forget the baked pixel source (the develop went back to parametric-only).
+/// Clearing means DETACH, so the retired `pixels.json.bak` goes too:
+/// `write_pixel_source` keeps the previous linkage there for crash recovery,
+/// and `recover_orphan_baks` restores a `.bak` whenever the live file is
+/// missing — which is exactly the state removing only the live file creates.
+/// That combination RESURRECTED the previously superseded master on the next
+/// open (and `has_pixel_source` kept counting the develop as retouched).
+/// The `.bak` goes FIRST: a crash between the two removals then leaves the
+/// live linkage intact (the clear simply has not happened yet) instead of
+/// leaving the resurrection bait behind.
 /// A file already missing IS the desired end state; any OTHER failure must
 /// reach the caller — a surviving pixels.json silently resurrects an obsolete
 /// retouched canvas on the next open.
 pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(pixel_source_path(src)) {
+    let rm = |p: PathBuf| match std::fs::remove_file(p) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
-    }
+    };
+    rm(develop_dir(src).join("pixels.json.bak"))?;
+    rm(pixel_source_path(src))
 }
 
 /// THE develop's render source, shared by every surface (CLI, GUI export and
@@ -308,8 +329,9 @@ pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<Path
 /// programmatic save then snapshotted THAT and overwrote the survivor —
 /// recipe-only work (bitmap masks, colour gains, the baked-master linkage)
 /// was gone. Restoring here makes every reader see the real last-known-good.
-/// Best-effort and idempotent: a live file always wins, and a failed rename
-/// simply leaves the situation as it was.
+/// Best-effort and idempotent: a live file always wins (the restore
+/// publishes no-clobber, so even a save landing CONCURRENTLY is never
+/// replaced), and a failed restore leaves the survivor untouched.
 /// Returns `Ok(())` when nothing needed recovering or everything recovered,
 /// and `Err` naming the survivor when an orphan could NOT be restored — a
 /// locked or permission-denied `.bak` is an EXISTING save we cannot see, and
@@ -323,15 +345,41 @@ pub fn recover_orphan_baks(src: &Path) -> std::io::Result<()> {
         (recipe_target(src), dev.join("recipe.json.bak")),
         (pixel_source_path(src), dev.join("pixels.json.bak")),
     ] {
-        if !live.exists()
-            && bak.exists()
-            && let Err(e) = std::fs::rename(&bak, &live)
-        {
-            eprintln!(
-                "⚠ {} survives a crashed publish but could not be restored ({e})",
-                bak.display()
-            );
-            failure.get_or_insert(e);
+        if live.exists() || !bak.exists() {
+            continue;
+        }
+        // NOT a direct rename: fs::rename REPLACES an existing destination
+        // (verified empirically — see next_tmp_seq), so the old exists-check
+        // + rename pair had a window in which a save published by a
+        // CONCURRENT process (GUI, web server and CLI share this store) was
+        // silently replaced with the older pre-crash bytes. Stage a COPY of
+        // the survivor and publish through the no-clobber primitive; the
+        // .bak itself is consumed only AFTER its content demonstrably landed
+        // — publish_no_clobber deletes its staged input on every path, which
+        // must never happen to the only copy of a develop.
+        let published = (|| {
+            let tmp = sibling_tmp(&live);
+            if let Err(e) = std::fs::copy(&bak, &tmp) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            publish_no_clobber(&tmp, &live)
+        })();
+        match published {
+            // Restored: the survivor is live again — consume the .bak.
+            Ok(true) => {
+                let _ = std::fs::remove_file(&bak);
+            }
+            // A concurrent save owns the live file — newest intent wins, and
+            // the .bak stays behind as the normal retired previous state.
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!(
+                    "⚠ {} survives a crashed publish but could not be restored ({e})",
+                    bak.display()
+                );
+                failure.get_or_insert(e);
+            }
         }
     }
     match failure {
@@ -761,11 +809,16 @@ pub fn claim_version(src: &Path) -> std::io::Result<(u32, PathBuf)> {
 /// The XMP-only half of [`backup_saved_develop`]: no recipe.json, but a
 /// central (or not-yet-migrated legacy) XMP with real edits exists. Two
 /// artifacts per version: `v<n>.<stem>.xmp` — the LOSSLESS bytes — published
-/// first, then `v<n>.recipe.json` derived via `xmp_to_recipe` (clamped; XMP
-/// carries no bitmap masks, so no rasters to freeze) — published LAST because
-/// `list_versions` scans only `v<N>.recipe.json`: a crash between the two
-/// leaves no half-visible version. A neutral/foreign sidecar is not a save
-/// (the NoopOnly rule) and needs no snapshot.
+/// first, then the `v<n>.recipe.json` CONTENT derived via `xmp_to_recipe`
+/// (clamped; XMP carries no bitmap masks, so no rasters to freeze). NB this
+/// ordering cannot hide the version number itself: `claim_version` has to
+/// run before either publish (the xmp artifact's NAME needs `n`), and its
+/// create_new claim IS a `v<n>.recipe.json` — `list_versions` therefore sees
+/// the number as a 0-byte entry for the whole window, and a crash leaves
+/// that documented loud residue (see `claim_version`). What xmp-first DOES
+/// guarantee: any version whose recipe content is readable already has its
+/// lossless xmp bytes on disk beside it. A neutral/foreign sidecar is not a
+/// save (the NoopOnly rule) and needs no snapshot.
 fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
     let mut found: Option<String> = None;
     for xp in [xmp_target(src), legacy_xmp(src)] {
@@ -1550,6 +1603,10 @@ mod tests {
         // A live file always wins: a second .bak must NOT clobber it.
         std::fs::write(dev.join("recipe.json.bak"), b"{\"exposure\":9.0}").unwrap();
         recover_orphan_baks(&photo).expect("a live file present is not a failure");
+        assert!(
+            dev.join("recipe.json.bak").exists(),
+            "adoption keeps the retired .bak — live + .bak is the normal post-publish state"
+        );
         // A RECORDED master is visible even when unusable (the predicate the
         // GUI warning needs — read_pixel_source cannot answer this).
         assert!(!has_pixel_source(&photo), "no pixels sidecar yet");
@@ -1558,6 +1615,35 @@ mod tests {
         assert!(read_pixel_source(&photo).is_none(), "...while the reader honestly fails");
         let live = std::fs::read_to_string(recipe_target(&photo)).unwrap();
         assert!(live.contains("1.0"), "live file must win: {live}");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn clear_pixel_source_detaches_the_retired_bak_too() {
+        // Detach sequence: master A saved, master B saved (A retired to
+        // .bak), then a parametric-only save clears the linkage. Without the
+        // .bak removal, the next open's recover_orphan_baks resurrected
+        // master A — a state the user explicitly left.
+        let base = std::env::temp_dir().join("autoshop-store-test-clearbak");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let photo = base.join("DSC_CLEAR.ARW");
+        std::fs::write(&photo, b"raw").unwrap();
+        let dev = develop_dir(&photo);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let master_a = dev.join("master-a.png");
+        let master_b = dev.join("master-b.png");
+        std::fs::write(&master_a, b"A").unwrap();
+        std::fs::write(&master_b, b"B").unwrap();
+        write_pixel_source(&photo, &master_a, false).unwrap();
+        write_pixel_source(&photo, &master_b, false).unwrap();
+        assert!(dev.join("pixels.json.bak").exists(), "precondition: A retired to .bak");
+        clear_pixel_source(&photo).unwrap();
+        assert!(!dev.join("pixels.json.bak").exists(), "detach must take the .bak too");
+        assert!(!has_pixel_source(&photo), "nothing recorded anymore");
+        assert!(read_pixel_source(&photo).is_none(), "and nothing resurrects on read");
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1637,9 +1723,19 @@ mod tests {
         // must never share one develop dir.
         let a = photo_key(Path::new("D:/trip-a/DSC001.ARW"));
         let b = photo_key(Path::new("D:/trip-b/DSC001.ARW"));
-        assert!(a.starts_with("DSC001-"), "{a}");
-        assert!(b.starts_with("DSC001-"), "{b}");
+        // Windows folds BOTH halves of the key (NTFS is case-insensitive);
+        // elsewhere the spelling is identity-relevant and stays.
+        let want = if cfg!(windows) { "dsc001-" } else { "DSC001-" };
+        assert!(a.starts_with(want), "{a}");
+        assert!(b.starts_with(want), "{b}");
         assert_ne!(a, b);
+        if cfg!(windows) {
+            assert_eq!(
+                a,
+                photo_key(Path::new("d:/trip-a/dsc001.arw")),
+                "case-variant spellings of ONE file must produce ONE key"
+            );
+        }
         // Stable across calls (persistent directory names).
         assert_eq!(a, photo_key(Path::new("D:/trip-a/DSC001.ARW")));
     }

@@ -587,8 +587,11 @@ fn refresh_rationale_comment(doc: String, r: &EditRecipe) -> String {
 /// Boundary, disclosed: MASKS are replaced wholesale as one block.
 /// Lightroom extras INSIDE individual mask items (LocalHue / LocalMoire /
 /// range-mask Invert flags, …) do not survive a re-save; parametric mask
-/// geometry does, via the normal recipe round-trip. Scalar crs properties
-/// in ELEMENT form (no known producer) are not de-duplicated. Matching is
+/// geometry does, via the normal recipe round-trip. Owned scalar crs
+/// properties are stripped in BOTH forms — attribute and property-element
+/// (`<crs:Exposure2012>…</crs:Exposure2012>`, a form Lightroom really
+/// writes and the reader really accepts); unowned properties survive in
+/// either form. Matching is
 /// by the CONVENTIONAL prefixes (`rdf:`, `crs:`) — a document binding the
 /// camera-raw namespace to another prefix (no known producer; Adobe and
 /// every interop tool use these) is judged unmergeable and regenerated,
@@ -628,15 +631,25 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
         let close = find_matching_close(existing, gt + 1)?;
         (existing[gt + 1..close].to_string(), close + "</rdf:Description>".len())
     };
-    for name in [
-        "crs:ToneCurvePV2012",
-        "crs:ToneCurvePV2012Red",
-        "crs:ToneCurvePV2012Green",
-        "crs:ToneCurvePV2012Blue",
-        "crs:MaskGroupBasedCorrections",
-    ] {
-        let open = format!("<{name}>");
-        let close = format!("</{name}>");
+    // Curve/mask child blocks AND owned scalars in PROPERTY-ELEMENT form:
+    // Lightroom serialises the same settings as
+    // `<crs:Exposure2012>+0.65</crs:Exposure2012>` in plenty of real
+    // sidecars (crs_str reads that form for exactly that reason), so an
+    // attribute-only strip left the old element value in the body beside
+    // the attribute we append — one document, two conflicting answers.
+    let owned_elements = [
+        "ToneCurvePV2012",
+        "ToneCurvePV2012Red",
+        "ToneCurvePV2012Green",
+        "ToneCurvePV2012Blue",
+        "MaskGroupBasedCorrections",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .chain(owned_attr_keys());
+    for name in owned_elements {
+        let open = format!("<crs:{name}>");
+        let close = format!("</crs:{name}>");
         while let Some(p) = body.find(&open) {
             let after = p + body[p..].find(&close)? + close.len();
             let mut left = p;
@@ -801,19 +814,28 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         .into_iter()
         .filter(|k| !STRINGY.contains(&k.as_str()))
         .filter(|k| {
-            // EXACT mirror of crs_f32's parse — a stricter check here would
-            // flag values the import actually reads fine.
-            crs_str(xmp, k)
-                .is_some_and(|v| v.trim().trim_start_matches('+').parse::<f32>().is_err())
+            // Present-but-unreadable, decided BY the import's own reader
+            // (crs_f32, including its finiteness filter) so the disclosure
+            // can never drift from what the import actually does: anything
+            // read as None-while-present becomes a silent neutral.
+            crs_str(xmp, k).is_some() && crs_f32(xmp, k).is_none()
         })
         .collect()
 }
 
-/// Numeric `crs:` attribute, tolerating ACR's explicit `+` (`"+22"`). `None` if
-/// the key is absent or unparsable. Shared with the eval harness + style index
-/// (re-exported through `eval`).
+/// Numeric `crs:` attribute, tolerating ACR's explicit `+` (`"+22"`). `None`
+/// if the key is absent, unparsable, or NON-FINITE: Rust's f32 parser accepts
+/// "NaN"/"inf", no real sidecar writer emits them, and letting one through
+/// imported a value the recipe clamp then silently neutralised WITHOUT the
+/// unparsable-number disclosure ever firing. Shared with the eval harness +
+/// style index (re-exported through `eval`).
 pub(crate) fn crs_f32(xmp: &str, key: &str) -> Option<f32> {
-    crs_str(xmp, key)?.trim().trim_start_matches('+').parse::<f32>().ok()
+    crs_str(xmp, key)?
+        .trim()
+        .trim_start_matches('+')
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())
 }
 
 /// Undo [`xml_escape`]. `&amp;` is decoded LAST so an escaped `&lt;` cannot
@@ -1434,6 +1456,36 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_numbers_import_neutral_and_are_disclosed() {
+        // Rust's f32 parser accepts "NaN" and "inf"; no real sidecar writer
+        // emits them. They must import as neutral AND be named by the
+        // disclosure scanner — the old exact-parse mirror read them as
+        // "fine", so the silent neutral was never disclosed.
+        let lr = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 7.0-c000">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:WhiteBalance="Custom"
+    crs:Temperature="NaN"
+    crs:Contrast2012="inf"
+    crs:Exposure2012="+0.65"
+    crs:HasSettings="True">
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+        assert_eq!(crs_f32(lr, "Temperature"), None, "NaN is not a Kelvin");
+        assert_eq!(crs_f32(lr, "Contrast2012"), None, "inf is not a slider");
+        let r = xmp_to_recipe(lr);
+        assert_eq!(r.temperature_k, None);
+        assert_eq!(r.contrast, 0.0);
+        assert_eq!(r.exposure_ev, 0.65, "finite neighbours still import");
+        let bad = unparsable_crs_numbers(lr);
+        assert!(bad.contains(&"Temperature".to_string()), "{bad:?}");
+        assert!(bad.contains(&"Contrast2012".to_string()), "{bad:?}");
+        assert!(!bad.contains(&"Exposure2012".to_string()), "{bad:?}");
+    }
+
+    #[test]
     fn renders_hsl_bands_only_when_set() {
         let r = EditRecipe {
             hsl: crate::recipe::Hsl {
@@ -1568,6 +1620,39 @@ mod tests {
         assert!(merged2.contains("crs:Texture=\"+20\""), "still there after a second merge");
         assert_eq!(merged2.matches("<crs:ToneCurvePV2012>").count(), 0, "cleared curve gone");
         assert!(merged2.contains("ToneCurveName2012=\"Linear\""));
+    }
+
+    #[test]
+    fn merge_strips_owned_element_form_properties() {
+        // Lightroom serialises the SAME settings as property elements in
+        // plenty of real sidecars (crs_str accepts that form). The merge
+        // must strip the owned element too, or the document answers one
+        // slider with two conflicting values — while unowned elements
+        // (Texture) survive untouched.
+        let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 7.0-c000\">\n\
+ <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+  <rdf:Description rdf:about=\"\"\n\
+    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+    crs:HasSettings=\"True\">\n\
+   <crs:Exposure2012>+1.00</crs:Exposure2012>\n\
+   <crs:Contrast2012>+22</crs:Contrast2012>\n\
+   <crs:Texture>+20</crs:Texture>\n\
+  </rdf:Description>\n\
+ </rdf:RDF>\n\
+</x:xmpmeta>\n";
+        let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        let merged = merge_recipe_into_xmp(lr, &r).expect("mergeable");
+        assert!(!merged.contains("<crs:Exposure2012>"), "owned element stripped: {merged}");
+        assert!(!merged.contains("<crs:Contrast2012>"), "owned element stripped");
+        assert_eq!(merged.matches("crs:Exposure2012").count(), 1, "ours only: {merged}");
+        assert!(merged.contains("crs:Exposure2012=\"0.25\""));
+        assert!(
+            merged.contains("<crs:Texture>+20</crs:Texture>"),
+            "unowned element survives: {merged}"
+        );
+        let back = xmp_to_recipe(&merged);
+        assert_eq!(back.exposure_ev, 0.25);
+        assert_eq!(back.contrast, 0.0, "the old element value must not shadow the cleared slider");
     }
 
     #[test]
