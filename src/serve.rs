@@ -1179,12 +1179,17 @@ fn unwarp_mask(bytes: &[u8], view: Option<&EditRecipe>, raw: &Path) -> Option<Ve
 }
 
 /// Dims of the oriented source frame — only the ASPECT matters to the
-/// normalised geometry maps, so preview-scale dims are exact. RAW: the
-/// oriented embedded preview (a decode, but analyze is already a multi-second
-/// AI call); baked sources: a header-only dimension read.
+/// normalised geometry maps (they are homogeneous in dims), so preview-scale
+/// dims are exact. RAW: the cached neutral develop BOTH panes serve
+/// (`develop_base` — one demosaic per photo, already paid the moment the
+/// photo was selected). The embedded preview this used to decode was not
+/// only a repeated full JPEG decode per mapping call — its aspect can
+/// DIFFER from the develop output (a small-preview camera's 1616×1080
+/// ≈ 1.496 vs the sensor's 3:2), and the maps must consume exactly the
+/// frame the user pointed at. Baked sources: a header-only dimension read.
 fn source_dims(raw: &Path) -> Option<(f32, f32)> {
     if decode::is_raw(raw) {
-        let img = decode::embedded_preview(raw).ok()??;
+        let img = develop_base(raw).ok()?;
         Some((img.width() as f32, img.height() as f32))
     } else {
         // ORIENTED dims: load_image applies the EXIF orientation, so the

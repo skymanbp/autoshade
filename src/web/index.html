@@ -1300,10 +1300,13 @@ window.addEventListener("mousemove", e => {
   const rect = drag.wrap.getBoundingClientRect();
   const x1 = clampv(e.clientX - rect.left, 0, rect.width), y1 = clampv(e.clientY - rect.top, 0, rect.height);
   drag.box.hidden = false;
-  drag.box.style.left = Math.min(drag.x0, x1) + "px";
-  drag.box.style.top = Math.min(drag.y0, y1) + "px";
-  drag.box.style.width = Math.abs(x1 - drag.x0) + "px";
-  drag.box.style.height = Math.abs(y1 - drag.y0) + "px";
+  // PERCENT, not px: the box then tracks the image through window resizes,
+  // still covering the same normalized region the analyze will target — a
+  // px box froze at its old spot while the region silently meant elsewhere.
+  drag.box.style.left = (Math.min(drag.x0, x1) / rect.width * 100) + "%";
+  drag.box.style.top = (Math.min(drag.y0, y1) / rect.height * 100) + "%";
+  drag.box.style.width = (Math.abs(x1 - drag.x0) / rect.width * 100) + "%";
+  drag.box.style.height = (Math.abs(y1 - drag.y0) / rect.height * 100) + "%";
 });
 window.addEventListener("mouseup", e => {
   if (!drag) return;
@@ -1314,6 +1317,10 @@ window.addEventListener("mouseup", e => {
   const box = drag.box; drag = null;
   if (r - l > 0.02 && b - t > 0.02) {
     state.region = { left: l, top: t, right: r, bottom: b };
+    // Pin the box to the COMMITTED normalized region (percent = resize-proof),
+    // so what stays on screen is exactly what the analyze will target.
+    box.style.left = (l * 100) + "%"; box.style.top = (t * 100) + "%";
+    box.style.width = ((r - l) * 100) + "%"; box.style.height = ((b - t) * 100) + "%";
     setStatus(`region set ${Math.round((r-l)*100)}×${Math.round((b-t)*100)}% — type a direction, then Analyze (small click clears)`);
   } else { state.region = null; box.hidden = true; setStatus(""); }
 });

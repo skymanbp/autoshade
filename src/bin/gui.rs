@@ -7880,6 +7880,15 @@ impl AutoshopApp {
                 }
             }
             MaskKind::Radial => {
+                // Under straighten/distortion the dragged view-rect has NO
+                // exact preimage in the model — Radial carries no rotation —
+                // so the committed area is the bbox of the mapped corners: a
+                // SUPERSET of the drag (the effect covers everything pointed
+                // at; the alternative, axis-preserving, would miss corners).
+                // The selected-mask outline then shows the TRUE transformed
+                // ellipse (parametric sampler in draw_masks) and the edge
+                // handles move by deltas, so the approximation never
+                // compounds. Identity when geometry is neutral.
                 let corners = [(sv.0, sv.1), (ev.0, ev.1), (sv.0, ev.1), (ev.0, sv.1)]
                     .map(|(x, y)| view_norm_to_orig(x, y, dims, deg, &dist));
                 let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
