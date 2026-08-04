@@ -46,7 +46,19 @@ WEIGHT_URLS = {
     "color_25": f"{_BASE}/scunet_color_25.pth",
     "color_50": f"{_BASE}/scunet_color_50.pth",
 }
-NETWORK_URL = "https://raw.githubusercontent.com/cszn/SCUNet/main/models/network_scunet.py"
+# PINNED to an immutable commit, not a branch. This file is EXECUTED
+# (exec_module below), so `.../SCUNet/main/...` meant "run whatever upstream
+# has at download time, with the user's privileges, beside their API keys and
+# photo library" — an upstream compromise or force-push would have been enough.
+# 9a6c650 (2022-03-23) is the last commit that touched this path.
+NETWORK_COMMIT = "9a6c6507aaddde34712553babc5e1f7fb8522287"
+NETWORK_URL = (
+    f"https://raw.githubusercontent.com/cszn/SCUNet/{NETWORK_COMMIT}/models/network_scunet.py"
+)
+# SHA-256 of that exact file (11445 bytes), verified against the upstream
+# commit on 2026-08-04. A poisoned cache, a corrupted download or a MITM now
+# fails LOUDLY instead of executing.
+NETWORK_SHA256 = "77aeefd31e37080db7f0bf46bca5efcecc800fcfddb502081340a10b2b949c60"
 
 
 def log(msg):
@@ -121,13 +133,58 @@ def _install_timm_shim():
     sys.modules.setdefault("thop", thop)
 
 
+def _sha256(path):
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch_verified(url, dest, want_sha256, what):
+    """Download (if absent) and REFUSE to proceed unless the bytes match.
+
+    A cache filled by an older build — which fetched this file from a moving
+    branch — is exactly the case that must not be trusted, so an existing file
+    is verified too. One mismatch triggers a single re-download (the benign
+    legacy-cache / truncated-download case); a second mismatch is fatal.
+    """
+    for attempt in (0, 1):
+        if not os.path.exists(dest):
+            _download(url, dest)
+        if not os.path.exists(dest):
+            # A download that produced nothing without raising must not crash
+            # this gate with FileNotFoundError — refuse honestly instead.
+            break
+        got = _sha256(dest)
+        if got == want_sha256:
+            return
+        log(f"{what}: checksum mismatch (expected {want_sha256}, got {got})")
+        try:
+            os.remove(dest)
+        except OSError:
+            # why: cannot re-fetch over a file we may not delete — fail below
+            # rather than execute unverified bytes.
+            break
+        if attempt == 0:
+            log(f"{what}: re-downloading from the pinned source ...")
+    raise SystemExit(
+        f"refusing to run {what}: its bytes do not match the pinned checksum. "
+        f"Delete the cache directory and retry; if it persists, the upstream "
+        f"download is not trustworthy."
+    )
+
+
 def load_model(model_name, cache_dir, device):
     import torch
 
     os.makedirs(cache_dir, exist_ok=True)
     net_path = os.path.join(cache_dir, "network_scunet.py")
-    if not os.path.exists(net_path):
-        _download(NETWORK_URL, net_path)
+    # Verified BEFORE exec_module — including a file an older build cached
+    # from the moving branch.
+    _fetch_verified(NETWORK_URL, net_path, NETWORK_SHA256, "the SCUNet network definition")
     weight_path = os.path.join(cache_dir, f"scunet_{model_name}.pth")
     if not os.path.exists(weight_path):
         if model_name not in WEIGHT_URLS:
@@ -141,7 +198,16 @@ def load_model(model_name, cache_dir, device):
 
     # color_real models: 3-channel, dim=64, 7 stages of depth 4 (KAIR test config).
     model = mod.SCUNet(in_nc=3, config=[4, 4, 4, 4, 4, 4, 4], dim=64)
-    state = torch.load(weight_path, map_location="cpu")
+    # weights_only: a .pth is a PICKLE, and torch below 2.6 executes arbitrary
+    # code while unpickling — a tampered or replaced weight download would run
+    # as the user. A state dict is plain tensors, so the safe loader suffices.
+    # The fallback covers a torch too old to know the flag; it says so rather
+    # than pretending the load was sandboxed.
+    try:
+        state = torch.load(weight_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        log("torch is too old for weights_only=True — loading the weight pickle unsandboxed")
+        state = torch.load(weight_path, map_location="cpu")
     model.load_state_dict(state, strict=True)
     model.eval().to(device)
     return model
