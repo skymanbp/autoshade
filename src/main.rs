@@ -427,12 +427,19 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
         // not to ./out: a lone out/<stem>.xmp is what the GUI/web would restore
         // instead of this recipe, silently dropping everything classic sidecars
         // cannot carry (bitmap masks, recolour gains).
-        let xmp_path = if redirected {
-            pipeline::write_xmp_at(recipe_path.with_extension("xmp"), &recipe)?
+        // The recipe write ALONE decides the saved state (the cross-surface
+        // rule): failing the command here reported "analyze failed" for a
+        // develop every reader already restores, and scripts then re-ran a
+        // paid analysis that had in fact succeeded.
+        let projected = if redirected {
+            pipeline::write_xmp_at(recipe_path.with_extension("xmp"), &recipe)
         } else {
-            write_xmp(raw, &recipe)?
+            write_xmp(raw, &recipe)
         };
-        println!("xmp    -> {}", xmp_path.display());
+        match projected {
+            Ok(p) => println!("xmp    -> {}", p.display()),
+            Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
+        }
         if redirected {
             // Post-store, ./out is only a legacy read fallback — the place the
             // GUI/web actually restore from is the photo's develop dir, so the
@@ -513,13 +520,26 @@ fn auto_cmd(
         },
         if denoise { " with AI denoise" } else { "" }
     );
-    let (w, h) = render::render_to_file(raw, &recipe, &out, dn.as_ref(), None)?;
+    // Render from the SAME source the GUI and web use: a saved heal/clone or
+    // generative master IS this develop's source (store::render_source, which
+    // also strips calibration for a generated master). Rendering the
+    // untouched RAW silently dropped every baked pixel edit and produced a
+    // file that disagreed with what reopening the photo shows.
+    let mut render_recipe = recipe.clone();
+    let src = autoshop::store::render_source(raw, &mut render_recipe);
+    if src != raw {
+        println!("  (rendering the saved pixel master {})", src.display());
+    }
+    let (w, h) = render::render_to_file(&src, &render_recipe, &out, dn.as_ref(), None)?;
     println!("render -> {} ({} x {})", out.display(), w, h);
     // XMP only for a RAW (Lightroom reads it beside the RAW); a baked source
-    // (PNG/TIFF) gets the recipe JSON only.
+    // (PNG/TIFF) gets the recipe JSON only. A projection failure is a WARNING:
+    // recipe.json (and the rendered file) already committed.
     if decode::is_raw(raw) {
-        let xmp_path = write_xmp(raw, &recipe)?;
-        println!("xmp    -> {}", xmp_path.display());
+        match write_xmp(raw, &recipe) {
+            Ok(xmp_path) => println!("xmp    -> {}", xmp_path.display()),
+            Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
+        }
     } else {
         println!("(baked source — recipe.json only, no XMP)");
     }
@@ -627,11 +647,24 @@ fn match_cmd(
         }
         let p = write_recipe(raw, &rep.recipe, Some(canonical))?;
         println!("sidecar-> {} (what the GUI/web restore; overwrites any earlier develop)", p.display());
+        // This fit was solved from the ORIGINAL source, so it describes the
+        // RAW — not a previously saved heal/generative master. Leaving that
+        // link in place made every later open apply the new look ON TOP of
+        // pixels it was never fitted to (the GUI reverse-fit clears it for
+        // exactly this reason).
+        if let Err(e) = autoshop::store::clear_pixel_source(raw) {
+            eprintln!("  ⚠ the saved pixel-master link could not be cleared: {e}");
+        }
     }
     if decode::is_raw(raw) {
-        let xmp_path = write_xmp(raw, &rep.recipe)?;
-        let s = stem(raw);
-        println!("xmp    -> {} (copy {s}.xmp beside {s}.ARW for Lightroom)", xmp_path.display());
+        // Warning, not failure: the recipe above already committed.
+        match write_xmp(raw, &rep.recipe) {
+            Ok(xmp_path) => {
+                let s = stem(raw);
+                println!("xmp    -> {} (copy {s}.xmp beside {s}.ARW for Lightroom)", xmp_path.display());
+            }
+            Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
+        }
     }
     if render_full {
         let img_out = default_out(raw, "matched", "tif");

@@ -2627,6 +2627,8 @@ impl AutoshopApp {
             });
         if save_quit {
             let mut failed: Option<String> = None;
+            // Collected, not fatal — reported on the way out (see below).
+            let mut xmp_warn: Option<String> = None;
             for (p, r, pix) in &pending {
                 // Neutral + no pixel identity = Ctrl+S's "clear my edits":
                 // WRITING neutral files here pinned the existence-keyed ●
@@ -2661,25 +2663,36 @@ impl AutoshopApp {
                         Some((o, g)) => autoshop::store::write_pixel_source(p, o, *g),
                         None => autoshop::store::clear_pixel_source(p),
                     }
-                    .map_err(anyhow::Error::from)?;
-                    // NO XMP for a generated entry — Ctrl+S refuses those for
-                    // the same reason: the look lives in baked pixels no
-                    // parametric sidecar can reproduce, and writing one here
-                    // overwrote a real Lightroom sidecar with a lie. The
-                    // recipe + pixels pair alone restores faithfully.
-                    if autoshop::decode::is_raw(p) && !generated {
-                        autoshop::pipeline::write_xmp(p, &disk).map(|_| ())
-                    } else {
-                        Ok(())
-                    }
+                    .map_err(anyhow::Error::from)
                 });
                 if let Err(e) = res {
                     failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
                     break;
                 }
+                // NO XMP for a generated entry — Ctrl+S refuses those for the
+                // same reason: the look lives in baked pixels no parametric
+                // sidecar can reproduce, and writing one here overwrote a real
+                // Lightroom sidecar with a lie. The recipe + pixels pair alone
+                // restores faithfully.
+                //
+                // OUTSIDE the fatal result: the recipe write alone decides the
+                // saved state (cross-surface rule), so a failed XMP projection
+                // must not abort the remaining photos or refuse to quit over a
+                // develop that IS durably saved.
+                if autoshop::decode::is_raw(p)
+                    && !generated
+                    && let Err(e) = autoshop::pipeline::write_xmp(p, &disk)
+                {
+                    xmp_warn = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                }
             }
             match failed {
                 None => {
+                    if let Some(w) = xmp_warn {
+                        // Said, never swallowed: the develops ARE saved, but
+                        // Lightroom will not see this one until it is rewritten.
+                        eprintln!("⚠ develops saved; a Lightroom XMP failed: {w}");
+                    }
                     self.nav_stash.clear();
                     self.saved_recipe = self.recipe.clone();
                     self.confirm_quit = false;

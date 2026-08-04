@@ -1184,18 +1184,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 /// photo itself. A GENERATED master carries the look in its pixels, so the
 /// recipe drops base_curve + lens_profile (the same strip rule every GUI
 /// render path applies).
-fn render_source(raw: &Path, recipe: &mut EditRecipe) -> PathBuf {
-    match crate::store::read_pixel_source(raw) {
-        Some((m, generated)) => {
-            if generated {
-                recipe.base_curve = Vec::new();
-                recipe.lens_profile = Default::default();
-            }
-            m
-        }
-        None => raw.to_path_buf(),
-    }
-}
+use crate::store::render_source;
 
 fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let mut req: DevelopReq = read_json(request)?;

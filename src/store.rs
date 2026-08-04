@@ -219,6 +219,31 @@ pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
     }
 }
 
+/// THE develop's render source, shared by every surface (CLI, GUI export and
+/// the web) so they can never disagree about what a recipe is applied TO.
+///
+/// A saved `pixels.json` master IS the develop's source: heal/clone/generative
+/// results are pixels no recipe can reproduce. The calibration rule rides
+/// along because it is a property of the SOURCE, not of the surface:
+/// * `inplace` master (heal/clone) = a NEUTRAL develop, so `base_curve` and
+///   `lens_profile` still render on top of it;
+/// * `generated` master (AI reimagine/fill) already carries the look in its
+///   pixels, so both fields are stripped from the copy being rendered — the
+///   recipe ON DISK keeps them (a master that later fails to decode must
+///   still restore a calibrated develop).
+pub fn render_source(raw: &Path, recipe: &mut EditRecipe) -> PathBuf {
+    match read_pixel_source(raw) {
+        Some((master, generated)) => {
+            if generated {
+                recipe.base_curve = Vec::new();
+                recipe.lens_profile = Default::default();
+            }
+            master
+        }
+        None => raw.to_path_buf(),
+    }
+}
+
 /// Repair a CRASHED publish. `write_recipe` and `write_pixel_source` retire
 /// the live file to `<name>.bak` and then rename the staged copy over it; a
 /// crash between those two renames leaves the develop ONLY in the `.bak`.
