@@ -222,7 +222,49 @@ pub fn produce_recipe(
             recipe.lens_profile = fresh_lens_profile(raw);
         }
     }
+    // REFINE means "adjust MY edit", so it must not delete work the model was
+    // never able to return. The strict response schema
+    // (advisor::openai::edit_recipe_schema) can express only LINEAR and RADIAL
+    // mask geometry and carries no colour gains, no mask role and none of the
+    // manual lens fields — so a round-trip silently dropped every bitmap mask
+    // (AI-selected sky/subject, painted, reverse-fit zones) with its recolour
+    // gains, plus any manual lens correction. The result then auto-saves.
+    // Carry those back from the base the user actually had.
+    if let Some(b) = base {
+        carry_over_unrepresentable(&mut recipe, b);
+    }
     Ok((recipe, verdict))
+}
+
+/// Re-attach what the AI's response schema CANNOT express, from the refine
+/// base the photographer actually had.
+///
+/// `advisor::openai::edit_recipe_schema` can encode only LINEAR and RADIAL
+/// mask geometry and carries no colour gains, no mask role and none of the
+/// manual lens fields. A missing bitmap mask in the response therefore
+/// carries NO intent — the model had no way to return one — yet the refined
+/// recipe auto-saves, so every AI-selected sky/subject mask, painted mask,
+/// reverse-fit zone (with its recolour gains) and hand-dialled lens
+/// correction silently disappeared the moment the user clicked Refine.
+pub(crate) fn carry_over_unrepresentable(recipe: &mut EditRecipe, base: &EditRecipe) {
+    let carried: Vec<_> = base
+        .masks
+        .iter()
+        .filter(|m| matches!(m.mask, crate::recipe::MaskGeometry::Bitmap { .. }))
+        .cloned()
+        .collect();
+    if !carried.is_empty() {
+        // Ahead of the proposed ones: the order they were authored in.
+        let proposed = std::mem::take(&mut recipe.masks);
+        recipe.masks = carried;
+        recipe.masks.extend(proposed);
+    }
+    // Manual lens corrections are geometry the photographer dialled in and the
+    // model never saw; defaulting them silently re-warped the frame.
+    recipe.lens_distortion = base.lens_distortion;
+    recipe.lens_vignette = base.lens_vignette;
+    recipe.lens_vignette_mid = base.lens_vignette_mid;
+    recipe.clamp(); // the size caps still apply after re-attaching
 }
 
 /// The photo's saved recipe (central store first, then legacy), parsed once —
@@ -584,6 +626,57 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
 #[cfg(test)]
 mod guard_tests {
     use super::*;
+
+    #[test]
+    fn refine_keeps_what_the_ai_schema_cannot_return() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        // The photographer's edit: an AI-selected sky (bitmap, with recolour
+        // gains), a hand-drawn radial, and manual lens corrections.
+        let base = EditRecipe {
+            masks: vec![
+                LocalAdjustment {
+                    mask: MaskGeometry::Bitmap { path: "mask-sky.png".into() },
+                    color_gains: Some([1.2, 1.0, 0.8]),
+                    exposure_ev: -0.5,
+                    ..Default::default()
+                },
+                LocalAdjustment {
+                    mask: MaskGeometry::Radial {
+                        top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
+                        feather: 0.5, roundness: 0.0, flipped: false,
+                    },
+                    ..Default::default()
+                },
+            ],
+            lens_distortion: -8.0,
+            lens_vignette: 30.0,
+            lens_vignette_mid: 40.0,
+            ..Default::default()
+        };
+        // What the model can return: parametric masks only, lens fields absent
+        // from the schema so they deserialize to their defaults.
+        let mut proposed = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Linear {
+                    zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 0.4,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        carry_over_unrepresentable(&mut proposed, &base);
+        assert_eq!(proposed.masks.len(), 2, "the bitmap mask must survive Refine");
+        let MaskGeometry::Bitmap { path } = &proposed.masks[0].mask else {
+            panic!("the carried mask must come first, got {:?}", proposed.masks[0].mask)
+        };
+        assert_eq!(path, "mask-sky.png");
+        assert_eq!(proposed.masks[0].color_gains, Some([1.2, 1.0, 0.8]), "gains too");
+        assert_eq!(proposed.lens_distortion, -8.0, "manual lens correction kept");
+        assert_eq!(proposed.lens_vignette, 30.0);
+        assert_eq!(proposed.lens_vignette_mid, 40.0);
+        // The model's own proposal is still there, after the carried one.
+        assert!(matches!(proposed.masks[1].mask, MaskGeometry::Linear { .. }));
+    }
 
     #[test]
     fn guard_refuses_to_overwrite_a_photo_in_a_sibling_library_folder() {
