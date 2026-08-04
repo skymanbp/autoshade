@@ -780,6 +780,8 @@ struct AutoshopApp {
     // --- tone-curve editor ---
     curve_channel: usize,                  // CURVE_CHANNELS index: 0=master 1=R 2=G 3=B
     curve_drag: Option<usize>,             // control point being dragged (active channel)
+    #[cfg(test)]
+    curve_rect: Option<egui::Rect>,        // test seam: the editor square's last rect
     // --- batch recipe copy / paste ---
     multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1094,6 +1096,8 @@ impl Default for AutoshopApp {
             place_start: None,
             curve_channel: 0,
             curve_drag: None,
+            #[cfg(test)]
+            curve_rect: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,
@@ -1826,6 +1830,10 @@ impl AutoshopApp {
         if self.busy {
             return;
         }
+        // Flush a typed-but-uncommitted mask rename before the stash below
+        // snapshots the recipe — a thumbnail click / Ctrl+O / arrow-key nav
+        // with the name box focused silently stashed the OLD name (U10).
+        self.commit_mask_name_buf();
         // The mid-open window marker (see confirm_quit_layer): src_path is
         // re-pointed below while recipe/saved_recipe still describe the old
         // photo; cleared in BOTH Msg::Opened arms.
@@ -3692,6 +3700,13 @@ impl AutoshopApp {
         let side = ui.available_width().clamp(160.0, 240.0);
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click_and_drag());
+        #[cfg(test)]
+        {
+            // Test seam (the same convention as develop_count /
+            // overlay_build_count): the headless driven test aims its
+            // synthetic click with the square's screen rect.
+            self.curve_rect = Some(rect);
+        }
         let p = ui.painter_at(rect);
         let accent = CURVE_CHANNELS[self.curve_channel].1;
         p.rect_filled(rect, 3.0, egui::Color32::from_gray(16));
@@ -4243,6 +4258,10 @@ impl AutoshopApp {
     /// write — steer the user to 反推 (which produces a Fitted variant whose XMP
     /// IS the look). Always keyed to the original RAW `src_path`.
     fn save_xmp(&mut self) {
+        // Flush a typed-but-uncommitted mask rename FIRST (U10): every save
+        // entry point (Ctrl+S, the Save develop button) must write the name
+        // the user sees in the box, not the pre-focus snapshot.
+        self.commit_mask_name_buf();
         let lang = self.lang;
         if self.active_is_generated() {
             // A keyboard Ctrl+S refusal must be SEEN — the status line alone
@@ -9383,6 +9402,11 @@ impl eframe::App for AutoshopApp {
         // save-all / discard / cancel; the guard re-checks on the way out, so
         // both quit buttons work by making the state genuinely clean.
         if ctx.input(|i| i.viewport().close_requested()) {
+            // A typed-but-uncommitted mask rename must COUNT as unsaved
+            // work: commit it before the dirty check below — an otherwise
+            // clean recipe used to close without a prompt and the rename
+            // died with the window (U10).
+            self.commit_mask_name_buf();
             // Unsaved covers PIXELS too: a baked retouch whose master isn't
             // recorded in the store yet dies with the window exactly like an
             // unsaved slider move (the master PNG survives, its linkage not).
@@ -9483,10 +9507,9 @@ impl eframe::App for AutoshopApp {
                 self.start_export();
             }
             if do_xmp && self.src_path.is_some() && !self.busy {
-                // Ctrl+S now fires while a TextEdit holds focus — a pending
-                // mask rename would otherwise save with the OLD name (and
-                // the advanced baseline then let quit drop the rename).
-                self.commit_mask_name_buf();
+                // The pending-rename flush lives at save_xmp's head now (it
+                // fires while a TextEdit holds focus either way) — the Save
+                // develop BUTTON takes the same entry point (U10).
                 self.save_xmp();
             }
         }
@@ -10489,6 +10512,21 @@ mod tests {
                 ] {
                     for (nx, ny) in [(0.5, 0.5), (0.35, 0.65), (0.6, 0.42)] {
                         let (vx, vy) = orig_norm_to_view(nx, ny, dims, deg, &lens);
+                        // Active geometry must MOVE an off-centre point —
+                        // identity-regressed wrappers round-trip perfectly
+                        // and hid exactly that. This is also the suite's
+                        // only inertness pin for lens_geom_norm's PROFILE
+                        // branch (the render-side batch-20 twin runs
+                        // profile-off) (U10).
+                        if (deg != 0.0 || dist != 0.0 || lens.profile.distortion_on)
+                            && (nx, ny) != (0.5, 0.5)
+                        {
+                            assert!(
+                                (vx - nx).abs() > 1e-4 || (vy - ny).abs() > 1e-4,
+                                "deg {deg} dist {dist} profile {}: ({nx},{ny}) unmoved — inert map",
+                                lens.profile.distortion_on
+                            );
+                        }
                         let (ox, oy) = view_norm_to_orig(vx, vy, dims, deg, &lens);
                         assert!(
                             (ox - nx).abs() < 2e-3 && (oy - ny).abs() < 2e-3,
@@ -10504,10 +10542,12 @@ mod tests {
     }
 
     #[test]
-    fn curve_editor_edits_render_identically_to_the_engine() {
-        // The editor mutates recipe.*_curve and previews via render::curve_lut —
-        // the exact LUT the engine applies. Empty = identity; an anchored lift
-        // keeps the ends and raises the anchored midpoint.
+    fn curve_lut_helpers_match_the_engine() {
+        // The LUT + point helpers the editor builds on — renamed from
+        // "curve_editor_edits_render_identically_to_the_engine": this test
+        // never enters curve_editor (the driven test below does, U10).
+        // Empty = identity; an anchored lift keeps the ends and raises the
+        // anchored midpoint.
         let id = autoshop::render::curve_lut(&[]);
         assert!(id[0].abs() < 1e-6 && (id[255] - 1.0).abs() < 1e-6);
         assert!((id[128] - 128.0 / 255.0).abs() < 1e-3);
@@ -10524,6 +10564,66 @@ mod tests {
         for ch in 0..4 {
             assert_eq!(curve_points(&r, ch).len(), if ch == 0 { 3 } else { 0 });
         }
+    }
+
+    #[test]
+    fn curve_editor_click_adds_a_point_to_the_selected_channel() {
+        // Drive the REAL editor with synthetic pointer events — a hard-coded
+        // channel in the write path, a dead click branch, or a lost `changed`
+        // report all stayed green under the LUT-only test above (U10).
+        // Pass 1 lays out and records the square (test seam); pass 2
+        // presses; pass 3 releases → egui reports the click (which pass
+        // reports the change depends on egui's drag-vs-click bookkeeping,
+        // so the two are OR-ed).
+        let mut app = AutoshopApp { curve_channel: 2, ..Default::default() };
+        let ctx = egui::Context::default();
+        let run_pass = |app: &mut AutoshopApp, events: Vec<egui::Event>| -> bool {
+            let mut changed = false;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    changed |= app.curve_editor(ui);
+                });
+            });
+            changed
+        };
+        let _ = run_pass(&mut app, vec![]);
+        let rect = app.curve_rect.expect("the editor records its square (test seam)");
+        let q = egui::pos2(rect.min.x + rect.width() * 0.25, rect.min.y + rect.height() * 0.5);
+        let button = |pressed: bool| egui::Event::PointerButton {
+            pos: q,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let changed_press = run_pass(&mut app, vec![egui::Event::PointerMoved(q), button(true)]);
+        let changed_release = run_pass(&mut app, vec![button(false)]);
+        assert!(changed_press || changed_release, "the editor must report the edit");
+        assert_eq!(
+            curve_points(&app.recipe, 2).len(),
+            1,
+            "the click adds one point to the SELECTED channel"
+        );
+        for ch in [0usize, 1, 3] {
+            assert!(curve_points(&app.recipe, ch).is_empty(), "no cross-channel write (ch {ch})");
+        }
+        let p = &curve_points(&app.recipe, 2)[0];
+        assert!(
+            (p.input as f32 - 255.0 * 0.25).abs() <= 2.0,
+            "the point lands at the clicked input: {}",
+            p.input
+        );
+        assert!(
+            (p.output as i16 - p.input as i16).abs() <= 2,
+            "seeded ON the identity curve: {p:?}"
+        );
     }
 
     /// A tiny synthetic base + a bitmap mask on disk, for the async-develop and
@@ -10577,6 +10677,19 @@ mod tests {
         let ctx = egui::Context::default();
         let base = app.base_preview.clone().unwrap();
 
+        // Dispatch itself (U10): arming must set the in-flight flag and
+        // consume the pending edit, and the guard must swallow a SECOND
+        // dispatch while one is armed — this is also what makes the
+        // "inflight cleared" assertion below non-vacuous (develop_inflight
+        // used to be false from construction to the end).
+        app.dirty = true;
+        app.start_redevelop();
+        assert!(app.develop_inflight, "dispatch arms the in-flight flag");
+        assert!(!app.dirty, "dispatch consumes the pending edit");
+        app.dirty = true;
+        app.start_redevelop();
+        assert!(app.dirty, "the in-flight guard swallows a second dispatch (edit stays armed)");
+
         // A matching frame is accepted and bumps the counter + sets the texture.
         let good = build_preview(base.clone(), app.recipe.clone(), false);
         app.finish_redevelop(&ctx, Ok(good));
@@ -10590,6 +10703,38 @@ mod tests {
         app.recipe.masks[0].exposure_ev = 1.9; // user kept dragging
         app.finish_redevelop(&ctx, Ok(stale));
         assert_eq!(app.develop_count, 1, "stale frame (recipe moved) discarded");
+
+        std::fs::remove_file(&mask_path).ok();
+    }
+
+    #[test]
+    fn mask_rename_flushes_at_every_entry_point() {
+        // A typed-but-uncommitted mask rename (TextEdit still focused, so
+        // the panel's lost-focus commit has not run) used to be silently
+        // dropped by every entry point except Ctrl+S (U10). open_path must
+        // flush BEFORE stashing — and a flushed rename must read as
+        // unsaved, which is what arms the close guard's dirty check.
+        let (mut app, mask_path) = app_with_masked_photo("rename");
+        app.recipe.masks[0].name = "sky".into();
+        app.saved_recipe = app.recipe.clone();
+        let old = std::path::PathBuf::from("out/_rename_old.arw");
+        app.src_path = Some(old.clone());
+        app.mask_name_buf = Some((0, "sky".into(), "sky gradient".into()));
+
+        app.open_path(std::path::PathBuf::from("out/_rename_new.arw"));
+        assert_eq!(
+            app.recipe.masks[0].name, "sky gradient",
+            "open_path itself must flush the pending rename"
+        );
+        assert!(
+            dirty_vs(&app.recipe, &app.saved_recipe),
+            "the flushed rename must read as unsaved (the close guard's gate)"
+        );
+        let stash = app.nav_stash.get(&old).expect("a dirty canvas must be stashed");
+        assert_eq!(
+            stash.recipe.masks[0].name, "sky gradient",
+            "the stash carries the TYPED name, not the pre-focus one"
+        );
 
         std::fs::remove_file(&mask_path).ok();
     }
