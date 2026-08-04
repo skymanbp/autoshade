@@ -43,13 +43,18 @@ struct AppState {
     /// Config behind a lock so the Settings panel can hot-reload it (POST
     /// /api/settings rewrites the local file, then swaps in a fresh `Config`).
     cfg: RwLock<Config>,
-    /// Folder-switch generation: each /api/setdir claims the next number
+    /// Folder-switch CLAIM counter: each /api/setdir claims the next number
     /// BEFORE scanning and only installs its result while still current —
     /// without this, a SLOW scan of folder A finishing after a fast scan of
-    /// folder B silently swapped the server back to A under B's UI. It also
-    /// STAMPS every listing, so a request built for the old folder cannot
-    /// resolve its index against the new one (see `stale_generation`).
+    /// folder B silently swapped the server back to A under B's UI.
     dir_gen: std::sync::atomic::AtomicU64,
+    /// The generation actually INSTALLED — stamped inside the same
+    /// write-lock scope that swaps `raws`/`dir`. Listings and the stale-id
+    /// guards compare against THIS, never the claim counter: the claim
+    /// advances at the START of a possibly-slow scan, so stamping listings
+    /// with it handed rows still read from the OLD table the NEW generation
+    /// — a stale id then passed the guard against the swapped table.
+    installed_gen: std::sync::atomic::AtomicU64,
     /// The port we are actually listening on — the loopback-origin guard
     /// compares it against the request's Host/Origin.
     port: u16,
@@ -71,6 +76,28 @@ impl AppState {
     fn config(&self) -> std::sync::RwLockReadGuard<'_, Config> {
         self.cfg.read().unwrap_or_else(|e| e.into_inner())
     }
+    /// Resolve `id` for an id-bound MUTATION: the generation check and the
+    /// index lookup happen under ONE read guard, so a folder switch can
+    /// never slip between them (`stamp` = the client's X-Autoshop-Gen
+    /// value). Needed in ADDITION to the pre-dispatch
+    /// `stale_generation` bail — that one runs before the request BODY is
+    /// read, and a body can take seconds (a full-res mask), long enough for
+    /// a switch to install a new table under the old id.
+    fn at_checked(&self, id: usize, stamp: Option<u64>) -> std::result::Result<PathBuf, ResponseBox> {
+        let Ok(raws) = self.raws.read() else {
+            return Err(status_response(500, "listing lock poisoned"));
+        };
+        if stamp != Some(self.installed_gen.load(std::sync::atomic::Ordering::SeqCst)) {
+            return Err(status_response(
+                409,
+                "the gallery moved to another folder — reload the page and try again",
+            ));
+        }
+        match raws.get(id) {
+            Some(p) => Ok(p.clone()),
+            None => Err(status_response(400, "bad id")),
+        }
+    }
 }
 
 pub fn serve(dir: &Path, port: u16) -> Result<()> {
@@ -82,6 +109,7 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
         raws: RwLock::new(raws),
         cfg: RwLock::new(Config::load()),
         dir_gen: std::sync::atomic::AtomicU64::new(0),
+        installed_gen: std::sync::atomic::AtomicU64::new(0),
         port,
     });
     let addr = format!("127.0.0.1:{port}");
@@ -134,6 +162,12 @@ fn req_header(request: &Request, name: &'static str) -> Option<String> {
         .iter()
         .find(|h| h.field.equiv(name))
         .map(|h| h.value.as_str().to_string())
+}
+
+/// The client's `X-Autoshop-Gen` stamp (the listing generation its photo
+/// ids came from), if present and numeric.
+fn request_gen(request: &Request) -> Option<u64> {
+    req_header(request, "X-Autoshop-Gen").and_then(|v| v.trim().parse::<u64>().ok())
 }
 
 /// Refuse anything a HOSTILE WEB PAGE could send us.
@@ -202,9 +236,13 @@ fn id_bound_mutation(path: &str) -> bool {
 /// client stamps every /api request with the generation its ids came from
 /// (`X-Autoshop-Gen`, see index.html); a mismatch means the gallery moved
 /// under it and the id now points at another photo.
+/// EARLY bail only — it runs before the request body is read; the
+/// authoritative re-check happens at id-resolution time under the listing
+/// lock (`AppState::at_checked`), because a folder switch can complete
+/// while a large body is still uploading.
 fn stale_generation(request: &Request, state: &AppState) -> Option<ResponseBox> {
-    let cur = state.dir_gen.load(std::sync::atomic::Ordering::SeqCst);
-    match req_header(request, "X-Autoshop-Gen").and_then(|v| v.trim().parse::<u64>().ok()) {
+    let cur = state.installed_gen.load(std::sync::atomic::Ordering::SeqCst);
+    match request_gen(request) {
         Some(g) if g == cur => None,
         _ => Some(status_response(
             409,
@@ -321,13 +359,15 @@ fn api_list(request: &Request, state: &AppState) -> Result<ResponseBox> {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(LIST_CAP)
         .clamp(1, LIST_CAP);
-    // Read the generation BEFORE the list: /api/setdir bumps it, then scans,
-    // then installs. Reading it first can only under-report (items newer than
-    // the stamp -> the client's next mutation 409s and it reloads); reading it
-    // after could stamp OLD items with the NEW generation, which would let a
-    // stale id through — fail closed, never open.
-    let listing_gen = state.dir_gen.load(std::sync::atomic::Ordering::SeqCst);
+    // The INSTALLED generation, read while HOLDING the read guard: the
+    // install stamps it inside the write-guard scope, so (gen, items) is one
+    // coherent pair. The old pre-lock read of the CLAIM counter — bumped
+    // BEFORE the possibly-slow folder scan — stamped rows still read from
+    // the OLD table with the NEW generation whenever a listing landed inside
+    // a switch's scan window, and a mutation built from those rows then
+    // passed the stale-generation guard against the swapped table.
     let raws = state.raws.read().map_err(|_| anyhow!("lock poisoned"))?;
+    let listing_gen = state.installed_gen.load(std::sync::atomic::Ordering::SeqCst);
     let total = raws.len();
     let items: Vec<_> = raws
         .iter()
@@ -396,6 +436,9 @@ fn api_setdir(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         }
         *raws = found;
         *dir = p.clone();
+        // Inside the write-guard scope: readers holding the read guard see
+        // (installed_gen, raws) as one coherent pair.
+        state.installed_gen.store(claimed_gen, Ordering::SeqCst);
     }
     Ok(json_response(
         &json!({ "dir": p.display().to_string(), "total": total, "gen": claimed_gen }),
@@ -808,6 +851,26 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_tint = ast;
                 }
                 let mut resp = json_text(serde_json::to_string(&r)?);
+                // A corrupt recipe.json used to fall through to THIS lossy
+                // XMP answer SILENTLY — the authoritative save (bitmap
+                // masks, engine-only fields) deserves a disclosure, or the
+                // next explicit save quietly overwrites it with the
+                // projection shown here. Detail to stderr (the path can be
+                // non-ASCII; header values cannot).
+                if let Some(err) = &parse_err {
+                    eprintln!(
+                        "⚠ recipe.json for {} is unreadable ({err}) — serving the XMP projection instead",
+                        raw.display()
+                    );
+                    if let Some(h) = header(
+                        "X-Recipe-Warning",
+                        "the saved recipe.json is unreadable - showing the lossy XMP projection \
+                         instead (bitmap masks and engine-only edits are missing); saving \
+                         overwrites the unreadable file",
+                    ) {
+                        resp = resp.with_header(h);
+                    }
+                }
                 if let Some(w) = xmp_warn.take() {
                     resp = resp.with_header(w);
                 }
@@ -1061,38 +1124,57 @@ struct RetouchReq {
 /// fill/heal answer's X-Output-Path, posted back so the NEXT operation (or
 /// the preview / an export) builds on it — without this a second fill/heal
 /// restarted from the persisted master and silently discarded the first
-/// (U30). UNTRUSTED input: accept only a path that canonicalises INSIDE the
-/// project's ./out tree (where every fill/heal master lives). Anything else
-/// is a hard error — falling back silently would re-introduce the exact
-/// stealth loss this exists to fix.
+/// (U30). UNTRUSTED input: accepted ONLY when THIS server process issued it
+/// for THIS photo — every fill/heal output is registered at creation
+/// (`issue_session_master`). Registry membership replaces the old
+/// canonicalise-into-./out + stem-prefix checks and closes their gap: a
+/// same-stem master of a DIFFERENT photo (same file name, different source
+/// folder — the ./out namespace is global) passed the stem test and grafted
+/// one photo's frame onto another's develop. The registered flag carries
+/// whether the chain's ROOT source was a GENERATED master (the look baked
+/// into its pixels): consumers must strip base curve / lens profile / the
+/// as-shot anchor exactly as `render_source_checked` does, and Save must
+/// record that provenance (it used to hardcode inplace). The registry dies
+/// with the process; a browser holding masters from an earlier run is told
+/// to reselect — never a silent fallback.
 fn session_master(
     claim: Option<&str>,
     raw: &Path,
-) -> std::result::Result<Option<PathBuf>, String> {
+) -> std::result::Result<Option<(PathBuf, bool)>, String> {
     let Some(c) = claim else { return Ok(None) };
     if c.trim().is_empty() {
         return Ok(None);
     }
     let canon = std::fs::canonicalize(c)
         .map_err(|e| format!("session master {c} is not readable ({e}) — reselect the photo and retry"))?;
-    let root = std::fs::canonicalize("out")
-        .map_err(|e| format!("no ./out tree ({e}) — reselect the photo and retry"))?;
-    if !canon.starts_with(&root) {
-        return Err(format!("session master {c} is outside ./out — reselect the photo and retry"));
+    let issued = issued_masters().lock().unwrap_or_else(|p| p.into_inner());
+    match issued.get(&crate::store::photo_key(raw)).and_then(|m| m.get(&canon)) {
+        Some(&generated) => Ok(Some((canon, generated))),
+        None => Err(format!(
+            "session master {c} was not issued for this photo by this server run — reselect the photo and retry"
+        )),
     }
-    // The master must BELONG to this photo: every retouch master is named by
-    // its photo's stem (unique_out → default_out gives "<stem>.<tag>.png"),
-    // so a claim whose file name does not start with "<stem>." carries some
-    // OTHER photo's pixels — replaying it here would graft photo A's frame
-    // onto photo B's develop, and Save would persist that graft.
-    let stem = pipeline::stem(raw);
-    let name = canon.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if !name.starts_with(&format!("{stem}.")) {
-        return Err(format!(
-            "session master {c} does not belong to this photo — reselect the photo and retry"
-        ));
-    }
-    Ok(Some(canon))
+}
+
+/// The issuance registry behind [`session_master`]: photo key → canonical
+/// master path → root-was-generated flag.
+fn issued_masters()
+-> &'static Mutex<std::collections::HashMap<String, std::collections::HashMap<PathBuf, bool>>> {
+    static ISSUED: OnceLock<
+        Mutex<std::collections::HashMap<String, std::collections::HashMap<PathBuf, bool>>>,
+    > = OnceLock::new();
+    ISSUED.get_or_init(Default::default)
+}
+
+/// Register a master this process just wrote for `raw`; `generated` = the
+/// chain's root source carried the look (see [`session_master`]).
+fn issue_session_master(raw: &Path, out: &Path, generated: bool) {
+    // Canonical form, because session_master compares canonical forms. A
+    // failure (the file we just wrote vanishing) only means the claim is
+    // refused later — with the reselect message, never a silent wrong master.
+    let Ok(canon) = std::fs::canonicalize(out) else { return };
+    let mut map = issued_masters().lock().unwrap_or_else(|p| p.into_inner());
+    map.entry(crate::store::photo_key(raw)).or_default().insert(canon, generated);
 }
 
 /// Map a dragged region from the DISPLAYED After frame back into the ORIGINAL
@@ -1260,8 +1342,12 @@ fn source_dims(raw: &Path) -> Option<(f32, f32)> {
 }
 
 fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let stamp = request_gen(request);
     let req: AnalyzeReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
+    let raw = match state.at_checked(req.id, stamp) {
+        Ok(r) => r,
+        Err(resp) => return Ok(resp),
+    };
     // A dragged region anchors the edit: fold its coords into the direction so the
     // AI places a mask over exactly that box (reuses the Phase-2 area→mask prompt).
     // The box was dragged on the DISPLAYED preview (post lens/straighten/crop);
@@ -1367,8 +1453,12 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 // degrades-with-warning on the preview (A6).
 
 fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let stamp = request_gen(request);
     let mut req: DevelopReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
+    let raw = match state.at_checked(req.id, stamp) {
+        Ok(r) => r,
+        Err(resp) => return Ok(resp),
+    };
     // Store recipes reference rasters by bare name (api_recipe serves them
     // verbatim) — anchor them to the photo's develop dir before rendering.
     // UNTRUSTED input, like any hand-edited recipe: clamp before it reaches
@@ -1379,15 +1469,25 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Same decode source as `api_export` below — see `develop_base`. A
     // browser-session master (fill/heal chained this session, not yet
-    // persisted) overrides the persisted source; such masters are NEUTRAL
-    // develops (InPlace), so the recipe — calibration included — renders on
-    // top, no strip.
+    // persisted) overrides the persisted source; whether the calibration
+    // renders on top depends on the chain's ROOT: rooted at the photo or an
+    // inplace heal = a neutral develop (no strip); rooted at a GENERATED
+    // master = the look lives in the pixels (strip, exactly like
+    // render_source_checked). The issuance registry carries that provenance.
     // A recorded master that cannot be honoured must not fail the PREVIEW —
     // the user needs a canvas to act on — but silence was the A6 defect: the
     // degradation rides back as a header the status line surfaces.
     let mut preview_warning: Option<String> = None;
     let src = match session_master(req.master.as_deref(), &raw) {
-        Ok(Some(p)) => p,
+        Ok(Some((p, generated))) => {
+            if generated {
+                req.recipe.base_curve = Vec::new();
+                req.recipe.lens_profile = Default::default();
+                req.recipe.as_shot_k = None;
+                req.recipe.as_shot_tint = None;
+            }
+            p
+        }
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
             Ok(p) => p,
             Err(msg) => {
@@ -1437,14 +1537,27 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // Full-resolution work — see HEAVY. Held for the whole handler.
     let _heavy = HEAVY.lock().unwrap_or_else(|p| p.into_inner());
 
+    let stamp = request_gen(request);
     let mut req: DevelopReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
+    let raw = match state.at_checked(req.id, stamp) {
+        Ok(r) => r,
+        Err(resp) => return Ok(resp),
+    };
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Session master wins here too (api_develop's rule) — the deliverable
-    // must match the healed preview the user just approved.
+    // must match the healed preview the user just approved, generated-root
+    // strip included.
     let src = match session_master(req.master.as_deref(), &raw) {
-        Ok(Some(p)) => p,
+        Ok(Some((p, generated))) => {
+            if generated {
+                req.recipe.base_curve = Vec::new();
+                req.recipe.lens_profile = Default::default();
+                req.recipe.as_shot_k = None;
+                req.recipe.as_shot_tint = None;
+            }
+            p
+        }
         // DELIVERABLE: a broken master link refuses instead of silently
         // exporting the un-retouched source (A6). Server-side state, not the
         // client's request — a 500 whose body names the remedy.
@@ -1454,6 +1567,10 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         },
         Err(msg) => return Ok(status_response(400, &msg)),
     };
+    // Fixed name BY DESIGN: re-exporting the same photo replaces its own
+    // previous deliverable. Recorded residual: two same-stem photos from
+    // DIFFERENT folders share this name (the batch-naming avoidance ruling
+    // covered CLI batches; single exports mirror the GUI's policy).
     let out = pipeline::default_out(&raw, "developed", fmt_ext(&req));
     pipeline::ensure_parent(&out)?;
     // Config SNAPSHOT: the read guard held across a multi-minute render
@@ -1488,13 +1605,26 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     // Full-resolution work — see HEAVY. Held for the whole handler.
     let _heavy = HEAVY.lock().unwrap_or_else(|p| p.into_inner());
 
+    let stamp = request_gen(request);
     let mut req: DevelopReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
+    let raw = match state.at_checked(req.id, stamp) {
+        Ok(r) => r,
+        Err(resp) => return Ok(resp),
+    };
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
-    // Session master wins here too (api_develop's rule).
+    // Session master wins here too (api_develop's rule), generated-root
+    // strip included.
     let src = match session_master(req.master.as_deref(), &raw) {
-        Ok(Some(p)) => p,
+        Ok(Some((p, generated))) => {
+            if generated {
+                req.recipe.base_curve = Vec::new();
+                req.recipe.lens_profile = Default::default();
+                req.recipe.as_shot_k = None;
+                req.recipe.as_shot_tint = None;
+            }
+            p
+        }
         // DELIVERABLE: a broken master link refuses instead of silently
         // exporting the un-retouched source (A6). Server-side state, not the
         // client's request — a 500 whose body names the remedy.
@@ -1588,8 +1718,12 @@ fn sweep_stale_temp_files() {
 }
 
 fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
+    let stamp = request_gen(request);
     let req: XmpReq = read_json(request)?;
-    let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
+    let raw = match state.at_checked(req.id, stamp) {
+        Ok(r) => r,
+        Err(resp) => return Ok(resp),
+    };
     // Same intra-process save serialization as api_analyze.
     let _save = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // Resolve the session master FIRST: a rejected master must fail the save
@@ -1649,11 +1783,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // reopen that follows "saved". Only ever WRITTEN here: an absent claim
     // must not clear a GUI-persisted master.
     let mut master_note = String::new();
-    if let Some(p) = &master {
+    if let Some((p, generated)) = &master {
         // Recipe already committed (the cross-surface rule); an I/O failure
         // recording the pixels degrades to a disclosed warning, same as the
         // GUI's pixels_ok path. Claim REJECTION was a 400 before any write.
-        if let Err(e) = crate::store::write_pixel_source(&raw, p, false) {
+        // GENERATED provenance rides from the issuance registry: hardcoding
+        // inplace here made every later open render the base curve / lens
+        // profile / anchor on top of pixels that already carry them.
+        if let Err(e) = crate::store::write_pixel_source(&raw, p, *generated) {
             master_note = format!(
                 " — but recording the retouched master failed ({e}); reopening shows the un-retouched source"
             );
@@ -1677,10 +1814,11 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 /// display, with the saved master path in `X-Output-Path`. Needs OPENAI_API_KEY.
 fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 
+    let stamp = request_gen(request);
     let req: RetouchReq = read_json(request)?;
-    let raw = match state.at(req.id) {
-        Some(r) => r,
-        None => return Ok(status_response(400, "bad id")),
+    let raw = match state.at_checked(req.id, stamp) {
+        Ok(r) => r,
+        Err(resp) => return Ok(resp),
     };
     // Accept either a "data:image/png;base64,XXXX" URL or bare base64.
     let b64 = req.mask.rsplit(',').next().unwrap_or(&req.mask).trim();
@@ -1693,11 +1831,10 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // second operation restarted from the persisted master and silently
     // discarded the first, U30), else the persisted pixels.json master, else
     // the photo itself (api_develop's rule).
-    let src = match session_master(req.master.as_deref(), &raw) {
-        Ok(Some(p)) => p,
+    let (src, src_generated) = match session_master(req.master.as_deref(), &raw) {
+        Ok(Some((p, g))) => (p, g),
         Ok(None) => crate::store::read_pixel_source(&raw)
-            .map(|(m, _)| m)
-            .unwrap_or_else(|| raw.clone()),
+            .unwrap_or_else(|| (raw.clone(), false)),
         Err(msg) => return Ok(status_response(400, &msg)),
     };
     // The mask was painted over the DISPLAYED (post-geometry) preview —
@@ -1731,6 +1868,9 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let _ = std::fs::remove_file(&mask_tmp);
     match result {
         Ok(()) => {
+            // The new master inherits the chain root's generated-ness: a fill
+            // composited ONTO a generated master still carries its look.
+            issue_session_master(&raw, &out, src_generated);
             let img = decode::load_image(&out)?
                 .resize(1400, 1400, image::imageops::FilterType::Triangle);
             let mut buf = Vec::new();
@@ -1782,10 +1922,11 @@ fn default_true() -> bool {
 /// returns a JPEG of the result for inline display, path in `X-Output-Path`.
 fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 
+    let stamp = request_gen(request);
     let req: HealReq = read_json(request)?;
-    let raw = match state.at(req.id) {
-        Some(r) => r,
-        None => return Ok(status_response(400, "bad id")),
+    let raw = match state.at_checked(req.id, stamp) {
+        Ok(r) => r,
+        Err(resp) => return Ok(resp),
     };
     // Stage the optional painted mask (data URL or bare base64) to a temp PNG.
     let mask_tmp = match &req.mask {
@@ -1797,7 +1938,7 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                     // mapping view AND the DISPLAYED source's dims, which is
                     // the session master when one is chained.
                     let display_src = match session_master(req.master.as_deref(), &raw) {
-                        Ok(Some(p)) => p,
+                        Ok(Some((p, _))) => p,
                         Ok(None) => crate::store::read_pixel_source(&raw)
                             .map(|(m, _)| m)
                             .unwrap_or_else(|| raw.clone()),
@@ -1831,11 +1972,10 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let cfg = state.config().clone();
     // Same master-input rule as api_retouch (see there): session master
     // first — a second heal must build ON the first, not beside it.
-    let src = match session_master(req.master.as_deref(), &raw) {
-        Ok(Some(p)) => p,
+    let (src, src_generated) = match session_master(req.master.as_deref(), &raw) {
+        Ok(Some((p, g))) => (p, g),
         Ok(None) => crate::store::read_pixel_source(&raw)
-            .map(|(m, _)| m)
-            .unwrap_or_else(|| raw.clone()),
+            .unwrap_or_else(|| (raw.clone(), false)),
         Err(msg) => return Ok(status_response(400, &msg)),
     };
     let result = crate::retouch::heal(&cfg, &src, mask_tmp.as_deref(), req.auto, req.full_res, &out);
@@ -1844,6 +1984,8 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     }
     match result {
         Ok(rep) => {
+            // Same inheritance rule as api_retouch (see there).
+            issue_session_master(&raw, &out, src_generated);
             let img =
                 decode::load_image(&out)?.resize(1400, 1400, image::imageops::FilterType::Triangle);
             let mut buf = Vec::new();
@@ -2097,7 +2239,55 @@ fn status_response(code: u16, msg: &str) -> ResponseBox {
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_decode, percent_encode};
+    use super::*;
+
+    #[test]
+    fn at_checked_binds_id_resolution_to_the_installed_generation() {
+        use std::sync::atomic::AtomicU64;
+        let state = AppState {
+            dir: RwLock::new(PathBuf::new()),
+            raws: RwLock::new(vec![PathBuf::from("D:/x/a.arw")]),
+            cfg: RwLock::new(Config::load()),
+            dir_gen: AtomicU64::new(9), // a scan in flight has CLAIMED 9…
+            installed_gen: AtomicU64::new(3), // …but the listing still says 3
+            port: 0,
+        };
+        assert!(state.at_checked(0, Some(3)).is_ok(), "current generation resolves");
+        // The claim counter must never be the authority (the H5 window).
+        assert!(state.at_checked(0, Some(9)).is_err(), "claimed-but-not-installed refused");
+        assert!(state.at_checked(0, Some(2)).is_err(), "stale stamp refused");
+        assert!(state.at_checked(0, None).is_err(), "missing stamp refused");
+        assert!(state.at_checked(7, Some(3)).is_err(), "unknown id refused");
+    }
+
+    #[test]
+    fn session_masters_are_issued_per_photo_and_per_run() {
+        let dir = std::env::temp_dir().join("autoshop-serve-test-masters");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two photos with the SAME stem in different folders — the pre-registry
+        // stem-prefix check accepted either's master for both.
+        let photo_a = dir.join("trip-a").join("DSC001.ARW");
+        let photo_b = dir.join("trip-b").join("DSC001.ARW");
+        let master = dir.join("DSC001.retouch.png");
+        std::fs::write(&master, b"px").unwrap();
+        let claim = master.to_string_lossy().into_owned();
+        // Nothing issued yet: an earlier run's (or forged) claim is refused.
+        assert!(session_master(Some(&claim), &photo_a).is_err(), "unissued claim refused");
+        issue_session_master(&photo_a, &master, true);
+        let (_, generated) = session_master(Some(&claim), &photo_a)
+            .expect("issued claim accepted")
+            .expect("a real master, not None");
+        assert!(generated, "the generated provenance rides the registry");
+        assert!(
+            session_master(Some(&claim), &photo_b).is_err(),
+            "same stem, different folder: photo B never sees A's master"
+        );
+        // Absent / blank claims mean "no session master", never an error.
+        assert!(session_master(None, &photo_a).unwrap().is_none());
+        assert!(session_master(Some("  "), &photo_a).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn percent_encode_is_ascii_and_round_trips() {

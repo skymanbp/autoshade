@@ -399,18 +399,22 @@ document.addEventListener("keydown", e => {
   // modal's own listener handles Esc / Tab.
   const sm = document.getElementById("settings-modal");
   if (sm && !sm.hidden) return;
+  // Ctrl+S BEFORE the typing gate: "save my edit" must fire from a text
+  // field too (typing a direction and hitting Ctrl+S saved the PAGE) —
+  // unlike Ctrl+Z, which stays native inside text fields.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    // Ctrl+S means "save my edit", not "save the page" — Save XMP was
+    // click-only (D13).
+    e.preventDefault();
+    if (state.id !== null && state.recipe) saveXmp();
+    return;
+  }
   const t = e.target, NON_TEXT = ["range","checkbox","radio","button","submit","reset","file","color"];
   const typing = t && (t.isContentEditable || t.tagName === "TEXTAREA" ||
     (t.tagName === "INPUT" && !NON_TEXT.includes((t.type || "text").toLowerCase())));
   if (typing) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
-  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-    // Ctrl+S means "save my edit", not "save the page" — Save XMP was
-    // click-only (D13).
-    e.preventDefault();
-    if (state.id !== null && state.recipe) saveXmp();
-  }
 });
 
 // --- gallery + import ------------------------------------------------------
@@ -516,13 +520,21 @@ $("#page-next").onclick = () => loadList(pageOffset + PAGE);
 // After import/upload, jump to the new item's PAGE, refresh, and OPEN it DIRECTLY
 // by id — never by finding+clicking its thumbnail (it may sit on another page).
 // `stem` comes from the upload response, else the thumb, else a harmless fallback.
-async function revealNew(firstId, firstStem) {
+async function revealNew(firstId, firstStem, mintedGen) {
   // Act ONLY when our list request actually rendered: a superseded/failed
   // refresh means the ids may belong to a replaced folder (and pageOffset
   // is committed by loadList itself now, on success only).
   const at = firstId != null ? Math.floor(firstId / PAGE) * PAGE : pageOffset;
   const rendered = await loadList(at);
   if (!rendered || firstId == null) return;
+  // The id was minted against the generation current when the import/upload
+  // started; if the listing that just rendered belongs to ANOTHER generation
+  // (a folder switch here or in another window), the same number now names
+  // an unrelated photo — don't select a stranger.
+  if (mintedGen != null && serverGen !== mintedGen) {
+    setStatus("the folder changed — the new files are in their own folder's gallery");
+    return;
+  }
   const el = document.querySelector(`.thumb[data-id="${firstId}"]`);
   if (el) el.scrollIntoView({block:"center"});
   const stem = firstStem || el?.querySelector(".name")?.textContent || "photo";
@@ -534,12 +546,13 @@ $("#import-btn").onclick = async () => {
   const path = $("#import-path").value.trim().replace(/^"+|"+$/g, "").trim();
   if (!path) { setStatus("type or paste a file/folder path to import"); return; }
   setStatus("importing…");
+  const g0 = serverGen;   // the generation the response's first_id indexes
   try {
     const r = await fetch("/api/import", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({path})});
     if (!r.ok) { setStatus("import failed: " + await r.text()); return; }
     const d = await r.json();
     $("#import-path").value = "";
-    if (d.added > 0) { setStatus(`imported ${d.added} (total ${d.total})`); revealNew(d.first_id != null ? d.first_id : d.total - d.added); }
+    if (d.added > 0) { setStatus(`imported ${d.added} (total ${d.total})`); revealNew(d.first_id != null ? d.first_id : d.total - d.added, null, g0); }
     else setStatus(`already in the gallery (total ${d.total})`);
   } catch (e) { setStatus("import failed: " + (e.message || e)); }
 };
@@ -552,6 +565,12 @@ let dirSeq = 0;   // latest-wins for folder switches (slow scan vs fast scan)
 async function setWorkingDir() {
   const path = $("#dir-path").value.trim().replace(/^"+|"+$/g, "").trim();
   if (!path) { setStatus("paste a folder path to open"); return; }
+  // The same courtesy as a thumbnail click: a folder switch destroys
+  // browser-only work just as thoroughly, and it used to ask nothing.
+  if (hasUnsavedEdits()
+      && !confirm("This photo has edits that were never saved.\n\nThey exist only in this browser — switching folders discards them.\n\nSwitch anyway?")) {
+    return;
+  }
   // The user COMMITTED to switching: kill the old pane and every old-folder
   // generation BEFORE the request — the server swaps its folder-relative id
   // table while this is in flight, and an old-pane Save/Analyze/Fill click
@@ -615,6 +634,7 @@ $("#dir-path").addEventListener("keydown", e => { if (e.key === "Enter") setWork
 // Drag-drop + file picker. Browsers can't give a local server a dropped file's
 // disk PATH (security), so we upload the bytes (saved under ./out/imported).
 async function uploadFiles(files) {
+  const g0 = serverGen;   // the generation the minted ids will index
   let firstId = null, firstStem = null, ok = 0; const failed = [];
   for (const f of files) {
     setStatus(`uploading ${f.name}…`);
@@ -630,7 +650,7 @@ async function uploadFiles(files) {
       ok++;
     } catch (e) { failed.push(`${f.name}: ${e.message || e}`); }
   }
-  if (ok) { setStatus(`opened ${ok} file${ok>1?"s":""}${failed.length?` · ${failed.length} failed`:""}`); revealNew(firstId, firstStem); }
+  if (ok) { setStatus(`opened ${ok} file${ok>1?"s":""}${failed.length?` · ${failed.length} failed`:""}`); revealNew(firstId, firstStem, g0); }
   else if (failed.length) { setStatus(`could not open: ${failed[0]}`); }
 }
 
@@ -914,8 +934,10 @@ async function selectPhoto(id, stem, el) {
   // ASK before discarding. Everything below — the history reset, the recipe
   // swap — is irreversible for work that was never saved, and this surface
   // has nowhere to stash it the way the desktop app does.
-  if (hasUnsavedEdits() && id !== state.id
-      && !confirm("This photo has edits that were never saved.\n\nThey exist only in this browser — switching photos discards them.\n\nSwitch anyway?")) {
+  // Same-id re-clicks confirm too: reloading from disk is exactly as
+  // destructive for browser-only work as switching away.
+  if (hasUnsavedEdits()
+      && !confirm("This photo has edits that were never saved.\n\nThey exist only in this browser — switching or reloading discards them.\n\nSwitch anyway?")) {
     return;
   }
   const seq = ++selectSeq;
@@ -930,6 +952,12 @@ async function selectPhoto(id, stem, el) {
   document.querySelectorAll(".thumb").forEach(t=>t.classList.remove("sel"));
   if (el) el.classList.add("sel");
   state.id = id; state.stem = stem;
+  // The OLD photo's recipe dies synchronously with the id: it used to
+  // survive the awaits below, and Ctrl+S in that window saved photo A's
+  // recipe into photo B's develop dir. Null until B's own recipe lands
+  // (every consumer already guards on state.recipe).
+  state.recipe = null;
+  savedRecipe = null;
   state.sessionMaster = null;   // the fill/heal chain restarts per photo
   const main = $("#main");
   main.innerHTML = "";
@@ -1004,10 +1032,13 @@ async function selectPhoto(id, stem, el) {
     showRationale();
   } else {
     state.recipe = structuredClone(DEFAULT_RECIPE);
-    markSaved(); // a fresh (unedited) photo: neutral IS its saved state
     if (freshCurve && freshCurve.length) state.recipe.base_curve = freshCurve;
     if (freshLens) state.recipe.lens_profile = freshLens;
     if (freshAsShot) { state.recipe.as_shot_k = freshAsShot.k; state.recipe.as_shot_tint = freshAsShot.t; }
+    // AFTER the calibration stamps: a baseline snapshotted before them
+    // differed from the canvas immediately, so a fresh, untouched photo
+    // already raised the unsaved-edits confirm.
+    markSaved(); // a fresh (unedited) photo: neutral IS its saved state
     $(".verdict").textContent = loadErr ? loadErr : "Not analyzed yet.";
     if (loadedWarn) {
       // Same XSS-safe pattern as the loaded branch: server text via textContent.
@@ -1133,7 +1164,11 @@ async function selectPhoto(id, stem, el) {
   // deliberately-empty curve must NOT survive Reset — "preserve the canvas
   // curve" kept those photos dark. Fallback when fresh knots are unavailable
   // (non-RAW / older server): preserve the current curve, the old behaviour.
-  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const bc = (state.freshCurve && state.freshCurve.length) ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; syncSliders(); pushHistory(state.recipe); renderAfter(); };
+  // The unsaved fill/heal chain resets too (fresh-open shows the PERSISTED
+  // source): leaving state.sessionMaster kept the retouch on the canvas
+  // under neutral sliders, and a Save then cleared pixels.json while the
+  // canvas still showed it. Ctrl+Z restores the chain.
+  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const bc = (state.freshCurve && state.freshCurve.length) ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; state.sessionMaster = null; syncSliders(); pushHistory(state.recipe); renderAfter(); };
   main.querySelector(".savexmp").onclick = saveXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;
@@ -1366,7 +1401,14 @@ async function analyze() {
     // UNSAVED proposal). Without this the saved-baseline stayed stale even
     // after a saved analyze, and switching photos raised a false
     // unsaved-edits warning.
-    if (data.saved) markSaved();
+    if (data.saved) {
+      // /api/analyze persists the RECIPE only — an unsaved fill/heal chain
+      // stays browser-only, so the baseline's master half keeps its previous
+      // value: marking the session master saved here silenced the
+      // unsaved-retouch warning and a thumbnail click discarded the chain.
+      const prevMaster = savedRecipe ? JSON.parse(savedRecipe).master : null;
+      savedRecipe = JSON.stringify({ recipe: state.recipe, master: prevMaster });
+    }
     // `warning` = the proposal is on screen but was NOT persisted — an
     // existing explicit save could not be snapshotted, or the verdict was
     // non-Accept (a non-Accept verdict never auto-saves).
@@ -1382,6 +1424,7 @@ async function analyze() {
 }
 
 async function saveXmp() {
+  if (state.id == null || !state.recipe) return;   // mid-select: nothing coherent to save
   // One save in flight: overlapping clicks are independent requests and the
   // server only guarantees mutual exclusion, not invocation order — a slower
   // OLDER click could land after (and silently overwrite) a newer one.
@@ -1389,18 +1432,37 @@ async function saveXmp() {
   if (btn && btn.disabled) return;
   if (btn) btn.disabled = true;
   setStatus("saving xmp…");
+  // The answer belongs to THIS photo: markSaved() after a switch would
+  // baseline the NEW photo's canvas as saved and silence its own
+  // unsaved-edits warning (the fill/heal handlers' guard).
+  const reqId = state.id, reqSeq = selectSeq, sentMaster = state.sessionMaster || null;
   try {
     const r = await fetch("/api/xmp", {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({id: state.id, recipe: state.recipe,
-                            master: state.sessionMaster || undefined})});
+      body: JSON.stringify({id: reqId, recipe: state.recipe,
+                            master: sentMaster || undefined})});
     const body = await r.text();
     // The server writes the recipe.json alongside the XMP, so reopening this photo
     // (here or in the GUI) restores exactly this edit. A NEUTRAL recipe is not a
     // save at all: the server deletes the sidecars instead (Reset + Save = "clear
     // my edits") and answers "cleared …".
-    if (!r.ok) { setStatus("save failed: " + body); return; }
+    const stale = reqId !== state.id || reqSeq !== selectSeq;
+    if (!r.ok) { setStatus((stale ? "save for another photo failed: " : "save failed: ") + body); return; }
+    if (stale) { setStatus("save for another photo finished — its develop is on disk"); loadList(); return; }
     setStatus(body.startsWith("cleared") ? "saved edits cleared" : ("xmp + recipe saved → " + body));
     markSaved(); // what is on disk now matches the canvas
+    if (sentMaster && !body.startsWith("cleared")
+        && !body.includes("recording the retouched master failed")) {
+      // The session master is now the photo's PERSISTED pixel source, so
+      // pre-fill history entries (master:null = "render the persisted
+      // source") would render the freshly persisted fill under pre-fill
+      // sliders — a lie. Drop them; fill-era entries name their ./out file
+      // explicitly and stay undoable.
+      const cur = history[hi];
+      history = history.filter(h => h.master !== null);
+      hi = history.indexOf(cur);
+      if (hi < 0) { history = cur ? [cur] : []; hi = history.length - 1; }
+      updateUndo();
+    }
     loadList();   // the ● edited badge just appeared / disappeared
   } finally { if (btn) btn.disabled = false; }
 }
