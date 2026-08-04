@@ -227,9 +227,15 @@ pub(crate) fn zone_luma_cdf(px: &[[f32; 3]], weights: &[f32]) -> Vec<f32> {
 /// (`seg`, the same sidecar the GUI's mask panel uses), compare zone moments,
 /// attach a Bitmap-masked [`LocalAdjustment`] when it measurably helps.
 ///
-/// `mask_path` is where the SOURCE sky mask lands (the recipe references it;
-/// use the GUI convention `out/<stem>.mask-sky.png` so the mask panel shows
-/// the same raster). GRACEFUL BY CONTRACT: segmentation missing/failing, a
+/// `mask_path` is where the SOURCE sky mask lands (the recipe references
+/// it). Pass a FRESHLY CLAIMED raster name (`store::claim_raster`, prefix
+/// `mask-zone-sky`, in the photo's develop dir — what the CLI and the GUI
+/// both do), never a shared or pre-existing raster: when every zone is
+/// skipped or rejected the file at `mask_path` is REMOVED to release the
+/// claim, which would destroy a raster another mask still references (an
+/// older version of this doc named the AI-select `out/<stem>.mask-sky.png`
+/// convention — exactly such a shared raster).
+/// GRACEFUL BY CONTRACT: segmentation missing/failing, a
 /// degenerate sky, or a correction that does not improve the look all fall
 /// back to the plain global fit with an honest rationale note — never an
 /// error, because the global fit in hand is already a valid result.

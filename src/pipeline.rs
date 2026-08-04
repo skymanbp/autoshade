@@ -78,15 +78,36 @@ pub fn produce_recipe(
     // before the store existed working unchanged.
     let style = (style_strength > 0.0)
         .then(|| {
-            crate::style::StyleIndex::load(&crate::store::style_index_path())
-                .or_else(|_| {
-                    crate::style::StyleIndex::load(std::path::Path::new("out/style-index.json"))
-                })
-                .ok()
+            let central = crate::store::style_index_path();
+            match crate::style::StyleIndex::load(&central).or_else(|e| {
+                crate::style::StyleIndex::load(std::path::Path::new("out/style-index.json"))
+                    // Keep the CENTRAL error — it carries the version-gate
+                    // message naming the rebuild command.
+                    .map_err(|_| e)
+            }) {
+                Ok(ix) => Some(ix),
+                Err(e) => {
+                    // Surfaced ONCE, and only when an index file exists: the
+                    // old `.ok()` swallowed the version-gate message, so a
+                    // stale index silently disabled the style reference with
+                    // nothing to say why. (No file at all is the normal
+                    // fresh-install case — no noise there.)
+                    if central.exists() {
+                        static ONCE: std::sync::Once = std::sync::Once::new();
+                        ONCE.call_once(|| {
+                            eprintln!(
+                                "⚠ style reference unavailable ({e:#}) — the Style slider has \
+                                 no effect until the index is rebuilt"
+                            );
+                        });
+                    }
+                    None
+                }
+            }
         })
         .flatten()
         .map(|ix| {
-            let ex = ix.retrieve(&meta, &histogram, 4, stem(raw));
+            let ex = ix.retrieve(&meta, &histogram, 4, raw);
             (ix.render_reference(&ex), crate::style::style_targets(&ex))
         });
     let reference: Option<String> = style.as_ref().and_then(|(r, _)| r.clone());

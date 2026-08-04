@@ -126,6 +126,10 @@ fn curve_lut(points: &[(f32, f32)]) -> [f32; 256] {
     }
     let mut pts = points.to_vec();
     pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Duplicate inputs: FIRST wins — the same rule as render::curve_lut, so
+    // the judge scores the curve the engine actually renders (interpolating
+    // across a duplicated input stepped at a different height).
+    pts.dedup_by(|b, a| (b.0 - a.0).abs() < 1e-6);
     if pts[0].0 > 0.0 {
         pts.insert(0, (0.0, 0.0));
     }
@@ -184,7 +188,10 @@ fn curve_rmse(a: &[f32; 256], b: &[f32; 256]) -> f64 {
 /// mush). Reused by `style.rs` so the curve metric has one definition.
 pub(crate) fn user_curve_shape(xmp: &str) -> Option<(f32, f32)> {
     let pts = parse_tone_curve(xmp, "ToneCurvePV2012");
-    if pts.len() < 2 {
+    // ANY point counts — even a one-point curve renders (pinned endpoints,
+    // the same rule the comparison loop follows). `< 2` silently dropped
+    // real one-point curve habits from the style library.
+    if pts.is_empty() {
         return None;
     }
     let lut = curve_lut(&pts);
@@ -256,8 +263,20 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
                 None => continue,
             };
             let eps = if *name == "exposure_ev" { 0.05 } else { 0.5 };
+            let ai_val = ai_field(&ai, name);
+            // A both-neutral row is not a comparison: Lightroom writes EVERY
+            // slider explicitly (Contrast2012="0"), so counting 0↔0 rows
+            // inflated n and diluted each control's MAE toward zero — the gap
+            // score understated real divergence. A row where EITHER side
+            // moved still counts (that disagreement is the signal).
+            if let Some(a) = ai_val
+                && u.abs() <= eps
+                && a.abs() <= eps
+            {
+                continue;
+            }
             let e = acc.entry(name).or_default();
-            match ai_field(&ai, name) {
+            match ai_val {
                 Some(a) => {
                     let d = (a - u) as f64;
                     e.sum_abs += d.abs();
@@ -326,7 +345,7 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
     // --- master tone curve summary -------------------------------------------
     if curve_n > 0 {
         let avg = |s: f64| s / curve_n as f64;
-        println!("\n=== Master tone curve (you drew one on {curve_n} photo(s)) ===");
+        println!("\n=== Master tone curve ({curve_n} photo(s) where you or the AI drew one) ===");
         println!("  black lift (output@0):  you {:>6.1}   AI {:>6.1}", avg(sum_user_lift), avg(sum_ai_lift));
         println!("  S-strength (contrast):  you {:>6.1}   AI {:>6.1}", avg(sum_user_s), avg(sum_ai_s));
         println!("  curve RMSE (AI vs you): {:>6.1}   (0 = identical, on the 0..255 scale)", avg(sum_curve_rmse));
@@ -362,10 +381,19 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         frac_sum += (sum_curve_rmse / curve_n as f64) / 255.0;
         frac_n += 1;
     }
-    let gap = if frac_n > 0 { 100.0 * frac_sum / frac_n as f64 } else { 0.0 };
-    println!(
-        "\nOverall gap score: {gap:.1}%  (mean per-control divergence incl. tone curve; lower = closer to your look)"
-    );
+    // n/a, not 0.0%: with nothing measured, a perfect score claimed the AI
+    // matched a look that was never compared.
+    if frac_n > 0 {
+        let gap = 100.0 * frac_sum / frac_n as f64;
+        println!(
+            "\nOverall gap score: {gap:.1}%  (mean per-control divergence incl. tone curve; lower = closer to your look)"
+        );
+    } else {
+        println!(
+            "\nOverall gap score: n/a — no comparable controls were measured (the XMPs may hold \
+             no readable crs settings)"
+        );
+    }
     println!(
         "Interpretation: positive bias = AI sets this higher than you do; large mean|Δ| = you \
          disagree a lot on that control; AI-omit = times you used a control the AI ignored. Use \
@@ -413,6 +441,19 @@ mod tests {
   <rdf:li>255, 255</rdf:li>
  </rdf:Seq>
 </crs:ToneCurvePV2012>"#;
+
+    #[test]
+    fn curve_helpers_follow_the_renderers_rules() {
+        // Duplicate input: FIRST point wins (render::curve_lut's rule) — no
+        // cliff to the later twin's height just past the duplicate.
+        let lut = curve_lut(&[(0.0, 0.0), (128.0, 200.0), (128.0, 60.0), (255.0, 255.0)]);
+        assert!((lut[128] - 200.0).abs() < 0.5, "first duplicate wins: {}", lut[128]);
+        assert!(lut[129] > 190.0, "no cliff after the duplicate: {}", lut[129]);
+        // A ONE-point user curve is a real habit, not "no curve".
+        let one = r#"<crs:ToneCurvePV2012><rdf:Seq><rdf:li>0, 30</rdf:li></rdf:Seq></crs:ToneCurvePV2012>"#;
+        let (lift, _s) = user_curve_shape(one).expect("one-point curve counts");
+        assert!(lift > 25.0, "black lift read from the single point: {lift}");
+    }
 
     #[test]
     fn parses_tone_curve_and_measures_shape() {

@@ -633,7 +633,7 @@ fn match_cmd(
     let src = decode::preview_only(raw)?;
     let tgt = decode::load_image(target)?;
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
-    let rep = if zoned {
+    let mut rep = if zoned {
         // Sky mask lands at the GUI's convention (the photo's develop dir,
         // a FRESH claimed `mask-zone-sky*.png` per run — see
         // store::claim_raster: rewriting one fixed name in place left the
@@ -656,6 +656,18 @@ fn match_cmd(
     } else {
         fit::fit_recipe(&src, &tgt)
     };
+    // Calibration stamp, ONE snapshot (produce_recipe's rule): the fit solved
+    // against the camera's embedded preview — the very base the base curve
+    // approximates — but the deliverable renders from the NEUTRAL sensor
+    // develop, so without the curve the fitted deltas landed on a much darker
+    // base and the render disagreed with the fit's own numbers. The lens
+    // profile and the as-shot WB anchor ride the same snapshot (the fitted
+    // recipe was built from EditRecipe::default and silently dropped both).
+    let (bc, lp, (ask, ast)) = pipeline::photo_calibration(raw);
+    rep.recipe.base_curve = bc;
+    rep.recipe.lens_profile = lp;
+    rep.recipe.as_shot_k = ask;
+    rep.recipe.as_shot_tint = ast;
     println!(
         "  look error {:.3} → {:.3}  (0 = identical distributions; masks/local edits are not recoverable)",
         rep.err_before, rep.err_after

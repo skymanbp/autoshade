@@ -133,6 +133,39 @@ pub struct StyleExemplar {
     /// `#[serde(default)]` keeps v1 index files loadable.
     #[serde(default)]
     pub curve: Option<[f32; 2]>,
+    /// Absolute source path — self-exclusion identity (two rolls can hold two
+    /// DSC00001.ARW, and stem-based exclusion dropped BOTH whenever either
+    /// was being edited). `#[serde(default)]`: older indexes lack it and fall
+    /// back to stem exclusion, over-exclusion being the safe direction.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// Is this exemplar the QUERY photo itself? Path identity when the exemplar
+/// records one (case-folded on Windows, like `store::photo_key`); stem
+/// fallback for pre-path indexes — there, over-exclusion is the safe
+/// direction (an unrelated same-stem exemplar loses one retrieval slot; a
+/// self-reference would teach the AI to copy the photo's own edit back).
+fn is_self(e: &StyleExemplar, query_path: &str, query_stem: &str) -> bool {
+    match &e.path {
+        Some(p) => {
+            if cfg!(windows) {
+                p.to_lowercase() == query_path.to_lowercase()
+            } else {
+                p == query_path
+            }
+        }
+        None => e.stem == query_stem,
+    }
+}
+
+/// Every number an exemplar carries must be FINITE: serde_json writes a NaN
+/// as `null`, and the next LOAD of the index then fails wholesale — one bad
+/// EXIF field or curve point published an UNLOADABLE index.
+fn exemplar_is_finite(e: &StyleExemplar) -> bool {
+    e.feat.iter().all(|v| v.is_finite())
+        && e.settings.values().all(|v| v.is_finite())
+        && e.curve.is_none_or(|c| c.iter().all(|v| v.is_finite()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -182,14 +215,29 @@ impl StyleIndex {
                             // retrieval (the pair scan guaranteed the .xmp
                             // exists — a read failure here is a real error).
                             match std::fs::read_to_string(raw.with_extension("xmp")) {
-                                Ok(xmp) => Some(StyleExemplar {
-                                    stem: pipeline::stem(raw).to_string(),
-                                    tag: derive_tag(&feat),
-                                    feat: feat.to_vec(),
-                                    settings: read_settings(&xmp),
-                                    curve: crate::eval::user_curve_shape(&xmp)
-                                        .map(|(b, s)| [b, s]),
-                                }),
+                                Ok(xmp) => {
+                                    let ex = StyleExemplar {
+                                        stem: pipeline::stem(raw).to_string(),
+                                        path: std::path::absolute(raw)
+                                            .ok()
+                                            .map(|p| p.display().to_string()),
+                                        tag: derive_tag(&feat),
+                                        feat: feat.to_vec(),
+                                        settings: read_settings(&xmp),
+                                        curve: crate::eval::user_curve_shape(&xmp)
+                                            .map(|(b, s)| [b, s]),
+                                    };
+                                    if exemplar_is_finite(&ex) {
+                                        Some(ex)
+                                    } else {
+                                        eprintln!(
+                                            "  skip {}: non-finite metadata/settings \
+                                             (would corrupt the index)",
+                                            pipeline::stem(raw)
+                                        );
+                                        None
+                                    }
+                                }
                                 Err(e) => {
                                     eprintln!(
                                         "  skip {}: xmp unreadable: {e}",
@@ -289,14 +337,19 @@ impl StyleIndex {
         Ok(idx)
     }
 
-    /// k nearest exemplars to (meta,hist), excluding `exclude_stem` (the query
-    /// itself when it's a corpus member).
-    pub fn retrieve(&self, meta: &Meta, hist: &Histogram, k: usize, exclude_stem: &str) -> Vec<&StyleExemplar> {
+    /// k nearest exemplars to (meta,hist), excluding the query photo itself
+    /// when it is a corpus member (see [`is_self`]).
+    pub fn retrieve(&self, meta: &Meta, hist: &Histogram, k: usize, exclude: &Path) -> Vec<&StyleExemplar> {
         let q = normalize(feature_vector(meta, hist), &self.mean, &self.std);
+        let ex_path = std::path::absolute(exclude)
+            .unwrap_or_else(|_| exclude.to_path_buf())
+            .display()
+            .to_string();
+        let ex_stem = pipeline::stem(exclude);
         let mut scored: Vec<(f32, &StyleExemplar)> = self
             .exemplars
             .iter()
-            .filter(|e| e.stem != exclude_stem && e.feat.len() == NDIM)
+            .filter(|e| !is_self(e, &ex_path, ex_stem) && e.feat.len() == NDIM)
             .map(|e| {
                 let mut ef = [0.0f32; NDIM];
                 ef.copy_from_slice(&e.feat);
@@ -397,7 +450,16 @@ pub fn blend_toward(recipe: &mut EditRecipe, targets: &BTreeMap<&'static str, f3
             "blacks" => recipe.blacks = lerp(recipe.blacks, target),
             "vibrance" => recipe.vibrance = lerp(recipe.vibrance, target),
             "clarity" => recipe.clarity = lerp(recipe.clarity, target),
-            "tint" => recipe.tint = lerp(recipe.tint, target),
+            "tint" => {
+                // Tint pairs with Temperature (a tint is tuned AT a Kelvin,
+                // and the index records the pair only under Custom WB) —
+                // pulling tint onto an as-shot recipe applied HALF of a WB
+                // decision as a floating colour cast. Same as-shot-stays
+                // rule as temperature_k below.
+                if recipe.temperature_k.is_some() {
+                    recipe.tint = lerp(recipe.tint, target);
+                }
+            }
             "saturation" => recipe.saturation = lerp(recipe.saturation, target),
             "dehaze" => recipe.dehaze = lerp(recipe.dehaze, target),
             "temperature_k" => {
@@ -474,6 +536,7 @@ mod tests {
                 ("dehaze".to_string(), 8.0),
             ]),
             curve: Some([5.0, 12.0]),
+            path: None,
         };
         let (a, b) = (mk(0.4, 20.0, 10.0), mk(0.6, 40.0, 30.0));
         let targets = style_targets(&[&a, &b]);
@@ -495,6 +558,61 @@ mod tests {
     }
 
     #[test]
+    fn tint_never_lands_alone_on_an_as_shot_recipe() {
+        let targets = BTreeMap::from([("tint", 20.0f32), ("temperature_k", 6000.0f32)]);
+        let mut as_shot = EditRecipe::default(); // temperature_k = None
+        blend_toward(&mut as_shot, &targets, 0.5);
+        assert_eq!(as_shot.temperature_k, None, "as-shot stays as-shot");
+        assert_eq!(as_shot.tint, 0.0, "no floating half-WB cast");
+        let mut custom = EditRecipe { temperature_k: Some(5000.0), ..Default::default() };
+        blend_toward(&mut custom, &targets, 0.5);
+        assert_eq!(custom.temperature_k, Some(5500.0));
+        assert_eq!(custom.tint, 10.0, "the pair moves together under custom WB");
+    }
+
+    #[test]
+    fn self_exclusion_prefers_path_and_falls_back_to_stem() {
+        let mk = |stem: &str, path: Option<&str>| StyleExemplar {
+            stem: stem.into(),
+            path: path.map(str::to_string),
+            feat: vec![0.0; NDIM],
+            tag: "t".into(),
+            settings: BTreeMap::new(),
+            curve: None,
+        };
+        let q_path = "D:\\roll-a\\DSC1.ARW";
+        // Path identity: the same file, case-flipped, is SELF on Windows.
+        let same = mk("DSC1", Some("d:\\roll-a\\dsc1.arw"));
+        assert_eq!(is_self(&same, q_path, "DSC1"), cfg!(windows));
+        let exact = mk("DSC1", Some("D:\\roll-a\\DSC1.ARW"));
+        assert!(is_self(&exact, q_path, "DSC1"));
+        // A same-stem photo from ANOTHER roll is not self (the old stem rule
+        // dropped it too — one retrieval slot lost for nothing).
+        let other = mk("DSC1", Some("D:\\roll-b\\DSC1.ARW"));
+        assert!(!is_self(&other, q_path, "DSC1"));
+        // Pre-path (legacy index) exemplars keep the stem fallback.
+        let legacy = mk("DSC1", None);
+        assert!(is_self(&legacy, q_path, "DSC1"));
+    }
+
+    #[test]
+    fn non_finite_exemplars_are_refused() {
+        let mut e = StyleExemplar {
+            stem: "x".into(),
+            path: None,
+            feat: vec![0.0; NDIM],
+            tag: "t".into(),
+            settings: BTreeMap::new(),
+            curve: Some([f32::NAN, 0.0]),
+        };
+        assert!(!exemplar_is_finite(&e), "NaN curve shape refused");
+        e.curve = None;
+        assert!(exemplar_is_finite(&e));
+        e.feat[0] = f32::INFINITY;
+        assert!(!exemplar_is_finite(&e), "non-finite feature refused");
+    }
+
+    #[test]
     fn reference_surfaces_the_users_curve_habit() {
         let ex = StyleExemplar {
             stem: "x".into(),
@@ -502,6 +620,7 @@ mod tests {
             tag: "wide/mid/midday/landscape".into(),
             settings: BTreeMap::from([("contrast".to_string(), 15.0)]),
             curve: Some([6.0, 20.0]),
+            path: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,

@@ -166,6 +166,19 @@ const ROT_DEG: f32 = 75.0;
 /// Frame share of re-hued pixels that constitutes a REGION (same region-vs-
 /// speckle logic as [`VETO_CREATED_SHARE`]; the live wrecks measure 12.5%).
 const ROT_SHARE: f32 = 0.05;
+/// The BEFORE side of the rotation census needs only a MEASURABLE hue, not a
+/// visible tint: requiring [`VETO_TINT_CHROMA`] on both sides let the curves
+/// rotate a region whose chroma sat just UNDER that gate (a barely-blue sky
+/// at 0.035) into a strong target-native colour without the census ever
+/// seeing it — the golden-sky class again, one threshold to the left.
+/// CALIBRATED at 0.03 (the [`VETO_SUPPORT_CHROMA`] "a pale sky still
+/// testifies" level) by the haze regression itself: at 0.015 the haze
+/// correction's legitimately-restored faint pixels measured a 0.0414 census
+/// share — 0.83× the firing threshold, margin gone — because hue is
+/// genuinely unstable that close to neutral. Residual, disclosed: a region
+/// under 0.03 chroma stays rotation-blind (colourising near-neutrals is
+/// also what a corrective cast legitimately does — the haze pair).
+const ROT_HUE_MEASURABLE_CHROMA: f32 = 0.03;
 
 /// The fit outcome: the recipe plus the distribution error (mean |Δ| over luma
 /// quantiles and channel means, 0 = identical look) before and after.
@@ -330,6 +343,17 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
         err_after = look_err(&pixels_of(&render::develop_preview(&s_img, &recipe)), &tp);
     }
     let sat_reduced = recipe.saturation != sat_fitted;
+    // TERMINAL do-no-harm: saturation is the loop's only shrinkable dial, so
+    // it can exhaust at zero with the finished recipe STILL rendering farther
+    // from the target than the untouched source (the tone/curve stages have
+    // no shrink path). Handing that back violates the check's own promise —
+    // return neutrality instead, with the honest numbers in the report.
+    let mut fit_regressed = false;
+    if err_after > err_before + 1e-4 {
+        recipe = EditRecipe::default();
+        err_after = look_err(&pixels_of(&render::develop_preview(&s_img, &recipe)), &tp);
+        fit_regressed = true;
+    }
 
     // --- report ---------------------------------------------------------------
     // Honest-mismatch notes: the user reads WHY a fit stayed approximate
@@ -351,7 +375,14 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
     if sat_pegged {
         notes.push_str(" Saturation demand exceeded the model cap (±60).");
     }
-    if sat_reduced {
+    if fit_regressed {
+        notes.push_str(
+            " The full fit rendered farther from the target than the untouched \
+             source at every saturation level — returning a NEUTRAL recipe \
+             (do-no-harm terminal case); this look is outside the global \
+             model's reach.",
+        );
+    } else if sat_reduced {
         notes.push_str(&format!(
             " Saturation was pulled back from the chroma-matched {sat_fitted:+.0} \
              to {:+.0} after the full-strength fit rendered farther from the \
@@ -658,8 +689,9 @@ fn cast_paints_foreign_hues(cur: &[[f32; 3]], with_px: &[[f32; 3]], tp: &[[f32; 
     foreign_share(with_px, &foreign) - foreign_share(cur, &foreign) >= VETO_CREATED_SHARE
 }
 
-/// Frame share of RE-HUED pixels: visibly tinted on BOTH sides (chroma ≥
-/// [`VETO_TINT_CHROMA`]) yet landing ≥ [`ROT_DEG`] of circular hue away.
+/// Frame share of RE-HUED pixels: a MEASURABLE hue before (chroma ≥
+/// [`ROT_HUE_MEASURABLE_CHROMA`]), a visible tint after (chroma ≥
+/// [`VETO_TINT_CHROMA`]), landing ≥ [`ROT_DEG`] of circular hue away.
 /// Pixel-aligned: `cur`/`with_px` render the SAME source, so per-pixel hue
 /// movement is exact. De-tinting (end chroma under the gate) is exempt —
 /// removing colour is what a corrective cast does. Exposed separately from
@@ -669,7 +701,7 @@ fn rehued_share(cur: &[[f32; 3]], with_px: &[[f32; 3]]) -> f32 {
     for (c, w) in cur.iter().zip(with_px) {
         let cc = c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
         let wc = w[0].max(w[1]).max(w[2]) - w[0].min(w[1]).min(w[2]);
-        if cc < VETO_TINT_CHROMA || wc < VETO_TINT_CHROMA {
+        if cc < ROT_HUE_MEASURABLE_CHROMA || wc < VETO_TINT_CHROMA {
             continue;
         }
         let h0 = render::rgb_to_hsl(c[0], c[1], c[2]).0 * 360.0;
@@ -1477,6 +1509,22 @@ mod tests {
         // 0.0134 (0.27× ROT_SHARE) and would fail here; at 75° it measures
         // ≈ 0.0001.
         assert!(s3 < 0.1 * ROT_SHARE, "margin eroded: haze share {s3:.4} (measured ≈ 0)");
+    }
+
+    #[test]
+    fn rotation_census_sees_a_barely_tinted_before_side() {
+        // H17: a faint blue (chroma 0.035 — UNDER the visible-tint gate,
+        // above the measurable-hue floor) painted strong gold is a ~180°
+        // re-hue; the old both-sides-visible census skipped it entirely,
+        // reopening the golden-sky class one threshold to the left.
+        let cur = vec![[0.665f32, 0.68, 0.70]; 1000];
+        let with = vec![[0.92f32, 0.78, 0.58]; 1000];
+        assert!(rehued_share(&cur, &with) > 0.99, "the whole faint-blue field re-hued");
+        assert!(cast_rotates_a_region(&cur, &with));
+        // A truly NEUTRAL before side has no hue to rotate — colourising
+        // neutrals is what a corrective cast legitimately does.
+        let neutral = vec![[0.68f32, 0.68, 0.68]; 1000];
+        assert_eq!(rehued_share(&neutral, &with), 0.0);
     }
 
     #[test]
