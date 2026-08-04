@@ -161,12 +161,15 @@ pub fn render_to_image_in(
     // The A7 queue asked whether the cap below could run BEFORE orientation
     // (a capped portrait render would then orient a preview-sized buffer
     // instead of paying a second ~720 MB full-res frame for the rotation).
-    // Probed and REJECTED: `image::thumbnail`'s integer binning is not
-    // orientation-equivariant — cap-then-orient diverged from this order by
-    // one source pixel under flips/90/270 and by up to 0.48 on a smooth
-    // [0,1] gradient under Transpose/Transverse (measured on a 97×61 frame,
-    // edge 40). The portrait-preview rotation transient is the accepted
-    // price of preview pixels that match the export path exactly.
+    // Probed and REJECTED: `image::thumbnail`'s integer binning commutes
+    // only with pure axis swaps (Normal/Transpose) — every orientation with
+    // a REVERSAL component diverges by one source bin (mirrored bin edges
+    // of a non-integer ratio don't line up; measured on a 97×61 frame,
+    // edge 40). The first probe's 0.48 Transpose figure was contaminated
+    // by the Rgba<u8> flip adapter (fixed in U14) — the corrected probe
+    // still forbids the swap for six of eight states. The portrait-preview
+    // rotation transient is the accepted price of preview pixels that
+    // match the export path exactly.
     let (data, w, h) = orient_f32(data, w, h, orientation);
     // Working-resolution cap: downscale-then-develop, the same order the GUI
     // preview path uses — masks/sharpen/geometry are resolution-normalised.
@@ -889,7 +892,7 @@ fn apply_develop(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
     //    and saturation/vibrance stay downstream so the user can trim dehaze's
     //    chroma restoration.
     if r.dehaze != 0.0 {
-        apply_dehaze(data, r.dehaze);
+        apply_dehaze(data, w, r.dehaze);
     }
     // 1) tonal ops via the LUT (exposure/contrast/whites/blacks/highlights/
     //    shadows/tone-curve). Tone the pixel's LUMINANCE and scale RGB by the
@@ -975,6 +978,9 @@ fn luma601(p: &[f32; 3]) -> f32 {
 /// proprietary — this is our documented approximation (XMP carries the raw
 /// slider values, so Lightroom re-renders with its own model).
 fn apply_vignette(data: &mut [[f32; 3]], w: usize, h: usize, amount: f32, midpoint: f32) {
+    if w == 0 || h == 0 {
+        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
+    }
     let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
     let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
     let gamma = 0.6 + 2.4 * (midpoint.clamp(0.0, 100.0) / 100.0);
@@ -1008,6 +1014,9 @@ fn apply_vignette(data: &mut [[f32; 3]], w: usize, h: usize, amount: f32, midpoi
 /// linearly interpolated. Same LUT + row-parallel skeleton as the manual
 /// stage below; gains come from the camera, not a slider model.
 fn apply_profile_vignette(data: &mut [[f32; 3]], w: usize, h: usize, knots: &[f32]) {
+    if w == 0 || h == 0 {
+        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
+    }
     let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
     let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
     let gain_lut: Vec<f32> = (0..LUT_N)
@@ -1052,7 +1061,15 @@ fn apply_profile_vignette(data: &mut [[f32; 3]], w: usize, h: usize, knots: &[f3
 ///
 /// Negative `amount` adds a uniform veil toward the airlight (`ω ≡ 1`, the
 /// exact inverse family): a convex blend, mathematically clip-free.
-fn apply_dehaze(data: &mut [[f32; 3]], amount: f32) {
+/// Euclid, for the airlight stride below.
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
     let s = amount.clamp(-100.0, 100.0) / 100.0;
     if s.abs() < 1e-4 {
         return;
@@ -1065,10 +1082,19 @@ fn apply_dehaze(data: &mut [[f32; 3]], amount: f32) {
 
     // Airlight: histogram of the linear min-channel over ≤ ~262k strided
     // samples (resolution-stable), P99, clamped away from black so a frame
-    // with no bright region cannot produce a degenerate divisor.
+    // with no bright region cannot produce a degenerate divisor. The stride
+    // must stay COPRIME with the row width: a lattice with gcd(stride, w) =
+    // g > 1 visits only w/g columns, phase-locking the estimate to column
+    // parity (shifting a periodic frame one pixel flipped the airlight
+    // between the 0.10 floor and the bright bin) — and it silently broke
+    // the "full-res export and 384px analysis agree" contract, since the
+    // small analysis frame samples every pixel (U14).
     let mut hist = [0u32; 1024];
     let mut n = 0u32;
-    let stride = (data.len() / 262_144).max(1);
+    let mut stride = (data.len() / 262_144).max(1) | 1;
+    while w > 1 && gcd(stride, w) != 1 {
+        stride += 2;
+    }
     for px in data.iter().step_by(stride) {
         let m = srgb_to_linear(px[0]).min(srgb_to_linear(px[1])).min(srgb_to_linear(px[2]));
         hist[(m.clamp(0.0, 1.0) * 1023.0) as usize] += 1;
@@ -2444,15 +2470,40 @@ pub(crate) fn oriented(img: DynamicImage, o: Orientation) -> DynamicImage {
         Orientation::Transpose => {
             let mut r = img.rotate90();
             drop(img);
-            image::imageops::flip_horizontal_in_place(&mut r);
+            flip_h_in_place(&mut r);
             r
         }
         Orientation::Transverse => {
             let mut r = img.rotate270();
             drop(img);
-            image::imageops::flip_horizontal_in_place(&mut r);
+            flip_h_in_place(&mut r);
             r
         }
+    }
+}
+
+/// In-place horizontal flip that stays in the image's OWN pixel type.
+/// Calling `flip_horizontal_in_place(&mut DynamicImage)` goes through the
+/// GenericImage adapter, whose Pixel is Rgba<u8> — that QUANTIZED f32/u16
+/// frames to 8 bits (and clamped f32, killing wide-gamut negatives) on every
+/// Transpose/Transverse-oriented photo since the A7 in-place rewrite; the
+/// eight-state orientation test caught it (U14).
+fn flip_h_in_place(img: &mut DynamicImage) {
+    use image::imageops::flip_horizontal_in_place as flip;
+    match img {
+        DynamicImage::ImageLuma8(b) => flip(b),
+        DynamicImage::ImageLumaA8(b) => flip(b),
+        DynamicImage::ImageRgb8(b) => flip(b),
+        DynamicImage::ImageRgba8(b) => flip(b),
+        DynamicImage::ImageLuma16(b) => flip(b),
+        DynamicImage::ImageLumaA16(b) => flip(b),
+        DynamicImage::ImageRgb16(b) => flip(b),
+        DynamicImage::ImageRgba16(b) => flip(b),
+        DynamicImage::ImageRgb32F(b) => flip(b),
+        DynamicImage::ImageRgba32F(b) => flip(b),
+        // DynamicImage is #[non_exhaustive]: a future variant falls back to
+        // the adapter path (quantizing, but never silently skipped).
+        other => flip(other),
     }
 }
 
@@ -2490,9 +2541,10 @@ fn orient_f32(
 
 /// Downscale the oriented f32 buffer to fit `max_edge` (aspect preserved;
 /// the same zero-copy [f32;3]⇄f32 casts as [`orient_f32`]). It must be the
-/// ORIENTED buffer: `thumbnail`'s integer binning is not
-/// orientation-equivariant, so capping in the sensor frame would change
-/// preview pixels (see the probe note in `render_to_image_in`). No-op when
+/// ORIENTED buffer: `thumbnail`'s integer binning only commutes with pure
+/// axis swaps — reversing orientations shift its bin edges by one source
+/// bin, so capping in the sensor frame would change preview pixels (see
+/// the probe note in `render_to_image_in`). No-op when
 /// the frame already fits. Backs `render_to_image`'s working-resolution
 /// cap: developing 61 MP only to thumbnail the result wasted a ~1.5 GB
 /// transient chain on every preview-resolution retouch base.
@@ -3482,6 +3534,27 @@ mod tests {
     }
 
     #[test]
+    fn develop_survives_a_zero_size_frame() {
+        // The vignette passes were the last unguarded par_chunks_mut(w)
+        // sites of the family (straighten/distortion/lens-geometry/downscale
+        // all early-return on zero dims) — rayon asserts chunk_size != 0
+        // even on an empty slice, so a 0×0 frame with any vignette active
+        // panicked instead of rendering nothing (U14).
+        let img = DynamicImage::ImageRgb8(image::RgbImage::new(0, 0));
+        let r = EditRecipe {
+            lens_vignette: 60.0,
+            lens_profile: crate::recipe::LensProfile {
+                vignette: vec![1.0, 1.2, 1.4, 1.6],
+                vignette_on: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = develop_preview(&img, &r);
+        assert_eq!((out.width(), out.height()), (0, 0));
+    }
+
+    #[test]
     fn grading_blending_controls_overlap_not_amplitude() {
         use crate::recipe::ColorGrade;
         // A legal Blending of 0 used to zero every regional wheel. It must
@@ -3494,18 +3567,20 @@ mod tests {
             "blending=0 must still apply the shadow wheel, got {:?}",
             dark[0]
         );
-        // And 100 must reproduce the historical weights exactly: at the
-        // midpoint the midtone wheel owns the pixel, shadows/highlights ~0.
+        // And 100 must keep the shadow wheel OFF the midtone: at l = 0.5,
+        // mid = 0.5, w_sh = 1 − smoothstep(0, 0.5, 0.5) = 0 exactly, and the
+        // midtone/global wheels carry no sat/lum here — the pixel must come
+        // back UNTOUCHED. (The old form compared two applications with
+        // field-for-field identical ColorGrade values — f(x) == f(x) could
+        // never fail, so a shadow-into-midtone leak passed, U14.)
         cg.blending = 100.0;
         let mut a = [[0.5f32, 0.5, 0.5]];
-        let mut b = a;
         apply_color_grade(&mut a, &cg);
-        // Hand-computed reference for the previous formula at l = 0.5, mid =
-        // 0.5: w_sh = 1 - smoothstep(0, 0.5, 0.5) = 0 -> the shadow wheel is
-        // inert on a mid-grey pixel either way.
-        let mid_only = ColorGrade { blending: 100.0, shadow_sat: 100.0, shadow_hue: 210.0, ..Default::default() };
-        apply_color_grade(&mut b, &mid_only);
-        assert_eq!(a, b);
+        assert_eq!(
+            a[0],
+            [0.5f32, 0.5, 0.5],
+            "blending=100: the shadow wheel must not reach the midtone"
+        );
     }
 
     #[test]
@@ -3658,6 +3733,15 @@ mod tests {
         apply_develop(&mut data, w, h, &r);
         assert!((data[0][0] - 0.6).abs() < 0.03, "top should be ~unchanged: {}", data[0][0]);
         assert!(data[3][0] < 0.5, "bottom should darken: {}", data[3][0]);
+        // The interior rows carry the actual gradient — the endpoint checks
+        // alone let a "positive weight ⇒ full coverage" mutation render the
+        // ramp as a hard step (row 0 has weight EXACTLY 0 and stays pinned;
+        // row 3 only darkens further) (U14).
+        assert!(
+            data[1][0] > data[2][0] + 0.05 && data[2][0] > data[3][0] + 0.05,
+            "linear ramp collapsed to a step: {:?}",
+            [data[1][0], data[2][0], data[3][0]]
+        );
     }
 
     #[test]
@@ -3681,10 +3765,17 @@ mod tests {
             let m = v.iter().sum::<f32>() / v.len() as f32;
             v.iter().map(|x| (x - m).powi(2)).sum::<f32>() / v.len() as f32
         };
-        let (left0, right0) = (var(&data, 0..4), var(&data, 4..8));
+        // Control render (mask-less, same global stages): "untouched" must
+        // mean BIT-FOR-BIT equal — the convention the range-mask tests use.
+        // The old probe compared the left half's red-channel VARIANCE, which
+        // is blind to a constant offset (translation-invariant) and to
+        // green/blue-only leaks (it never read those channels) (U14).
+        let mut control = data.clone();
+        apply_develop(&mut control, w, h, &EditRecipe::default());
+        let right0 = var(&data, 4..8);
         apply_develop(&mut data, w, h, &r);
         assert!(var(&data, 4..8) < right0 * 0.8, "right half should smooth");
-        assert!((var(&data, 0..4) - left0).abs() < 1e-4, "left half untouched");
+        assert_eq!(&data[0..4], &control[0..4], "left half untouched, bit for bit");
     }
 
     #[test]
@@ -3753,6 +3844,22 @@ mod tests {
         assert!(spread(data[1]) < 0.05, "dark orange (same hue) must desaturate: {:?}", data[1]);
         assert_eq!(data[2], control[2], "opposite hue: the mask must skip it");
         assert_eq!(data[3], control[3], "neutral grey: the mask must skip it");
+        // Desaturation must land at the pixel's LUMA, not at black — spread
+        // alone cannot tell grey from destroyed (a `c * factor` rewrite of
+        // the sat formula yields [0,0,0] with spread 0 and passed) (U14).
+        let lum = |p: [f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        assert!(
+            (data[0][0] - lum(control[0])).abs() < 0.03,
+            "orange must keep its brightness: {:?} vs luma {}",
+            data[0],
+            lum(control[0])
+        );
+        assert!(
+            (data[1][0] - lum(control[1])).abs() < 0.03,
+            "dark orange must keep its brightness: {:?} vs luma {}",
+            data[1],
+            lum(control[1])
+        );
     }
 
     #[test]
@@ -3879,6 +3986,26 @@ mod tests {
                 bytes.windows(needle.len()).any(|win| win == needle),
                 "{name} must carry the sRGB ICC marker"
             );
+            // The markers above match ANY ICC payload — pin the PROFILE:
+            // tag_icc's Srgb arm shipping the P3/Adobe bytes passed every
+            // marker check (U14). JPEG/TIFF store the profile verbatim; PNG
+            // deflate-compresses it, so compare the DECODED profile.
+            if name.ends_with(".png") {
+                let mut d = image::codecs::png::PngDecoder::new(std::io::BufReader::new(
+                    std::fs::File::open(name).unwrap(),
+                ))
+                .unwrap();
+                assert_eq!(
+                    image::ImageDecoder::icc_profile(&mut d).unwrap().unwrap(),
+                    SRGB_ICC.to_vec(),
+                    "{name} must embed the sRGB profile (decompressed iCCP)"
+                );
+            } else {
+                assert!(
+                    bytes.windows(SRGB_ICC.len()).any(|win| win == SRGB_ICC),
+                    "{name} must embed the sRGB profile bytes"
+                );
+            }
         }
     }
 
@@ -3936,6 +4063,30 @@ mod tests {
             q[0] > 50000 && q[0] < 62000 && q[1] <= 300 && q[2] <= 300,
             "AdobeRGB: sRGB red must stay a rescaled pure red, got {q:?}"
         );
+
+        // (d2) Green and blue primaries pin the REMAINING columns: the red
+        // probe alone survives a green/blue column swap of the matrix — row
+        // sums, invertibility, grey and red are all invariant under it, and
+        // so is the calibration cross-check, which derives from the same
+        // primaries table (U14). All three spaces share the same blue
+        // CHROMATICITY, so sRGB blue stays a pure blue in both targets;
+        // under the swap each primary would receive the other's column.
+        let green = DynamicImage::ImageRgb16(ImageBuffer::from_pixel(1, 1, Rgb([0u16, 65535, 0])));
+        let blue = DynamicImage::ImageRgb16(ImageBuffer::from_pixel(1, 1, Rgb([0u16, 0, 65535])));
+        for space in [ExportColorSpace::DisplayP3, ExportColorSpace::AdobeRgb] {
+            let g = convert_export_color_space(green.clone(), space).to_rgb16();
+            let p = g.get_pixel(0, 0);
+            assert!(
+                p[1] > 50000 && p[0] < p[1] && p[2] < p[1],
+                "{space:?}: sRGB green must stay dominant-green, got {p:?}"
+            );
+            let b = convert_export_color_space(blue.clone(), space).to_rgb16();
+            let p = b.get_pixel(0, 0);
+            assert!(
+                p[2] > 55000 && p[0] < 1000 && p[1] < 1000,
+                "{space:?}: sRGB blue shares the target's blue primary — must stay pure, got {p:?}"
+            );
+        }
 
         // (e) sRGB is the identity (now a MOVE, not a clone).
         let same = convert_export_color_space(grey, ExportColorSpace::Srgb).to_rgb16();
@@ -4034,8 +4185,11 @@ mod tests {
     fn exports_embed_the_selected_wide_gamut_profile() {
         // JPEG (APP2, one segment at 736 B) and TIFF (tag 34675) store the raw
         // profile — the ENTIRE profile bytes must appear in the file. PNG
-        // deflate-compresses inside iCCP, so it is covered by the chunk check
-        // in exports_are_tagged_srgb_in_all_three_formats.
+        // deflate-compresses inside iCCP, so its profile is compared
+        // DECOMPRESSED via the decoder — the old claim that the sRGB test's
+        // chunk check covered it was FALSE: that check only proves an iCCP
+        // chunk exists, so a PNG arm shipping sRGB bytes under a P3
+        // selection passed everything (U14).
         std::fs::create_dir_all("out").ok();
         let src_p = std::path::Path::new("out/_gamut_src.png");
         RgbImage::from_fn(24, 12, |x, y| Rgb([(x * 10) as u8, (y * 20) as u8, 90]))
@@ -4056,6 +4210,17 @@ mod tests {
                     profile.len()
                 );
             }
+            let png_name = "out/_gamut.png";
+            render_to_file(src_p, &neutral, std::path::Path::new(png_name), None, Some(&opts)).unwrap();
+            let mut d = image::codecs::png::PngDecoder::new(std::io::BufReader::new(
+                std::fs::File::open(png_name).unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(
+                image::ImageDecoder::icc_profile(&mut d).unwrap().unwrap(),
+                profile.to_vec(),
+                "{png_name} must embed the full {space:?} profile"
+            );
         }
     }
 
@@ -4074,6 +4239,15 @@ mod tests {
         assert!((centre - 0.5).abs() < 1e-4, "centre must not move: {centre}");
         assert!(corner > mid && mid > centre, "radial monotone: {centre} < {mid} < {corner}");
         assert!(corner > 0.62, "corner must clearly brighten: {corner}");
+        // Pin the NAMED linear-light formula at the exact corner (rn = 1 →
+        // gain = 1.6): decode → gain → encode. Gamma-space multiplication
+        // (0.5·1.6 = 0.8) clears every shape assertion here yet misses this
+        // by 0.18 (U14).
+        let expect = linear_to_srgb((srgb_to_linear(0.5) * 1.6).min(1.0));
+        assert!(
+            (corner - expect).abs() < 2e-3,
+            "corner must follow the linear-light gain: {corner} vs {expect}"
+        );
 
         let mut down = flat.clone();
         apply_vignette(&mut down, w, h, -60.0, 50.0);
@@ -4123,6 +4297,33 @@ mod tests {
             std::fs::metadata("out/_export_q95.jpg").unwrap().len(),
         );
         assert!(s30 < s95, "q30 ({s30} B) must be smaller than q95 ({s95} B)");
+
+        // Output sharpening must be OBSERVABLE: same source, same size, only
+        // `sharpen` differs — the sharpened file needs strictly more edge
+        // energy. Deleting the whole post-resize stage changed no previously
+        // asserted quantity (dims and JPEG sizes are blind to it) (U14).
+        let edge_p = std::path::Path::new("out/_export_edge.png");
+        RgbImage::from_fn(200, 100, |x, _| Rgb([if x < 100 { 40 } else { 215 }; 3]))
+            .save(edge_p)
+            .unwrap();
+        let export = |sharpen: f32, name: &str| {
+            let opts = ExportOpts { long_edge: Some(100), sharpen, ..Default::default() };
+            render_to_file(edge_p, &neutral, std::path::Path::new(name), None, Some(&opts)).unwrap();
+            let px = image::open(name).unwrap().to_rgb8();
+            let (w, h) = px.dimensions();
+            let energy: u64 = (0..h)
+                .flat_map(|y| (1..w).map(move |x| (x, y)))
+                .map(|(x, y)| (px[(x, y)][0] as i64 - px[(x - 1, y)][0] as i64).unsigned_abs())
+                .sum();
+            ((w, h), energy)
+        };
+        let (dim_flat, e_flat) = export(0.0, "out/_export_sharp0.png");
+        let (dim_sharp, e_sharp) = export(100.0, "out/_export_sharp100.png");
+        assert_eq!(dim_flat, dim_sharp, "only the sharpen knob differs");
+        assert!(
+            e_sharp > e_flat,
+            "output sharpening must raise edge energy: {e_sharp} vs {e_flat}"
+        );
     }
 
     #[test]
@@ -4445,6 +4646,21 @@ mod tests {
         let r = apply_lens_geometry(&white, &profile, 0.0).to_rgb16();
         let min = r.pixels().flat_map(|p| p.0).min().unwrap();
         assert!(min >= 65000, "unfilled pixels through the profile map: min {min}");
+        // A flat frame cannot see WHERE samples come from — an identity
+        // resampler passes the white probe (U14). Encode x into the value:
+        // the barrel profile must pull the left edge inward (nonzero source
+        // x → nonzero value), and CA must sample R and B at their own radii
+        // (ca_r > 1 reaches farther out than green; ca_b < 1 less far).
+        let ramp = DynamicImage::ImageRgb16(ImageBuffer::from_fn(121, 81, |x, _| {
+            Rgb([(x as u16) * 500; 3])
+        }));
+        let g = apply_lens_geometry(&ramp, &profile, 0.0).to_rgb16();
+        let p = g.get_pixel(0, 40).0;
+        assert!(p[1] > 300, "profile distortion inert at the left edge: {p:?}");
+        assert!(
+            p[0] != p[1] && p[2] != p[1] && (p[0] < p[1]) != (p[2] < p[1]),
+            "CA must split R and B to opposite sides of green: {p:?}"
+        );
     }
 
     #[test]
@@ -4636,32 +4852,52 @@ mod tests {
 
     #[test]
     fn orient_f32_matches_the_display_orientation_semantics() {
-        // A 3×2 buffer with a unique corner: Rotate90 (clockwise) must swap
-        // dims and move the top-left pixel to the top-right — the same
-        // convention `oriented` (and thus the GUI preview) uses. Normal is a
-        // pass-through with no copy semantics to break.
-        let mut data = vec![[0.0f32; 3]; 6];
-        data[0] = [1.0, 0.5, 0.25]; // top-left of the 3×2 frame
-        let (same, w, h) = orient_f32(data.clone(), 3, 2, Orientation::Normal);
-        assert_eq!((w, h), (3, 2));
-        assert_eq!(same[0], [1.0, 0.5, 0.25]);
-        let (rot, w, h) = orient_f32(data, 3, 2, Orientation::Rotate90);
-        assert_eq!((w, h), (2, 3), "90° swaps dimensions");
-        assert_eq!(rot[1], [1.0, 0.5, 0.25], "top-left → top-right under clockwise 90°");
-        assert_eq!(rot[0], [0.0, 0.0, 0.0]);
+        // A 3×2 buffer whose pixels carry their own index: every one of the
+        // EIGHT states must produce the exact hand-derived EXIF mapping
+        // (Rotate90 = clockwise, so top-left → top-right; Transpose =
+        // main-diagonal mirror; Transverse = anti-diagonal). Only Normal and
+        // Rotate90 were pinned before — the other six arms of `oriented`,
+        // including the two in-place A7 compositions, had no coverage, and
+        // orient_f32 round-trips through `oriented`, so the table below is
+        // derived from the EXIF definitions, NOT from the image crate (a
+        // crate-op reference would compare the function against itself)
+        // (U14).
+        let src: Vec<[f32; 3]> = (0..6).map(|i| [i as f32, 0.0, 0.0]).collect();
+        let cases: [(Orientation, (usize, usize), [usize; 6]); 8] = [
+            (Orientation::Normal, (3, 2), [0, 1, 2, 3, 4, 5]),
+            (Orientation::HorizontalFlip, (3, 2), [2, 1, 0, 5, 4, 3]),
+            (Orientation::Rotate180, (3, 2), [5, 4, 3, 2, 1, 0]),
+            (Orientation::VerticalFlip, (3, 2), [3, 4, 5, 0, 1, 2]),
+            (Orientation::Rotate90, (2, 3), [3, 0, 4, 1, 5, 2]),
+            (Orientation::Rotate270, (2, 3), [2, 5, 1, 4, 0, 3]),
+            (Orientation::Transpose, (2, 3), [0, 3, 1, 4, 2, 5]),
+            (Orientation::Transverse, (2, 3), [5, 2, 4, 1, 3, 0]),
+        ];
+        for (o, dims, map) in cases {
+            let (out, w, h) = orient_f32(src.clone(), 3, 2, o);
+            assert_eq!((w, h), dims, "{o:?} dims");
+            let got: Vec<usize> = out.iter().map(|p| p[0] as usize).collect();
+            assert_eq!(&got[..], &map[..], "{o:?} pixel mapping");
+        }
     }
 
     #[test]
-    fn thumbnail_binning_is_not_orientation_equivariant() {
+    fn thumbnail_binning_commutes_only_with_non_reversing_orientations() {
         // The probe behind the A7 decision to keep the working-resolution
-        // cap AFTER orientation (see `render_to_image_in`): if capping in
-        // the sensor frame were equivalent, a capped portrait render could
-        // skip a ~720 MB full-res rotation. It is not — `thumbnail`'s
-        // integer binning diverges under axis-swapping orientations (0.48
-        // on a smooth [0,1] gradient here; flips/90/270 err by one source
-        // pixel). If this test ever FAILS, the image crate's resampler
-        // became equivariant and that memory optimisation is back on the
-        // table — it is a canary, not a defect report.
+        // cap AFTER orientation (see `render_to_image_in`) — RE-RUN with the
+        // type-exact flip after the eight-state test exposed that the first
+        // measurement's Transpose figure (0.48) was entirely the Rgba<u8>
+        // flip adapter's quantization (U14). The true shape: `thumbnail`'s
+        // integer binning uses forward bin edges, so it commutes EXACTLY
+        // with pure axis swaps (Normal, Transpose) and diverges by one
+        // source bin (≈1/97 on this gradient) under every orientation with
+        // a REVERSAL component — mirrored bin edges of a non-integer ratio
+        // don't line up. Cap-before-orientation therefore STAYS forbidden
+        // (six of eight states would change preview pixels). The exact arm
+        // also pins the type-exact flip: a quantizing Transpose flip shows
+        // up here as ~0.5. If the reversing arm ever FAILS, the crate's
+        // binning became mirror-symmetric — re-probe all eight states
+        // before touching the pipeline order.
         let (w, h) = (97usize, 61usize);
         let data: Vec<[f32; 3]> = (0..w * h)
             .map(|i| {
@@ -4669,28 +4905,40 @@ mod tests {
                 [x as f32 / w as f32, y as f32 / h as f32, 0.0]
             })
             .collect();
-        let o = Orientation::Transpose;
-        let (a, aw, ah) = {
-            let (d, dw, dh) = orient_f32(data.clone(), w, h, o);
-            downscale_f32(d, dw, dh, 40)
+        let diff = |o: Orientation| -> f32 {
+            let (a, aw, ah) = {
+                let (d, dw, dh) = orient_f32(data.clone(), w, h, o);
+                downscale_f32(d, dw, dh, 40)
+            };
+            let (b, bw, bh) = {
+                let (d, dw, dh) = downscale_f32(data.clone(), w, h, 40);
+                orient_f32(d, dw, dh, o)
+            };
+            assert_eq!((aw, ah), (bw, bh), "{o:?}: dims always agree");
+            a.iter()
+                .zip(&b)
+                .flat_map(|(p, q)| (0..3).map(move |c| (p[c] - q[c]).abs()))
+                .fold(0.0f32, f32::max)
         };
-        let (b, bw, bh) = {
-            let (d, dw, dh) = downscale_f32(data, w, h, 40);
-            orient_f32(d, dw, dh, o)
-        };
-        assert_eq!((aw, ah), (bw, bh), "dims DO agree — only the sampling differs");
-        let max0 = a
-            .iter()
-            .zip(&b)
-            .map(|(p, q)| (p[0] - q[0]).abs())
-            .fold(0.0f32, f32::max);
-        assert!(
-            max0 > 0.1,
-            "thumbnail's binning no longer diverges grossly under Transpose \
-             (max ch0 diff {max0}) — re-run the full 8-orientation probe before \
-             concluding the A7 cap-before-orientation swap is available; a \
-             smaller-but-NONZERO divergence still forbids it"
-        );
+        for o in [Orientation::Normal, Orientation::Transpose] {
+            let d = diff(o);
+            assert!(d <= 1e-6, "{o:?} must commute exactly, diff {d}");
+        }
+        for o in [
+            Orientation::HorizontalFlip,
+            Orientation::VerticalFlip,
+            Orientation::Rotate90,
+            Orientation::Rotate180,
+            Orientation::Rotate270,
+            Orientation::Transverse,
+        ] {
+            let d = diff(o);
+            assert!(
+                d > 1e-4,
+                "{o:?}: binning became mirror-symmetric (diff {d}) — re-probe \
+                 all eight states before considering cap-before-orientation"
+            );
+        }
     }
 
     #[test]
@@ -4862,16 +5110,27 @@ mod tests {
     #[test]
     fn sharpening_raises_local_contrast_at_an_edge() {
         // A vertical edge: sharpening should push the dark side darker / bright
-        // side brighter (overshoot), increasing the edge step.
-        let (w, h) = (8usize, 1usize);
+        // side brighter (overshoot), increasing the edge step. The flat ends
+        // (outside the ±3 px unsharp support at radius 1) must NOT move — a
+        // global pointwise contrast curve also grows the step, and only the
+        // flat-field control tells the two apart (U14).
+        let (w, h) = (12usize, 1usize);
         let mut data: Vec<[f32; 3]> = (0..w)
-            .map(|x| { let v = if x < 4 { 0.3 } else { 0.7 }; [v, v, v] })
+            .map(|x| { let v = if x < 6 { 0.3 } else { 0.7 }; [v, v, v] })
             .collect();
-        let before = data[4][0] - data[3][0];
+        let before = data[6][0] - data[5][0];
         let r = EditRecipe { sharpening: 120.0, ..Default::default() };
         apply_develop(&mut data, w, h, &r);
-        let after = data[4][0] - data[3][0];
+        let after = data[6][0] - data[5][0];
         assert!(after > before, "edge step {after} should exceed {before}");
+        for x in [0usize, 1, 10, 11] {
+            let want = if x < 6 { 0.3 } else { 0.7 };
+            assert!(
+                (data[x][0] - want).abs() < 1e-6,
+                "flat field at x={x} must not move: {} vs {want}",
+                data[x][0]
+            );
+        }
     }
 
     // ---- dehaze -----------------------------------------------------------
@@ -4916,9 +5175,9 @@ mod tests {
     fn dehaze_zero_is_exact_identity() {
         // Like neutral_recipe_is_near_identity but bit-exact: the stage is
         // gated on != 0.0 and must not run at all.
-        let (data, _, _) = hazy_frame();
+        let (data, w, _) = hazy_frame();
         let mut out = data.clone();
-        apply_dehaze(&mut out, 0.0);
+        apply_dehaze(&mut out, w, 0.0);
         assert_eq!(data, out, "dehaze 0 must be a bit-exact no-op");
     }
 
@@ -4927,10 +5186,10 @@ mod tests {
         // Haze removal must jointly deepen tone AND restore chroma — the
         // signature no combination of tone sliders (luma-preserving chroma)
         // reproduces.
-        let (mut data, _, _) = hazy_frame();
+        let (mut data, w, _) = hazy_frame();
         let spread0 = luma_quantile_spread(&data);
         let chroma0 = mean_chroma(&data);
-        apply_dehaze(&mut data, 50.0);
+        apply_dehaze(&mut data, w, 50.0);
         let spread1 = luma_quantile_spread(&data);
         let chroma1 = mean_chroma(&data);
         assert!(
@@ -4948,7 +5207,7 @@ mod tests {
         let (mut data, w, _) = hazy_frame();
         let sky = [0.80f32, 0.85, 0.92];
         data[w / 2] = sky;
-        apply_dehaze(&mut data, 75.0);
+        apply_dehaze(&mut data, w, 75.0);
         let p = data[w / 2];
         assert!(p[2] > p[1] && p[1] > p[0], "channel order flipped: {p:?}");
         assert!(p[2] < 0.999, "sky blew out: {p:?}");
@@ -4967,11 +5226,11 @@ mod tests {
                 [v, v, v]
             })
             .collect();
-        let (mut colour, _, _) = hazy_frame();
+        let (mut colour, cw, _) = hazy_frame();
         let chroma0 = mean_chroma(&colour);
-        apply_dehaze(&mut colour, -50.0);
+        apply_dehaze(&mut colour, cw, -50.0);
         assert!(mean_chroma(&colour) < chroma0, "a veil must desaturate");
-        apply_dehaze(&mut data, -50.0);
+        apply_dehaze(&mut data, w, -50.0);
         assert!(data[0][0] > 0.05, "black point must lift under a veil: {}", data[0][0]);
         for i in 1..w {
             assert!(
@@ -5000,10 +5259,41 @@ mod tests {
         }
         let probe_idx = w + w / 2; // saturated orange, mid ramp
         let before = data[probe_idx];
-        apply_dehaze(&mut data, 50.0);
+        apply_dehaze(&mut data, w, 50.0);
         let after = data[probe_idx];
         let moved = (0..3).map(|c| (after[c] - before[c]).abs()).fold(0.0f32, f32::max);
         assert!(moved < 0.05, "clean saturated midtone moved {moved:.3}: {before:?} → {after:?}");
+    }
+
+    #[test]
+    fn dehaze_airlight_does_not_phase_lock_to_column_parity() {
+        // 1024×512 = 524288 px → the raw stride would be 2: alternating
+        // dark/bright COLUMNS then fed the histogram exactly one parity, and
+        // shifting the frame one pixel flipped the airlight from the 0.10
+        // floor to the bright bin — preview and export disagreed on any
+        // frame whose width shared a factor with the stride (U14). The
+        // coprime stride must make both phases agree.
+        let (w, h) = (1024usize, 512usize);
+        let frame = |phase: usize| -> Vec<[f32; 3]> {
+            (0..w * h)
+                .map(|i| {
+                    let v = if (i % w + phase).is_multiple_of(2) { 0.05 } else { 0.85 };
+                    [v, v, v]
+                })
+                .collect()
+        };
+        let mut a = frame(0);
+        let mut b = frame(1);
+        apply_dehaze(&mut a, w, 50.0);
+        apply_dehaze(&mut b, w, 50.0);
+        // Compare value-to-value, not index-to-index: the frames are
+        // one-pixel-shifted copies, so the same INPUT value must map to the
+        // same output in both.
+        let (pa, pb) = (a[0][0], b[1][0]); // both were 0.05 before develop
+        assert!(
+            (pa - pb).abs() < 1e-3,
+            "airlight phase-locked to column parity: {pa} vs {pb}"
+        );
     }
 
     #[test]
@@ -5021,10 +5311,15 @@ mod tests {
             "red pixel desaturated toward grey: {red:?}"
         );
         let blue = data[1];
-        assert!(
-            (blue[0] - 0.1).abs() < 0.02 && (blue[2] - 0.8).abs() < 0.02,
-            "blue pixel untouched: {blue:?}"
-        );
+        // ALL three channels — hsl_to_rgb derives them from three different
+        // hue offsets, so a green-only defect is a real failure class, and
+        // green is exactly the channel a blue→cyan cast moves first (U14).
+        for (c, want) in [0.1f32, 0.1, 0.8].iter().enumerate() {
+            assert!(
+                (blue[c] - want).abs() < 0.02,
+                "blue pixel untouched on every channel: {blue:?}"
+            );
+        }
     }
 
     #[test]
@@ -5040,10 +5335,20 @@ mod tests {
         let mut grey = vec![[0.5_f32, 0.5, 0.5]];
         apply_hsl(&mut grey, &hsl);
         assert!(
-            (grey[0][0] - 0.5).abs() < 1e-4 && (grey[0][2] - 0.5).abs() < 1e-4,
+            (grey[0][0] - 0.5).abs() < 1e-4
+                && (grey[0][1] - 0.5).abs() < 1e-4
+                && (grey[0][2] - 0.5).abs() < 1e-4,
             "grey untouched: {:?}",
             grey[0]
         );
+        // A LUMINANCE push probes the chroma gate itself: the saturation
+        // case is nearly vacuous for grey (s = 0 short-circuits both hue
+        // converters), while a grey that slipped the gate would be SCALED
+        // by the luminance term on all three channels (U14).
+        let hsl_lum = Hsl { luminance: [100.0; 8], ..Hsl::default() };
+        let mut grey2 = vec![[0.5_f32, 0.5, 0.5]];
+        apply_hsl(&mut grey2, &hsl_lum);
+        assert_eq!(grey2[0], [0.5, 0.5, 0.5], "grey must not respond to band luminance");
     }
 
     #[test]
