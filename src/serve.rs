@@ -46,8 +46,13 @@ struct AppState {
     /// Folder-switch generation: each /api/setdir claims the next number
     /// BEFORE scanning and only installs its result while still current —
     /// without this, a SLOW scan of folder A finishing after a fast scan of
-    /// folder B silently swapped the server back to A under B's UI.
+    /// folder B silently swapped the server back to A under B's UI. It also
+    /// STAMPS every listing, so a request built for the old folder cannot
+    /// resolve its index against the new one (see `stale_generation`).
     dir_gen: std::sync::atomic::AtomicU64,
+    /// The port we are actually listening on — the loopback-origin guard
+    /// compares it against the request's Host/Origin.
+    port: u16,
 }
 
 impl AppState {
@@ -77,6 +82,7 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
         raws: RwLock::new(raws),
         cfg: RwLock::new(Config::load()),
         dir_gen: std::sync::atomic::AtomicU64::new(0),
+        port,
     });
     let addr = format!("127.0.0.1:{port}");
     let server = Server::http(&addr).map_err(|e| anyhow!("start server on {addr}: {e}"))?;
@@ -121,10 +127,105 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Read a request header (case-insensitive), if present.
+fn req_header(request: &Request, name: &'static str) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv(name))
+        .map(|h| h.value.as_str().to_string())
+}
+
+/// Refuse anything a HOSTILE WEB PAGE could send us.
+///
+/// Binding 127.0.0.1 protects nothing on its own: any page the user visits
+/// can POST to `http://127.0.0.1:<port>` without a preflight (simple
+/// requests), and a DNS-rebinding host — a name that resolves to the
+/// attacker first and to 127.0.0.1 seconds later — becomes "same origin" and
+/// can READ the answers too (gallery paths, photos, settings incl. the API
+/// key). Both attacks necessarily carry a foreign `Host` (the rebound name)
+/// or a foreign `Origin`, so requiring the literal loopback host and a
+/// same-origin (or absent — same-origin GETs and our own tooling) Origin
+/// removes the entire class. Returns the refusal to send, or None to accept.
+fn foreign_origin(request: &Request, port: u16) -> Option<ResponseBox> {
+    fn loopback(h: &str, port: u16) -> bool {
+        let h = h.trim();
+        // "127.0.0.1:8080" / "localhost" / "[::1]:8080"
+        let (name, p) = match h.rsplit_once(':') {
+            // An IPv6 literal's own colons live INSIDE the brackets.
+            Some((n, p)) if !n.ends_with(']') || p.chars().all(|c| c.is_ascii_digit()) => {
+                (n, Some(p))
+            }
+            _ => (h, None),
+        };
+        let name_ok = matches!(name, "127.0.0.1" | "localhost" | "[::1]");
+        let port_ok = p.is_none_or(|p| p == port.to_string());
+        name_ok && port_ok
+    }
+    if let Some(host) = req_header(request, "Host")
+        && !loopback(&host, port)
+    {
+        return Some(status_response(
+            403,
+            "refused: this server only answers requests addressed to localhost",
+        ));
+    }
+    if let Some(origin) = req_header(request, "Origin") {
+        let ok = origin.strip_prefix("http://").is_some_and(|h| loopback(h, port));
+        if !ok {
+            return Some(status_response(
+                403,
+                "refused: cross-origin requests are not accepted by the local Autoshop server",
+            ));
+        }
+    }
+    None
+}
+
+/// Routes that RESOLVE A PHOTO ID and then write (or render what a write will
+/// use). Photo ids are indexes into the CURRENT folder listing, so one built
+/// before a folder switch would silently land on an unrelated photo.
+fn id_bound_mutation(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/analyze"
+            | "/api/develop"
+            | "/api/export"
+            | "/api/download"
+            | "/api/xmp"
+            | "/api/retouch"
+            | "/api/heal"
+    )
+}
+
+/// Refuse an id-bearing mutation built for a DIFFERENT folder listing. The
+/// client stamps every /api request with the generation its ids came from
+/// (`X-Autoshop-Gen`, see index.html); a mismatch means the gallery moved
+/// under it and the id now points at another photo.
+fn stale_generation(request: &Request, state: &AppState) -> Option<ResponseBox> {
+    let cur = state.dir_gen.load(std::sync::atomic::Ordering::SeqCst);
+    match req_header(request, "X-Autoshop-Gen").and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(g) if g == cur => None,
+        _ => Some(status_response(
+            409,
+            "the gallery moved to another folder — reload the page and try again",
+        )),
+    }
+}
+
 fn handle(mut request: Request, state: &AppState) -> Result<()> {
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("/");
     let is_post = request.method() == &tiny_http::Method::Post;
+
+    if let Some(refusal) = foreign_origin(&request, state.port) {
+        return request.respond(refusal).map_err(Into::into);
+    }
+    if id_bound_mutation(path)
+        && let Some(stale) = stale_generation(&request, state)
+    {
+        return request.respond(stale).map_err(Into::into);
+    }
 
     // Handlers BUILD a response instead of consuming the request, so the request
     // is still ours when one of them fails.
@@ -196,6 +297,12 @@ fn api_list(request: &Request, state: &AppState) -> Result<ResponseBox> {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(LIST_CAP)
         .clamp(1, LIST_CAP);
+    // Read the generation BEFORE the list: /api/setdir bumps it, then scans,
+    // then installs. Reading it first can only under-report (items newer than
+    // the stamp -> the client's next mutation 409s and it reloads); reading it
+    // after could stamp OLD items with the NEW generation, which would let a
+    // stale id through — fail closed, never open.
+    let listing_gen = state.dir_gen.load(std::sync::atomic::Ordering::SeqCst);
     let raws = state.raws.read().map_err(|_| anyhow!("lock poisoned"))?;
     let total = raws.len();
     let items: Vec<_> = raws
@@ -222,6 +329,7 @@ fn api_list(request: &Request, state: &AppState) -> Result<ResponseBox> {
         "limit": limit,
         "shown": items.len(),
         "items": items,
+        "gen": listing_gen,
     });
     Ok(json_response(&body))
 }
@@ -265,7 +373,9 @@ fn api_setdir(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         *raws = found;
         *dir = p.clone();
     }
-    Ok(json_response(&json!({ "dir": p.display().to_string(), "total": total })))
+    Ok(json_response(
+        &json!({ "dir": p.display().to_string(), "total": total, "gen": claimed_gen }),
+    ))
 }
 
 #[derive(Deserialize)]

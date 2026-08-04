@@ -386,6 +386,22 @@ const PAGE = 200;          // gallery page size (a folder can hold thousands)
 let pageOffset = 0;        // current page's first GLOBAL index
 let listSeq = 0;           // latest-wins: rapid Prev/Next answers race
 
+// Every /api request carries the gallery GENERATION the UI's ids came from.
+// A request built before a folder switch would otherwise resolve its index
+// against the new folder's table and save onto an unrelated photo; the server
+// answers 409 for id-bearing mutations that carry a stale (or no) stamp.
+// A wrapper instead of 16 call-site edits: one place, impossible to forget.
+let serverGen = null;
+const rawFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const url = typeof input === "string" ? input : (input && input.url) || "";
+  if (serverGen !== null && url.startsWith("/api/")) {
+    init = Object.assign({}, init || {});
+    init.headers = Object.assign({}, init.headers || {}, { "X-Autoshop-Gen": String(serverGen) });
+  }
+  return rawFetch(input, init);
+};
+
 async function loadList(offset) {
   // The offset COMMITS only when its response actually renders: committing
   // before the fetch left pageOffset pointing at a page that never appeared,
@@ -408,6 +424,9 @@ async function loadList(offset) {
   }
   if (seq !== listSeq) return false;   // superseded by a newer page request
   if (typeof dirSeq === "number" && dseq !== dirSeq) return false; // folder switched mid-flight
+  // The ids below are indexes into THIS generation of the folder listing —
+  // stamp every later request with it so a switch invalidates them.
+  if (typeof data.gen === "number") serverGen = data.gen;
   pageOffset = at;               // this response owns the pane — commit now
   const grid = $("#grid");
   // Reflect the authoritative working folder in the field (unless the user is typing).
@@ -527,6 +546,9 @@ async function setWorkingDir() {
   }
   const d = await r.json();
   if (seq !== dirSeq) return;
+  // Adopt the NEW generation immediately: the loadList below (and every
+  // request after it) belongs to the folder the server just installed.
+  if (typeof d.gen === "number") serverGen = d.gen;
   const rendered = await loadList(0);   // a new folder starts at page 1
   // A newer switch may have superseded us during that await — its status
   // (and its list) own the pane now.

@@ -219,6 +219,28 @@ pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Repair a CRASHED publish. `write_recipe` and `write_pixel_source` retire
+/// the live file to `<name>.bak` and then rename the staged copy over it; a
+/// crash between those two renames leaves the develop ONLY in the `.bak`.
+/// Nothing used to look there at read time: every reader reported "no
+/// develop", the GUI/web silently fell back to the lossy XMP, and the next
+/// programmatic save then snapshotted THAT and overwrote the survivor —
+/// recipe-only work (bitmap masks, colour gains, the baked-master linkage)
+/// was gone. Restoring here makes every reader see the real last-known-good.
+/// Best-effort and idempotent: a live file always wins, and a failed rename
+/// simply leaves the situation as it was.
+pub fn recover_orphan_baks(src: &Path) {
+    let dev = develop_dir(src);
+    for (live, bak) in [
+        (recipe_target(src), dev.join("recipe.json.bak")),
+        (pixel_source_path(src), dev.join("pixels.json.bak")),
+    ] {
+        if !live.exists() && bak.exists() {
+            let _ = std::fs::rename(&bak, &live);
+        }
+    }
+}
+
 /// The photo's recorded baked pixel source, if it still resolves on disk:
 /// `(master_path, is_generated)`. A missing sidecar is silent (the normal
 /// parametric-only case); an EXISTING sidecar that cannot be honoured —
@@ -226,6 +248,9 @@ pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
 /// stderr warning, so "the canvas reverted to the un-retouched source" stays
 /// traceable instead of looking like data loss with no cause.
 pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
+    // A crashed publish leaves the linkage only in pixels.json.bak — without
+    // this the canvas silently reverts to the un-retouched source.
+    recover_orphan_baks(src);
     let sidecar = pixel_source_path(src);
     let bytes = match std::fs::read(&sidecar) {
         Ok(b) => b,
@@ -429,6 +454,9 @@ pub fn backup_saved_develop(
     // Central first, then a not-yet-migrated LEGACY recipe — the read
     // fallbacks restore either, so overwriting the central slot unversioned
     // while a legacy develop still answered was silent destruction too.
+    // A crashed publish's survivor is a save like any other — restore it
+    // before deciding what to snapshot, or the write below destroys it.
+    recover_orphan_baks(src);
     let mut found: Option<(PathBuf, String)> = None;
     for rj in [recipe_target(src), legacy_recipe(src)] {
         match std::fs::read_to_string(&rj) {
@@ -451,6 +479,18 @@ pub fn backup_saved_develop(
         return backup_xmp_only(src);
     };
     let parsed = serde_json::from_str::<EditRecipe>(&text).ok();
+    // A NEUTRAL recipe.json is NOT what the readers restore: both the GUI
+    // (`SavedDevelop::NoopOnly`) and the web (`api_recipe`) fall THROUGH it
+    // to the XMP sidecar. Snapshotting the neutral JSON while the paired XMP
+    // write destroys the edits it shadows is exactly the silent loss this
+    // gate exists to prevent, so a neutral recipe takes the XMP-only path
+    // (which change-detects and answers Ok(None) when there is no XMP
+    // develop to lose — the plain neutral snapshot below then still runs).
+    if parsed.as_ref().is_some_and(|r| r.is_noop())
+        && let Some(n) = backup_xmp_only(src)?
+    {
+        return Ok(Some(n));
+    }
     if let (Some(existing), Some(inc)) = (&parsed, incoming) {
         // The on-disk copy names rasters by bare file name while `incoming`
         // carries absolute paths — resolve before comparing, or every
@@ -875,6 +915,10 @@ fn move_file_no_clobber(from: &Path, to: &Path) -> std::io::Result<bool> {
 /// resumability finish any remainder on the next touch. No lock: the store is
 /// single-user by construction, and identical-content races cannot corrupt.
 pub fn migrate_legacy(src: &Path) -> bool {
+    // Ahead of the memo: this is the "touching this photo" hook every reader
+    // (GUI read_saved_develop, web api_recipe) already calls, and a crashed
+    // publish must be repaired on EVERY touch, not once per process.
+    recover_orphan_baks(src);
     // Process-wide memo: a photo can only need migrating once per process, and
     // this runs on every photo open (UI thread) — without the memo a library
     // whose ./out holds thousands of exports pays a full directory enumeration
@@ -1196,6 +1240,32 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
 mod tests {
     use super::*;
     use crate::recipe::LocalAdjustment;
+
+    #[test]
+    fn orphan_bak_is_restored_on_read() {
+        // The crashed-publish window: recipe.json gone, recipe.json.bak holds
+        // the develop. A reader must see the develop, not "unedited".
+        let base = std::env::temp_dir().join("autoshop-store-test-orphanbak");
+        let _ = std::fs::remove_dir_all(&base);
+        let photo = base.join("DSC_ORPHAN.ARW");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&photo, b"not a real raw").unwrap();
+        // develop_dir is keyed by absolute path; build it through the API.
+        let dev = develop_dir(&photo);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("recipe.json.bak"), b"{\"exposure\":1.0}").unwrap();
+        assert!(!recipe_target(&photo).exists(), "precondition: live file gone");
+        recover_orphan_baks(&photo);
+        assert!(recipe_target(&photo).exists(), "the survivor must be restored");
+        assert!(!dev.join("recipe.json.bak").exists(), "and consumed");
+        // A live file always wins: a second .bak must NOT clobber it.
+        std::fs::write(dev.join("recipe.json.bak"), b"{\"exposure\":9.0}").unwrap();
+        recover_orphan_baks(&photo);
+        let live = std::fs::read_to_string(recipe_target(&photo)).unwrap();
+        assert!(live.contains("1.0"), "live file must win: {live}");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn tmp_names_are_process_unique_across_minters() {
