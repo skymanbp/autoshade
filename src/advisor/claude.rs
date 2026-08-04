@@ -54,12 +54,23 @@ impl Advisor for ClaudeProvider {
         cmd.args([
             "-p",
             // NOT `--bare`: it never reads the stored OAuth login (see the
-            // module docs) — these three flags give the same isolation while
+            // module docs) — these flags give the same isolation while
             // keeping the subscription auth.
             "--setting-sources",
             "",
             "--strict-mcp-config",
             "--disable-slash-commands",
+            // NO TOOLS. This subprocess is a pure data-in / verdict-out call:
+            // it receives numbers and returns JSON, and never needs to touch
+            // the filesystem. But the prompt embeds the recipe's `rationale`
+            // — text an upstream model wrote — so leaving the built-in tools
+            // enabled left a path from model output to local file reads whose
+            // contents could then travel to the verifier's model. `--tools ""`
+            // is the CLI's documented way to disable all of them ("Use \"\"
+            // to disable all tools"); measured on this machine, the verifier
+            // still answers normally with it set.
+            "--tools",
+            "",
             "--model",
             &self.model,
             "--output-format",

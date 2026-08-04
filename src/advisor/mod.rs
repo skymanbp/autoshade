@@ -408,21 +408,38 @@ pub(crate) fn post_ai_json(
                     }
                     return res;
                 }
-                // A body-read failure on the blocking path is the SAME
-                // connection blip class as the pre-response and SSE cases —
+                // A body-READ failure on the blocking path is the same
+                // connection-blip class as the pre-response and SSE cases —
                 // it used to bypass the one-time retry entirely.
-                let res = r
-                    .into_json()
-                    .map_err(|e| AdvisorError::Transport(format!("read AI response body: {e}")));
-                if let Err(AdvisorError::Transport(msg)) = &res
-                    && !transport_retried
-                    && started.elapsed().as_secs() < TRANSPORT_RETRY_UNDER_SECS
-                {
-                    transport_retried = true;
-                    eprintln!("  note: {msg} — retrying once (connection blip, not model time)");
-                    continue;
+                //
+                // A body-PARSE failure is NOT. `into_json` reports it as
+                // InvalidData, and it means the endpoint ANSWERED — it
+                // accepted the request, did the work and billed for it, then
+                // sent something we could not read. Re-posting a
+                // non-idempotent paid call there buys a second charge for a
+                // request that already succeeded on their side. Surface it.
+                match r.into_json() {
+                    Ok(v) => return Ok(v),
+                    Err(e) => {
+                        let parse_failure = e.kind() == std::io::ErrorKind::InvalidData;
+                        let msg = if parse_failure {
+                            format!("the AI endpoint answered with unreadable JSON: {e}")
+                        } else {
+                            format!("read AI response body: {e}")
+                        };
+                        if !parse_failure
+                            && !transport_retried
+                            && started.elapsed().as_secs() < TRANSPORT_RETRY_UNDER_SECS
+                        {
+                            transport_retried = true;
+                            eprintln!(
+                                "  note: {msg} — retrying once (connection blip, not model time)"
+                            );
+                            continue;
+                        }
+                        return Err(AdvisorError::Transport(msg));
+                    }
                 }
-                return res;
             }
             Err(ureq::Error::Status(code, r)) => {
                 let b = r.into_string().unwrap_or_default();
