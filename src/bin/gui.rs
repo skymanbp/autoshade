@@ -10708,12 +10708,15 @@ mod tests {
     }
 
     #[test]
-    fn mask_rename_flushes_at_every_entry_point() {
+    fn mask_rename_flushes_at_entry_points() {
         // A typed-but-uncommitted mask rename (TextEdit still focused, so
         // the panel's lost-focus commit has not run) used to be silently
-        // dropped by every entry point except Ctrl+S (U10). open_path must
-        // flush BEFORE stashing — and a flushed rename must read as
-        // unsaved, which is what arms the close guard's dirty check.
+        // dropped by every entry point except Ctrl+S (U10). Driven here:
+        // open_path (flush before the stash) and save_xmp (flush at its
+        // head). The close guard's own call site can't be driven headless
+        // (it needs a viewport close event through update()); its
+        // precondition — a flushed rename reads as UNSAVED — is pinned
+        // instead (Codex batch 41).
         let (mut app, mask_path) = app_with_masked_photo("rename");
         app.recipe.masks[0].name = "sky".into();
         app.saved_recipe = app.recipe.clone();
@@ -10734,6 +10737,18 @@ mod tests {
         assert_eq!(
             stash.recipe.masks[0].name, "sky gradient",
             "the stash carries the TYPED name, not the pre-focus one"
+        );
+
+        // save_xmp's head flush, driven WITHOUT disk side effects: on a
+        // generated variant save_xmp refuses with a toast BEFORE touching
+        // any file, but the flush at its head has already run — removing
+        // that flush previously survived this test (Codex batch 41).
+        app.variants[0].kind = VariantKind::Generated;
+        app.mask_name_buf = Some((0, "sky gradient".into(), "sky gradient 2".into()));
+        app.save_xmp();
+        assert_eq!(
+            app.recipe.masks[0].name, "sky gradient 2",
+            "save_xmp itself must flush the pending rename"
         );
 
         std::fs::remove_file(&mask_path).ok();

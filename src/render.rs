@@ -1061,14 +1061,6 @@ fn apply_profile_vignette(data: &mut [[f32; 3]], w: usize, h: usize, knots: &[f3
 ///
 /// Negative `amount` adds a uniform veil toward the airlight (`ω ≡ 1`, the
 /// exact inverse family): a convex blend, mathematically clip-free.
-/// Euclid, for the airlight stride below.
-fn gcd(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
-}
-
 fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
     let s = amount.clamp(-100.0, 100.0) / 100.0;
     if s.abs() < 1e-4 {
@@ -1082,23 +1074,30 @@ fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
 
     // Airlight: histogram of the linear min-channel over ≤ ~262k strided
     // samples (resolution-stable), P99, clamped away from black so a frame
-    // with no bright region cannot produce a degenerate divisor. The stride
-    // must stay COPRIME with the row width: a lattice with gcd(stride, w) =
-    // g > 1 visits only w/g columns, phase-locking the estimate to column
-    // parity (shifting a periodic frame one pixel flipped the airlight
-    // between the 0.10 floor and the bright bin) — and it silently broke
-    // the "full-res export and 384px analysis agree" contract, since the
-    // small analysis frame samples every pixel (U14).
+    // with no bright region cannot produce a degenerate divisor. The
+    // lattice is SHEARED — each row's sampling phase advances by one — so
+    // every column residue class is visited regardless of gcd(stride, w).
+    // A flat step_by lattice phase-locked to column parity (shifting a
+    // periodic frame one pixel flipped the airlight between the 0.10 floor
+    // and the bright bin, and preview disagreed with export — U14). The
+    // first fix bumped the stride to the next coprime, but on a width with
+    // many small odd factors that collapsed the sample count to a fraction
+    // of the budget (Codex batch 40); shearing keeps the count exact.
     let mut hist = [0u32; 1024];
     let mut n = 0u32;
-    let mut stride = (data.len() / 262_144).max(1) | 1;
-    while w > 1 && gcd(stride, w) != 1 {
-        stride += 2;
-    }
-    for px in data.iter().step_by(stride) {
+    let stride = (data.len() / 262_144).max(1);
+    let mut add = |px: &[f32; 3]| {
         let m = srgb_to_linear(px[0]).min(srgb_to_linear(px[1])).min(srgb_to_linear(px[2]));
         hist[(m.clamp(0.0, 1.0) * 1023.0) as usize] += 1;
         n += 1;
+    };
+    if stride == 1 {
+        data.iter().for_each(&mut add);
+    } else {
+        // stride > 1 implies len ≥ 524288, so w ≥ 1 and chunks(w) is safe.
+        for (y, row) in data.chunks(w).enumerate() {
+            row.iter().skip(y % stride).step_by(stride).for_each(&mut add);
+        }
     }
     let mut acc = 0u32;
     let mut a_bin = 1023usize;
@@ -4658,8 +4657,10 @@ mod tests {
         let p = g.get_pixel(0, 40).0;
         assert!(p[1] > 300, "profile distortion inert at the left edge: {p:?}");
         assert!(
-            p[0] != p[1] && p[2] != p[1] && (p[0] < p[1]) != (p[2] < p[1]),
-            "CA must split R and B to opposite sides of green: {p:?}"
+            p[0] < p[1] && p[1] < p[2],
+            "CA directions: ca_r > 1 samples farther out (smaller ramp value \
+             at the left edge), ca_b < 1 nearer (larger) — a symmetric split \
+             also passed a swapped R/B correction (Codex batch 40): {p:?}"
         );
     }
 
