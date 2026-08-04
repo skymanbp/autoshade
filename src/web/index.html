@@ -1177,8 +1177,15 @@ async function analyze() {
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), data.recipe);
     syncSliders(); showVerdict(data.verdict); showRationale();
     pushHistory(state.recipe); renderAfter();
-    // `warning` = the proposal is on screen but was NOT persisted (an existing
-    // explicit save could not be snapshotted, so overwriting it was refused).
+    // The develop on disk matches the canvas ONLY when the server says it
+    // saved (an Accept verdict; non-Accept and a refused backup hand back an
+    // UNSAVED proposal). Without this the saved-baseline stayed stale even
+    // after a saved analyze, and switching photos raised a false
+    // unsaved-edits warning.
+    if (data.saved) markSaved();
+    // `warning` = the proposal is on screen but was NOT persisted — an
+    // existing explicit save could not be snapshotted, or the verdict was
+    // non-Accept (a non-Accept verdict never auto-saves).
     // Also pinned under the verdict: the status line is wiped by the preview
     // render that is already in flight above.
     if (data.warning) {

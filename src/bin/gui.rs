@@ -4844,6 +4844,8 @@ impl AutoshopApp {
                         // or the wholesale install below folds it into the
                         // pre-analyze step and Ctrl+Z skips it.
                         self.commit_now();
+                        let accepted =
+                            verdict.decision == autoshop::advisor::Decision::Accept;
                         // The recipe arrives with its base_curve already
                         // stamped by produce_recipe (saved-curve-first, else a
                         // fresh estimate) — the single authority all three
@@ -4878,7 +4880,22 @@ impl AutoshopApp {
                         // an unpersisted analyze silently diverges from every
                         // one of them. An existing explicit save is snapshotted
                         // to v<N> first, never destroyed.
-                        self.status = match self.src_path.clone() {
+                        self.status = if !accepted {
+                            // The verifier itself judged this result not
+                            // ready, and a non-Accept verdict may not
+                            // auto-save (user decision). The result stays on
+                            // the canvas as an UNSAVED edit — ● lit, the nav
+                            // stash and the close guard protect it — and the
+                            // user decides: Ctrl+S keeps it, Ctrl+Z steps
+                            // back to the pre-analyze edit.
+                            let t = trf(
+                                lang,
+                                "AI develop applied — verdict {v}: NOT saved (Ctrl+S keeps it, Ctrl+Z steps back)",
+                                &[("v", &format!("{:?}", verdict.decision))],
+                            );
+                            self.toast(ToastKind::Success, t.clone());
+                            t
+                        } else { match self.src_path.clone() {
                             // The backup gate comes FIRST: if the existing save
                             // cannot be snapshotted, it is not overwritten —
                             // the analyze result stays on the canvas only.
@@ -4993,7 +5010,7 @@ impl AutoshopApp {
                                 }
                             },
                             None => tr(lang, "AI develop applied").into(),
-                        };
+                        } };
                     }
                     Err(e) => {
                         self.fail(tr(lang, "analyze failed"), e);

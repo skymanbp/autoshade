@@ -517,6 +517,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it",
         "recipe.json 无法解析（{err}）— 编辑未完整恢复；Ctrl+S 会覆盖它"),
     ("a saved develop exists but holds no effective edits", "已保存的显影存在但不含有效编辑"),
+    ("AI develop applied — verdict {v}: NOT saved (Ctrl+S keeps it, Ctrl+Z steps back)",
+        "AI 显影已应用 — 判词 {v}：未保存（Ctrl+S 保留，Ctrl+Z 回退）"),
     ("AI develop applied · saved to recipe.json", "AI 显影已应用 · 已保存到 recipe.json"),
     ("AI develop applied · saved (previous save backed up as v{n})",
         "AI 显影已应用 · 已保存（之前的保存已备份为 v{n}）"),

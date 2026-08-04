@@ -402,6 +402,23 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     // recipe.xmp instead of the canonical <stem>.xmp.
     let redirected =
         out.as_ref().is_some_and(|o| !same_path(o, &autoshop::store::recipe_target(raw)));
+
+    println!("\n--- proposed recipe ---");
+    println!("{}", serde_json::to_string_pretty(&recipe)?);
+    println!("\n--- verdict: {:?} ---", verdict.decision);
+    for reason in &verdict.reasons {
+        println!("  - {reason}");
+    }
+    // A non-Accept verdict may not auto-save (user decision): the verifier
+    // itself judged the result not ready, so the canonical develop stays
+    // untouched. A redirected -o is an explicit destination that never
+    // touches the develop — it still writes, whatever the verdict.
+    if !redirected && verdict.decision != autoshop::advisor::Decision::Accept {
+        println!("\nNOT saved: verdict {:?} — a non-Accept verdict never auto-saves.", verdict.decision);
+        println!("  keep it anyway: save the JSON above to a file and render it via  autoshop apply,");
+        println!("  or steer with  --guidance \"…\"  and re-run analyze.");
+        return Ok(());
+    }
     // The v<N> backup gate (store.rs "any surface" contract): a programmatic
     // canonical overwrite snapshots an existing explicit save first and is
     // REFUSED when the snapshot fails — the GUI and web already do this; the
@@ -413,13 +430,6 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
     let recipe_path = write_recipe(raw, &recipe, out)?;
-
-    println!("\n--- proposed recipe ---");
-    println!("{}", serde_json::to_string_pretty(&recipe)?);
-    println!("\n--- verdict: {:?} ---", verdict.decision);
-    for reason in &verdict.reasons {
-        println!("  - {reason}");
-    }
     println!("\nrecipe -> {}", recipe_path.display());
     // XMP only for a RAW; a baked source (PNG/TIFF) gets the recipe JSON only.
     if decode::is_raw(raw) {
@@ -511,11 +521,14 @@ fn auto_cmd(
     // smaller 8-bit file.
     let out = out.unwrap_or_else(|| default_out(raw, "developed", "tif"));
     pipeline::guard_readonly(&out, raw)?;
-    // Same backup gate as analyze: `auto` is a programmatic canonical writer.
-    if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
-        anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
+    let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
+    if accepted {
+        // Same backup gate as analyze: `auto` is a programmatic canonical writer.
+        if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
+            anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
+        }
+        write_recipe(raw, &recipe, None)?;
     }
-    write_recipe(raw, &recipe, None)?;
     ensure_parent(&out)?;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
@@ -556,7 +569,14 @@ fn auto_cmd(
     // XMP only for a RAW (Lightroom reads it beside the RAW); a baked source
     // (PNG/TIFF) gets the recipe JSON only. A projection failure is a WARNING:
     // recipe.json (and the rendered file) already committed.
-    if decode::is_raw(raw) {
+    if !accepted {
+        // A non-Accept verdict may not auto-save (user decision): the render
+        // above is this command's explicit deliverable, but the develop and
+        // its XMP stay untouched. Print the recipe so nothing is lost.
+        println!("develop NOT saved: verdict {:?} — a non-Accept verdict never auto-saves.", verdict.decision);
+        println!("--- proposed recipe (render it again via  autoshop apply) ---");
+        println!("{}", serde_json::to_string_pretty(&recipe)?);
+    } else if decode::is_raw(raw) {
         match write_xmp(raw, &recipe) {
             Ok(xmp_path) => println!("xmp    -> {}", xmp_path.display()),
             Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
@@ -788,9 +808,15 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     };
     let workers = work.len().min(3);
     let next = std::sync::atomic::AtomicUsize::new(0);
-    // Per-index results (Some(true) = ok, Some(false) = failed): summary counts
-    // stay exact and deterministic regardless of completion order.
-    let results: std::sync::Mutex<Vec<Option<bool>>> = std::sync::Mutex::new(vec![None; n]);
+    // Per-index results: summary counts stay exact and deterministic
+    // regardless of completion order.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Outcome {
+        Saved,
+        NotAccepted, // produced but NOT saved — a non-Accept verdict never auto-saves
+        Failed,
+    }
+    let results: std::sync::Mutex<Vec<Option<Outcome>>> = std::sync::Mutex::new(vec![None; n]);
 
     std::thread::scope(|s| {
         for _ in 0..workers {
@@ -807,29 +833,57 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
                     // the stdout lock keeps workers' lines from interleaving.
                     use std::io::Write;
                     let mut out = std::io::stdout().lock();
-                    let _ = match &res {
-                        Ok(v) => writeln!(out, "[{}/{n}] {} ... {:?}", i + 1, stem(raw), v.decision),
-                        Err(e) => writeln!(out, "[{}/{n}] {} ... FAILED: {e}", i + 1, stem(raw)),
+                    let outcome = match &res {
+                        Ok(v) if v.decision == autoshop::advisor::Decision::Accept => {
+                            let _ = writeln!(out, "[{}/{n}] {} ... {:?}", i + 1, stem(raw), v.decision);
+                            Outcome::Saved
+                        }
+                        Ok(v) => {
+                            let _ = writeln!(
+                                out,
+                                "[{}/{n}] {} ... {:?} — NOT saved (a non-Accept verdict never auto-saves)",
+                                i + 1,
+                                stem(raw),
+                                v.decision
+                            );
+                            Outcome::NotAccepted
+                        }
+                        Err(e) => {
+                            let _ = writeln!(out, "[{}/{n}] {} ... FAILED: {e}", i + 1, stem(raw));
+                            Outcome::Failed
+                        }
                     };
                     drop(out);
-                    results.lock().unwrap()[i] = Some(res.is_ok());
+                    results.lock().unwrap()[i] = Some(outcome);
                 }
             });
         }
     });
 
     let results = results.into_inner().unwrap();
-    let ok = results.iter().filter(|r| **r == Some(true)).count();
-    let fail = results.iter().filter(|r| **r == Some(false)).count();
-    // Failed attempts produced no sidecar, so they are STILL pending — count
-    // only the successes as done.
-    println!("\nbatch done: {ok} ok, {fail} failed, {} still pending.", todo.saturating_sub(ok));
+    let ok = results.iter().filter(|r| **r == Some(Outcome::Saved)).count();
+    let skipped = results.iter().filter(|r| **r == Some(Outcome::NotAccepted)).count();
+    let fail = results.iter().filter(|r| **r == Some(Outcome::Failed)).count();
+    // Only a SAVED develop leaves the pending set: failures AND non-Accept
+    // results produced no sidecar, so a re-run re-attempts (and re-bills)
+    // them — said here, not discovered on the next invoice.
+    println!(
+        "\nbatch done: {ok} saved, {skipped} not saved (non-Accept), {fail} failed, {} still pending.",
+        todo.saturating_sub(ok)
+    );
     Ok(())
 }
 
 fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Verdict> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
     let (recipe, verdict) = produce_recipe(raw, cfg, false, None, None, cfg.style_strength)?;
+    // A non-Accept verdict may not auto-save (user decision). In a headless
+    // batch that means NO sidecars and NO deliverable: the photo stays
+    // pending, the caller's summary names it, and a re-run re-attempts it —
+    // the same consequence a failed photo already has.
+    if verdict.decision != autoshop::advisor::Decision::Accept {
+        return Ok(verdict);
+    }
     // Every fallible product BEFORE the completion markers: `has_develop`
     // (the batch resume filter) keys on the sidecars, so any failure after
     // one lands would leave a photo both "failed" in this run AND skipped by

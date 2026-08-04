@@ -1166,6 +1166,23 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     });
     let (recipe, verdict) =
         pipeline::produce_recipe(&raw, &cfg, false, guidance, refine_base.as_ref(), style)?;
+    // A non-Accept verdict may not auto-save (user decision): the verifier
+    // itself judged the result not ready, so the develop on disk stays
+    // untouched and the browser gets the proposal back as an UNSAVED edit —
+    // its saved-baseline machinery shows it as such and asks before
+    // discarding.
+    if verdict.decision != crate::advisor::Decision::Accept {
+        return Ok(json_response(&json!({
+            "recipe": recipe,
+            "verdict": verdict,
+            "saved": false,
+            "warning": format!(
+                "verdict {:?} — not saved (a non-Accept verdict never auto-saves); \
+                 Save XMP keeps it, switching photos discards it",
+                verdict.decision
+            ),
+        })));
+    }
     // Analyze is a PROGRAMMATIC writer: it may not destroy an explicit save
     // without a `v<N>` snapshot — the same contract the GUI enforces. A backup
     // that FAILS (locked / unreadable existing save) means we must not write at
