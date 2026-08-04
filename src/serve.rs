@@ -956,11 +956,19 @@ struct DevelopReq {
     /// Export/download only: "tif" (16-bit master, default) or "jpg".
     #[serde(default)]
     format: Option<String>,
+    /// Browser-session master (see `session_master`): render from THIS
+    /// ./out file instead of the persisted pixel source.
+    #[serde(default)]
+    master: Option<String>,
 }
 #[derive(Deserialize)]
 struct XmpReq {
     id: usize,
     recipe: EditRecipe,
+    /// Browser-session master to RECORD as the develop's pixel source on
+    /// save (the GUI rule) — else the healed pixels evaporate on reopen.
+    #[serde(default)]
+    master: Option<String>,
 }
 #[derive(Deserialize)]
 struct RetouchReq {
@@ -982,6 +990,33 @@ struct RetouchReq {
     /// Absent = no mapping (older clients / no geometry).
     #[serde(default)]
     view: Option<EditRecipe>,
+    /// Browser-session master (see `session_master`): fill on top of THIS
+    /// ./out file — a chained retouch — instead of the persisted source.
+    #[serde(default)]
+    master: Option<String>,
+}
+
+/// A browser-carried ./out master path for session chaining: the previous
+/// fill/heal answer's X-Output-Path, posted back so the NEXT operation (or
+/// the preview / an export) builds on it — without this a second fill/heal
+/// restarted from the persisted master and silently discarded the first
+/// (U30). UNTRUSTED input: accept only a path that canonicalises INSIDE the
+/// project's ./out tree (where every fill/heal master lives). Anything else
+/// is a hard error — falling back silently would re-introduce the exact
+/// stealth loss this exists to fix.
+fn session_master(claim: Option<&str>) -> std::result::Result<Option<PathBuf>, String> {
+    let Some(c) = claim else { return Ok(None) };
+    if c.trim().is_empty() {
+        return Ok(None);
+    }
+    let canon = std::fs::canonicalize(c)
+        .map_err(|e| format!("session master {c} is not readable ({e}) — reselect the photo and retry"))?;
+    let root = std::fs::canonicalize("out")
+        .map_err(|e| format!("no ./out tree ({e}) — reselect the photo and retry"))?;
+    if !canon.starts_with(&root) {
+        return Err(format!("session master {c} is outside ./out — reselect the photo and retry"));
+    }
+    Ok(Some(canon))
 }
 
 /// Map a dragged region from the DISPLAYED After frame back into the ORIGINAL
@@ -1260,8 +1295,16 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // thousand-mask body monopolised the render thread).
     req.recipe.clamp();
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
-    // Same decode source as `api_export` below — see `develop_base`.
-    let src = render_source(&raw, &mut req.recipe);
+    // Same decode source as `api_export` below — see `develop_base`. A
+    // browser-session master (fill/heal chained this session, not yet
+    // persisted) overrides the persisted source; such masters are NEUTRAL
+    // develops (InPlace), so the recipe — calibration included — renders on
+    // top, no strip.
+    let src = match session_master(req.master.as_deref()) {
+        Ok(Some(p)) => p,
+        Ok(None) => render_source(&raw, &mut req.recipe),
+        Err(msg) => return Ok(status_response(400, &msg)),
+    };
     let preview = develop_base(&src)?;
     let mut after = render::develop_preview(&preview, &req.recipe);
     // Geometry, mirroring the GUI preview chain (lens geometry → straighten;
@@ -1300,7 +1343,13 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
-    let src = render_source(&raw, &mut req.recipe);
+    // Session master wins here too (api_develop's rule) — the deliverable
+    // must match the healed preview the user just approved.
+    let src = match session_master(req.master.as_deref()) {
+        Ok(Some(p)) => p,
+        Ok(None) => render_source(&raw, &mut req.recipe),
+        Err(msg) => return Ok(status_response(400, &msg)),
+    };
     let out = pipeline::default_out(&raw, "developed", fmt_ext(&req));
     pipeline::ensure_parent(&out)?;
     // Config SNAPSHOT: the read guard held across a multi-minute render
@@ -1339,7 +1388,12 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     let raw = state.at(req.id).ok_or_else(|| anyhow!(ClientErr("bad id".into())))?;
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
-    let src = render_source(&raw, &mut req.recipe);
+    // Session master wins here too (api_develop's rule).
+    let src = match session_master(req.master.as_deref()) {
+        Ok(Some(p)) => p,
+        Ok(None) => render_source(&raw, &mut req.recipe),
+        Err(msg) => return Ok(status_response(400, &msg)),
+    };
     // Config SNAPSHOT — see api_export.
     let cfg = state.config().clone();
     let ext = fmt_ext(&req);
@@ -1471,13 +1525,34 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // writing the XMP first meant a failed recipe write left a NEW XMP shadowed
     // by the STALE recipe both surfaces prefer.
     pipeline::write_recipe(&raw, &req.recipe, None)?;
+    // A browser-session master (fill/heal chained this session) becomes the
+    // develop's persisted pixel source on save — the GUI rule: saving
+    // records pixel identity, else the healed pixels evaporate on the very
+    // reopen that follows "saved". Only ever WRITTEN here: an absent claim
+    // must not clear a GUI-persisted master.
+    let mut master_note = String::new();
+    match session_master(req.master.as_deref()) {
+        Ok(Some(p)) => {
+            if let Err(e) = crate::store::write_pixel_source(&raw, &p, false) {
+                master_note = format!(
+                    " — but recording the retouched master failed ({e}); reopening shows the un-retouched source"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(msg) => {
+            master_note = format!(
+                " — but the session master was rejected ({msg}); reopening shows the un-retouched source"
+            );
+        }
+    }
     // Recipe committed = saved (the cross-surface rule): a failed XMP
     // projection reports success WITH the warning instead of a 500 that
     // contradicts the on-disk state.
     match pipeline::write_xmp(&raw, &req.recipe) {
-        Ok(path) => Ok(text_response(&path.display().to_string())),
+        Ok(path) => Ok(text_response(&format!("{}{master_note}", path.display()))),
         Err(e) => Ok(text_response(&format!(
-            "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}"
+            "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{master_note}"
         ))),
     }
 }
@@ -1500,13 +1575,18 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(b) => b,
         Err(e) => return Ok(status_response(400, &format!("bad mask base64: {e}"))),
     };
-    // Retouch the photo's RENDER INPUT — the persisted pixels.json master
-    // when one exists — not the original raw: filling on a GUI-saved heal /
-    // Generated master used to rebuild from the un-retouched source and
-    // silently discard the prior baked work (api_develop's rule).
-    let src = crate::store::read_pixel_source(&raw)
-        .map(|(m, _)| m)
-        .unwrap_or_else(|| raw.clone());
+    // Retouch the photo's RENDER INPUT — the browser-session master when the
+    // client carries one (a fill/heal chained THIS session; without it a
+    // second operation restarted from the persisted master and silently
+    // discarded the first, U30), else the persisted pixels.json master, else
+    // the photo itself (api_develop's rule).
+    let src = match session_master(req.master.as_deref()) {
+        Ok(Some(p)) => p,
+        Ok(None) => crate::store::read_pixel_source(&raw)
+            .map(|(m, _)| m)
+            .unwrap_or_else(|| raw.clone()),
+        Err(msg) => return Ok(status_response(400, &msg)),
+    };
     // The mask was painted over the DISPLAYED (post-geometry) preview —
     // un-warp it into the source frame the retouch engine works in, using
     // the DISPLAYED source's dims (the master, not the RAW: their aspects
@@ -1574,6 +1654,10 @@ struct HealReq {
     /// See RetouchReq.view — the mask's viewing geometry for un-warping.
     #[serde(default)]
     view: Option<EditRecipe>,
+    /// Browser-session master (see `session_master`): heal on top of THIS
+    /// ./out file — a chained retouch — instead of the persisted source.
+    #[serde(default)]
+    master: Option<String>,
 }
 fn default_true() -> bool {
     true
@@ -1597,10 +1681,15 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             match base64::engine::general_purpose::STANDARD.decode(b64) {
                 Ok(bytes) => {
                     // Same un-warp as api_retouch (see there) — through the
-                    // mapping view AND the displayed source's dims.
-                    let display_src = crate::store::read_pixel_source(&raw)
-                        .map(|(m, _)| m)
-                        .unwrap_or_else(|| raw.clone());
+                    // mapping view AND the DISPLAYED source's dims, which is
+                    // the session master when one is chained.
+                    let display_src = match session_master(req.master.as_deref()) {
+                        Ok(Some(p)) => p,
+                        Ok(None) => crate::store::read_pixel_source(&raw)
+                            .map(|(m, _)| m)
+                            .unwrap_or_else(|| raw.clone()),
+                        Err(msg) => return Ok(status_response(400, &msg)),
+                    };
                     let bytes = unwarp_mask(
                         &bytes,
                         view_for_mapping(&raw, req.view.as_ref()).as_ref(),
@@ -1627,10 +1716,15 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         return Ok(status_response(500, "no free heal output name (999 in ./out)"));
     };
     let cfg = state.config().clone();
-    // Same master-input rule as api_retouch (see there).
-    let src = crate::store::read_pixel_source(&raw)
-        .map(|(m, _)| m)
-        .unwrap_or_else(|| raw.clone());
+    // Same master-input rule as api_retouch (see there): session master
+    // first — a second heal must build ON the first, not beside it.
+    let src = match session_master(req.master.as_deref()) {
+        Ok(Some(p)) => p,
+        Ok(None) => crate::store::read_pixel_source(&raw)
+            .map(|(m, _)| m)
+            .unwrap_or_else(|| raw.clone()),
+        Err(msg) => return Ok(status_response(400, &msg)),
+    };
     let result = crate::retouch::heal(&cfg, &src, mask_tmp.as_deref(), req.auto, req.full_res, &out);
     if let Some(t) = &mask_tmp {
         let _ = std::fs::remove_file(t);

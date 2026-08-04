@@ -783,7 +783,7 @@ async function renderAfter() {
   setStatus("rendering preview…");
   try {
     const r = await fetch("/api/develop", {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({id, recipe: state.recipe})});
+      body: JSON.stringify({id, recipe: state.recipe, master: state.sessionMaster || undefined})});
     if (seq !== afterSeq || id !== state.id) return;   // superseded: don't touch the pane or the status
     if (!r.ok) {
       const t = await r.text();
@@ -830,6 +830,7 @@ async function selectPhoto(id, stem, el) {
   document.querySelectorAll(".thumb").forEach(t=>t.classList.remove("sel"));
   if (el) el.classList.add("sel");
   state.id = id; state.stem = stem;
+  state.sessionMaster = null;   // the fill/heal chain restarts per photo
   const main = $("#main");
   main.innerHTML = "";
   main.appendChild($("#detail-tpl").content.cloneNode(true));
@@ -1041,7 +1042,8 @@ async function selectPhoto(id, stem, el) {
     const reqId = state.id, reqSeq = selectSeq;
     try {
       const r = await fetch("/api/retouch", {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ id: reqId, prompt, mask, quality, full_res: fullRes, view: state.recipe })});
+        body: JSON.stringify({ id: reqId, prompt, mask, quality, full_res: fullRes, view: state.recipe,
+                               master: state.sessionMaster || undefined })});
       // r.ok FIRST: a failed request saved NOTHING — the stale-path message
       // used to promise a ./out master that never existed.
       if (!r.ok) {
@@ -1056,7 +1058,12 @@ async function selectPhoto(id, stem, el) {
       setAfterSrc(afterImg, blob);
       fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r);
-      setStatus("filled" + (saved ? " → " + saved : "") + " (saved to ./out; separate from the develop recipe)");
+      // Chain: the NEXT fill/heal builds on this master (a second one used
+      // to restart from the persisted source and silently discard the
+      // first), and the preview re-renders the RECIPE over it — the raw
+      // master blob above is a neutral develop, not what the canvas shows.
+      if (saved) { state.sessionMaster = saved; renderAfter(); }
+      setStatus("filled" + (saved ? " → " + saved : "") + " (in ./out; Save records it for reopening)");
     } catch (e) {
       // Without this, a transport rejection skipped the stale checks and the
       // GLOBAL handler stamped a generic failure over the NEW photo's status.
@@ -1089,7 +1096,8 @@ async function selectPhoto(id, stem, el) {
     const reqId = state.id, reqSeq = selectSeq;
     try {
       const r = await fetch("/api/heal", {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ id: reqId, mask, auto: !useMask, full_res: fullRes, view: state.recipe })});
+        body: JSON.stringify({ id: reqId, mask, auto: !useMask, full_res: fullRes, view: state.recipe,
+                               master: state.sessionMaster || undefined })});
       // r.ok FIRST — a failed heal saved nothing (see the fill handler).
       if (!r.ok) {
         const t = await r.text();
@@ -1103,11 +1111,13 @@ async function selectPhoto(id, stem, el) {
       setAfterSrc(afterImg, blob);
       if (useMask) fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r), n = r.headers.get("X-Heal-Spots");
+      // Same chain + recipe-composited re-render as fill (see there).
+      if (saved) { state.sessionMaster = saved; renderAfter(); }
       // A rationale can disclose a partial outcome (e.g. AI detection failed,
       // only the painted mask healed) — surface it, don't imply full success.
       let why = r.headers.get("X-Heal-Rationale");
       if (why) { try { why = decodeURIComponent(why); } catch (e) { /* show raw */ } }
-      setStatus(`healed ${n || "?"} spot(s)${saved ? " → " + saved : ""}${why ? " · " + why : ""} (saved to ./out; pixel retouch, not the develop recipe)`);
+      setStatus(`healed ${n || "?"} spot(s)${saved ? " → " + saved : ""}${why ? " · " + why : ""} (in ./out; Save records it for reopening)`);
     } catch (e) {
       // Same stale-aware catch as fill (see there).
       const stale = reqId !== state.id || reqSeq !== selectSeq;
@@ -1212,7 +1222,8 @@ async function saveXmp() {
   setStatus("saving xmp…");
   try {
     const r = await fetch("/api/xmp", {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({id: state.id, recipe: state.recipe})});
+      body: JSON.stringify({id: state.id, recipe: state.recipe,
+                            master: state.sessionMaster || undefined})});
     const body = await r.text();
     // The server writes the recipe.json alongside the XMP, so reopening this photo
     // (here or in the GUI) restores exactly this edit. A NEUTRAL recipe is not a
@@ -1228,7 +1239,8 @@ async function saveXmp() {
 function saveBody() {
   const dn = document.querySelector(".denoise-toggle")?.checked || false;
   const format = document.querySelector(".save-format")?.value || "tif";
-  return { id: state.id, recipe: state.recipe, denoise: dn, format };
+  return { id: state.id, recipe: state.recipe, denoise: dn, format,
+           master: state.sessionMaster || undefined };
 }
 
 let exportBusy = false;   // per-pane buttons are resurrected by reselecting — gate globally

@@ -20,7 +20,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
-use image::{RgbImage, RgbaImage};
+use image::{DynamicImage, ImageBuffer, Rgb, RgbaImage};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -78,12 +78,40 @@ pub struct HealReport {
 
 // --- the deterministic heal engine -----------------------------------------
 
+/// The channel depth the heal engine runs at: u8 masters (baked 8-bit
+/// sources) and u16 masters (RAW develops, 16-bit TIFF/PNG). The math stays
+/// f32 either way; `from_chan` clamps to the depth's range. Forcing every
+/// source through u8 quantised 16-bit pixels — U30's headline finding.
+pub trait HealDepth: image::Primitive {
+    fn chan_f32(self) -> f32;
+    fn from_chan(v: f32) -> Self;
+}
+impl HealDepth for u8 {
+    fn chan_f32(self) -> f32 {
+        self as f32
+    }
+    fn from_chan(v: f32) -> Self {
+        v.round().clamp(0.0, 255.0) as u8
+    }
+}
+impl HealDepth for u16 {
+    fn chan_f32(self) -> f32 {
+        self as f32
+    }
+    fn from_chan(v: f32) -> Self {
+        v.round().clamp(0.0, 65535.0) as u16
+    }
+}
+
 /// Apply every spot to `img` in place, healing from surrounding real pixels.
 /// Donors AND blend bases are read from a snapshot of the ORIGINAL image, so
 /// no spot ever reads a half-written region and each spot's output is a pure
 /// function of the source. Where spots OVERLAP, the later spot's result wins
 /// (deliberate last-writer rule — not order-independent in the overlap).
-pub fn heal_image(img: &mut RgbImage, spots: &[HealSpot]) {
+pub fn heal_image<T: HealDepth>(img: &mut ImageBuffer<Rgb<T>, Vec<T>>, spots: &[HealSpot])
+where
+    Rgb<T>: image::Pixel<Subpixel = T>,
+{
     if spots.is_empty() {
         return;
     }
@@ -104,18 +132,24 @@ pub fn heal_image(img: &mut RgbImage, spots: &[HealSpot]) {
 
 /// Read a pixel as f32 RGB, clamping coordinates to the image edge.
 #[inline]
-fn px(src: &RgbImage, x: i32, y: i32) -> [f32; 3] {
+fn px<T: HealDepth>(src: &ImageBuffer<Rgb<T>, Vec<T>>, x: i32, y: i32) -> [f32; 3]
+where
+    Rgb<T>: image::Pixel<Subpixel = T>,
+{
     let xx = x.clamp(0, src.width() as i32 - 1) as u32;
     let yy = y.clamp(0, src.height() as i32 - 1) as u32;
     let p = src.get_pixel(xx, yy).0;
-    [p[0] as f32, p[1] as f32, p[2] as f32]
+    [p[0].chan_f32(), p[1].chan_f32(), p[2].chan_f32()]
 }
 
 /// Search candidate donor offsets on rings around the spot; pick the one whose
 /// surroundings best match the spot's border (so the patch is seamless) and that
 /// stays in-bounds. Returns a pixel offset (dx, dy) from the spot centre, or
 /// (0,0) if no in-bounds donor exists (caller then leaves the spot untouched).
-fn find_donor(src: &RgbImage, cx: f32, cy: f32, r: f32) -> (i32, i32) {
+fn find_donor<T: HealDepth>(src: &ImageBuffer<Rgb<T>, Vec<T>>, cx: f32, cy: f32, r: f32) -> (i32, i32)
+where
+    Rgb<T>: image::Pixel<Subpixel = T>,
+{
     let (w, h) = (src.width() as f32, src.height() as f32);
     let mut best = (0i32, 0i32);
     let mut best_score = f32::INFINITY;
@@ -173,16 +207,18 @@ fn find_donor(src: &RgbImage, cx: f32, cy: f32, r: f32) -> (i32, i32) {
 /// clone stamp), which is exactly what you want when transplanting texture and
 /// exactly wrong when repairing into different-toned surroundings.
 #[allow(clippy::too_many_arguments)] // internal helper mirroring HealSpot's fields
-fn heal_one(
-    src: &RgbImage,
-    dst: &mut RgbImage,
+fn heal_one<T: HealDepth>(
+    src: &ImageBuffer<Rgb<T>, Vec<T>>,
+    dst: &mut ImageBuffer<Rgb<T>, Vec<T>>,
     cx: f32,
     cy: f32,
     r: f32,
     feather: f32,
     off: (i32, i32),
     clone_raw: bool,
-) {
+) where
+    Rgb<T>: image::Pixel<Subpixel = T>,
+{
     if off == (0, 0) {
         return; // no donor found → honest no-op rather than cloning the spot onto itself
     }
@@ -228,13 +264,13 @@ fn heal_one(
             }
             let donor = px(src, tx + ox, ty + oy);
             let base = px(src, tx, ty);
-            let mut out = [0u8; 3];
+            let mut out = [T::from_chan(0.0); 3];
             for c in 0..3 {
                 let healed = donor[c] + corr[c];
                 let v = base[c] * (1.0 - alpha) + healed * alpha;
-                out[c] = v.round().clamp(0.0, 255.0) as u8;
+                out[c] = T::from_chan(v);
             }
-            dst.put_pixel(tx as u32, ty as u32, image::Rgb(out));
+            dst.put_pixel(tx as u32, ty as u32, Rgb(out));
         }
     }
 }
@@ -474,31 +510,21 @@ pub fn heal(
         let img = decode::load_image(src_path)?;
         if full_res { img } else { img.thumbnail(2048, 2048) }
     };
-    let mut rgb = base.to_rgb8();
-    let (w, h) = rgb.dimensions();
+    let (w, h) = (base.width(), base.height());
 
     let mut spots: Vec<HealSpot> = Vec::new();
     let mut rationale = String::new();
     if auto_detect {
-        // Aspect-preserving downscale straight off the borrowed buffer — the
-        // old DynamicImage wrap cloned the ENTIRE frame (a ~183 MB transient
-        // on a 61 MP full-res heal) just to make a ≤1568px detection JPEG.
-        let (dw, dh) = {
-            let s = 1568.0 / w.max(h).max(1) as f32;
-            if s >= 1.0 {
-                (w, h)
-            } else {
-                (((w as f32 * s).round() as u32).max(1), ((h as f32 * s).round() as u32).max(1))
-            }
+        // ≤1568px detection JPEG. `resize` allocates only the TARGET buffer
+        // (the old path cloned the full frame first); a source already ≤1568
+        // clones, which is ≤ ~20 MB.
+        let small = if w.max(h) > 1568 {
+            base.resize(1568, 1568, image::imageops::FilterType::Triangle)
+        } else {
+            base.clone()
         };
-        let small = image::DynamicImage::ImageRgb8(image::imageops::resize(
-            &rgb,
-            dw,
-            dh,
-            image::imageops::FilterType::Triangle,
-        ));
         let mut jpeg = Vec::new();
-        small
+        DynamicImage::ImageRgb8(small.into_rgb8())
             .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
             .context("encode jpeg for detection")?;
         match detect_spots(cfg, &jpeg) {
@@ -540,12 +566,101 @@ pub fn heal(
     }
 
     let n = spots.len();
-    heal_image(&mut rgb, &spots);
-    crate::pipeline::ensure_parent(out)?;
-    image::DynamicImage::ImageRgb8(rgb)
-        .save(out)
-        .with_context(|| format!("write {}", out.display()))?;
+    // Native-depth heal + alpha carry-through (U30): a 16-bit source must not
+    // quantise to 8 bits just to pass the healer, and transparency is not a
+    // defect — the alpha plane rides through untouched.
+    let alpha = split_alpha(&base);
+    let healed = if deep_color(&base) {
+        let mut rgb = base.into_rgb16();
+        heal_image(&mut rgb, &spots);
+        DynamicImage::ImageRgb16(rgb)
+    } else {
+        let mut rgb = base.into_rgb8();
+        heal_image(&mut rgb, &spots);
+        DynamicImage::ImageRgb8(rgb)
+    };
+    save_master(out, reattach_alpha(healed, alpha))?;
     Ok(HealReport { spots: n, rationale, dims: (w, h) })
+}
+
+/// 8-bit or deeper? Everything that is not 8-bit heals at 16 bits.
+fn deep_color(img: &DynamicImage) -> bool {
+    !matches!(
+        img,
+        DynamicImage::ImageRgb8(_)
+            | DynamicImage::ImageRgba8(_)
+            | DynamicImage::ImageLuma8(_)
+            | DynamicImage::ImageLumaA8(_)
+    )
+}
+
+/// Detach the alpha plane (16-bit precision; 8-bit sources scale up
+/// losslessly ×257) so the RGB heal cannot touch it.
+fn split_alpha(img: &DynamicImage) -> Option<Vec<u16>> {
+    if !img.color().has_alpha() {
+        return None;
+    }
+    Some(match img {
+        DynamicImage::ImageRgba8(b) => b.pixels().map(|p| p.0[3] as u16 * 257).collect(),
+        DynamicImage::ImageLumaA8(b) => b.pixels().map(|p| p.0[1] as u16 * 257).collect(),
+        DynamicImage::ImageRgba16(b) => b.pixels().map(|p| p.0[3]).collect(),
+        DynamicImage::ImageLumaA16(b) => b.pixels().map(|p| p.0[1]).collect(),
+        other => other.to_rgba16().pixels().map(|p| p.0[3]).collect(),
+    })
+}
+
+/// Put a detached alpha plane back onto the healed RGB frame, at its depth.
+fn reattach_alpha(healed: DynamicImage, alpha: Option<Vec<u16>>) -> DynamicImage {
+    let Some(a) = alpha else { return healed };
+    match healed {
+        DynamicImage::ImageRgb16(rgb) => {
+            let (w, h) = rgb.dimensions();
+            let mut out: ImageBuffer<image::Rgba<u16>, Vec<u16>> = ImageBuffer::new(w, h);
+            for (i, (p, o)) in rgb.pixels().zip(out.pixels_mut()).enumerate() {
+                *o = image::Rgba([p.0[0], p.0[1], p.0[2], a[i]]);
+            }
+            DynamicImage::ImageRgba16(out)
+        }
+        DynamicImage::ImageRgb8(rgb) => {
+            let (w, h) = rgb.dimensions();
+            let mut out: RgbaImage = ImageBuffer::new(w, h);
+            for (i, (p, o)) in rgb.pixels().zip(out.pixels_mut()).enumerate() {
+                *o = image::Rgba([p.0[0], p.0[1], p.0[2], (a[i] / 257) as u8]);
+            }
+            DynamicImage::ImageRgba8(out)
+        }
+        other => other,
+    }
+}
+
+/// Stage + rename (the batch-13 export rule): a failed encode must not leave
+/// a partial file at the master name pixels.json / the GUI will link, and a
+/// repeat write must not destroy the previous master before the new one is
+/// known good. JPEG cannot carry 16-bit or alpha — flatten for it (the user
+/// chose that format).
+fn save_master(out: &Path, img: DynamicImage) -> Result<()> {
+    crate::pipeline::ensure_parent(out)?;
+    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+    let fmt = image::ImageFormat::from_extension(&ext).unwrap_or(image::ImageFormat::Png);
+    let img = if fmt == image::ImageFormat::Jpeg {
+        DynamicImage::ImageRgb8(img.into_rgb8())
+    } else {
+        img
+    };
+    let staged = out.with_extension(format!(
+        "{ext}.tmp.{}.{}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ));
+    if let Err(e) = img.save_with_format(&staged, fmt) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e).with_context(|| format!("write {}", staged.display()));
+    }
+    if let Err(e) = std::fs::rename(&staged, out) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e).with_context(|| format!("publish {}", out.display()));
+    }
+    Ok(())
 }
 
 /// Clone-stamp mode: copy pixels from a user-picked SOURCE point over every
@@ -572,8 +687,7 @@ pub fn clone_stamp(
         let img = decode::load_image(src_path)?;
         if full_res { img } else { img.thumbnail(2048, 2048) }
     };
-    let mut rgb = base.to_rgb8();
-    let (w, h) = rgb.dimensions();
+    let (w, h) = (base.width(), base.height());
 
     let m = image::open(mask_path)
         .with_context(|| format!("open mask {}", mask_path.display()))?
@@ -589,18 +703,90 @@ pub fn clone_stamp(
         s.label = "clone".into();
     }
     let n = spots.len();
-    heal_image(&mut rgb, &spots);
-    crate::pipeline::ensure_parent(out)?;
-    image::DynamicImage::ImageRgb8(rgb)
-        .save(out)
-        .with_context(|| format!("write {}", out.display()))?;
+    // Same native-depth + alpha + staged-save contract as `heal` (U30).
+    let alpha = split_alpha(&base);
+    let healed = if deep_color(&base) {
+        let mut rgb = base.into_rgb16();
+        heal_image(&mut rgb, &spots);
+        DynamicImage::ImageRgb16(rgb)
+    } else {
+        let mut rgb = base.into_rgb8();
+        heal_image(&mut rgb, &spots);
+        DynamicImage::ImageRgb8(rgb)
+    };
+    save_master(out, reattach_alpha(healed, alpha))?;
     Ok(HealReport { spots: n, rationale: String::new(), dims: (w, h) })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Rgb, Rgba};
+    use image::{Rgb, RgbImage, Rgba};
+
+    #[test]
+    fn heal_engine_runs_at_sixteen_bits() {
+        // The generic engine must heal in the u16 domain — a healed value
+        // ABOVE 255 proves no 8-bit quantisation happened anywhere.
+        let mut img: ImageBuffer<Rgb<u16>, Vec<u16>> =
+            ImageBuffer::from_pixel(64, 64, Rgb([30000u16, 30000, 30000]));
+        for y in 28..36 {
+            for x in 28..36 {
+                img.put_pixel(x, y, Rgb([500u16, 500, 500]));
+            }
+        }
+        let spots = vec![HealSpot { cx: 0.5, cy: 0.5, radius: 7.0 / 64.0, ..Default::default() }];
+        heal_image(&mut img, &spots);
+        let c = img.get_pixel(32, 32).0;
+        assert!(c[0] > 20000, "healed centre must approach the 16-bit grey, got {c:?}");
+    }
+
+    #[test]
+    fn heal_keeps_bit_depth_and_alpha_and_stages_the_master() {
+        let dir = std::env::temp_dir().join("autoshop-retouch-depth");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 16-bit RGBA source: grey field, dark defect at centre, alpha ramp.
+        let (w, h) = (64u32, 64u32);
+        let mut img: ImageBuffer<Rgba<u16>, Vec<u16>> = ImageBuffer::new(w, h);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let v: u16 = if (28..36).contains(&x) && (28..36).contains(&y) { 500 } else { 30000 };
+            *p = Rgba([v, v, v, (x * 1000).min(65535) as u16]);
+        }
+        let srcp = dir.join("deep_src.png");
+        DynamicImage::ImageRgba16(img).save(&srcp).unwrap();
+        // Painted mask, client contract: TRANSPARENT = heal here.
+        let mut mask: RgbaImage = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255]));
+        for y in 26..38 {
+            for x in 26..38 {
+                mask.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+            }
+        }
+        let maskp = dir.join("mask.png");
+        mask.save(&maskp).unwrap();
+        let outp = dir.join("healed.png");
+        let rep =
+            heal(&Config::load(), &srcp, Some(&maskp), false, true, &outp).unwrap();
+        assert!(rep.spots >= 1);
+        let healed = image::open(&outp).unwrap();
+        assert!(
+            matches!(healed, DynamicImage::ImageRgba16(_)),
+            "16-bit + alpha must SURVIVE the heal, got {:?}",
+            healed.color()
+        );
+        let hb = healed.to_rgba16();
+        let c = hb.get_pixel(32, 32).0;
+        assert!(c[0] > 20000, "defect healed in the 16-bit domain, got {c:?}");
+        assert_eq!(c[3], 32 * 1000, "alpha rides through untouched");
+        // The staged write leaves no residue beside the master.
+        let residue: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(residue.is_empty(), "no staging residue: {residue:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn heal_replaces_a_spot_with_surroundings() {
