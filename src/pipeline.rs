@@ -473,14 +473,35 @@ pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
 }
 
 pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
-    write_xmp_at(xmp_target(raw), recipe)
+    let target = xmp_target(raw);
+    // MERGE, never regenerate over Lightroom's work (A11): the base is the
+    // sidecar Lightroom itself writes (beside the RAW) when one exists — its
+    // LR-only properties (global Texture, camera profile / Look, LR
+    // lens-profile data, foreign namespaces) survive our save, so the file
+    // the user copies back beside the RAW keeps them. Else the previous
+    // projection at the destination, which carries forward whatever an
+    // earlier merge preserved.
+    let base = std::fs::read_to_string(raw.with_extension("xmp"))
+        .ok()
+        .or_else(|| std::fs::read_to_string(&target).ok());
+    write_xmp_doc(target, recipe, base)
 }
 
 /// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
 /// `-o`: the two halves of one develop must stay in the same folder, or the
 /// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
 pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
+    let base = std::fs::read_to_string(&out).ok();
+    write_xmp_doc(out, recipe, base)
+}
+
+fn write_xmp_doc(out: PathBuf, recipe: &EditRecipe, merge_base: Option<String>) -> Result<PathBuf> {
     ensure_parent(&out)?;
+    // A base the splicer cannot safely handle falls back to a FRESH document
+    // — exactly the old behaviour, never a failed save.
+    let doc = merge_base
+        .and_then(|b| xmp::merge_recipe_into_xmp(&b, recipe))
+        .unwrap_or_else(|| xmp::recipe_to_xmp(recipe));
     // Stage + rename, never truncate in place: `fs::write` opens the LIVE
     // sidecar with O_TRUNC, so a full disk, an interruption or a competing
     // writer left a truncated file where a valid Lightroom sidecar used to
@@ -491,8 +512,7 @@ pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
         std::process::id(),
         crate::store::next_tmp_seq()
     ));
-    std::fs::write(&tmp, xmp::recipe_to_xmp(recipe))
-        .with_context(|| format!("write xmp {}", tmp.display()))?;
+    std::fs::write(&tmp, doc).with_context(|| format!("write xmp {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, &out) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("publish xmp {}", out.display()));
@@ -699,6 +719,39 @@ mod guard_tests {
         std::fs::write(&notes, b"x").unwrap();
         assert!(guard_readonly(&notes, &raw).is_ok(), "non-photo allowed");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_xmp_merges_over_the_lightroom_sidecar_beside_the_raw() {
+        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-merge");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_xmp_merge.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        // Lightroom's sidecar beside the RAW, carrying a property we do not
+        // model (Texture) — the exact thing regeneration used to destroy.
+        let lr = dir.join("_pipe_xmp_merge.xmp");
+        std::fs::write(
+            &lr,
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+             <rdf:Description rdf:about=\"\"\n    \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
+             crs:Texture=\"+21\"\n    crs:Exposure2012=\"+1.00\"\n    \
+             crs:HasSettings=\"True\">\n  </rdf:Description>\n \
+             </rdf:RDF>\n</x:xmpmeta>\n",
+        )
+        .unwrap();
+        let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
+        let out = write_xmp(&raw, &r).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.contains("crs:Texture=\"+21\""), "LR-only property survives the save");
+        assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
+        assert!(text.contains("crs:Exposure2012=\"0.75\""), "…with OUR value");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]
