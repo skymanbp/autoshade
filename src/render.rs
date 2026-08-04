@@ -21,7 +21,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use image::{DynamicImage, ImageBuffer, ImageEncoder, Rgb, RgbImage};
 use rawler::decoders::RawDecodeParams;
 use rawler::get_decoder;
-use rawler::imgop::develop::{Intermediate, RawDevelop};
+use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
 use rawler::rawsource::RawSource;
 use rawler::Orientation;
 use rayon::prelude::*;
@@ -67,19 +67,51 @@ pub fn render_to_image(
     denoise: Option<&crate::denoise::DenoiseOpts>,
     max_edge: Option<u32>,
 ) -> Result<DynamicImage> {
+    render_to_image_in(raw_path, recipe, denoise, max_edge, ExportColorSpace::Srgb)
+}
+
+/// [`render_to_image`] with a chosen WORKING space. `Srgb` is the exact
+/// historical pipeline (rawler's own calibrated develop, byte-identical). A
+/// wide space develops DIRECTLY in the delivery primaries: rawler's own
+/// calibrate gamut-clips at the sRGB boundary (its `map_3ch_to_rgb` ends in
+/// a negative clip, where every colour outside sRGB dies — verified in the
+/// 0.7.2 source), so the wide path runs the develop WITHOUT
+/// WhiteBalance/Calibrate/SRgb and performs the DNG-spec calibration
+/// itself, into the delivery primaries, with no gamut clip. The working
+/// ENCODING stays the sRGB transfer in every space (shared D65 white +
+/// shared transfer → the neutral axis renders identically to sRGB), and
+/// colours outside the DELIVERY gamut clip only at the final 16-bit pack —
+/// the honest boundary of the chosen deliverable.
+pub fn render_to_image_in(
+    raw_path: &Path,
+    recipe: &EditRecipe,
+    denoise: Option<&crate::denoise::DenoiseOpts>,
+    max_edge: Option<u32>,
+    working: ExportColorSpace,
+) -> Result<DynamicImage> {
     let src = RawSource::new(raw_path)
         .with_context(|| format!("open RAW {}", raw_path.display()))?;
     let decoder =
         get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", raw_path.display()))?;
     let params = RawDecodeParams { image_index: 0 };
 
-    // Full sensor data (dummy = false) → demosaic + colour pipeline → sRGB float.
+    // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
     let rawimage = decoder
         .raw_image(&src, &params, false)
         .map_err(|e| anyhow!("raw_image: {e}"))?;
     let orientation = rawimage.orientation;
 
-    let inter = RawDevelop::default()
+    let wide = working != ExportColorSpace::Srgb;
+    let mut dev = RawDevelop::default();
+    if wide {
+        dev.steps.retain(|s| {
+            !matches!(
+                s,
+                ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb
+            )
+        });
+    }
+    let inter = dev
         .develop_intermediate(&rawimage)
         .map_err(|e| anyhow!("develop: {e}"))?;
     let rgb = match inter {
@@ -88,7 +120,19 @@ pub fn render_to_image(
         Intermediate::FourColor(_) => bail!("4-colour develop output not supported by render v1"),
     };
     let (w, h) = (rgb.width, rgb.height);
-    let data: Vec<[f32; 3]> = rgb.data; // sRGB-gamma, ~[0,1]; owned (no copy)
+    // sRGB path: sRGB-gamma ~[0,1] straight from rawler (owned, no copy).
+    // Wide path: camera-native LINEAR until the calibrate below.
+    let mut data: Vec<[f32; 3]> = rgb.data;
+    if wide {
+        let xyz2cam = camera_matrix(&rawimage)?;
+        let wb = if rawimage.wb_coeffs[0].is_nan() {
+            [1.0, 1.0, 1.0]
+        } else {
+            [rawimage.wb_coeffs[0], rawimage.wb_coeffs[1], rawimage.wb_coeffs[2]]
+        };
+        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working);
+    }
+    let data = data;
 
     // --- EXIF orientation FIRST, so the whole pipeline works in the DISPLAY
     // frame. Masks / crop / straighten are all defined against what the user
@@ -375,6 +419,101 @@ pub fn convert_export_color_space(img: DynamicImage, space: ExportColorSpace) ->
     DynamicImage::ImageRgb16(rgb)
 }
 
+/// The camera's xyz→cam matrix (3-colour), by rawler's own selection rule:
+/// the D65-illuminant matrix first, else whichever exists.
+fn camera_matrix(rawimage: &rawler::RawImage) -> Result<[[f32; 3]; 3]> {
+    let cm = rawimage
+        .color_matrix
+        .iter()
+        .find(|(i, _)| **i == rawler::imgop::xyz::Illuminant::D65)
+        .or_else(|| rawimage.color_matrix.iter().next())
+        .map(|(_, m)| m)
+        .ok_or_else(|| anyhow!("no camera colour matrix — the wide-gamut develop needs one"))?;
+    if cm.len() < 9 {
+        bail!("camera colour matrix has {} entries (need 9)", cm.len());
+    }
+    let mut xyz2cam = [[0.0f32; 3]; 3];
+    for (i, row) in xyz2cam.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = cm[i * 3 + j];
+        }
+    }
+    Ok(xyz2cam)
+}
+
+/// The delivery space's primaries.
+fn space_primaries(space: ExportColorSpace) -> [[f32; 2]; 3] {
+    match space {
+        ExportColorSpace::Srgb => SRGB_PRIM,
+        ExportColorSpace::DisplayP3 => P3_PRIM,
+        ExportColorSpace::AdobeRgb => ADOBE_PRIM,
+    }
+}
+
+/// cam→space by the DNG white-preservation rule: space→cam =
+/// xyz2cam · M(space→XYZ) with each row normalised to sum 1 (a
+/// white-balanced grey then maps to the SAME grey in every space), inverted.
+fn camera_to_space_matrix(xyz2cam: &[[f32; 3]; 3], space: ExportColorSpace) -> [[f32; 3]; 3] {
+    let mut space2cam = mat_mul3(xyz2cam, &rgb_to_xyz(space_primaries(space), D65_XY));
+    for row in &mut space2cam {
+        let s = row[0] + row[1] + row[2];
+        if s.abs() > 1e-6 {
+            for v in row {
+                *v /= s;
+            }
+        }
+    }
+    inv3(&space2cam)
+}
+
+/// White-balance + calibrate a camera-native LINEAR buffer into `space`'s
+/// primaries and encode the sRGB transfer — WITHOUT a gamut clip: a colour
+/// outside sRGB but inside the delivery gamut is exactly what a wide-gamut
+/// export exists to carry (rawler's own calibrate kills it). Components
+/// outside the DELIVERY gamut go negative here and clip at the final
+/// 16-bit pack. Highlights (any component > 1 after white balance) get the
+/// same desaturating treatment rawler's develop applies — scale-to-max
+/// averaged with the euclidean norm — so wide and sRGB renders treat blown
+/// areas alike. The transfer's linear segment covers negatives (no NaN).
+fn calibrate_camera_buffer(
+    data: &mut [[f32; 3]],
+    xyz2cam: &[[f32; 3]; 3],
+    wb: [f32; 3],
+    space: ExportColorSpace,
+) {
+    let m = camera_to_space_matrix(xyz2cam, space);
+    data.par_iter_mut().for_each(|px| {
+        let v = [px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]];
+        let mut t = mat_vec3(&m, &v);
+        let max = t[0].max(t[1]).max(t[2]);
+        if max > 1.0 {
+            let eucl = ((t[0] * t[0] + t[1] * t[1] + t[2] * t[2]) / 3.0).sqrt();
+            t = t.map(|c| (c / max + eucl) / 2.0);
+        }
+        *px = [linear_to_srgb(t[0]), linear_to_srgb(t[1]), linear_to_srgb(t[2])];
+    });
+}
+
+/// An Adobe RGB deliverable developed NATIVELY in Adobe primaries still
+/// carries the working sRGB transfer — swap the per-channel TRANSFER only
+/// (no primary change): decode the sRGB TRC, encode the pure 563/256 gamma.
+/// Same exact-table scheme as `convert_export_color_space`.
+fn transcode_srgb_trc_to_adobe(img: DynamicImage) -> DynamicImage {
+    let mut rgb = match img {
+        DynamicImage::ImageRgb16(b) => b,
+        other => other.to_rgb16(),
+    };
+    let lut: Vec<u16> = (0..=65535u32)
+        .map(|v| {
+            let lin = srgb_to_linear(v as f32 / 65535.0).clamp(0.0, 1.0);
+            (lin.powf(1.0 / ADOBE_GAMMA) * 65535.0).round() as u16
+        })
+        .collect();
+    let buf: &mut [u16] = &mut rgb;
+    buf.par_iter_mut().for_each(|v| *v = lut[*v as usize]);
+    DynamicImage::ImageRgb16(rgb)
+}
+
 /// Compact v2 ICC profiles embedded in exports — an UNTAGGED file makes
 /// wide-gamut displays guess (typically stretching colors to the panel gamut).
 /// All three from saucecontrol/Compact-ICC-Profiles, licensed CC0-1.0 (public
@@ -415,13 +554,31 @@ pub fn render_to_file(
     denoise: Option<&crate::denoise::DenoiseOpts>,
     export: Option<&ExportOpts>,
 ) -> Result<(u32, u32)> {
-    let mut img = if crate::decode::is_raw(src_path) {
-        render_to_image(src_path, recipe, denoise, None)?
+    let opts = export.copied().unwrap_or_default();
+    let ext = out
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    // The gamut transform only runs for formats that can carry the matching
+    // profile: pixels re-encoded for P3/AdobeRGB but saved UNTAGGED would
+    // display wrong everywhere — sRGB is the only space safe to leave untagged.
+    let taggable = matches!(ext.as_str(), "jpg" | "jpeg" | "tif" | "tiff" | "png");
+    let space = if taggable { opts.color_space } else { ExportColorSpace::Srgb };
+    let is_raw_src = crate::decode::is_raw(src_path);
+    // RAW + wide delivery develops DIRECTLY in the delivery primaries — the
+    // only route that carries camera colours beyond sRGB into the file (the
+    // sRGB working develop gamut-clips at decode, making the conversion
+    // below a relabelling that can never ADD colour). A baked source IS
+    // sRGB pixels — for it the conversion below is complete by construction.
+    let native_wide = is_raw_src && space != ExportColorSpace::Srgb;
+    let mut img = if is_raw_src {
+        let working = if native_wide { space } else { ExportColorSpace::Srgb };
+        render_to_image_in(src_path, recipe, denoise, None, working)?
     } else {
         let src = crate::decode::load_image(src_path)?;
         render_baked_to_image(&src, recipe, denoise)?
     };
-    let opts = export.copied().unwrap_or_default();
     if let Some(le) = opts.long_edge
         && le > 0
         && img.width().max(img.height()) > le
@@ -454,18 +611,16 @@ pub fn render_to_file(
         );
     }
     let (w, h) = (img.width(), img.height());
-    let ext = out
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    // The gamut transform only runs for formats that can carry the matching
-    // profile: pixels re-encoded for P3/AdobeRGB but saved UNTAGGED would
-    // display wrong everywhere — sRGB is the only space safe to leave untagged.
-    let taggable = matches!(ext.as_str(), "jpg" | "jpeg" | "tif" | "tiff" | "png");
-    let space = if taggable { opts.color_space } else { ExportColorSpace::Srgb };
     if space != ExportColorSpace::Srgb {
-        img = convert_export_color_space(img, space);
+        if native_wide {
+            // Already IN the delivery primaries. Adobe RGB still swaps to
+            // its own transfer; P3's native transfer IS the sRGB curve.
+            if space == ExportColorSpace::AdobeRgb {
+                img = transcode_srgb_trc_to_adobe(img);
+            }
+        } else {
+            img = convert_export_color_space(img, space);
+        }
     }
     // STAGE, then publish. `File::create` truncates the delivery path, so an
     // encode that failed half-way (disk full, a killed process) left a partial
@@ -3588,6 +3743,94 @@ mod tests {
         // (e) sRGB is the identity (now a MOVE, not a clone).
         let same = convert_export_color_space(grey, ExportColorSpace::Srgb).to_rgb16();
         assert_eq!(same.get_pixel(1, 1)[0], 32896);
+    }
+
+    #[test]
+    fn wide_develop_calibration_agrees_with_the_export_matrix() {
+        // A synthetic camera whose native space IS sRGB: xyz2cam =
+        // inv(sRGB→XYZ). The DNG calibration into a target space must then
+        // equal the sRGB→target export matrix — the two derivations meet.
+        let xyz2cam = inv3(&rgb_to_xyz(SRGB_PRIM, D65_XY));
+        for space in [ExportColorSpace::DisplayP3, ExportColorSpace::AdobeRgb] {
+            let cam2space = camera_to_space_matrix(&xyz2cam, space);
+            let reference = srgb_to_space_matrix(space).unwrap();
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!(
+                        (cam2space[i][j] - reference[i][j]).abs() < 2e-3,
+                        "{space:?} [{i}][{j}]: {} vs {}",
+                        cam2space[i][j],
+                        reference[i][j]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wide_develop_keeps_out_of_srgb_camera_colors_and_neutral_parity() {
+        // A camera whose native space IS Display P3: its pure red lies
+        // OUTSIDE sRGB. Developed INTO DisplayP3 it must survive as ~[1,0,0]
+        // — the colour the old clip-at-sRGB pipeline destroyed.
+        let xyz2cam = inv3(&rgb_to_xyz(P3_PRIM, D65_XY));
+        let mut px = [[1.0f32, 0.0, 0.0]];
+        calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::DisplayP3);
+        let p = px[0];
+        assert!(
+            p[0] > 0.99 && p[1].abs() < 0.02 && p[2].abs() < 0.02,
+            "P3-native red must survive a P3 develop, got {p:?}"
+        );
+        // The same HUE at 80% (an unblown saturated colour — full-scale 1.0
+        // is a clipped sensor reading and legitimately takes the highlight
+        // desaturation, same as rawler) into sRGB goes out of gamut: a
+        // NEGATIVE component must reach the caller (the final pack clips it
+        // — not the decode).
+        let mut px = [[0.8f32, 0.0, 0.0]];
+        calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::Srgb);
+        assert!(
+            px[0][1] < -0.001 || px[0][2] < -0.001,
+            "out-of-gamut components must SURVIVE to the pack, got {:?}",
+            px[0]
+        );
+        // Neutral parity: a white-balanced grey encodes to the SAME value in
+        // every space (shared D65 white + shared working transfer) — the
+        // whole reason the wide develop may share the sRGB tone pipeline.
+        let wb = [2.0f32, 1.0, 1.5];
+        let grey_cam = [[0.4 / 2.0, 0.4, 0.4 / 1.5]];
+        let mut out = [[0.0f32; 3]; 3];
+        for (i, space) in
+            [ExportColorSpace::Srgb, ExportColorSpace::DisplayP3, ExportColorSpace::AdobeRgb]
+                .into_iter()
+                .enumerate()
+        {
+            let mut px = grey_cam;
+            calibrate_camera_buffer(&mut px, &xyz2cam, wb, space);
+            out[i] = px[0];
+        }
+        let want = linear_to_srgb(0.4);
+        for (i, o) in out.iter().enumerate() {
+            for c in o {
+                assert!((c - want).abs() < 2e-3, "space {i}: grey drifted to {o:?} (want {want})");
+            }
+        }
+    }
+
+    #[test]
+    fn adobe_trc_transcode_matches_the_conversion_path_on_neutrals() {
+        // A grey through the native-wide path (primaries already Adobe,
+        // transfer swap only) must land where the matrix path lands it —
+        // on neutrals the matrix is a no-op, isolating the TRC.
+        let grey = DynamicImage::ImageRgb16(ImageBuffer::from_pixel(1, 1, Rgb([32896u16, 32896, 32896])));
+        let via_matrix =
+            convert_export_color_space(grey.clone(), ExportColorSpace::AdobeRgb).to_rgb16();
+        let via_transcode = transcode_srgb_trc_to_adobe(grey).to_rgb16();
+        let (a, b) = (via_matrix.get_pixel(0, 0), via_transcode.get_pixel(0, 0));
+        for c in 0..3 {
+            assert!(
+                (a[c] as i32 - b[c] as i32).abs() <= 1,
+                "TRC transcode must agree with the conversion path: {a:?} vs {b:?}"
+            );
+        }
     }
 
     #[test]
