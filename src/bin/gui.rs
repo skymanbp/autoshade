@@ -7970,8 +7970,18 @@ impl AutoshopApp {
         // degenerates to exactly the old constant.
         let brush_at = |p: egui::Pos2| {
             let a = to_mask(p);
-            let b = to_mask(p + egui::vec2(brush, 0.0));
-            ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt().max(1.0)
+            // Probe BOTH directions and keep the larger. `ViewXform::to_norm`
+            // CLAMPS to the viewport, so a rightward-only probe mapped to the
+            // same point as the centre once the pointer reached the right
+            // edge: the distance went to zero, the `.max(1.0)` floor took
+            // over, and a 30 px brush stamped a single mask pixel exactly
+            // where the user was painting along that edge. The chain is
+            // smooth, so the direction with room measures the same radius.
+            let probe = |dx: f32| {
+                let b = to_mask(p + egui::vec2(dx, 0.0));
+                ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt()
+            };
+            probe(brush).max(probe(-brush)).max(1.0)
         };
         // Union a brush segment's bounding box (± radius, canvas px) into the
         // pending dirty rect — ensure_mask_tex's partial-upload path.
@@ -7988,7 +7998,12 @@ impl AutoshopApp {
                 None => n,
             });
         };
-        if resp.dragged() || resp.drag_started() {
+        // PRIMARY button only: `dragged()` is button-agnostic, so a
+        // secondary-button drag — which the caller intercepts for panning —
+        // was also reported here and painted into the fill/heal/clone mask.
+        if resp.dragged_by(egui::PointerButton::Primary)
+            || resp.drag_started_by(egui::PointerButton::Primary)
+        {
             if let Some(p) = resp.interact_pointer_pos() {
                 let cur = to_mask(p);
                 let r = brush_at(p);
