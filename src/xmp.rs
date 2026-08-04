@@ -428,19 +428,22 @@ fn is_autoshop_sidecar(xmp: &str) -> bool {
     // TRAILING comment. One pass skipping `<!-- … -->` spans settles both
     // (full XML parsing stays out of scope; this only gates the As-Shot
     // tint import).
+    // BYTE scanning throughout: `&xmp[i + 1..]` PANICS when i+1 falls inside a
+    // multi-byte char, and a file that opens with a UTF-8 BOM (EF BB BF) hits
+    // that on the very first step. Every index this loop keeps lands on `<`
+    // or just past `-->` — both ASCII — so the one str slice below is safe.
     let bytes = xmp.as_bytes();
     let mut i = 0usize;
     let mut tag_start: Option<usize> = None;
     while i < bytes.len() {
-        if xmp[i..].starts_with("<!--") {
-            match xmp[i + 4..].find("-->") {
+        if bytes[i..].starts_with(b"<!--") {
+            match bytes[i + 4..].windows(3).position(|w| w == b"-->") {
                 Some(end) => i += 4 + end + 3,
                 None => break, // unterminated comment: nothing real follows
             }
-        } else if let Some(rest) = xmp[i..].strip_prefix("<x:xmpmeta")
-            && rest
-                .bytes()
-                .next()
+        } else if bytes[i..].starts_with(b"<x:xmpmeta")
+            && bytes
+                .get(i + "<x:xmpmeta".len())
                 .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/'))
         {
             // Name-boundary check: without it a preceding wrapper whose
@@ -449,9 +452,8 @@ fn is_autoshop_sidecar(xmp: &str) -> bool {
             tag_start = Some(i);
             break;
         } else {
-            // Jump to the next '<' (or end) — byte-wise, so multi-byte UTF-8
-            // content is skipped safely.
-            match xmp[i + 1..].find('<') {
+            // Advance to the next '<' (or end).
+            match bytes[i + 1..].iter().position(|&c| c == b'<') {
                 Some(off) => i += 1 + off,
                 None => break,
             }
@@ -482,10 +484,22 @@ fn is_autoshop_sidecar(xmp: &str) -> bool {
 /// WhiteBalance="Custom" provenance rule (as-shot Temperature/Tint are camera
 /// values, not user edits) — see `style::read_settings`.
 pub(crate) fn crs_str<'a>(xmp: &'a str, key: &str) -> Option<&'a str> {
-    let needle = format!("crs:{key}=\"");
-    let start = xmp.find(&needle)? + needle.len();
-    let rest = &xmp[start..];
-    Some(&rest[..rest.find('"')?])
+    for quote in ['"', '\''] {
+        let needle = format!("crs:{key}={quote}");
+        if let Some(at) = xmp.find(&needle) {
+            let rest = &xmp[at + needle.len()..];
+            return Some(&rest[..rest.find(quote)?]);
+        }
+    }
+    // PROPERTY-ELEMENT form: Lightroom serialises the very same settings as
+    // `<crs:Exposure2012>+0.65</crs:Exposure2012>` in plenty of real
+    // sidecars, and reading only the attribute form imported those files as
+    // UNEDITED — which then let an explicit save overwrite them.
+    let open = format!("<crs:{key}>");
+    let close = format!("</crs:{key}>");
+    let at = xmp.find(&open)? + open.len();
+    let rest = &xmp[at..];
+    Some(rest[..rest.find(&close)?].trim())
 }
 
 /// Numeric `crs:` attribute, tolerating ACR's explicit `+` (`"+22"`). `None` if
@@ -544,6 +558,14 @@ fn parse_masks(xmp: &str) -> Vec<LocalAdjustment> {
     else {
         return Vec::new();
     };
+    // Corrections are split on their `What="Correction"` attribute. This DOES
+    // make attribute order significant (XML says it is not), but the obvious
+    // alternative — splitting on `<rdf:li` — is WRONG here: a correction
+    // CONTAINS its own `<crs:CorrectionMasks>` rdf:li list, so naive element
+    // splitting shreds each correction into pieces (proved by the round-trip
+    // tests below). Order-independent splitting needs real XML parsing, which
+    // this module deliberately does not do; every serializer seen in the wild
+    // (ACR, Lightroom, our writer) puts What first.
     let starts: Vec<usize> =
         block.match_indices("crs:What=\"Correction\"").map(|(i, _)| i).collect();
     let mut out = Vec::new();
@@ -691,7 +713,13 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
 /// untrusted recipe input.
 pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     let ours = is_autoshop_sidecar(xmp);
-    let custom_wb = crs_str(xmp, "WhiteBalance") == Some("Custom");
+    // Any EXPLICIT white balance is a user decision, not the camera's: ACR
+    // writes Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash — each
+    // with its own Temperature+Tint — and accepting only "Custom" imported all
+    // of them as as-shot, dropping a WB the photographer had chosen. (Absent
+    // is treated as explicit for the same reason `eval`/`style` do: a sidecar
+    // carrying Temperature without the mode is still a stated value.)
+    let custom_wb = crs_str(xmp, "WhiteBalance") != Some("As Shot");
     let f = |k: &str| crs_f32(xmp, k).unwrap_or(0.0);
 
     let mut hsl = Hsl::default();

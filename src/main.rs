@@ -432,7 +432,19 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
         // develop every reader already restores, and scripts then re-ran a
         // paid analysis that had in fact succeeded.
         let projected = if redirected {
-            pipeline::write_xmp_at(recipe_path.with_extension("xmp"), &recipe)
+            // `-o edit.xmp` makes the derived XMP path the RECIPE's own path:
+            // the projection then overwrote the recipe JSON written moments
+            // ago while both were reported as separate successful outputs.
+            let side = recipe_path.with_extension("xmp");
+            if same_path(&side, &recipe_path) {
+                Err(anyhow::anyhow!(
+                    "-o names {} — the XMP projection would overwrite the recipe; \
+                     pass a .json path (the XMP is written beside it)",
+                    recipe_path.display()
+                ))
+            } else {
+                pipeline::write_xmp_at(side, &recipe)
+            }
         } else {
             write_xmp(raw, &recipe)
         };

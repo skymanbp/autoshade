@@ -439,8 +439,22 @@ pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
 /// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
 pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
     ensure_parent(&out)?;
-    std::fs::write(&out, xmp::recipe_to_xmp(recipe))
-        .with_context(|| format!("write xmp {}", out.display()))?;
+    // Stage + rename, never truncate in place: `fs::write` opens the LIVE
+    // sidecar with O_TRUNC, so a full disk, an interruption or a competing
+    // writer left a truncated file where a valid Lightroom sidecar used to
+    // be — the previous projection destroyed by the failed attempt to
+    // replace it. (fs::rename replaces the destination on every platform.)
+    let tmp = out.with_extension(format!(
+        "xmp.tmp.{}.{}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ));
+    std::fs::write(&tmp, xmp::recipe_to_xmp(recipe))
+        .with_context(|| format!("write xmp {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &out) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("publish xmp {}", out.display()));
+    }
     Ok(out)
 }
 
