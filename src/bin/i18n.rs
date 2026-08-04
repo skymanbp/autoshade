@@ -472,6 +472,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Batch-rendering {n} photos → ./out …", "批量渲染 {n} 张 → ./out …"),
     ("./out — batch {n} done", "./out — 批量 {n} 张完成"),
     ("Batch: {ok} succeeded, {fail} failed: {detail}", "批量：{ok} 成功、{fail} 失败：{detail}"),
+    (" · same-name photos kept apart: {list}", " · 同名照片已避让：{list}"),
     ("Batch-rendering {done}/{total} → ./out …", "批量渲染 {done}/{total} → ./out …"),
     ("Pasting recipe to {n} photos…", "粘贴配方到 {n} 张…"),
     ("Recipe pasted to {ok} photos ({xmp} XMP) → develop store", "配方已粘贴到 {ok} 张（{xmp} 个 XMP）→ 显影库"),

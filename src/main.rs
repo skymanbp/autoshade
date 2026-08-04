@@ -770,6 +770,22 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     // memory modest. process_one already runs produce_recipe with verbose=false,
     // so workers print nothing until their one completion line below.
     let work: Vec<&Path> = pending.iter().take(n).map(|p| p.as_path()).collect();
+    // Deliverables are stem-keyed and one library can hold two DSC00001.ARW
+    // (counter rollover — four review units reported the silent overwrite).
+    // Claim every render target UP FRONT in work order, so names stay
+    // deterministic regardless of worker scheduling, and disclose the
+    // deviations BEFORE the batch runs instead of after a file was destroyed.
+    let outs: Vec<Option<PathBuf>> = {
+        let mut names = autoshop::pipeline::BatchNames::default();
+        let outs = work
+            .iter()
+            .map(|r| if render { Some(names.claim(r, "developed", "tif")) } else { None })
+            .collect();
+        for line in &names.renamed {
+            println!("  same-name RAW keeps a separate deliverable: {line}");
+        }
+        outs
+    };
     let workers = work.len().min(3);
     let next = std::sync::atomic::AtomicUsize::new(0);
     // Per-index results (Some(true) = ok, Some(false) = failed): summary counts
@@ -786,7 +802,7 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
                     let Some(raw) = work.get(i) else { break };
                     // A failed photo reports its error and the batch continues
                     // (same as the old sequential loop).
-                    let res = process_one(raw, &cfg, render);
+                    let res = process_one(raw, &cfg, outs[i].as_deref());
                     // One WHOLE line per photo, printed on completion; holding
                     // the stdout lock keeps workers' lines from interleaving.
                     use std::io::Write;
@@ -811,7 +827,7 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn process_one(raw: &Path, cfg: &Config, render_master: bool) -> Result<Verdict> {
+fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Verdict> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
     let (recipe, verdict) = produce_recipe(raw, cfg, false, None, None, cfg.style_strength)?;
     // Every fallible product BEFORE the completion markers: `has_develop`
@@ -823,10 +839,12 @@ fn process_one(raw: &Path, cfg: &Config, render_master: bool) -> Result<Verdict>
     // cross-surface rule is "the recipe write alone decides the saved state";
     // the old xmp-first order could crash into an XMP-only marker that
     // suppressed every retry while the authoritative recipe never landed.
-    if render_master {
-        let out = default_out(raw, "developed", "tif"); // 16-bit master
-        ensure_parent(&out)?;
-        render::render_to_file(raw, &recipe, &out, None, None)?;
+    if let Some(out) = render_to {
+        // 16-bit master at the batch-claimed name — claimed up front by the
+        // caller so same-stem photos in one batch each keep a deliverable
+        // and worker scheduling cannot reorder the names.
+        ensure_parent(out)?;
+        render::render_to_file(raw, &recipe, out, None, None)?;
     }
     // Backup gate, same as every surface: cheap Ok(None) in the batch's
     // usual no-develop-yet case, and a save created mid-batch by another

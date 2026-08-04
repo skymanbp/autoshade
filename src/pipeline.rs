@@ -700,11 +700,66 @@ mod guard_tests {
         assert!(guard_readonly(&notes, &raw).is_ok(), "non-photo allowed");
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn batch_names_keep_same_stem_deliverables_apart() {
+        let mut names = BatchNames::default();
+        let a = names.claim(Path::new("D:/roll1/DSC00001.ARW"), "developed", "tif");
+        let b = names.claim(Path::new("D:/roll2/DSC00001.ARW"), "developed", "tif");
+        // Case must fold: the filesystem collides DSC with dsc even though
+        // the strings differ.
+        let c = names.claim(Path::new("D:/roll3/dsc00001.arw"), "developed", "tif");
+        assert_eq!(a, PathBuf::from("out").join("DSC00001.developed.tif"));
+        assert_eq!(b, PathBuf::from("out").join("DSC00001 (2).developed.tif"));
+        assert_eq!(c, PathBuf::from("out").join("dsc00001 (3).developed.tif"));
+        // Exactly the deviations are disclosed; the first claimant is silent.
+        assert_eq!(names.renamed.len(), 2);
+        assert!(names.renamed[0].contains("DSC00001 (2).developed.tif"));
+        assert!(names.renamed[0].contains("roll2"), "the SOURCE photo is named");
+        // A distinct stem stays untouched — bare name, no disclosure.
+        let d = names.claim(Path::new("D:/roll1/DSC00002.ARW"), "developed", "tif");
+        assert_eq!(d, PathBuf::from("out").join("DSC00002.developed.tif"));
+        assert_eq!(names.renamed.len(), 2);
+    }
 }
 
 /// `./out/<stem>.<kind>.<ext>` — outputs never go beside the source RAW.
 pub fn default_out(raw: &Path, kind: &str, ext: &str) -> PathBuf {
     PathBuf::from("out").join(format!("{}.{kind}.{ext}", stem(raw)))
+}
+
+/// Batch-scope deliverable names. `default_out` keys deliverables by STEM
+/// alone — deliberate (a re-export replaces its previous deliverable, and
+/// user scripts key on the bare name) — but one batch can hold two
+/// DSC00001.ARW from different folders (camera counter rollover), and both
+/// would then write the SAME file: the second silently destroyed the first.
+/// Four review units reported it independently. Within one batch the first
+/// claimant keeps the bare name; later same-stem claimants get the import
+/// convention `<stem> (2).<kind>.<ext>`, and every deviation is recorded in
+/// `renamed` so the batch summary can say WHICH photo took WHICH name.
+/// Claims fold case: the filesystem would collide `DSC` with `dsc` even
+/// though the strings differ.
+#[derive(Default)]
+pub struct BatchNames {
+    taken: std::collections::HashSet<String>,
+    /// Disclosure lines, `"<final deliverable> ← <source photo>"`.
+    pub renamed: Vec<String>,
+}
+
+impl BatchNames {
+    /// The deliverable path for `raw`, unique within this batch.
+    pub fn claim(&mut self, raw: &Path, kind: &str, ext: &str) -> PathBuf {
+        let mut out = default_out(raw, kind, ext);
+        let mut n = 1u32;
+        while !self.taken.insert(out.to_string_lossy().to_lowercase()) {
+            n += 1;
+            out = PathBuf::from("out").join(format!("{} ({n}).{kind}.{ext}", stem(raw)));
+        }
+        if n > 1 {
+            self.renamed.push(format!("{} ← {}", out.display(), raw.display()));
+        }
+        out
+    }
 }
 
 pub fn ensure_parent(path: &Path) -> Result<()> {

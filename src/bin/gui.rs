@@ -4001,6 +4001,13 @@ impl AutoshopApp {
                 let res = (|| {
                     let total = targets.len();
                     let (mut okn, mut errs) = (0usize, Vec::<String>::new());
+                    // A selection can hold two same-stem photos (different
+                    // folders). Batch-scope claims keep their deliverables
+                    // apart; the summary disloses which photo took which
+                    // name. Single exports stay stem-keyed (re-export
+                    // replaces in place) — the dedup is batch-level by
+                    // decision.
+                    let mut names = autoshop::pipeline::BatchNames::default();
                     for p in &targets {
                         let one = (|| -> anyhow::Result<()> {
                             let over = overrides.get(p);
@@ -4038,7 +4045,7 @@ impl AutoshopApp {
                                     ..Default::default()
                                 })
                             };
-                            let out = autoshop::pipeline::default_out(p, "developed", &ext);
+                            let out = names.claim(p, "developed", &ext);
                             autoshop::pipeline::ensure_parent(&out)?;
                             // A develop whose pixels are a baked retouch
                             // master renders FROM that master (the recipe
@@ -4073,11 +4080,26 @@ impl AutoshopApp {
                         }
                         let _ = tx.send(Msg::BatchProgress { done: okn + errs.len(), total });
                     }
+                    // Same-stem photos were kept apart — disclose WHICH
+                    // photo took WHICH name, or the user hunts for an export
+                    // that "vanished" (it was never under the bare name).
+                    let renames = if names.renamed.is_empty() {
+                        String::new()
+                    } else {
+                        trf(
+                            lang,
+                            " · same-name photos kept apart: {list}",
+                            &[("list", &names.renamed.join(", "))],
+                        )
+                    };
                     if errs.is_empty() {
-                        Ok(trf(lang, "./out — batch {n} done", &[("n", &okn.to_string())]))
+                        Ok(format!(
+                            "{}{renames}",
+                            trf(lang, "./out — batch {n} done", &[("n", &okn.to_string())])
+                        ))
                     } else {
                         anyhow::bail!(
-                            "{}",
+                            "{}{renames}",
                             trf(
                                 lang,
                                 "Batch: {ok} succeeded, {fail} failed: {detail}",
