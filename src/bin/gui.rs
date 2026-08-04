@@ -2219,6 +2219,13 @@ impl AutoshopApp {
                 if let Some(base) = p.parent() {
                     autoshop::store::resolve_mask_paths(&mut r, base);
                 }
+                // Then DETACH from the snapshot: the frozen v<N>.*.png files
+                // belong to that version and `delete_version` sweeps them, so
+                // a canvas pointing at them lost its masks the moment the user
+                // deleted the version it was loaded from — and the next save
+                // persisted the dangling path. The loaded state gets its own
+                // claimed copies.
+                autoshop::store::detach_rasters(&src, &mut r, "mask-restored");
                 // A Generated variant's pixels already carry the camera look
                 // AND the lens corrections — a source-based snapshot's
                 // calibration would cook both twice (same strip rule as the

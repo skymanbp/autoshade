@@ -127,6 +127,36 @@ pub fn claim_raster(src: &Path, prefix: &str) -> std::io::Result<PathBuf> {
     )))
 }
 
+/// Give every bitmap mask in `r` its own LIVE raster copy, claimed under
+/// `prefix`, and repoint the recipe at the copies.
+///
+/// Used when a VERSION snapshot becomes the working recipe. A snapshot's
+/// rasters are frozen under that version's own names (`v3.mask-sky.png`) and
+/// `delete_version` sweeps them with the snapshot, so a canvas still pointing
+/// at them lost its masks the moment the user deleted the version it came
+/// from — and the next save wrote the dangling path to disk. Copies make the
+/// loaded state independent of the snapshot's lifetime.
+///
+/// Best-effort per mask: a raster that cannot be copied keeps its existing
+/// reference (the engine's missing-raster contract still reports it) rather
+/// than failing the whole load.
+pub fn detach_rasters(src: &Path, r: &mut EditRecipe, prefix: &str) {
+    for m in r.masks.iter_mut() {
+        let MaskGeometry::Bitmap { path } = &mut m.mask else { continue };
+        let from = PathBuf::from(path.as_str());
+        if !from.exists() {
+            continue;
+        }
+        let Ok(dst) = claim_raster(src, prefix) else { continue };
+        if copy_atomic(&from, &dst).is_ok() {
+            *path = dst.to_string_lossy().into_owned();
+        } else {
+            // Release the claim we could not fill.
+            let _ = std::fs::remove_file(&dst);
+        }
+    }
+}
+
 /// Sidecar recording the saved develop's PIXEL SOURCE when it is a baked
 /// raster — an in-place heal/clone/fill/denoise master, or a reimagine
 /// rendition. The recipe/XMP are parametric and cannot carry baked pixels;
@@ -1306,6 +1336,36 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
 mod tests {
     use super::*;
     use crate::recipe::LocalAdjustment;
+
+    #[test]
+    fn detach_rasters_frees_a_loaded_version_from_its_snapshot() {
+        use crate::recipe::LocalAdjustment;
+        let base = std::env::temp_dir().join("autoshop-store-test-detach");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let photo = base.join("DSC_DETACH.ARW");
+        std::fs::write(&photo, b"raw").unwrap();
+        let dev = develop_dir(&photo);
+        std::fs::create_dir_all(&dev).unwrap();
+        // A version-frozen raster, exactly as save_version writes it.
+        let frozen = dev.join("v3.mask-sky.png");
+        std::fs::write(&frozen, b"raster bytes").unwrap();
+        let mut r = EditRecipe::default();
+        r.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: frozen.to_string_lossy().into_owned() },
+            ..Default::default()
+        });
+        detach_rasters(&photo, &mut r, "mask-restored");
+        let MaskGeometry::Bitmap { path } = &r.masks[0].mask else { panic!() };
+        assert_ne!(Path::new(path), frozen, "must no longer point at the snapshot's file");
+        assert!(Path::new(path).exists(), "the copy must exist");
+        assert_eq!(std::fs::read(path).unwrap(), b"raster bytes", "content preserved");
+        // Deleting the version's raster now leaves the live mask intact.
+        std::fs::remove_file(&frozen).unwrap();
+        assert!(Path::new(path).exists(), "live mask survives the version delete");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn orphan_bak_is_restored_on_read() {
