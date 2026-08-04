@@ -1931,6 +1931,30 @@ impl AutoshopApp {
         }
     }
 
+    /// How many BACKGROUND variants hold work that quitting would discard.
+    ///
+    /// A photo has ONE saved develop and every save path (Ctrl+S, Save-all)
+    /// writes the ACTIVE canvas, so a variant the user switched away from can
+    /// hold real work with nowhere to put it. Both the navigation stash and
+    /// the close guard used to consider only the active canvas, so switching
+    /// from an edited Generated variant to a clean Original made the ● vanish
+    /// and the app exited without a word. This cannot make those edits
+    /// saveable — it makes their loss an informed choice.
+    ///
+    /// Dirty means: the variant's recipe differs from the photo's disk
+    /// baseline, or its raster origin is not the master recorded on disk.
+    fn inactive_dirty_variants(&self) -> usize {
+        let recorded = self.pixels_on_disk.clone();
+        self.variants
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| {
+                *i != self.active
+                    && (dirty_vs(&v.recipe, &self.saved_recipe) || v.origin != recorded)
+            })
+            .count()
+    }
+
     /// The active variant, if a photo is open.
     fn active_variant(&self) -> Option<&Variant> {
         self.variants.get(self.active)
@@ -2576,7 +2600,12 @@ impl AutoshopApp {
                 pending.push((p, self.recipe.clone(), pix));
             }
         }
-        if pending.is_empty() {
+        // Background variants are NOT in `pending` and cannot be: Save-all
+        // writes one develop per photo, the active canvas. They still count as
+        // work quitting destroys, so they keep this layer up (and get their own
+        // honest line below) instead of letting the empty-pending branch close.
+        let orphan_variants = self.inactive_dirty_variants();
+        if pending.is_empty() && orphan_variants == 0 {
             // Saved (or discarded) since the guard fired — nothing to protect.
             self.confirm_quit = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2607,11 +2636,13 @@ impl AutoshopApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label(trf(
-                    lang,
-                    "{n} photo(s) have edits that were never saved:",
-                    &[("n", &pending.len().to_string())],
-                ));
+                if !pending.is_empty() {
+                    ui.label(trf(
+                        lang,
+                        "{n} photo(s) have edits that were never saved:",
+                        &[("n", &pending.len().to_string())],
+                    ));
+                }
                 // Parent folder + stem: two DSC_0431 from two shoots must be
                 // distinguishable in the one dialog where the stakes are real.
                 egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
@@ -2631,6 +2662,22 @@ impl AutoshopApp {
                         );
                     }
                 });
+                if orphan_variants > 0 {
+                    // Said plainly, because Save-all CANNOT rescue these: one
+                    // photo keeps one saved develop and every save path writes
+                    // the ACTIVE canvas. Promising otherwise would be worse
+                    // than the silent exit this dialog now prevents.
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(trf(
+                            lang,
+                            "{n} other variant(s) of the open photo hold edits. Only the ACTIVE variant can be saved — Cancel, switch to each one, and save it.",
+                            &[("n", &orphan_variants.to_string())],
+                        ))
+                        .small()
+                        .color(ui.visuals().warn_fg_color),
+                    );
+                }
                 ui.add_space(6.0);
                 // Safe escape far left, the destructive action fenced off by
                 // space, the primary (save) tinted and last — a 4px slip from
@@ -9012,7 +9059,10 @@ impl eframe::App for AutoshopApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 let t = tr(self.lang, "An operation is still running — wait for it to finish, then close").to_string();
                 self.toast(ToastKind::Error, t);
-            } else if unsaved_open || !self.nav_stash.is_empty() {
+            } else if unsaved_open
+                || !self.nav_stash.is_empty()
+                || self.inactive_dirty_variants() > 0
+            {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm_quit = true;
                 // Surrender any widget focus NOW: the layer's Enter-saves
