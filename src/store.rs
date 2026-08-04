@@ -262,15 +262,37 @@ pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
 ///   recipe ON DISK keeps them (a master that later fails to decode must
 ///   still restore a calibrated develop).
 pub fn render_source(raw: &Path, recipe: &mut EditRecipe) -> PathBuf {
+    render_source_checked(raw, recipe).unwrap_or_else(|_| raw.to_path_buf())
+}
+
+/// [`render_source`] for DELIVERABLE paths: a master that WAS recorded but
+/// cannot be honoured is an `Err` naming the remedy, not a silent fallback —
+/// exporting the un-retouched source while reporting success was the A6
+/// defect. Preview surfaces keep the degrading wrapper above (a canvas must
+/// still open; the GUI toasts at open, the web rides an X-Preview-Warning).
+/// The message is ASCII-only: it travels in an HTTP header.
+pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<PathBuf, String> {
     match read_pixel_source(raw) {
         Some((master, generated)) => {
             if generated {
                 recipe.base_curve = Vec::new();
                 recipe.lens_profile = Default::default();
+                // Batch-30 rule, applied where every surface renders: baked
+                // pixels carry their white balance, so the absolute anchor is
+                // stripped — a CLI/web render of a generated master must
+                // match the GUI canvas, which strips it too.
+                recipe.as_shot_k = None;
+                recipe.as_shot_tint = None;
             }
-            master
+            Ok(master)
         }
-        None => raw.to_path_buf(),
+        None if has_pixel_source(raw) => Err(format!(
+            "the saved retouch master for {} could not be loaded - rendering would silently \
+             drop the retouch; open the photo for the cause, then re-save or clear the link \
+             with a parametric-only save",
+            crate::pipeline::stem(raw)
+        )),
+        None => Ok(raw.to_path_buf()),
     }
 }
 
@@ -768,6 +790,17 @@ fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
         return Ok(None);
     }
     let mut derived = crate::xmp::xmp_to_recipe(&text);
+    // A6 disclosure: numbers the import cannot read become silent neutrals
+    // in this derived snapshot. Background path — the trace goes to stderr;
+    // the interactive surfaces disclose the same fact at restore time.
+    let bad = crate::xmp::unparsable_crs_numbers(&text);
+    if !bad.is_empty() {
+        eprintln!(
+            "⚠ {} numeric XMP setting(s) unreadable ({}) — the derived snapshot treats them as neutral",
+            bad.len(),
+            bad.join(", ")
+        );
+    }
     derived.clamp();
     // Stamp like the GUI's XMP-only RESTORE does (fresh camera knots + the
     // in-camera lens profile): a verbatim derived snapshot loaded back would

@@ -1545,7 +1545,7 @@ enum SavedDevelop {
 /// the legacy cwd-relative ./out are migrated in on first touch; a file the
 /// migration could not move keeps being read in place, and the `kind` string
 /// says which file actually answered.
-fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
+fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
     autoshop::store::migrate_legacy(src);
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
     // Newest intent wins (store::lightroom_sidecar): a sidecar Lightroom
@@ -1568,7 +1568,12 @@ fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
         // exactly as before.
         if !r.is_noop() {
             r.clamp();
-            return SavedDevelop::Restored(r, kind);
+            // A6 disclosure: numbers this XMP carries that do not parse
+            // imported as silent neutrals — the open handler says so.
+            return (
+                SavedDevelop::Restored(r, kind),
+                autoshop::xmp::unparsable_crs_numbers(&text),
+            );
         }
     }
     let mut any = false;
@@ -1614,9 +1619,11 @@ fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
         break;
     }
     if let Some((r, kind)) = restored {
-        return SavedDevelop::Restored(r, kind);
+        // recipe.json restored: lossless, nothing to disclose.
+        return (SavedDevelop::Restored(r, kind), Vec::new());
     }
     let mut fallback = None;
+    let mut fallback_warn = Vec::new();
     for (xp, kind) in [
         (autoshop::pipeline::xmp_target(src), "XMP"),
         (autoshop::store::legacy_xmp(src), "XMP (legacy ./out)"),
@@ -1638,16 +1645,17 @@ fn read_saved_develop(src: &std::path::Path) -> SavedDevelop {
         if !r.is_noop() {
             r.clamp();
             fallback = Some((r, kind));
+            fallback_warn = autoshop::xmp::unparsable_crs_numbers(&text);
         }
         break; // same rule: the file that answered decides
     }
     if let Some(err) = parse_err {
-        return SavedDevelop::Unreadable { err, fallback };
+        return (SavedDevelop::Unreadable { err, fallback }, fallback_warn);
     }
     match (fallback, any) {
-        (Some((r, k)), _) => SavedDevelop::Restored(r, k),
-        (None, true) => SavedDevelop::NoopOnly,
-        (None, false) => SavedDevelop::Nothing,
+        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), fallback_warn),
+        (None, true) => (SavedDevelop::NoopOnly, Vec::new()),
+        (None, false) => (SavedDevelop::Nothing, Vec::new()),
     }
 }
 
@@ -4117,7 +4125,19 @@ impl AutoshopApp {
                             // like its canvas.
                             let pix = match over {
                                 Some((_, pix)) => pix.clone(),
-                                None => autoshop::store::read_pixel_source(p),
+                                None => {
+                                    let pix = autoshop::store::read_pixel_source(p);
+                                    // A recorded-but-unhonourable master:
+                                    // exporting would silently drop the
+                                    // retouch — fail THIS photo with the
+                                    // cause instead (the summary lists it).
+                                    if pix.is_none() && autoshop::store::has_pixel_source(p) {
+                                        anyhow::bail!(
+                                            "the saved retouch master could not be loaded — the export would silently drop the retouch (open the photo for the cause, then re-save or clear it)"
+                                        );
+                                    }
+                                    pix
+                                }
                             };
                             let mut recipe = recipe;
                             if pix.as_ref().is_some_and(|(_, generated)| *generated) {
@@ -4646,11 +4666,11 @@ impl AutoshopApp {
                             // recipe's own base_curve.
                             self.source_preview = Some(base.clone());
                             self.base_preview = Some(base);
-                            let saved = self
+                            let (saved, xmp_bad) = self
                                 .src_path
                                 .as_deref()
                                 .map(read_saved_develop)
-                                .unwrap_or(SavedDevelop::Nothing);
+                                .unwrap_or((SavedDevelop::Nothing, Vec::new()));
                             let mut restored: Option<&'static str> = None;
                             let mut open_note: Option<String> = None;
                             let mut recipe = EditRecipe::default();
@@ -4692,6 +4712,24 @@ impl AutoshopApp {
                                     );
                                 }
                                 SavedDevelop::Nothing => {}
+                            }
+                            // A6 disclosure: numeric settings in the restored
+                            // XMP that do not parse imported as SILENT
+                            // neutrals — and the next save would write those
+                            // neutrals back over the sidecar. Say so on open.
+                            if !xmp_bad.is_empty() {
+                                let w = trf(
+                                    lang,
+                                    "{n} XMP numeric setting(s) unreadable ({list}) — restored as neutral; saving would overwrite the sidecar with those neutrals",
+                                    &[
+                                        ("n", &xmp_bad.len().to_string()),
+                                        ("list", &xmp_bad.join(", ")),
+                                    ],
+                                );
+                                open_note = Some(match open_note {
+                                    Some(o) => format!("{o} · {w}"),
+                                    None => w,
+                                });
                             }
                             if stamp {
                                 if !knots.is_empty() {
@@ -10395,21 +10433,21 @@ mod tests {
         let _ = std::fs::remove_file(&legacy_rj);
 
         assert!(
-            matches!(read_saved_develop(src), SavedDevelop::Nothing),
+            matches!(read_saved_develop(src).0, SavedDevelop::Nothing),
             "no sidecar → Nothing"
         );
 
         // A NEUTRAL XMP (foreign file, or ours with nothing set) restores nothing.
         std::fs::write(&xp, autoshop::xmp::recipe_to_xmp(&EditRecipe::default())).unwrap();
         assert!(
-            matches!(read_saved_develop(src), SavedDevelop::NoopOnly),
+            matches!(read_saved_develop(src).0, SavedDevelop::NoopOnly),
             "a no-op XMP must not claim a restore"
         );
 
         // XMP with real edits → imported through the reverse crs mapping.
         let edited = EditRecipe { contrast: 22.0, ..Default::default() };
         std::fs::write(&xp, autoshop::xmp::recipe_to_xmp(&edited)).unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(src) else {
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src).0 else {
             panic!("an edited XMP restores");
         };
         assert_eq!((r.contrast, kind), (22.0, "XMP"));
@@ -10417,14 +10455,14 @@ mod tests {
         // recipe.json appears → preferred over the XMP.
         let full = EditRecipe { exposure_ev: 0.5, ..Default::default() };
         std::fs::write(&rj, serde_json::to_string(&full).unwrap()).unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(src) else {
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src).0 else {
             panic!("recipe.json restores");
         };
         assert_eq!((r.exposure_ev, kind), (0.5, "recipe.json"));
 
         // A damaged recipe.json degrades LOUDLY, XMP fallback attached.
         std::fs::write(&rj, "{ not json").unwrap();
-        let SavedDevelop::Unreadable { fallback, .. } = read_saved_develop(src) else {
+        let SavedDevelop::Unreadable { fallback, .. } = read_saved_develop(src).0 else {
             panic!("a damaged recipe.json must be reported, not skipped");
         };
         assert_eq!(fallback.expect("XMP fallback rides along").1, "XMP");
@@ -10442,7 +10480,7 @@ mod tests {
             PathBuf::from("out").join("_sidecar_prio_test_legacy.recipe.json");
         let legacy = EditRecipe { contrast: -11.0, ..Default::default() };
         std::fs::write(&legacy_rj2, serde_json::to_string(&legacy).unwrap()).unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(src2) else {
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src2).0 else {
             panic!("a legacy ./out recipe restores");
         };
         assert_eq!((r.contrast, kind), (-11.0, "recipe.json"));
@@ -10487,7 +10525,7 @@ mod tests {
             .unwrap()
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
             .unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(&src) else {
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(&src).0 else {
             panic!("a newer Lightroom sidecar must restore");
         };
         assert_eq!(r.contrast, 33.0, "the newer Lightroom edit wins over the stored develop");

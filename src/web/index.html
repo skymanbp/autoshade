@@ -799,7 +799,10 @@ async function renderAfter() {
     const blob = await r.blob();
     if (seq !== afterSeq || id !== state.id) return;   // it went stale while we decoded the body
     setAfterSrc($(".after"), blob);
-    setStatus("");
+    // A degraded preview (e.g. broken retouch-master link) says so instead
+    // of silently showing the un-retouched source (A6).
+    const warn = r.headers.get("X-Preview-Warning");
+    setStatus(warn ? "⚠ " + warn : "");
   } catch (e) {
     // Network-level rejection: without this the promise died unhandled and
     // the status claimed "rendering preview…" forever.
@@ -842,12 +845,16 @@ async function selectPhoto(id, stem, el) {
   // A damaged / unreachable recipe must still leave a WORKING panel: fall back
   // to the neutral recipe and show the server's reason, instead of throwing out
   // of selectPhoto and leaving an empty control column with no explanation.
-  let loaded = null, loadedFrom = null, loadErr = null, freshCurve = null, freshLens = null,
-      freshAsShot = null;
+  let loaded = null, loadedFrom = null, loadedWarn = null, loadErr = null, freshCurve = null,
+      freshLens = null, freshAsShot = null;
   try {
     const rr = await fetch(`/api/recipe?id=${id}`);
     if (seq !== selectSeq) return;
-    if (rr.ok) { loaded = await rr.json(); loadedFrom = rr.headers.get("X-Recipe-Source"); }
+    if (rr.ok) {
+      loaded = await rr.json();
+      loadedFrom = rr.headers.get("X-Recipe-Source");
+      loadedWarn = rr.headers.get("X-Recipe-Warning");
+    }
     else if (rr.status === 404) {
       // "Not analyzed yet" — but the 404 body carries the photo's camera-
       // matched base look AND its in-camera lens profile, so a fresh open
@@ -891,6 +898,13 @@ async function selectPhoto(id, stem, el) {
     $(".verdict").innerHTML = loadedFrom === "lightroom-sidecar"
       ? '<span class="tag saved">SAVED</span> Loaded the Lightroom sidecar beside the RAW (its edits are newest). Saving adopts it as the develop.'
       : '<span class="tag saved">SAVED</span> Loaded a previously-saved recipe. Re-run Analyze for a live verdict.';
+    if (loadedWarn) {
+      // Server-provided text: textContent, never innerHTML (the XSS rule).
+      const w = document.createElement("div");
+      w.style.color = "#e0a84e";
+      w.textContent = "⚠ " + loadedWarn;
+      $(".verdict").appendChild(w);
+    }
     showRationale();
   } else {
     state.recipe = structuredClone(DEFAULT_RECIPE);

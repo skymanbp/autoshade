@@ -782,6 +782,33 @@ pub(crate) fn crs_str<'a>(xmp: &'a str, key: &str) -> Option<&'a str> {
     Some(rest[..rest.find(&close)?].trim())
 }
 
+/// Owned crs settings PRESENT in a document whose value does not parse as a
+/// number under [`crs_f32`]'s exact rule. Each of these imports as a SILENT
+/// neutral in [`xmp_to_recipe`], and the next save then overwrites the
+/// sidecar with those neutrals — so restore surfaces disclose them (GUI open
+/// note, web X-Recipe-Warning, store derived-snapshot trace). String-typed
+/// owned keys are exempt.
+pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
+    const STRINGY: [&str; 6] = [
+        "Version",
+        "ProcessVersion",
+        "WhiteBalance",
+        "HasCrop",
+        "ToneCurveName2012",
+        "HasSettings",
+    ];
+    owned_attr_keys()
+        .into_iter()
+        .filter(|k| !STRINGY.contains(&k.as_str()))
+        .filter(|k| {
+            // EXACT mirror of crs_f32's parse — a stricter check here would
+            // flag values the import actually reads fine.
+            crs_str(xmp, k)
+                .is_some_and(|v| v.trim().trim_start_matches('+').parse::<f32>().is_err())
+        })
+        .collect()
+}
+
 /// Numeric `crs:` attribute, tolerating ACR's explicit `+` (`"+22"`). `None` if
 /// the key is absent or unparsable. Shared with the eval harness + style index
 /// (re-exported through `eval`).
@@ -1374,6 +1401,26 @@ mod tests {
         // Foreign (Lightroom) sidecars are never pinned either.
         let lr = old.replace("Autoshop", "Adobe XMP Core 7.0-c000");
         assert_eq!(xmp_to_recipe(&lr).as_shot_k, None, "foreign Kelvin is absolute");
+        // A6 disclosure scanner: corrupt numbers are NAMED; parsable and
+        // string-typed keys never flag; our own writer round-trips clean.
+        let corrupt = old
+            .replace(r#"crs:Temperature="5000""#, r#"crs:Temperature="fivethousand""#)
+            .replace(
+                r#"crs:HasSettings="True""#,
+                "crs:Contrast2012=\"NaNny\"\n    crs:Exposure2012=\"+0.65\"\n    crs:HasSettings=\"True\"",
+            );
+        let bad = unparsable_crs_numbers(&corrupt);
+        assert!(bad.contains(&"Temperature".to_string()), "{bad:?}");
+        assert!(bad.contains(&"Contrast2012".to_string()), "{bad:?}");
+        assert!(!bad.contains(&"Exposure2012".to_string()), "{bad:?}");
+        assert!(!bad.iter().any(|k| k == "WhiteBalance" || k == "HasSettings"), "{bad:?}");
+        assert_eq!(xmp_to_recipe(&corrupt).contrast, 0.0, "the silent neutral being disclosed");
+        let clean = recipe_to_xmp(&EditRecipe {
+            exposure_ev: 0.4,
+            temperature_k: Some(5600.0),
+            ..Default::default()
+        });
+        assert!(unparsable_crs_numbers(&clean).is_empty());
         // A MERGE into an old Autoshop document rewrites the WB attributes in
         // absolute semantics — the era marker must upgrade with them.
         let merged = merge_recipe_into_xmp(

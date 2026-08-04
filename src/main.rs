@@ -560,7 +560,10 @@ fn auto_cmd(
     // untouched RAW silently dropped every baked pixel edit and produced a
     // file that disagreed with what reopening the photo shows.
     let mut render_recipe = recipe.clone();
-    let src = autoshop::store::render_source(raw, &mut render_recipe);
+    // DELIVERABLE: a recorded master that cannot be honoured refuses with the
+    // remedy instead of silently rendering the un-retouched RAW (A6).
+    let src = autoshop::store::render_source_checked(raw, &mut render_recipe)
+        .map_err(|m| anyhow::anyhow!(m))?;
     if src != raw {
         println!("  (rendering the saved pixel master {})", src.display());
     }

@@ -199,6 +199,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Tone & WB", "色调 · Tone & WB"),
     ("Custom white balance (off = as-shot)", "自定义白平衡（关=按拍摄值）"),
     ("as shot ≈ {k} K · tint {t}", "拍摄时 ≈ {k} K · 色调 {t}"),
+    ("{n} XMP numeric setting(s) unreadable ({list}) — restored as neutral; saving would overwrite the sidecar with those neutrals",
+     "XMP 有 {n} 个数值设置无法读取（{list}）——已按中性恢复；保存会用这些中性值覆盖 sidecar"),
     ("💧 Click in image…", "💧 点击图中…"),
     ("💧 Eyedropper", "💧 吸管"),
     ("Click a spot in the image that should be neutral grey/white to auto-solve Temp/Tint (same forward model as the engine). Click again to cancel.",

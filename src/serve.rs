@@ -723,7 +723,11 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 }
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
                     .expect("static ASCII header");
-                return Ok(json_text(serde_json::to_string(&r)?).with_header(h));
+                let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);
+                if let Some(w) = recipe_warning_header(&text) {
+                    resp = resp.with_header(w);
+                }
+                return Ok(resp);
             }
         }
         _ => {}
@@ -792,7 +796,11 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
-                return Ok(json_text(serde_json::to_string(&r)?));
+                let mut resp = json_text(serde_json::to_string(&r)?);
+                if let Some(w) = recipe_warning_header(&text) {
+                    resp = resp.with_header(w);
+                }
+                return Ok(resp);
             }
         }
     }
@@ -816,6 +824,24 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static ASCII header");
     Ok(Response::from_string(body).with_status_code(404).with_header(ct).boxed())
+}
+
+/// A6 disclosure header for XMP-derived recipes: numeric settings the import
+/// could not read became silent neutrals — the client shows this beside the
+/// SAVED verdict, because the next save overwrites the sidecar with those
+/// neutrals. ASCII by construction (crs key names). `None` when all parsed.
+fn recipe_warning_header(xmp_text: &str) -> Option<Header> {
+    let bad = crate::xmp::unparsable_crs_numbers(xmp_text);
+    if bad.is_empty() {
+        return None;
+    }
+    let msg = format!(
+        "{} numeric XMP setting(s) unreadable ({}) - restored as neutral; saving overwrites \
+         the sidecar with those neutrals",
+        bad.len(),
+        bad.join(", ")
+    );
+    Header::from_bytes(&b"X-Recipe-Warning"[..], msg.as_bytes()).ok()
 }
 
 /// The photo's FRESH camera-matched base-look knots, regardless of any saved
@@ -1316,13 +1342,14 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     }
 }
 
-/// The photo's RENDER INPUT: the persisted pixels.json master when the store
-/// records one (a GUI-saved heal/denoise/reimagine — the web used to silently
-/// render the un-retouched source while the GUI showed the master), else the
-/// photo itself. A GENERATED master carries the look in its pixels, so the
-/// recipe drops base_curve + lens_profile (the same strip rule every GUI
-/// render path applies).
-use crate::store::render_source;
+// The photo's RENDER INPUT is store::render_source_checked everywhere here:
+// the persisted pixels.json master when the store records one (a GUI-saved
+// heal/denoise/reimagine — the web used to silently render the un-retouched
+// source while the GUI showed the master), else the photo itself. A GENERATED
+// master carries the look in its pixels, so the recipe drops base_curve +
+// lens_profile + the as-shot anchor (the strip rule every GUI render path
+// applies). A recorded-but-unhonourable master REFUSES on deliverables and
+// degrades-with-warning on the preview (A6).
 
 fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let mut req: DevelopReq = read_json(request)?;
@@ -1340,9 +1367,19 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // persisted) overrides the persisted source; such masters are NEUTRAL
     // develops (InPlace), so the recipe — calibration included — renders on
     // top, no strip.
+    // A recorded master that cannot be honoured must not fail the PREVIEW —
+    // the user needs a canvas to act on — but silence was the A6 defect: the
+    // degradation rides back as a header the status line surfaces.
+    let mut preview_warning: Option<String> = None;
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some(p)) => p,
-        Ok(None) => render_source(&raw, &mut req.recipe),
+        Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
+            Ok(p) => p,
+            Err(msg) => {
+                preview_warning = Some(msg);
+                raw.clone()
+            }
+        },
         Err(msg) => return Ok(status_response(400, &msg)),
     };
     let preview = develop_base(&src)?;
@@ -1358,7 +1395,13 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     if req.recipe.straighten_deg != 0.0 {
         after = render::rotate_straighten(&after, req.recipe.straighten_deg);
     }
-    jpeg_response(&after)
+    let resp = jpeg_response(&after)?;
+    Ok(match preview_warning
+        .and_then(|m| Header::from_bytes(&b"X-Preview-Warning"[..], m.as_bytes()).ok())
+    {
+        Some(h) => resp.with_header(h),
+        None => resp,
+    })
 }
 
 /// Resolve the output extension from the request ("jpg" → jpg, else 16-bit tif).
@@ -1387,7 +1430,13 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // must match the healed preview the user just approved.
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some(p)) => p,
-        Ok(None) => render_source(&raw, &mut req.recipe),
+        // DELIVERABLE: a broken master link refuses instead of silently
+        // exporting the un-retouched source (A6). Server-side state, not the
+        // client's request — a 500 whose body names the remedy.
+        Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
+            Ok(p) => p,
+            Err(msg) => return Ok(status_response(500, &msg)),
+        },
         Err(msg) => return Ok(status_response(400, &msg)),
     };
     let out = pipeline::default_out(&raw, "developed", fmt_ext(&req));
@@ -1431,7 +1480,13 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     // Session master wins here too (api_develop's rule).
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some(p)) => p,
-        Ok(None) => render_source(&raw, &mut req.recipe),
+        // DELIVERABLE: a broken master link refuses instead of silently
+        // exporting the un-retouched source (A6). Server-side state, not the
+        // client's request — a 500 whose body names the remedy.
+        Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
+            Ok(p) => p,
+            Err(msg) => return Ok(status_response(500, &msg)),
+        },
         Err(msg) => return Ok(status_response(400, &msg)),
     };
     // Config SNAPSHOT — see api_export.

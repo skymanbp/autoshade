@@ -654,6 +654,19 @@ pub fn render_to_file(
     export: Option<&ExportOpts>,
 ) -> Result<(u32, u32)> {
     let opts = export.copied().unwrap_or_default();
+    // DELIVERABLE gate (every export surface funnels through here): an
+    // unloadable Bitmap raster renders INERT, so this file would "succeed"
+    // minus an edit the user made — and nothing would say so (A6). Refuse
+    // with the mask named; the remedies (delete the mask / restore the
+    // raster) are one step away in the app.
+    let broken = unreadable_mask_rasters(recipe);
+    if !broken.is_empty() {
+        bail!(
+            "mask raster(s) unreadable: {} — the export would silently drop those edits; \
+             delete the mask(s) or restore the raster file(s), then export again",
+            broken.join(", ")
+        );
+    }
     let ext = out
         .extension()
         .and_then(|e| e.to_str())
@@ -1253,6 +1266,27 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             None => 0.0,
         },
     }
+}
+
+/// Display names of ENABLED Bitmap masks whose raster does not decode right
+/// now (missing or corrupt file). The engine contract for those is "render
+/// inert" — right for a live preview (recoverable, warned once by the
+/// loader) — but a DELIVERABLE rendered that way "succeeds" minus an edit
+/// the user made and never says so; `render_to_file` refuses on a non-empty
+/// answer. Callers must have resolved mask paths first (every render path
+/// already does).
+pub fn unreadable_mask_rasters(recipe: &EditRecipe) -> Vec<String> {
+    recipe
+        .masks
+        .iter()
+        .filter_map(|m| {
+            let MaskGeometry::Bitmap { path } = &m.mask else { return None };
+            if m.amount == 0.0 || load_mask_bitmap(&m.mask).is_some() {
+                return None;
+            }
+            Some(if m.name.is_empty() { path.clone() } else { m.name.clone() })
+        })
+        .collect()
 }
 
 /// Decode the raster of a Bitmap mask geometry, greyscale — through a
@@ -4143,6 +4177,33 @@ mod tests {
             &EditRecipe { temperature_k: Some(4000.0), ..Default::default() },
         );
         assert_ne!(legacy_shift, grey, "legacy 5500-anchored shift still applies");
+    }
+
+    #[test]
+    fn export_refuses_a_recipe_whose_mask_raster_is_unreadable() {
+        use crate::recipe::LocalAdjustment;
+        let dir = std::env::temp_dir().join(format!("autoshop_maskgate_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("base.png");
+        image::DynamicImage::new_rgb8(8, 8).save(&src).unwrap();
+        let broken = LocalAdjustment {
+            name: "sky".into(),
+            amount: 1.0,
+            exposure_ev: -0.5,
+            mask: MaskGeometry::Bitmap { path: dir.join("gone.png").display().to_string() },
+            ..Default::default()
+        };
+        let r = EditRecipe { masks: vec![broken.clone()], ..Default::default() };
+        let out = dir.join("out.png");
+        let err = render_to_file(&src, &r, &out, None, None).unwrap_err().to_string();
+        assert!(err.contains("sky"), "the refusal names the mask: {err}");
+        assert!(!out.exists(), "a refused export writes nothing");
+        // amount = 0 is inert BY the recipe — nothing is being dropped.
+        let mut disabled = broken;
+        disabled.amount = 0.0;
+        let r = EditRecipe { masks: vec![disabled], ..Default::default() };
+        render_to_file(&src, &r, &out, None, None).expect("disabled mask exports fine");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
