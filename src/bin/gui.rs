@@ -2784,9 +2784,12 @@ impl AutoshopApp {
         }
     }
 
-    /// Reset undo history — call when a brand-new photo opens or the active
-    /// variant changes (you can't undo across either). `committed` becomes the
-    /// current head.
+    /// Reset undo history — call when a brand-new photo opens, when the active
+    /// variant changes (you can't undo across either), or when a photo GOES
+    /// AWAY: a failed fresh open leaves no canvas for its steps to apply to,
+    /// and an undo there restored one that no longer existed. `committed`
+    /// becomes the current head — with no photo open that is the empty step,
+    /// which is exactly what stops the next settled frame pushing a phantom.
     fn reset_history(&mut self) {
         self.committed = self.current_step();
         self.undo_stack.clear();
@@ -12828,9 +12831,10 @@ mod tests {
         let ctx = egui::Context::default();
         let superseded = Arc::new(image::DynamicImage::new_rgb8(640, 480));
         // 800 is what the SOURCE delivers here, and it is NOT the preference
-        // (1280): the retraction therefore has to come from the delivered-edge
-        // arm specifically. With the two equal, this test passed under either
-        // arm and pinned neither.
+        // (1280): the retraction therefore comes from the delivered-edge arm
+        // specifically, and the exact-string assert below is what turns that
+        // into a pin. With the two equal — and with a substring assert — this
+        // test passed under either arm and pinned neither.
         let current = Arc::new(image::DynamicImage::new_rgb8(800, 600));
         let step = |base: &Arc<image::DynamicImage>, tag: &str| UndoStep {
             recipe: EditRecipe::default(),
@@ -12871,10 +12875,13 @@ mod tests {
             app.base_preview.as_ref().is_some_and(|b| Arc::ptr_eq(b, &current)),
             "premise: the matching-edge raster is back"
         );
-        assert!(
-            !app.status.contains("640px"),
-            "the claim is retracted when the disagreement ends: {}",
-            app.status
+        // EXACT, not `!contains("640px")`: a negative substring cannot tell
+        // "no claim" from "a different claim", so it survived deleting the
+        // delivered-edge conjunct (the redo then claims 800px, which contains
+        // no "640px"). This is what makes the fixture pin that arm.
+        assert_eq!(
+            app.status, "restored the canvas pixels",
+            "the claim is retracted when the disagreement ends, not merely reworded"
         );
     }
 
