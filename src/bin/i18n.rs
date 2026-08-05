@@ -748,7 +748,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "用周围真实像素修复涂抹区——本地计算，无 API"),
     ("● Unsaved edits", "● 未保存的编辑"),
     ("Enter · save every listed develop, then quit", "Enter · 保存列出的全部显影后退出"),
-    ("{n} other variant(s) of the open photo hold edits. Only the ACTIVE variant can be saved — Cancel, switch to each one, and save it.",
+    ("{n} other variant(s) hold edits — of this photo, or of photos you navigated away from. Only the ACTIVE variant of a photo can be saved: Cancel, open each one, and save it.",
         "当前照片还有 {n} 个变体存有编辑。只有「活动」变体能被保存——请取消后逐个切换过去保存。"),
     ("Quit WITHOUT saving — these edits are gone for good", "不保存直接退出——这些编辑将永久丢失"),
     // --- round-3 audit batch (new / reworded user-facing strings) ------------

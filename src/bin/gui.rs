@@ -2089,14 +2089,22 @@ impl AutoshopApp {
     /// baseline, or its raster origin is not the master recorded on disk.
     fn inactive_dirty_variants(&self) -> usize {
         let recorded = self.pixels_on_disk.clone();
-        self.variants
+        let open = self
+            .variants
             .iter()
             .enumerate()
             .filter(|(i, v)| {
                 *i != self.active
                     && (dirty_vs(&v.recipe, &self.saved_recipe) || v.origin != recorded)
             })
-            .count()
+            .count();
+        // Photos NAVIGATED AWAY FROM count too. Since batch 47 a photo is
+        // stashed when only a BACKGROUND variant is dirty, so the quit dialog
+        // lists it — while Save-all writes just the stashed ACTIVE canvas and
+        // then clears the stash. Counting only the open photo's strip meant
+        // the dialog promised a save that destroyed that work without a word.
+        let stashed: usize = self.nav_stash.values().map(|st| st.others.len()).sum();
+        open + stashed
     }
 
     /// The active variant, if a photo is open.
@@ -2861,7 +2869,7 @@ impl AutoshopApp {
                     ui.label(
                         egui::RichText::new(trf(
                             lang,
-                            "{n} other variant(s) of the open photo hold edits. Only the ACTIVE variant can be saved — Cancel, switch to each one, and save it.",
+                            "{n} other variant(s) hold edits — of this photo, or of photos you navigated away from. Only the ACTIVE variant of a photo can be saved: Cancel, open each one, and save it.",
                             &[("n", &orphan_variants.to_string())],
                         ))
                         .small()
@@ -3525,6 +3533,14 @@ impl AutoshopApp {
         // A geometry-only mask never reads reference pixels. Avoid the old
         // second develop entirely; only Range Masks need the masks-cleared
         // developed reference and its recipe-keyed cache.
+        // KNOWN COST (C21): this is a ONE-slot cache compared by full-recipe
+        // equality, and the reference is now the mask PREFIX rather than a
+        // masks-cleared develop — so sweeping the pointer down a list of
+        // Range masks alternates prefixes and misses the cache on every row,
+        // paying a synchronous preview develop each time. Correctness first:
+        // the prefix IS what the engine evaluates a range against, and a
+        // wrong overlay is worse than a slow one. Keyed multi-slot caching is
+        // the fix and is recorded in the roadmap, not smuggled in here.
         let reference: &image::DynamicImage = if mask.range.is_some() {
             if !matches!(&self.overlay_ref, Some((r, _)) if *r == pre) {
                 // Rebuilding the masks-cleared reference is a full develop on
@@ -5503,11 +5519,19 @@ impl AutoshopApp {
                                 self.thumbs.insert(idx, tex);
                             }
                             Err(_) => {
-                                // Drop the queued marker so a scroll-back
-                                // retries: one transient decode failure (AV
-                                // lock, slow share) used to blank the row for
-                                // the rest of the session (L25).
-                                self.thumb_requested.remove(&idx);
+                                // The marker STAYS. `request_thumb` refuses
+                                // only what is already in `thumbs` or already
+                                // requested, and the visible rows re-request
+                                // unconditionally every frame — so dropping it
+                                // here made a permanently undecodable file
+                                // (0-byte, truncated, unsupported) respawn up
+                                // to six decode OS threads every 100 ms for as
+                                // long as its row stayed on screen.
+                                //
+                                // Scroll-back still retries, which is what L25
+                                // actually asked for: the LRU drops the marker
+                                // together with the texture when the row is
+                                // evicted.
                             }
                         }
                     }
@@ -7840,10 +7864,16 @@ impl AutoshopApp {
                     self.region = None; // a tiny drag clears the selection
                 }
             }
-        } else if resp.clicked() {
+        } else if resp.clicked() && !resp.double_clicked() {
             // Remember what this click cleared: if it turns out to be the
             // first half of a Fit↔1:1 double-click, after_view restores it
             // (M18 — zooming must not eat the AI region).
+            //
+            // `&& !resp.double_clicked()`: egui sets `clicked` on the release
+            // that COMPLETES the pair too, and after_view restores the region
+            // earlier in this same frame — so without this the restore was
+            // taken straight back out and the double-click still ate the
+            // region. The fix was inert until this line existed.
             self.region_restore = self.region.take().map(|r| (r, Instant::now()));
         }
         // (Drawing lives in after_view so the box shows under every tool —
@@ -11045,6 +11075,19 @@ mod tests {
                 .iter()
                 .any(|v| v.kind == VariantKind::Generated && v.recipe.contrast == 33.0),
             "…with its unsaved recipe intact"
+        );
+        // The commit claimed "active position included", and nothing pinned
+        // it: with the fixture's active == 0 the whole restore could append
+        // the active variant at the END and leave self.active at 0 — canvas
+        // and index disagreeing — and every assertion above still passed.
+        assert_eq!(app.active, 0, "the active position comes back with the strip");
+        assert!(
+            matches!(app.variants[app.active].kind, VariantKind::Original),
+            "…pointing at the variant that WAS active, not merely at a valid index"
+        );
+        assert_eq!(
+            app.variants[app.active].recipe, app.recipe,
+            "the canvas and the active slot must agree after a restore"
         );
         std::fs::remove_file(&mask_path).ok();
     }
