@@ -339,13 +339,68 @@ pub(crate) fn carry_over_unrepresentable(recipe: &mut EditRecipe, base: &EditRec
     recipe.clamp(); // the size caps still apply after re-attaching
 }
 
+/// Does this saved curve carry the fingerprint of the +0.5 preview bias?
+///
+/// `camera_base_knots` pins `[0,0]` and `[1,1]` and fills the middle with
+/// quantiles of the NEUTRAL develop (x) against the camera rendition (y).
+/// A develop biased by +0.5 puts every sample in the top half by
+/// construction, so every interior x lands at or above 0.5. A real neutral
+/// never does — it is the dark render the base curve exists to lift (the
+/// user's own pre-bias develops top out at x = 0.493).
+///
+/// Era-stamped recipes are exempt: only an era-1 curve has unknown
+/// provenance. A false positive costs one re-estimate that reproduces the
+/// same curve, so this errs toward checking.
+pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
+    if version >= crate::recipe::CALIB_ERA || curve.len() < 3 {
+        return false;
+    }
+    curve[1..curve.len() - 1].iter().all(|k| k[0] >= 0.5)
+}
+
+/// Re-estimate a base curve that was fitted against a washed frame, and say
+/// so. Returns the disclosure when the curve was replaced.
+///
+/// The bias was a PREVIEW defect only in the sense that it never touched an
+/// export's pixels directly. It reached deliverables anyway: the estimate
+/// runs on a capped develop ([`photo_base_knots`]), the result is persisted
+/// like any user edit, and `build_tone_lut` composes it under the full-
+/// resolution render. Batch 43 fixed the sampler and thereby made an
+/// already-stored curve WORSE — it is now laid over a correct develop, which
+/// is what turns "slightly off" into several stops dark.
+pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<String> {
+    if !base_curve_looks_pre_era(r.version, &r.base_curve) {
+        return None;
+    }
+    let fresh = photo_base_knots(raw);
+    if fresh.is_empty() {
+        // No estimate to swap in (no embedded preview, or the neutral develop
+        // failed). Leave the saved curve alone rather than flatten the photo,
+        // and stay silent — photo_base_knots already logged the cause.
+        return None;
+    }
+    r.base_curve = fresh;
+    r.version = crate::recipe::CALIB_ERA;
+    Some(
+        "this photo's camera base look was re-estimated: it was saved by a version whose \
+         preview sampler ran bright, so the stored base look rendered too dark"
+            .to_string(),
+    )
+}
+
 /// The photo's saved recipe (central store first, then legacy), parsed once —
 /// the calibration-stamping snapshot both fields must come from.
+///
+/// The pre-era repair happens HERE, in the one funnel every library consumer
+/// shares, so no surface can render a washed-frame curve by forgetting to ask.
 fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
     for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
         if let Ok(text) = std::fs::read_to_string(&p)
-            && let Ok(r) = serde_json::from_str::<EditRecipe>(&text)
+            && let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
         {
+            if let Some(note) = repair_pre_era_base_curve(raw, &mut r) {
+                eprintln!("⚠ {}: {note}", stem(raw));
+            }
             return Some(r);
         }
     }
@@ -1126,6 +1181,43 @@ mod tests {
             eprintln!("note: symlink unavailable — the cycle arm was not exercised");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pre_era_base_curve_fingerprint_separates_washed_from_tuned() {
+        use crate::recipe::CALIB_ERA;
+        // A +0.5-biased develop puts EVERY sample in the top half, so every
+        // interior knot's input does too. This is the shape that renders
+        // several stops dark once batch 43 made the develop correct.
+        let washed = vec![[0.0, 0.0], [0.55, 0.10], [0.72, 0.44], [0.96, 0.90], [1.0, 1.0]];
+        assert!(base_curve_looks_pre_era(1, &washed), "the washed shape must be caught");
+        // The user's own pre-bias develops: interior inputs 0.126..0.493 —
+        // a real neutral is DARK, which is why the base curve exists.
+        let tuned = vec![[0.0, 0.0], [0.126, 0.29], [0.31, 0.55], [0.493, 0.78], [1.0, 1.0]];
+        assert!(!base_curve_looks_pre_era(1, &tuned), "a legitimate curve must be left alone");
+        // ONE interior knot below the half is enough to clear it: quantiles
+        // are non-decreasing, so a real neutral's toe always lands low.
+        let mostly_high = vec![[0.0, 0.0], [0.49, 0.10], [0.80, 0.60], [1.0, 1.0]];
+        assert!(!base_curve_looks_pre_era(1, &mostly_high));
+        // Era-stamped recipes are never second-guessed, whatever they hold.
+        assert!(!base_curve_looks_pre_era(CALIB_ERA, &washed), "an era stamp is trusted");
+        // Nothing to judge: no curve, or endpoints only.
+        assert!(!base_curve_looks_pre_era(1, &[]));
+        assert!(!base_curve_looks_pre_era(1, &[[0.0, 0.0], [1.0, 1.0]]));
+    }
+
+    #[test]
+    fn an_era_stamp_is_provenance_not_an_edit() {
+        // A recipe saved by an older build carries version 1. It must still
+        // read as "no edits" — otherwise every legacy photo opens with a
+        // permanent edited badge and Ctrl+S writes neutral files instead of
+        // clearing (the badge trap R4-8 closed).
+        let legacy = EditRecipe { version: 1, ..Default::default() };
+        assert!(legacy.is_noop(), "an era-1 neutral recipe is still neutral");
+        assert!(EditRecipe::default().is_noop());
+        // ...while a real edit stays a real edit in either era.
+        let edited = EditRecipe { version: 1, exposure_ev: 0.4, ..Default::default() };
+        assert!(!edited.is_noop());
     }
 
     #[test]

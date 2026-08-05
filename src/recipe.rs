@@ -21,7 +21,11 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct EditRecipe {
     /// Schema version so we can evolve the contract without silently
-    /// misreading old recipes.
+    /// misreading old recipes — and, since [`CALIB_ERA`], the CALIBRATION
+    /// era that produced `base_curve`. Version 1 recipes were written by
+    /// builds whose working-resolution cap biased every sample, so a curve
+    /// they stored may have been fitted against a washed frame; see
+    /// `pipeline::repair_pre_era_base_curve`.
     pub version: u32,
 
     // --- Tone ---------------------------------------------------------------
@@ -148,10 +152,19 @@ pub struct EditRecipe {
     pub confidence: f32,
 }
 
+/// The current calibration era, stamped into every recipe we write.
+///
+/// Era 1 = any build up to R12 batch 43. Its working-resolution cap added
+/// +0.5 to every channel of every capped frame, and `photo_base_knots`
+/// estimates the camera base curve from exactly such a capped develop — so an
+/// era-1 `base_curve` may encode a washed frame. Bumping this is what lets a
+/// later load tell the two apart; nothing else in the file could.
+pub const CALIB_ERA: u32 = 2;
+
 impl Default for EditRecipe {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: CALIB_ERA,
             exposure_ev: 0.0,
             contrast: 0.0,
             highlights: 0.0,
@@ -869,6 +882,10 @@ impl EditRecipe {
             || EditRecipe {
                 rationale: String::new(),
                 confidence: 0.0,
+                // The era stamp is provenance, not an edit: a recipe saved by
+                // an older build is still "no edits" and must still clear
+                // rather than pin a permanent edited badge.
+                version: EditRecipe::default().version,
                 base_curve: Vec::new(),
                 // The as-shot WB anchor is the same kind of stamped
                 // calibration — a fresh-open stamp must still count as no-op.
@@ -1166,7 +1183,7 @@ mod tests {
         assert_eq!(recipe.exposure_ev, 0.5);
         assert_eq!(recipe.contrast, 0.0); // defaulted
         assert_eq!(recipe.temperature_k, None);
-        assert_eq!(recipe.version, 1);
+        assert_eq!(recipe.version, CALIB_ERA);
     }
 
     #[test]
