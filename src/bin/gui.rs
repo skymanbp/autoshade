@@ -1605,22 +1605,6 @@ enum SavedDevelop {
 /// the legacy cwd-relative ./out are migrated in on first touch; a file the
 /// migration could not move keeps being read in place, and the `kind` string
 /// says which file actually answered.
-/// Every restore leaves through here so a washed-frame base curve cannot
-/// reach the canvas unrepaired on one path while being fixed on another
-/// (C1): the curve is re-estimated and the user is TOLD, because the photo
-/// they are looking at will render differently than it did yesterday.
-fn restored_with_repair(
-    src: &std::path::Path,
-    mut r: autoshop::recipe::EditRecipe,
-    kind: &'static str,
-    mut warns: Vec<String>,
-) -> (SavedDevelop, Vec<String>) {
-    if let Some(note) = autoshop::pipeline::repair_pre_era_base_curve(src, &mut r) {
-        warns.push(note);
-    }
-    (SavedDevelop::Restored(r, kind), warns)
-}
-
 fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
     autoshop::store::migrate_legacy(src);
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
@@ -1651,7 +1635,7 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         // exactly as before.
         if !r.is_noop() {
             r.clamp();
-            return restored_with_repair(src, r, kind, xmp_bad);
+            return (SavedDevelop::Restored(r, kind), xmp_bad);
         }
     }
     let mut any = false;
@@ -1700,7 +1684,7 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         // recipe.json restored: lossless truth — a corrupt number in the
         // subordinate XMP is REPLACED by the next save's owned-attr merge,
         // so there is nothing to disclose on this path.
-        return restored_with_repair(src, r, kind, Vec::new());
+        return (SavedDevelop::Restored(r, kind), Vec::new());
     }
     let mut fallback = None;
     for (xp, kind) in [
@@ -1738,7 +1722,7 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         return (SavedDevelop::Unreadable { err, fallback }, xmp_bad);
     }
     match (fallback, any) {
-        (Some((r, k)), _) => restored_with_repair(src, r, k, xmp_bad),
+        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), xmp_bad),
         (None, true) => (SavedDevelop::NoopOnly, xmp_bad),
         (None, false) => (SavedDevelop::Nothing, xmp_bad),
     }
@@ -4871,6 +4855,25 @@ impl AutoshopApp {
                                     recipe = r;
                                     restored = Some(kind);
                                     stamp = kind.starts_with("XMP");
+                                    // Only the recipe.json path can carry a
+                                    // washed-frame base curve to the canvas: an
+                                    // XMP restore re-stamps the curve anyway
+                                    // (stamp == true). Its own sentence, in the
+                                    // open-note channel — appended to `xmp_bad`
+                                    // it was rendered as "unreadable XMP
+                                    // numeric setting(s) … restored as
+                                    // neutral", a warning about something else
+                                    // entirely.
+                                    if !stamp
+                                        && let Some(note) =
+                                            self.src_path.clone().and_then(|p| {
+                                                autoshop::pipeline::repair_pre_era_base_curve(
+                                                    &p, &mut recipe,
+                                                )
+                                            })
+                                    {
+                                        open_note = Some(note);
+                                    }
                                 }
                                 SavedDevelop::Unreadable { err, fallback } => {
                                     // A damaged / newer-build recipe.json must

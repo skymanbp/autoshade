@@ -349,16 +349,20 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
     // no shrink path). Handing that back violates the check's own promise —
     // return neutrality instead, with the honest numbers in the report.
     let mut fit_regressed = false;
-    // FLOOR, not just a margin. The fit's own quantisation — the rounded
-    // sliders, the 8-bit residual tone curve, the f32 develop round trip —
-    // costs about 1e-3 of residual even on an IDENTICAL pair, where
-    // err_before is exactly 0. Against a bare +1e-4 margin the reset
-    // therefore fired on a pair that already matched: it wiped a perfectly
-    // good near-neutral solve and reported "outside the global model's
-    // reach" directly beneath a printed residual of 0.000 -> 0.000. Reset
-    // only what is meaningfully worse.
-    const DO_NO_HARM_FLOOR: f32 = 3e-3;
-    if err_after > err_before + 1e-4 && err_after > DO_NO_HARM_FLOOR {
+    // Tolerate the fit's OWN quantisation, not a fixed error size. The
+    // rounded sliders, the 8-bit residual tone curve and the f32 develop
+    // round trip cost about 1e-3 of residual even on an IDENTICAL pair, where
+    // err_before is exactly 0 — so a bare +1e-4 margin fired there, wiping a
+    // perfectly good near-neutral solve and reporting "outside the global
+    // model's reach" directly beneath a printed residual of 0.000 -> 0.000.
+    //
+    // A flat FLOOR is the wrong correction though: it would also wave through
+    // a fit that is genuinely worse whenever both numbers are small
+    // (err_before 0.0010 -> err_after 0.0029 is nearly 3x worse, and no
+    // absolute floor below 0.003 catches it). Scale with the error instead
+    // and add the quantisation budget once.
+    const FIT_QUANT: f32 = 1.2e-3;
+    if err_after > err_before * 1.25 + FIT_QUANT {
         recipe = EditRecipe::default();
         err_after = look_err(&pixels_of(&render::develop_preview(&s_img, &recipe)), &tp);
         fit_regressed = true;

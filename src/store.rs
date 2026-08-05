@@ -82,6 +82,11 @@ pub fn photo_key(src: &Path) -> String {
         // raster and the master link — and the next save would create a fresh
         // empty one beside it. ASCII folding is the subset NTFS always agrees
         // with, and it is the case the fold was added for.
+        //
+        // No migration is needed for the full-Unicode spelling this replaces:
+        // it existed only between two unreleased commits of this same fix
+        // wave, so no build that ever shipped could have created a directory
+        // under it.
         stem = stem.to_ascii_lowercase();
     }
     format!("{}-{:016x}", stem, fnv1a64(s.as_bytes()))

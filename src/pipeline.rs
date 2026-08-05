@@ -368,7 +368,26 @@ pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
     if version >= crate::recipe::CALIB_ERA || curve.len() < 3 {
         return false;
     }
-    curve[1..curve.len() - 1].iter().all(|k| k[0] >= 0.5)
+    let interior = &curve[1..curve.len() - 1];
+    // (a) Every interior INPUT in the top half — what a +0.5 bias produces by
+    // construction.
+    if !interior.iter().all(|k| k[0] >= 0.5) {
+        return false;
+    }
+    // (b) ...AND the curve DARKENS somewhere. This half is what keeps a
+    // legitimately high-key photo — one whose darkest 2% really does sit above
+    // mid-grey — from being re-estimated: (a) alone is a property of the
+    // SCENE, not of the bias, and replacing a saved look the current estimator
+    // need not reproduce (an older estimator's, or a hand-authored one) would
+    // change how that photo renders for no reason.
+    //
+    // A camera base look LIFTS: it maps a dark neutral develop onto the
+    // camera's own brighter rendition, which is the entire reason it exists,
+    // and every legitimately derived curve in the user's store has y > x
+    // throughout. The bias shifts only the INPUT side up by 0.5 while the
+    // camera side keeps its true, low values — so a washed curve comes out
+    // strongly DARKENING, which no real camera base look is.
+    interior.iter().any(|k| k[1] < k[0] - 0.15)
 }
 
 /// Re-estimate a base curve that was fitted against a washed frame, and say
@@ -1208,6 +1227,16 @@ mod tests {
         // a real neutral is DARK, which is why the base curve exists.
         let tuned = vec![[0.0, 0.0], [0.126, 0.29], [0.31, 0.55], [0.493, 0.78], [1.0, 1.0]];
         assert!(!base_curve_looks_pre_era(1, &tuned), "a legitimate curve must be left alone");
+        // A legitimately HIGH-KEY photo: its darkest 2% really is above
+        // mid-grey, so every interior input clears 0.5 — but the curve still
+        // LIFTS, as a camera base look does. Re-estimating it would replace a
+        // saved look for no reason (the estimator need not reproduce a curve
+        // an older build, or the user, authored).
+        let high_key = vec![[0.0, 0.0], [0.55, 0.68], [0.72, 0.84], [0.93, 0.97], [1.0, 1.0]];
+        assert!(
+            !base_curve_looks_pre_era(1, &high_key),
+            "a bright scene is not a washed frame — the curve still lifts"
+        );
         // ONE interior knot below the half is enough to clear it: quantiles
         // are non-decreasing, so a real neutral's toe always lands low.
         let mostly_high = vec![[0.0, 0.0], [0.49, 0.10], [0.80, 0.60], [1.0, 1.0]];
