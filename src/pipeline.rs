@@ -387,13 +387,19 @@ pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
     // throughout. The bias shifts only the INPUT side up by 0.5 while the
     // camera side keeps its true, low values — so a washed curve comes out
     // strongly DARKENING, which no real camera base look is.
-    // EVERY interior knot, and no arbitrary margin. The bias raises the input
-    // side by a constant while the camera side keeps its true values, so a
-    // washed curve darkens throughout — including the shallow cases a 0.15
-    // margin let escape (an embedded rendition that is itself dark, or
-    // quantile merging compressing the separation). A real camera base look
-    // lifts throughout, so requiring ALL is both sharper and threshold-free.
-    interior.iter().all(|k| k[1] < k[0])
+    // No interior knot LIFTS, and at least one measurably darkens.
+    //
+    // Requiring every knot to darken STRICTLY was wrong at the clipped end:
+    // the bias pushes every neutral sample to the top of the range, so the
+    // last interior knot's input is 1.0 for any frame with sky or highlights,
+    // and when the camera rendition also clips there (a blown window, the sun,
+    // a specular highlight) that knot is exactly [1.0, 1.0]. A tie is not a
+    // lift, but `1.0 < 1.0` is false, so one saturated frame disabled the
+    // repair for the whole photo. The toe is where the bias is unmistakable —
+    // it darkens hugely there — so a small margin on the maximum keeps the
+    // shallow cases a 0.15 margin used to lose, without demanding anything of
+    // the saturated end.
+    interior.iter().all(|k| k[1] <= k[0]) && interior.iter().any(|k| k[1] < k[0] - 0.05)
 }
 
 /// Re-estimate a base curve that was fitted against a washed frame, and say
@@ -1280,6 +1286,19 @@ mod tests {
         // LIFTS, as a camera base look does. Re-estimating it would replace a
         // saved look for no reason (the estimator need not reproduce a curve
         // an older build, or the user, authored).
+        // A washed curve whose TOP interior knot clips on both sides: the
+        // neutral saturates because of the bias, the camera rendition because
+        // the frame really does hold blown highlights. The tie must not read
+        // as a lift — one saturated frame used to disable the repair entirely.
+        let washed_clipped = vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0], [1.0, 1.0]];
+        assert!(
+            base_curve_looks_pre_era(1, &washed_clipped),
+            "a clipped tie at the top is not a lift"
+        );
+        // ...and a curve that merely FLATTENS (never darkens measurably) is
+        // not the bias either.
+        let flat = vec![[0.0, 0.0], [0.55, 0.55], [0.80, 0.79], [1.0, 1.0], [1.0, 1.0]];
+        assert!(!base_curve_looks_pre_era(1, &flat), "no measurable darkening is no fingerprint");
         let high_key = vec![[0.0, 0.0], [0.55, 0.68], [0.72, 0.84], [0.93, 0.97], [1.0, 1.0]];
         assert!(
             !base_curve_looks_pre_era(1, &high_key),

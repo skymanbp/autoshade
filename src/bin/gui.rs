@@ -1768,7 +1768,20 @@ fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe
     ] {
         match std::fs::read_to_string(&p) {
             Ok(text) => {
-                if let Ok(saved) = serde_json::from_str::<EditRecipe>(&text) {
+                if let Ok(mut saved) = serde_json::from_str::<EditRecipe>(&text) {
+                    // Repair BEFORE adopting, and carry the era stamp WITH the
+                    // curve. The stamp describes the curve's provenance, and
+                    // the curve comes from the target — keeping the pasted
+                    // recipe's version 2 on top of the target's era-1 washed
+                    // curve laundered it into a file every repair then
+                    // declines forever (the version gate short-circuits), so
+                    // the photo rendered several stops dark on every surface,
+                    // permanently, with nothing left to detect it by. Pasting
+                    // onto the OPEN photo did it immediately: the canvas had
+                    // been repaired, this re-read the still-washed file and
+                    // overwrote it, and the save baselined that as correct.
+                    let _ = autoshop::pipeline::repair_pre_era_base_curve(target, &mut saved);
+                    r.version = saved.version;
                     r.base_curve = saved.base_curve;
                     // A saved develop owns its profile verbatim — including any
                     // user toggle and the legacy default-off.
