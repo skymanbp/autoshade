@@ -1857,9 +1857,11 @@ fn mask_family(bare: &str) -> &str {
 /// to clear it" regression the adversarial review caught. `version` is the
 /// SAME calibration's provenance stamp (the pre-era repair bumps it with the
 /// curve), so it is neutralised with it: a repaired canvas against an
-/// unrepaired baseline — either direction, the stash paths produce both —
-/// must not read as an edit, or the photo stays "unsaved" all session and
-/// Save-all writes sidecars for zero user edits.
+/// unrepaired baseline — either direction: the stash gate produces
+/// baseline-v1 vs canvas-v2, and load_version's rightly-declined pre-era
+/// snapshots produce the reverse — must not read as an edit, or the photo
+/// stays "unsaved" all session and Save-all writes sidecars for zero user
+/// edits.
 fn dirty_vs(canvas: &EditRecipe, baseline: &EditRecipe) -> bool {
     canvas != baseline
         && EditRecipe { version: 0, base_curve: Vec::new(), ..canvas.clone() }
@@ -3003,6 +3005,13 @@ impl AutoshopApp {
                     disk.as_shot_k = cal.as_shot_k;
                     disk.as_shot_tint = cal.as_shot_tint;
                 }
+                // The WRITER's rule (Ctrl+S, api_xmp): a stashed canvas whose
+                // open-time estimate failed still carries the washed pre-era
+                // curve — repaired before it is persisted. Memo-cheap when
+                // already repaired, and it also covers the generated arm
+                // above, whose calibration snapshot may itself have adopted
+                // an unrepaired curve when the store read hit an inability.
+                let _ = autoshop::pipeline::repair_pre_era_base_curve(p, &mut disk);
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
                 let res = autoshop::pipeline::write_recipe(p, &disk, None).and_then(|_| {
                     // The baked-pixels link saves/clears with the recipe —
@@ -4591,6 +4600,24 @@ impl AutoshopApp {
         // once it lands, reopening restores it regardless of the XMP — so the
         // ● baseline must follow it even when the XMP half fails.
         let raw = autoshop::decode::is_raw(&path);
+        // The WRITER's rule (api_xmp, produce_recipe, match, Save-all): a
+        // washed pre-era curve must not be re-persisted verbatim. The canvas
+        // normally arrives repaired at open, but an open-time INABILITY (a
+        // then-locked file) leaves it washed — and Ctrl+S then froze the
+        // defect on disk while a single export from the SAME canvas repaired
+        // and disclosed. The canvas itself heals here: what is written is
+        // what is shown (a generated canvas was refused above, and its curve
+        // is empty by invariant).
+        let relooked =
+            autoshop::pipeline::repair_pre_era_base_curve(&path, &mut self.recipe).is_some();
+        if relooked {
+            // The strip entry that IS the canvas follows it, and the preview
+            // re-develops under the healed curve.
+            if let Some(v) = self.variants.get_mut(self.active) {
+                v.recipe = self.recipe.clone();
+            }
+            self.dirty = true;
+        }
         match autoshop::pipeline::write_recipe(&path, &self.recipe, None) {
             Ok(rp) => {
                 // Pixel identity FIRST — before the badge/baseline/stash are
@@ -4675,6 +4702,15 @@ impl AutoshopApp {
                 };
                 if let Some(n) = pixel_note {
                     s.push_str(&n);
+                }
+                if relooked {
+                    s.push_str(&format!(
+                        " · {}",
+                        tr(
+                            lang,
+                            "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                        )
+                    ));
                 }
                 self.forget_open_base();
                 self.status = s;
@@ -5183,36 +5219,6 @@ impl AutoshopApp {
                                 self.src_path.as_ref().and_then(|p| self.nav_stash.remove(p))
                             {
                                 recipe = st.recipe;
-                                // The stash carries the canvas VERBATIM — and
-                                // when the ORIGINAL open's repair was an
-                                // inability, that canvas still holds the
-                                // washed era-1 curve. Inabilities exist to be
-                                // retried by the next reader, and the gate
-                                // above deliberately skipped the disk-recipe
-                                // repair in deference to this override — so
-                                // the retry happens HERE, on the recipe that
-                                // actually lands on the canvas. Memo-bounded:
-                                // an already-repaired stash short-circuits on
-                                // its era stamp before touching the file.
-                                // Without this, the canvas rendered
-                                // stops-dark all session while every
-                                // deliverable repaired for itself.
-                                if let Some(p) = self.src_path.clone()
-                                    && autoshop::pipeline::repair_pre_era_base_curve(
-                                        &p, &mut recipe,
-                                    )
-                                    .is_some()
-                                {
-                                    let w = tr(
-                                        lang,
-                                        "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
-                                    )
-                                    .to_string();
-                                    open_note = Some(match open_note {
-                                        Some(o) => format!("{o} · {w}"),
-                                        None => w,
-                                    });
-                                }
                                 pixels = match (st.base, st.origin) {
                                     (Some(b), Some(o)) => Some((b, o, st.generated)),
                                     _ => None,
@@ -5220,6 +5226,67 @@ impl AutoshopApp {
                                 stash_others = st.others;
                                 stash_active_pos = st.active_pos;
                                 from_stash = true;
+                                // The stash carries the strip VERBATIM — and
+                                // when the ORIGINAL open's repair was an
+                                // inability, those recipes still hold the
+                                // washed era-1 curve. Inabilities exist to
+                                // be retried by the next reader, and the
+                                // gate above deliberately skipped the
+                                // disk-recipe repair in deference to this
+                                // override — so the retry happens HERE, on
+                                // every recipe that can land on the canvas:
+                                // the active one AND each sibling (a strip
+                                // entry is one click from BEING the canvas).
+                                // Pushed variants are era-2 by construction
+                                // (NewGenerated and Fitted both start from
+                                // Default), so for them the loop is a pure
+                                // version-check no-op — it exists for the
+                                // narrow residual (a pre-era snapshot
+                                // load_version'd onto a variant during an
+                                // inability window) and to enforce the
+                                // invariant HERE instead of leaning on the
+                                // construction sites. ONE estimate total —
+                                // the memo keys on the photo — and already-
+                                // repaired recipes short-circuit on their
+                                // era stamp.
+                                // A failed estimate retries on the next
+                                // return; the deterministic-inability
+                                // population is empty for estimator-written
+                                // curves (the too-few-pixels guard is
+                                // coeval with base_curve itself). Generated
+                                // entries are skipped like the other four
+                                // ordering sites — their curves are empty
+                                // by invariant, and the explicit guard
+                                // beats leaning on six unrelated call
+                                // sites.
+                                if let Some(p) = self.src_path.clone() {
+                                    let mut relooked = !st.generated
+                                        && autoshop::pipeline::repair_pre_era_base_curve(
+                                            &p, &mut recipe,
+                                        )
+                                        .is_some();
+                                    for sv in &mut stash_others {
+                                        if sv.kind != VariantKind::Generated {
+                                            relooked |=
+                                                autoshop::pipeline::repair_pre_era_base_curve(
+                                                    &p,
+                                                    &mut sv.recipe,
+                                                )
+                                                .is_some();
+                                        }
+                                    }
+                                    if relooked {
+                                        let w = tr(
+                                            lang,
+                                            "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                                        )
+                                        .to_string();
+                                        open_note = Some(match open_note {
+                                            Some(o) => format!("{o} · {w}"),
+                                            None => w,
+                                        });
+                                    }
+                                }
                             }
                             self.recipe = recipe.clone();
                             self.rationale = recipe.rationale.clone();
@@ -10942,10 +11009,11 @@ mod tests {
         // A repaired canvas (era 2, fresh curve) against an unrepaired
         // baseline (era 1, washed curve) — same user edits — is NOT dirty:
         // the curve is calibration and `version` is its provenance stamp.
-        // The live mismatch is baseline-v1 vs canvas-v2 (a repaired stash
-        // over a gated disk read); the reverse is asserted for symmetry —
-        // an inability at open leaves BOTH sides era 1, so no current path
-        // produces it, and none may ever read it as an edit.
+        // BOTH directions are live: the stash gate produces baseline-v1 vs
+        // canvas-v2, and load_version produces the reverse — a pre-era
+        // snapshot whose LIFTING curve the fingerprint rightly declines
+        // lands on the canvas at era 1 under an era-2 baseline. Neither may
+        // ever read as an edit.
         let baseline = EditRecipe {
             version: 1,
             base_curve: vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0]],
@@ -11270,6 +11338,49 @@ mod tests {
             "save_xmp itself must flush the pending rename"
         );
 
+        std::fs::remove_file(&mask_path).ok();
+    }
+
+    #[test]
+    fn a_clean_photo_is_not_stashed_for_another_photos_background_work() {
+        // Batch 47's stash gate keyed on a per-photo count; batch 56 widened
+        // the count for the quit dialog and the gate silently inherited it —
+        // one photo with a dirty background variant then chain-stashed every
+        // clean photo the user merely visited, the quit dialog listed them
+        // as unsaved, and Save-all wrote sidecars for zero user edits.
+        let (mut app, mask_path) = app_with_masked_photo("chainstash");
+        app.saved_recipe = app.recipe.clone(); // this canvas is clean
+        app.variants[0].origin = None;
+        app.pixels_on_disk = None;
+        let clean = PathBuf::from("D:/__autoshop_chain__/clean.ARW");
+        app.src_path = Some(clean.clone());
+        // ANOTHER photo's stash holds a dirty background variant.
+        app.nav_stash.insert(
+            PathBuf::from("D:/__autoshop_chain__/other.ARW"),
+            StashEntry {
+                recipe: app.recipe.clone(),
+                base: None,
+                origin: None,
+                generated: false,
+                others: vec![StashedVariant {
+                    kind: VariantKind::Generated,
+                    recipe: EditRecipe { contrast: 33.0, ..Default::default() },
+                    base: None,
+                    origin: Some(PathBuf::from("out/_chain_gen.png")),
+                }],
+                active_pos: 0,
+            },
+        );
+        assert_eq!(app.open_dirty_variants(), 0, "this photo's strip is clean");
+        assert!(
+            app.inactive_dirty_variants() > 0,
+            "the quit surfaces still see the other photo's work"
+        );
+        app.open_path(PathBuf::from("D:/__autoshop_chain__/next.ARW"));
+        assert!(
+            !app.nav_stash.contains_key(&clean),
+            "a clean photo must not be stashed for another photo's background work"
+        );
         std::fs::remove_file(&mask_path).ok();
     }
 
