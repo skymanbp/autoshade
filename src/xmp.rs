@@ -619,6 +619,15 @@ fn top_level_owned_spans(
             i = p + 2 + after.find("?>")? + 2;
             continue;
         }
+        // CDATA is TEXT, not markup: its `<`/`>` must not be counted as tags.
+        // Counting them left `depth` unbalanced, which bails the whole merge
+        // into a full regenerate — and that path replaces the user's sidecar
+        // with our own document, taking every foreign property with it. Legal
+        // XML must never reach the bail.
+        if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            i = p + "<![CDATA[".len() + after.find("]]>")? + 3;
+            continue;
+        }
         let (gt, self_closing) = scan_tag_end(body, p)?;
         let name = tag_name(&body[p..=gt]).to_string();
         if rest.starts_with("</") {
@@ -1791,6 +1800,36 @@ mod tests {
             "ours + the Look's open/close, no shadow copy: {merged}"
         );
         assert_eq!(xmp_to_recipe(&merged).exposure_ev, 0.25);
+    }
+
+    #[test]
+    fn merge_survives_a_cdata_section() {
+        // LEGAL XML must never fall back to a full regenerate: that path
+        // replaces the user's whole sidecar with our own document and takes
+        // every foreign property with it — the data loss the merge exists to
+        // prevent. A CDATA section is not a tag; a scanner that counts it as
+        // one leaves `depth` unbalanced and bails.
+        let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+ <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+  <rdf:Description rdf:about=\"\"\n\
+    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+    xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n\
+    crs:HasSettings=\"True\">\n\
+   <crs:Exposure2012>+1.00</crs:Exposure2012>\n\
+   <dc:description><![CDATA[client <proof> notes]]></dc:description>\n\
+   <crs:Texture>+20</crs:Texture>\n\
+  </rdf:Description>\n\
+ </rdf:RDF>\n\
+</x:xmpmeta>\n";
+        let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        let merged = merge_recipe_into_xmp(lr, &r).expect("a CDATA section must stay mergeable");
+        assert!(
+            merged.contains("<![CDATA[client <proof> notes]]>"),
+            "the foreign CDATA property must survive verbatim: {merged}"
+        );
+        assert!(merged.contains("<crs:Texture>+20</crs:Texture>"), "unowned element survives");
+        assert!(!merged.contains("<crs:Exposure2012>"), "ours is still stripped: {merged}");
+        assert!(merged.contains("crs:Exposure2012=\"0.25\""));
     }
 
     #[test]
