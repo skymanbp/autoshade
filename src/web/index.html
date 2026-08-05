@@ -1435,7 +1435,15 @@ async function saveXmp() {
   // The answer belongs to THIS photo: markSaved() after a switch would
   // baseline the NEW photo's canvas as saved and silence its own
   // unsaved-edits warning (the fill/heal handlers' guard).
+  // Snapshot the BASELINE at send time, not at response time. Sliders, Undo
+  // and the fill/heal buttons all stay live during the flight (only .savexmp
+  // is disabled), so a markSaved() after the await recorded whatever the
+  // canvas happened to hold — edits the server never received were marked
+  // "on disk" and were then discarded without warning on the next photo
+  // switch. This is the same failure the analyze path already fixed for the
+  // master half; the save path sitting next to it kept it.
   const reqId = state.id, reqSeq = selectSeq, sentMaster = state.sessionMaster || null;
+  const sentBaseline = JSON.stringify({ recipe: state.recipe, master: sentMaster });
   try {
     const r = await fetch("/api/xmp", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({id: reqId, recipe: state.recipe,
@@ -1449,7 +1457,7 @@ async function saveXmp() {
     if (!r.ok) { setStatus((stale ? "save for another photo failed: " : "save failed: ") + body); return; }
     if (stale) { setStatus("save for another photo finished — its develop is on disk"); loadList(); return; }
     setStatus(body.startsWith("cleared") ? "saved edits cleared" : ("xmp + recipe saved → " + body));
-    markSaved(); // what is on disk now matches the canvas
+    savedRecipe = sentBaseline; // what is on disk = what this request CARRIED
     if (sentMaster && !body.startsWith("cleared")
         && !body.includes("recording the retouched master failed")) {
       // The session master is now the photo's PERSISTED pixel source, so
@@ -1457,11 +1465,17 @@ async function saveXmp() {
       // source") would render the freshly persisted fill under pre-fill
       // sliders — a lie. Drop them; fill-era entries name their ./out file
       // explicitly and stay undoable.
+      // Only when the CURRENT entry is itself fill-era. An Undo landing
+      // during the flight moves hi onto a master:null entry; the filter then
+      // removed that very entry, indexOf returned -1, and the array collapsed
+      // to [cur] — keeping the one entry this prune exists to drop and
+      // destroying every undoable fill-era entry with it.
       const cur = history[hi];
-      history = history.filter(h => h.master !== null);
-      hi = history.indexOf(cur);
-      if (hi < 0) { history = cur ? [cur] : []; hi = history.length - 1; }
-      updateUndo();
+      if (cur && cur.master !== null) {
+        history = history.filter(h => h.master !== null);
+        hi = history.indexOf(cur);
+        updateUndo();
+      }
     }
     loadList();   // the ● edited badge just appeared / disappeared
   } finally { if (btn) btn.disabled = false; }

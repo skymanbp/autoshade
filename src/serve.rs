@@ -1736,7 +1736,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // BOTH homes are cleared — the central store AND any legacy ./out sidecar,
     // which would otherwise resurrect the edits through the read fallbacks.
     // Version snapshots are kept.
-    if req.recipe.is_noop() {
+    // `&& master.is_none()`: a baked pixel retouch IS an edit even under a
+    // neutral recipe. Without it, "Fill (or heal) then Save" on a photo whose
+    // sliders were never touched took the CLEAR path — the accepted master was
+    // dropped, pixels.json was deleted, and the 200 said "cleared", after which
+    // the browser baselined the canvas as saved and the retouch died silently
+    // on the next thumbnail click. The GUI has carried exactly this guard since
+    // it hit the same defect (its `active_variant().origin` clause).
+    if req.recipe.is_noop() && master.is_none() {
         // ONE primitive for every surface (`store::clear_develop`). This branch
         // and the GUI's Ctrl+S each kept their own copy of the file list and
         // drifted twice: the marker landed only in the GUI, and BOTH unlinked
@@ -1956,19 +1963,27 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         }
         _ => None,
     };
-    // Same unique-claim + config-snapshot rules as api_retouch (see there).
-    let Some(out) = pipeline::unique_out(&raw, "heal") else {
-        return Ok(status_response(500, "no free heal output name (999 in ./out)"));
-    };
-    let cfg = state.config().clone();
     // Same master-input rule as api_retouch (see there): session master
     // first — a second heal must build ON the first, not beside it.
+    //
+    // RESOLVED BEFORE the output claim, in api_retouch's order. `unique_out`
+    // claims its name by creating a 0-byte placeholder, and the rejection arm
+    // below returns without releasing it — so every rejected claim used to
+    // leave a 0-byte out/<stem>.heal-N.png that the next claim then skips.
+    // Batch 46 made rejection routine (any master not issued by THIS server
+    // run is refused, which is the normal state of a tab that outlived a
+    // restart), and 999 leaks retire that photo's heal output names for good.
     let (src, src_generated) = match session_master(req.master.as_deref(), &raw) {
         Ok(Some((p, g))) => (p, g),
         Ok(None) => crate::store::read_pixel_source(&raw)
             .unwrap_or_else(|| (raw.clone(), false)),
         Err(msg) => return Ok(status_response(400, &msg)),
     };
+    // Same unique-claim + config-snapshot rules as api_retouch (see there).
+    let Some(out) = pipeline::unique_out(&raw, "heal") else {
+        return Ok(status_response(500, "no free heal output name (999 in ./out)"));
+    };
+    let cfg = state.config().clone();
     let result = crate::retouch::heal(&cfg, &src, mask_tmp.as_deref(), req.auto, req.full_res, &out);
     if let Some(t) = &mask_tmp {
         let _ = std::fs::remove_file(t);
