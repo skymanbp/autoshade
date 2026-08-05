@@ -1204,7 +1204,16 @@ impl AutoshopApp {
     }
 
     fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
-        self.toasts.push(Toast { text: text.into(), kind, born: Instant::now() });
+        let text = text.into();
+        // An identical LIVE toast refreshes instead of duplicating: undoing
+        // through a washed history region fires the same repair disclosure
+        // once per healed step, and five copies evicted still-live ERROR
+        // toasts from the ring.
+        if let Some(t) = self.toasts.iter_mut().find(|t| t.text == text && t.kind == kind) {
+            t.born = Instant::now();
+            return;
+        }
+        self.toasts.push(Toast { text, kind, born: Instant::now() });
         if self.toasts.len() > 5 {
             self.toasts.remove(0); // keep the stack readable
         }
@@ -1997,11 +2006,26 @@ impl AutoshopApp {
                         let knots = match autoshop::decode::embedded_preview(&path) {
                             Ok(Some(cam)) => {
                                 let est = autoshop::render::estimation_base(&full, &lens);
-                                // None = could not judge. For an OPEN that is
-                                // the same as no base look — the repair path
-                                // is where the distinction decides whether a
-                                // SAVED curve may be replaced.
-                                autoshop::render::camera_base_knots(&est, &cam).unwrap_or_default()
+                                match autoshop::render::camera_base_knots(&est, &cam) {
+                                    // The ANSWER primes the repair memo: the
+                                    // open already paid this develop, and
+                                    // discarding the result made every later
+                                    // repair site (Ctrl+Z, variant switch,
+                                    // Ctrl+S) pay a second full decode on
+                                    // the UI thread. Answers only — an
+                                    // inability stays uncached so the next
+                                    // reader retries.
+                                    Some(k) => {
+                                        autoshop::pipeline::prime_curve_memo(&path, k.clone());
+                                        k
+                                    }
+                                    // None = could not judge. For an OPEN
+                                    // that is the same as no base look — the
+                                    // repair path is where the distinction
+                                    // decides whether a SAVED curve may be
+                                    // replaced.
+                                    None => Vec::new(),
+                                }
                             }
                             _ => Vec::new(),
                         };
@@ -2217,6 +2241,11 @@ impl AutoshopApp {
         // transient inability early-exits on the failed probe and retries on
         // the next read.
         if vkind != VariantKind::Generated
+            // ...and never while a photo OPEN is in flight: src_path already
+            // points at the INCOMING photo (the apply_step / live-canvas
+            // override hazard) — a worker-completion push_variant lands in
+            // exactly that window.
+            && !self.open_in_flight
             && let Some(p) = self.src_path.clone()
             && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
@@ -2677,11 +2706,22 @@ impl AutoshopApp {
         // that later promoted the canvas (Reset, Analyze, load_version,
         // Ctrl+S) cannot know which stack entries still hold it (the
         // save-time restamp covers only the pair IT replaced). Repairing on
-        // the way back keeps every door to the canvas behind one rule;
-        // memo-warm, and era-2 installs short-circuit before any I/O.
-        // `committed` follows the heal, or the next commit_now would push
-        // the washed head straight back onto the stack.
-        if let Some(p) = self.src_path.clone()
+        // the way back keeps every door to the canvas behind one rule.
+        // Memo-warm FOR REAL: the open worker primes the memo with its own
+        // estimate, so this is a lookup, not a decode; era-2 installs
+        // short-circuit before any I/O; the Generated guard matches every
+        // other ordering site; and an in-flight OPEN is refused — src_path
+        // already points at the INCOMING photo while this history belongs
+        // to the outgoing one (the live-canvas override records the same
+        // hazard), so repairing here would estimate the WRONG photo onto
+        // this canvas. `committed` follows the heal, or the next commit_now
+        // would push the washed head straight back onto the stack.
+        if !self.open_in_flight
+            && !self
+                .variants
+                .get(self.active)
+                .is_some_and(|v| v.kind == VariantKind::Generated)
+            && let Some(p) = self.src_path.clone()
             && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
             self.committed.recipe = self.recipe.clone();
@@ -3072,13 +3112,17 @@ impl AutoshopApp {
                 // already repaired, and it also covers the generated arm
                 // above, whose calibration snapshot may itself have adopted
                 // an unrepaired curve when the store read hit an inability.
-                // SAID on the loop's existing quitting-time channel — but
-                // only AFTER the write lands (below): a failed write changed
-                // nothing on disk, and claiming a re-estimate for it would
-                // be false.
+                // SAID on the loop's existing quitting-time channel — gated
+                // on the RECIPE write, not the compound result below: the
+                // pixel-link half can fail AFTER recipe.json already
+                // published the re-estimated curve, and dropping the note
+                // then hid a mutation that IS on disk (the Ctrl+S rule: the
+                // disclosure travels with the mutation).
                 let relook_note = autoshop::pipeline::repair_pre_era_base_curve(p, &mut disk);
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
-                let res = autoshop::pipeline::write_recipe(p, &disk, None).and_then(|_| {
+                let recipe_written = autoshop::pipeline::write_recipe(p, &disk, None);
+                let recipe_ok = recipe_written.is_ok();
+                let res = recipe_written.and_then(|_| {
                     // The baked-pixels link saves/clears with the recipe —
                     // the same pairing Ctrl+S writes.
                     match pix {
@@ -3087,12 +3131,14 @@ impl AutoshopApp {
                     }
                     .map_err(anyhow::Error::from)
                 });
+                if recipe_ok
+                    && let Some(note) = relook_note.as_deref()
+                {
+                    eprintln!("⚠ {}: {note}", autoshop::pipeline::stem(p));
+                }
                 if let Err(e) = res {
                     failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
                     break;
-                }
-                if let Some(note) = relook_note {
-                    eprintln!("⚠ {}: {note}", autoshop::pipeline::stem(p));
                 }
                 // NO XMP for a generated entry — Ctrl+S refuses those for the
                 // same reason: the look lives in baked pixels no parametric

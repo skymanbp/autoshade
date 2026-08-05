@@ -443,6 +443,26 @@ fn fresh_curve_memo()
     MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Seed the memo with an ANSWER a caller already computed. The GUI open
+/// worker develops the neutral and CDF-matches the camera rendition anyway;
+/// discarding that answer made every later repair site (Ctrl+Z's
+/// apply_step, a variant switch, Ctrl+S) pay a second full decode + develop
+/// on the UI thread for the identical result. Same identity key as the
+/// repair's own lookup. Answers only — callers must never prime an
+/// inability, which stays uncached so the next reader retries. The caller's
+/// working edge may differ from the repair's 2048 cap; both sides histogram
+/// through the same <=1024 thumbnail (see `render::camera_base_knots`), so
+/// the answer is the same within the estimator's own sub-bin tolerance.
+pub fn prime_curve_memo(raw: &Path, knots: Vec<[f32; 2]>) {
+    let ident = std::fs::metadata(raw)
+        .ok()
+        .map(|m| (m.len(), m.modified().ok()))
+        .unwrap_or((0, None));
+    if let Ok(mut m) = fresh_curve_memo().lock() {
+        m.insert((raw.to_path_buf(), ident), knots);
+    }
+}
+
 /// Re-estimate a base curve that was fitted against a washed frame, and say
 /// so. Returns the disclosure when the curve was replaced.
 ///
