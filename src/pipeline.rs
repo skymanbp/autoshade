@@ -1407,7 +1407,11 @@ mod tests {
     #[test]
     fn render_funnel_repairs_with_a_source_and_never_on_a_refusal() {
         use crate::recipe::CALIB_ERA;
-        let dir = std::env::temp_dir().join("autoshop-pipeline-test-rsc-funnel");
+        // Process-unique: debug and gui-config `cargo test` runs can overlap,
+        // and a shared fixture path lets one process delete the other's probe
+        // mid-test — the exact race a round-5 fixture caught.
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-pipeline-test-rsc-funnel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let raw = dir.join("_rsc_funnel_probe.arw");

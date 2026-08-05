@@ -1499,6 +1499,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // degradation rides back as a header the status line surfaces.
     let mut preview_warning: Option<String> = None;
     let mut recipe_note: Option<String> = None;
+    let mut funnel_ran = false;
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some((p, generated))) => {
             if generated {
@@ -1512,6 +1513,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
             Ok((p, note)) => {
                 recipe_note = note;
+                funnel_ran = true;
                 p
             }
             Err(msg) => {
@@ -1523,12 +1525,16 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     };
     // ONE repair for the arms the funnel did not cover — a SESSION master
     // (non-generated pixels render the curve on top) and the degraded Err
-    // fallback above (which renders the RAW) — and a no-op when the funnel
-    // already repaired. The note rides X-Recipe-Warning below: for a browser
-    // it is None (api_recipe repaired and disclosed before the client ever
-    // held this recipe), so the header fires exactly for clients that
-    // BYPASSED api_recipe — the population that was never told.
-    if recipe_note.is_none() {
+    // fallback above (which renders the RAW). Keyed on whether the funnel
+    // RAN, never on the note: a None note also means "the funnel tried and
+    // the estimate was an inability" (uncached by design), and re-running
+    // the identical call paid the failed decode + develop twice per request.
+    // The note rides X-Recipe-Warning below, and the browser DOES read it on
+    // render fetches: a select-time inability makes api_recipe serve the
+    // washed recipe verbatim with no warning, and the retry that succeeds
+    // happens here — "for a browser it is None" was false in exactly that
+    // designed-for state.
+    if !funnel_ran {
         recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
     }
     let preview = develop_base(&src)?;
@@ -1588,6 +1594,7 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // must match the healed preview the user just approved, generated-root
     // strip included.
     let mut recipe_note: Option<String> = None;
+    let mut funnel_ran = false;
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some((p, generated))) => {
             if generated {
@@ -1604,17 +1611,19 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
             Ok((p, note)) => {
                 recipe_note = note;
+                funnel_ran = true;
                 p
             }
             Err(msg) => return Ok(status_response(500, &msg)),
         },
         Err(msg) => return Ok(status_response(400, &msg)),
     };
-    // ONE repair for the session-master arm (non-generated pixels render the
-    // curve on top; the funnel never ran there) — a no-op when the funnel
-    // already repaired. X-Recipe-Warning below fires exactly for clients
-    // that bypassed api_recipe's select-time repair + disclosure.
-    if recipe_note.is_none() {
+    // ONE repair for the session-master arm (the funnel never ran there).
+    // Keyed on whether the funnel RAN, never on the note — a None note also
+    // means "tried, inability", and re-running the identical call paid the
+    // failed decode twice per request while holding the HEAVY lock. The
+    // client reads X-Recipe-Warning on this fetch too (see api_develop).
+    if !funnel_ran {
         recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
     }
     // Fixed name BY DESIGN: re-exporting the same photo replaces its own
@@ -1672,6 +1681,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     // Session master wins here too (api_develop's rule), generated-root
     // strip included.
     let mut recipe_note: Option<String> = None;
+    let mut funnel_ran = false;
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some((p, generated))) => {
             if generated {
@@ -1688,6 +1698,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
             Ok((p, note)) => {
                 recipe_note = note;
+                funnel_ran = true;
                 p
             }
             Err(msg) => return Ok(status_response(500, &msg)),
@@ -1695,7 +1706,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         Err(msg) => return Ok(status_response(400, &msg)),
     };
     // ONE repair for the session-master arm — see api_export.
-    if recipe_note.is_none() {
+    if !funnel_ran {
         recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
     }
     // Config SNAPSHOT — see api_export.
@@ -1868,12 +1879,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // This save was routed PAST the clear branch above solely because of
         // the persisted master — say so, or the 200 reads as "everything is
         // neutral now" while the baked retouch still backs every render.
-        // No removal instruction: an in-place master currently has NO detach
-        // affordance on either surface (the GUI clear guard needs an
-        // origin-free canvas, and only reverse-fit — Generated-only — or a
-        // failed master load produces one). The gap is a roadmap item; until
-        // then the note states what happened, not a route that does not
-        // exist.
+        // No removal instruction: the only route that detaches a healthy
+        // in-place master is SESSION-BOUND and undiscoverable — in the GUI,
+        // undo to the pre-retouch step and save (the clear guard sees an
+        // origin-free canvas); gone after a reopen, when the undo stack is
+        // empty and origin restores from pixels.json. The web has no route
+        // at all. The roadmap records the missing explicit action; until
+        // then the note states what happened, not a route the user cannot
+        // find.
         master_note = " — the saved retouch master was kept: a neutral save never deletes \
                        baked pixels"
             .to_string();

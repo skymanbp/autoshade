@@ -1854,11 +1854,16 @@ fn mask_family(bare: &str) -> &str {
 /// stamp over a neutral-cleared baseline, a Generated variant's empty curve,
 /// a paste that resolved the target's own curve) must not light ●, block
 /// quit, or stash a canvas — that was exactly the "permanent ● with no way
-/// to clear it" regression the adversarial review caught.
+/// to clear it" regression the adversarial review caught. `version` is the
+/// SAME calibration's provenance stamp (the pre-era repair bumps it with the
+/// curve), so it is neutralised with it: a repaired canvas against an
+/// unrepaired baseline — either direction, the stash paths produce both —
+/// must not read as an edit, or the photo stays "unsaved" all session and
+/// Save-all writes sidecars for zero user edits.
 fn dirty_vs(canvas: &EditRecipe, baseline: &EditRecipe) -> bool {
     canvas != baseline
-        && EditRecipe { base_curve: Vec::new(), ..canvas.clone() }
-            != EditRecipe { base_curve: Vec::new(), ..baseline.clone() }
+        && EditRecipe { version: 0, base_curve: Vec::new(), ..canvas.clone() }
+            != EditRecipe { version: 0, base_curve: Vec::new(), ..baseline.clone() }
 }
 
 impl AutoshopApp {
@@ -5012,10 +5017,12 @@ impl AutoshopApp {
                                         // stash is about to override the
                                         // canvas wholesale (below): the
                                         // toast would disclose a repair the
-                                        // stash discards, and ● would
-                                        // compare a repaired baseline
-                                        // against the unrepaired stashed
-                                        // canvas. Deliverables repair for
+                                        // stash discards, and the decode
+                                        // would be paid for nothing. (● is
+                                        // safe in BOTH directions now —
+                                        // dirty_vs neutralises the era
+                                        // stamp with the curve.)
+                                        // Deliverables repair for
                                         // themselves.
                                         && !self
                                             .src_path
@@ -10886,6 +10893,33 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dirty_vs_ignores_calibration_provenance() {
+        // A repaired canvas (era 2, fresh curve) against an unrepaired
+        // baseline (era 1, washed curve) — same user edits — is NOT dirty:
+        // the curve is calibration and `version` is its provenance stamp.
+        // Both directions occur (the stash gate produces baseline-v1 vs
+        // canvas-v2; an inability-at-open stash produces the reverse), and
+        // either one read as "unsaved edits" pinned ● for the session.
+        let baseline = EditRecipe {
+            version: 1,
+            base_curve: vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0]],
+            contrast: 20.0,
+            ..Default::default()
+        };
+        let canvas = EditRecipe {
+            version: 2,
+            base_curve: vec![[0.0, 0.0], [0.2, 0.4], [1.0, 1.0]],
+            contrast: 20.0,
+            ..Default::default()
+        };
+        assert!(!dirty_vs(&canvas, &baseline), "repair is not an edit");
+        assert!(!dirty_vs(&baseline, &canvas), "in either direction");
+        // ...while a real edit on the same pair still is.
+        let edited = EditRecipe { exposure_ev: 0.3, ..canvas.clone() };
+        assert!(dirty_vs(&edited, &baseline));
+    }
 
     #[test]
     fn insert_curve_point_keeps_inputs_sorted_and_unique() {

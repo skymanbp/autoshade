@@ -920,9 +920,14 @@ async function renderAfter() {
     if (seq !== afterSeq || id !== state.id) return;   // it went stale while we decoded the body
     setAfterSrc($(".after"), blob);
     // A degraded preview (e.g. broken retouch-master link) says so instead
-    // of silently showing the un-retouched source (A6).
+    // of silently showing the un-retouched source (A6). X-Recipe-Warning
+    // arrives when THIS render repaired a pre-era base look the loaded
+    // recipe still carries — api_recipe's own repair was an inability at
+    // select time and served the washed file verbatim; the retry that
+    // succeeded happened here. Reselecting the photo refreshes the recipe.
     const warn = r.headers.get("X-Preview-Warning");
-    setStatus(warn ? "⚠ " + warn : "");
+    const relook = r.headers.get("X-Recipe-Warning");
+    setStatus([warn, relook].filter(Boolean).map(w => "⚠ " + w).join("  ·  "));
   } catch (e) {
     // Network-level rejection: without this the promise died unhandled and
     // the status claimed "rendering preview…" forever.
@@ -1517,7 +1522,11 @@ async function exportFull() {
   try {
     const r = await fetch("/api/export", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(saveBody())});
     const body = await r.text();
-    setStatus(r.ok ? ("exported → " + body) : ("export failed: " + body));
+    // Same rule as the preview: the render-side repair disclosure must not
+    // be write-only for the browser.
+    const relook = r.headers.get("X-Recipe-Warning");
+    setStatus((r.ok ? ("exported → " + body) : ("export failed: " + body))
+      + (relook ? "  ·  ⚠ " + relook : ""));
   } finally { exportBusy = false; btn.disabled = false; }
 }
 
@@ -1541,7 +1550,8 @@ async function downloadFull() {
     // clicked — but the blob lives until revoked. Give the browser a generous
     // window to actually start the save, then free it.
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-    setStatus("downloaded");
+    const relook = r.headers.get("X-Recipe-Warning");
+    setStatus("downloaded" + (relook ? "  ·  ⚠ " + relook : ""));
   } finally { exportBusy = false; btn.disabled = false; }
 }
 
