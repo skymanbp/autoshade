@@ -1795,52 +1795,6 @@ fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe
     r
 }
 
-/// Delete a photo's saved-develop sidecars (Ctrl+S's neutral-save semantics:
-/// "clear my edits"): BOTH homes — central store and legacy ./out — plus the
-/// baked-pixels link; version snapshots are kept. A file already missing IS
-/// the desired end state; any other removal failure surfaces (the surviving
-/// sidecar would resurrect the edits on reopen). Returns whether anything was
-/// actually removed. Shared by Ctrl+S and 「Save all & quit」 — the quit path
-/// used to WRITE neutral files instead, pinning the ● badge Ctrl+S clears.
-fn clear_saved_develop(path: &std::path::Path) -> std::io::Result<bool> {
-    let del = |p: &std::path::Path| match std::fs::remove_file(p) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
-    };
-    let mut removed = false;
-    let mut first_err: Option<std::io::Error> = None;
-    for p in [
-        autoshop::store::recipe_target(path),
-        autoshop::pipeline::xmp_target(path),
-        autoshop::store::legacy_recipe(path),
-        autoshop::store::legacy_xmp(path),
-        autoshop::store::pixel_source_path(path),
-    ] {
-        match del(&p) {
-            Ok(b) => removed |= b,
-            Err(e) => {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-    }
-    if let Some(e) = first_err {
-        return Err(e);
-    }
-    // Stamp the clear's moment so the newest-intent rule can rank it against
-    // the Lightroom sidecar beside the RAW (store::lightroom_sidecar): the
-    // projection the user once copied there — no longer byte-matchable after
-    // this clear deleted our store copies — used to resurrect the cleared
-    // edits on the very next open (M22). Best-effort: without the marker the
-    // only cost is that old behaviour.
-    if let Err(e) = autoshop::store::mark_develop_cleared(path) {
-        eprintln!("⚠ could not stamp the cleared marker: {e}");
-    }
-    Ok(removed)
-}
-
 /// The pointer's press origin via a Response (`handle_paint` has no `ui`).
 fn ui_press_origin(resp: &egui::Response) -> Option<egui::Pos2> {
     resp.ctx.input(|i| i.pointer.press_origin())
@@ -2922,14 +2876,28 @@ impl AutoshopApp {
             let mut failed: Option<String> = None;
             // Collected, not fatal — reported on the way out (see below).
             let mut xmp_warn: Option<String> = None;
+            let mut clear_warn: Option<String> = None;
             for (p, r, pix) in &pending {
                 // Neutral + no pixel identity = Ctrl+S's "clear my edits":
                 // WRITING neutral files here pinned the existence-keyed ●
                 // badge that a direct Ctrl+S removes.
                 if r.is_noop() && pix.is_none() {
-                    if let Err(e) = clear_saved_develop(p) {
-                        failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
-                        break;
+                    // The store's ONE clear primitive (both surfaces): it takes
+                    // the retired pixels.json.bak with it, which a bare unlink
+                    // left behind for the next open to republish.
+                    match autoshop::store::clear_develop(p) {
+                        Ok(o) => {
+                            // Cleared, but not MARKED — same channel as the XMP
+                            // half: quitting silently would let a projection
+                            // copied beside the RAW undo this clear unannounced.
+                            if let Some(w) = o.marker_warning {
+                                clear_warn = Some(format!("{}: {w}", autoshop::pipeline::stem(p)));
+                            }
+                        }
+                        Err(e) => {
+                            failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -2987,6 +2955,12 @@ impl AutoshopApp {
                         // Said, never swallowed: the develops ARE saved, but
                         // Lightroom will not see this one until it is rewritten.
                         eprintln!("⚠ develops saved; a Lightroom XMP failed: {w}");
+                    }
+                    if let Some(w) = clear_warn {
+                        eprintln!(
+                            "⚠ edits cleared, but the clear could not be marked: {w} — a sidecar \
+                             beside the RAW may restore them on the next open"
+                        );
                     }
                     self.nav_stash.clear();
                     self.saved_recipe = self.recipe.clone();
@@ -4399,8 +4373,8 @@ impl AutoshopApp {
         // pixels.json), not report "nothing to save" while deleting the very
         // linkage the retouch needs to survive a reopen.
         if self.recipe.is_noop() && self.active_variant().is_none_or(|v| v.origin.is_none()) {
-            match clear_saved_develop(&path) {
-                Ok(removed) => {
+            match autoshop::store::clear_develop(&path) {
+                Ok(o) => {
                     self.edited_badge.clear();
                     // The CANVAS is the baseline, not default(): Reset leaves
                     // the stamped lens profile (and knots) on the canvas, and
@@ -4410,11 +4384,28 @@ impl AutoshopApp {
                     self.pixels_on_disk = None;
                     self.nav_stash.remove(&path);
                     self.forget_open_base();
-                    self.status = if removed {
-                        tr(lang, "neutral recipe — saved edits cleared (saved files removed)").into()
-                    } else {
-                        tr(lang, "neutral recipe — nothing to save").into()
-                    };
+                    match o.marker_warning {
+                        // NEVER a plain success: the store copies are gone, but
+                        // without the marker a projection copied beside the RAW
+                        // out-ranks this clear and restores the edits on reopen.
+                        Some(w) => {
+                            let t = trf(
+                                lang,
+                                "saved edits cleared, but the clear could not be marked ({err}) — a sidecar beside the RAW may restore them",
+                                &[("err", &w)],
+                            );
+                            self.status = t.clone();
+                            self.toast(ToastKind::Error, t);
+                        }
+                        None => {
+                            self.status = if o.removed {
+                                tr(lang, "neutral recipe — saved edits cleared (saved files removed)")
+                                    .into()
+                            } else {
+                                tr(lang, "neutral recipe — nothing to save").into()
+                            };
+                        }
+                    }
                 }
                 Err(e) => {
                     let t = trf(

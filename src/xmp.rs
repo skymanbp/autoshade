@@ -573,6 +573,100 @@ fn refresh_rationale_comment(doc: String, r: &EditRecipe) -> String {
     )
 }
 
+/// The element name in a start or end tag: `<crs:Exposure2012 xml:lang="…">`
+/// and `</crs:Exposure2012>` both give `crs:Exposure2012`.
+fn tag_name(tag: &str) -> &str {
+    let t = tag.trim_start_matches('<').trim_start_matches('/');
+    let end = t.find(|c: char| c.is_whitespace() || c == '>' || c == '/').unwrap_or(t.len());
+    &t[..end]
+}
+
+/// Byte spans of the body's TOP-LEVEL owned property elements, in reverse
+/// document order so the caller can splice them out without re-indexing.
+///
+/// DEPTH-AWARE, and matched by tag NAME. A flat `<crs:Name>` literal scan
+/// reached INSIDE the creative Look this merge exists to preserve: Adobe
+/// writes a profile's baked parameters as owned-LOOKING children of a nested
+/// `rdf:Description` (`<crs:Look><rdf:Description><crs:Parameters>
+/// <rdf:Description><crs:Exposure2012>…`), and stripping those gutted the
+/// Look — verified by a probe on that exact shape. An owned property belongs
+/// to THIS Description; anything deeper belongs to its container. Matching by
+/// name also catches the attribute-carrying spelling
+/// (`<crs:Exposure2012 xml:lang="x-default">`), which the literal missed —
+/// leaving behind the very duplicate the element strip exists to prevent.
+///
+/// `None` = markup this scanner cannot account for (an unterminated tag, a
+/// close with no open, an owned element that never closes). The merge then
+/// bails and the caller regenerates the document, which is the pre-merge
+/// behaviour.
+fn top_level_owned_spans(
+    body: &str,
+    owned: &std::collections::HashSet<String>,
+) -> Option<Vec<(usize, usize)>> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0usize;
+    // The owned element currently open AT TOP LEVEL: (span start, tag name).
+    let mut open: Option<(usize, String)> = None;
+    let mut i = 0usize;
+    while let Some(rel) = body[i..].find('<') {
+        let p = i + rel;
+        let rest = &body[p..];
+        if let Some(after) = rest.strip_prefix("<!--") {
+            i = p + 4 + after.find("-->")? + 3;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("<?") {
+            i = p + 2 + after.find("?>")? + 2;
+            continue;
+        }
+        let (gt, self_closing) = scan_tag_end(body, p)?;
+        let name = tag_name(&body[p..=gt]).to_string();
+        if rest.starts_with("</") {
+            // A close with no open: not markup this scanner can splice.
+            depth = depth.checked_sub(1)?;
+            if depth == 0
+                && let Some((start, open_name)) = open.take()
+            {
+                if name != open_name {
+                    return None;
+                }
+                spans.push((start, gt + 1));
+            }
+            i = gt + 1;
+            continue;
+        }
+        if depth == 0
+            && let Some(bare) = name.strip_prefix("crs:")
+            && owned.contains(bare)
+        {
+            // The leading indentation (and the newline before it) goes with
+            // the property — the same whitespace hygiene the attribute strip
+            // applies, so an untouched document's formatting is preserved.
+            let mut start = p;
+            while start > 0 && matches!(body.as_bytes()[start - 1], b' ' | b'\t') {
+                start -= 1;
+            }
+            if start > 0 && body.as_bytes()[start - 1] == b'\n' {
+                start -= 1;
+            }
+            if self_closing {
+                spans.push((start, gt + 1));
+            } else {
+                open = Some((start, name.clone()));
+            }
+        }
+        if !self_closing {
+            depth += 1;
+        }
+        i = gt + 1;
+    }
+    if open.is_some() || depth != 0 {
+        return None; // unbalanced: regenerate rather than splice blind
+    }
+    spans.reverse();
+    Some(spans)
+}
+
 /// Graft `r`'s owned settings INTO an existing sidecar document, preserving
 /// every property Autoshop does not model — Lightroom-only globals
 /// (Texture), the camera profile / creative Look, Lightroom's lens-profile
@@ -637,7 +731,7 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
     // sidecars (crs_str reads that form for exactly that reason), so an
     // attribute-only strip left the old element value in the body beside
     // the attribute we append — one document, two conflicting answers.
-    let owned_elements = [
+    let owned_elements: std::collections::HashSet<String> = [
         "ToneCurvePV2012",
         "ToneCurvePV2012Red",
         "ToneCurvePV2012Green",
@@ -646,21 +740,14 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
     ]
     .into_iter()
     .map(str::to_string)
-    .chain(owned_attr_keys());
-    for name in owned_elements {
-        let open = format!("<crs:{name}>");
-        let close = format!("</crs:{name}>");
-        while let Some(p) = body.find(&open) {
-            let after = p + body[p..].find(&close)? + close.len();
-            let mut left = p;
-            while left > 0 && matches!(body.as_bytes()[left - 1], b' ' | b'\t') {
-                left -= 1;
-            }
-            if left > 0 && body.as_bytes()[left - 1] == b'\n' {
-                left -= 1;
-            }
-            body.replace_range(left..after, "");
-        }
+    .chain(owned_attr_keys())
+    .collect();
+    // TOP LEVEL ONLY (see `top_level_owned_spans`): the previous flat scan
+    // also stripped identically-named children out of the nested Look this
+    // merge exists to preserve. Reverse document order — earlier spans keep
+    // their indices while later ones are spliced out.
+    for (start, end) in top_level_owned_spans(&body, &owned_elements)? {
+        body.replace_range(start..end, "");
     }
 
     let mut out = String::with_capacity(existing.len() + 256);
@@ -1653,6 +1740,57 @@ mod tests {
         let back = xmp_to_recipe(&merged);
         assert_eq!(back.exposure_ev, 0.25);
         assert_eq!(back.contrast, 0.0, "the old element value must not shadow the cleared slider");
+    }
+
+    #[test]
+    fn merge_strips_only_top_level_owned_elements() {
+        // The strip is a property of THIS Description. Adobe writes a creative
+        // profile's baked parameters as owned-LOOKING children of a nested
+        // rdf:Description inside <crs:Look>, and a flat scan reached in and
+        // gutted them — destroying the very Look this merge exists to
+        // preserve. Name matching also catches the attribute-carrying
+        // spelling, which the `<crs:Name>` literal missed (leaving exactly the
+        // duplicate the element strip exists to prevent).
+        let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+ <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+  <rdf:Description rdf:about=\"\"\n\
+    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+    crs:HasSettings=\"True\">\n\
+   <crs:Exposure2012 xml:lang=\"x-default\">+1.00</crs:Exposure2012>\n\
+   <crs:Look>\n\
+    <rdf:Description crs:Name=\"Adobe Landscape\" crs:Amount=\"1\">\n\
+     <crs:Parameters>\n\
+      <rdf:Description crs:Version=\"15.4\">\n\
+       <crs:Exposure2012>+0.35</crs:Exposure2012>\n\
+       <crs:ToneCurvePV2012>\n\
+        <rdf:Seq><rdf:li>0, 0</rdf:li></rdf:Seq>\n\
+       </crs:ToneCurvePV2012>\n\
+      </rdf:Description>\n\
+     </crs:Parameters>\n\
+    </rdf:Description>\n\
+   </crs:Look>\n\
+  </rdf:Description>\n\
+ </rdf:RDF>\n\
+</x:xmpmeta>\n";
+        let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        let merged = merge_recipe_into_xmp(lr, &r).expect("mergeable");
+        // The Look keeps BOTH of its own baked parameters.
+        assert!(
+            merged.contains("<crs:Exposure2012>+0.35</crs:Exposure2012>"),
+            "the Look's own parameter must survive: {merged}"
+        );
+        assert!(merged.contains("<rdf:li>0, 0</rdf:li>"), "the Look's own curve must survive");
+        assert!(merged.contains("crs:Name=\"Adobe Landscape\""), "and the Look itself");
+        // ...while OUR top-level property is stripped in the attribute-carrying
+        // spelling too, leaving exactly one answer for the slider.
+        assert!(!merged.contains("xml:lang"), "top-level owned element stripped: {merged}");
+        assert!(merged.contains("crs:Exposure2012=\"0.25\""), "ours is the attribute");
+        assert_eq!(
+            merged.matches("crs:Exposure2012").count(),
+            3,
+            "ours + the Look's open/close, no shadow copy: {merged}"
+        );
+        assert_eq!(xmp_to_recipe(&merged).exposure_ev, 0.25);
     }
 
     #[test]

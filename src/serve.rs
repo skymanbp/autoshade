@@ -1737,40 +1737,27 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // which would otherwise resurrect the edits through the read fallbacks.
     // Version snapshots are kept.
     if req.recipe.is_noop() {
-        // A file already missing IS the desired end state; any other removal
-        // failure (lock, permissions) must not let us claim the edits were
-        // cleared — the surviving sidecar would resurrect them on reopen.
-        let del = |p: &Path| match std::fs::remove_file(p) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Some(e),
-            _ => None,
-        };
-        let mut first_err: Option<std::io::Error> = None;
-        for p in [
-            crate::store::recipe_target(&raw),
-            pipeline::xmp_target(&raw),
-            crate::store::legacy_recipe(&raw),
-            crate::store::legacy_xmp(&raw),
-            // The GUI's baked-pixels link too — a "cleared" answer here must
-            // not let the next GUI open resurrect a retouched master.
-            crate::store::pixel_source_path(&raw),
-        ] {
-            if let Some(e) = del(&p) {
-                first_err.get_or_insert(e);
+        // ONE primitive for every surface (`store::clear_develop`). This branch
+        // and the GUI's Ctrl+S each kept their own copy of the file list and
+        // drifted twice: the marker landed only in the GUI, and BOTH unlinked
+        // `pixels.json` directly — leaving the retired `pixels.json.bak` as
+        // bait for the next open's `recover_orphan_baks`, which handed the user
+        // back the very retouch this call reported as cleared.
+        return match crate::store::clear_develop(&raw) {
+            Ok(outcome) => {
+                // Said, never swallowed: the store copies ARE gone, but without
+                // the marker a projection the user copied beside the RAW now
+                // out-ranks this clear and restores the edits on the next open.
+                let note = match &outcome.marker_warning {
+                    Some(w) => format!(
+                        " - but the clear could not be marked ({w}); a sidecar beside the RAW \
+                         may restore these edits when you reopen"
+                    ),
+                    None => String::new(),
+                };
+                Ok(text_response(&format!("cleared — saved edits removed{note}")))
             }
-        }
-        return match first_err {
-            None => {
-                // Same newest-intent marker as the GUI's clear (M22) — the
-                // copied projection beside the RAW must not resurrect the
-                // edits this clear just removed (store::mark_develop_cleared).
-                if let Err(e) = crate::store::mark_develop_cleared(&raw) {
-                    eprintln!("⚠ could not stamp the cleared marker: {e}");
-                }
-                Ok(text_response("cleared — saved edits removed"))
-            }
-            Some(e) => {
-                Ok(status_response(500, &format!("could not clear the saved edits: {e}")))
-            }
+            Err(e) => Ok(status_response(500, &format!("could not clear the saved edits: {e}"))),
         };
     }
     // Dual-write, exactly as the GUI's `save_xmp` does: the XMP alone is lossy

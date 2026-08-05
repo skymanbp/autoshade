@@ -500,6 +500,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("neutral recipe — saved edits cleared (saved files removed)",
         "中性配方 — 已清除保存的编辑（存档文件已删除）"),
     ("neutral recipe — nothing to save", "中性配方 — 无需保存"),
+    ("saved edits cleared, but the clear could not be marked ({err}) — a sidecar beside the RAW may restore them",
+        "已清除保存的编辑，但清除标记写入失败（{err}）— RAW 旁的 sidecar 可能在重新打开时恢复这些编辑"),
     (" · retouched pixels: master linked — reopening restores them (the Lightroom XMP stays parametric-only)",
         " · 修饰像素：已关联烘焙母版 — 重新打开会恢复（Lightroom XMP 仍只含参数化显影）"),
     ("could not record the retouched master ({err}) — reopening shows the un-retouched source; Export keeps the pixels",

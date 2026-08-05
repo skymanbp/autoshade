@@ -613,6 +613,66 @@ pub fn mark_develop_cleared(src: &Path) -> std::io::Result<()> {
     )
 }
 
+/// What an explicit clear actually achieved. The marker is best-effort by
+/// nature (it only decides anything when a projection sits beside the RAW),
+/// but a clear that reports plain success while that resurrection route stays
+/// open is the same lie the deliverable paths already outlawed — so the
+/// failure rides back to the surface, which shows it.
+pub struct ClearOutcome {
+    /// Did any saved file actually go away (else: "nothing to save").
+    pub removed: bool,
+    /// The develop IS cleared, but [`mark_develop_cleared`] failed: a sidecar
+    /// beside the RAW can still out-rank the clear and restore the edits.
+    pub marker_warning: Option<String>,
+}
+
+/// Delete a photo's saved develop — the "clear my edits" semantics of a
+/// neutral Reset-then-Save — from EVERY home: the central store, any legacy
+/// ./out sidecar a pre-store build left behind, and the baked-pixels link.
+/// Version snapshots are kept.
+///
+/// ONE primitive for every surface. The GUI and the web each carried their own
+/// copy of this list and drifted apart twice: the web missed the cleared
+/// marker, and BOTH unlinked `pixels.json` directly instead of going through
+/// [`clear_pixel_source`] — which leaves the retired `pixels.json.bak` behind
+/// for [`recover_orphan_baks`] to republish, handing the next open the very
+/// retouch the user just cleared.
+///
+/// A file already missing IS the desired end state; any OTHER removal failure
+/// reaches the caller — a surviving sidecar resurrects the edits on reopen.
+pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
+    let del = |p: &Path| match std::fs::remove_file(p) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    };
+    let mut removed = false;
+    let mut first_err: Option<std::io::Error> = None;
+    for p in [recipe_target(src), xmp_target(src), legacy_recipe(src), legacy_xmp(src)] {
+        match del(&p) {
+            Ok(b) => removed |= b,
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    // Asked BEFORE the removal, and of the predicate that counts the `.bak`: a
+    // develop whose only surviving trace was the retired master still had
+    // something to remove.
+    let had_pixels = has_pixel_source(src);
+    match clear_pixel_source(src) {
+        Ok(()) => removed |= had_pixels,
+        Err(e) => {
+            first_err.get_or_insert(e);
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    let marker_warning = mark_develop_cleared(src).err().map(|e| e.to_string());
+    Ok(ClearOutcome { removed, marker_warning })
+}
+
 /// Snapshot numbers present in the photo's develop dir, sorted ascending.
 pub fn list_versions(src: &Path) -> Vec<u32> {
     let mut out = Vec::new();
@@ -1684,6 +1744,46 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    #[test]
+    fn clear_develop_leaves_no_resurrection_route() {
+        // The whole contract of an explicit clear, in the one place both
+        // surfaces now go through: every home gone, the retired master gone
+        // with it (a `.bak` the next open would have republished), and the
+        // newest-intent marker stamped.
+        let base = std::env::temp_dir().join("autoshop-store-test-cleardev");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let photo = base.join("DSC_CLEARDEV.ARW");
+        std::fs::write(&photo, b"raw").unwrap();
+        let dev = develop_dir(&photo);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let master_a = dev.join("master-a.png");
+        let master_b = dev.join("master-b.png");
+        std::fs::write(&master_a, b"A").unwrap();
+        std::fs::write(&master_b, b"B").unwrap();
+        write_pixel_source(&photo, &master_a, false).unwrap();
+        write_pixel_source(&photo, &master_b, false).unwrap();
+        std::fs::write(recipe_target(&photo), b"{}").unwrap();
+        assert!(dev.join("pixels.json.bak").exists(), "precondition: a retired master exists");
+        assert!(has_develop(&photo), "precondition: a develop exists");
+        let out = clear_develop(&photo).expect("the clear must succeed");
+        assert!(out.removed, "files really went away");
+        assert!(out.marker_warning.is_none(), "the marker was stamped");
+        assert!(!has_develop(&photo), "no sidecar survives");
+        assert!(!has_pixel_source(&photo), "no master survives — the .bak included");
+        assert!(dev.join("cleared.txt").exists(), "the newest-intent marker is stamped");
+        // The resurrection probe itself: every reader recovers orphans first.
+        recover_orphan_baks(&photo).unwrap();
+        assert!(read_pixel_source(&photo).is_none(), "nothing resurrects the cleared retouch");
+        assert!(!has_develop(&photo), "and nothing resurrects the cleared recipe");
+        // Clearing an already-clean develop is a no-op, not an error.
+        let again = clear_develop(&photo).expect("idempotent");
+        assert!(!again.removed, "nothing left to remove");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

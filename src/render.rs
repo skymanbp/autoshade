@@ -5710,15 +5710,18 @@ mod tests {
                 (255.0 * (0.18 + 0.55 * (1.0 - fx * fy))).round() as u8,
             ])
         }));
-        std::fs::create_dir_all("out").unwrap();
-        let mask_path = "out/_preview_perf_mask.png";
+        // Process-unique (the ./out fixture race — see fit_zoned's
+        // fixture_mask_path): a concurrent `cargo test` deleted this mask
+        // mid-run, turning the zone inert and the measurement meaningless.
+        let mask_path =
+            std::env::temp_dir().join(format!("autoshop-preview-perf-mask-{}.png", std::process::id()));
         image::GrayImage::from_fn(w / 4, h / 4, |x, _| {
             image::Luma([((x as f32 / (w / 4 - 1) as f32) * 255.0).round() as u8])
         })
-        .save(mask_path)
+        .save(&mask_path)
         .unwrap();
         let zone = |inverted| LocalAdjustment {
-            mask: MaskGeometry::Bitmap { path: mask_path.into() },
+            mask: MaskGeometry::Bitmap { path: mask_path.to_string_lossy().into_owned() },
             inverted,
             exposure_ev: if inverted { -0.35 } else { 0.45 },
             contrast: if inverted { 8.0 } else { -6.0 },
@@ -5727,7 +5730,7 @@ mod tests {
             ..Default::default()
         };
         let no_colour_zone = |inverted| LocalAdjustment {
-            mask: MaskGeometry::Bitmap { path: mask_path.into() },
+            mask: MaskGeometry::Bitmap { path: mask_path.to_string_lossy().into_owned() },
             inverted,
             exposure_ev: if inverted { -0.35 } else { 0.45 },
             contrast: if inverted { 8.0 } else { -6.0 },
@@ -5779,6 +5782,6 @@ mod tests {
                 start.elapsed().as_secs_f64() * 1000.0 / N as f64,
             );
         }
-        std::fs::remove_file(mask_path).ok();
+        std::fs::remove_file(&mask_path).ok();
     }
 }

@@ -658,10 +658,9 @@ mod tests {
         let src = build(sky_src);
         let tgt = build(sky_tgt);
         // Binary sky mask on disk — the production carrier (Bitmap geometry).
-        std::fs::create_dir_all("out").ok();
-        let mask_path = "out/_zoned_dials_test_mask.png";
+        let mask_path = fixture_mask_path("zoned-dials-mask");
         GrayImage::from_fn(w, h, |_, y| image::Luma([if y >= 12 { 255u8 } else { 0 }]))
-            .save(mask_path)
+            .save(&mask_path)
             .unwrap();
 
         let px_of = |img: &DynamicImage| -> Vec<[f32; 3]> {
@@ -683,7 +682,7 @@ mod tests {
 
         let recipe = EditRecipe {
             masks: vec![LocalAdjustment {
-                mask: MaskGeometry::Bitmap { path: mask_path.into() },
+                mask: MaskGeometry::Bitmap { path: mask_path.to_string_lossy().into_owned() },
                 role: MaskRole::ZoneSky,
                 amount: 1.0,
                 exposure_ev: d.exposure_ev,
@@ -741,15 +740,24 @@ mod tests {
         (build([0.60, 0.63, 0.67]), build([0.92, 0.72, 0.48]), sky_mask)
     }
 
+    /// A mask fixture no OTHER process can pull out from under this one.
+    /// These tests write a mask, render through it, then delete it — at a
+    /// FIXED relative path under ./out that every concurrent `cargo test` on
+    /// the same checkout shared, so one run's cleanup made another run's mask
+    /// inert (the zone then "failed to attach" nowhere near its own code).
+    /// Process-unique, in the temp dir, and no ./out litter left behind.
+    fn fixture_mask_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("autoshop-{name}-{}.png", std::process::id()))
+    }
+
     #[test]
     fn zoned_orchestration_attaches_the_sky_mask_and_improves_the_zone() {
         let (src, tgt, sky_mask) = zoned_pair();
-        std::fs::create_dir_all("out").ok();
-        let mask_path = Path::new("out/_zoned_orch_mask.png");
-        sky_mask.save(mask_path).unwrap();
+        let mask_path = fixture_mask_path("zoned-orch-mask");
+        sky_mask.save(&mask_path).unwrap();
         let mut report = fit::fit_recipe(&src, &tgt);
         let err_global = report.err_after;
-        attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, mask_path);
+        attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
         assert!(
             report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneSky && !m.inverted),
             "sky correction must attach: {}",
@@ -798,11 +806,10 @@ mod tests {
         let tgt = build([0.92, 0.72, 0.48], [0.80, 0.50, 0.28]);
         let sky_mask =
             GrayImage::from_fn(w, h, |_, y| image::Luma([if y >= 12 { 255u8 } else { 0 }]));
-        std::fs::create_dir_all("out").ok();
-        let mask_path = Path::new("out/_zoned_orch_land_mask.png");
-        sky_mask.save(mask_path).unwrap();
+        let mask_path = fixture_mask_path("zoned-orch-land-mask");
+        sky_mask.save(&mask_path).unwrap();
         let mut report = fit::fit_recipe(&src, &tgt);
-        attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, mask_path);
+        attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
         assert!(
             report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneSky && !m.inverted),
             "sky zone must attach: {}",
@@ -855,11 +862,10 @@ mod tests {
         let src = build([0.60, 0.63, 0.67], 2);
         let tgt = build([0.92, 0.72, 0.48], 6);
         let (sm, tm) = (mask_of(2), mask_of(6));
-        std::fs::create_dir_all("out").ok();
-        let mask_path = Path::new("out/_zoned_orch_share_mask.png");
-        sm.save(mask_path).unwrap();
+        let mask_path = fixture_mask_path("zoned-orch-share-mask");
+        sm.save(&mask_path).unwrap();
         let mut report = fit::fit_recipe(&src, &tgt);
-        attach_zones(&src, &tgt, &mut report, &sm, &tm, mask_path);
+        attach_zones(&src, &tgt, &mut report, &sm, &tm, &mask_path);
         assert!(
             report.recipe.rationale.contains("Zoned sky correction attached"),
             "the zone gate must attach a correct repaint despite the share \
@@ -881,9 +887,9 @@ mod tests {
         // of the global fit, not a semantic zone.
         let (src, tgt, _) = zoned_pair();
         let empty = GrayImage::from_pixel(16, 16, image::Luma([0u8]));
-        let mask_path = Path::new("out/_zoned_orch_empty_mask.png");
+        let mask_path = fixture_mask_path("zoned-orch-empty-mask");
         let mut report = fit::fit_recipe(&src, &tgt);
-        attach_zones(&src, &tgt, &mut report, &empty, &empty, mask_path);
+        attach_zones(&src, &tgt, &mut report, &empty, &empty, &mask_path);
         assert!(report.recipe.masks.is_empty(), "no mask on a degenerate partition");
         assert!(
             report.recipe.rationale.contains("no usable sky partition"),
@@ -904,9 +910,8 @@ mod tests {
             script: "Cargo.toml".into(),
             target: "sky".into(),
         };
-        std::fs::create_dir_all("out").ok();
-        let mask_path = Path::new("out/_zoned_orch_nopython_mask.png");
-        let report = fit_recipe_zoned(&src, &tgt, &seg, mask_path);
+        let mask_path = fixture_mask_path("zoned-orch-nopython-mask");
+        let report = fit_recipe_zoned(&src, &tgt, &seg, &mask_path);
         assert!(report.recipe.masks.is_empty(), "fallback must not attach masks");
         assert!(
             report.recipe.rationale.contains("global fit only"),
