@@ -2425,8 +2425,9 @@ impl AutoshopApp {
             // live-canvas override hazard); a same-path keep-flight stays
             // admitted. Unreachable today through this fn's callers — the
             // busy interlocks exclude an in-flight open during switch /
-            // push / delete — so this is defence-in-depth beside the
-            // apply_step gate, and says so instead of claiming a live
+            // push / delete — so this is defence-in-depth, like the
+            // apply_step gate beside it (whose own callers became
+            // busy-gated later), and says so instead of claiming a live
             // scenario.
             && (!self.open_in_flight || (self.open_same_path && self.keep_recipe))
             && let Some(p) = self.src_path.clone()
@@ -2929,6 +2930,13 @@ impl AutoshopApp {
         // so admitting it bought a concurrent decode and a false success
         // toast. `committed` follows the heal, or the next commit_now would
         // push the washed head straight back onto the stack.
+        //
+        // DEFENCE IN DEPTH since the keyboard undo took the buttons' busy
+        // gate: `open_in_flight` implies `busy` (open_path early-returns while
+        // busy, sets both, and clears both in one handler), and undo/redo are
+        // this fn's only callers — so no live caller reaches here mid-flight
+        // any more. The gate stays because ungating the keyboard would
+        // resurrect every scenario above, and the test drives it directly.
         if (!self.open_in_flight || (self.open_same_path && self.keep_recipe))
             && !self
                 .variants
@@ -5983,6 +5991,16 @@ impl AutoshopApp {
                             self.before_tex = None;
                             self.after_tex = None;
                             self.selected = None;
+                            // …and its HISTORY, which this arm used to leave
+                            // standing: the steps hold the dead photo's
+                            // rasters and its recipe, so an undo here restored
+                            // a canvas that no longer exists (the keyboard
+                            // path reached it because it checked only `busy`).
+                            // Gating the key is the guard; clearing the stack
+                            // is the reason there is nothing to guard. The
+                            // photo's unsaved work is NOT lost — open_path
+                            // stashed it before the flight.
+                            self.reset_history();
                         } else if let Some(p) = self.src_path.clone() {
                             // A preview-res re-decode failed: the photo (and
                             // its live canvas) is untouched — consume the
@@ -10706,18 +10724,30 @@ impl eframe::App for AutoshopApp {
                     do_cheatsheet = true;
                 }
             });
-            // The keyboard takes the same gate as the ↶/↷ BUTTONS (which are
-            // `add_enabled(ready && …)` with `ready = src_path.is_some() &&
-            // !busy`): un-gated, Ctrl+Z during a retouch swapped the base the
-            // landing result is applied over, and — since every pixel undo now
-            // writes a status — wiped the only liveness the bar was showing
-            // for a worker that sends no progress. A refusal must be visible.
-            if (do_undo || do_redo) && self.busy {
-                let t = tr(self.lang, "busy — undo unlocks when the current task finishes");
-                self.toast(ToastKind::Error, t);
+            // Mirror the ↶/↷ BUTTONS exactly — `add_enabled(ready &&
+            // !stack.is_empty())` with `ready = src_path.is_some() && !busy`.
+            // Un-gated, Ctrl+Z during a retouch swapped the base the landing
+            // result is applied over and, since every pixel undo now writes a
+            // status, wiped the only liveness the bar was showing for a
+            // worker that sends no progress. But the BUSY half alone made the
+            // refusal lie: Ctrl+Z during a folder scan with no photo open
+            // drew "busy — …unlock when the current task finishes" for an
+            // unlock that would never come (no photo, no history). Only a
+            // press that WOULD have acted earns a refusal; the rest stay the
+            // silent no-ops the disabled buttons are.
+            let armed_undo = do_undo && self.src_path.is_some() && !self.undo_stack.is_empty();
+            let armed_redo = do_redo && self.src_path.is_some() && !self.redo_stack.is_empty();
+            if self.busy {
+                if armed_undo || armed_redo {
+                    let t = tr(
+                        self.lang,
+                        "busy — undo and redo unlock when the current task finishes",
+                    );
+                    self.toast(ToastKind::Error, t);
+                }
             } else {
-                if do_undo { self.undo(ctx); }
-                if do_redo { self.redo(ctx); }
+                if armed_undo { self.undo(ctx); }
+                if armed_redo { self.redo(ctx); }
             }
             // R mirrors the crop button exactly (incl. the one-tool-at-a-time
             // disarms); no photo → nothing to crop.
@@ -11800,9 +11830,9 @@ mod tests {
         );
     }
 
-    /// A tiny synthetic base + a bitmap mask on disk, for the async-develop and
-    /// overlay regression tests. Returns (app, mask_path) — caller cleans up.
-    /// …and its `Scrub`: the ./out fixture is removed on DROP, so a failing
+    /// A tiny synthetic base + a bitmap mask on disk, for the async-develop
+    /// and overlay regression tests — returned WITH its `Scrub`, never a path
+    /// for the caller to clean up: the ./out fixture is removed on DROP, so a failing
     /// assert cannot leave it behind. Handing the guard back (rather than
     /// trusting a trailing `remove_file`) is what makes it impossible for the
     /// next caller to forget — five of them had.
@@ -12344,9 +12374,11 @@ mod tests {
     #[test]
     fn the_history_gate_takes_request_and_fact_before_repairing() {
         // apply_step is history's one exit, and its repair gate takes
-        // request AND fact: during a same-path FRESH reopen (Ctrl+Z is not
-        // busy-gated) the rebuild discards the repair, so the gate refuses;
-        // a same-path keep-flight is admitted. The memo seam keeps this
+        // request AND fact: during a same-path FRESH reopen the rebuild
+        // discards the repair, so the gate refuses; a same-path keep-flight
+        // is admitted. (The keyboard undo is busy-gated now, so this test
+        // drives the states directly — the gate is defence-in-depth, and
+        // this is what keeps it honest.) The memo seam keeps this
         // decodable-RAW-free — the repair consults the memo before
         // estimating, so a primed answer makes the gate's verdict visible
         // as the era stamp. Deleting `&& self.keep_recipe` at the
@@ -12784,22 +12816,9 @@ mod tests {
             "a canvas at the preference is not a stale bake either: {}",
             app.status
         );
-        // (5) …while a THIRD value — baked under an older preference — is.
-        let mut app = AutoshopApp {
-            preview_edge: 1280,
-            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
-            variants: vec![
-                src(None),
-                src(Some(Arc::new(image::DynamicImage::new_rgb8(640, 480)))),
-            ],
-            ..Default::default()
-        };
-        app.switch_variant(1, &ctx);
-        assert!(
-            app.status.contains("640px"),
-            "neither the preference nor what the source delivers: {}",
-            app.status
-        );
+        // (A third value — neither the preference nor what the source
+        // delivers — is case (2) above: 640 under a 1280 preference on an 800
+        // source. A separate case here would have been that fixture again.)
     }
 
     #[test]
@@ -12808,7 +12827,11 @@ mod tests {
         // canvas/preference disagreement said nothing.
         let ctx = egui::Context::default();
         let superseded = Arc::new(image::DynamicImage::new_rgb8(640, 480));
-        let current = Arc::new(image::DynamicImage::new_rgb8(1280, 853));
+        // 800 is what the SOURCE delivers here, and it is NOT the preference
+        // (1280): the retraction therefore has to come from the delivered-edge
+        // arm specifically. With the two equal, this test passed under either
+        // arm and pinned neither.
+        let current = Arc::new(image::DynamicImage::new_rgb8(800, 600));
         let step = |base: &Arc<image::DynamicImage>, tag: &str| UndoStep {
             recipe: EditRecipe::default(),
             base: Some(base.clone()),
@@ -12817,9 +12840,8 @@ mod tests {
         let mut app = AutoshopApp {
             preview_edge: 1280,
             // A REAL source: without it the ruler took its `unwrap_or`
-            // fallback and this test never touched the delivered-edge path it
-            // is meant to cover.
-            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853))),
+            // fallback and never the delivered-edge path this test covers.
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
             base_preview: Some(current.clone()),
             variants: vec![Variant {
                 kind: VariantKind::Original,
@@ -12930,6 +12952,46 @@ mod tests {
             origin: Some(PathBuf::from("out/_spelling-2.png")),
         };
         assert!(!rel.same_pixels(&other), "…but a DIFFERENT master still differs");
+    }
+
+    #[test]
+    fn a_failed_open_takes_the_dead_photos_history_with_it() {
+        // The Err arm dropped src_path, the strip and the canvas but left the
+        // undo stack standing, so an undo afterwards restored a canvas that no
+        // longer existed — the keyboard path reached it because it checked
+        // only `busy`. Gating the key is the guard; clearing the stack is the
+        // reason there is nothing to guard. (The photo's unsaved work is not
+        // lost: open_path stashed it before the flight.)
+        let mut app = AutoshopApp::default();
+        let ctx = egui::Context::default();
+        app.src_path = Some(PathBuf::from("D:/__autoshop_deadopen__/__autoshop_deadopen__.ARW"));
+        app.variants = vec![Variant {
+            kind: VariantKind::Original,
+            recipe: EditRecipe::default(),
+            base: Some(Arc::new(image::DynamicImage::new_rgb8(4, 3))),
+            origin: Some(PathBuf::from("out/_deadopen.png")),
+            thumb: None,
+        }];
+        let step = || UndoStep {
+            recipe: EditRecipe { contrast: 11.0, ..Default::default() },
+            base: None,
+            origin: None,
+        };
+        app.undo_stack.push(step());
+        app.redo_stack.push(step());
+        app.tx
+            .send(Msg::Opened(Box::new(Err(anyhow::anyhow!("decode failed")))))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert!(app.src_path.is_none(), "premise: a FRESH open failed into the no-photo state");
+        assert!(
+            app.undo_stack.is_empty() && app.redo_stack.is_empty(),
+            "the dead photo's history goes with it"
+        );
+        // …so an undo here cannot reinstate the recipe of a photo that is gone.
+        app.undo(&ctx);
+        assert_eq!(app.recipe.contrast, 0.0, "nothing left to restore");
+        assert!(app.variants.is_empty(), "…and no canvas to restore it onto");
     }
 
     #[test]

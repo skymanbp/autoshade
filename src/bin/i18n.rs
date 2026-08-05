@@ -550,7 +550,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "打开一张照片，或打开文件夹浏览图库。"),
     ("busy — variants unlock when the current task finishes",
         "忙碌中 — 当前任务完成后变体才可切换/删除"),
-    ("busy — undo unlocks when the current task finishes",
+    ("busy — undo and redo unlock when the current task finishes",
         "忙碌中 — 当前任务完成后才可撤销/重做"),
     ("opened the first photo — {n} more ignored (drop their folder to browse them all)",
         "已打开第一张 — 其余 {n} 张被忽略（把它们所在的文件夹拖进来可整体浏览）"),
