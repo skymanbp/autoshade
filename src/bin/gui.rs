@@ -829,6 +829,7 @@ struct AutoshopApp {
     active: usize,                         // index into `variants` (always valid once a photo is open)
     keep_recipe: bool,                     // one-shot: next Opened keeps recipe/variants (preview-res re-decode)
     open_in_flight: bool,                  // mid-open window: src_path re-pointed, Opened not yet processed
+    open_same_path: bool,                  // the in-flight open targets the photo already open (recorded by open_path — keep_recipe is a REQUEST, not a fact)
     // --- export pipeline (gap batch F + D2) ---
     exp_long_edge: u32,                    // resize long edge in px; 0 = full resolution
     exp_sharpen: f32,                      // output sharpening 0..100, post-resize
@@ -1141,6 +1142,7 @@ impl Default for AutoshopApp {
             active: 0,
             keep_recipe: false,
             open_in_flight: false,
+            open_same_path: false,
             exp_long_edge: 0,
             exp_sharpen: 0.0,
             exp_quality: 95.0,
@@ -1580,12 +1582,17 @@ type BakedBase = (Arc<image::DynamicImage>, PathBuf, bool);
 /// (`render::camera_base_knots`; empty = no base look) + its in-camera lens
 /// profile (`pipeline::fresh_lens_profile`; default = none available) + its
 /// as-shot WB anchor (`render::as_shot_wb`; None = unknown → 5500 K).
+/// The sixth element is the decode's IDENTITY, captured in the worker BEFORE
+/// any read (working edge + source stamp + baked-pixel identity):
+/// `remember_base` files the entry under it, never under completion-time
+/// state — the curve-memo rule.
 type OpenedBase = (
     Arc<image::DynamicImage>,
     Vec<[f32; 2]>,
     autoshop::recipe::LensProfile,
     Option<(f32, f32)>,
     Option<BakedBase>,
+    (u32, FileStamp, PixelIdentity),
 );
 
 /// How many decoded preview bases to keep for instant photo revisits (~3.3 MB
@@ -1881,6 +1888,13 @@ fn dirty_vs(canvas: &EditRecipe, baseline: &EditRecipe) -> bool {
 impl AutoshopApp {
     fn open_path(&mut self, path: PathBuf) {
         if self.busy {
+            // The px combo may have armed keep_recipe for a re-decode that
+            // is NOT happening: an already-open egui dropdown popup outlives
+            // add_enabled_ui(!busy) (the popup is its own Area), so the
+            // combo stays clickable while busy. A stale flag later
+            // misclassified a genuine cross-photo open as a same-path
+            // keep-flight — it dies with the refusal.
+            self.keep_recipe = false;
             return;
         }
         // Flush a typed-but-uncommitted mask rename before the stash below
@@ -1893,8 +1907,11 @@ impl AutoshopApp {
         self.mask_name_buf = None;
         // The mid-open window marker (see confirm_quit_layer): src_path is
         // re-pointed below while recipe/saved_recipe still describe the old
-        // photo; cleared in BOTH Msg::Opened arms.
+        // photo; cleared in BOTH Msg::Opened arms. `open_same_path` is the
+        // FACT the repair gates key on — keep_recipe is only a request, and
+        // a stale request must never classify a flight.
         self.open_in_flight = true;
+        self.open_same_path = self.src_path.as_ref() == Some(&path);
         // Leaving a photo with unsaved edits: stash the canvas for this
         // session so navigation can never silently destroy work (arrow keys /
         // thumbnail clicks used to drop the whole develop). Ctrl+S still owns
@@ -1976,6 +1993,12 @@ impl AutoshopApp {
                 // you push tone/clarity. Baked images (PNG/TIFF/JPEG) are their own
                 // source. Demosaic is slow, so this runs off the UI thread.
                 let res = (|| -> anyhow::Result<OpenedBase> {
+                    // The LRU key, captured BEFORE any read (the curve-memo
+                    // rule): filing the decode under completion-time state
+                    // handed a mid-open replacement the previous content's
+                    // pixels and knots under its own key, and a popup-driven
+                    // px change mid-flight mislabelled the edge.
+                    let src_ident = (edge, file_stamp(&path), pixel_identity(&path));
                     let (thumb, knots, lens, as_shot) = if autoshop::decode::is_raw(&path) {
                         // Identity BEFORE the read: the primed answer below
                         // is filed under the content it was computed FROM —
@@ -2084,7 +2107,7 @@ impl AutoshopApp {
                     );
                     // Arc once here so every downstream sharer (variants, the
                     // preview worker) is an O(1) refcount bump, not a deep copy.
-                    Ok((Arc::new(thumb), knots, lens, as_shot, baked))
+                    Ok((Arc::new(thumb), knots, lens, as_shot, baked, src_ident))
                 })();
                 Msg::Opened(Box::new(res))
             },
@@ -2107,12 +2130,16 @@ impl AutoshopApp {
         Some(hit)
     }
 
-    /// Remember a freshly decoded base. Called from the Opened handler — the px
-    /// combo is disabled while busy, so `preview_edge` still describes the
-    /// decode that just completed.
-    fn remember_base(&mut self, path: &std::path::Path, edge: u32, opened: &OpenedBase) {
-        let mtime = file_stamp(path);
-        let pixels = pixel_identity(path);
+    /// Remember a freshly decoded base. The KEY comes from the worker's
+    /// pre-read capture (`opened.5`), never from a stat or `preview_edge`
+    /// here: the decode takes seconds, an egui dropdown popup outlives
+    /// add_enabled_ui(!busy) (so the px combo CAN change mid-flight), and
+    /// filing the pixels under completion-time state handed a mid-open
+    /// replacement the previous content's pixels AND knots under its own
+    /// key — the curve memo's identity-before-read rule, applied to its
+    /// missed twin.
+    fn remember_base(&mut self, path: &std::path::Path, opened: &OpenedBase) {
+        let (edge, mtime, pixels) = opened.5.clone();
         self.base_cache.retain(|((p, e, _, _), _)| !(p == path && *e == edge));
         self.base_cache.push(((path.to_path_buf(), edge, mtime, pixels), opened.clone()));
         if self.base_cache.len() > BASE_CACHE_CAP {
@@ -2260,7 +2287,7 @@ impl AutoshopApp {
             // push / delete — so this is defence-in-depth beside the
             // apply_step gate, and says so instead of claiming a live
             // scenario.
-            && (!self.open_in_flight || self.keep_recipe)
+            && (!self.open_in_flight || self.open_same_path)
             && let Some(p) = self.src_path.clone()
             && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
@@ -2739,7 +2766,7 @@ impl AutoshopApp {
         // made a washed install DURABLE, so it is admitted. `committed`
         // follows the heal, or the next commit_now would push the washed
         // head straight back onto the stack.
-        if (!self.open_in_flight || self.keep_recipe)
+        if (!self.open_in_flight || self.open_same_path)
             && !self
                 .variants
                 .get(self.active)
@@ -3082,8 +3109,8 @@ impl AutoshopApp {
         if save_quit {
             let mut failed: Option<String> = None;
             // Collected, not fatal — reported on the way out (see below).
-            let mut xmp_warn: Option<String> = None;
-            let mut clear_warn: Option<String> = None;
+            let mut xmp_warns: Vec<String> = Vec::new();
+            let mut clear_warns: Vec<String> = Vec::new();
             for (p, r, pix) in &pending {
                 // Neutral + no pixel identity = Ctrl+S's "clear my edits":
                 // WRITING neutral files here pinned the existence-keyed ●
@@ -3098,7 +3125,7 @@ impl AutoshopApp {
                             // half: quitting silently would let a projection
                             // copied beside the RAW undo this clear unannounced.
                             if let Some(w) = o.marker_warning {
-                                clear_warn = Some(format!("{}: {w}", autoshop::pipeline::stem(p)));
+                                clear_warns.push(format!("{}: {w}", autoshop::pipeline::stem(p)));
                             }
                         }
                         Err(e) => {
@@ -3177,24 +3204,28 @@ impl AutoshopApp {
                     && !generated
                     && let Err(e) = autoshop::pipeline::write_xmp(p, &disk)
                 {
-                    xmp_warn = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                    xmp_warns.push(format!("{}: {e}", autoshop::pipeline::stem(p)));
                 }
             }
-            // BOTH said regardless of a later photo's failure (the
-            // travels-with-the-mutation rule the repair note above follows):
-            // the XMP that failed belongs to a develop that IS saved, and
-            // clear_warn's develop was DESTROYED on disk with only the
-            // marker missing — a break on photo B must not swallow photo
-            // A's disclosures.
-            if let Some(w) = xmp_warn {
-                // Said, never swallowed: the develops ARE saved, but
-                // Lightroom will not see this one until it is rewritten.
-                eprintln!("⚠ develops saved; a Lightroom XMP failed: {w}");
-            }
-            if let Some(w) = clear_warn {
+            // ALL said regardless of a later photo's failure (the
+            // travels-with-the-mutation rule the repair note above follows),
+            // COUNTED (a single-slot accumulator reported only the last of
+            // several same-kind failures), and worded per-photo so the
+            // sentence stays true on the abort path — the old "develops
+            // saved" claimed a completed batch even after a break.
+            if !xmp_warns.is_empty() {
                 eprintln!(
-                    "⚠ edits cleared, but the clear could not be marked: {w} — a sidecar \
-                     beside the RAW may restore them on the next open"
+                    "⚠ {} Lightroom XMP projection(s) failed for develop(s) that ARE saved: {}",
+                    xmp_warns.len(),
+                    xmp_warns.join("; ")
+                );
+            }
+            if !clear_warns.is_empty() {
+                eprintln!(
+                    "⚠ {} clear(s) succeeded but could not be marked: {} — a sidecar \
+                     beside the RAW may restore those edits on the next open",
+                    clear_warns.len(),
+                    clear_warns.join("; ")
                 );
             }
             match failed {
@@ -5101,18 +5132,36 @@ impl AutoshopApp {
                     // re-decode (the px combo): consumed whether the open
                     // succeeds or fails so a failure can't leak it into a later
                     // open.
-                    let keep = std::mem::take(&mut self.keep_recipe);
+                    // The KEEP request is honoured only when the recorded
+                    // FACT agrees the flight was same-path: a stale request
+                    // must never graft the outgoing photo's whole canvas,
+                    // strip and history onto an incoming photo.
+                    let keep = std::mem::take(&mut self.keep_recipe) && self.open_same_path;
                     self.open_in_flight = false; // both arms: the transition ended
                     match *boxed {
-                    Ok((base, knots, lens, as_shot, baked)) => {
+                    Ok((base, knots, lens, as_shot, baked, src_ident)) => {
                         self.busy = false;
                         if let Some(p) = self.src_path.clone() {
-                            let edge = self.preview_edge.clamp(640, 8192);
-                            self.remember_base(&p, edge, &(base.clone(), knots.clone(), lens.clone(), as_shot, baked.clone()));
+                            self.remember_base(
+                                &p,
+                                &(
+                                    base.clone(),
+                                    knots.clone(),
+                                    lens.clone(),
+                                    as_shot,
+                                    baked.clone(),
+                                    src_ident.clone(),
+                                ),
+                            );
                         }
                         // Kept for Reset: "reset" = the fresh-open look, so it
                         // needs this photo's knots even when the restored
                         // recipe (legacy save) deliberately carries none.
+                        // Deliberately LAST-wins across preview-edge switches
+                        // (Reset means the fresh-open look at the CURRENT
+                        // edge) while the repair memo pins its FIRST answer
+                        // for persistence determinism — the two agree within
+                        // the estimator's documented tolerance.
                         self.photo_knots = knots.clone();
                         self.photo_lens = lens.clone();
                         self.photo_as_shot = as_shot;
@@ -11618,7 +11667,14 @@ mod tests {
         app.src_path = Some(old.clone());
         let base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
         app.tx
-            .send(Msg::Opened(Box::new(Ok((base, Vec::new(), Default::default(), None, None)))))
+            .send(Msg::Opened(Box::new(Ok((
+                base,
+                Vec::new(),
+                Default::default(),
+                None,
+                None,
+                (1280, None, None),
+            )))))
             .unwrap();
         app.poll_workers(&ctx);
         assert_eq!(app.variants.len(), 2, "the background variant survives the round trip");
@@ -11860,7 +11916,17 @@ mod tests {
             ..Default::default()
         };
         let p = std::path::Path::new("D:/__autoshop_nonexistent__/x.ARW");
-        app.remember_base(p, 1280, &(base.clone(), knots.clone(), lens.clone(), Some((4830.0, 6.0)), None));
+        app.remember_base(
+            p,
+            &(
+                base.clone(),
+                knots.clone(),
+                lens.clone(),
+                Some((4830.0, 6.0)),
+                None,
+                (1280, None, None),
+            ),
+        );
         let hit = app.cached_base(p, 1280);
         assert!(hit.is_some(), "same path+edge hits");
         let hit = hit.unwrap();
@@ -11873,7 +11939,10 @@ mod tests {
             .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/{i}.ARW")))
             .collect();
         for o in &others {
-            app.remember_base(o, 1280, &(base.clone(), Vec::new(), Default::default(), None, None));
+            app.remember_base(
+                o,
+                &(base.clone(), Vec::new(), Default::default(), None, None, (1280, None, None)),
+            );
         }
         assert!(app.cached_base(p, 1280).is_none(), "least-recent evicted at cap");
         assert!(app.cached_base(&others[1], 1280).is_some(), "newer entries survive");

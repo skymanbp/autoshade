@@ -503,13 +503,16 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
             // the neutral develop did not work THIS time (a locked file, a
             // disconnected share), and caching it would leave the photo
             // unrepaired for the rest of the process even after it became
-            // readable.
-            if let Some(knots) = &c
-                && let Ok(mut m) = memo.lock()
-            {
-                m.insert(key, knots.clone());
+            // readable. FIRST ANSWER WINS here too: the lock was released
+            // across the estimate, and the open worker can prime this very
+            // key in that gap (the same-path keep-flight is where the two
+            // threads meet) — a bare insert would put a different curve in
+            // the memo than the one this call installs, so the repair
+            // ADOPTS whichever answer won.
+            match (c, memo.lock()) {
+                (Some(knots), Ok(mut m)) => Some(m.entry(key).or_insert(knots).clone()),
+                (c, _) => c,
             }
-            c
         }
     };
     // Tri-state, and the difference is the whole repair: an ANSWER replaces
