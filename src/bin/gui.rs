@@ -830,6 +830,7 @@ struct AutoshopApp {
     keep_recipe: bool,                     // one-shot: next Opened keeps recipe/variants (preview-res re-decode)
     open_in_flight: bool,                  // mid-open window: src_path re-pointed, Opened not yet processed
     open_same_path: bool,                  // the in-flight open targets the photo already open (recorded by open_path — keep_recipe is a REQUEST, not a fact)
+    edge_before_flight: Option<u32>,       // armed by the px combo with its re-decode flight; a FAILED keep-flight reverts preview_edge to it (the canvas kept the old edge)
     // --- export pipeline (gap batch F + D2) ---
     exp_long_edge: u32,                    // resize long edge in px; 0 = full resolution
     exp_sharpen: f32,                      // output sharpening 0..100, post-resize
@@ -1143,6 +1144,7 @@ impl Default for AutoshopApp {
             keep_recipe: false,
             open_in_flight: false,
             open_same_path: false,
+            edge_before_flight: None,
             exp_long_edge: 0,
             exp_sharpen: 0.0,
             exp_quality: 95.0,
@@ -1888,12 +1890,13 @@ fn dirty_vs(canvas: &EditRecipe, baseline: &EditRecipe) -> bool {
 impl AutoshopApp {
     fn open_path(&mut self, path: PathBuf) {
         if self.busy {
-            // The px combo may have armed keep_recipe for a re-decode that
-            // is NOT happening: an already-open egui dropdown popup outlives
-            // add_enabled_ui(!busy) (the popup is its own Area), so the
-            // combo stays clickable while busy. A stale flag later
-            // misclassified a genuine cross-photo open as a same-path
-            // keep-flight — it dies with the refusal.
+            // Defence-in-depth: since the px combo refuses BEFORE arming, no
+            // live caller reaches this guard with keep_recipe set — but a
+            // stale request here once misclassified a genuine cross-photo
+            // open as a same-path keep-flight, and any future caller that
+            // arms-then-calls gets the same protection instead of relying on
+            // its own busy check. Said so, instead of claiming a live
+            // scenario.
             self.keep_recipe = false;
             return;
         }
@@ -5140,6 +5143,7 @@ impl AutoshopApp {
                     // must never graft the outgoing photo's whole canvas,
                     // strip and history onto an incoming photo.
                     let keep = std::mem::take(&mut self.keep_recipe) && self.open_same_path;
+                    let edge_revert = self.edge_before_flight.take();
                     self.open_in_flight = false; // both arms: the transition ended
                     match *boxed {
                     Ok((base, knots, lens, as_shot, baked, src_ident)) => {
@@ -5709,6 +5713,15 @@ impl AutoshopApp {
                             // navigation resurrected these pre-undo edits on
                             // the way back (CX4-4).
                             self.nav_stash.remove(&p);
+                            // ...and the switch never materialized: the
+                            // canvas kept the OLD edge, so preview_edge
+                            // reverts with it (the busy-refusal rule) —
+                            // leaving the new value displayed an unreachable
+                            // resolution and fed it to every bake site under
+                            // an old-edge canvas.
+                            if let Some(e) = edge_revert {
+                                self.preview_edge = e;
+                            }
                         }
                     }
                 }},
@@ -7854,12 +7867,25 @@ impl AutoshopApp {
                         // refusal, and the status says so instead of
                         // dropping it silently.
                         self.preview_edge = before;
-                        self.status = tr(
+                        // BY TOAST (the switch_variant / Ctrl+S refusal
+                        // rule): this runs during the draw phase, and a
+                        // status line dies under the very next worker
+                        // message — one frame, then the combo just snaps
+                        // back with no visible reason.
+                        let t = tr(
                             lang,
                             "busy — the preview-resolution switch was not applied; pick it again when the current task finishes",
                         )
-                        .into();
+                        .to_string();
+                        self.toast(ToastKind::Error, t);
                     } else {
+                        // The pre-switch edge rides the flight: a FAILED
+                        // keep-flight leaves the canvas at the OLD edge, and
+                        // preview_edge must not keep displaying (and feeding
+                        // every bake site) a resolution the preview never
+                        // reached — the same residue the busy refusal above
+                        // is cured of.
+                        self.edge_before_flight = Some(before);
                         self.keep_recipe = true; // re-decode, keep the edit
                         self.open_path(p);
                     }
@@ -11665,11 +11691,13 @@ mod tests {
             thumb: None,
         });
         app.saved_recipe = app.recipe.clone(); // active canvas clean
-        let old = PathBuf::from("D:/__autoshop_h4__/a.ARW");
+        // Unique stems (both paths): the Opened fresh arm below migrates
+        // cwd ./out legacy sidecars by stem — see the keep-fact test.
+        let old = PathBuf::from("D:/__autoshop_h4__/__autoshop_h4_a__.ARW");
         app.src_path = Some(old.clone());
         assert_eq!(app.inactive_dirty_variants(), 1, "premise: background dirty");
         // Navigate away — the stash snapshot is written synchronously.
-        app.open_path(PathBuf::from("D:/__autoshop_h4__/b.ARW"));
+        app.open_path(PathBuf::from("D:/__autoshop_h4__/__autoshop_h4_b__.ARW"));
         {
             let st = app.nav_stash.get(&old).expect("background work must stash the strip");
             assert_eq!(st.others.len(), 1);
@@ -11942,7 +11970,14 @@ mod tests {
             thumb: None,
         };
         app.variants = vec![mk(), mk()];
-        app.src_path = Some(PathBuf::from("D:/__autoshop_keepfact__/b.ARW"));
+        // Stem must be globally improbable: the fresh arm's
+        // read_saved_develop runs store::migrate_legacy, which scans the
+        // cwd ./out for {stem}.recipe.json / {stem}.xmp and MOVES any hit
+        // into the develop dir keyed to this fake path — a generic stem
+        // ("b") could relocate a real user's legacy sidecars into an
+        // unreachable key.
+        app.src_path =
+            Some(PathBuf::from("D:/__autoshop_keepfact__/__autoshop_keepfact__.ARW"));
         app.keep_recipe = true;
         app.open_same_path = false; // stale request, cross-photo fact
         let base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
@@ -11974,6 +12009,83 @@ mod tests {
             .unwrap();
         app.poll_workers(&ctx);
         assert_eq!(app.variants.len(), 2, "keep arm: the strip survives a same-path re-decode");
+        // ...and the REQUEST half is load-bearing too: fact without request
+        // (a same-path FRESH reopen) reloads fresh. Reducing the KEEP arm to
+        // `let keep = self.open_same_path;` turns this into a graft — the
+        // reload never happens and the one-shot request goes sticky — and
+        // fails the assert.
+        app.variants = vec![mk(), mk()];
+        app.keep_recipe = false;
+        app.open_same_path = true;
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((
+                Arc::new(image::DynamicImage::new_rgb8(8, 6)),
+                Vec::new(),
+                Default::default(),
+                None,
+                None,
+                (1280, None, None),
+            )))))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.variants.len(), 1, "fresh arm: a reopen without the request reloads");
+    }
+
+    #[test]
+    fn the_history_gate_takes_request_and_fact_before_repairing() {
+        // apply_step is history's one exit, and its repair gate takes
+        // request AND fact: during a same-path FRESH reopen (Ctrl+Z is not
+        // busy-gated) the rebuild discards the repair, so the gate refuses;
+        // a same-path keep-flight is admitted. The memo seam keeps this
+        // decodable-RAW-free — the repair consults the memo before
+        // estimating, so a primed answer makes the gate's verdict visible
+        // as the era stamp. Deleting `&& self.keep_recipe` at the
+        // apply_step gate repairs phase 1's install and fails its assert.
+        let mut app = AutoshopApp::default();
+        let ctx = egui::Context::default();
+        let p = PathBuf::from("D:/__autoshop_histgate__/__autoshop_histgate__.ARW");
+        // Pre-era fingerprint: version 1, interior x >= 0.5, darkens > 0.05.
+        let washy = vec![[0.0, 0.0], [0.6, 0.4], [1.0, 1.0]];
+        let primed = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
+        autoshop::pipeline::prime_curve_memo(
+            &p,
+            autoshop::pipeline::curve_ident(&p),
+            primed.clone(),
+        );
+        let pre_era =
+            EditRecipe { version: 1, base_curve: washy.clone(), ..Default::default() };
+        app.src_path = Some(p);
+        app.variants = vec![Variant {
+            kind: VariantKind::Original,
+            recipe: pre_era.clone(),
+            base: None,
+            origin: None,
+            thumb: None,
+        }];
+        app.recipe = pre_era.clone();
+        app.committed = UndoStep { recipe: pre_era.clone(), base: None, origin: None };
+        app.undo_stack.push(UndoStep { recipe: pre_era.clone(), base: None, origin: None });
+        // Same-path FRESH reopen in flight: fact without request — refused.
+        app.open_in_flight = true;
+        app.open_same_path = true;
+        app.keep_recipe = false;
+        app.undo(&ctx);
+        assert_eq!(app.recipe.version, 1, "fresh-reopen flight: the install is NOT repaired");
+        assert_eq!(app.recipe.base_curve, washy, "…and the washed curve is untouched");
+        // Same-path keep-flight: request AND fact — admitted, and the memo's
+        // primed answer is adopted with its era stamp.
+        app.keep_recipe = true;
+        app.redo(&ctx);
+        assert_eq!(
+            app.recipe.version,
+            autoshop::recipe::CALIB_ERA,
+            "keep-flight: the reinstalled pre-era pair is repaired"
+        );
+        assert_eq!(app.recipe.base_curve, primed, "…with the primed answer, not a re-estimate");
+        assert_eq!(
+            app.variants[0].recipe.base_curve, primed,
+            "…and the strip entry follows the healed canvas"
+        );
     }
 
     #[test]
@@ -11991,8 +12103,11 @@ mod tests {
         let p = std::path::Path::new("D:/__autoshop_nonexistent__/x.ARW");
         // The entry's edge (2560) deliberately DIFFERS from app.preview_edge
         // (1280): the key must come from the worker's pre-read ident riding
-        // OpenedBase — a body that re-derives it from app state or a
-        // completion-time stat files under 1280 and both edge asserts flip.
+        // OpenedBase — a body that re-derives the EDGE from app state files
+        // under 1280 and both edge asserts flip. (The stamp halves are
+        // None-on-None for these nonexistent fixtures, so only the edge
+        // component is pinned here; identity-before-read for the stamps is
+        // review-enforced and recorded in the remember_base doc.)
         app.remember_base(
             p,
             &(
