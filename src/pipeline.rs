@@ -433,7 +433,7 @@ pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
 /// replacement is caught whenever it changes either; an equal-size,
 /// timestamp-preserving swap is NOT, and content-hashing a 50-120 MB RAW per
 /// check would cost the very read this memo exists to avoid.
-type CurveMemoKey = (PathBuf, (u64, Option<std::time::SystemTime>));
+type CurveMemoKey = (PathBuf, CurveIdent);
 
 fn fresh_curve_memo()
 -> &'static std::sync::Mutex<std::collections::HashMap<CurveMemoKey, Vec<[f32; 2]>>> {
@@ -443,23 +443,36 @@ fn fresh_curve_memo()
     MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// The (size, mtime) half of the memo key. CAPTURE IT BEFORE READING the
+/// file: an answer must be filed under the identity of the content it was
+/// computed FROM, so a file replaced mid-read lands under the OLD key and
+/// the next reader (new identity) recomputes. The repair does this; primers
+/// must too — stat'ing after a multi-second develop filed a mid-open
+/// replacement's NEW identity with the OLD content's answer, permanently.
+pub type CurveIdent = (u64, Option<std::time::SystemTime>);
+
+pub fn curve_ident(raw: &Path) -> CurveIdent {
+    std::fs::metadata(raw).ok().map(|m| (m.len(), m.modified().ok())).unwrap_or((0, None))
+}
+
 /// Seed the memo with an ANSWER a caller already computed. The GUI open
 /// worker develops the neutral and CDF-matches the camera rendition anyway;
 /// discarding that answer made every later repair site (Ctrl+Z's
 /// apply_step, a variant switch, Ctrl+S) pay a second full decode + develop
-/// on the UI thread for the identical result. Same identity key as the
-/// repair's own lookup. Answers only — callers must never prime an
-/// inability, which stays uncached so the next reader retries. The caller's
-/// working edge may differ from the repair's 2048 cap; both sides histogram
-/// through the same <=1024 thumbnail (see `render::camera_base_knots`), so
-/// the answer is the same within the estimator's own sub-bin tolerance.
-pub fn prime_curve_memo(raw: &Path, knots: Vec<[f32; 2]>) {
-    let ident = std::fs::metadata(raw)
-        .ok()
-        .map(|m| (m.len(), m.modified().ok()))
-        .unwrap_or((0, None));
+/// on the UI thread. Answers only — an inability must never be primed (it
+/// stays uncached so the next reader retries). FIRST ANSWER WINS
+/// (`or_insert`): the memo's contract is that the answer cannot change
+/// while the process runs, and the GUI's working edge is a user preference
+/// — overwriting on a resolution switch would have made the repaired curve
+/// a function of that preference. The caller's edge may differ from the
+/// repair's 2048 cap; each side is box-binned to <=1024 INDEPENDENTLY (the
+/// neutral by `render::estimation_base`'s cap, the camera side inside
+/// `camera_base_knots`), so answers agree within the estimator's documented
+/// tolerance — not byte-identically, which is exactly why one answer is
+/// recorded and kept.
+pub fn prime_curve_memo(raw: &Path, ident: CurveIdent, knots: Vec<[f32; 2]>) {
     if let Ok(mut m) = fresh_curve_memo().lock() {
-        m.insert((raw.to_path_buf(), ident), knots);
+        m.entry((raw.to_path_buf(), ident)).or_insert(knots);
     }
 }
 
@@ -477,10 +490,7 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
     if !base_curve_looks_pre_era(r.version, &r.base_curve) {
         return None;
     }
-    let ident = std::fs::metadata(raw)
-        .ok()
-        .map(|m| (m.len(), m.modified().ok()))
-        .unwrap_or((0, None));
+    let ident = curve_ident(raw);
     let key = (raw.to_path_buf(), ident);
     let memo = fresh_curve_memo();
     let cached = memo.lock().ok().and_then(|m| m.get(&key).cloned());
@@ -1422,6 +1432,40 @@ mod tests {
         assert!(repair_pre_era_base_curve(&raw, &mut r).is_none());
         assert_eq!(r.base_curve, washed, "an inability must not touch the curve");
         assert_eq!(r.version, 1, "nor launder the stamp");
+    }
+
+    #[test]
+    fn a_primed_answer_is_what_the_repair_consumes() {
+        use crate::recipe::CALIB_ERA;
+        // Pins the two contracts priming rests on: the primed key is
+        // byte-identical to the repair's lookup key, and a primed answer is
+        // consumed instead of a fresh estimate. A tuple-shape typo in
+        // either would compile, pass clippy and every other test, and
+        // silently restore the memo-never-hits behavior priming exists to
+        // prevent. (Nonexistent fixture path: curve_ident falls back to the
+        // deterministic (0, None).)
+        let raw = std::path::PathBuf::from("primed-answer-fixture.arw");
+        let primed = vec![[0.0, 0.0], [0.3, 0.55], [1.0, 1.0]];
+        prime_curve_memo(&raw, curve_ident(&raw), primed.clone());
+        let mut r = EditRecipe {
+            version: 1,
+            base_curve: vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0]],
+            ..Default::default()
+        };
+        assert!(repair_pre_era_base_curve(&raw, &mut r).is_some());
+        assert_eq!(r.base_curve, primed, "the repair consumed the PRIMED answer");
+        assert_eq!(r.version, CALIB_ERA);
+        // First answer wins: a second prime must not overwrite a live key —
+        // the GUI's working edge is a preference, and the memo's contract is
+        // that the answer cannot change while the process runs.
+        prime_curve_memo(&raw, curve_ident(&raw), Vec::new());
+        let mut r2 = EditRecipe {
+            version: 1,
+            base_curve: vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0]],
+            ..Default::default()
+        };
+        assert!(repair_pre_era_base_curve(&raw, &mut r2).is_some());
+        assert_eq!(r2.base_curve, primed, "or_insert: the first recorded answer stays");
     }
 
     #[test]

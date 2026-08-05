@@ -1208,10 +1208,11 @@ impl AutoshopApp {
         // An identical LIVE toast refreshes instead of duplicating: undoing
         // through a washed history region fires the same repair disclosure
         // once per healed step, and five copies evicted still-live ERROR
-        // toasts from the ring.
-        if let Some(t) = self.toasts.iter_mut().find(|t| t.text == text && t.kind == kind) {
-            t.born = Instant::now();
-            return;
+        // toasts from the ring. The refresh MOVES it to the back — it is
+        // the newest content, and refreshing in place left it first in
+        // line for eviction, the exact loss the dedup exists to prevent.
+        if let Some(i) = self.toasts.iter().position(|t| t.text == text && t.kind == kind) {
+            self.toasts.remove(i);
         }
         self.toasts.push(Toast { text, kind, born: Instant::now() });
         if self.toasts.len() > 5 {
@@ -1976,6 +1977,12 @@ impl AutoshopApp {
                 // source. Demosaic is slow, so this runs off the UI thread.
                 let res = (|| -> anyhow::Result<OpenedBase> {
                     let (thumb, knots, lens, as_shot) = if autoshop::decode::is_raw(&path) {
+                        // Identity BEFORE the read: the primed answer below
+                        // is filed under the content it was computed FROM —
+                        // stat'ing after the multi-second develop filed a
+                        // mid-open replacement's NEW identity with the OLD
+                        // content's answer.
+                        let ident = autoshop::pipeline::curve_ident(&path);
                         // Developed AT the working edge (the cap runs before
                         // tone/geometry): opening a 61 MP RAW no longer keeps
                         // a full-resolution develop resident just to be
@@ -2016,7 +2023,11 @@ impl AutoshopApp {
                                     // inability stays uncached so the next
                                     // reader retries.
                                     Some(k) => {
-                                        autoshop::pipeline::prime_curve_memo(&path, k.clone());
+                                        autoshop::pipeline::prime_curve_memo(
+                                            &path,
+                                            ident,
+                                            k.clone(),
+                                        );
                                         k
                                     }
                                     // None = could not judge. For an OPEN
@@ -2241,11 +2252,15 @@ impl AutoshopApp {
         // transient inability early-exits on the failed probe and retries on
         // the next read.
         if vkind != VariantKind::Generated
-            // ...and never while a photo OPEN is in flight: src_path already
-            // points at the INCOMING photo (the apply_step / live-canvas
-            // override hazard) — a worker-completion push_variant lands in
-            // exactly that window.
-            && !self.open_in_flight
+            // ...and never while a CROSS-PHOTO open is in flight (src_path
+            // already points at the INCOMING photo — the apply_step /
+            // live-canvas override hazard); a same-path keep-flight stays
+            // admitted. Unreachable today through this fn's callers — the
+            // busy interlocks exclude an in-flight open during switch /
+            // push / delete — so this is defence-in-depth beside the
+            // apply_step gate, and says so instead of claiming a live
+            // scenario.
+            && (!self.open_in_flight || self.keep_recipe)
             && let Some(p) = self.src_path.clone()
             && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
@@ -2707,16 +2722,24 @@ impl AutoshopApp {
         // Ctrl+S) cannot know which stack entries still hold it (the
         // save-time restamp covers only the pair IT replaced). Repairing on
         // the way back keeps every door to the canvas behind one rule.
-        // Memo-warm FOR REAL: the open worker primes the memo with its own
-        // estimate, so this is a lookup, not a decode; era-2 installs
-        // short-circuit before any I/O; the Generated guard matches every
-        // other ordering site; and an in-flight OPEN is refused — src_path
-        // already points at the INCOMING photo while this history belongs
-        // to the outgoing one (the live-canvas override records the same
-        // hazard), so repairing here would estimate the WRONG photo onto
-        // this canvas. `committed` follows the heal, or the next commit_now
-        // would push the washed head straight back onto the stack.
-        if !self.open_in_flight
+        // Cost honesty: when the OPEN succeeded, the worker primed the
+        // memo and this is a lookup. But washed steps enter history
+        // precisely when the open-time estimate was an INABILITY — uncached
+        // by design — so the first traversal here IS the retry point and
+        // pays one estimate (the accepted class shared with load_active and
+        // the open gate); its answer memoizes and the rest of the washed
+        // history heals by lookup. Era-2 installs short-circuit before any
+        // I/O; the Generated guard matches every other ordering site; and a
+        // CROSS-PHOTO in-flight open is refused — src_path already points
+        // at the INCOMING photo while this history belongs to the outgoing
+        // one (the live-canvas override records the same hazard), so
+        // repairing would estimate the WRONG photo onto this canvas. A
+        // same-path preview-resolution re-decode (keep_recipe) keeps the
+        // pair coherent AND its keep arm preserves history — refusing there
+        // made a washed install DURABLE, so it is admitted. `committed`
+        // follows the heal, or the next commit_now would push the washed
+        // head straight back onto the stack.
+        if (!self.open_in_flight || self.keep_recipe)
             && !self
                 .variants
                 .get(self.active)
@@ -3157,19 +3180,25 @@ impl AutoshopApp {
                     xmp_warn = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
                 }
             }
+            // BOTH said regardless of a later photo's failure (the
+            // travels-with-the-mutation rule the repair note above follows):
+            // the XMP that failed belongs to a develop that IS saved, and
+            // clear_warn's develop was DESTROYED on disk with only the
+            // marker missing — a break on photo B must not swallow photo
+            // A's disclosures.
+            if let Some(w) = xmp_warn {
+                // Said, never swallowed: the develops ARE saved, but
+                // Lightroom will not see this one until it is rewritten.
+                eprintln!("⚠ develops saved; a Lightroom XMP failed: {w}");
+            }
+            if let Some(w) = clear_warn {
+                eprintln!(
+                    "⚠ edits cleared, but the clear could not be marked: {w} — a sidecar \
+                     beside the RAW may restore them on the next open"
+                );
+            }
             match failed {
                 None => {
-                    if let Some(w) = xmp_warn {
-                        // Said, never swallowed: the develops ARE saved, but
-                        // Lightroom will not see this one until it is rewritten.
-                        eprintln!("⚠ develops saved; a Lightroom XMP failed: {w}");
-                    }
-                    if let Some(w) = clear_warn {
-                        eprintln!(
-                            "⚠ edits cleared, but the clear could not be marked: {w} — a sidecar \
-                             beside the RAW may restore them on the next open"
-                        );
-                    }
                     self.nav_stash.clear();
                     self.saved_recipe = self.recipe.clone();
                     self.confirm_quit = false;
