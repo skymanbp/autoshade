@@ -648,7 +648,23 @@ pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
     };
     let mut removed = false;
     let mut first_err: Option<std::io::Error> = None;
-    for p in [recipe_target(src), xmp_target(src), legacy_recipe(src), legacy_xmp(src)] {
+    // The retired `recipe.json.bak` goes FIRST, for exactly the reason
+    // [`clear_pixel_source`] retires its own: [`recover_orphan_baks`]
+    // republishes a `.bak` whenever the live file is missing, so a clear that
+    // removes only the live recipe hands the next open the develop it just
+    // cleared — in the same session, since every read runs the recovery.
+    // `write_recipe` drops its `.bak` on a successful publish, so this needs
+    // one ignored-unlink fault to arise (the AV-lock case the publisher
+    // already documents) — but the clear path is the ONE save path that never
+    // runs that publisher's stale-`.bak` hygiene, so nothing else would ever
+    // sweep it. `cleared.txt` cannot help: the recovery never reads it.
+    for p in [
+        develop_dir(src).join("recipe.json.bak"),
+        recipe_target(src),
+        xmp_target(src),
+        legacy_recipe(src),
+        legacy_xmp(src),
+    ] {
         match del(&p) {
             Ok(b) => removed |= b,
             Err(e) => {
@@ -1766,7 +1782,15 @@ mod tests {
         std::fs::write(&master_b, b"B").unwrap();
         write_pixel_source(&photo, &master_a, false).unwrap();
         write_pixel_source(&photo, &master_b, false).unwrap();
+        // EVERY removal target the primitive owns — including the retired
+        // recipe.json.bak, whose own resurrection route this gate previously
+        // asserted about without ever creating one.
         std::fs::write(recipe_target(&photo), b"{}").unwrap();
+        std::fs::write(dev.join("recipe.json.bak"), b"{\"contrast\":30.0}").unwrap();
+        std::fs::write(xmp_target(&photo), b"<x:xmpmeta/>").unwrap();
+        let _ = std::fs::create_dir_all("out");
+        std::fs::write(legacy_recipe(&photo), b"{}").unwrap();
+        std::fs::write(legacy_xmp(&photo), b"<x:xmpmeta/>").unwrap();
         assert!(dev.join("pixels.json.bak").exists(), "precondition: a retired master exists");
         assert!(has_develop(&photo), "precondition: a develop exists");
         let out = clear_develop(&photo).expect("the clear must succeed");
@@ -1774,10 +1798,19 @@ mod tests {
         assert!(out.marker_warning.is_none(), "the marker was stamped");
         assert!(!has_develop(&photo), "no sidecar survives");
         assert!(!has_pixel_source(&photo), "no master survives — the .bak included");
+        for p in [xmp_target(&photo), legacy_recipe(&photo), legacy_xmp(&photo)] {
+            assert!(!p.exists(), "every home is cleared, including {}", p.display());
+        }
+        assert!(
+            !dev.join("recipe.json.bak").exists(),
+            "the retired recipe goes too — recover_orphan_baks would republish it"
+        );
         assert!(dev.join("cleared.txt").exists(), "the newest-intent marker is stamped");
         // The resurrection probe itself: every reader recovers orphans first.
         recover_orphan_baks(&photo).unwrap();
         assert!(read_pixel_source(&photo).is_none(), "nothing resurrects the cleared retouch");
+        // Non-vacuous now: a recipe.json.bak DID exist before the clear, so
+        // this really exercises the recovery's recipe row.
         assert!(!has_develop(&photo), "and nothing resurrects the cleared recipe");
         // Clearing an already-clean develop is a no-op, not an error.
         let again = clear_develop(&photo).expect("idempotent");

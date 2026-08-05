@@ -1456,7 +1456,10 @@ async function saveXmp() {
     const stale = reqId !== state.id || reqSeq !== selectSeq;
     if (!r.ok) { setStatus((stale ? "save for another photo failed: " : "save failed: ") + body); return; }
     if (stale) { setStatus("save for another photo finished — its develop is on disk"); loadList(); return; }
-    setStatus(body.startsWith("cleared") ? "saved edits cleared" : ("xmp + recipe saved → " + body));
+    // The server APPENDS why a clear could not be marked (without the marker
+    // a sidecar beside the RAW can restore the edits on the next open).
+    // Substituting a fixed string threw away the one thing worth reading.
+    setStatus(body.startsWith("cleared") ? body : ("xmp + recipe saved → " + body));
     savedRecipe = sentBaseline; // what is on disk = what this request CARRIED
     if (sentMaster && !body.startsWith("cleared")
         && !body.includes("recording the retouched master failed")) {
