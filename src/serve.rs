@@ -1259,7 +1259,7 @@ fn region_to_original(
 /// persisted master is GENERATED, the render path strips lens_profile (the
 /// look lives in the pixels) — so the DISPLAYED frame never had the profile
 /// geometry applied, and mapping a box/mask through it would land off target.
-/// Mirrors render_source's strip on the mapping side.
+/// Mirrors render_source_checked's strip on the mapping side.
 fn view_for_mapping(raw: &Path, view: Option<&EditRecipe>) -> Option<EditRecipe> {
     let mut v = view?.clone();
     if crate::store::read_pixel_source(raw).is_some_and(|(_, generated)| generated) {
@@ -1509,7 +1509,12 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             p
         }
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
-            Ok(p) => p,
+            // The repair note is dropped ON PURPOSE: this runs per slider
+            // release, and the recipe the client holds was already disclosed
+            // by api_recipe's X-Recipe-Warning at select time. On the Err arm
+            // the repair still ran — the degraded render below must not show
+            // the washed curve.
+            Ok((p, _repair_note)) => p,
             Err(msg) => {
                 preview_warning = Some(msg);
                 raw.clone()
@@ -1582,7 +1587,9 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // exporting the un-retouched source (A6). Server-side state, not the
         // client's request — a 500 whose body names the remedy.
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
-            Ok(p) => p,
+            // Note dropped: the loaded recipe was disclosed by api_recipe's
+            // X-Recipe-Warning at select time.
+            Ok((p, _repair_note)) => p,
             Err(msg) => return Ok(status_response(500, &msg)),
         },
         Err(msg) => return Ok(status_response(400, &msg)),
@@ -1649,7 +1656,9 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         // exporting the un-retouched source (A6). Server-side state, not the
         // client's request — a 500 whose body names the remedy.
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
-            Ok(p) => p,
+            // Note dropped: the loaded recipe was disclosed by api_recipe's
+            // X-Recipe-Warning at select time.
+            Ok((p, _repair_note)) => p,
             Err(msg) => return Ok(status_response(500, &msg)),
         },
         Err(msg) => return Ok(status_response(400, &msg)),
@@ -1819,8 +1828,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // This save was routed PAST the clear branch above solely because of
         // the persisted master — say so, or the 200 reads as "everything is
         // neutral now" while the baked retouch still backs every render.
+        // No removal instruction: an in-place master currently has NO detach
+        // affordance on either surface (the GUI clear guard needs an
+        // origin-free canvas, and only reverse-fit — Generated-only — or a
+        // failed master load produces one). The gap is a roadmap item; until
+        // then the note states what happened, not a route that does not
+        // exist.
         master_note = " — the saved retouch master was kept: a neutral save never deletes \
-                       baked pixels (detach the retouch from the GUI canvas to remove it)"
+                       baked pixels"
             .to_string();
     }
     if let Some((p, generated)) = &master {

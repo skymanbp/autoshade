@@ -496,31 +496,21 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     // The guard FIRST: a refused -o must not pay a RAW decode for the repair
     // below, nor print a disclosure for a render that never runs.
     pipeline::guard_readonly(out, raw)?;
-    // `apply` is the remedy the batch summary names, and it reads the recipe
-    // straight off disk like every other deliverable path — so without this it
-    // rendered the washed pre-era curve while the GUI canvas of the same build
-    // showed the repaired one. The peek is ADVISORY, for the disclosure only
-    // (render_source_checked below stays authoritative and repairs
-    // internally): a GENERATED master's curve is stripped either way, and an
-    // unhonourable master refuses the render — printing "re-estimated" ahead
-    // of either discloses a correction no pixel receives.
-    let pix = autoshop::store::read_pixel_source(raw);
-    let generated_master = pix.as_ref().is_some_and(|(_, generated)| *generated);
-    let unhonourable = pix.is_none() && autoshop::store::has_pixel_source(raw);
-    if !generated_master
-        && !unhonourable
-        && let Some(note) = pipeline::repair_pre_era_base_curve(raw, &mut recipe)
-    {
-        println!("note: {note}");
-    }
     // Render from the SAME source every other deliverable uses (auto_cmd,
     // serve, the GUI batch): a saved heal/clone or generative master IS this
     // develop's source, and a recorded master that cannot be honoured refuses
     // with the remedy — `apply` was the one surface that rendered the
     // untouched RAW, silently dropping every baked pixel edit while
-    // reporting success.
-    let src = autoshop::store::render_source_checked(raw, &mut recipe)
+    // reporting success. The funnel repairs a washed pre-era curve (after its
+    // generated strip) and hands the disclosure back, so the note prints
+    // exactly when a repaired curve reaches pixels — the advisory peek this
+    // replaces re-ran read_pixel_source for the same answer, doubling its
+    // stderr warnings and its .bak recovery on the very path that refuses.
+    let (src, relook) = autoshop::store::render_source_checked(raw, &mut recipe)
         .map_err(|m| anyhow::anyhow!(m))?;
+    if let Some(note) = relook {
+        println!("note: {note}");
+    }
     if src != raw {
         println!("  (rendering the saved pixel master {})", src.display());
     }
@@ -586,15 +576,21 @@ fn auto_cmd(
         if denoise { " with AI denoise" } else { "" }
     );
     // Render from the SAME source the GUI and web use: a saved heal/clone or
-    // generative master IS this develop's source (store::render_source, which
+    // generative master IS this develop's source (store::render_source_checked, which
     // also strips calibration for a generated master). Rendering the
     // untouched RAW silently dropped every baked pixel edit and produced a
     // file that disagreed with what reopening the photo shows.
     let mut render_recipe = recipe.clone();
     // DELIVERABLE: a recorded master that cannot be honoured refuses with the
     // remedy instead of silently rendering the un-retouched RAW (A6).
-    let src = autoshop::store::render_source_checked(raw, &mut render_recipe)
+    let (src, relook) = autoshop::store::render_source_checked(raw, &mut render_recipe)
         .map_err(|m| anyhow::anyhow!(m))?;
+    if let Some(note) = relook {
+        // Normally None — produce_recipe already repaired through
+        // saved_recipe_snapshot — but a recipe that slipped past still gets
+        // its disclosure.
+        println!("note: {note}");
+    }
     if src != raw {
         println!("  (rendering the saved pixel master {})", src.display());
     }

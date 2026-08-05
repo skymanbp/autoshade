@@ -4136,12 +4136,34 @@ impl AutoshopApp {
                     if let Some(p) = out.parent() {
                         std::fs::create_dir_all(p)?;
                     }
+                    // Every deliverable repairs (the batch worker's rule):
+                    // the canvas normally arrives repaired at open, but when
+                    // that repair was an INABILITY (a then-locked file) the
+                    // canvas holds the washed curve — and this export shipped
+                    // it while a batch export of the SAME canvas repaired it.
+                    // A generated canvas is already stripped, so the repair
+                    // no-ops there; `path` IS the photo for every canvas the
+                    // repair can fire on. Off the UI thread, memo-bounded.
+                    let mut recipe = recipe;
+                    let relook = autoshop::pipeline::repair_pre_era_base_curve(&path, &mut recipe)
+                        .is_some();
                     // SCUNet AI denoise (python sidecar) runs before the develop when on.
                     let opts = denoise.then(|| {
                         autoshop::denoise::DenoiseOpts::from_config(&autoshop::config::Config::load(), None, 1.0)
                     });
                     autoshop::render::render_to_file(&path, &recipe, &out, opts.as_ref(), Some(&export))?;
-                    Ok::<String, anyhow::Error>(out.display().to_string())
+                    Ok::<String, anyhow::Error>(if relook {
+                        format!(
+                            "{} — {}",
+                            out.display(),
+                            tr(
+                                lang,
+                                "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                            )
+                        )
+                    } else {
+                        out.display().to_string()
+                    })
                 })();
                 Msg::Exported(res)
             },
@@ -4965,6 +4987,18 @@ impl AutoshopApp {
                                     // neutral", a warning about something else
                                     // entirely.
                                     if !stamp
+                                        // The fourth ordering site: a
+                                        // GENERATED canvas strips its
+                                        // calibration below, so repairing
+                                        // first paid a synchronous RAW
+                                        // decode + develop ON THE UI THREAD
+                                        // for a curve the strip then
+                                        // deleted — and the note disclosed
+                                        // a re-estimate that never reached
+                                        // a pixel (load_version, the render
+                                        // funnel and the batch export were
+                                        // the other three).
+                                        && !baked.as_ref().is_some_and(|(_, _, g)| *g)
                                         && self.src_path.clone().is_some_and(|p| {
                                             autoshop::pipeline::repair_pre_era_base_curve(
                                                 &p, &mut recipe,

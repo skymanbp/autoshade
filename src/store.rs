@@ -327,17 +327,19 @@ pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
 ///   pixels, so both fields are stripped from the copy being rendered — the
 ///   recipe ON DISK keeps them (a master that later fails to decode must
 ///   still restore a calibrated develop).
-pub fn render_source(raw: &Path, recipe: &mut EditRecipe) -> PathBuf {
-    render_source_checked(raw, recipe).unwrap_or_else(|_| raw.to_path_buf())
-}
-
-/// [`render_source`] for DELIVERABLE paths: a master that WAS recorded but
-/// cannot be honoured is an `Err` naming the remedy, not a silent fallback —
-/// exporting the un-retouched source while reporting success was the A6
-/// defect. Preview surfaces keep the degrading wrapper above (a canvas must
-/// still open; the GUI toasts at open, the web rides an X-Preview-Warning).
-/// The message is ASCII-only: it travels in an HTTP header.
-pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<PathBuf, String> {
+///
+/// A master that WAS recorded but cannot be honoured is an `Err` naming the
+/// remedy, not a silent fallback — exporting the un-retouched source while
+/// reporting success was the A6 defect. Preview surfaces degrade explicitly
+/// at their call site (a canvas must still open; the web rides an
+/// X-Preview-Warning); the silently-degrading `render_source` wrapper had no
+/// callers left and hid exactly that decision, so it is gone. On success the
+/// pre-era repair's disclosure rides along for the caller to surface.
+/// The `Err` message is ASCII-only: it travels in an HTTP header.
+pub fn render_source_checked(
+    raw: &Path,
+    recipe: &mut EditRecipe,
+) -> Result<(PathBuf, Option<String>), String> {
     // The pre-era base-curve repair belongs HERE, not only on the surfaces
     // that stamp calibration. Batch 52 put it in `saved_recipe_snapshot` and
     // claimed "no surface can render a washed curve by forgetting to ask" —
@@ -354,7 +356,10 @@ pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<Path
     // runs AFTER the generated strip below (the load_version ordering): a
     // generated master's curve is deleted either way, so repairing first paid
     // a RAW decode + develop for an estimate nothing could use, on every
-    // caller of this funnel.
+    // caller of this funnel. But it runs for EVERY outcome, the Err arm
+    // included: the web preview's degraded fallback renders the RAW on Err,
+    // and gating the repair on Ok left that canvas showing the washed curve
+    // under a warning that named only the missing retouch.
     let source = match read_pixel_source(raw) {
         Some((master, generated)) => {
             if generated {
@@ -381,10 +386,8 @@ pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<Path
         ),
         None => Ok(raw.to_path_buf()),
     };
-    if source.is_ok() {
-        let _ = crate::pipeline::repair_pre_era_base_curve(raw, recipe);
-    }
-    source
+    let note = crate::pipeline::repair_pre_era_base_curve(raw, recipe);
+    source.map(|p| (p, note))
 }
 
 /// Repair a CRASHED publish. `write_recipe` and `write_pixel_source` retire
