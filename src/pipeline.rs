@@ -402,16 +402,6 @@ pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
     interior.iter().all(|k| k[1] <= k[0]) && interior.iter().any(|k| k[1] < k[0] - 0.05)
 }
 
-/// Re-estimate a base curve that was fitted against a washed frame, and say
-/// so. Returns the disclosure when the curve was replaced.
-///
-/// The bias was a PREVIEW defect only in the sense that it never touched an
-/// export's pixels directly. It reached deliverables anyway: the estimate
-/// runs on a capped develop ([`photo_base_knots`]), the result is persisted
-/// like any user edit, and `build_tone_lut` composes it under the full-
-/// resolution render. Batch 43 fixed the sampler and thereby made an
-/// already-stored curve WORSE — it is now laid over a correct develop, which
-/// is what turns "slightly off" into several stops dark.
 /// Estimates already computed this run, keyed by photo — including the EMPTY
 /// answer, which means "no estimate available, leave the saved curve alone".
 ///
@@ -430,6 +420,16 @@ fn fresh_curve_memo()
     MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Re-estimate a base curve that was fitted against a washed frame, and say
+/// so. Returns the disclosure when the curve was replaced.
+///
+/// The bias was a PREVIEW defect only in the sense that it never touched an
+/// export's pixels directly. It reached deliverables anyway: the estimate
+/// runs on a capped develop ([`photo_base_knots`]), the result is persisted
+/// like any user edit, and `build_tone_lut` composes it under the full-
+/// resolution render. Batch 43 fixed the sampler and thereby made an
+/// already-stored curve WORSE — it is now laid over a correct develop, which
+/// is what turns "slightly off" into several stops dark.
 pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<String> {
     if !base_curve_looks_pre_era(r.version, &r.base_curve) {
         return None;

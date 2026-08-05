@@ -2391,6 +2391,13 @@ impl AutoshopApp {
                 // persisted the dangling path. The loaded state gets its own
                 // claimed copies.
                 autoshop::store::detach_rasters(&src, &mut r, "mask-restored");
+                // A version snapshot is a saved recipe like any other, and it
+                // predates the era stamp by definition — loading one put an
+                // unrepaired washed curve straight onto the canvas and into
+                // everything exported from it.
+                if let Some(note) = autoshop::pipeline::repair_pre_era_base_curve(&src, &mut r) {
+                    self.status = note;
+                }
                 // A Generated variant's pixels already carry the camera look
                 // AND the lens corrections — a source-based snapshot's
                 // calibration would cook both twice (same strip rule as the

@@ -832,10 +832,18 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         // Re-serialised only when the repair actually fired; an untouched
         // recipe still goes out byte-for-byte, forward-schema fields and all.
         if let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
-            && crate::pipeline::repair_pre_era_base_curve(&raw, &mut r).is_some()
+            && let Some(note) = crate::pipeline::repair_pre_era_base_curve(&raw, &mut r)
             && let Ok(fixed) = serde_json::to_string(&r)
         {
-            return Ok(json_text(fixed));
+            // SAID, not just done: the photo renders differently than it did
+            // yesterday, and the GUI tells its user exactly that. The client
+            // already surfaces this header for corrupt-recipe fallbacks.
+            // ASCII by construction — it travels in an HTTP header.
+            let mut resp = json_text(fixed);
+            if let Ok(h) = Header::from_bytes(&b"X-Recipe-Warning"[..], note.as_bytes()) {
+                resp.add_header(h);
+            }
+            return Ok(resp);
         }
         return Ok(json_text(text));
     }
