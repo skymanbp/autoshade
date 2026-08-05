@@ -1405,6 +1405,50 @@ mod tests {
     }
 
     #[test]
+    fn render_funnel_repairs_with_a_source_and_never_on_a_refusal() {
+        use crate::recipe::CALIB_ERA;
+        let dir = std::env::temp_dir().join("autoshop-pipeline-test-rsc-funnel");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_rsc_funnel_probe.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        let washed = vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0]];
+        // Seed the process memo with the IDENTITY answer under this file's
+        // real identity — exactly what a successful estimate would have left.
+        let ident = std::fs::metadata(&raw)
+            .ok()
+            .map(|m| (m.len(), m.modified().ok()))
+            .unwrap_or((0, None));
+        fresh_curve_memo().lock().unwrap().insert((raw.clone(), ident), Vec::new());
+        // No master recorded: the funnel hands back the RAW and must repair
+        // AND return the disclosure with it.
+        let mut r = EditRecipe { version: 1, base_curve: washed.clone(), ..Default::default() };
+        let (src, note) =
+            crate::store::render_source_checked(&raw, &mut r).expect("no master recorded");
+        assert_eq!(src, raw);
+        assert!(note.is_some(), "the disclosure rides the returned source");
+        assert_eq!(r.version, CALIB_ERA);
+        assert!(r.base_curve.is_empty(), "the identity answer replaced the washed curve");
+        // A recorded-but-unloadable master: Err, and the refusal must leave
+        // the recipe UNTOUCHED — every deliverable caller aborts on this arm,
+        // and funding a RAW decode for a render that never runs is the tax
+        // the Ok-only rule exists to avoid (the one caller that renders
+        // anyway, the web preview's degraded fallback, repairs for itself).
+        let gone = dir.join("gone-master.png");
+        std::fs::write(&gone, b"png").unwrap();
+        crate::store::write_pixel_source(&raw, &gone, false).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+        let mut r2 = EditRecipe { version: 1, base_curve: washed.clone(), ..Default::default() };
+        assert!(crate::store::render_source_checked(&raw, &mut r2).is_err());
+        assert_eq!(r2.version, 1, "a refusal must not launder the stamp");
+        assert_eq!(r2.base_curve, washed, "nor touch the curve");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    #[test]
     fn an_era_stamp_is_provenance_not_an_edit() {
         // A recipe saved by an older build carries version 1. It must still
         // read as "no edits" — otherwise every legacy photo opens with a

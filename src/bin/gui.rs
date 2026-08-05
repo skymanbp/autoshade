@@ -4130,6 +4130,7 @@ impl AutoshopApp {
         let recipe = self.recipe.clone();
         let denoise = self.save_denoise;
         let export = self.export_opts();
+        let src_photo = self.src_path.clone();
         self.spawn_worker(
             move || {
                 let res = (|| {
@@ -4141,11 +4142,19 @@ impl AutoshopApp {
                     // that repair was an INABILITY (a then-locked file) the
                     // canvas holds the washed curve — and this export shipped
                     // it while a batch export of the SAME canvas repaired it.
-                    // A generated canvas is already stripped, so the repair
-                    // no-ops there; `path` IS the photo for every canvas the
-                    // repair can fire on. Off the UI thread, memo-bounded.
+                    // Anchored on the PHOTO, like every sibling site: `path`
+                    // is the RENDER SOURCE, which for an in-place heal/clone
+                    // is the baked master .png — never a RAW — so anchoring
+                    // there left the repair permanently dead for exactly the
+                    // canvases whose curve still renders (a generated canvas
+                    // is stripped and no-ops either way). Off the UI thread,
+                    // memo-bounded.
                     let mut recipe = recipe;
-                    let relook = autoshop::pipeline::repair_pre_era_base_curve(&path, &mut recipe)
+                    let relook = src_photo
+                        .as_deref()
+                        .and_then(|p| {
+                            autoshop::pipeline::repair_pre_era_base_curve(p, &mut recipe)
+                        })
                         .is_some();
                     // SCUNet AI denoise (python sidecar) runs before the develop when on.
                     let opts = denoise.then(|| {
@@ -4999,6 +5008,19 @@ impl AutoshopApp {
                                         // funnel and the batch export were
                                         // the other three).
                                         && !baked.as_ref().is_some_and(|(_, _, g)| *g)
+                                        // ...nor when THIS session's nav
+                                        // stash is about to override the
+                                        // canvas wholesale (below): the
+                                        // toast would disclose a repair the
+                                        // stash discards, and ● would
+                                        // compare a repaired baseline
+                                        // against the unrepaired stashed
+                                        // canvas. Deliverables repair for
+                                        // themselves.
+                                        && !self
+                                            .src_path
+                                            .as_ref()
+                                            .is_some_and(|p| self.nav_stash.contains_key(p))
                                         && self.src_path.clone().is_some_and(|p| {
                                             autoshop::pipeline::repair_pre_era_base_curve(
                                                 &p, &mut recipe,

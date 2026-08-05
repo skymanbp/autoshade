@@ -356,10 +356,13 @@ pub fn render_source_checked(
     // runs AFTER the generated strip below (the load_version ordering): a
     // generated master's curve is deleted either way, so repairing first paid
     // a RAW decode + develop for an estimate nothing could use, on every
-    // caller of this funnel. But it runs for EVERY outcome, the Err arm
-    // included: the web preview's degraded fallback renders the RAW on Err,
-    // and gating the repair on Ok left that canvas showing the washed curve
-    // under a warning that named only the missing retouch.
+    // caller of this funnel. And it runs ONLY when a source is handed back:
+    // every deliverable caller ABORTS on the Err arm, and funding a full RAW
+    // decode for a render that never runs was the tax two earlier fixes
+    // existed to avoid (api_export pays it holding the HEAVY lock). The one
+    // caller that renders anyway after a refusal — the web preview's
+    // degraded fallback — runs the repair itself at that decision, where the
+    // cost buys pixels the user actually sees.
     let source = match read_pixel_source(raw) {
         Some((master, generated)) => {
             if generated {
@@ -386,8 +389,7 @@ pub fn render_source_checked(
         ),
         None => Ok(raw.to_path_buf()),
     };
-    let note = crate::pipeline::repair_pre_era_base_curve(raw, recipe);
-    source.map(|p| (p, note))
+    source.map(|p| (p, crate::pipeline::repair_pre_era_base_curve(raw, recipe)))
 }
 
 /// Repair a CRASHED publish. `write_recipe` and `write_pixel_source` retire

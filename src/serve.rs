@@ -1498,6 +1498,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // the user needs a canvas to act on — but silence was the A6 defect: the
     // degradation rides back as a header the status line surfaces.
     let mut preview_warning: Option<String> = None;
+    let mut recipe_note: Option<String> = None;
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some((p, generated))) => {
             if generated {
@@ -1509,12 +1510,10 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             p
         }
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
-            // The repair note is dropped ON PURPOSE: this runs per slider
-            // release, and the recipe the client holds was already disclosed
-            // by api_recipe's X-Recipe-Warning at select time. On the Err arm
-            // the repair still ran — the degraded render below must not show
-            // the washed curve.
-            Ok((p, _repair_note)) => p,
+            Ok((p, note)) => {
+                recipe_note = note;
+                p
+            }
             Err(msg) => {
                 preview_warning = Some(msg);
                 raw.clone()
@@ -1522,6 +1521,16 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         },
         Err(msg) => return Ok(status_response(400, &msg)),
     };
+    // ONE repair for the arms the funnel did not cover — a SESSION master
+    // (non-generated pixels render the curve on top) and the degraded Err
+    // fallback above (which renders the RAW) — and a no-op when the funnel
+    // already repaired. The note rides X-Recipe-Warning below: for a browser
+    // it is None (api_recipe repaired and disclosed before the client ever
+    // held this recipe), so the header fires exactly for clients that
+    // BYPASSED api_recipe — the population that was never told.
+    if recipe_note.is_none() {
+        recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
+    }
     let preview = develop_base(&src)?;
     let mut after = render::develop_preview(&preview, &req.recipe);
     // Geometry, mirroring the GUI preview chain (lens geometry → straighten;
@@ -1535,13 +1544,18 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     if req.recipe.straighten_deg != 0.0 {
         after = render::rotate_straighten(&after, req.recipe.straighten_deg);
     }
-    let resp = jpeg_response(&after)?;
-    Ok(match preview_warning
+    let mut resp = jpeg_response(&after)?;
+    if let Some(h) = preview_warning
         .and_then(|m| Header::from_bytes(&b"X-Preview-Warning"[..], m.as_bytes()).ok())
     {
-        Some(h) => resp.with_header(h),
-        None => resp,
-    })
+        resp = resp.with_header(h);
+    }
+    if let Some(h) = recipe_note
+        .and_then(|m| Header::from_bytes(&b"X-Recipe-Warning"[..], m.as_bytes()).ok())
+    {
+        resp = resp.with_header(h);
+    }
+    Ok(resp)
 }
 
 /// Resolve the output extension from the request ("jpg" → jpg, else 16-bit tif).
@@ -1573,6 +1587,7 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // Session master wins here too (api_develop's rule) — the deliverable
     // must match the healed preview the user just approved, generated-root
     // strip included.
+    let mut recipe_note: Option<String> = None;
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some((p, generated))) => {
             if generated {
@@ -1587,13 +1602,21 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // exporting the un-retouched source (A6). Server-side state, not the
         // client's request — a 500 whose body names the remedy.
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
-            // Note dropped: the loaded recipe was disclosed by api_recipe's
-            // X-Recipe-Warning at select time.
-            Ok((p, _repair_note)) => p,
+            Ok((p, note)) => {
+                recipe_note = note;
+                p
+            }
             Err(msg) => return Ok(status_response(500, &msg)),
         },
         Err(msg) => return Ok(status_response(400, &msg)),
     };
+    // ONE repair for the session-master arm (non-generated pixels render the
+    // curve on top; the funnel never ran there) — a no-op when the funnel
+    // already repaired. X-Recipe-Warning below fires exactly for clients
+    // that bypassed api_recipe's select-time repair + disclosure.
+    if recipe_note.is_none() {
+        recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
+    }
     // Fixed name BY DESIGN: re-exporting the same photo replaces its own
     // previous deliverable. Recorded residual: two same-stem photos from
     // DIFFERENT folders share this name (the batch-naming avoidance ruling
@@ -1623,7 +1646,13 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("publish export {}", out.display()));
     }
-    Ok(text_response(&out.display().to_string()))
+    let mut resp = text_response(&out.display().to_string());
+    if let Some(h) =
+        recipe_note.and_then(|m| Header::from_bytes(&b"X-Recipe-Warning"[..], m.as_bytes()).ok())
+    {
+        resp = resp.with_header(h);
+    }
+    Ok(resp)
 }
 
 /// Render and stream the image back as a download (browser "Save As"), without
@@ -1642,6 +1671,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // Session master wins here too (api_develop's rule), generated-root
     // strip included.
+    let mut recipe_note: Option<String> = None;
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some((p, generated))) => {
             if generated {
@@ -1656,13 +1686,18 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         // exporting the un-retouched source (A6). Server-side state, not the
         // client's request — a 500 whose body names the remedy.
         Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
-            // Note dropped: the loaded recipe was disclosed by api_recipe's
-            // X-Recipe-Warning at select time.
-            Ok((p, _repair_note)) => p,
+            Ok((p, note)) => {
+                recipe_note = note;
+                p
+            }
             Err(msg) => return Ok(status_response(500, &msg)),
         },
         Err(msg) => return Ok(status_response(400, &msg)),
     };
+    // ONE repair for the session-master arm — see api_export.
+    if recipe_note.is_none() {
+        recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
+    }
     // Config SNAPSHOT — see api_export.
     let cfg = state.config().clone();
     let ext = fmt_ext(&req);
@@ -1708,6 +1743,11 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         resp = resp.with_header(h);
     }
     if let Some(h) = header("Content-Disposition", &disposition) {
+        resp = resp.with_header(h);
+    }
+    if let Some(h) =
+        recipe_note.and_then(|m| Header::from_bytes(&b"X-Recipe-Warning"[..], m.as_bytes()).ok())
+    {
         resp = resp.with_header(h);
     }
     // Unlink while the stream handle is open: works on Unix, and on Windows
