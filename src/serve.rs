@@ -718,8 +718,10 @@ fn fresh_base_knots(raw: &Path) -> Vec<[f32; 2]> {
         Ok(neutral) => {
             // Same contract as the GUI/pipeline estimators: match against the
             // profile-vignette-corrected neutral (render::estimation_base).
+            // None (could not judge) = no base look in the fresh-open
+            // payload, exactly like the GUI open.
             let est = render::estimation_base(&neutral, &pipeline::fresh_lens_profile(raw));
-            render::camera_base_knots(&est, &camera)
+            render::camera_base_knots(&est, &camera).unwrap_or_default()
         }
         Err(e) => {
             // Disclosed, not silent — the pane render will fail loudly too,
@@ -1769,8 +1771,12 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // session's heal chain, so a GUI-saved pixels.json was invisible here and
     // a neutral web Save deleted the saved retouch through clear_develop.
     // `has_pixel_source`, not `read_pixel_source` — a recorded master that
-    // fails to LOAD right now must block the delete too (the GUI protects
-    // exactly those with the same primitive).
+    // fails to LOAD right now must block the delete too. The GUI's own CLEAR
+    // guard keys on the CANVAS instead (origin.is_none(): the user visibly
+    // removed the baked pixels before saving neutral); the web has no canvas
+    // state to consult, so the master's existence is the conservative proxy —
+    // detaching a persisted retouch stays a GUI operation, and the
+    // fall-through below DISCLOSES that the master was kept.
     if req.recipe.is_noop() && master.is_none() && !crate::store::has_pixel_source(&raw) {
         // ONE primitive for every surface (`store::clear_develop`). This branch
         // and the GUI's Ctrl+S each kept their own copy of the file list and
@@ -1809,6 +1815,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // reopen that follows "saved". Only ever WRITTEN here: an absent claim
     // must not clear a GUI-persisted master.
     let mut master_note = String::new();
+    if req.recipe.is_noop() && master.is_none() && crate::store::has_pixel_source(&raw) {
+        // This save was routed PAST the clear branch above solely because of
+        // the persisted master — say so, or the 200 reads as "everything is
+        // neutral now" while the baked retouch still backs every render.
+        master_note = " — the saved retouch master was kept: a neutral save never deletes \
+                       baked pixels (detach the retouch from the GUI canvas to remove it)"
+            .to_string();
+    }
     if let Some((p, generated)) = &master {
         // Recipe already committed (the cross-surface rule); an I/O failure
         // recording the pixels degrades to a disclosed warning, same as the

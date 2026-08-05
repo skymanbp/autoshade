@@ -619,7 +619,18 @@ pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
             // Estimate on the profile-vignette-corrected neutral — the same
             // base a stamped canvas starts from (see render::estimation_base).
             let est = crate::render::estimation_base(&neutral, &fresh_lens_profile(raw));
-            Some(crate::render::camera_base_knots(&est, &camera))
+            match crate::render::camera_base_knots(&est, &camera) {
+                Some(k) => Some(k),
+                None => {
+                    // Could not JUDGE (too few pixels on a side) — an
+                    // inability like the arms above, never a verdict.
+                    eprintln!(
+                        "⚠ base look skipped: too few pixels to compare for {}",
+                        raw.display()
+                    );
+                    None
+                }
+            }
         }
         Err(e) => {
             // Disclosed, not silent: the caller's own render will surface the

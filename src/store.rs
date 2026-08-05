@@ -350,9 +350,12 @@ pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<Path
     // This function is what deliverables DO share, and it already takes the
     // recipe by &mut for exactly this class of source-dependent correction.
     // The repair is a no-op for era-2 recipes and for any curve without the
-    // fingerprint, so the cost lands only on the photos that need it.
-    let _ = crate::pipeline::repair_pre_era_base_curve(raw, recipe);
-    match read_pixel_source(raw) {
+    // fingerprint, so the cost lands only on the photos that need it — and it
+    // runs AFTER the generated strip below (the load_version ordering): a
+    // generated master's curve is deleted either way, so repairing first paid
+    // a RAW decode + develop for an estimate nothing could use, on every
+    // caller of this funnel.
+    let source = match read_pixel_source(raw) {
         Some((master, generated)) => {
             if generated {
                 recipe.base_curve = Vec::new();
@@ -377,7 +380,11 @@ pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<Path
                 .to_string(),
         ),
         None => Ok(raw.to_path_buf()),
+    };
+    if source.is_ok() {
+        let _ = crate::pipeline::repair_pre_era_base_curve(raw, recipe);
     }
+    source
 }
 
 /// Repair a CRASHED publish. `write_recipe` and `write_pixel_source` retire

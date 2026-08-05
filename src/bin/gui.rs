@@ -1988,7 +1988,11 @@ impl AutoshopApp {
                         let knots = match autoshop::decode::embedded_preview(&path) {
                             Ok(Some(cam)) => {
                                 let est = autoshop::render::estimation_base(&full, &lens);
-                                autoshop::render::camera_base_knots(&est, &cam)
+                                // None = could not judge. For an OPEN that is
+                                // the same as no base look — the repair path
+                                // is where the distinction decides whether a
+                                // SAVED curve may be replaced.
+                                autoshop::render::camera_base_knots(&est, &cam).unwrap_or_default()
                             }
                             _ => Vec::new(),
                         };
@@ -2421,14 +2425,26 @@ impl AutoshopApp {
                 // load announcement — a separate earlier write was replaced
                 // one statement later, so the promised disclosure never
                 // survived to a single rendered frame.
-                let relook = autoshop::pipeline::repair_pre_era_base_curve(&src, &mut r);
+                let relook =
+                    autoshop::pipeline::repair_pre_era_base_curve(&src, &mut r).is_some();
                 self.recipe = r;
                 self.resync_recipe_display();
                 self.dirty = true;
                 let loaded = trf(lang, "Loaded version v{n} — Ctrl+Z returns to before the load", &[("n", &n.to_string())]);
-                self.status = match relook {
-                    Some(note) => format!("{loaded} — {note}"),
-                    None => loaded,
+                self.status = if relook {
+                    // The GUI's OWN sentence, localized: the engine note is
+                    // English prose meant for the CLI/HTTP surfaces, and
+                    // embedding it verbatim put raw English into a localized
+                    // status line.
+                    format!(
+                        "{loaded} — {}",
+                        tr(
+                            lang,
+                            "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                        )
+                    )
+                } else {
+                    loaded
                 };
             }
             Err(e) => {
@@ -4301,26 +4317,6 @@ impl AutoshopApp {
                                         if let Some(base) = rj.parent() {
                                             autoshop::store::resolve_mask_paths(&mut r, base);
                                         }
-                                        // Batch export renders through
-                                        // render_to_file, which does NOT go
-                                        // through store::render_source_checked
-                                        // — so the repair batch 60 put there
-                                        // never reached this path, and a
-                                        // multi-selection of era-1 photos
-                                        // still exported several stops dark
-                                        // while the same photo exported from
-                                        // its open canvas came out right.
-                                        // SAID, not just done: the count
-                                        // rides the completion summary
-                                        // (per-photo notes would flood a
-                                        // large batch).
-                                        if autoshop::pipeline::repair_pre_era_base_curve(
-                                            p, &mut r,
-                                        )
-                                        .is_some()
-                                        {
-                                            relooked += 1;
-                                        }
                                         found = Some(r);
                                         break;
                                     }
@@ -4378,8 +4374,26 @@ impl AutoshopApp {
                                 recipe.as_shot_k = None;
                                 recipe.as_shot_tint = None;
                             }
+                            // Repair AFTER the strip, BEFORE the render — the
+                            // load_version ordering, for the same reason: a
+                            // generated master's curve is deleted either way,
+                            // so repairing first paid a decode for an estimate
+                            // nothing used, and the summary then claimed a
+                            // correction that never reached a pixel. Counted
+                            // only when the export LANDS, so a failure summary
+                            // cannot claim corrections it did not ship.
+                            // (render_to_file does not go through
+                            // store::render_source_checked — batch 60 put the
+                            // repair there and this path never saw it.)
+                            let repaired = autoshop::pipeline::repair_pre_era_base_curve(
+                                p, &mut recipe,
+                            )
+                            .is_some();
                             let src = pix.map(|(m, _)| m).unwrap_or_else(|| p.clone());
                             autoshop::render::render_to_file(&src, &recipe, &out, None, Some(&export))?;
+                            if repaired {
+                                relooked += 1;
+                            }
                             Ok(())
                         })();
                         match one {
@@ -4951,14 +4965,24 @@ impl AutoshopApp {
                                     // neutral", a warning about something else
                                     // entirely.
                                     if !stamp
-                                        && let Some(note) =
-                                            self.src_path.clone().and_then(|p| {
-                                                autoshop::pipeline::repair_pre_era_base_curve(
-                                                    &p, &mut recipe,
-                                                )
-                                            })
+                                        && self.src_path.clone().is_some_and(|p| {
+                                            autoshop::pipeline::repair_pre_era_base_curve(
+                                                &p, &mut recipe,
+                                            )
+                                            .is_some()
+                                        })
                                     {
-                                        open_note = Some(note);
+                                        // The GUI's OWN sentence, localized —
+                                        // every other open-note here goes
+                                        // through tr/trf; the engine note is
+                                        // for the CLI/HTTP surfaces.
+                                        open_note = Some(
+                                            tr(
+                                                lang,
+                                                "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                                            )
+                                            .into(),
+                                        );
                                     }
                                 }
                                 SavedDevelop::Unreadable { err, fallback } => {

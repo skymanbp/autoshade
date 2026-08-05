@@ -496,12 +496,21 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     // The guard FIRST: a refused -o must not pay a RAW decode for the repair
     // below, nor print a disclosure for a render that never runs.
     pipeline::guard_readonly(out, raw)?;
-    ensure_parent(out)?;
     // `apply` is the remedy the batch summary names, and it reads the recipe
     // straight off disk like every other deliverable path — so without this it
     // rendered the washed pre-era curve while the GUI canvas of the same build
-    // showed the repaired one.
-    if let Some(note) = pipeline::repair_pre_era_base_curve(raw, &mut recipe) {
+    // showed the repaired one. The peek is ADVISORY, for the disclosure only
+    // (render_source_checked below stays authoritative and repairs
+    // internally): a GENERATED master's curve is stripped either way, and an
+    // unhonourable master refuses the render — printing "re-estimated" ahead
+    // of either discloses a correction no pixel receives.
+    let pix = autoshop::store::read_pixel_source(raw);
+    let generated_master = pix.as_ref().is_some_and(|(_, generated)| *generated);
+    let unhonourable = pix.is_none() && autoshop::store::has_pixel_source(raw);
+    if !generated_master
+        && !unhonourable
+        && let Some(note) = pipeline::repair_pre_era_base_curve(raw, &mut recipe)
+    {
         println!("note: {note}");
     }
     // Render from the SAME source every other deliverable uses (auto_cmd,
@@ -515,6 +524,9 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     if src != raw {
         println!("  (rendering the saved pixel master {})", src.display());
     }
+    // AFTER the master check: a refused apply must not leave a freshly
+    // created, empty output directory behind.
+    ensure_parent(out)?;
     println!("rendering {} with {} ...", raw.display(), recipe_path.display());
     let (w, h) = render::render_to_file(&src, &recipe, out, None, None)?;
     println!("render -> {} ({} x {})", out.display(), w, h);

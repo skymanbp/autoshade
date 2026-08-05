@@ -2055,8 +2055,14 @@ fn base_curve_lut(knots: &[[f32; 2]]) -> Vec<f32> {
 /// sub-bin. Field-measured on A7RIV ARWs: the neutral develop sits
 /// 0.6–1.4 EV under the camera JPEG with a consistent S shape that is NOT a
 /// single gain (midtones move ~3× more than the toe) — hence a curve.
-/// Returns EMPTY (= no base look) when near-identity or degenerate.
-pub fn camera_base_knots(neutral: &DynamicImage, camera: &DynamicImage) -> Vec<[f32; 2]> {
+/// Returns `None` when it cannot JUDGE (degenerate input: too few pixels on
+/// either side — an inability the pre-era repair must never mistake for a
+/// verdict), `Some(empty)` for the identity verdict (= no base look), and
+/// `Some(knots)` otherwise.
+pub fn camera_base_knots(
+    neutral: &DynamicImage,
+    camera: &DynamicImage,
+) -> Option<Vec<[f32; 2]>> {
     const BINS: usize = 1024;
     const EST_EDGE: u32 = 1024;
     fn luma_hist(img: &DynamicImage) -> (Vec<u64>, u64) {
@@ -2085,7 +2091,12 @@ pub fn camera_base_knots(neutral: &DynamicImage, camera: &DynamicImage) -> Vec<[
     let (hist_n, count_n) = luma_hist(neutral);
     let (hist_c, count_c) = luma_hist(camera);
     if count_n < 10_000 || count_c < 10_000 {
-        return Vec::new();
+        // Not enough mass to compare CDFs — an INABILITY, distinct from the
+        // identity verdict below. Sharing its empty return meant a tiny
+        // embedded thumbnail read as "this photo needs no base look", and
+        // once the repair adopted empty answers it permanently cleared saved
+        // curves over an estimate that never judged anything.
+        return None;
     }
     let cumulate = |h: &[u64]| -> Vec<u64> {
         let mut acc = 0u64;
@@ -2130,9 +2141,9 @@ pub fn camera_base_knots(neutral: &DynamicImage, camera: &DynamicImage) -> Vec<[
     // maps onto itself — return empty so the recipe stays clean.
     let max_dev = knots.iter().map(|p| (p[1] - p[0]).abs()).fold(0.0f32, f32::max);
     if max_dev < 0.02 {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    knots
+    Some(knots)
 }
 
 /// Monotone cubic Hermite tangents (Fritsch–Carlson). With `xs` strictly increasing
@@ -3396,7 +3407,8 @@ mod tests {
         }
         let n = DynamicImage::ImageRgb8(n);
         let c = DynamicImage::ImageRgb8(c);
-        let knots = camera_base_knots(&n, &c);
+        let knots =
+            camera_base_knots(&n, &c).expect("512x64 clears the degenerate-input guard");
         assert!(!knots.is_empty(), "a real lift must be detected");
         assert_eq!(knots.first(), Some(&[0.0, 0.0]), "black endpoint pinned");
         assert_eq!(knots.last(), Some(&[1.0, 1.0]), "white endpoint pinned");
@@ -3409,7 +3421,19 @@ mod tests {
                 );
             }
         }
-        assert!(camera_base_knots(&n, &n).is_empty(), "identity map → empty (no base look)");
+        assert!(
+            camera_base_knots(&n, &n).expect("same pair — still judgeable").is_empty(),
+            "identity map → Some(empty) (no base look)"
+        );
+        // Degenerate input is an INABILITY, not a verdict: the pre-era repair
+        // keys on exactly this distinction (None retries later; Some(empty)
+        // clears a saved curve and stamps the era).
+        let tiny =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(50, 50, image::Rgb([128, 128, 128])));
+        assert!(
+            camera_base_knots(&tiny, &tiny).is_none(),
+            "too few pixels is an inability, not an identity verdict"
+        );
     }
 
     #[test]
@@ -3434,8 +3458,8 @@ mod tests {
                 c.put_pixel(x, y, image::Rgb([(cv * 255.0).round() as u8; 3]));
             }
         }
-        let knots =
-            camera_base_knots(&DynamicImage::ImageRgb8(n), &DynamicImage::ImageRgb8(c));
+        let knots = camera_base_knots(&DynamicImage::ImageRgb8(n), &DynamicImage::ImageRgb8(c))
+            .expect("512x64 clears the degenerate-input guard");
         assert!(!knots.is_empty(), "a real lift must be detected");
         // Apply through the real render path over a full ramp and measure.
         let mut ramp = RgbImage::new(256, 1);
@@ -3475,8 +3499,8 @@ mod tests {
                 c.put_pixel(x, y, image::Rgb([cv; 3]));
             }
         }
-        let knots =
-            camera_base_knots(&DynamicImage::ImageRgb8(n), &DynamicImage::ImageRgb8(c));
+        let knots = camera_base_knots(&DynamicImage::ImageRgb8(n), &DynamicImage::ImageRgb8(c))
+            .expect("512x64 clears the degenerate-input guard");
         assert_eq!(knots.len(), 3, "one merged mid knot between the pins: {knots:?}");
         let mid = knots[1];
         assert!((mid[0] - 0.302).abs() < 0.01, "x = the neutral spike: {mid:?}");

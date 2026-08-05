@@ -1174,7 +1174,12 @@ async function selectPhoto(id, stem, el) {
   // source): leaving state.sessionMaster kept the retouch on the canvas
   // under neutral sliders, and a Save then cleared pixels.json while the
   // canvas still showed it. Ctrl+Z restores the chain.
-  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const bc = (state.freshCurve && state.freshCurve.length) ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; state.sessionMaster = null; syncSliders(); pushHistory(state.recipe); renderAfter(); };
+  // The CARRIED curve keeps its era stamp (the stamp travels with the curve):
+  // a fresh curve is the server's current era by serde default, but the
+  // fallback curve may be an era-1 save that was momentarily unrepairable —
+  // posting it stampless would launder it to era-2 and disable the repair
+  // forever.
+  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const curVer = state.recipe ? state.recipe.version : null; const usedFresh = !!(state.freshCurve && state.freshCurve.length); const bc = usedFresh ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (!usedFresh && bc && bc.length && curVer != null) state.recipe.version = curVer; if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; state.sessionMaster = null; syncSliders(); pushHistory(state.recipe); renderAfter(); };
   main.querySelector(".savexmp").onclick = saveXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;

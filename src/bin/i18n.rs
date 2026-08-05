@@ -430,6 +430,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Version v{n} saved → {path}", "版本 v{n} 已存 → {path}"),
     ("Save version failed: {err}", "存版本失败: {err}"),
     ("Loaded version v{n} — Ctrl+Z returns to before the load", "已载入版本 v{n} — Ctrl+Z 可回到载入前"),
+    ("camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark", "相机基调已重估——这张照片由预览采样偏亮的旧版本保存，存档基调渲染过暗"),
     ("Load v{n} failed: {err}", "载入 v{n} 失败: {err}"),
 
     // ── Tone curve caption (curve_editor) ────────────────────────────────────
