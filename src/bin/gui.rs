@@ -890,6 +890,27 @@ fn unique_out(path: &std::path::Path, tag: &str) -> Option<PathBuf> {
     autoshop::pipeline::unique_out(path, tag)
 }
 
+/// Do two spellings name the same baked master?
+///
+/// An in-session retouch records its ./out artifact RELATIVE
+/// (`pipeline::default_out` -> `out/<stem>.heal.png`), while
+/// `store::write_pixel_source` stores the same file ABSOLUTIZED and
+/// `read_pixel_source` hands the absolute form back. Plain `PathBuf`
+/// equality therefore compared `out/x.png` against `<cwd>/out/x.png` and
+/// missed: a save-then-switch left 1:1 inspection stuck at the old
+/// resolution — the outcome the re-decode branch exists to prevent — and
+/// now would draw a refusal telling the user to save what they just saved.
+/// Lexical only: `std::path::absolute` normalizes without touching the
+/// filesystem, and both sides go through the same normalization the writer
+/// itself used.
+fn same_master(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b
+        || matches!(
+            (std::path::absolute(a), std::path::absolute(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
 /// Per-call temp-file counter: a cancelled worker and its replacement run
 /// CONCURRENTLY in one process, so pid-only names collide.
 static GUI_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -5178,84 +5199,125 @@ impl AutoshopApp {
                             // recipe, undo history and view (zoom included: you
                             // switched to 4096px to inspect 1:1, losing the zoom
                             // would defeat the point). Refresh the base a
-                            // source-based active variant develops from; a
-                            // baked-raster variant keeps its own pixels.
+                            // source-based active variant develops from; hand a
+                            // baked-raster variant its own master re-decoded —
+                            // and when neither is possible, REFUSE the switch
+                            // instead of half-applying it.
                             let (mw, mh) = base.dimensions();
                             // Consume the stash entry the same-path open_path
                             // call just wrote: the KEEP branch preserves the
                             // live canvas in place, so the entry is a stale
                             // duplicate — after an undo-to-clean it would
                             // resurrect the pre-undo edits on the next return.
+                            // (Both outcomes below keep the canvas in place, so
+                            // this is unconditional.)
                             if let Some(p) = self.src_path.clone() {
                                 self.nav_stash.remove(&p);
                             }
-                            self.source_preview = Some(base.clone());
                             let active_source =
                                 self.active_variant().is_none_or(|v| v.base.is_none());
-                            if active_source {
-                                let curve = self.recipe.base_curve.clone();
-                                self.set_before(ctx, &base, &curve);
-                                self.mask_paint = Some(image::RgbaImage::new(mw, mh));
-                                self.mask_tex = None;
-                                self.mask_dirty = false;
-                                self.paint_last = None;
-                                // The range-mask reference develop was computed
-                                // from the OLD base — recipe-only keying would
-                                // serve it stale against these new pixels.
-                                self.overlay_ref = None;
-                                self.overlay_stale = true;
-                                self.base_preview = Some(base);
-                            } else if let Some((bimg, borigin, _)) = &baked
-                                && self.active_variant().is_some_and(|v| {
-                                    v.origin.as_deref() == Some(borigin.as_path())
+                            // ONE source of truth for "the worker brought the
+                            // master this canvas renders": the branch below
+                            // destructures the same `baked`, and a guard that
+                            // could drift from it is how a canvas ends up at an
+                            // edge nobody recorded.
+                            let master_hit = baked.as_ref().is_some_and(|(_, borigin, _)| {
+                                self.active_variant().is_some_and(|v| {
+                                    v.origin.as_deref().is_some_and(|o| same_master(o, borigin))
                                 })
-                            {
-                                // The active variant renders a PERSISTED baked
-                                // master: hand it the master re-decoded at the
-                                // new preview edge too, or 1:1 inspection stays
-                                // at the old resolution. History steps holding
-                                // the old Arc are repointed — same master, new
-                                // resolution — so Ctrl+Z can't flip the canvas
-                                // back to the stale-res pixels.
-                                let old = self
-                                    .variants
-                                    .get(self.active)
-                                    .and_then(|v| v.base.clone());
-                                if let Some(v) = self.variants.get_mut(self.active) {
-                                    v.base = Some(bimg.clone());
+                            });
+                            if !active_source && !master_hit && let Some(e) = edge_revert {
+                                // The switch CANNOT materialize on THIS canvas:
+                                // the active variant renders baked pixels
+                                // (heal / clone / fill / reimagine) whose master
+                                // the worker had nothing to re-decode from —
+                                // `pixels.json` is written by SAVE, so an
+                                // unsaved retouch records no master at all.
+                                // Adopting the new edge anyway was the busy
+                                // refusal's residue through the third door: the
+                                // status announced a re-decode the canvas never
+                                // took, the value persisted into Prefs, and
+                                // every bake site would have installed a
+                                // new-edge raster under an old-edge canvas. The
+                                // re-decoded source is dropped with it, so
+                                // canvas and edge cannot disagree in either
+                                // direction (a later switch after saving
+                                // re-decodes the master properly).
+                                self.preview_edge = e;
+                                let t = tr(
+                                    lang,
+                                    "preview resolution kept — this retouched canvas has no saved master to re-decode at the new size; save the photo, then switch",
+                                );
+                                self.toast(ToastKind::Error, t);
+                            } else {
+                                self.source_preview = Some(base.clone());
+                                if active_source {
+                                    let curve = self.recipe.base_curve.clone();
+                                    self.set_before(ctx, &base, &curve);
+                                    self.mask_paint = Some(image::RgbaImage::new(mw, mh));
+                                    self.mask_tex = None;
+                                    self.mask_dirty = false;
+                                    self.paint_last = None;
+                                    // The range-mask reference develop was computed
+                                    // from the OLD base — recipe-only keying would
+                                    // serve it stale against these new pixels.
+                                    self.overlay_ref = None;
+                                    self.overlay_stale = true;
+                                    self.base_preview = Some(base);
+                                } else if master_hit
+                                    && let Some((bimg, _, _)) = &baked
+                                {
+                                    // The active variant renders a RECORDED baked
+                                    // master: hand it the master re-decoded at the
+                                    // new preview edge too, or 1:1 inspection stays
+                                    // at the old resolution. History steps holding
+                                    // the old Arc are repointed — same master, new
+                                    // resolution — so Ctrl+Z can't flip the canvas
+                                    // back to the stale-res pixels.
+                                    let old = self
+                                        .variants
+                                        .get(self.active)
+                                        .and_then(|v| v.base.clone());
+                                    if let Some(v) = self.variants.get_mut(self.active) {
+                                        v.base = Some(bimg.clone());
+                                    }
+                                    if let Some(old) = old {
+                                        let repoint = |s: &mut UndoStep| {
+                                            let hit = s
+                                                .base
+                                                .as_ref()
+                                                .is_some_and(|b| Arc::ptr_eq(b, &old));
+                                            if hit {
+                                                s.base = Some(bimg.clone());
+                                            }
+                                        };
+                                        repoint(&mut self.committed);
+                                        self.undo_stack.iter_mut().for_each(repoint);
+                                        self.redo_stack.iter_mut().for_each(repoint);
+                                    }
+                                    let (bw, bh) = bimg.dimensions();
+                                    // Canvas-curve Before, same rule as every
+                                    // restore path: an InPlace master is NEUTRAL
+                                    // (needs the camera curve); a Generated
+                                    // canvas recipe carries an empty curve.
+                                    let curve = self.recipe.base_curve.clone();
+                                    self.set_before(ctx, bimg, &curve);
+                                    self.mask_paint = Some(image::RgbaImage::new(bw, bh));
+                                    self.mask_tex = None;
+                                    self.mask_dirty = false;
+                                    self.paint_last = None;
+                                    self.overlay_ref = None;
+                                    self.overlay_stale = true;
+                                    self.base_preview = Some(bimg.clone());
                                 }
-                                if let Some(old) = old {
-                                    let repoint = |s: &mut UndoStep| {
-                                        if s.base.as_ref().is_some_and(|b| Arc::ptr_eq(b, &old)) {
-                                            s.base = Some(bimg.clone());
-                                        }
-                                    };
-                                    repoint(&mut self.committed);
-                                    self.undo_stack.iter_mut().for_each(repoint);
-                                    self.redo_stack.iter_mut().for_each(repoint);
-                                }
-                                let (bw, bh) = bimg.dimensions();
-                                // Canvas-curve Before, same rule as every
-                                // restore path: an InPlace master is NEUTRAL
-                                // (needs the camera curve); a Generated
-                                // canvas recipe carries an empty curve.
-                                let curve = self.recipe.base_curve.clone();
-                                self.set_before(ctx, bimg, &curve);
-                                self.mask_paint = Some(image::RgbaImage::new(bw, bh));
-                                self.mask_tex = None;
-                                self.mask_dirty = false;
-                                self.paint_last = None;
-                                self.overlay_ref = None;
-                                self.overlay_stale = true;
-                                self.base_preview = Some(bimg.clone());
+                                self.last_rgb = None; // resolution changed under the frame
+                                self.dirty = true;
+                                self.status = trf(
+                                    lang,
+                                    "Preview resolution {px}px — re-decoded",
+                                    &[("px", &self.preview_edge.to_string())],
+                                );
                             }
-                            self.last_rgb = None; // resolution changed under the frame
-                            self.dirty = true;
-                            self.status = trf(
-                                lang,
-                                "Preview resolution {px}px — re-decoded",
-                                &[("px", &self.preview_edge.to_string())],
-                            );
                         } else {
                             // Fresh open: a single Original variant, all
                             // per-photo state reset. The recipe starts from the
@@ -11691,8 +11753,11 @@ mod tests {
             thumb: None,
         });
         app.saved_recipe = app.recipe.clone(); // active canvas clean
-        // Unique stems (both paths): the Opened fresh arm below migrates
-        // cwd ./out legacy sidecars by stem — see the keep-fact test.
+        // Unique stem, load-bearing for THIS path: the synthetic Opened
+        // below lands on the fresh arm, whose read_saved_develop migrates
+        // cwd ./out legacy sidecars by stem (see the keep-fact test). The
+        // nav target's own rename is defence-in-depth — its decode fails
+        // into the Err arm, which never reads a sidecar.
         let old = PathBuf::from("D:/__autoshop_h4__/__autoshop_h4_a__.ARW");
         app.src_path = Some(old.clone());
         assert_eq!(app.inactive_dirty_variants(), 1, "premise: background dirty");
@@ -12085,6 +12150,112 @@ mod tests {
         assert_eq!(
             app.variants[0].recipe.base_curve, primed,
             "…and the strip entry follows the healed canvas"
+        );
+        // ...and the FACT half is load-bearing too: the redo above pushed the
+        // still-washed `committed` back onto the undo stack, so one more undo
+        // reinstalls it — this time with the request but a CROSS-PHOTO fact,
+        // where src_path already points at the incoming photo and repairing
+        // would estimate the wrong RAW onto this canvas. Deleting
+        // `&& self.open_same_path` from the apply_step gate repairs it and
+        // fails these asserts.
+        app.open_same_path = false;
+        app.undo(&ctx);
+        assert_eq!(app.recipe.version, 1, "cross-photo flight: the install is NOT repaired");
+        assert_eq!(app.recipe.base_curve, washy, "…and the washed curve is untouched");
+    }
+
+    #[test]
+    fn a_landing_that_cannot_move_the_canvas_puts_the_switch_back() {
+        // The px combo mutates preview_edge BEFORE the flight starts, so
+        // every landing that leaves the canvas where it was must put the
+        // switch back — otherwise the displayed resolution is one the
+        // preview never reached, it persists into Prefs, and five bake sites
+        // read it (a heal in that window installs a new-edge raster under an
+        // old-edge canvas). Three outcomes, three asserts.
+        let ctx = egui::Context::default();
+        let armed = |base: Option<Arc<image::DynamicImage>>, origin: Option<PathBuf>| AutoshopApp {
+            src_path: Some(PathBuf::from(
+                "D:/__autoshop_edgeflight__/__autoshop_edgeflight__.ARW",
+            )),
+            variants: vec![Variant {
+                kind: VariantKind::Original,
+                recipe: EditRecipe::default(),
+                base,
+                origin,
+                thumb: None,
+            }],
+            preview_edge: 4096,             // the combo already switched...
+            edge_before_flight: Some(1280), // ...and armed the flight
+            keep_recipe: true,
+            open_same_path: true,
+            open_in_flight: true,
+            ..Default::default()
+        };
+        let fresh = || Arc::new(image::DynamicImage::new_rgb8(8, 6));
+
+        // (1) The re-decode FAILED: the photo and its canvas are untouched.
+        let mut app = armed(None, None);
+        app.tx.send(Msg::Opened(Box::new(Err(anyhow::anyhow!("decode failed"))))).unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.preview_edge, 1280, "a failed keep-flight puts the switch back");
+        assert!(app.src_path.is_some(), "…and leaves the still-open photo alone");
+
+        // (2) It landed, but the canvas renders an UNSAVED retouch — no
+        // pixels.json, so the worker brought no master and base_preview
+        // would have kept its old-edge raster under a 4096 preview_edge.
+        let old_raster = Arc::new(image::DynamicImage::new_rgb8(4, 3));
+        let mut app = armed(Some(old_raster.clone()), Some(PathBuf::from("out/_edgeflight.png")));
+        app.base_preview = Some(old_raster.clone());
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((
+                fresh(),
+                Vec::new(),
+                Default::default(),
+                None,
+                None,
+                (4096, None, None),
+            )))))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.preview_edge, 1280, "a switch the canvas cannot take is not recorded");
+        assert!(
+            app.base_preview.as_ref().is_some_and(|b| Arc::ptr_eq(b, &old_raster)),
+            "…the retouched canvas is untouched"
+        );
+        assert!(
+            app.source_preview.is_none(),
+            "…and the new-edge source is dropped with it, so nothing disagrees the other way"
+        );
+
+        // (3) The SAME master, recorded: the switch applies. The two
+        // spellings differ — an in-session retouch records ./out relative,
+        // store::write_pixel_source absolutizes — and comparing them
+        // literally left 1:1 inspection at the old resolution.
+        let rel = PathBuf::from("out/_edgeflight.png");
+        let abs = std::path::absolute(&rel).unwrap();
+        assert_ne!(rel, abs, "premise: the two spellings are not equal as paths");
+        let mut app = armed(Some(old_raster.clone()), Some(rel));
+        app.base_preview = Some(old_raster.clone());
+        let master = fresh();
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((
+                fresh(),
+                Vec::new(),
+                Default::default(),
+                None,
+                Some((master.clone(), abs, false)),
+                (4096, None, None),
+            )))))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.preview_edge, 4096, "a canvas that CAN be re-pointed keeps the switch");
+        assert!(
+            app.base_preview.as_ref().is_some_and(|b| Arc::ptr_eq(b, &master)),
+            "…and renders the master re-decoded at the new edge"
+        );
+        assert!(
+            app.variants[0].base.as_ref().is_some_and(|b| Arc::ptr_eq(b, &master)),
+            "…with the variant re-pointed at it"
         );
     }
 
