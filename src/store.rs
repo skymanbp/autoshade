@@ -1838,14 +1838,19 @@ mod tests {
     }
 
     #[test]
-    fn a_concurrent_save_is_never_clobbered_by_a_recovered_bak() {
-        // The reason the restore stages a copy and publishes NO-CLOBBER
-        // instead of renaming: another process (GUI, server, CLI share this
-        // store) can publish the live file between our exists-check and the
-        // rename, and a bare rename REPLACES it — silently discarding a save
-        // that is newer than the crash we are repairing. Nothing exercised
-        // that branch, so reverting the fix to `fs::rename` passed the whole
-        // suite.
+    fn a_live_file_survives_recovery_and_keeps_its_retired_bak() {
+        // What this pins: recovery must not touch a develop that already has
+        // a live file, and the retired `.bak` beside it stays (live + .bak is
+        // the normal post-publish state, not an orphan to consume).
+        //
+        // What it does NOT pin, stated plainly because the earlier version of
+        // this comment claimed otherwise: it never reaches
+        // `publish_no_clobber`, because recovery skips the row as soon as the
+        // live file exists. The window the no-clobber publish exists for —
+        // another process landing the live file BETWEEN that check and the
+        // publish — cannot be staged single-threaded. The primitive itself is
+        // covered directly by `publish_no_clobber_never_replaces_an_owner`
+        // and `publish_no_clobber_lands_on_a_fresh_destination`.
         let base = std::env::temp_dir().join("autoshop-store-test-noclobber");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();

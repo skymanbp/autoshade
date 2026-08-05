@@ -400,11 +400,38 @@ pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
 /// resolution render. Batch 43 fixed the sampler and thereby made an
 /// already-stored curve WORSE — it is now laid over a correct develop, which
 /// is what turns "slightly off" into several stops dark.
+/// Estimates already computed this run, keyed by photo — including the EMPTY
+/// answer, which means "no estimate available, leave the saved curve alone".
+///
+/// The repair is asked on every open AND, since the render funnel carries it,
+/// on every render of an affected photo. Each estimate costs a RAW decode plus
+/// a working-resolution develop, and the result cannot change while the
+/// process runs, so paying it once per photo is the difference between a
+/// correction and a stall on the UI thread.
+fn fresh_curve_memo() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<[f32; 2]>>>
+{
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<[f32; 2]>>>,
+    > = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<String> {
     if !base_curve_looks_pre_era(r.version, &r.base_curve) {
         return None;
     }
-    let fresh = photo_base_knots(raw);
+    let memo = fresh_curve_memo();
+    let cached = memo.lock().ok().and_then(|m| m.get(raw).cloned());
+    let fresh = match cached {
+        Some(c) => c,
+        None => {
+            let c = photo_base_knots(raw);
+            if let Ok(mut m) = memo.lock() {
+                m.insert(raw.to_path_buf(), c.clone());
+            }
+            c
+        }
+    };
     if fresh.is_empty() {
         // No estimate to swap in (no embedded preview, or the neutral develop
         // failed). Leave the saved curve alone rather than flatten the photo,
