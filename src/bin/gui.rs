@@ -875,7 +875,13 @@ impl UndoStep {
             (None, None) => true,
             _ => false,
         };
-        base_eq && self.origin == other.origin
+        // Master identity, not string identity: this was the one comparison
+        // the batch-80 sweep left on `==`, which made its own "EVERY" false.
+        // Benign today — a step's base and origin are always replaced
+        // together, so no same-Arc / two-spellings pair can reach here — and
+        // `same_master` tries plain equality first, so the common path is
+        // unchanged.
+        base_eq && same_master_opt(self.origin.as_deref(), other.origin.as_deref())
     }
 }
 
@@ -915,12 +921,12 @@ fn same_master(a: &std::path::Path, b: &std::path::Path) -> bool {
 /// itself; the path halves go through [`same_master`], so the two spellings
 /// the store and the GUI produce for ONE file cannot read as a difference.
 ///
-/// EVERY master comparison goes through here. Fixing only the site that
-/// happened to be under review left the same bug at five others, where it was
-/// worse: a SAVED retouch was re-reported as unsaved by the navigation stash
-/// gate, the ● marker, the strip's dirty count, the quit dialog and the close
-/// guard — permanently, because nothing rewrites the in-memory origin at save
-/// time.
+/// EVERY master comparison goes through here — the five saved-pixel guards
+/// (navigation stash gate, ● marker, strip dirty count, quit dialog, close
+/// guard) and the history step's pixel identity. Fixing only the site that
+/// happened to be under review left the same bug at those five, where it was
+/// worse: a SAVED retouch was re-reported as unsaved by all of them,
+/// permanently, because nothing rewrites the in-memory origin at save time.
 fn same_master_opt(a: Option<&std::path::Path>, b: Option<&std::path::Path>) -> bool {
     match (a, b) {
         (None, None) => true,
@@ -2274,6 +2280,25 @@ impl AutoshopApp {
             .clamp(640, 8192)
     }
 
+    /// The resolution a canvas must DISCLOSE, when it holds baked pixels the
+    /// preview preference cannot reach. `None` when there is nothing to say.
+    ///
+    /// Gated on the canvas actually HOLDING a baked raster, not on the sizes
+    /// differing: a RAW whose sensor is smaller than the preference decodes
+    /// un-upscaled (any sub-4096 sensor under "4096px · inspect"), so a
+    /// size-only test told the user their source-based Original was a stale
+    /// bake — on the status bar, which never expires. THREE doors install
+    /// such a canvas: the strip click, an undo to a SUPERSEDED master (the
+    /// re-decode repoints only the Arc the canvas held), and the navigation
+    /// stash restore (which reinstalls the raster the photo was left with
+    /// while this open decoded the source at the current preference).
+    fn baked_canvas_edge(&self) -> Option<u32> {
+        let canvas = self.canvas_edge();
+        (canvas != self.preview_edge
+            && self.active_variant().is_some_and(|v| v.base.is_some()))
+        .then_some(canvas)
+    }
+
     /// The reverse-fit / style-prompt target: the ./out PNG behind the active
     /// variant when it is an AI-generated rendition (nothing to fit otherwise).
     /// Reverse-fit maps the SOURCE neutral onto this rendition, so it only
@@ -2443,19 +2468,17 @@ impl AutoshopApp {
         // legitimately disagree from here on. Said at the moment the
         // disagreement is created — the combo alone would imply the canvas
         // followed it.
-        let canvas = self.canvas_edge();
-        self.status = if canvas == self.preview_edge {
-            trf(
+        self.status = match self.baked_canvas_edge() {
+            None => trf(
                 lang,
                 "Switched to variant「{name}」 — variants are independent, switching is lossless",
                 &[("name", name)],
-            )
-        } else {
-            trf(
+            ),
+            Some(px) => trf(
                 lang,
                 "Switched to variant「{name}」 — its baked pixels stay at {px}px (their own bake); edits and retouches follow that, not the preview preference",
-                &[("name", name), ("px", &canvas.to_string())],
-            )
+                &[("name", name), ("px", &px.to_string())],
+            ),
         };
     }
 
@@ -2880,6 +2903,19 @@ impl AutoshopApp {
                 v.origin = step.origin;
             }
             self.refresh_active_pixels(ctx);
+            // The second door onto the same disagreement, and the quietest:
+            // undoing to a SUPERSEDED master installs a raster the preference
+            // cannot re-decode (the resolution switch repoints only the Arc
+            // the canvas held), and undo/redo write no status at all — so the
+            // combo was left to imply the canvas had followed it.
+            if let Some(px) = self.baked_canvas_edge() {
+                let lang = self.lang;
+                self.status = trf(
+                    lang,
+                    "restored pixels stay at {px}px (their own bake) — edits and retouches follow that, not the preview preference",
+                    &[("px", &px.to_string())],
+                );
+            }
         }
         self.dirty = true;
         self.resync_recipe_display();
@@ -5308,25 +5344,37 @@ impl AutoshopApp {
                                 // direction (a later switch after saving
                                 // re-decodes the master properly).
                                 self.preview_edge = e;
-                                // The remedy depends on WHY there was nothing
-                                // to re-decode. No record at all (an unsaved
-                                // retouch, or one superseded since the last
-                                // save) is cured by saving. A record the store
-                                // could not resolve — the master moved, was
-                                // deleted or is unreadable, and
-                                // `read_pixel_source` already said so on
-                                // stderr — is NOT: saving would re-record the
-                                // same broken link and the refusal would
-                                // repeat forever.
-                                let recorded_but_gone = baked.is_none()
-                                    && self
-                                        .src_path
-                                        .as_deref()
-                                        .is_some_and(autoshop::store::has_pixel_source);
-                                let t = if recorded_but_gone {
+                                // The remedy is read off THIS CANVAS, never
+                                // off the photo's record: a stale broken
+                                // record (an ./out cleanup) plus a NEW unsaved
+                                // retouch used to be told its situation was
+                                // unfixable and denied the one cure that
+                                // works. Three causes, three answers:
+                                //  · a GENERATED canvas cannot be recorded at
+                                //    all — Ctrl+S refuses it outright — so
+                                //    saving is not a remedy to offer;
+                                //  · a master no longer ON DISK cannot be
+                                //    re-decoded however often it is recorded
+                                //    (saving would re-record the same broken
+                                //    link and the refusal would repeat);
+                                //  · otherwise the master is there and merely
+                                //    unrecorded (or superseded since the last
+                                //    save), which saving fixes.
+                                // Residual, bounded and stderr-visible: a
+                                // master that exists but will not DECODE takes
+                                // the third arm, and `read_pixel_source` /
+                                // the worker already name it on stderr.
+                                let canvas_master =
+                                    self.active_variant().and_then(|v| v.origin.clone());
+                                let t = if self.active_is_generated() {
                                     tr(
                                         lang,
-                                        "preview resolution kept — this photo's recorded retouch master could not be read, so the canvas cannot be re-decoded at the new size",
+                                        "preview resolution kept — a generated variant's pixels come from its own render; switch to a source-based variant to work at another resolution",
+                                    )
+                                } else if !canvas_master.as_deref().is_some_and(|o| o.exists()) {
+                                    tr(
+                                        lang,
+                                        "preview resolution kept — this canvas's retouch master is no longer on disk, so it cannot be re-decoded at the new size",
                                     )
                                 } else {
                                     tr(
@@ -5844,6 +5892,19 @@ impl AutoshopApp {
                                     }
                                 }
                             };
+                            // The third door: a stash restore reinstalls the
+                            // raster this photo was LEFT with, at its own
+                            // edge, while this open decoded the source at the
+                            // current preference — which may have moved while
+                            // the user was on another photo.
+                            if let Some(px) = self.baked_canvas_edge() {
+                                let extra = trf(
+                                    lang,
+                                    " · restored pixels stay at {px}px (their own bake)",
+                                    &[("px", &px.to_string())],
+                                );
+                                self.status.push_str(&extra);
+                            }
                             if let Some(note) = open_note {
                                 // Sidecar anomalies must be seen, not scrolled
                                 // away in the status line.
@@ -9784,7 +9845,14 @@ impl AutoshopApp {
         let lang = self.lang;
         self.status =
             tr(lang, "AI generating… (gpt-image; high quality can run minutes — progress in the status bar; ✕ Cancel to stop; hi-res input needs a full-frame develop first)").into();
-        let edge = self.canvas_edge(); // the reimagine replaces the canvas — same res
+        // The PREFERENCE here, not `canvas_edge`: this is the one bake that
+        // renders from src_path (never the canvas — see above) and lands as a
+        // NEW variant, so nothing is composited under it and there is no
+        // raster to match. Following a stale canvas — a background 1280 bake
+        // clicked while the preference sat at 4096 — pinned the new variant
+        // below the resolution the user asked for, behind a refusal whose own
+        // remedy (save) Ctrl+S REFUSES for a generated variant.
+        let edge = self.preview_edge.clamp(640, 8192);
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
         let (epoch, flag) = self.arm_cancel();
@@ -12315,7 +12383,15 @@ mod tests {
         // would have kept its old-edge raster under a 4096 preview_edge.
         let old_raster = Arc::new(image::DynamicImage::new_rgb8(4, 3));
         let old_source = Arc::new(image::DynamicImage::new_rgb8(6, 4));
-        let mut app = armed(Some(old_raster.clone()), Some(PathBuf::from("out/_edgeflight.png")));
+        // The canvas master EXISTS: this is the arm where saving is the real
+        // remedy, and without a live file the missing-master arm would answer
+        // instead — leaving the record-less arm unpinned (a mutant that always
+        // emits the other message used to survive the whole suite).
+        let master = PathBuf::from("out/__autoshop_edgeflight__.heal.png");
+        std::fs::create_dir_all("out").unwrap();
+        let _scrub = Scrub(vec![master.clone()]);
+        std::fs::write(&master, b"png").unwrap();
+        let mut app = armed(Some(old_raster.clone()), Some(master.clone()));
         app.base_preview = Some(old_raster.clone());
         app.source_preview = Some(old_source.clone()); // the OLD-edge decode
         app.tx
@@ -12342,6 +12418,11 @@ mod tests {
         assert!(
             app.status.starts_with("preview resolution kept"),
             "…and the refusal replaces the flight's 'decoding …', which never expires: {}",
+            app.status
+        );
+        assert!(
+            app.status.contains("save the photo"),
+            "…prescribing the remedy that DOES work when the master is on disk: {}",
             app.status
         );
 
@@ -12377,6 +12458,20 @@ mod tests {
         );
     }
 
+    /// Removes its paths on DROP, so a failing assert cannot leave fixtures
+    /// behind in the user's real central store or in ./out — a panic skips
+    /// trailing cleanup lines, and the failing case is exactly the one a
+    /// regression hits.
+    struct Scrub(Vec<PathBuf>);
+    impl Drop for Scrub {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                let _ = std::fs::remove_file(p);
+                let _ = std::fs::remove_dir_all(p);
+            }
+        }
+    }
+
     #[test]
     fn a_saved_retouch_is_not_re_reported_as_unsaved() {
         // The store records the master ABSOLUTIZED while an in-session
@@ -12391,6 +12486,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all("out").unwrap();
         let master = PathBuf::from("out/__autoshop_masterid__.heal.png");
+        let _scrub = Scrub(vec![master.clone(), dev.clone()]);
         std::fs::write(&master, b"png").unwrap();
         autoshop::store::write_pixel_source(src, &master, false).unwrap();
         let mk = |origin: PathBuf| Variant {
@@ -12418,8 +12514,6 @@ mod tests {
             !app.nav_stash.contains_key(src),
             "a saved retouch must not stash as unsaved just because the store spells its master absolutely"
         );
-        let _ = std::fs::remove_file(&master);
-        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]
@@ -12428,6 +12522,11 @@ mod tests {
         // preview_edge moves on (switching variants cannot re-decode a
         // master), so baking at the preference installed a new-edge raster
         // under an old-edge canvas — the frame jumped mid-retouch.
+        //
+        // COVERAGE BOUND, stated instead of implied: this pins the RULER, not
+        // the five call sites that use it — the bake starters spawn network
+        // workers and cannot run headless, so reverting one of those
+        // single-expression uses would not fail here. Reviewed by reading.
         let mut app = AutoshopApp { preview_edge: 4096, ..Default::default() };
         assert_eq!(app.canvas_edge(), 4096, "no canvas yet: the preference is all there is");
         app.base_preview = Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853)));
@@ -12446,6 +12545,7 @@ mod tests {
         let dev = autoshop::store::develop_dir(src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dev.clone()]);
         let gone = dev.join("gone-master.png");
         std::fs::write(&gone, b"png").unwrap();
         autoshop::store::write_pixel_source(src, &gone, false).unwrap();
@@ -12481,16 +12581,163 @@ mod tests {
         app.poll_workers(&ctx);
         assert_eq!(app.preview_edge, 1280, "premise: the switch is refused");
         assert!(
-            app.status.contains("could not be read"),
-            "the unresolvable-record case names its own cause: {}",
+            app.status.contains("no longer on disk"),
+            "the missing-master case names its own cause: {}",
             app.status
         );
         assert!(
             !app.status.contains("save the photo"),
-            "…and never prescribes a save that would re-record the same broken link: {}",
+            "…and never prescribes a save that cannot restore a master that is gone: {}",
             app.status
         );
-        let _ = std::fs::remove_dir_all(&dev);
+        // ...and a GENERATED canvas is not told to save either: Ctrl+S refuses
+        // a generated variant outright, so that remedy is unreachable for it.
+        let present = dev.join("present-master.png");
+        std::fs::write(&present, b"png").unwrap();
+        let mut app = AutoshopApp {
+            src_path: Some(src.to_path_buf()),
+            variants: vec![Variant {
+                kind: VariantKind::Generated,
+                recipe: EditRecipe::default(),
+                base: Some(Arc::new(image::DynamicImage::new_rgb8(4, 3))),
+                origin: Some(present.clone()),
+                thumb: None,
+            }],
+            preview_edge: 4096,
+            edge_before_flight: Some(1280),
+            keep_recipe: true,
+            open_same_path: true,
+            open_in_flight: true,
+            ..Default::default()
+        };
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((
+                Arc::new(image::DynamicImage::new_rgb8(8, 6)),
+                Vec::new(),
+                Default::default(),
+                None,
+                None,
+                (4096, None, None),
+            )))))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert!(
+            app.status.contains("generated variant"),
+            "a generated canvas names its own cause: {}",
+            app.status
+        );
+        assert!(
+            !app.status.contains("save the photo"),
+            "…and is not told to save, which Ctrl+S refuses for it: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn only_a_baked_canvas_discloses_its_own_resolution() {
+        // The disclosure must key on the canvas HOLDING baked pixels, not on
+        // the sizes differing: a RAW smaller than the preference decodes
+        // un-upscaled, and calling that source canvas a stale bake is a lie on
+        // the surface that never expires.
+        let ctx = egui::Context::default();
+        let src = |base: Option<Arc<image::DynamicImage>>| Variant {
+            kind: VariantKind::Original,
+            recipe: EditRecipe::default(),
+            base,
+            origin: None,
+            thumb: None,
+        };
+        // (1) source-based canvas, sensor below the preference: no disclosure.
+        let mut app = AutoshopApp {
+            preview_edge: 1280,
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
+            variants: vec![src(None), src(None)],
+            ..Default::default()
+        };
+        app.switch_variant(1, &ctx);
+        assert_eq!(app.canvas_edge(), 800, "premise: the canvas is below the preference");
+        assert!(
+            !app.status.contains("baked"),
+            "a source-based canvas is not a bake: {}",
+            app.status
+        );
+        // (2) the same size gap, but the canvas really is a baked raster.
+        let mut app = AutoshopApp {
+            preview_edge: 1280,
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
+            variants: vec![
+                src(None),
+                src(Some(Arc::new(image::DynamicImage::new_rgb8(640, 480)))),
+            ],
+            ..Default::default()
+        };
+        app.switch_variant(1, &ctx);
+        assert!(
+            app.status.contains("640px"),
+            "a baked canvas says which resolution it kept: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn an_undo_to_a_superseded_master_discloses_its_resolution() {
+        // Undo/redo wrote no status at all, so the quietest door onto the same
+        // canvas/preference disagreement said nothing.
+        let ctx = egui::Context::default();
+        let superseded = Arc::new(image::DynamicImage::new_rgb8(640, 480));
+        let current = Arc::new(image::DynamicImage::new_rgb8(1280, 853));
+        let step = |base: &Arc<image::DynamicImage>, tag: &str| UndoStep {
+            recipe: EditRecipe::default(),
+            base: Some(base.clone()),
+            origin: Some(PathBuf::from(format!("out/_{tag}.png"))),
+        };
+        let mut app = AutoshopApp {
+            preview_edge: 1280,
+            base_preview: Some(current.clone()),
+            variants: vec![Variant {
+                kind: VariantKind::Original,
+                recipe: EditRecipe::default(),
+                base: Some(current.clone()),
+                origin: Some(PathBuf::from("out/_current.png")),
+                thumb: None,
+            }],
+            committed: step(&current, "current"),
+            ..Default::default()
+        };
+        app.undo_stack.push(step(&superseded, "superseded"));
+        app.undo(&ctx);
+        assert!(
+            app.base_preview.as_ref().is_some_and(|b| Arc::ptr_eq(b, &superseded)),
+            "premise: the superseded raster is back on the canvas"
+        );
+        assert!(
+            app.status.contains("640px"),
+            "the undo door discloses the resolution it restored: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn history_pixel_identity_compares_the_master_not_its_spelling() {
+        // The last comparison the batch-80 sweep left on `==`.
+        let base = Arc::new(image::DynamicImage::new_rgb8(4, 3));
+        let rel = UndoStep {
+            recipe: EditRecipe::default(),
+            base: Some(base.clone()),
+            origin: Some(PathBuf::from("out/_spelling.png")),
+        };
+        let abs = UndoStep {
+            recipe: EditRecipe::default(),
+            base: Some(base),
+            origin: Some(std::path::absolute("out/_spelling.png").unwrap()),
+        };
+        assert!(rel.same_pixels(&abs), "one master, two spellings, one pixel identity");
+        let other = UndoStep {
+            recipe: EditRecipe::default(),
+            base: rel.base.clone(),
+            origin: Some(PathBuf::from("out/_spelling-2.png")),
+        };
+        assert!(!rel.same_pixels(&other), "…but a DIFFERENT master still differs");
     }
 
     #[test]
