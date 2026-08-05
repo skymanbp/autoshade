@@ -2287,7 +2287,7 @@ impl AutoshopApp {
             // push / delete — so this is defence-in-depth beside the
             // apply_step gate, and says so instead of claiming a live
             // scenario.
-            && (!self.open_in_flight || self.open_same_path)
+            && (!self.open_in_flight || (self.open_same_path && self.keep_recipe))
             && let Some(p) = self.src_path.clone()
             && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
@@ -2761,12 +2761,15 @@ impl AutoshopApp {
         // at the INCOMING photo while this history belongs to the outgoing
         // one (the live-canvas override records the same hazard), so
         // repairing would estimate the WRONG photo onto this canvas. A
-        // same-path preview-resolution re-decode (keep_recipe) keeps the
-        // pair coherent AND its keep arm preserves history — refusing there
-        // made a washed install DURABLE, so it is admitted. `committed`
-        // follows the heal, or the next commit_now would push the washed
-        // head straight back onto the stack.
-        if (!self.open_in_flight || self.open_same_path)
+        // same-path preview-resolution re-decode (request AND fact: the
+        // keep_recipe request verified against the recorded open_same_path)
+        // keeps the pair coherent AND its keep arm preserves history —
+        // refusing there made a washed install DURABLE, so it is admitted.
+        // A same-path FRESH reopen is NOT: its rebuild discards this repair,
+        // so admitting it bought a concurrent decode and a false success
+        // toast. `committed` follows the heal, or the next commit_now would
+        // push the washed head straight back onto the stack.
+        if (!self.open_in_flight || (self.open_same_path && self.keep_recipe))
             && !self
                 .variants
                 .get(self.active)
@@ -7839,8 +7842,27 @@ impl AutoshopApp {
                 if self.preview_edge != before
                     && let Some(p) = self.src_path.clone()
                 {
-                    self.keep_recipe = true; // re-decode, keep the edit
-                    self.open_path(p);
+                    if self.busy {
+                        // An already-open popup outlives the disabled combo
+                        // (its own egui Area), so this is reachable while
+                        // busy — and the combo has ALREADY mutated
+                        // preview_edge. Keeping the new value displayed a
+                        // resolution the working preview does not have,
+                        // unreachable to boot (the != trigger above is a
+                        // one-shot), persisted it into Prefs, and fed it to
+                        // every bake site. The switch reverts with the
+                        // refusal, and the status says so instead of
+                        // dropping it silently.
+                        self.preview_edge = before;
+                        self.status = tr(
+                            lang,
+                            "busy — the preview-resolution switch was not applied; pick it again when the current task finishes",
+                        )
+                        .into();
+                    } else {
+                        self.keep_recipe = true; // re-decode, keep the edit
+                        self.open_path(p);
+                    }
                 }
             });
         });
@@ -11904,6 +11926,57 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_keep_request_is_refused_without_the_same_path_fact() {
+        // The KEEP arm honours the request only when open_path's recorded
+        // FACT agrees the flight was same-path: honouring a stale request
+        // grafted the outgoing photo's whole strip onto the incoming one.
+        // Deleting `&& self.open_same_path` at the KEEP arm turns phase 1
+        // into a graft and fails its assert.
+        let mut app = AutoshopApp::default();
+        let ctx = egui::Context::default();
+        let mk = || Variant {
+            kind: VariantKind::Generated,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: Some(PathBuf::from("out/_keepfact_gen.png")),
+            thumb: None,
+        };
+        app.variants = vec![mk(), mk()];
+        app.src_path = Some(PathBuf::from("D:/__autoshop_keepfact__/b.ARW"));
+        app.keep_recipe = true;
+        app.open_same_path = false; // stale request, cross-photo fact
+        let base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((
+                base.clone(),
+                Vec::new(),
+                Default::default(),
+                None,
+                None,
+                (1280, None, None),
+            )))))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.variants.len(), 1, "fresh arm: the strip is rebuilt, never grafted");
+        // ...and an HONOURED request (fact agrees) preserves the strip.
+        app.variants = vec![mk(), mk()];
+        app.keep_recipe = true;
+        app.open_same_path = true;
+        app.tx
+            .send(Msg::Opened(Box::new(Ok((
+                base,
+                Vec::new(),
+                Default::default(),
+                None,
+                None,
+                (1280, None, None),
+            )))))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.variants.len(), 2, "keep arm: the strip survives a same-path re-decode");
+    }
+
+    #[test]
     fn decoded_base_lru_hits_by_key_and_evicts_least_recent() {
         // Nonexistent paths give mtime None on both sides, which must match
         // itself (the cache still works where metadata is unavailable).
@@ -11916,6 +11989,10 @@ mod tests {
             ..Default::default()
         };
         let p = std::path::Path::new("D:/__autoshop_nonexistent__/x.ARW");
+        // The entry's edge (2560) deliberately DIFFERS from app.preview_edge
+        // (1280): the key must come from the worker's pre-read ident riding
+        // OpenedBase — a body that re-derives it from app state or a
+        // completion-time stat files under 1280 and both edge asserts flip.
         app.remember_base(
             p,
             &(
@@ -11924,16 +12001,19 @@ mod tests {
                 lens.clone(),
                 Some((4830.0, 6.0)),
                 None,
-                (1280, None, None),
+                (2560, None, None),
             ),
         );
-        let hit = app.cached_base(p, 1280);
-        assert!(hit.is_some(), "same path+edge hits");
+        let hit = app.cached_base(p, 2560);
+        assert!(hit.is_some(), "same path + the IDENT's edge hits");
         let hit = hit.unwrap();
         assert_eq!(hit.1, knots, "base-look knots ride the cache entry");
         assert_eq!(hit.2, lens, "the lens profile rides the cache entry too");
         assert_eq!(hit.3, Some((4830.0, 6.0)), "the as-shot anchor rides the cache entry too");
-        assert!(app.cached_base(p, 2560).is_none(), "edge is part of the key");
+        assert!(
+            app.cached_base(p, 1280).is_none(),
+            "the key's edge comes from the pre-read ident, not preview_edge"
+        );
         // Filling past the cap evicts the least-recently-used entry.
         let others: Vec<std::path::PathBuf> = (0..BASE_CACHE_CAP)
             .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/{i}.ARW")))
@@ -11944,7 +12024,7 @@ mod tests {
                 &(base.clone(), Vec::new(), Default::default(), None, None, (1280, None, None)),
             );
         }
-        assert!(app.cached_base(p, 1280).is_none(), "least-recent evicted at cap");
+        assert!(app.cached_base(p, 2560).is_none(), "least-recent evicted at cap");
         assert!(app.cached_base(&others[1], 1280).is_some(), "newer entries survive");
         assert!(app.base_cache.len() <= BASE_CACHE_CAP, "cap holds");
     }

@@ -1468,7 +1468,11 @@ mod tests {
             ..Default::default()
         };
         assert!(repair_pre_era_base_curve(&raw, &mut r2).is_some());
-        assert_eq!(r2.base_curve, primed, "or_insert: the first recorded answer stays");
+        assert_eq!(
+            r2.base_curve, primed,
+            "prime-side or_insert: the first recorded answer stays (the repair-side \
+             adopt arm needs a decodable RAW and is review-verified, not pinned here)"
+        );
     }
 
     #[test]
