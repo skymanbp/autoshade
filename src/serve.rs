@@ -1557,6 +1557,10 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         resp = resp.with_header(h);
     }
     if let Some(h) = recipe_note
+        // The remedy rides with the fact (ASCII — it travels in a header):
+        // the recipe the client HOLDS still carries the washed curve until a
+        // reselect refreshes it, or a save repairs it on the way to disk.
+        .map(|m| format!("{m} - reselect the photo to refresh the loaded recipe"))
         .and_then(|m| Header::from_bytes(&b"X-Recipe-Warning"[..], m.as_bytes()).ok())
     {
         resp = resp.with_header(h);
@@ -1799,7 +1803,7 @@ fn sweep_stale_temp_files() {
 
 fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let stamp = request_gen(request);
-    let req: XmpReq = read_json(request)?;
+    let mut req: XmpReq = read_json(request)?;
     let raw = match state.at_checked(req.id, stamp) {
         Ok(r) => r,
         Err(resp) => return Ok(resp),
@@ -1861,6 +1865,18 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             Err(e) => Ok(status_response(500, &format!("could not clear the saved edits: {e}"))),
         };
     }
+    // The WRITER's rule (produce_recipe, match, the GUI savers): a washed
+    // pre-era curve must not be re-persisted verbatim. The browser can hold
+    // one legitimately — a select-time inability made api_recipe serve it
+    // unrepaired — and saving it back froze the defect on disk while the
+    // render surfaces kept disclosing a repair the file never received.
+    // AFTER the clear branch above: the repair changes only the curve and
+    // its stamp, both of which is_noop neutralises, so the branch decision
+    // cannot flip.
+    let mut save_note = String::new();
+    if let Some(note) = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe) {
+        save_note = format!(" — {note}");
+    }
     // Dual-write, exactly as the GUI's `save_xmp` does: the XMP alone is lossy
     // (no bitmap masks / recolour gains) AND neither surface reads it back while
     // a `recipe.json` exists — so an XMP-only save was unreachable, silently
@@ -1881,12 +1897,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // neutral now" while the baked retouch still backs every render.
         // No removal instruction: the only route that detaches a healthy
         // in-place master is SESSION-BOUND and undiscoverable — in the GUI,
-        // undo to the pre-retouch step and save (the clear guard sees an
-        // origin-free canvas); gone after a reopen, when the undo stack is
-        // empty and origin restores from pixels.json. The web has no route
-        // at all. The roadmap records the missing explicit action; until
-        // then the note states what happened, not a route the user cannot
-        // find.
+        // undo to the pre-retouch step and save (the save sees an
+        // origin-free canvas and clears the recorded link: through the
+        // neutral-clear guard when the sliders are neutral, through the
+        // ordinary save's clear_pixel_source otherwise); gone after a
+        // reopen, when the undo stack is empty and origin restores from
+        // pixels.json. The web has no route at all. The roadmap records the
+        // missing explicit action; until then the note states what
+        // happened, not a route the user cannot find.
         master_note = " — the saved retouch master was kept: a neutral save never deletes \
                        baked pixels"
             .to_string();
@@ -1908,9 +1926,9 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // projection reports success WITH the warning instead of a 500 that
     // contradicts the on-disk state.
     match pipeline::write_xmp(&raw, &req.recipe) {
-        Ok(path) => Ok(text_response(&format!("{}{master_note}", path.display()))),
+        Ok(path) => Ok(text_response(&format!("{}{save_note}{master_note}", path.display()))),
         Err(e) => Ok(text_response(&format!(
-            "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{master_note}"
+            "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{save_note}{master_note}"
         ))),
     }
 }

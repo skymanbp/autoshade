@@ -1519,14 +1519,17 @@ async function exportFull() {
   const dn = document.querySelector(".denoise-toggle")?.checked;
   setStatus(dn ? "rendering + AI denoise… (GPU, can take minutes)" : "rendering full-resolution… (slow)");
   const btn = $(".export"); btn.disabled = true;
+  const stem = state.stem;   // snapshot: a slow render may outlive the selection
   try {
     const r = await fetch("/api/export", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(saveBody())});
     const body = await r.text();
     // Same rule as the preview: the render-side repair disclosure must not
-    // be write-only for the browser.
+    // be write-only for the browser. Attributed to ITS photo — the export
+    // has no staleness guard, so a late response must not pin the warning
+    // on whatever photo is selected when it lands.
     const relook = r.headers.get("X-Recipe-Warning");
     setStatus((r.ok ? ("exported → " + body) : ("export failed: " + body))
-      + (relook ? "  ·  ⚠ " + relook : ""));
+      + (relook ? "  ·  ⚠ (" + (stem || "photo") + ") " + relook : ""));
   } finally { exportBusy = false; btn.disabled = false; }
 }
 
@@ -1550,8 +1553,10 @@ async function downloadFull() {
     // clicked — but the blob lives until revoked. Give the browser a generous
     // window to actually start the save, then free it.
     setTimeout(() => URL.revokeObjectURL(url), 60000);
+    // Attributed to ITS photo (`stem` is snapshotted above) — no staleness
+    // guard on this path.
     const relook = r.headers.get("X-Recipe-Warning");
-    setStatus("downloaded" + (relook ? "  ·  ⚠ " + relook : ""));
+    setStatus("downloaded" + (relook ? "  ·  ⚠ (" + (stem || "photo") + ") " + relook : ""));
   } finally { exportBusy = false; btn.disabled = false; }
 }
 

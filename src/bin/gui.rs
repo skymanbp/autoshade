@@ -1908,8 +1908,10 @@ impl AutoshopApp {
                 != origin.clone().map(|o| (o, self.active_is_generated()));
             // Background variants count too (H4): their unsaved work has no
             // sidecar to survive in, and the strip used to collapse to the
-            // active canvas alone on navigation.
-            let background_dirty = self.inactive_dirty_variants() > 0;
+            // active canvas alone on navigation. THIS photo's strip only:
+            // the cross-photo sum (inactive_dirty_variants) belongs to the
+            // quit dialog, and using it here chain-stashed clean photos.
+            let background_dirty = self.open_dirty_variants() > 0;
             if dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved || background_dirty
             {
                 let others: Vec<StashedVariant> = self
@@ -2103,24 +2105,35 @@ impl AutoshopApp {
     ///
     /// Dirty means: the variant's recipe differs from the photo's disk
     /// baseline, or its raster origin is not the master recorded on disk.
-    fn inactive_dirty_variants(&self) -> usize {
+    /// The OPEN photo's strip only — the per-photo half of
+    /// [`Self::inactive_dirty_variants`]. The stash decision in `open_path`
+    /// keys on THIS: summing other photos' stashed variants into the gate
+    /// chain-stashed every clean photo the user merely visited (one photo
+    /// with a dirty background variant armed it), the quit dialog then
+    /// listed them all, and Save-all wrote sidecars — or cleared and MARKED
+    /// develops — for photos with zero user edits.
+    fn open_dirty_variants(&self) -> usize {
         let recorded = self.pixels_on_disk.clone();
-        let open = self
-            .variants
+        self.variants
             .iter()
             .enumerate()
             .filter(|(i, v)| {
                 *i != self.active
                     && (dirty_vs(&v.recipe, &self.saved_recipe) || v.origin != recorded)
             })
-            .count();
+            .count()
+    }
+
+    fn inactive_dirty_variants(&self) -> usize {
         // Photos NAVIGATED AWAY FROM count too. Since batch 47 a photo is
         // stashed when only a BACKGROUND variant is dirty, so the quit dialog
         // lists it — while Save-all writes just the stashed ACTIVE canvas and
         // then clears the stash. Counting only the open photo's strip meant
         // the dialog promised a save that destroyed that work without a word.
+        // (The quit surfaces keep this widened count; the per-photo stash
+        // gate must NOT — see `open_dirty_variants`.)
         let stashed: usize = self.nav_stash.values().map(|st| st.others.len()).sum();
-        open + stashed
+        self.open_dirty_variants() + stashed
     }
 
     /// The active variant, if a photo is open.
@@ -5170,6 +5183,36 @@ impl AutoshopApp {
                                 self.src_path.as_ref().and_then(|p| self.nav_stash.remove(p))
                             {
                                 recipe = st.recipe;
+                                // The stash carries the canvas VERBATIM — and
+                                // when the ORIGINAL open's repair was an
+                                // inability, that canvas still holds the
+                                // washed era-1 curve. Inabilities exist to be
+                                // retried by the next reader, and the gate
+                                // above deliberately skipped the disk-recipe
+                                // repair in deference to this override — so
+                                // the retry happens HERE, on the recipe that
+                                // actually lands on the canvas. Memo-bounded:
+                                // an already-repaired stash short-circuits on
+                                // its era stamp before touching the file.
+                                // Without this, the canvas rendered
+                                // stops-dark all session while every
+                                // deliverable repaired for itself.
+                                if let Some(p) = self.src_path.clone()
+                                    && autoshop::pipeline::repair_pre_era_base_curve(
+                                        &p, &mut recipe,
+                                    )
+                                    .is_some()
+                                {
+                                    let w = tr(
+                                        lang,
+                                        "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                                    )
+                                    .to_string();
+                                    open_note = Some(match open_note {
+                                        Some(o) => format!("{o} · {w}"),
+                                        None => w,
+                                    });
+                                }
                                 pixels = match (st.base, st.origin) {
                                     (Some(b), Some(o)) => Some((b, o, st.generated)),
                                     _ => None,
@@ -10899,9 +10942,10 @@ mod tests {
         // A repaired canvas (era 2, fresh curve) against an unrepaired
         // baseline (era 1, washed curve) — same user edits — is NOT dirty:
         // the curve is calibration and `version` is its provenance stamp.
-        // Both directions occur (the stash gate produces baseline-v1 vs
-        // canvas-v2; an inability-at-open stash produces the reverse), and
-        // either one read as "unsaved edits" pinned ● for the session.
+        // The live mismatch is baseline-v1 vs canvas-v2 (a repaired stash
+        // over a gated disk read); the reverse is asserted for symmetry —
+        // an inability at open leaves BOTH sides era 1, so no current path
+        // produces it, and none may ever read it as an edit.
         let baseline = EditRecipe {
             version: 1,
             base_curve: vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0]],
