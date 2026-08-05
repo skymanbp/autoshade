@@ -885,13 +885,24 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     let ok = results.iter().filter(|r| **r == Some(Outcome::Saved)).count();
     let skipped = results.iter().filter(|r| **r == Some(Outcome::NotAccepted)).count();
     let fail = results.iter().filter(|r| **r == Some(Outcome::Failed)).count();
-    // Only a SAVED develop leaves the pending set: failures AND non-Accept
-    // results produced no sidecar, so a re-run re-attempts (and re-bills)
-    // them — said here, not discovered on the next invoice.
+    // What LEAVES the pending set is a develop on disk, which is not the
+    // same as a success: since a render failure persists the develop it
+    // already paid for (so a re-run cannot re-bill it), such a photo is
+    // FAILED and no longer pending. Counting `todo - ok` therefore told the
+    // user to re-run for photos a re-run would skip. Ask the store instead of
+    // inferring, and keep the re-bill promise scoped to what still holds:
+    // a non-Accept photo really did leave no sidecar.
+    let still_pending =
+        pending.iter().filter(|p| !autoshop::store::has_develop(p.as_path())).count();
     println!(
-        "\nbatch done: {ok} saved, {skipped} not saved (non-Accept), {fail} failed, {} still pending.",
-        todo.saturating_sub(ok)
+        "\nbatch done: {ok} saved, {skipped} not saved (non-Accept), {fail} failed, {still_pending} still pending.",
     );
+    if fail > 0 && still_pending < fail {
+        println!(
+            "  note: a photo whose RENDER failed keeps the develop it already paid for, so it is \
+             no longer pending — re-run `autoshop apply` for its deliverable."
+        );
+    }
     Ok(())
 }
 

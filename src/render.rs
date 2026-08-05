@@ -2560,12 +2560,13 @@ fn orient_f32(
     (data, ow as usize, oh as usize)
 }
 
-/// Downscale the oriented f32 buffer to fit `max_edge` (aspect preserved;
-/// the same zero-copy [f32;3]⇄f32 casts as [`orient_f32`]). It must be the
-/// ORIENTED buffer: `thumbnail`'s integer binning only commutes with pure
-/// axis swaps — reversing orientations shift its bin edges by one source
-/// bin, so capping in the sensor frame would change preview pixels (see
-/// the probe note in `render_to_image_in`). No-op when
+/// Downscale the oriented f32 buffer to fit `max_edge` (aspect preserved).
+/// The averaging is hand-rolled — a fresh `Vec<[f32; 3]>` filled through an
+/// f64 accumulator, NOT a cast-and-delegate — for the bias reason spelled out
+/// in the body. It must be the ORIENTED buffer: this binning only commutes
+/// with pure axis swaps — reversing orientations shift the bin edges by one
+/// source bin, so capping in the sensor frame would change preview pixels
+/// (see the probe note in `render_to_image_in`). No-op when
 /// the frame already fits. Backs `render_to_image`'s working-resolution
 /// cap: developing 61 MP only to thumbnail the result wasted a ~1.5 GB
 /// transient chain on every preview-resolution retouch base.
@@ -2586,8 +2587,16 @@ fn downscale_f32(
     // that is round-to-nearest; for f32 (whose `Enlargeable::Larger` is f64)
     // `n/2` stays a float, so every channel of every capped frame came back
     // exactly +0.5 too bright — GUI previews, retouch/generative bases, the
-    // web preview and the camera-base-curve estimate all washed to white
-    // (R12; exports pass max_edge = None and were never affected).
+    // web preview and the camera-base-curve estimate all washed to white.
+    //
+    // An export's own pixels never went through here (deliverables pass
+    // max_edge = None) — but saying exports "were never affected" was WRONG,
+    // and this comment said it. `photo_base_knots` estimates the camera base
+    // curve from a CAPPED develop and that curve is PERSISTED, so every
+    // recipe saved by a build with the bias carries a curve fitted to a
+    // washed frame, and the full-resolution render composes it. Fixing the
+    // sampler made those saved curves worse, not better — they now sit over a
+    // correct develop. See `pipeline::repair_pre_era_base_curve`.
     // The BIN GEOMETRY below is a faithful replica of that function (the same
     // aspect-preserving output dims and the same ceil-based windows), so the
     // orientation behaviour the canary test pins is unchanged — only the bias
@@ -3694,13 +3703,17 @@ mod tests {
             );
             sweep.push(px[0]);
         }
-        for pair in sweep.windows(2) {
-            for (a, b) in pair[0].iter().zip(&pair[1]) {
-                assert!(
-                    (a - b).abs() < 5e-3,
-                    "blending changed the shadow AMPLITUDE: {sweep:?}"
-                );
-            }
+        // ENDPOINTS, not consecutive pairs. An amplitude multiplier moves
+        // this probe monotonically across the sweep, so each STEP is only
+        // ~4e-3 — under a 5e-3 tolerance — while end to end it moves ~8e-3.
+        // The consecutive form therefore passed on the exact mutation this
+        // block names (measured against the real engine, which stays within
+        // 3.7e-5 end to end, so the endpoint form keeps 100x+ of headroom).
+        for (a, b) in sweep[0].iter().zip(&sweep[sweep.len() - 1]) {
+            assert!(
+                (a - b).abs() < 5e-3,
+                "blending changed the shadow AMPLITUDE: {sweep:?}"
+            );
         }
     }
 
