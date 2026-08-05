@@ -2199,12 +2199,37 @@ impl AutoshopApp {
     /// local selection, view) restarts — like a soft re-open; what persists is
     /// each variant's recipe + pixels. Shared by switch / push / delete.
     fn load_active(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
         let Some(v) = self.variants.get(self.active) else { return };
         self.recipe = v.recipe.clone();
+        let vkind = v.kind;
+        let vbase = v.base.clone();
         self.rationale = self.recipe.rationale.clone();
+        // The strip's READER joins the repair rule: push_variant and
+        // switch_variant sync the OUTGOING canvas into the strip, so a
+        // washed Original displaced by an AI push comes back through HERE
+        // when its card is clicked — no navigation, no stash, no save
+        // involved. Memo-bounded; era-2 recipes short-circuit; a Generated
+        // entry is skipped like every other ordering site (its curve is
+        // empty by invariant).
+        if vkind != VariantKind::Generated
+            && let Some(p) = self.src_path.clone()
+            && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
+        {
+            // The strip entry follows the healed canvas (the Ctrl+S rule),
+            // and the user is told.
+            if let Some(v) = self.variants.get_mut(self.active) {
+                v.recipe = self.recipe.clone();
+            }
+            self.status = tr(
+                lang,
+                "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+            )
+            .into();
+        }
         // Base pixels: the variant's own baked raster, else the shared source
         // neutral (Original / Fitted re-develop the same negative).
-        let base = v.base.clone().or_else(|| self.source_preview.clone());
+        let base = vbase.or_else(|| self.source_preview.clone());
         if let Some(base) = base {
             let (mw, mh) = base.dimensions();
             // Before compares under the canvas recipe's own base calibration
@@ -3011,7 +3036,12 @@ impl AutoshopApp {
                 // already repaired, and it also covers the generated arm
                 // above, whose calibration snapshot may itself have adopted
                 // an unrepaired curve when the store read hit an inability.
-                let _ = autoshop::pipeline::repair_pre_era_base_curve(p, &mut disk);
+                // SAID on the loop's existing quitting-time channel: this is
+                // the one persisted-artifact change here, and every other
+                // repair site reports.
+                if let Some(note) = autoshop::pipeline::repair_pre_era_base_curve(p, &mut disk) {
+                    eprintln!("⚠ {}: {note}", autoshop::pipeline::stem(p));
+                }
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
                 let res = autoshop::pipeline::write_recipe(p, &disk, None).and_then(|_| {
                     // The baked-pixels link saves/clears with the recipe —
@@ -4608,13 +4638,44 @@ impl AutoshopApp {
         // and disclosed. The canvas itself heals here: what is written is
         // what is shown (a generated canvas was refused above, and its curve
         // is empty by invariant).
+        // ...and the HISTORY follows it — the Arc-repoint rule (see the
+        // preview-resolution repoint below in this file): calibration is not
+        // an edit, so every step holding the exact pre-repair pair is
+        // re-stamped in place. Without this, commit_if_settled pushed the
+        // washed step onto the undo stack and ONE Ctrl+Z after Ctrl+S handed
+        // the washed curve back to the canvas invisibly (dirty_vs neutralises
+        // both fields, so no ● would have said so) — while disk and every
+        // deliverable stayed repaired.
+        let before = (self.recipe.version, self.recipe.base_curve.clone());
         let relooked =
             autoshop::pipeline::repair_pre_era_base_curve(&path, &mut self.recipe).is_some();
         if relooked {
+            let (after_ver, after_curve) =
+                (self.recipe.version, self.recipe.base_curve.clone());
+            let restamp = |r: &mut EditRecipe| {
+                if r.version == before.0 && r.base_curve == before.1 {
+                    r.version = after_ver;
+                    r.base_curve = after_curve.clone();
+                }
+            };
+            restamp(&mut self.committed.recipe);
+            self.undo_stack.iter_mut().for_each(|s| restamp(&mut s.recipe));
+            self.redo_stack.iter_mut().for_each(|s| restamp(&mut s.recipe));
             // The strip entry that IS the canvas follows it, and the preview
             // re-develops under the healed curve.
             if let Some(v) = self.variants.get_mut(self.active) {
                 v.recipe = self.recipe.clone();
+            }
+            // ...and the SIBLINGS follow too (the stash-retry rule): the
+            // estimate is already paid, so healing the rest of the strip is
+            // a memo hit apiece — a save must not leave the photo split
+            // into a bright canvas and washed cards (load_active would heal
+            // each on click, but the strip should be whole NOW).
+            let active = self.active;
+            for (i, v) in self.variants.iter_mut().enumerate() {
+                if i != active && v.kind != VariantKind::Generated {
+                    let _ = autoshop::pipeline::repair_pre_era_base_curve(&path, &mut v.recipe);
+                }
             }
             self.dirty = true;
         }
@@ -4716,7 +4777,20 @@ impl AutoshopApp {
                 self.status = s;
             }
             Err(e) => {
-                let t = trf(lang, "save failed: {err}", &[("err", &e.to_string())]);
+                let mut t = trf(lang, "save failed: {err}", &[("err", &e.to_string())]);
+                if relooked {
+                    // The disclosure travels with the MUTATION, not the
+                    // success: the canvas healed above even though the write
+                    // failed, and a silently brighter photo under an
+                    // unrelated error reads as a glitch.
+                    t.push_str(&format!(
+                        " · {}",
+                        tr(
+                            lang,
+                            "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                        )
+                    ));
+                }
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t); // a failed save must be seen
             }
@@ -5237,18 +5311,19 @@ impl AutoshopApp {
                                 // every recipe that can land on the canvas:
                                 // the active one AND each sibling (a strip
                                 // entry is one click from BEING the canvas).
-                                // Pushed variants are era-2 by construction
-                                // (NewGenerated and Fitted both start from
-                                // Default), so for them the loop is a pure
-                                // version-check no-op — it exists for the
-                                // narrow residual (a pre-era snapshot
-                                // load_version'd onto a variant during an
-                                // inability window) and to enforce the
-                                // invariant HERE instead of leaning on the
-                                // construction sites. ONE estimate total —
-                                // the memo keys on the photo — and already-
-                                // repaired recipes short-circuit on their
-                                // era stamp.
+                                // The washed-sibling population is ORDINARY,
+                                // not residual: push_variant/switch_variant
+                                // sync the OUTGOING canvas into the strip,
+                                // so a washed Original displaced by an AI
+                                // push is a washed sibling (the freshly
+                                // PUSHED variants themselves are era-2 and
+                                // empty by construction). load_active
+                                // repairs on switch as the last line of
+                                // defence; this eager pass heals the whole
+                                // strip the moment it is restored. ONE
+                                // estimate total — the memo keys on the
+                                // photo — and already-repaired recipes
+                                // short-circuit on their era stamp.
                                 // A failed estimate retries on the next
                                 // return; the deterministic-inability
                                 // population is empty for estimator-written
