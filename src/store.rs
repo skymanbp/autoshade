@@ -1803,6 +1803,40 @@ mod tests {
     }
 
     #[test]
+    fn a_concurrent_save_is_never_clobbered_by_a_recovered_bak() {
+        // The reason the restore stages a copy and publishes NO-CLOBBER
+        // instead of renaming: another process (GUI, server, CLI share this
+        // store) can publish the live file between our exists-check and the
+        // rename, and a bare rename REPLACES it — silently discarding a save
+        // that is newer than the crash we are repairing. Nothing exercised
+        // that branch, so reverting the fix to `fs::rename` passed the whole
+        // suite.
+        let base = std::env::temp_dir().join("autoshop-store-test-noclobber");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let photo = base.join("DSC_NOCLOBBER.ARW");
+        std::fs::write(&photo, b"raw").unwrap();
+        let dev = develop_dir(&photo);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        // The crashed publish's survivor AND a concurrent save's live file.
+        std::fs::write(dev.join("recipe.json.bak"), b"{\"contrast\":11.0}").unwrap();
+        std::fs::write(recipe_target(&photo), b"{\"contrast\":22.0}").unwrap();
+        recover_orphan_baks(&photo).expect("a live file present is not a failure");
+        let live = std::fs::read_to_string(recipe_target(&photo)).unwrap();
+        assert!(
+            live.contains("22.0"),
+            "the CONCURRENT save owns the live file — the .bak must not replace it: {live}"
+        );
+        assert!(
+            dev.join("recipe.json.bak").exists(),
+            "and the retired .bak stays put; live + .bak is the normal state"
+        );
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn clear_develop_leaves_no_resurrection_route() {
         // The whole contract of an explicit clear, in the one place both
         // surfaces now go through: every home gone, the retired master gone

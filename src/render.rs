@@ -708,7 +708,7 @@ pub fn render_to_file(
     // The gamut transform only runs for formats that can carry the matching
     // profile: pixels re-encoded for P3/AdobeRGB but saved UNTAGGED would
     // display wrong everywhere — sRGB is the only space safe to leave untagged.
-    let taggable = matches!(ext.as_str(), "jpg" | "jpeg" | "tif" | "tiff" | "png");
+    let taggable = matches!(ext.as_str(), "jpg" | "jpeg" | "jfif" | "tif" | "tiff" | "png");
     let space = if taggable { opts.color_space } else { ExportColorSpace::Srgb };
     let is_raw_src = crate::decode::is_raw(src_path);
     // RAW + wide delivery develops DIRECTLY in the delivery primaries — the
@@ -793,7 +793,13 @@ pub fn render_to_file(
     // successful export over a truncated file.
     use std::io::Write as _;
     match ext.as_str() {
-        "jpg" | "jpeg" => {
+        // "jfif" belongs HERE: `ImageFormat::from_extension` maps it to Jpeg,
+        // so it used to fall through to the generic arm, which constructs the
+        // encoder with the library's default quality and silently ignored
+        // opts.jpeg_quality — an export typed as out.jfif came out at 75 no
+        // matter what the Export panel said. (Before the generic arm existed
+        // it failed loudly, which was at least honest.)
+        "jpg" | "jpeg" | "jfif" => {
             // JPEG is 8-bit only — downconvert from 16-bit.
             let rgb8 = img.to_rgb8();
             let mut wr = create(&staged)?;
@@ -5140,6 +5146,29 @@ mod tests {
         assert!(
             (mean_out - mean_in).abs() < 0.02,
             "the cap must preserve the mean level: {mean_in} -> {mean_out}"
+        );
+        // AVERAGING, not merely level. Both arms above pass for a
+        // nearest-neighbour sampler (measured: top-left 0.0023 and
+        // bottom-right 0.0125 off the mean, inside the 0.02 budget, and a
+        // flat field survives point sampling exactly) — so "optimising" the
+        // inner loop into `*px = data[bottom * w + left]` would keep the
+        // suite green while every preview started aliasing.
+        //
+        // One lit source pixel in a dark field: a box filter spreads it over
+        // its whole window, so the output lands at 1/window_area — never at 0
+        // (a point sampler that missed it) and never at 1 (one that hit it).
+        let mut spike = vec![[0.0f32; 3]; w * h];
+        spike[(h / 2) * w + w / 2] = [1.0; 3];
+        let (small, _sw, _sh) = downscale_f32(spike, w, h, 40);
+        let peak = small.iter().map(|p| p[0]).fold(0.0f32, f32::max);
+        let lit = small.iter().filter(|p| p[0] > 0.0).count();
+        assert_eq!(lit, 1, "exactly one output window contains the lit pixel");
+        // Bin windows are ceil-based, so this fixture (97x61 -> 40x25, ratios
+        // 2.425 and 2.44) gives each output pixel 2 or 3 source columns and
+        // rows: the lit sample is therefore averaged over 4..=9 of them.
+        assert!(
+            (1.0 / 9.0..=1.0 / 4.0).contains(&peak),
+            "one lit pixel must be AVERAGED over its 4..=9 sample window, got {peak}"
         );
     }
 
