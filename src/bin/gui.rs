@@ -2283,31 +2283,45 @@ impl AutoshopApp {
     /// The resolution a canvas must DISCLOSE, when it holds baked pixels the
     /// preview preference cannot reach. `None` when there is nothing to say.
     ///
-    /// Gated on the canvas actually HOLDING a baked raster, not on the sizes
-    /// differing: a RAW whose sensor is smaller than the preference decodes
-    /// un-upscaled (any sub-4096 sensor under "4096px · inspect"), so a
-    /// size-only test told the user their source-based Original was a stale
-    /// bake — on the status bar, which never expires. THREE doors install
-    /// such a canvas: the strip click, an undo to a SUPERSEDED master (the
-    /// re-decode repoints only the Arc the canvas held), and the navigation
-    /// stash restore (which reinstalls the raster the photo was left with
-    /// while this open decoded the source at the current preference).
+    /// FOUR doors install such a canvas: the strip click, an undo to a
+    /// SUPERSEDED master (the re-decode repoints only the Arc the canvas
+    /// held), the navigation stash restore (which reinstalls the raster the
+    /// photo was left with while this open decoded the source at the current
+    /// preference), and deleting the active variant (which re-anchors onto a
+    /// background one).
     fn baked_canvas_edge(&self) -> Option<u32> {
-        // The ruler is what the preference DELIVERS for this photo — the
-        // source decoded at it — not the preference itself. A sensor smaller
-        // than the preference decodes un-upscaled, so a heal on such a photo
-        // bakes at the sensor's edge and is perfectly current; measured
-        // against the raw preference, that fresh bake was announced as a
-        // stale one on every door.
-        let reachable = self
+        // A canvas has TWO legitimate resolutions, and measuring against
+        // either one alone produced a false claim:
+        //  · the PREFERENCE — a recorded master is re-decoded with an
+        //    UNGUARDED `thumbnail`, which upscales, so a re-decode lands
+        //    exactly there whatever the sensor is;
+        //  · what the source DELIVERS — the RAW decode is guarded against
+        //    upscaling, so a fresh bake on a sensor smaller than the
+        //    preference lands there instead, and is perfectly current.
+        // Only a THIRD value is stale: a raster baked under an older
+        // preference, or a superseded master an undo brought back. Measuring
+        // against the preference alone called every fresh sub-preference bake
+        // stale; against the delivered edge alone it called every REOPENED
+        // sub-preference master stale ("not the preview preference" while the
+        // preference was exactly that). It takes both.
+        let delivered = self
             .source_preview
             .as_ref()
             .map(|s| s.width().max(s.height()))
             .unwrap_or(self.preview_edge)
             .clamp(640, 8192);
         let canvas = self.canvas_edge();
-        (canvas != reachable && self.active_variant().is_some_and(|v| v.base.is_some()))
-            .then_some(canvas)
+        // The baked-raster gate is DEFENCE IN DEPTH, not load-bearing: a
+        // source-based canvas IS the source decode (`load_active` falls back
+        // to `source_preview`, and every install keeps the pair in lockstep),
+        // so `canvas == delivered` already silences it. No test can kill this
+        // conjunct; it stays because a future canvas that is neither would
+        // otherwise be announced with a word — "bake" — that would not be
+        // true of it.
+        (canvas != delivered
+            && canvas != self.preview_edge
+            && self.active_variant().is_some_and(|v| v.base.is_some()))
+        .then_some(canvas)
     }
 
     /// Write the status for a door that just installed a canvas, in BOTH
@@ -10692,8 +10706,19 @@ impl eframe::App for AutoshopApp {
                     do_cheatsheet = true;
                 }
             });
-            if do_undo { self.undo(ctx); }
-            if do_redo { self.redo(ctx); }
+            // The keyboard takes the same gate as the ↶/↷ BUTTONS (which are
+            // `add_enabled(ready && …)` with `ready = src_path.is_some() &&
+            // !busy`): un-gated, Ctrl+Z during a retouch swapped the base the
+            // landing result is applied over, and — since every pixel undo now
+            // writes a status — wiped the only liveness the bar was showing
+            // for a worker that sends no progress. A refusal must be visible.
+            if (do_undo || do_redo) && self.busy {
+                let t = tr(self.lang, "busy — undo unlocks when the current task finishes");
+                self.toast(ToastKind::Error, t);
+            } else {
+                if do_undo { self.undo(ctx); }
+                if do_redo { self.redo(ctx); }
+            }
             // R mirrors the crop button exactly (incl. the one-tool-at-a-time
             // disarms); no photo → nothing to crop.
             if do_crop && self.src_path.is_some() {
@@ -11777,7 +11802,11 @@ mod tests {
 
     /// A tiny synthetic base + a bitmap mask on disk, for the async-develop and
     /// overlay regression tests. Returns (app, mask_path) — caller cleans up.
-    fn app_with_masked_photo(tag: &str) -> (AutoshopApp, std::path::PathBuf) {
+    /// …and its `Scrub`: the ./out fixture is removed on DROP, so a failing
+    /// assert cannot leave it behind. Handing the guard back (rather than
+    /// trusting a trailing `remove_file`) is what makes it impossible for the
+    /// next caller to forget — five of them had.
+    fn app_with_masked_photo(tag: &str) -> (AutoshopApp, Scrub) {
         let (w, h) = (24u32, 16u32);
         let base = Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(
             w,
@@ -11798,6 +11827,7 @@ mod tests {
             }],
             ..Default::default()
         };
+        let scrub = Scrub(vec![mask_path.clone()]);
         let app = AutoshopApp {
             source_preview: Some(base.clone()),
             base_preview: Some(base),
@@ -11812,7 +11842,7 @@ mod tests {
             sel_mask: Some(0),
             ..AutoshopApp::default()
         };
-        (app, mask_path)
+        (app, scrub)
     }
 
     #[test]
@@ -11822,7 +11852,7 @@ mod tests {
         // in-flight guard must prevent a second dispatch. Drives the pure
         // pieces (build_preview + finish_redevelop) with a headless egui ctx —
         // never run_native.
-        let (mut app, mask_path) = app_with_masked_photo("latest");
+        let (mut app, _scrub) = app_with_masked_photo("latest");
         let ctx = egui::Context::default();
         let base = app.base_preview.clone().unwrap();
 
@@ -11858,7 +11888,7 @@ mod tests {
         assert_eq!(app.develop_count, 1, "stale frame (recipe moved) discarded");
         assert!(app.dirty, "a discarded stale frame re-arms the pending edit");
 
-        std::fs::remove_file(&mask_path).ok();
+
     }
 
     #[test]
@@ -11871,7 +11901,7 @@ mod tests {
         // (it needs a viewport close event through update()); its
         // precondition — a flushed rename reads as UNSAVED — is pinned
         // instead (Codex batch 41).
-        let (mut app, mask_path) = app_with_masked_photo("rename");
+        let (mut app, _scrub) = app_with_masked_photo("rename");
         app.recipe.masks[0].name = "sky".into();
         app.saved_recipe = app.recipe.clone();
         let old = std::path::PathBuf::from("out/_rename_old.arw");
@@ -11905,7 +11935,7 @@ mod tests {
             "save_xmp itself must flush the pending rename"
         );
 
-        std::fs::remove_file(&mask_path).ok();
+
     }
 
     #[test]
@@ -11915,7 +11945,7 @@ mod tests {
         // one photo with a dirty background variant then chain-stashed every
         // clean photo the user merely visited, the quit dialog listed them
         // as unsaved, and Save-all wrote sidecars for zero user edits.
-        let (mut app, mask_path) = app_with_masked_photo("chainstash");
+        let (mut app, _scrub) = app_with_masked_photo("chainstash");
         app.saved_recipe = app.recipe.clone(); // this canvas is clean
         app.variants[0].origin = None;
         app.pixels_on_disk = None;
@@ -11948,7 +11978,7 @@ mod tests {
             !app.nav_stash.contains_key(&clean),
             "a clean photo must not be stashed for another photo's background work"
         );
-        std::fs::remove_file(&mask_path).ok();
+
     }
 
     #[test]
@@ -11956,7 +11986,7 @@ mod tests {
         // H4: a dirty BACKGROUND variant must survive nav-away-and-back —
         // the stash used to carry only the active canvas, so the strip
         // collapsed and the background variant's unsaved work died.
-        let (mut app, mask_path) = app_with_masked_photo("h4stash");
+        let (mut app, _scrub) = app_with_masked_photo("h4stash");
         let ctx = egui::Context::default();
         let gen_base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
         app.variants.push(Variant {
@@ -12026,7 +12056,7 @@ mod tests {
             app.variants[app.active].recipe, app.recipe,
             "the canvas and the active slot must agree after a restore"
         );
-        std::fs::remove_file(&mask_path).ok();
+
     }
 
     #[test]
@@ -12034,7 +12064,7 @@ mod tests {
         // The coverage-aware key: dragging a mask's Exposure/Temp/color_gains
         // changes WHAT it does, not WHERE — so the full-frame coverage raster
         // must NOT rebuild. Geometry / amount / inversion MUST rebuild.
-        let (mut app, mask_path) = app_with_masked_photo("overlay");
+        let (mut app, _scrub) = app_with_masked_photo("overlay");
         let ctx = egui::Context::default();
 
         app.refresh_mask_overlay(&ctx);
@@ -12060,7 +12090,7 @@ mod tests {
         app.refresh_mask_overlay(&ctx);
         assert_eq!(app.overlay_build_count, 3, "inversion rebuilds coverage");
 
-        std::fs::remove_file(&mask_path).ok();
+
     }
 
     #[test]
@@ -12716,9 +12746,9 @@ mod tests {
             "a baked canvas says which resolution it kept: {}",
             app.status
         );
-        // (3) a baked canvas at the resolution the preference DELIVERS for
-        // this photo — a sub-preference sensor, freshly healed. Measured
-        // against the raw preference this fresh bake was called a stale one.
+        // (3) a baked canvas at the resolution the source DELIVERS — a
+        // sub-preference sensor, freshly healed. Measured against the raw
+        // preference this fresh bake was called a stale one.
         let mut app = AutoshopApp {
             preview_edge: 1280,
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
@@ -12731,7 +12761,43 @@ mod tests {
         app.switch_variant(1, &ctx);
         assert!(
             !app.status.contains("800px"),
-            "a bake at the reachable resolution is not a stale bake: {}",
+            "a bake at the delivered resolution is not a stale bake: {}",
+            app.status
+        );
+        // (4) …and a baked canvas at the PREFERENCE on that same photo — a
+        // recorded master re-decoded on open, which `thumbnail` UPSCALES to
+        // exactly the preference. Measured against the delivered edge alone,
+        // this said "stays at 1280px … not the preview preference" while the
+        // preference was 1280.
+        let mut app = AutoshopApp {
+            preview_edge: 1280,
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
+            variants: vec![
+                src(None),
+                src(Some(Arc::new(image::DynamicImage::new_rgb8(1280, 960)))),
+            ],
+            ..Default::default()
+        };
+        app.switch_variant(1, &ctx);
+        assert!(
+            !app.status.contains("1280px"),
+            "a canvas at the preference is not a stale bake either: {}",
+            app.status
+        );
+        // (5) …while a THIRD value — baked under an older preference — is.
+        let mut app = AutoshopApp {
+            preview_edge: 1280,
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
+            variants: vec![
+                src(None),
+                src(Some(Arc::new(image::DynamicImage::new_rgb8(640, 480)))),
+            ],
+            ..Default::default()
+        };
+        app.switch_variant(1, &ctx);
+        assert!(
+            app.status.contains("640px"),
+            "neither the preference nor what the source delivers: {}",
             app.status
         );
     }
@@ -12750,6 +12816,10 @@ mod tests {
         };
         let mut app = AutoshopApp {
             preview_edge: 1280,
+            // A REAL source: without it the ruler took its `unwrap_or`
+            // fallback and this test never touched the delivered-edge path it
+            // is meant to cover.
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853))),
             base_preview: Some(current.clone()),
             variants: vec![Variant {
                 kind: VariantKind::Original,
