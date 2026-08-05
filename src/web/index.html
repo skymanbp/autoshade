@@ -1460,7 +1460,12 @@ async function saveXmp() {
     // a sidecar beside the RAW can restore the edits on the next open).
     // Substituting a fixed string threw away the one thing worth reading.
     setStatus(body.startsWith("cleared") ? body : ("xmp + recipe saved → " + body));
-    savedRecipe = sentBaseline; // what is on disk = what this request CARRIED
+    // ...but NOT the master half when the server says it could not record it:
+    // the recipe landed, the pixel link did not, and baselining the master as
+    // saved let the next thumbnail click discard the fill with no warning.
+    savedRecipe = body.includes("recording the retouched master failed")
+      ? JSON.stringify({ recipe: JSON.parse(sentBaseline).recipe, master: null })
+      : sentBaseline; // what is on disk = what this request CARRIED
     if (sentMaster && !body.startsWith("cleared")
         && !body.includes("recording the retouched master failed")) {
       // The session master is now the photo's PERSISTED pixel source, so

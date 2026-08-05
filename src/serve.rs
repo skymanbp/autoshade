@@ -823,6 +823,20 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         }
         // Bare raster names stay bare — api_develop/api_export re-anchor them
         // before rendering.
+        //
+        // The pre-era base-curve repair happens BEFORE the browser gets a
+        // copy: everything the web then does — preview, export, download,
+        // save — is driven by the object it holds, so serving the file
+        // verbatim handed the washed curve to every one of them (and the
+        // client would have written it straight back on the next save).
+        // Re-serialised only when the repair actually fired; an untouched
+        // recipe still goes out byte-for-byte, forward-schema fields and all.
+        if let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
+            && crate::pipeline::repair_pre_era_base_curve(&raw, &mut r).is_some()
+            && let Ok(fixed) = serde_json::to_string(&r)
+        {
+            return Ok(json_text(fixed));
+        }
         return Ok(json_text(text));
     }
     // No recipe.json → fall back to the XMP sidecar, exactly like the GUI's

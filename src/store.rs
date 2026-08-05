@@ -338,6 +338,20 @@ pub fn render_source(raw: &Path, recipe: &mut EditRecipe) -> PathBuf {
 /// still open; the GUI toasts at open, the web rides an X-Preview-Warning).
 /// The message is ASCII-only: it travels in an HTTP header.
 pub fn render_source_checked(raw: &Path, recipe: &mut EditRecipe) -> Result<PathBuf, String> {
+    // The pre-era base-curve repair belongs HERE, not only on the surfaces
+    // that stamp calibration. Batch 52 put it in `saved_recipe_snapshot` and
+    // claimed "no surface can render a washed curve by forgetting to ask" —
+    // but that funnel is the programmatic WRITER's path. Every deliverable
+    // reads recipe.json for itself (GUI batch export, CLI apply, load_version)
+    // or receives it over HTTP, and each of them rendered the washed curve at
+    // full resolution while the GUI canvas showed the repaired one: two
+    // surfaces of the same build disagreeing about the same file.
+    //
+    // This function is what deliverables DO share, and it already takes the
+    // recipe by &mut for exactly this class of source-dependent correction.
+    // The repair is a no-op for era-2 recipes and for any curve without the
+    // fingerprint, so the cost lands only on the photos that need it.
+    let _ = crate::pipeline::repair_pre_era_base_curve(raw, recipe);
     match read_pixel_source(raw) {
         Some((master, generated)) => {
             if generated {
@@ -703,13 +717,29 @@ pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
     // already documents) — but the clear path is the ONE save path that never
     // runs that publisher's stale-`.bak` hygiene, so nothing else would ever
     // sweep it. `cleared.txt` cannot help: the recovery never reads it.
+    // EVERY legacy root, not just the one `legacy_recipe` resolves to.
+    // `legacy_file` returns the FIRST existing match, so with two ./out roots
+    // in play (the env override and the cwd/exe fallbacks) a clear removed one
+    // copy and left the other — which the very next read then restored, so
+    // "cleared" did not stay cleared. Duplicates are harmless: a missing file
+    // is already the desired end state.
+    let stem = crate::pipeline::stem(src);
+    let legacy: Vec<PathBuf> = legacy_out_roots()
+        .into_iter()
+        .flat_map(|root| {
+            [root.join(format!("{stem}.recipe.json")), root.join(format!("{stem}.xmp"))]
+        })
+        .collect();
     for p in [
         develop_dir(src).join("recipe.json.bak"),
         recipe_target(src),
         xmp_target(src),
         legacy_recipe(src),
         legacy_xmp(src),
-    ] {
+    ]
+    .into_iter()
+    .chain(legacy)
+    {
         match del(&p) {
             Ok(b) => removed |= b,
             Err(e) => {

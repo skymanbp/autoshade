@@ -713,6 +713,9 @@ struct AutoshopApp {
     selected: Option<usize>,        // index of the open gallery photo (for highlight)
     thumbs: HashMap<usize, egui::TextureHandle>, // decoded thumbnails by index
     thumb_requested: HashSet<usize>,             // indices already queued/decoded
+    /// Decode attempts that FAILED, per gallery index. Bounds the retry: see
+    /// `request_thumb`. Not a cache — it holds no pixels, only a count.
+    thumb_fail: std::collections::HashMap<usize, u8>,
     thumb_inflight: usize,                       // live thumbnail-decode threads
     edited_badge: HashMap<usize, bool>,          // cached "● edited" sidecar stat per index
     // Decoded-base LRU (recent last): base pixels + the photo's base-look knots.
@@ -1069,6 +1072,7 @@ impl Default for AutoshopApp {
             selected: None,
             thumbs: HashMap::new(),
             thumb_requested: HashSet::new(),
+            thumb_fail: std::collections::HashMap::new(),
             thumb_inflight: 0,
             edited_badge: HashMap::new(),
             base_cache: Vec::new(),
@@ -3276,6 +3280,17 @@ impl AutoshopApp {
     /// read instead of a full decode.
     fn request_thumb(&mut self, idx: usize) {
         if self.thumbs.contains_key(&idx) || self.thumb_requested.contains(&idx) {
+            return;
+        }
+        // A BOUNDED retry, because both extremes are wrong. Dropping the
+        // marker on failure re-requested every frame — six decode threads per
+        // 100 ms for as long as the row was visible. Keeping it forever
+        // blanked the row for the session, and the LRU that was supposed to
+        // provide the retry only prunes above THUMB_TEX_CAP, so a folder
+        // under that size never retried at all. Three attempts covers the
+        // transient causes (AV lock, a slow share) and stops dead on a file
+        // that simply cannot be decoded.
+        if self.thumb_fail.get(&idx).is_some_and(|n| *n >= 3) {
             return;
         }
         if self.thumb_inflight >= MAX_THUMB_INFLIGHT {
@@ -5522,19 +5537,14 @@ impl AutoshopApp {
                                 self.thumbs.insert(idx, tex);
                             }
                             Err(_) => {
-                                // The marker STAYS. `request_thumb` refuses
-                                // only what is already in `thumbs` or already
-                                // requested, and the visible rows re-request
-                                // unconditionally every frame — so dropping it
-                                // here made a permanently undecodable file
-                                // (0-byte, truncated, unsupported) respawn up
-                                // to six decode OS threads every 100 ms for as
-                                // long as its row stayed on screen.
-                                //
-                                // Scroll-back still retries, which is what L25
-                                // actually asked for: the LRU drops the marker
-                                // together with the texture when the row is
-                                // evicted.
+                                // Count the failure and release the queue slot:
+                                // `request_thumb` allows three attempts, so a
+                                // transient decode failure (AV lock, a slow
+                                // share) still recovers on a later frame while
+                                // an undecodable file stops for good instead of
+                                // respawning decode threads every frame.
+                                *self.thumb_fail.entry(idx).or_insert(0) += 1;
+                                self.thumb_requested.remove(&idx);
                             }
                         }
                     }
