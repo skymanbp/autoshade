@@ -2212,20 +2212,30 @@ impl AutoshopApp {
         // involved. Memo-bounded; era-2 recipes short-circuit; a Generated
         // entry is skipped like every other ordering site (its curve is
         // empty by invariant).
+        // Synchronous first-click cost: the same accepted class as the open
+        // gate — one estimate per photo per process when it succeeds, and a
+        // transient inability early-exits on the failed probe and retries on
+        // the next read.
         if vkind != VariantKind::Generated
             && let Some(p) = self.src_path.clone()
             && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
             // The strip entry follows the healed canvas (the Ctrl+S rule),
-            // and the user is told.
+            // and the user is told BY TOAST: the dominant callers
+            // (switch_variant, push_variant) overwrite self.status in the
+            // same frame, so a status write here died before a single paint
+            // — the exact defect the load_version site documented.
             if let Some(v) = self.variants.get_mut(self.active) {
                 v.recipe = self.recipe.clone();
             }
-            self.status = tr(
-                lang,
-                "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
-            )
-            .into();
+            self.toast(
+                ToastKind::Success,
+                tr(
+                    lang,
+                    "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                )
+                .to_string(),
+            );
         }
         // Base pixels: the variant's own baked raster, else the shared source
         // neutral (Original / Fitted re-develop the same negative).
@@ -2662,6 +2672,32 @@ impl AutoshopApp {
         let pixels_differ = !step.same_pixels(&self.committed);
         self.committed = step.clone();
         self.recipe = step.recipe;
+        // The history is a READER too: a step recorded while the canvas was
+        // washed reinstalls the pre-era pair on undo/redo — and the actor
+        // that later promoted the canvas (Reset, Analyze, load_version,
+        // Ctrl+S) cannot know which stack entries still hold it (the
+        // save-time restamp covers only the pair IT replaced). Repairing on
+        // the way back keeps every door to the canvas behind one rule;
+        // memo-warm, and era-2 installs short-circuit before any I/O.
+        // `committed` follows the heal, or the next commit_now would push
+        // the washed head straight back onto the stack.
+        if let Some(p) = self.src_path.clone()
+            && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
+        {
+            self.committed.recipe = self.recipe.clone();
+            if let Some(v) = self.variants.get_mut(self.active) {
+                v.recipe = self.recipe.clone();
+            }
+            let lang = self.lang;
+            self.toast(
+                ToastKind::Success,
+                tr(
+                    lang,
+                    "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                )
+                .to_string(),
+            );
+        }
         if pixels_differ {
             if let Some(v) = self.variants.get_mut(self.active) {
                 v.base = step.base;
@@ -3036,12 +3072,11 @@ impl AutoshopApp {
                 // already repaired, and it also covers the generated arm
                 // above, whose calibration snapshot may itself have adopted
                 // an unrepaired curve when the store read hit an inability.
-                // SAID on the loop's existing quitting-time channel: this is
-                // the one persisted-artifact change here, and every other
-                // repair site reports.
-                if let Some(note) = autoshop::pipeline::repair_pre_era_base_curve(p, &mut disk) {
-                    eprintln!("⚠ {}: {note}", autoshop::pipeline::stem(p));
-                }
+                // SAID on the loop's existing quitting-time channel — but
+                // only AFTER the write lands (below): a failed write changed
+                // nothing on disk, and claiming a re-estimate for it would
+                // be false.
+                let relook_note = autoshop::pipeline::repair_pre_era_base_curve(p, &mut disk);
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
                 let res = autoshop::pipeline::write_recipe(p, &disk, None).and_then(|_| {
                     // The baked-pixels link saves/clears with the recipe —
@@ -3055,6 +3090,9 @@ impl AutoshopApp {
                 if let Err(e) = res {
                     failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
                     break;
+                }
+                if let Some(note) = relook_note {
+                    eprintln!("⚠ {}: {note}", autoshop::pipeline::stem(p));
                 }
                 // NO XMP for a generated entry — Ctrl+S refuses those for the
                 // same reason: the look lives in baked pixels no parametric
@@ -4669,12 +4707,18 @@ impl AutoshopApp {
             // ...and the SIBLINGS follow too (the stash-retry rule): the
             // estimate is already paid, so healing the rest of the strip is
             // a memo hit apiece — a save must not leave the photo split
-            // into a bright canvas and washed cards (load_active would heal
-            // each on click, but the strip should be whole NOW).
+            // into a bright canvas over washed sibling RECIPES. A healed
+            // sibling also drops its CARD: the thumb is a stale render of
+            // the washed recipe, and keeping it showed a stops-dark
+            // thumbnail beside a bright canvas until the next rebuild.
             let active = self.active;
             for (i, v) in self.variants.iter_mut().enumerate() {
-                if i != active && v.kind != VariantKind::Generated {
-                    let _ = autoshop::pipeline::repair_pre_era_base_curve(&path, &mut v.recipe);
+                if i != active
+                    && v.kind != VariantKind::Generated
+                    && autoshop::pipeline::repair_pre_era_base_curve(&path, &mut v.recipe)
+                        .is_some()
+                {
+                    v.thumb = None;
                 }
             }
             self.dirty = true;
