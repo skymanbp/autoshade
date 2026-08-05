@@ -707,14 +707,16 @@ fn match_cmd(
         }
         let p = write_recipe(raw, &rep.recipe, Some(canonical))?;
         println!("sidecar-> {} (what the GUI/web restore; overwrites any earlier develop)", p.display());
-        // This fit was solved from the ORIGINAL source, so it describes the
-        // RAW — not a previously saved heal/generative master. Leaving that
-        // link in place made every later open apply the new look ON TOP of
-        // pixels it was never fitted to (the GUI reverse-fit clears it for
-        // exactly this reason).
-        if let Err(e) = autoshop::store::clear_pixel_source(raw) {
-            eprintln!("  ⚠ the saved pixel-master link could not be cleared: {e}");
-        }
+    }
+    // OUTSIDE that gate: whether -o happened to name the canonical file is
+    // about not writing it twice, and says nothing about the pixel master.
+    // This fit was solved from the ORIGINAL source, so it describes the RAW —
+    // not a previously saved heal/generative master. Leaving that link in
+    // place makes every later open apply the new look ON TOP of pixels it was
+    // never fitted to (the GUI reverse-fit clears it for exactly this
+    // reason), and an -o naming the canonical recipe used to skip the clear.
+    if let Err(e) = autoshop::store::clear_pixel_source(raw) {
+        eprintln!("  ⚠ the saved pixel-master link could not be cleared: {e}");
     }
     if decode::is_raw(raw) {
         // Warning, not failure: the recipe above already committed.

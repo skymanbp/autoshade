@@ -151,6 +151,19 @@ pub fn produce_recipe(
             }
         }
     } else {
+        // Refine is not a proposal — it is "adjust THIS edit". The heuristic
+        // cannot do that: it never receives `base` and builds a fresh recipe
+        // from the histogram alone, so letting it answer a refine replaces
+        // the user's work with a generic baseline AND saves it (the verifier
+        // accepts a plain baseline happily). The has-key path already refuses
+        // for the same reason; this branch is reachable with no key at all,
+        // and both UIs offer the Refine control without checking for one.
+        if base.is_some() {
+            anyhow::bail!(
+                "Refine needs the image model, and no OPENAI_API_KEY is set — \
+                 your current edit is unchanged"
+            );
+        }
         if verbose {
             println!("proposer : heuristic baseline (set OPENAI_API_KEY to use GPT vision)");
         }

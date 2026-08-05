@@ -72,9 +72,49 @@ pub fn photo_key(src: &Path) -> String {
     let mut stem = crate::pipeline::stem(src).to_string();
     if cfg!(windows) {
         s = s.to_lowercase();
-        stem = stem.to_lowercase();
+        // ASCII-only for the DIRECTORY NAME half. Rust's full Unicode
+        // lowercase and NTFS's $UpCase table disagree — and where they do,
+        // the folded name is a directory that does not exist: measured on
+        // this machine, "İMG_001" folds to "i\u{307}mg_001" (one char becomes
+        // two), "ΣΑΣ" to "σας" (final sigma) and "ẞ" to "ß", and NONE of the
+        // three resolve back to the pre-fold directory. The develop dir would
+        // silently orphan — recipe, XMP, every version snapshot, every mask
+        // raster and the master link — and the next save would create a fresh
+        // empty one beside it. ASCII folding is the subset NTFS always agrees
+        // with, and it is the case the fold was added for.
+        stem = stem.to_ascii_lowercase();
     }
     format!("{}-{:016x}", stem, fnv1a64(s.as_bytes()))
+}
+
+/// Two spellings of the same photo must land in the same develop dir on a
+/// case-insensitive volume — and the folded name must actually RESOLVE to any
+/// directory an earlier build created.
+#[cfg(test)]
+#[test]
+fn the_stem_fold_never_invents_a_name_ntfs_cannot_resolve() {
+    // ASCII case folds (the reason the fold exists).
+    assert_eq!(photo_key(Path::new("D:/p/DSC001.ARW")), photo_key(Path::new("D:/p/dsc001.arw")));
+    // Non-ASCII stems are left ALONE: Rust's full lowercase maps these to
+    // names NTFS does not consider equal to the original, so folding them
+    // would point at a directory that does not exist.
+    for stem in ["\u{130}MG_001", "\u{3a3}\u{391}\u{3a3}", "\u{1e9e}"] {
+        let p = format!("D:/p/{stem}.ARW");
+        let key = photo_key(Path::new(&p));
+        let folded = key.rsplit_once('-').expect("key is <stem>-<hash>").0;
+        // Each fixture is a case where Rust's full lowercase and NTFS's own
+        // folding disagree — that is what makes it a fixture at all.
+        assert_ne!(
+            stem.to_lowercase(),
+            stem.to_ascii_lowercase(),
+            "fixture must be a divergence case"
+        );
+        // The guarantee: no character EXPANDS (Rust maps U+0130 to two chars,
+        // which can never name the same NTFS directory), and only ASCII
+        // letters change — the subset NTFS folds identically.
+        assert_eq!(folded.chars().count(), stem.chars().count(), "no expansion: {folded}");
+        assert_eq!(folded, stem.to_ascii_lowercase(), "only ASCII letters fold: {folded}");
+    }
 }
 
 /// This photo's develop directory (not created here).
