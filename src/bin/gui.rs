@@ -1780,6 +1780,12 @@ fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe
                     // onto the OPEN photo did it immediately: the canvas had
                     // been repaired, this re-read the still-washed file and
                     // overwrote it, and the save baselined that as correct.
+                    // Synchronous on the UI thread, accepted: the memo
+                    // bounds it to one estimate per photo per process, paste
+                    // is an explicit and infrequent action, and the
+                    // mask-list hover's reference develop set the precedent
+                    // for paying a bounded develop where correctness needs
+                    // it.
                     let _ = autoshop::pipeline::repair_pre_era_base_curve(target, &mut saved);
                     r.version = saved.version;
                     r.base_curve = saved.base_curve;
@@ -2391,13 +2397,6 @@ impl AutoshopApp {
                 // persisted the dangling path. The loaded state gets its own
                 // claimed copies.
                 autoshop::store::detach_rasters(&src, &mut r, "mask-restored");
-                // A version snapshot is a saved recipe like any other, and it
-                // predates the era stamp by definition — loading one put an
-                // unrepaired washed curve straight onto the canvas and into
-                // everything exported from it.
-                if let Some(note) = autoshop::pipeline::repair_pre_era_base_curve(&src, &mut r) {
-                    self.status = note;
-                }
                 // A Generated variant's pixels already carry the camera look
                 // AND the lens corrections — a source-based snapshot's
                 // calibration would cook both twice (same strip rule as the
@@ -2411,10 +2410,26 @@ impl AutoshopApp {
                     r.as_shot_k = None;
                     r.as_shot_tint = None;
                 }
+                // A version snapshot is a saved recipe like any other, and
+                // it predates the era stamp by definition — loading one put
+                // an unrepaired washed curve straight onto the canvas and
+                // into everything exported from it. AFTER the generated
+                // strip: a generated canvas keeps no base curve, so there is
+                // nothing to repair (paying the estimate just to discard it,
+                // and disclosing a re-estimate the strip then deleted, were
+                // both wrong). The note rides the SAME status write as the
+                // load announcement — a separate earlier write was replaced
+                // one statement later, so the promised disclosure never
+                // survived to a single rendered frame.
+                let relook = autoshop::pipeline::repair_pre_era_base_curve(&src, &mut r);
                 self.recipe = r;
                 self.resync_recipe_display();
                 self.dirty = true;
-                self.status = trf(lang, "Loaded version v{n} — Ctrl+Z returns to before the load", &[("n", &n.to_string())]);
+                let loaded = trf(lang, "Loaded version v{n} — Ctrl+Z returns to before the load", &[("n", &n.to_string())]);
+                self.status = match relook {
+                    Some(note) => format!("{loaded} — {note}"),
+                    None => loaded,
+                };
             }
             Err(e) => {
                 let t = trf(
@@ -2941,14 +2956,18 @@ impl AutoshopApp {
                 // saved-first source produce_recipe uses.
                 let mut disk = r.clone();
                 if pix.as_ref().is_some_and(|(_, g)| *g) {
-                    // ONE snapshot for all three halves — independent reads
-                    // could pair an OLD curve with a NEW profile if another
-                    // surface published between them.
-                    let (bc, lp, (ask, ast)) = autoshop::pipeline::photo_calibration(p);
-                    disk.base_curve = bc;
-                    disk.lens_profile = lp;
-                    disk.as_shot_k = ask;
-                    disk.as_shot_tint = ast;
+                    // ONE snapshot for every half — independent reads could
+                    // pair an OLD curve with a NEW profile if another surface
+                    // published between them. The era stamp rides WITH the
+                    // curve (the paste rule): this WRITES recipe.json, and a
+                    // canvas-era stamp over a saved era-1 curve would launder
+                    // it past every repair.
+                    let cal = autoshop::pipeline::photo_calibration(p);
+                    disk.version = cal.version;
+                    disk.base_curve = cal.base_curve;
+                    disk.lens_profile = cal.lens_profile;
+                    disk.as_shot_k = cal.as_shot_k;
+                    disk.as_shot_tint = cal.as_shot_tint;
                 }
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
                 let res = autoshop::pipeline::write_recipe(p, &disk, None).and_then(|_| {
@@ -4258,6 +4277,9 @@ impl AutoshopApp {
                     // replaces in place) — the dedup is batch-level by
                     // decision.
                     let mut names = autoshop::pipeline::BatchNames::default();
+                    // Disclosure counter, like `names.renamed`: this worker
+                    // was the one reader that repaired with nobody watching.
+                    let mut relooked = 0usize;
                     for p in &targets {
                         let one = (|| -> anyhow::Result<()> {
                             let over = overrides.get(p);
@@ -4288,9 +4310,17 @@ impl AutoshopApp {
                                         // still exported several stops dark
                                         // while the same photo exported from
                                         // its open canvas came out right.
-                                        let _ = autoshop::pipeline::repair_pre_era_base_curve(
+                                        // SAID, not just done: the count
+                                        // rides the completion summary
+                                        // (per-photo notes would flood a
+                                        // large batch).
+                                        if autoshop::pipeline::repair_pre_era_base_curve(
                                             p, &mut r,
-                                        );
+                                        )
+                                        .is_some()
+                                        {
+                                            relooked += 1;
+                                        }
                                         found = Some(r);
                                         break;
                                     }
@@ -4370,14 +4400,23 @@ impl AutoshopApp {
                             &[("list", &names.renamed.join(", "))],
                         )
                     };
+                    let relook = if relooked == 0 {
+                        String::new()
+                    } else {
+                        trf(
+                            lang,
+                            " · {n} base look(s) re-estimated (a pre-era save rendered too dark)",
+                            &[("n", &relooked.to_string())],
+                        )
+                    };
                     if errs.is_empty() {
                         Ok(format!(
-                            "{}{renames}",
+                            "{}{renames}{relook}",
                             trf(lang, "./out — batch {n} done", &[("n", &okn.to_string())])
                         ))
                     } else {
                         anyhow::bail!(
-                            "{}{renames}",
+                            "{}{renames}{relook}",
                             trf(
                                 lang,
                                 "Batch: {ok} succeeded, {fail} failed: {detail}",

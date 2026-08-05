@@ -1765,7 +1765,13 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // the browser baselined the canvas as saved and the retouch died silently
     // on the next thumbnail click. The GUI has carried exactly this guard since
     // it hit the same defect (its `active_variant().origin` clause).
-    if req.recipe.is_noop() && master.is_none() {
+    // AND the PERSISTED master: `session_master` resolves only THIS browser
+    // session's heal chain, so a GUI-saved pixels.json was invisible here and
+    // a neutral web Save deleted the saved retouch through clear_develop.
+    // `has_pixel_source`, not `read_pixel_source` — a recorded master that
+    // fails to LOAD right now must block the delete too (the GUI protects
+    // exactly those with the same primitive).
+    if req.recipe.is_noop() && master.is_none() && !crate::store::has_pixel_source(&raw) {
         // ONE primitive for every surface (`store::clear_develop`). This branch
         // and the GUI's Ctrl+S each kept their own copy of the file list and
         // drifted twice: the marker landed only in the GUI, and BOTH unlinked

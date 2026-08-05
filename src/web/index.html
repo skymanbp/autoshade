@@ -339,7 +339,13 @@ const newGrade = () => ({
   blending:50, balance:0
 });
 const DEFAULT_RECIPE = {
-  version:1, exposure_ev:0, contrast:0, highlights:0, shadows:0, whites:0, blacks:0,
+  // No `version` here: the era stamp is PROVENANCE and the server authors it.
+  // A loaded recipe's own stamp rides the Object.assign merges; a recipe
+  // posted without one deserialises to the server's CURRENT era, which is
+  // exactly true of the fresh calibration stamped over this template.
+  // Hardcoding 1 wrote false "pre-era" claims over curves the FIXED
+  // estimator produced.
+  exposure_ev:0, contrast:0, highlights:0, shadows:0, whites:0, blacks:0,
   temperature_k:null, tint:0, as_shot_k:null, as_shot_tint:null,
   vibrance:0, saturation:0, clarity:0, dehaze:0,
   hsl:newHsl(), color_grade:newGrade(),

@@ -493,6 +493,10 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     // Untrusted input, like any other recipe source: an enormous finite
     // exposure (hand-edited JSON) otherwise reaches powf unbounded.
     recipe.clamp();
+    // The guard FIRST: a refused -o must not pay a RAW decode for the repair
+    // below, nor print a disclosure for a render that never runs.
+    pipeline::guard_readonly(out, raw)?;
+    ensure_parent(out)?;
     // `apply` is the remedy the batch summary names, and it reads the recipe
     // straight off disk like every other deliverable path — so without this it
     // rendered the washed pre-era curve while the GUI canvas of the same build
@@ -500,11 +504,19 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     if let Some(note) = pipeline::repair_pre_era_base_curve(raw, &mut recipe) {
         println!("note: {note}");
     }
-    let recipe = recipe;
-    pipeline::guard_readonly(out, raw)?;
-    ensure_parent(out)?;
+    // Render from the SAME source every other deliverable uses (auto_cmd,
+    // serve, the GUI batch): a saved heal/clone or generative master IS this
+    // develop's source, and a recorded master that cannot be honoured refuses
+    // with the remedy — `apply` was the one surface that rendered the
+    // untouched RAW, silently dropping every baked pixel edit while
+    // reporting success.
+    let src = autoshop::store::render_source_checked(raw, &mut recipe)
+        .map_err(|m| anyhow::anyhow!(m))?;
+    if src != raw {
+        println!("  (rendering the saved pixel master {})", src.display());
+    }
     println!("rendering {} with {} ...", raw.display(), recipe_path.display());
-    let (w, h) = render::render_to_file(raw, &recipe, out, None, None)?;
+    let (w, h) = render::render_to_file(&src, &recipe, out, None, None)?;
     println!("render -> {} ({} x {})", out.display(), w, h);
     Ok(())
 }
@@ -670,11 +682,15 @@ fn match_cmd(
     // base and the render disagreed with the fit's own numbers. The lens
     // profile and the as-shot WB anchor ride the same snapshot (the fitted
     // recipe was built from EditRecipe::default and silently dropped both).
-    let (bc, lp, (ask, ast)) = pipeline::photo_calibration(raw);
-    rep.recipe.base_curve = bc;
-    rep.recipe.lens_profile = lp;
-    rep.recipe.as_shot_k = ask;
-    rep.recipe.as_shot_tint = ast;
+    let cal = pipeline::photo_calibration(raw);
+    // The era stamp rides WITH the curve (the paste rule): the fitted recipe
+    // is era-2 by Default, and stamping a saved era-1 curve under it
+    // laundered the provenance the pre-era repair keys on.
+    rep.recipe.version = cal.version;
+    rep.recipe.base_curve = cal.base_curve;
+    rep.recipe.lens_profile = cal.lens_profile;
+    rep.recipe.as_shot_k = cal.as_shot_k;
+    rep.recipe.as_shot_tint = cal.as_shot_tint;
     println!(
         "  look error {:.3} → {:.3}  (0 = identical distributions; masks/local edits are not recoverable)",
         rep.err_before, rep.err_after
@@ -901,10 +917,19 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     // a non-Accept photo really did leave no sidecar.
     let still_pending =
         pending.iter().filter(|p| !autoshop::store::has_develop(p.as_path())).count();
+    // The remedy note keys on the photos that NEED it, counted directly: a
+    // FAILED photo whose develop persisted is exactly what `apply` finishes.
+    // The old proxy (`still_pending < fail`) compared the library-wide
+    // pending count against this run's failures, so any non-Accept photo
+    // left pending — the default outcome of a cautious verdict — masked the
+    // note for the failure sitting right next to it.
+    let failed_developed = (0..results.len())
+        .filter(|&i| results[i] == Some(Outcome::Failed) && autoshop::store::has_develop(work[i]))
+        .count();
     println!(
         "\nbatch done: {ok} saved, {skipped} not saved (non-Accept), {fail} failed, {still_pending} still pending.",
     );
-    if fail > 0 && still_pending < fail {
+    if failed_developed > 0 {
         println!(
             "  note: a photo whose RENDER failed keeps the develop it already paid for, so it is \
              no longer pending — re-run `autoshop apply` for its deliverable."

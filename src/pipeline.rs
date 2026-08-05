@@ -281,6 +281,13 @@ pub fn produce_recipe(
     // beside a lens profile from the fresh fallback.
     match saved_recipe_snapshot(raw) {
         Some(saved) => {
+            // The era stamp travels WITH the curve (the paste rule): the
+            // proposer's recipe is era-2 by Default — or whatever integer the
+            // model chose to emit, since the strict schema forces the field —
+            // and stamping a saved era-1 curve under either laundered it past
+            // every repair permanently, from the very writer (Analyze) that
+            // produces the canonical recipe.json.
+            recipe.version = saved.version;
             recipe.base_curve = saved.base_curve;
             recipe.lens_profile = saved.lens_profile;
             // The as-shot WB anchor is the third calibration half — same
@@ -290,6 +297,10 @@ pub fn produce_recipe(
             recipe.as_shot_tint = saved.as_shot_tint;
         }
         None => {
+            // A fresh estimate by THIS build's sampler — and the stamp is
+            // authored here, never by the model: version is provenance, and
+            // the response schema makes the model emit SOMETHING for it.
+            recipe.version = crate::recipe::CALIB_ERA;
             recipe.base_curve = photo_base_knots(raw);
             recipe.lens_profile = fresh_lens_profile(raw);
             let (ask, ast) = fresh_as_shot_wb(raw);
@@ -398,18 +409,30 @@ pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
     // repair for the whole photo. The toe is where the bias is unmistakable —
     // it darkens hugely there — so a small margin on the maximum keeps the
     // shallow cases a 0.15 margin used to lose, without demanding anything of
-    // the saturated end.
+    // the saturated end. What the margin lets escape is bounded by itself: a
+    // curve that darkens NOWHERE by more than 0.05 can also mis-render by no
+    // more than that, and only a clipped-bright frame (all knots pinned near
+    // [1,1]) produces one — while dropping the margin would re-estimate
+    // legitimate pre-cap near-flat curves over quantile noise, the exact harm
+    // the SCENE/bias split above exists to avoid.
     interior.iter().all(|k| k[1] <= k[0]) && interior.iter().any(|k| k[1] < k[0] - 0.05)
 }
 
-/// Estimates already computed this run, keyed by photo — including the EMPTY
-/// answer, which means "no estimate available, leave the saved curve alone".
+/// Successful estimates already computed this run, keyed by photo identity —
+/// including the EMPTY answer, which is the estimator's identity verdict
+/// ("this photo needs no base look"), but never an inability: those must
+/// retry once the file is readable again.
 ///
 /// The repair is asked on every open AND, since the render funnel carries it,
 /// on every render of an affected photo. Each estimate costs a RAW decode plus
-/// a working-resolution develop, and the result cannot change while the
+/// a working-resolution develop, and the answer cannot change while the
 /// process runs, so paying it once per photo is the difference between a
 /// correction and a stall on the UI thread.
+///
+/// Identity = size + mtime (the thumbnail cache's convention): an in-place
+/// replacement is caught whenever it changes either; an equal-size,
+/// timestamp-preserving swap is NOT, and content-hashing a 50-120 MB RAW per
+/// check would cost the very read this memo exists to avoid.
 type CurveMemoKey = (PathBuf, (u64, Option<std::time::SystemTime>));
 
 fn fresh_curve_memo()
@@ -434,12 +457,6 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
     if !base_curve_looks_pre_era(r.version, &r.base_curve) {
         return None;
     }
-    // Keyed by path AND the file's own identity, so replacing the RAW in
-    // place cannot serve the previous file's camera curve. A FAILED estimate
-    // is never cached: it means the decode, the embedded preview or the
-    // neutral develop did not work THIS time (a locked file, a disconnected
-    // share), and caching it would leave the photo unrepaired for the rest of
-    // the process even after it became readable.
     let ident = std::fs::metadata(raw)
         .ok()
         .map(|m| (m.len(), m.modified().ok()))
@@ -448,24 +465,31 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
     let memo = fresh_curve_memo();
     let cached = memo.lock().ok().and_then(|m| m.get(&key).cloned());
     let fresh = match cached {
-        Some(c) => c,
+        Some(c) => Some(c),
         None => {
-            let c = photo_base_knots(raw);
-            if !c.is_empty()
+            let c = photo_base_knots_checked(raw);
+            // ANSWERS are cached — the empty identity verdict included. An
+            // inability (`None`) is not: it means the decode, the preview or
+            // the neutral develop did not work THIS time (a locked file, a
+            // disconnected share), and caching it would leave the photo
+            // unrepaired for the rest of the process even after it became
+            // readable.
+            if let Some(knots) = &c
                 && let Ok(mut m) = memo.lock()
             {
-                m.insert(key, c.clone());
+                m.insert(key, knots.clone());
             }
             c
         }
     };
-    if fresh.is_empty() {
-        // No estimate to swap in (no embedded preview, or the neutral develop
-        // failed). Leave the saved curve alone rather than flatten the photo,
-        // and stay silent — photo_base_knots already logged the cause.
-        return None;
-    }
-    r.base_curve = fresh;
+    // Tri-state, and the difference is the whole repair: an ANSWER replaces
+    // the washed curve — the EMPTY answer too, which says "this photo needs
+    // no base look" (treating it as a failure left the washed curve rendering
+    // stops-dark forever, and re-paid the full decode + develop on every
+    // reader, because inabilities are uncached). An INABILITY leaves the
+    // curve AND the era-1 stamp alone, so the next reader retries.
+    let knots = fresh?;
+    r.base_curve = knots;
     r.version = crate::recipe::CALIB_ERA;
     Some(
         "this photo's camera base look was re-estimated: it was saved by a version whose \
@@ -493,43 +517,45 @@ fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
     None
 }
 
-/// The base_curve a programmatic writer must carry for `raw`: an existing
-/// saved recipe.json owns it verbatim — including the legacy EMPTY curve,
-/// which must keep rendering exactly as it was tuned — otherwise the photo's
-/// fresh camera-matched estimate ([`photo_base_knots`]).
-pub fn photo_base_curve(raw: &Path) -> Vec<[f32; 2]> {
-    match saved_recipe_snapshot(raw) {
-        Some(r) => r.base_curve,
-        None => photo_base_knots(raw),
-    }
+/// The per-photo calibration a programmatic writer stamps — every field from
+/// ONE saved-recipe snapshot. The era stamp is a FIELD of it: it describes
+/// the curve's provenance, so a writer that stamps the curve without its
+/// version launders a saved era-1 curve under its own era-2 recipe (the
+/// defect the paste path shipped, then fixed). The two split accessors this
+/// replaces (`photo_base_curve`, `photo_lens_profile`) had no remaining
+/// callers and re-created both hazards for the next one.
+pub struct PhotoCalibration {
+    pub version: u32,
+    pub base_curve: Vec<[f32; 2]>,
+    pub lens_profile: crate::recipe::LensProfile,
+    pub as_shot_k: Option<f32>,
+    pub as_shot_tint: Option<f32>,
 }
 
-/// The three per-photo calibration halves a programmatic writer stamps:
-/// base curve, lens profile, and the as-shot WB anchor pair
-/// (`as_shot_k`, `as_shot_tint`).
-pub type PhotoCalibration =
-    (Vec<[f32; 2]>, crate::recipe::LensProfile, (Option<f32>, Option<f32>));
-
-/// ALL THREE calibration halves from ONE saved-recipe snapshot: independent
-/// [`photo_base_curve`] + [`photo_lens_profile`] reads could pair an OLD
-/// curve with a NEW profile when a concurrent publish lands between them
-/// (the same single-snapshot rule `produce_recipe` follows).
+/// ALL calibration halves from ONE saved-recipe snapshot: independent reads
+/// could pair an OLD curve with a NEW profile when a concurrent publish lands
+/// between them (the same single-snapshot rule `produce_recipe` follows).
+/// The fresh arm is era-stamped by construction — those estimates come from
+/// THIS build's sampler.
 pub fn photo_calibration(raw: &Path) -> PhotoCalibration {
     match saved_recipe_snapshot(raw) {
-        Some(r) => (r.base_curve, r.lens_profile, (r.as_shot_k, r.as_shot_tint)),
-        None => (photo_base_knots(raw), fresh_lens_profile(raw), fresh_as_shot_wb(raw)),
-    }
-}
-
-/// The lens profile a programmatic writer must carry for `raw` — the same
-/// saved-first rule as [`photo_base_curve`]: an existing recipe.json owns its
-/// profile verbatim (including the legacy default-off, and any user toggle),
-/// otherwise the photo's own in-camera metadata with every available
-/// component enabled ([`fresh_lens_profile`]).
-pub fn photo_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
-    match saved_recipe_snapshot(raw) {
-        Some(r) => r.lens_profile,
-        None => fresh_lens_profile(raw),
+        Some(r) => PhotoCalibration {
+            version: r.version,
+            base_curve: r.base_curve,
+            lens_profile: r.lens_profile,
+            as_shot_k: r.as_shot_k,
+            as_shot_tint: r.as_shot_tint,
+        },
+        None => {
+            let (as_shot_k, as_shot_tint) = fresh_as_shot_wb(raw);
+            PhotoCalibration {
+                version: crate::recipe::CALIB_ERA,
+                base_curve: photo_base_knots(raw),
+                lens_profile: fresh_lens_profile(raw),
+                as_shot_k,
+                as_shot_tint,
+            }
+        }
     }
 }
 
@@ -561,17 +587,29 @@ pub fn fresh_as_shot_wb(raw: &Path) -> (Option<f32>, Option<f32>) {
 /// (the GUI open worker) call the estimator directly instead. Best-effort by
 /// design: the base look is an enhancement, so a develop/decode failure here
 /// yields "no base look" rather than failing the caller's real operation
-/// (whose own render will surface the same error loudly).
+/// (whose own render will surface the same error loudly). Callers that must
+/// tell that failure apart from the estimator's own empty answer use
+/// [`photo_base_knots_checked`].
 pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
+    photo_base_knots_checked(raw).unwrap_or_default()
+}
+
+/// The tri-state form the pre-era repair needs: `None` = no estimate could be
+/// PRODUCED this time (not a RAW, unreadable or absent embedded preview,
+/// failed neutral develop); `Some(knots)` is the estimator's ANSWER —
+/// possibly EMPTY, `camera_base_knots`' documented identity verdict ("this
+/// photo needs no base look"). An answer may replace a saved curve; an
+/// inability must leave it alone.
+pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
     if !decode::is_raw(raw) {
-        return Vec::new();
+        return None;
     }
     let camera = match decode::embedded_preview(raw) {
         Ok(Some(c)) => c,
-        Ok(None) => return Vec::new(),
+        Ok(None) => return None,
         Err(e) => {
             eprintln!("⚠ base look skipped: embedded preview of {} failed ({e})", raw.display());
-            return Vec::new();
+            return None;
         }
     };
     // The estimate is CDF statistics — a ≤2048 working develop carries the
@@ -581,14 +619,14 @@ pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
             // Estimate on the profile-vignette-corrected neutral — the same
             // base a stamped canvas starts from (see render::estimation_base).
             let est = crate::render::estimation_base(&neutral, &fresh_lens_profile(raw));
-            crate::render::camera_base_knots(&est, &camera)
+            Some(crate::render::camera_base_knots(&est, &camera))
         }
         Err(e) => {
             // Disclosed, not silent: the caller's own render will surface the
             // same failure loudly, but the resulting darker-than-canvas output
             // needs a traceable cause in the log.
             eprintln!("⚠ base look skipped: neutral develop of {} failed ({e})", raw.display());
-            Vec::new()
+            None
         }
     }
 }
@@ -1313,6 +1351,46 @@ mod tests {
         // Nothing to judge: no curve, or endpoints only.
         assert!(!base_curve_looks_pre_era(1, &[]));
         assert!(!base_curve_looks_pre_era(1, &[[0.0, 0.0], [1.0, 1.0]]));
+    }
+
+    #[test]
+    fn repair_adopts_a_cached_identity_answer_and_stamps_the_era() {
+        use crate::recipe::CALIB_ERA;
+        // Success-EMPTY is an ANSWER, not a failure: seed the process memo
+        // exactly as a successful identity estimate would have (the fixture
+        // path does not exist, so its identity is the deterministic
+        // (0, None) metadata fallback), and the repair must CLEAR the washed
+        // curve, stamp the era, and disclose. Before the tri-state split it
+        // returned None here — the washed curve kept rendering stops-dark
+        // forever, and every reader re-paid the full decode + develop.
+        let raw = std::path::PathBuf::from("memo-seeded-identity-fixture.arw");
+        let key: CurveMemoKey = (raw.clone(), (0, None));
+        fresh_curve_memo().lock().unwrap().insert(key, Vec::new());
+        let mut r = EditRecipe {
+            version: 1,
+            base_curve: vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0]],
+            ..Default::default()
+        };
+        let note = repair_pre_era_base_curve(&raw, &mut r);
+        assert!(note.is_some(), "an identity answer must repair, and say so");
+        assert!(r.base_curve.is_empty(), "the answer replaces the washed curve");
+        assert_eq!(r.version, CALIB_ERA, "and the era stamp travels with it");
+    }
+
+    #[test]
+    fn repair_leaves_curve_and_stamp_alone_when_no_estimate_can_be_produced() {
+        // An unreadable RAW yields NO answer (tri-state None): the washed
+        // curve AND the era-1 stamp must both survive untouched, so the next
+        // reader retries instead of trusting a laundered stamp — the exact
+        // launder the analyze funnel shipped by stamping a curve without its
+        // version.
+        let raw = std::path::PathBuf::from("no-such-file-ever.arw");
+        let washed = vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0]];
+        let mut r =
+            EditRecipe { version: 1, base_curve: washed.clone(), ..Default::default() };
+        assert!(repair_pre_era_base_curve(&raw, &mut r).is_none());
+        assert_eq!(r.base_curve, washed, "an inability must not touch the curve");
+        assert_eq!(r.version, 1, "nor launder the stamp");
     }
 
     #[test]

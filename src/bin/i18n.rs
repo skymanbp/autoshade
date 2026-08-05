@@ -478,6 +478,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("./out — batch {n} done", "./out — 批量 {n} 张完成"),
     ("Batch: {ok} succeeded, {fail} failed: {detail}", "批量：{ok} 成功、{fail} 失败：{detail}"),
     (" · same-name photos kept apart: {list}", " · 同名照片已避让：{list}"),
+    (" · {n} base look(s) re-estimated (a pre-era save rendered too dark)", " · {n} 张的相机基调已重估（旧版保存的基调渲染过暗）"),
     ("Batch-rendering {done}/{total} → ./out …", "批量渲染 {done}/{total} → ./out …"),
     ("Pasting recipe to {n} photos…", "粘贴配方到 {n} 张…"),
     ("Recipe pasted to {ok} photos ({xmp} XMP) → develop store", "配方已粘贴到 {ok} 张（{xmp} 个 XMP）→ 显影库"),
