@@ -387,7 +387,13 @@ pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
     // throughout. The bias shifts only the INPUT side up by 0.5 while the
     // camera side keeps its true, low values — so a washed curve comes out
     // strongly DARKENING, which no real camera base look is.
-    interior.iter().any(|k| k[1] < k[0] - 0.15)
+    // EVERY interior knot, and no arbitrary margin. The bias raises the input
+    // side by a constant while the camera side keeps its true values, so a
+    // washed curve darkens throughout — including the shallow cases a 0.15
+    // margin let escape (an embedded rendition that is itself dark, or
+    // quantile merging compressing the separation). A real camera base look
+    // lifts throughout, so requiring ALL is both sharper and threshold-free.
+    interior.iter().all(|k| k[1] < k[0])
 }
 
 /// Re-estimate a base curve that was fitted against a washed frame, and say
@@ -408,10 +414,12 @@ pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
 /// a working-resolution develop, and the result cannot change while the
 /// process runs, so paying it once per photo is the difference between a
 /// correction and a stall on the UI thread.
-fn fresh_curve_memo() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<[f32; 2]>>>
-{
+type CurveMemoKey = (PathBuf, (u64, Option<std::time::SystemTime>));
+
+fn fresh_curve_memo()
+-> &'static std::sync::Mutex<std::collections::HashMap<CurveMemoKey, Vec<[f32; 2]>>> {
     static MEMO: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<[f32; 2]>>>,
+        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, Vec<[f32; 2]>>>,
     > = std::sync::OnceLock::new();
     MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
@@ -420,14 +428,27 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
     if !base_curve_looks_pre_era(r.version, &r.base_curve) {
         return None;
     }
+    // Keyed by path AND the file's own identity, so replacing the RAW in
+    // place cannot serve the previous file's camera curve. A FAILED estimate
+    // is never cached: it means the decode, the embedded preview or the
+    // neutral develop did not work THIS time (a locked file, a disconnected
+    // share), and caching it would leave the photo unrepaired for the rest of
+    // the process even after it became readable.
+    let ident = std::fs::metadata(raw)
+        .ok()
+        .map(|m| (m.len(), m.modified().ok()))
+        .unwrap_or((0, None));
+    let key = (raw.to_path_buf(), ident);
     let memo = fresh_curve_memo();
-    let cached = memo.lock().ok().and_then(|m| m.get(raw).cloned());
+    let cached = memo.lock().ok().and_then(|m| m.get(&key).cloned());
     let fresh = match cached {
         Some(c) => c,
         None => {
             let c = photo_base_knots(raw);
-            if let Ok(mut m) = memo.lock() {
-                m.insert(raw.to_path_buf(), c.clone());
+            if !c.is_empty()
+                && let Ok(mut m) = memo.lock()
+            {
+                m.insert(key, c.clone());
             }
             c
         }

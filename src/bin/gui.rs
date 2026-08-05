@@ -4259,6 +4259,18 @@ impl AutoshopApp {
                                         if let Some(base) = rj.parent() {
                                             autoshop::store::resolve_mask_paths(&mut r, base);
                                         }
+                                        // Batch export renders through
+                                        // render_to_file, which does NOT go
+                                        // through store::render_source_checked
+                                        // — so the repair batch 60 put there
+                                        // never reached this path, and a
+                                        // multi-selection of era-1 photos
+                                        // still exported several stops dark
+                                        // while the same photo exported from
+                                        // its open canvas came out right.
+                                        let _ = autoshop::pipeline::repair_pre_era_base_curve(
+                                            p, &mut r,
+                                        );
                                         found = Some(r);
                                         break;
                                     }
@@ -5503,6 +5515,11 @@ impl AutoshopApp {
                         self.gallery_gen += 1; // invalidate any in-flight old thumbs
                         self.thumbs.clear();
                         self.thumb_requested.clear();
+                        // Keyed by gallery INDEX, so it is meaningless across
+                        // folders: without this, index 0 failing three times
+                        // here silently denied index 0 a thumbnail in every
+                        // folder opened afterwards.
+                        self.thumb_fail.clear();
                         self.thumb_inflight = 0;
                         self.edited_badge.clear(); // badge stats belong to the old folder
                         self.selected = None;

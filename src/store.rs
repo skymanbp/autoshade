@@ -723,6 +723,12 @@ pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
     // copy and left the other — which the very next read then restored, so
     // "cleared" did not stay cleared. Duplicates are harmless: a missing file
     // is already the desired end state.
+    //
+    // Legacy names are STEM-ONLY, so two photos of the same stem in different
+    // folders share them — clearing one clears both. That ambiguity is the
+    // legacy layout's own, and it is exactly why the central store keys by
+    // path; leaving a root unswept does not avoid it, it only makes the clear
+    // fail while the same shared file resurrects the edits on the next read.
     let stem = crate::pipeline::stem(src);
     let legacy: Vec<PathBuf> = legacy_out_roots()
         .into_iter()
