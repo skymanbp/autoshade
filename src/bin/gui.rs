@@ -2293,10 +2293,43 @@ impl AutoshopApp {
     /// stash restore (which reinstalls the raster the photo was left with
     /// while this open decoded the source at the current preference).
     fn baked_canvas_edge(&self) -> Option<u32> {
+        // The ruler is what the preference DELIVERS for this photo — the
+        // source decoded at it — not the preference itself. A sensor smaller
+        // than the preference decodes un-upscaled, so a heal on such a photo
+        // bakes at the sensor's edge and is perfectly current; measured
+        // against the raw preference, that fresh bake was announced as a
+        // stale one on every door.
+        let reachable = self
+            .source_preview
+            .as_ref()
+            .map(|s| s.width().max(s.height()))
+            .unwrap_or(self.preview_edge)
+            .clamp(640, 8192);
         let canvas = self.canvas_edge();
-        (canvas != self.preview_edge
-            && self.active_variant().is_some_and(|v| v.base.is_some()))
-        .then_some(canvas)
+        (canvas != reachable && self.active_variant().is_some_and(|v| v.base.is_some()))
+            .then_some(canvas)
+    }
+
+    /// Write the status for a door that just installed a canvas, in BOTH
+    /// directions: the disclosure when this canvas disagrees with what the
+    /// preference can deliver, and `plain` when it does not.
+    ///
+    /// The `plain` arm is not decoration. Announcing the disagreement without
+    /// retracting it left the previous door's "stays at 1280px — edits and
+    /// retouches follow that" standing after a redo had put the canvas back
+    /// where the preference could reach: both halves false, on the status
+    /// bar, which never expires. A door that can create the disagreement can
+    /// also end it, so every door writes on every path.
+    fn set_canvas_status(&mut self, plain: &'static str) {
+        let lang = self.lang;
+        self.status = match self.baked_canvas_edge() {
+            Some(px) => trf(
+                lang,
+                "the canvas pixels stay at {px}px (their own bake) — edits and retouches follow that, not the preview preference",
+                &[("px", &px.to_string())],
+            ),
+            None => tr(lang, plain).to_string(),
+        };
     }
 
     /// The reverse-fit / style-prompt target: the ./out PNG behind the active
@@ -2468,6 +2501,8 @@ impl AutoshopApp {
         // legitimately disagree from here on. Said at the moment the
         // disagreement is created — the combo alone would imply the canvas
         // followed it.
+        // (Both arms, like every canvas door — see `set_canvas_status`; this
+        // one names the variant, so it writes its own pair.)
         self.status = match self.baked_canvas_edge() {
             None => trf(
                 lang,
@@ -2518,6 +2553,11 @@ impl AutoshopApp {
         }
         if active_removed {
             self.load_active(ctx); // the active variant changed identity
+            // …onto a canvas the user did not choose: deleting the active
+            // variant can land on a background BAKED one, whose raster the
+            // preference cannot re-decode. Silent before — and it carried the
+            // deleted canvas's own disclosure forward as if it still applied.
+            self.set_canvas_status("variant removed");
         }
     }
 
@@ -2903,19 +2943,13 @@ impl AutoshopApp {
                 v.origin = step.origin;
             }
             self.refresh_active_pixels(ctx);
-            // The second door onto the same disagreement, and the quietest:
-            // undoing to a SUPERSEDED master installs a raster the preference
-            // cannot re-decode (the resolution switch repoints only the Arc
-            // the canvas held), and undo/redo write no status at all — so the
-            // combo was left to imply the canvas had followed it.
-            if let Some(px) = self.baked_canvas_edge() {
-                let lang = self.lang;
-                self.status = trf(
-                    lang,
-                    "restored pixels stay at {px}px (their own bake) — edits and retouches follow that, not the preview preference",
-                    &[("px", &px.to_string())],
-                );
-            }
+            // The quietest door: undoing to a SUPERSEDED master installs a
+            // raster the preference cannot re-decode (the resolution switch
+            // repoints only the Arc the canvas held), and undo/redo wrote no
+            // status at all — so the combo was left to imply the canvas had
+            // followed it. BOTH directions: the redo back to a reachable
+            // canvas has to retract the claim, or it stands there false.
+            self.set_canvas_status("restored the canvas pixels");
         }
         self.dirty = true;
         self.resync_recipe_display();
@@ -5350,9 +5384,13 @@ impl AutoshopApp {
                                 // retouch used to be told its situation was
                                 // unfixable and denied the one cure that
                                 // works. Three causes, three answers:
-                                //  · a GENERATED canvas cannot be recorded at
-                                //    all — Ctrl+S refuses it outright — so
-                                //    saving is not a remedy to offer;
+                                //  · a GENERATED canvas has no save a user can
+                                //    be sent to press: Ctrl+S refuses it
+                                //    outright (the Analyze auto-save and
+                                //    Save-all DO record generated masters, so
+                                //    "cannot be recorded" would be false), and
+                                //    the message names the route that always
+                                //    works instead;
                                 //  · a master no longer ON DISK cannot be
                                 //    re-decoded however often it is recorded
                                 //    (saving would re-record the same broken
@@ -12073,6 +12111,10 @@ mod tests {
         let xp = autoshop::pipeline::xmp_target(src);
         let legacy_rj = autoshop::store::legacy_recipe(src);
         let _ = std::fs::remove_file(&legacy_rj);
+        // Scrub on DROP: a failing assert is exactly the regression case, and
+        // the tail cleanup never runs then — leaving fixtures in the real
+        // central store, in ./out and beside the fake library path.
+        let _scrub = Scrub(vec![dev.clone(), xp.clone(), legacy_rj.clone()]);
 
         assert!(
             matches!(read_saved_develop(src).0, SavedDevelop::Nothing),
@@ -12131,6 +12173,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev2);
         let legacy_rj2 =
             PathBuf::from("out").join("_sidecar_prio_test_legacy.recipe.json");
+        let _scrub2 = Scrub(vec![dev2.clone(), legacy_rj2.clone()]);
         let legacy = EditRecipe { contrast: -11.0, ..Default::default() };
         std::fs::write(&legacy_rj2, serde_json::to_string(&legacy).unwrap()).unwrap();
         let SavedDevelop::Restored(r, kind) = read_saved_develop(src2).0 else {
@@ -12142,9 +12185,6 @@ mod tests {
             autoshop::store::recipe_target(src2).exists(),
             "…and now lives in the central store"
         );
-
-        let _ = std::fs::remove_dir_all(&dev);
-        let _ = std::fs::remove_dir_all(&dev2);
     }
 
     #[test]
@@ -12157,6 +12197,7 @@ mod tests {
         let dev = autoshop::store::develop_dir(&src);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dir.clone(), dev.clone()]); // …even if an assert fires
         // The stored develop (older).
         let saved = EditRecipe { exposure_ev: 0.5, ..Default::default() };
         std::fs::write(
@@ -12190,8 +12231,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(kept.exposure_ev, 0.5);
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]
@@ -12677,6 +12716,24 @@ mod tests {
             "a baked canvas says which resolution it kept: {}",
             app.status
         );
+        // (3) a baked canvas at the resolution the preference DELIVERS for
+        // this photo — a sub-preference sensor, freshly healed. Measured
+        // against the raw preference this fresh bake was called a stale one.
+        let mut app = AutoshopApp {
+            preview_edge: 1280,
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
+            variants: vec![
+                src(None),
+                src(Some(Arc::new(image::DynamicImage::new_rgb8(800, 600)))),
+            ],
+            ..Default::default()
+        };
+        app.switch_variant(1, &ctx);
+        assert!(
+            !app.status.contains("800px"),
+            "a bake at the reachable resolution is not a stale bake: {}",
+            app.status
+        );
     }
 
     #[test]
@@ -12713,6 +12770,71 @@ mod tests {
         assert!(
             app.status.contains("640px"),
             "the undo door discloses the resolution it restored: {}",
+            app.status
+        );
+        // ...and REDOING back to a reachable canvas must RETRACT it: a
+        // disclosure left standing is false in both halves.
+        app.redo(&ctx);
+        assert!(
+            app.base_preview.as_ref().is_some_and(|b| Arc::ptr_eq(b, &current)),
+            "premise: the matching-edge raster is back"
+        );
+        assert!(
+            !app.status.contains("640px"),
+            "the claim is retracted when the disagreement ends: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn deleting_the_active_variant_discloses_the_canvas_it_lands_on() {
+        // The fourth door: deleting the active variant re-anchors onto a
+        // BACKGROUND variant, whose baked raster the preference cannot
+        // re-decode — silently, and carrying the deleted canvas's own
+        // disclosure forward.
+        let ctx = egui::Context::default();
+        let baked = |w: u32, h: u32, tag: &str| Variant {
+            kind: VariantKind::Generated,
+            recipe: EditRecipe::default(),
+            base: Some(Arc::new(image::DynamicImage::new_rgb8(w, h))),
+            origin: Some(PathBuf::from(format!("out/_{tag}.png"))),
+            thumb: None,
+        };
+        let mut app = AutoshopApp {
+            preview_edge: 1280,
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853))),
+            variants: vec![baked(640, 480, "keep"), baked(1280, 853, "drop")],
+            active: 1,
+            ..Default::default()
+        };
+        app.delete_variant(1, &ctx);
+        assert_eq!(app.active, 0, "premise: the strip re-anchored");
+        assert!(
+            app.status.contains("640px"),
+            "the landing canvas's resolution is disclosed: {}",
+            app.status
+        );
+        // ...and landing on a canvas the preference DOES reach says so plainly.
+        let mut app = AutoshopApp {
+            preview_edge: 1280,
+            source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853))),
+            variants: vec![
+                Variant {
+                    kind: VariantKind::Original,
+                    recipe: EditRecipe::default(),
+                    base: None,
+                    origin: None,
+                    thumb: None,
+                },
+                baked(1280, 853, "drop2"),
+            ],
+            active: 1,
+            ..Default::default()
+        };
+        app.delete_variant(1, &ctx);
+        assert!(
+            app.status.contains("variant removed"),
+            "no disagreement, no claim: {}",
             app.status
         );
     }

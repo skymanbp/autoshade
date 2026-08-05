@@ -436,7 +436,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("preview resolution kept — this canvas's retouch master is no longer on disk, so it cannot be re-decoded at the new size", "预览分辨率保持不变——本画布的修饰母版已不在磁盘上，无法按新尺寸重解码"),
     ("preview resolution kept — a generated variant's pixels come from its own render; switch to a source-based variant to work at another resolution", "预览分辨率保持不变——生成变体的像素来自它自己的渲染；请切换到基于源的变体以在其他分辨率下工作"),
     ("Switched to variant「{name}」 — its baked pixels stay at {px}px (their own bake); edits and retouches follow that, not the preview preference", "已切换到变体「{name}」——其烘焙像素保持在 {px}px（各自的烘焙分辨率）；编辑与修饰跟随它，而非预览偏好"),
-    ("restored pixels stay at {px}px (their own bake) — edits and retouches follow that, not the preview preference", "恢复的像素保持在 {px}px（各自的烘焙分辨率）——编辑与修饰跟随它，而非预览偏好"),
+    ("the canvas pixels stay at {px}px (their own bake) — edits and retouches follow that, not the preview preference", "画布像素保持在 {px}px（各自的烘焙分辨率）——编辑与修饰跟随它，而非预览偏好"),
+    ("restored the canvas pixels", "已恢复画布像素"),
+    ("variant removed", "变体已删除"),
     (" · restored pixels stay at {px}px (their own bake)", " · 恢复的像素保持在 {px}px（各自的烘焙分辨率）"),
     ("Load v{n} failed: {err}", "载入 v{n} 失败: {err}"),
 
