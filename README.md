@@ -44,8 +44,9 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
 - **PNG/TIFF source mode** — feed an already-processed image (e.g. denoised in
   Lightroom/Photoshop) and Autoshop grades it directly. Auto-detected by file
   type; no RAW required.
-- **Web UI** — `serve` opens a local gallery: pick a photo, Analyze, tweak 12
-  sliders with live before/after, give a text direction, export.
+- **Web UI** — `serve` opens a local gallery: pick a photo, Analyze, tweak the
+  develop sliders (tone, presence, curves, 8-band HSL, colour grading) with live
+  before/after, give a text direction, export.
 - **Style retrieval** — learns from *similar* past edits you've made (k-NN over
   EXIF + histogram) and offers them to the advisor as soft reference.
 - **Generative (experimental)** — `reimagine` / `retouch` via OpenAI Images.
@@ -142,8 +143,10 @@ blind, best for real high-ISO/astro), `color_real_gan`, `color_15/25/50`.
 
 ## Configuration (env vars)
 
-Everything below is also settable in the **Settings (⚙)** panel; the per-user
-`autoshop.local.json` (in the Autoshop data folder) overrides the environment.
+The AI-provider rows below are also settable in the **Settings (⚙)** panel; the
+per-user `autoshop.local.json` (in the Autoshop data folder) overrides the
+environment. The two sidecar knobs (`AUTOSHOP_PYTHON`,
+`AUTOSHOP_DENOISE_MODEL`) are environment-only — the panel does not carry them.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -165,25 +168,30 @@ Everything below is also settable in the **Settings (⚙)** panel; the per-user
 - AI denoise runs on the demosaiced RGB (not the raw Bayer mosaic like Adobe
   Denoise), and ~3 min for a 60 MP frame on an RTX 4060 Ti. Excellent, not
   identical to Adobe.
-- Kelvin white balance is a no-op on baked PNG/TIFF sources (no raw WB
-  coefficients); relative tweaks still apply.
+- Kelvin white balance is **absolute** only on a RAW, where the as-shot
+  temperature is read from the camera metadata and stamped into the develop. A
+  baked PNG/TIFF has no as-shot reading, so the same slider anchors at 5500 K
+  and acts as a relative shift from there — it moves pixels, it just cannot
+  claim to be the scene's true colour temperature.
 - Generative `reimagine` is a low-res, lossy re-render — an experiment, not a
   master. `retouch` (generative fill) regenerates only the masked region and
-  composites it back onto the source's *preview* with a feathered seam, so the
-  rest of the frame keeps the original pixels. That preview is the camera's
-  embedded JPEG for a RAW (e.g. ~1616×1080 on a Sony A7RIV — not the 61 MP
-  sensor) or the full image for a baked PNG/TIFF. Pass `--full-res` (CLI) or
-  tick **Full-res** (UI) to composite onto the full-sensor develop instead
-  (~60 MP; slow — only the small removed patch is upscaled). Both pick an
-  aspect-correct size (no square-squash) and default to `quality=high`
+  composites it back onto the source's own develop with a feathered seam, so the
+  rest of the frame keeps the original pixels. That base is the **engine's own
+  neutral develop** — capped at 2048 px on the long edge by default — never the
+  camera's embedded JPEG, so the composite stays on the same tone chain as the
+  canvas. A baked PNG/TIFF is likewise thumbnailed to 2048 px. Pass `--full-res`
+  (CLI) or tick **Full-res** (UI) to composite at full resolution instead
+  (~60 MP for a RAW; slow — only the small removed patch is upscaled). Both pick
+  an aspect-correct size (no square-squash) and default to `quality=high`
   (override `--quality`).
 - Pixel **heal** (`autoshop heal` / the UI's 去瑕疵 panel) is the *non*-generative
   retoucher: it removes only SMALL defects (dust / blemishes / specks) by sampling
   surrounding REAL pixels — it never invents content. Best on fairly uniform
   backgrounds (sky, skin, wall, water); busy backgrounds heal approximately. AI
   auto-detection needs the vision key; the paint-a-mask path works offline. Runs
-  on the preview by default; `--full-res` heals the full-sensor develop (slow,
-  RAW only).
+  on a ≤2048 px base by default — the engine's own neutral develop for a RAW,
+  the source thumbnailed for a baked image; `--full-res` heals at full
+  resolution instead (slow), on either source type.
 
 ## Tech
 

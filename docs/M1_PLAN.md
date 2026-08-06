@@ -2,6 +2,16 @@
 
 # Autoshop — M1 Implementation Plan
 
+> **Historical planning document (2026-06).** It records the decisions and the
+> evidence available *when M1 was planned*; several of them were later reversed
+> by shipped code (the decode stack is `rawler` alone, config is JSON in the
+> per-user store rather than TOML beside the checkout, the XMP projection lives
+> in that store rather than beside the RAW, and the Kelvin/era rules changed in
+> v0.14–v0.16). Present-tense statements below describe the plan, not today's
+> behaviour — for that read [ROADMAP.md](ROADMAP.md), [ARCHITECTURE.md](ARCHITECTURE.md)
+> and the code. Corrections are inlined only where a stale claim would mislead
+> someone changing that subsystem today.
+
 > Synthesis of five research reports against the live scaffold ([src/recipe.rs](../src/recipe.rs), [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md), [Cargo.toml](../Cargo.toml)). Evidence tags are preserved from the source reports; `[verified: …]` = read from a primary source this research session, `[unverified]` = not yet confirmed against a real file/API. The authoritative `EditRecipe` field set is the one in `src/recipe.rs` (Report 2's schema was illustrative; Report 5 read the real one).
 
 M1 scope (from [docs/ARCHITECTURE.md:83-84](../docs/ARCHITECTURE.md)): RAW decode + features, unified provider framework, GPT image advisor, Claude verifier. XMP sidecar writer is M2 in the doc, but Reports 4 & 5 fully spec it and it is the primary deliverable — this plan includes a **decode-time spec lock** for it in M1 and the writer build in M2.
@@ -189,7 +199,15 @@ Image-input limits (well within our single small preview): ≤512 MB payload, �
 
 ## 4. Claude verifier — `claude -p` envelope parsing + `Verdict`
 
-**Invocation (empirically verified, Report 3):** `claude -p --bare --model <model> --output-format json <prompt>`. `--bare` is mandatory — without it a project-level skill (`cc-enslaver`) + PROGRESS.md auto-load and pollute `.result` with a YAML block; `--bare` strips it and cut cost 16× ($0.111 → $0.0070) [verified: A1 runs]. Pass the prompt as the **final positional arg** (or via stdin) — variadic flags like `--add-dir`/`--allowedTools` swallow a trailing positional [verified: A2 failure]. The verify path is **data-only / no image**, so it needs no `--allowedTools`/`--add-dir` and runs permission-free [verified: A1].
+**Invocation (as planned, Report 3):** `claude -p --bare --model <model> --output-format json <prompt>`. `--bare` was believed mandatory — without it a project-level skill (`cc-enslaver`) + PROGRESS.md auto-load and pollute `.result` with a YAML block; `--bare` strips it and cut cost 16× ($0.111 → $0.0070) [verified: A1 runs].
+
+> **Reversed in v0.11.2 — do not restore `--bare`.** Since claude CLI ≥ 2.1.210
+> `--bare` also means "OAuth and keychain are never read", so under it the
+> verifier could only authenticate from a stray `ANTHROPIC_API_KEY` and failed
+> with an empty stderr. The shipped invocation is
+> `claude -p --setting-sources "" --strict-mcp-config --disable-slash-commands
+> --output-format json --model <model>`, which achieves the same clean envelope
+> while keeping OAuth usable (`src/advisor/claude.rs`). Pass the prompt as the **final positional arg** (or via stdin) — variadic flags like `--add-dir`/`--allowedTools` swallow a trailing positional [verified: A2 failure]. The verify path is **data-only / no image**, so it needs no `--allowedTools`/`--add-dir` and runs permission-free [verified: A1].
 
 **Envelope shape (verified raw stdout, single JSON object):**
 

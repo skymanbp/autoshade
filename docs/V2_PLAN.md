@@ -2,6 +2,13 @@
 
 # Autoshop v2 — Implementation Plan
 
+> **Historical planning document.** It captures the design and the measurements
+> taken *while V2 was being planned*; much of it shipped, and several details
+> changed on the way (masks, the anchored absolute-Kelvin model, the style index
+> and the generative sizing all differ from the sketches below). Present-tense
+> statements describe the plan, not today's behaviour — for that read
+> [ROADMAP.md](ROADMAP.md), [ARCHITECTURE.md](ARCHITECTURE.md) and the code.
+
 Synthesis of four research reports against the current state (`src/recipe.rs`, `src/main.rs`, `docs/ARCHITECTURE.md`). Evidence tags `[verified]` / `[unverified]` are preserved from the source reports; do not silently promote any `[unverified]` claim to fact.
 
 ---
