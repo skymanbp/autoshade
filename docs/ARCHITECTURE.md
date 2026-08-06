@@ -1,12 +1,14 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.16.1). The full decode → advise → verify → render
+> Status: **implemented** (v0.17.0). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
 > baked-source mode, style retrieval, XMP sidecars (global + local masks),
-> experimental generative edits, and an optional pixel-**heal** retouch mode
-> (§4.7). 200 library + 1 CLI + 28 GUI tests pass in both build configurations.
+> experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
+> the deterministic look **reverse-fit** (§4.8) and the local server's refusal
+> model (§4.9).
+> 206 library + 1 CLI + 28 GUI tests pass in both build configurations.
 > This document describes the design; a few historical **[verify]** notes are
 > left in place for provenance.
 >
@@ -116,6 +118,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | V2 | Baked-source mode (edit exported PNG/TIFF) | extension dispatch; develop runs on loaded pixels | **done** |
 | V2 | Generative reimagine / retouch | OpenAI Images (`gpt-image-*`) | **done (experimental)** |
 | V2 | Pixel retouch / heal (spot removal) | deterministic heal engine + vision spot-detect ([`src/retouch.rs`](../src/retouch.rs)) | **done (experimental)** |
+| V2 | Look matching / reverse-fit (`match`) | distribution-level solve for the recipe that reproduces a target rendition ([`src/fit.rs`](../src/fit.rs); zoned variant [`src/fit_zoned.rs`](../src/fit_zoned.rs)) | **done** |
 
 ### 4.1 RAW decode (M1)
 
@@ -129,9 +132,11 @@ as-shot WB). Baked sources (PNG/TIFF/JPEG) skip this and load directly via the
 ### 4.2 Vision advisor — image processing (M1)
 
 A vision-capable OpenAI model receives the preview + metadata and returns an
-`EditRecipe` (JSON-schema-constrained output). Exact model id, request shape
-(base64 vs URL), and structured-output mechanism are **[verify]** in M1 and
-pinned in config — not hardcoded from memory.
+`EditRecipe`. What M1 left as **[verify]** is settled by the shipped code
+([`src/advisor/openai.rs`](../src/advisor/openai.rs)): the Responses API with a
+strict `json_schema` for structured output, the preview sent as a base64
+`input_image` data URL, and the model id read from config (default `gpt-5.5`) —
+never hardcoded from memory.
 
 ### 4.3 Claude analyst / verifier (M1)
 
@@ -215,6 +220,62 @@ source thumbnailed to 2048px for a baked image — never the camera's baked
 preview, so the healed master stays on the same tone chain as the canvas
 develop; `--full-res` works at full resolution on either source type (slow).
 
+### 4.8 Look matching / reverse-fit (`match`) — V2
+
+The inverse of the advisor path: given the same frame twice — the untouched
+source and a *target rendition* of it (a `reimagine` output, an exported JPEG,
+any finished reference of that shot) — solve for the `EditRecipe` that
+reproduces the target through our own engine ([`src/fit.rs`](../src/fit.rs)).
+No pixels are copied, so the answer is sliders + curves: it applies at full
+sensor resolution and serialises to XMP like any other develop. Deterministic
+and key-free.
+
+The method is deliberately **distribution-level, not per-pixel regression** — a
+generative target is not pixel-aligned with its source, so only statistics are
+trustworthy. Three stages, in this order: luminance-CDF tone matching (sampled
+at the engine's own tone knots and least-squares solved against the engine's own
+slider basis, with a ridge + penalised model-selection prior so numerically
+equivalent but semantically ruinous slider combos lose); then saturation by
+mean-chroma ratio, secant-refined through real renders and closed with a
+do-no-harm check; then per-channel CDF residuals as red/green/blue curves,
+admitted only through three vetoes (aggregate error, foreign-hue, rotation
+budget) — each veto is a specific real-photo failure recorded at its const
+block. `--zoned` ([`src/fit_zoned.rs`](../src/fit_zoned.rs)) adds a sky-to-sky
+local correction on top of the global fit via the segmentation sidecar; the
+XMP carries the global fit only, since classic sidecars cannot hold raster
+masks. The GUI's **反推 / Reverse-fit** action drives the same two entry points
+(`fit_recipe`, `fit_recipe_zoned`) and lands the result as an editable variant.
+
+### 4.9 What the local web server refuses
+
+`serve` binds `127.0.0.1`, and that on its own protects nothing: any page the
+user visits can POST to a loopback port without a preflight, and a DNS-rebinding
+name can read the answers too. The threat model is therefore *a hostile page in
+the user's own browser*, and the guarantees are:
+
+- **Cross-origin refusal** ([`foreign_origin`](../src/serve.rs)) runs before
+  dispatch, so it covers every route. `Host` and `Origin` must be a literal
+  loopback authority **on our port** — an absent port means the scheme default
+  (80), not "any port", or a page served on loopback:80 would count as
+  same-origin and could repoint the AI base URL through `/api/settings`, after
+  which the next Analyze hands over the user's API key.
+- **The UI is not frameable** (`X-Frame-Options: DENY`): the port is fixed and
+  well known, and a framed click is same-origin by construction.
+- **Bounded inputs.** JSON bodies cap at 256 MiB, uploads at 500 MB, SSE
+  assembly at 64 MiB, and XMP sidecars — metadata the user *receives* — at
+  16 MiB through one reader ([`store::read_sidecar`](../src/store.rs)).
+- **Bounded work.** `EditRecipe::clamp` caps masks/curves/knots, and the cap is
+  enforced at the persistence boundary (`pipeline::write_recipe` clamps the
+  copy it writes), not only on the render routes — a recipe that reached disk
+  used to escape every later reader's expectations.
+- **Bounded concurrency, released on unwind.** Eight request slots, each held
+  by an RAII permit: a handler that panics on a malformed image still gives its
+  slot back, where the earlier tail-release leaked one per panic and wedged the
+  accept loop after eight.
+- **Header values carry no control bytes**, enforced in the constructor rather
+  than by each call site remembering to percent-encode.
+- Keys are never returned: `GET /api/settings` answers `key_present: bool`.
+
 ## 5. Why Rust
 
 Cross-platform, no GC pauses on large-image pipelines, first-class image crates,
@@ -229,5 +290,5 @@ Toolchain in use: rustc/cargo **1.94.1** (verified locally).
 | 2 | Camera / RAW format | resolved: Sony `.ARW` |
 | 3 | Output target | resolved: XMP sidecar **+** rendered, XMP-first |
 | 4 | AI roles | resolved: GPT=image, Claude=non-image+verify, unified framework |
-| 5 | Exact meaning of Claude's "收货验证" (data-level vs pixel-level) | assumed data-level (§3) — confirm |
-| 6 | How to feed the preview to the GPT vision API; `crs:` key set for ARW | **[verify]** in M1 (research underway) |
+| 5 | Exact meaning of Claude's "收货验证" (data-level vs pixel-level) | resolved: **data-level**. The verifier is never sent pixels — it judges the recipe against EXIF/histogram/clipping stats and the advisor's rationale (§3, §4.3, [`src/advisor/claude.rs`](../src/advisor/claude.rs)) |
+| 6 | How to feed the preview to the GPT vision API; `crs:` key set for ARW | resolved in shipped code: the preview goes as a base64 `input_image` data URL on the Responses API with a strict `json_schema` ([`src/advisor/openai.rs`](../src/advisor/openai.rs)); the ARW `crs:` key set is the one the writer emits and round-trips ([`src/xmp.rs`](../src/xmp.rs)) |

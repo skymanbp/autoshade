@@ -623,6 +623,26 @@ pub enum LrSidecar {
     OlderThanStore,
 }
 
+/// Every read of an XMP sidecar, bounded. A sidecar is metadata a user
+/// RECEIVES — from Lightroom, from a shared shoot, from a stranger's delivery —
+/// so its size is not ours to trust: a plain `read_to_string` on a 2 GB file
+/// named `DSC0001.xmp` materialises 2 GB in a request thread just to be handed
+/// to a scanner. Real ones are kilobytes; the biggest Lightroom masks documents
+/// are single-digit megabytes. Over the cap the file is treated as absent,
+/// which every caller already handles (no develop restored, no merge base).
+///
+/// `Read::take` rather than a `metadata()` size check: the length is bounded by
+/// what was actually read, so a file that grows between the two syscalls cannot
+/// widen the allocation.
+pub fn read_sidecar(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    const MAX_SIDECAR: u64 = 16 * 1024 * 1024;
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = String::new();
+    let n = f.take(MAX_SIDECAR + 1).read_to_string(&mut buf).ok()?;
+    (n as u64 <= MAX_SIDECAR).then_some(buf)
+}
+
 pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
     // Only camera RAWs have a Lightroom-sidecar convention; a baked
     // PNG/TIFF's neighbouring .xmp (if any) is not ours to interpret.
@@ -630,11 +650,11 @@ pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
         return LrSidecar::None;
     }
     let lr = src.with_extension("xmp");
-    let Ok(text) = std::fs::read_to_string(&lr) else {
+    let Some(text) = read_sidecar(&lr) else {
         return LrSidecar::None;
     };
     for ours in [xmp_target(src), legacy_xmp(src)] {
-        if std::fs::read_to_string(&ours).is_ok_and(|t| t == text) {
+        if read_sidecar(&ours).is_some_and(|t| t == text) {
             return LrSidecar::None;
         }
     }

@@ -693,6 +693,14 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // at load). Serialize a relativized COPY — the caller's in-memory recipe
     // keeps its absolute paths for rendering.
     let mut on_disk = recipe.clone();
+    // The size caps belong to the WRITE, not to each caller's memory. Every
+    // render route clamped its untrusted input and `api_xmp` — the one that
+    // persists — did not, so a hostile body landed on disk as the photo's
+    // authoritative recipe.json and was re-parsed by every later reader. The
+    // caller's in-memory recipe is untouched (this is the on-disk clone), and
+    // the routes that already clamp see a no-op, so this is a floor no future
+    // route can forget to stand on.
+    on_disk.clamp();
     if let Some(parent) = out.parent() {
         crate::store::relativize_mask_paths(&mut on_disk, parent);
     }
@@ -785,6 +793,14 @@ pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
 }
 
 pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
+    write_xmp_disclosed(raw, recipe).map(|(p, _)| p)
+}
+
+/// [`write_xmp`], plus the note when the merge could not be performed and the
+/// sidecar was REGENERATED instead — see [`write_xmp_doc`] for why that is a
+/// loss worth telling the user about. Same single implementation; the two
+/// entry points differ only in whether the caller has somewhere to show it.
+pub fn write_xmp_disclosed(raw: &Path, recipe: &EditRecipe) -> Result<(PathBuf, Option<String>)> {
     let target = xmp_target(raw);
     // MERGE, never regenerate over Lightroom's work (A11): the base is the
     // sidecar Lightroom itself writes (beside the RAW) when one exists — its
@@ -793,9 +809,8 @@ pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
     // the user copies back beside the RAW keeps them. Else the previous
     // projection at the destination, which carries forward whatever an
     // earlier merge preserved.
-    let base = std::fs::read_to_string(raw.with_extension("xmp"))
-        .ok()
-        .or_else(|| std::fs::read_to_string(&target).ok());
+    let base = crate::store::read_sidecar(&raw.with_extension("xmp"))
+        .or_else(|| crate::store::read_sidecar(&target));
     write_xmp_doc(target, recipe, base)
 }
 
@@ -803,17 +818,42 @@ pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
 /// `-o`: the two halves of one develop must stay in the same folder, or the
 /// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
 pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
-    let base = std::fs::read_to_string(&out).ok();
-    write_xmp_doc(out, recipe, base)
+    let base = crate::store::read_sidecar(&out);
+    write_xmp_doc(out, recipe, base).map(|(p, _)| p)
 }
 
-fn write_xmp_doc(out: PathBuf, recipe: &EditRecipe, merge_base: Option<String>) -> Result<PathBuf> {
+/// Returns the published path and, when the merge could not run, a note naming
+/// what that cost.
+///
+/// A base the splicer cannot account for falls back to a FRESH document rather
+/// than failing the save — but that fallback DROPS exactly what the merge
+/// exists to protect: `crs:Texture`, the camera profile / creative `Look`,
+/// Lightroom's own lens-profile block, foreign namespaces, the xpacket
+/// wrapper. Doing it silently re-entered the A11 data loss through the back
+/// door: the user saw a plain "saved" and found their Lightroom work gone the
+/// next time they opened the catalog. Everywhere else in this codebase a
+/// degraded result is disclosed (`render_source_checked` refuses,
+/// `unparsable_crs_numbers` warns about far smaller losses); this now matches.
+fn write_xmp_doc(
+    out: PathBuf,
+    recipe: &EditRecipe,
+    merge_base: Option<String>,
+) -> Result<(PathBuf, Option<String>)> {
     ensure_parent(&out)?;
-    // A base the splicer cannot safely handle falls back to a FRESH document
-    // — exactly the old behaviour, never a failed save.
-    let doc = merge_base
-        .and_then(|b| xmp::merge_recipe_into_xmp(&b, recipe))
-        .unwrap_or_else(|| xmp::recipe_to_xmp(recipe));
+    let had_base = merge_base.is_some();
+    let merged = merge_base.and_then(|b| xmp::merge_recipe_into_xmp(&b, recipe));
+    let regenerated = had_base && merged.is_none();
+    let note = regenerated.then(|| {
+        let msg = format!(
+            "the existing sidecar at {} could not be merged — it was regenerated, \
+             so Lightroom-only properties it carried (Texture, camera profile / Look, \
+             LR lens-profile data) are not in the new file",
+            out.display()
+        );
+        eprintln!("⚠ {msg}");
+        msg
+    });
+    let doc = merged.unwrap_or_else(|| xmp::recipe_to_xmp(recipe));
     // Stage + rename, never truncate in place: `fs::write` opens the LIVE
     // sidecar with O_TRUNC, so a full disk, an interruption or a competing
     // writer left a truncated file where a valid Lightroom sidecar used to
@@ -829,7 +869,7 @@ fn write_xmp_doc(out: PathBuf, recipe: &EditRecipe, merge_base: Option<String>) 
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("publish xmp {}", out.display()));
     }
-    Ok(out)
+    Ok((out, note))
 }
 
 /// Where the .xmp for `raw` goes — the photo's central develop dir (see
@@ -1079,6 +1119,101 @@ mod guard_tests {
         assert!(text.contains("crs:Texture=\"+21\""), "LR-only property survives the save");
         assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "…with OUR value");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// The persistence boundary enforces the schema's size caps itself.
+    /// `EditRecipe::clamp` names "a hostile POST to the local web server" as
+    /// the reason those caps exist, yet the web route that WRITES skipped it:
+    /// a 100 000-mask body became the photo's authoritative recipe.json,
+    /// re-parsed by every later open and copied into the next version snapshot.
+    #[test]
+    fn a_persisted_recipe_cannot_exceed_the_schema_caps() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let dir = std::env::temp_dir().join("autoshop-pipe-recipe-caps");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_caps.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+
+        let hostile = EditRecipe {
+            masks: (0..1000)
+                .map(|_| LocalAdjustment {
+                    mask: MaskGeometry::Radial {
+                        top: 0.3,
+                        left: 0.3,
+                        bottom: 0.7,
+                        right: 0.7,
+                        feather: 0.5,
+                        roundness: 0.0,
+                        flipped: false,
+                    },
+                    exposure_ev: 1.0,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let out = write_recipe(&raw, &hostile, None).unwrap();
+        let on_disk: EditRecipe =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(on_disk.masks.len(), 64, "the file on disk is within the caps");
+        // The CALLER's recipe is not mutated — the clamp applies to the copy
+        // that is written, so a render in flight keeps its own state.
+        assert_eq!(hostile.masks.len(), 1000, "the caller's in-memory recipe is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// A sidecar the splicer cannot account for is REGENERATED rather than
+    /// merged — which drops the user's Lightroom-only properties. The fallback
+    /// itself is correct (never fail a save); doing it silently was the defect,
+    /// because the loss only surfaced the next time they opened the catalog.
+    #[test]
+    fn an_unmergeable_sidecar_is_regenerated_and_says_so() {
+        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-disclose");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_disclose.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        let lr = dir.join("_pipe_disclose.xmp");
+        let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
+
+        // A mergeable base: no note, and the LR-only property survives.
+        std::fs::write(
+            &lr,
+            "<rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:Texture=\"+21\"></rdf:Description>\n",
+        )
+        .unwrap();
+        let (out, note) = write_xmp_disclosed(&raw, &r).unwrap();
+        assert!(note.is_none(), "a merge that worked has nothing to disclose: {note:?}");
+        assert!(std::fs::read_to_string(&out).unwrap().contains("crs:Texture=\"+21\""));
+
+        // An UNTERMINATED description is markup the splicer cannot account
+        // for: the save still succeeds, the Texture is gone, and the caller is
+        // told exactly that.
+        std::fs::write(
+            &lr,
+            "<rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:Texture=\"+21\">\n",
+        )
+        .unwrap();
+        let (out, note) = write_xmp_disclosed(&raw, &r).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
+        assert!(!text.contains("crs:Texture"), "…by regenerating, so the LR property is gone");
+        let note = note.expect("the loss must be disclosed, not silent");
+        assert!(note.contains("regenerated"), "the note names what happened: {note}");
+        assert!(note.contains("Texture"), "…and what it cost: {note}");
+
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }

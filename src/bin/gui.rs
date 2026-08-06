@@ -5117,12 +5117,25 @@ impl AutoshopApp {
                     self.pixels_on_disk = self.active_variant().and_then(|v| v.origin.clone());
                 }
                 let mut s = if raw {
-                    match autoshop::pipeline::write_xmp(&path, &self.recipe) {
-                        Ok(p) => trf(
-                            lang,
-                            "XMP + recipe saved → {path}",
-                            &[("path", &p.display().to_string())],
-                        ),
+                    match autoshop::pipeline::write_xmp_disclosed(&path, &self.recipe) {
+                        Ok((p, merge_note)) => {
+                            // A sidecar we could not MERGE was regenerated, and
+                            // that drops the user's Lightroom-only properties.
+                            // Saying only "saved" is how that loss stayed
+                            // invisible until they reopened the catalog.
+                            if let Some(m) = &merge_note {
+                                self.toast(ToastKind::Error, m.clone());
+                            }
+                            let base = trf(
+                                lang,
+                                "XMP + recipe saved → {path}",
+                                &[("path", &p.display().to_string())],
+                            );
+                            match merge_note {
+                                Some(m) => format!("{base} — ⚠ {m}"),
+                                None => base,
+                            }
+                        }
                         Err(e) => {
                             let t = trf(
                                 lang,

@@ -133,26 +133,57 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
     let gate = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
     for request in server.incoming_requests() {
         let state = Arc::clone(&state);
-        let gate = Arc::clone(&gate);
+        let permit = Permit::acquire(Arc::clone(&gate), MAX_CONCURRENT);
+        std::thread::spawn(move || {
+            let _permit = permit;
+            if let Err(e) = handle(request, &state) {
+                eprintln!("request error: {e}");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// One of the eight request slots, released on DROP.
+///
+/// Releasing it with straight-line code after `handle` looked equivalent and
+/// was not: a panic inside a handler unwinds past that code, so the slot was
+/// never given back and the condvar never notified. Eight panicking requests
+/// wedged the accept loop forever — the server stopped answering and the only
+/// symptom was a browser that hung. This file already assumes handlers panic
+/// (every `Mutex::lock` here is `unwrap_or_else(|p| p.into_inner())`); the gate
+/// was the one place that assumption was not carried through, and the one
+/// place the consequence was unrecoverable. The handler thread reads image and
+/// RAW bytes through third-party parsers, which is exactly where a panic on a
+/// malformed file comes from.
+struct Permit(Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>);
+
+impl Permit {
+    fn acquire(gate: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>, max: usize) -> Self {
         {
             let (lock, cv) = &*gate;
             let mut n = lock.lock().unwrap_or_else(|p| p.into_inner());
-            while *n >= MAX_CONCURRENT {
+            while *n >= max {
                 n = cv.wait(n).unwrap_or_else(|p| p.into_inner());
             }
             *n += 1;
         }
-        std::thread::spawn(move || {
-            if let Err(e) = handle(request, &state) {
-                eprintln!("request error: {e}");
-            }
-            let (lock, cv) = &*gate;
-            let mut n = lock.lock().unwrap_or_else(|p| p.into_inner());
-            *n = n.saturating_sub(1);
-            cv.notify_one();
-        });
+        Permit(gate)
     }
-    Ok(())
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        // Deliberately NOT conditioned on `std::thread::panicking()`: the whole
+        // point is that the panicking path releases too. A poisoned mutex is
+        // recovered rather than re-panicked, matching every other lock here —
+        // turning a past panic into a second one inside a Drop would abort the
+        // process.
+        let (lock, cv) = &*self.0;
+        let mut n = lock.lock().unwrap_or_else(|p| p.into_inner());
+        *n = n.saturating_sub(1);
+        cv.notify_one();
+    }
 }
 
 /// Read a request header (case-insensitive), if present.
@@ -170,6 +201,33 @@ fn request_gen(request: &Request) -> Option<u64> {
     req_header(request, "X-Autoshop-Gen").and_then(|v| v.trim().parse::<u64>().ok())
 }
 
+/// Is this `Host`/`Origin` authority OUR loopback authority? Module-level and
+/// not nested inside [`foreign_origin`] so the rule can be unit-tested
+/// directly — it is the whole cross-origin guard, and the one bug it had was
+/// invisible from outside.
+fn loopback(h: &str, port: u16) -> bool {
+    let h = h.trim();
+    // "127.0.0.1:8080" / "localhost" / "[::1]:8080"
+    let (name, p) = match h.rsplit_once(':') {
+        // An IPv6 literal's own colons live INSIDE the brackets.
+        Some((n, p)) if !n.ends_with(']') || p.chars().all(|c| c.is_ascii_digit()) => (n, Some(p)),
+        _ => (h, None),
+    };
+    let name_ok = matches!(name, "127.0.0.1" | "localhost" | "[::1]");
+    // An ABSENT port is not a wildcard — it is the scheme default, 80.
+    // Treating it as "matches whatever we listen on" made
+    // `Origin: http://localhost` same-origin for a server on 8080, so any page
+    // served on loopback port 80 (a local IIS/XAMPP, a docker -p 80, a docs
+    // server with an HTML injection) could POST simple requests to us:
+    // /api/settings would repoint the AI base URL at the attacker and the next
+    // Analyze would hand over the user's API key.
+    let port_ok = match p {
+        Some(p) => p == port.to_string(),
+        None => port == 80,
+    };
+    name_ok && port_ok
+}
+
 /// Refuse anything a HOSTILE WEB PAGE could send us.
 ///
 /// Binding 127.0.0.1 protects nothing on its own: any page the user visits
@@ -182,20 +240,6 @@ fn request_gen(request: &Request) -> Option<u64> {
 /// same-origin (or absent — same-origin GETs and our own tooling) Origin
 /// removes the entire class. Returns the refusal to send, or None to accept.
 fn foreign_origin(request: &Request, port: u16) -> Option<ResponseBox> {
-    fn loopback(h: &str, port: u16) -> bool {
-        let h = h.trim();
-        // "127.0.0.1:8080" / "localhost" / "[::1]:8080"
-        let (name, p) = match h.rsplit_once(':') {
-            // An IPv6 literal's own colons live INSIDE the brackets.
-            Some((n, p)) if !n.ends_with(']') || p.chars().all(|c| c.is_ascii_digit()) => {
-                (n, Some(p))
-            }
-            _ => (h, None),
-        };
-        let name_ok = matches!(name, "127.0.0.1" | "localhost" | "[::1]");
-        let port_ok = p.is_none_or(|p| p == port.to_string());
-        name_ok && port_ok
-    }
     if let Some(host) = req_header(request, "Host")
         && !loopback(&host, port)
     {
@@ -911,14 +955,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // but the body carries the photo's camera-matched base look so the fresh
     // web canvas starts as bright as a fresh GUI open instead of jumping
     // only after the first Analyze.
-    let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
-    let body = serde_json::json!({
-        "base_curve": fresh_base_knots(&raw),
-        "lens_profile": pipeline::fresh_lens_profile(&raw),
-        "as_shot_k": ask,
-        "as_shot_tint": ast,
-    })
-    .to_string();
+    let body = fresh_base_payload(&raw);
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static ASCII header");
     let mut resp = Response::from_string(body).with_status_code(404).with_header(ct);
@@ -953,15 +990,23 @@ fn recipe_warning_header(xmp_text: &str) -> Option<Header> {
 /// the first call — `fresh_base_knots` reuses the cached `develop_base`.
 fn api_fresh_base(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let raw = raw_for(request, state)?;
-    let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
-    let body = serde_json::json!({
-        "base_curve": fresh_base_knots(&raw),
-        "lens_profile": pipeline::fresh_lens_profile(&raw),
-        "as_shot_k": ask,
-        "as_shot_tint": ast,
+    Ok(json_text(fresh_base_payload(&raw)))
+}
+
+/// The fresh-open calibration payload, in ONE place: `/api/fresh-base` serves
+/// it on demand and `/api/recipe`'s 404 ("not analyzed yet") carries it inline
+/// so the first canvas is already calibrated. Two endpoints, one key set — a
+/// key added to only one of them is a client that reads a photo's calibration
+/// differently depending on which door it came through.
+fn fresh_base_payload(raw: &Path) -> String {
+    let (as_shot_k, as_shot_tint) = pipeline::fresh_as_shot_wb(raw);
+    serde_json::json!({
+        "base_curve": fresh_base_knots(raw),
+        "lens_profile": pipeline::fresh_lens_profile(raw),
+        "as_shot_k": as_shot_k,
+        "as_shot_tint": as_shot_tint,
     })
-    .to_string();
-    Ok(json_text(body))
+    .to_string()
 }
 
 /// Style-library info for the UI's info box: is an index built, how many of the
@@ -1792,6 +1837,15 @@ fn sweep_stale_temp_files() {
 fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let stamp = request_gen(request);
     let mut req: XmpReq = read_json(request)?;
+    // Untrusted network input — and this is the route that PERSISTS it, so the
+    // clamp matters more here than on the render routes that already had it.
+    // `EditRecipe::clamp`'s size caps name "a hostile POST to the local web
+    // server" as their reason, yet the write path skipped them: a 100 000-mask
+    // body landed on disk as the photo's authoritative recipe.json, was
+    // re-parsed by every later open, and was copied verbatim into the next
+    // version snapshot. Clamping here cannot flip the is_noop branch below —
+    // it only ever removes or bounds values a neutral recipe does not have.
+    req.recipe.clamp();
     let raw = match state.at_checked(req.id, stamp) {
         Ok(r) => r,
         Err(resp) => return Ok(resp),
@@ -1913,8 +1967,17 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // Recipe committed = saved (the cross-surface rule): a failed XMP
     // projection reports success WITH the warning instead of a 500 that
     // contradicts the on-disk state.
-    match pipeline::write_xmp(&raw, &req.recipe) {
-        Ok(path) => Ok(text_response(&format!("{}{save_note}{master_note}", path.display()))),
+    match pipeline::write_xmp_disclosed(&raw, &req.recipe) {
+        // A regenerated (rather than merged) sidecar is a LOSS of the user's
+        // Lightroom-only properties, so it rides the same reply as the path —
+        // reporting a bare success here is what made the loss silent.
+        Ok((path, merge_note)) => {
+            let merge_note = merge_note.map(|m| format!("\n⚠ {m}")).unwrap_or_default();
+            Ok(text_response(&format!(
+                "{}{save_note}{master_note}{merge_note}",
+                path.display()
+            )))
+        }
         Err(e) => Ok(text_response(&format!(
             "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{save_note}{master_note}"
         ))),
@@ -2267,11 +2330,21 @@ fn percent_encode(s: &str) -> String {
 }
 
 /// Build a header, or `None` when the value is not a legal header value.
-/// `Header::from_bytes(..).unwrap()` is only safe on compile-time-ASCII
-/// literals; on anything derived from a photo's name it is a panic waiting for
-/// the first non-ASCII library, and a panicking handler thread answers with an
-/// EMPTY body (tiny_http's `impl Drop for Request`).
+///
+/// TWO hazards, and tiny_http covers only part of one. `Header::from_bytes`
+/// validates with `AsciiString::from_ascii`, which accepts every byte
+/// 0x00–0x7F — **including CR and LF** — and writes the value verbatim, so it
+/// rejects non-ASCII (hence `.ok()` rather than `.unwrap()`: a panicking
+/// handler thread answers with an EMPTY body via tiny_http's
+/// `impl Drop for Request`) but NOT response splitting. Today every value we
+/// emit is either a static ASCII string or percent-encoded at the call site,
+/// so nothing is exploitable; that safety rests entirely on a convention the
+/// next author has no way to see. Refuse control bytes here instead, so the
+/// guarantee lives with the constructor rather than with each caller's memory.
 fn header(field: &str, value: &str) -> Option<Header> {
+    if value.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return None;
+    }
     Header::from_bytes(field.as_bytes(), value.as_bytes()).ok()
 }
 
@@ -2340,7 +2413,16 @@ fn html_response(html: &str) -> ResponseBox {
         &b"no-cache, no-store, must-revalidate"[..],
     )
     .unwrap();
-    Response::from_string(html).with_header(ct).with_header(cc).boxed()
+    // The UI listens on a FIXED, well-known port (8080 by default), so any page
+    // can blind-frame it and clickjack a destructive control — Save on a
+    // neutral recipe routes to `clear_develop`. The Origin/Host guard does not
+    // help: a framed click is a same-origin action by the real page.
+    let frame = Header::from_bytes(&b"X-Frame-Options"[..], &b"DENY"[..]).unwrap();
+    Response::from_string(html)
+        .with_header(ct)
+        .with_header(cc)
+        .with_header(frame)
+        .boxed()
 }
 
 fn text_response(text: &str) -> ResponseBox {
@@ -2408,6 +2490,82 @@ mod tests {
         // Absent / blank claims mean "no session master", never an error.
         assert!(session_master(None, &photo_a).unwrap().is_none());
         assert!(session_master(Some("  "), &photo_a).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cross-origin guard is the ONLY thing standing between a hostile page
+    /// and every POST route (including the one that repoints the AI endpoint,
+    /// after which the next Analyze hands over the user's API key). A port-less
+    /// authority is the scheme default, NOT a wildcard.
+    #[test]
+    fn a_portless_origin_is_port_80_and_not_a_wildcard() {
+        // The hole: `http://localhost` was accepted by a server on 8080, so
+        // anything served on loopback port 80 became same-origin.
+        assert!(!loopback("localhost", 8080), "port-less origin is port 80, not ours");
+        assert!(!loopback("127.0.0.1", 8080));
+        assert!(!loopback("[::1]", 8080));
+        // …and it IS ours when we really are on 80.
+        assert!(loopback("localhost", 80));
+        assert!(loopback("127.0.0.1", 80));
+        // The ordinary cases stay exactly as before.
+        assert!(loopback("127.0.0.1:8080", 8080));
+        assert!(loopback("localhost:8080", 8080));
+        assert!(loopback("[::1]:8080", 8080), "an IPv6 literal's own colons are bracketed");
+        assert!(!loopback("localhost:3000", 8080), "a different port is a different origin");
+        assert!(!loopback("evil.example:8080", 8080));
+        assert!(!loopback("127.0.0.1.evil.example:8080", 8080), "suffix trick");
+        assert!(!loopback("[::1]:80", 8080));
+    }
+
+    /// A request permit must come back even when the handler PANICS: releasing
+    /// it after the call unwound past the release, and eight panics wedged the
+    /// accept loop forever with no error anywhere.
+    #[test]
+    fn a_panicking_handler_still_gives_its_request_slot_back() {
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
+        let count = || *gate.0.lock().unwrap_or_else(|p| p.into_inner());
+        for _ in 0..3 {
+            let g = std::sync::Arc::clone(&gate);
+            let h = std::thread::spawn(move || {
+                let _permit = Permit::acquire(g, 8);
+                panic!("a third-party parser met a malformed file");
+            });
+            assert!(h.join().is_err(), "the thread really did panic");
+            assert_eq!(count(), 0, "the slot came back through Drop, not through the tail");
+        }
+        // The gate is still usable: a taken permit occupies exactly one slot.
+        let p = Permit::acquire(std::sync::Arc::clone(&gate), 8);
+        assert_eq!(count(), 1);
+        drop(p);
+        assert_eq!(count(), 0);
+    }
+
+    /// The fresh-open calibration reaches the client through TWO doors
+    /// (`/api/fresh-base`, and `/api/recipe`'s 404 body) and they must carry
+    /// the SAME key set — a key added to one door only is a photo whose
+    /// calibration depends on how the client asked for it. One producer is the
+    /// enforcement; this pins the key set that producer emits.
+    #[test]
+    fn the_fresh_open_calibration_is_one_key_set_for_both_doors() {
+        let dir = std::env::temp_dir().join("autoshop-serve-freshbase");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let baked = dir.join("baked.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 3)).save(&baked).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&fresh_base_payload(&baked)).expect("the payload is JSON");
+        let mut keys: Vec<&str> = v.as_object().expect("an object").keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["as_shot_k", "as_shot_tint", "base_curve", "lens_profile"],
+            "the fresh-open contract is exactly these four keys"
+        );
+        // A baked source has no camera rendition and no as-shot reading: the
+        // keys are still PRESENT (the client branches on null, not on absence).
+        assert!(v["base_curve"].as_array().expect("an array").is_empty());
+        assert!(v["as_shot_k"].is_null() && v["as_shot_tint"].is_null());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

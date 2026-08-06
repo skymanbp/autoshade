@@ -17,15 +17,131 @@
 > v0.8.1（preview lag root-fix）；v0.8.0 → `1c1ea36`（zoned fit）。
 > 反馈驱动阶段——用户试用 → 报障/提需 → 修复/打磨 → 发布）。
 >
-> **v0.16.1 已发布（2026-08-06）**：单通道 debug + 死代码/重复清理批。
+> **v0.17.0 已发布（2026-08-06）**：**攻击视角安全批**。独立子代理以攻击者立场
+> 审全仓，8 条发现经逐条对码复核**全部属实**；两条 HIGH 是前三轮自审都没看见的：
+> 跨域门把无端口的 `Origin: http://localhost` 当通配（loopback:80 上的页面可改
+> AI 端点，下次 Analyze 即泄露 API key），以及请求许可在 handler panic 时永久
+> 泄漏（8 次 panic 后服务器彻底停止应答）。另修 XMP 扫描器 Θ(k²) + 注释误判、
+> 唯一持久化路由不 clamp、XMP merge 失败静默丢 Lightroom 属性。详见「当前状态」首条。
+>
+> 前版 **v0.16.1（2026-08-06）**：单通道 debug + 死代码/重复清理批。
 > 要害修复=XMP 读取端穿透嵌套 `<crs:Look>`（顶层缺键时把 Adobe 配置文件
 > 烘焙的参数当成用户滑杆导入，探针实证 clarity 0→50 / vibrance 0→35，还会
 > 学走 Look 的色调曲线）→ 新增 `xmp::crs_own_scope`，四个整档读者全部改走
 > scope；顺带 `apply_wb` 行并行（v0.11.0 rayon 扫荡唯一漏网的逐像素段，
 > 逐位不变）、一条 i18n 死翻译、一条瞎断言、七处重复的等价合并、一处过期
 > 的 `#[allow(dead_code)]`。详见「当前状态」首条。
+> 发布后又跑了两轮 debug（第二轮 `5aa9d28`、第三轮本条）：**生产行为未变**——
+> 只补测试、订正两条假注释、消掉一处两端手搓的契约重复，并把 README /
+> ARCHITECTURE 与代码对齐（补上此前完全缺席的桌面 GUI 与 `match` 反推）。
+> 故不发新版，已发布的 v0.16.1 二进制不受影响。
 
 ## 当前状态（已完成，勿重做）
+
+- **第四轮：攻击视角子代理审计 → v0.17.0（2026-08-06，用户令"派遣一个子代理用攻
+  击视角全面审阅并debug"）**——首次由**独立子代理以攻击者立场**扫全仓（此前三轮
+  都是自审）。返回 8 条，**我逐条对码复核，8 条全部属实，零证伪**。
+  - **HIGH·跨域门的无端口空洞**（serve.rs `loopback`）：`Origin: http://localhost`
+    没有冒号 → 端口被当作**通配**而非"方案默认 80"，于是服务在 8080 时任何
+    loopback:80 上的页面（本机 IIS/XAMPP、docker -p 80、有 HTML 注入的文档服务器）
+    都算同源，可发简单请求 POST `/api/settings` 把 AI base URL 改到攻击者，
+    **下一次 Analyze 就把用户的 OpenAI key 送出去**。修：缺省端口即 80；
+    `loopback` 提到模块级以便直测；新测试盖 11 种权威串。
+  - **HIGH·请求许可在 panic 时永久泄漏**（serve.rs 请求闸门）：许可由 `handle`
+    之后的直线代码归还，panic 展开会跳过它 → 8 次 panic 后 accept 循环永远卡在
+    `cv.wait`，**服务器彻底不再应答**，用户只看到浏览器转圈。该文件其它每个
+    `Mutex::lock` 都写了 `unwrap_or_else(|p| p.into_inner())`（即已假设 handler 会
+    panic），唯独闸门没贯彻。修：RAII `Permit`，Drop 里归还且**不**按
+    `thread::panicking()` 短路；新测试用真 panic 线程验证槽位归还。
+  - **MED·XMP 扫描器两个真缺陷**（xmp.rs `find_matching_close`）：①闭合标签搜索
+    每轮从头重扫 → 对嵌套深度 Θ(k²)，**实测 20000 层嵌套 13.62s vs 修后 0.02s
+    （680×）**，且这段跑在 `SAVE_LOCK` 内并占着一个请求许可；②不跳过注释/CDATA/PI，
+    于是注释里的 `</rdf:Description>` 被当成真闭合（它的两个兄弟函数早就跳了）→
+    body 被截断 → 整个 merge 退回重新生成，**把它本该保护的 LR 属性全丢了**。
+    修：闭合游标跨轮缓存（等价性有证明：`from` 只前进，故区间内无闭合）+ 新增
+    `skip_text_construct` 三构造跳过（未闭合构造 → 整档回退，绝不猜）。
+  - **MED·唯一持久化路由不做 clamp**（serve.rs `api_xmp`）：render 三个路由都写了
+    "untrusted network input" 并 clamp，**写盘的那个没有**。`EditRecipe::clamp`
+    的注释恰恰点名"a hostile POST to the local web server"是这些上限存在的理由。
+    10 万个蒙版的 body 就成了该照片权威的 recipe.json，之后每次打开都要重新解析，
+    还会原样进版本快照。修：api_xmp 补 clamp，**并把上限下沉到持久化边界**
+    （`write_recipe` clamp 它写出的那份克隆，调用方内存不动）——未来任何新路由
+    忘了 clamp 也踩不穿这层地板；新测试 1000→64 且调用方仍是 1000。
+  - **MED·XMP merge 失败静默降级**（pipeline.rs `write_xmp_doc`）：merge 不成即
+    重新生成整档，`crs:Texture`/相机配置文件与 Look/LR 镜头块/外来 ns/xpacket
+    **全部丢弃且零披露**——正是 A11 当初要根治的数据损失，从后门又走了回来。
+    修：`write_xmp_doc` 返回 `(路径, Option<note>)`，stderr 必报，web 保存回执与
+    GUI 保存状态/toast 都带上；`write_xmp` 保持原签名（一份实现两个入口，
+    同 decode.rs 的 `preview_only`/`embedded_preview` 惯例）。
+  - **LOW×3**：`header()` 放行 CR/LF（tiny_http 的 `AsciiString::from_ascii` 只挡
+    非 ASCII，源码已核）——当前无可控值故不可利用，但保证只写在每个调用点的记性
+    里，改为构造器拒绝控制字节并订正该函数的文档（它原本把危险说成"非 ASCII
+    panic"）；`html_response` 补 `X-Frame-Options: DENY`（端口固定，框架点击劫持
+    对同源门免疫）；五处 sidecar `read_to_string` 无上限 → 统一走新增的
+    `store::read_sidecar`（16 MiB 上限，`Read::take` 而非 `metadata()`，避免
+    stat-then-read 之间文件变大）。
+  - **审计中唯一未采纳的一条**：客户端可给 `Bitmap` 蒙版传**绝对路径**，
+    `resolve_mask_paths` 只重锚相对路径（store.rs），理论上能把任意本地图片的亮度
+    渲进成品。判定：修好跨域门后网络侧入口已关闭；而把非 store 的绝对路径改为
+    inert 会让手写 recipe 的合法用户**导出直接被拒**（引擎既有"不可读栅格→成品
+    拒绝"契约）。**如实记录为已审查未改**，不是遗漏。
+  - 子代理另提"ARCHITECTURE 说 201 个库测试，我数到 204 个 `#[test]`"——用
+    `cargo test` 实测澄清：204 个总数 = 201 通过 + 3 `#[ignore]`，文档正确，非缺陷。
+  - 门禁：**206 lib + 1 cli + 28 gui** 双配置绿、clippy 双零、i18n 458/486/0/0、
+    web `node --check` 通过；`pub` 死代码 0（273→275，新增两个公开入口）；克隆组
+    73→74（+1，如实记）；测试名集合 diff 删 0 增 5 留 233。
+  - **收敛判定（如实）**：本轮**非空且找到了前三轮都没找到的两个 HIGH** ——
+    自审三轮的盲区由攻击视角一次打穿，这本身是本轮最重要的结论。**下一轮应继续
+    用攻击视角审本轮的修复提交自身。**
+
+- **第三轮 debug：收敛确认 + 全量文档对齐（2026-08-06，用户令"第三轮 + 确保所
+  有文档同步更新，对齐事实"）**——审查对象=第二轮的提交 `5aa9d28` 自身。
+  - **生产行为轴：连续第二轮零发现。** `5aa9d28` 的五条新测试逐条重读重跑，断
+    言与被测契约一致。`apply_crop` 注释里"零尺寸帧会撞上下游 `par_chunks_mut(0)`"
+    经核实为真：render.rs:1231/1278/1645/2629 四处按行分块都没有零宽守卫，全仓
+    唯一有守卫的是 U14 补进 `apply_radial_gain`（render.rs:1029）的那处——所以
+    `apply_crop` 拒绝生成零尺寸帧确实是这条链上的真门。
+  - **记录轴：两条注释在撒谎，已订正**（本项目一贯把假注释当缺陷处理）：
+    - decode 测试称"**每个** `embedded_preview` 调用方都对 `Err` 打印诊断"——实
+      为三个调用方，其中 GUI 开图（gui.rs:2160 `_ => Vec::new()`）**故意**把
+      `Err` 与 `Ok(None)` 合并（开图不因缺相机渲染而失败）。改为点名"三取其二"
+      并写明 GUI 这条例外。
+    - 同一测试称非 RAW 的 `Ok(None)`"是基调估计器所依赖的"——三个调用方
+      （pipeline.rs:637 / serve.rs:706 / gui.rs:2098）全都先自行 `is_raw` 短路，
+      生产路径根本到不了该分支。改为如实陈述：钉它是为了让这条保证是**契约**，
+      而不是下一个调用方无权依赖的巧合。
+  - **重复轴：一处真实的契约重复。** `/api/fresh-base` 与 `/api/recipe` 的 404
+    体各自手搓同一份四键标定 JSON（serve.rs:914/956，8 行 ×2），客户端也各读一
+    遍（index.html:999/1021）。任一端加键而漏改另一端 = 同一张照片的标定取决于
+    客户端走了哪扇门。服务端提取 `fresh_base_payload`、客户端提取 `takeFresh`，
+    并补契约测试钉死键集（变异 `as_shot_k`→`as_shot_kelvin` 实证被杀）。
+  - **文档全量对齐**（用户令"确保所有文档同步更新，对齐事实"）：
+    - README **整个桌面 GUI 只字未提**——`src/bin/gui.rs` 13069 行（全仓最大文件、
+      约占三分之一代码），每个 tag 都随发布上传 `autoshop-gui.exe`（v0.16.1 实测
+      35475001 字节），而 README 的特性表、快速上手、Tech 三处都只有 CLI 与 web。
+      已补：特性条目、`cargo build --release --features gui --bin autoshop-gui`
+      构建行 + 为何藏在 feature 后（Cargo.toml:25-31）、Tech 补 `eframe`/`egui`
+      与 `rayon`。
+    - README **整条 `match` 子命令缺失**（main.rs:169-196）——`src/fit.rs` 1568 行
+      + `src/fit_zoned.rs` 931 行、GUI 也在用（gui.rs:9987）的全仓第四大子系统，
+      命令表和特性表都没有它。已补两处。
+    - ARCHITECTURE 组件表同样没有反推行，§4.1–4.7 也无对应小节 → 新增表行 +
+      **§4.8 反推**，按 `fit.rs` 模块文档如实写（分布级而非逐像素回归、三阶段
+      顺序、三道否决、`--zoned` 与"XMP 只带全局拟合"的边界）。
+    - ARCHITECTURE §6 遗留问题 #5/#6 还写着"待确认 / research underway"——两者在
+      出货代码里早已落定，改为已解决并附 `file` 引用；§4.2 的 M1 `[verify]` 同步
+      改为"已由出货代码落定"（Responses API + 严格 `json_schema` + base64
+      `input_image`，模型 id 走配置）。
+    - M1_PLAN / V2_PLAN 已在 `a4f818f` 加过历史文档横幅，本轮复核无新漂移。
+  - 门禁：**201 lib + 1 cli + 28 gui** 双配置绿、clippy 双零、i18n 458/486/0/0、
+    web `node --check` 通过；克隆组 74→**73**、`pub` 死代码 0；测试名集合 diff
+    （对 `5aa9d28`）删 0 增 1 留 232。
+  - **收敛判定（如实）**：生产**行为**轴连续两轮零发现=已收敛；但本轮**仍非空
+    轮**（2 条假注释 + 1 处契约重复 + 4 处文档缺口，其中"README 从未提过桌面
+    GUI"是全仓最大的一处文实不符），按本项目自己的规矩，宣布完全收敛仍需下一轮
+    归零。**下次开工可直接跑第四轮。**
+  - 本轮改了生产代码（两处等价提取），但**行为未变**，且已发布的 v0.16.1 二进制
+    与之无关——未发新版。
 
 - **第二轮 debug：对 v0.16.1 修复提交自身的复审（2026-08-06，用户令"再进行
   一轮debug，确保收敛"）**——按本项目自己的规矩，先审查**上一轮的修复提交

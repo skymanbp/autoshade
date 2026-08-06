@@ -44,11 +44,22 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
 - **PNG/TIFF source mode** — feed an already-processed image (e.g. denoised in
   Lightroom/Photoshop) and Autoshop grades it directly. Auto-detected by file
   type; no RAW required.
+- **Desktop app (native GUI)** — `autoshop-gui`: a library grid that marks which
+  photos already have a saved develop, the full develop panel (tone, presence,
+  curves, 8-band HSL, colour grading), local masks (linear / radial / brush /
+  AI-selected), crop & straighten, spot heal, reverse-fit, before/after,
+  per-photo version snapshots, and Ctrl+S to a Lightroom XMP. English / 中文.
 - **Web UI** — `serve` opens a local gallery: pick a photo, Analyze, tweak the
   develop sliders (tone, presence, curves, 8-band HSL, colour grading) with live
   before/after, give a text direction, export.
 - **Style retrieval** — learns from *similar* past edits you've made (k-NN over
   EXIF + histogram) and offers them to the advisor as soft reference.
+- **Look matching (reverse-fit)** — `match` takes the same frame twice (your
+  source and a finished rendition of it: a `reimagine` output, an exported JPEG,
+  any reference of that shot) and *solves* for the `EditRecipe` that reproduces
+  it through the engine — CDF tone matching, then saturation, then colour cast.
+  No pixels are copied, so the fit applies at full sensor resolution and writes
+  recipe.json + XMP. Deterministic, **no API key needed**.
 - **Generative (experimental)** — `reimagine` / `retouch` via OpenAI Images.
 - **Pixel retouch / Heal (experimental)** — an optional mode where the AI removes
   dust / blemishes / specks by healing from SURROUNDING REAL pixels
@@ -67,13 +78,20 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
 ## Quick start
 
 ```bash
-cargo build --release            # builds target/release/autoshop(.exe)
-cargo test                       # unit + engine tests
+cargo build --release                                    # CLI → target/release/autoshop(.exe)
+cargo build --release --features gui --bin autoshop-gui  # desktop app → autoshop-gui(.exe)
+cargo test                                               # unit + engine tests
 ```
 
-Then either:
+The GUI sits behind the `gui` feature so a plain `cargo build` / `cargo test`
+never pulls in eframe + winit + the GL stack. Both binaries link the same engine
+library, and each tagged release ships both prebuilt for Windows.
 
-- **Web UI (easiest):** double-click `Autoshop-UI.bat` (Windows) — it serves your
+Then any of:
+
+- **Desktop app:** run `autoshop-gui` (or the released `.exe`) and point it at a
+  folder — the full editor, no server and no browser involved.
+- **Web UI:** double-click `Autoshop-UI.bat` (Windows) — it serves your
   library and opens the browser. Or: `autoshop serve "D:\path\to\photos" --port 8080`.
 - **CLI:**
   ```bash
@@ -93,6 +111,7 @@ autoshop eval    <dir> [--limit N]           # compare AI edits vs your own .xmp
 autoshop style-index <dir>                   # build the "your taste" reference index
 autoshop serve   <dir> [--port 8080]         # local web UI
 autoshop reimagine <raw> --prompt "..."      # experimental generative restyle
+autoshop match   <raw> <target> [--render] [--zoned]    # reverse-fit a look → editable recipe + XMP (no key)
 autoshop retouch   <raw> --mask m.png --prompt "..."    # experimental generative object removal
 autoshop heal      <src> [--mask m.png] [--no-auto]     # pixel heal: spot/blemish removal (NOT generative)
 autoshop recipe-schema                       # print the EditRecipe JSON shape
@@ -119,8 +138,11 @@ protocol, different endpoint/credentials.
 
 Configure keys + models from the **Settings** panel — written to
 `autoshop.local.json` in your per-user Autoshop folder (never in a repo), which
-overrides the environment. Keys never leave your machine (the server is
-`127.0.0.1` only). You can also use `.env`:
+overrides the environment. Keys never leave your machine: the server binds
+`127.0.0.1`, refuses any request whose `Host`/`Origin` is not that exact
+loopback authority *on its own port*, never returns a key (settings answer
+`key_present: true/false`), and sends `X-Frame-Options: DENY` so a page you
+visit cannot frame the UI. You can also use `.env`:
 
 ```
 OPENAI_API_KEY=sk-...
@@ -195,8 +217,9 @@ environment. The two sidecar knobs (`AUTOSHOP_PYTHON`,
 
 ## Tech
 
-Rust (rustc/cargo 1.94) · `rawler` (Sony ARW decode) · `image` · `clap` ·
-`serde` · `ureq` · `tiny_http` (web UI) · Python + PyTorch + SCUNet (denoise) ·
-Claude CLI (verifier) · OpenAI Responses + Images (advisor + generative).
+Rust (rustc/cargo 1.94) · `rawler` (Sony ARW decode) · `image` · `rayon` ·
+`clap` · `serde` · `ureq` · `eframe`/`egui` (desktop GUI) · `tiny_http` (web UI) ·
+Python + PyTorch + SCUNet (denoise) · Claude CLI (verifier) ·
+OpenAI Responses + Images (advisor + generative).
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the full design.

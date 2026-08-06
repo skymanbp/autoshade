@@ -534,10 +534,36 @@ fn find_crs_description(doc: &str) -> Option<usize> {
 /// elements inside mask corrections (the batch-3 lesson: naive scans shred
 /// nested structures).
 fn find_matching_close(doc: &str, mut from: usize) -> Option<usize> {
+    const CLOSE: &str = "</rdf:Description>";
+    const OPEN: &str = "<rdf:Description";
     let mut depth = 0usize;
+    // The next close AT OR AFTER `from`, carried across iterations. Re-running
+    // the close search on every nested open made this Θ(k²) in the nesting
+    // depth: each open advances `from` by one tag while the search restarted
+    // and scanned all the way to the same distant close. A ~10 MB sidecar of
+    // nested <rdf:Description> (a hostile or merely pathological file sitting
+    // beside a RAW) then pegged a core for hours — inside SAVE_LOCK, holding
+    // one of the server's eight request permits. Caching is exact, not an
+    // approximation: no close exists in [old_from, close_abs), so none exists
+    // in [new_from, close_abs) either whenever `from` only moves forward.
+    let mut close_abs = from + doc[from..].find(CLOSE)?;
     loop {
-        let close_rel = doc[from..].find("</rdf:Description>")?;
-        match doc[from..from + close_rel].find("<rdf:Description") {
+        // Comments / PIs / CDATA are TEXT: a `</rdf:Description>` inside one is
+        // not a close. `crs_scope_inner` and `top_level_owned_spans` already
+        // skip all three; this scanner did not, so a sidecar carrying the
+        // literal in a comment reported a bogus close, the body came back
+        // truncated mid-construct, and the whole merge fell back to a fresh
+        // document — dropping every Lightroom-only property it exists to
+        // preserve. (Attribute values cannot trigger it: raw `<` is illegal
+        // there in XML, and `scan_tag_end` is quote-aware regardless.)
+        if let Some(skip) = skip_text_construct(doc, from, close_abs) {
+            from = skip;
+            if from > close_abs {
+                close_abs = from + doc[from..].find(CLOSE)?;
+            }
+            continue;
+        }
+        match doc[from..close_abs].find(OPEN) {
             Some(open_rel) => {
                 let abs = from + open_rel;
                 let (end, self_closing) = scan_tag_end(doc, abs)?;
@@ -545,17 +571,47 @@ fn find_matching_close(doc: &str, mut from: usize) -> Option<usize> {
                     depth += 1;
                 }
                 from = end + 1;
+                if from > close_abs {
+                    close_abs = from + doc[from..].find(CLOSE)?;
+                }
             }
             None => {
-                let abs = from + close_rel;
                 if depth == 0 {
-                    return Some(abs);
+                    return Some(close_abs);
                 }
                 depth -= 1;
-                from = abs + "</rdf:Description>".len();
+                from = close_abs + CLOSE.len();
+                close_abs = from + doc[from..].find(CLOSE)?;
             }
         }
     }
+}
+
+/// If a comment / PI / CDATA opens in `doc[from..limit)` BEFORE any
+/// `<rdf:Description`, answer the offset just past its terminator so the
+/// caller can resume there. `None` = nothing to skip in that window.
+///
+/// An UNTERMINATED construct answers `doc.len()`, which walks the caller off
+/// the end and makes its next `find(CLOSE)` fail: unbalanced markup must sink
+/// the whole scope (the caller falls back to the full document), never be
+/// silently read as tags.
+fn skip_text_construct(doc: &str, from: usize, limit: usize) -> Option<usize> {
+    const CONSTRUCTS: [(&str, &str); 3] = [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")];
+    let window = &doc[from..limit];
+    // Only a construct that opens before the next `<rdf:Description` matters —
+    // a later one is the NEXT iteration's problem, after this one's tag is
+    // accounted for.
+    let bound = window.find("<rdf:Description").unwrap_or(window.len());
+    let earliest = CONSTRUCTS
+        .iter()
+        .filter_map(|(open, close)| window[..bound].find(open).map(|rel| (rel, *open, *close)))
+        .min_by_key(|(rel, _, _)| *rel)?;
+    let (rel, open, close) = earliest;
+    let body_at = from + rel + open.len();
+    Some(match doc[body_at..].find(close) {
+        Some(end_rel) => body_at + end_rel + close.len(),
+        None => doc.len(),
+    })
 }
 
 /// Re-stamp the Autoshop rationale comment (older saves embedded it) so a
@@ -1372,6 +1428,66 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
 mod tests {
     use super::*;
     use crate::recipe::{CurvePoint, EditRecipe, LocalAdjustment};
+
+    /// The scope scanner meets a sidecar that is hostile rather than merely
+    /// unusual. Both halves were real defects: the close search restarted on
+    /// every nested open (Θ(k²) — this document took MINUTES before, inside
+    /// SAVE_LOCK and holding a server request permit), and a
+    /// `</rdf:Description>` inside a COMMENT was read as a real close, which
+    /// truncated the body and sank the whole merge to a fresh document,
+    /// dropping the Lightroom-only properties the merge exists to preserve.
+    #[test]
+    fn a_pathological_sidecar_neither_hangs_nor_believes_a_comment() {
+        // (a) Deep nesting: linear now, quadratic before. 20 000 opens is
+        // ~0.4 MB. MEASURED on this box: 0.02 s with the cached close cursor,
+        // 13.62 s when the cache is removed — 680x, on a file a user could
+        // receive by opening someone else's shoot. The assertion below pins
+        // correctness; the wall clock is the pin on the complexity, so keep
+        // the size when editing this test.
+        let mut doc = String::from(
+            r#"<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:Exposure2012="+0.50">"#,
+        );
+        let gt = doc.len() - 1;
+        for _ in 0..20_000 {
+            doc.push_str("<rdf:Description>");
+        }
+        for _ in 0..20_000 {
+            doc.push_str("</rdf:Description>");
+        }
+        doc.push_str("</rdf:Description>");
+        let close = find_matching_close(&doc, gt + 1).expect("the outermost close is found");
+        assert_eq!(&doc[close..close + 18], "</rdf:Description>");
+        assert_eq!(close, doc.len() - 18, "it is the LAST one, not an inner one");
+
+        // (b) A comment holding the close literal is TEXT, not a close.
+        let doc = format!(
+            "{}<!-- </rdf:Description> --><crs:Texture>25</crs:Texture></rdf:Description>",
+            r#"<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">"#
+        );
+        let gt = doc.find('>').unwrap();
+        let close = find_matching_close(&doc, gt + 1).expect("the real close is found");
+        assert_eq!(close, doc.len() - 18, "the comment's copy is not a close");
+        // …and the scope therefore still carries the child that follows it.
+        let scope = crs_own_scope(&doc);
+        assert!(scope.contains("crs:Texture"), "the body survived the comment: {scope}");
+
+        // (c) CDATA gets the same treatment.
+        let doc = format!(
+            "{}<![CDATA[ </rdf:Description> ]]><crs:Texture>25</crs:Texture></rdf:Description>",
+            r#"<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">"#
+        );
+        let gt = doc.find('>').unwrap();
+        assert_eq!(find_matching_close(&doc, gt + 1), Some(doc.len() - 18));
+
+        // (d) An UNTERMINATED comment is unaccountable markup: no close at all,
+        // so the caller falls back to the whole document rather than guessing.
+        let doc = format!(
+            "{}<!-- </rdf:Description>",
+            r#"<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">"#
+        );
+        let gt = doc.find('>').unwrap();
+        assert_eq!(find_matching_close(&doc, gt + 1), None);
+    }
 
     /// A creative profile's baked parameters are the PROFILE's, never the
     /// photographer's. Adobe nests them as owned-LOOKING crs children of a

@@ -980,6 +980,18 @@ async function selectPhoto(id, stem, el) {
   // of selectPhoto and leaving an empty control column with no explanation.
   let loaded = null, loadedFrom = null, loadedWarn = null, loadErr = null, freshCurve = null,
       freshLens = null, freshAsShot = null;
+  // The fresh-open calibration arrives through two doors (the 404 body below,
+  // and /api/fresh-base for a saved recipe) and the server builds ONE payload
+  // for both (serve::fresh_base_payload). Read it in one place too, or the two
+  // readers drift and a photo's calibration depends on which door it came
+  // through. An older server answering neither leaves all three null.
+  const takeFresh = (o) => {
+    if (!o) return;
+    if (Array.isArray(o.base_curve)) freshCurve = o.base_curve;
+    if (o.lens_profile) freshLens = o.lens_profile;
+    if (o.as_shot_k != null)
+      freshAsShot = { k: o.as_shot_k, t: (o.as_shot_tint != null ? o.as_shot_tint : null) };
+  };
   try {
     const rr = await fetch(`/api/recipe?id=${id}`);
     if (seq !== selectSeq) return;
@@ -995,11 +1007,7 @@ async function selectPhoto(id, stem, el) {
       // matched base look AND its in-camera lens profile, so a fresh open
       // matches a fresh GUI open instead of changing after the first Analyze.
       try {
-        const fresh = await rr.json();
-        if (fresh && Array.isArray(fresh.base_curve)) freshCurve = fresh.base_curve;
-        if (fresh && fresh.lens_profile) freshLens = fresh.lens_profile;
-        if (fresh && fresh.as_shot_k != null)
-          freshAsShot = { k: fresh.as_shot_k, t: (fresh.as_shot_tint != null ? fresh.as_shot_tint : null) };
+        takeFresh(await rr.json());
       } catch (_) { /* older server: plain-text 404 */ }
     }
     else loadErr = (await rr.text()) || `HTTP ${rr.status}`;
@@ -1016,13 +1024,7 @@ async function selectPhoto(id, stem, el) {
     try {
       const fr = await fetch(`/api/fresh-base?id=${id}`);
       if (seq !== selectSeq) return;
-      if (fr.ok) {
-        const f = await fr.json();
-        if (f && Array.isArray(f.base_curve)) freshCurve = f.base_curve;
-        if (f && f.lens_profile) freshLens = f.lens_profile;
-        if (f && f.as_shot_k != null)
-          freshAsShot = { k: f.as_shot_k, t: (f.as_shot_tint != null ? f.as_shot_tint : null) };
-      }
+      if (fr.ok) takeFresh(await fr.json());
     } catch (_) { /* older server without /api/fresh-base */ }
     if (seq !== selectSeq) return;
     state.recipe = Object.assign(structuredClone(DEFAULT_RECIPE), loaded);

@@ -253,7 +253,7 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         print!("[{}/{}] {} ... ", i + 1, pairs.len().min(limit), pipeline::stem(raw));
         use std::io::Write;
         let _ = std::io::stdout().flush();
-        let xmp_text = std::fs::read_to_string(raw.with_extension("xmp"))
+        let xmp_text = crate::store::read_sidecar(&raw.with_extension("xmp"))
             .with_context(|| format!("read user xmp for {}", raw.display()))?;
         let user = parse_user_xmp(&xmp_text);
         // style_strength = 0: eval measures the raw AI proposal vs your edits, so

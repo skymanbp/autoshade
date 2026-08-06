@@ -222,8 +222,8 @@ impl StyleIndex {
                             // produce a settings-free exemplar that dilutes
                             // retrieval (the pair scan guaranteed the .xmp
                             // exists — a read failure here is a real error).
-                            match std::fs::read_to_string(raw.with_extension("xmp")) {
-                                Ok(xmp) => {
+                            match crate::store::read_sidecar(&raw.with_extension("xmp")) {
+                                Some(xmp) => {
                                     let ex = StyleExemplar {
                                         stem: pipeline::stem(raw).to_string(),
                                         path: std::path::absolute(raw)
@@ -246,9 +246,9 @@ impl StyleIndex {
                                         None
                                     }
                                 }
-                                Err(e) => {
+                                None => {
                                     eprintln!(
-                                        "  skip {}: xmp unreadable: {e}",
+                                        "  skip {}: xmp unreadable or over the sidecar size cap",
                                         pipeline::stem(raw)
                                     );
                                     None
