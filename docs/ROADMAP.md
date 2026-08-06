@@ -19,6 +19,84 @@
 
 ## 当前状态（已完成，勿重做）
 
+- **单通道 debug（2026-08-06，用户令"进行一次完整的单通道debug"）**——单人
+  单轨全仓复核，基线门禁全绿后系统性通读 + 定向扫描，四条落地：
+  - **XMP 读取端穿透嵌套 Look（真缺陷，实证）**：写入端自批 3 起就是深度
+    感知的（`top_level_owned_spans`，为的正是 Adobe 把配置文件烘焙参数写成
+    `<crs:Look><rdf:Description><crs:Parameters><rdf:Description><crs:…>`
+    这一形状），**读取端 `crs_str` 仍是全文扁平扫描**——顶层 Description
+    缺某个键时，导入会从 Look 里取值当成用户滑杆。探针实证：clarity 0→50、
+    vibrance 0→35、还会学走 Look 烘焙的色调曲线。根治=新增
+    `xmp::crs_own_scope`（顶层标签 + 只属于它的子元素；嵌 `rdf:Description`
+    的容器一律丢弃，`MaskGroupBasedCorrections` 按名保留因其嵌的是自己的
+    蒙版项；无法核算的标记回退整档=修复前行为）。四个整档读者全部改走
+    scope：`xmp_to_recipe`、`unparsable_crs_numbers`（披露必须与导入同步）、
+    `style::read_settings` + `eval::user_curve_shape`（否则风格索引把 Adobe
+    的 Look 学成"这个用户的偏好"）。两条回归测试钉死。
+  - **i18n 死翻译**：`("Temp","色温")` 的调用点早已改为 "Temp (K)"/"Temp
+    shift"，条目成孤儿 → 删除（漂移 1→0）。
+  - **`apply_wb` 是唯一漏掉的串行逐像素段**：v0.11.0 的 rayon 扫荡覆盖了
+    色调/HSL/调色/曲线/去雾/暗角，独漏这一条——而它正是每次 Temp/Tint 改动
+    都要跑、导出时按全传感器分辨率跑的那条。改 `par_iter_mut`，逐位不变
+    （每像素只读自身 + 只读 LUT，无累加无顺序依赖；由既有的
+    `full_frame_local_wb_matches_the_global_wb_stage` 交叉钉死）。
+  - **文档数字失实**：ROADMAP 记 v0.16.0 为 51 提交，tag 区间实为 101；
+    ARCHITECTURE 的测试数 195 → 197。
+  - **测试模块通读的产出**（用户追加令"看到多余/重复/累赘的注释或者代码，
+    直接清理干净"）——六处清理，全部为注释/死代码，无行为改动：
+    - `style.rs::tag_describes_a_bright_tele_landscape` 只断言首尾两段，
+      **从不读时间段分量**——而 fixture 恰恰是刻意设了 `f[3]`/`f[4]` 才能
+      定出那一段；改 `assert_eq!` 钉全串 `tele/bright/night/landscape`，
+      同时删掉自相矛盾的注释（"midday-ish … → hour 0 = night"）。
+    - `pipeline.rs` 里"高调照片"那段注释被历次编辑挤到了 `washed_clipped`
+      头上，离它描述的 `high_key` 有 13 行 → 移回本位。
+    - `render.rs::dehaze_negative_adds_a_veil_without_clipping` 的
+      `let (w, h) = (64, 1)` 配一个结尾的 `let _ = h;` → 直接 `let w = 64`。
+    - `store.rs` 函数体内重复 `use crate::recipe::LocalAdjustment;`
+      （测试模块顶部已导入）。
+    - `i18n.rs` 悬空节注释 `// GRADE_REGIONS labels` 下面一条条目也没有
+      （四个标签实际散在 Tone 节与 UX 批次里）→ 删；另两处"某键已删除"的
+      墓碑注释 → 删（git 历史即记录）。
+  - 测试模块本身的结论：经 R1–R26 与 U14 加固后，断言普遍附带"这一条杀死
+    哪个具名变异"的说明，本轮未再发现瞎测试，唯一例外即上面那条 style.rs。
+    覆盖缺口如实记录：**`serve.rs` 2374 行只有 4 条单元测试**（HTTP 处理层
+    几乎无单元覆盖，靠 lib 层与真机验收兜底），本轮未扩测。
+  - **死代码 + 重复清理与等价精简**（用户令"全量清理死代码+多余/重复/累赘
+    的注释；能精简的地方进行等价精简"）——先量后改：自写函数长度/复杂度
+    度量与克隆检测（scratchpad 的 `fnmetrics.py` / `dupes.py` / `deadpub.py`，
+    带 Rust 原始字符串与块注释掩码），再按度量结果动刀：
+    - `pub` 死代码扫描：273 个 `pub` 项**无一处只出现在定义处**——lib 的
+      公开面全部有调用点，无可删项（如实记录，不是"清理了 N 个"）。
+    - `recipe.rs` 的 `#[allow(dead_code)]` 是**过期抑制**：实测删掉后 clippy
+      双配置仍为零告警——`clamp`/`is_noop` 早已是 pub 方法，永远不会被判死。
+    - 七处等价提取（全部为纯搬移，行为逐位不变）：`render::apply_crop`
+      （RAW 与烘焙两条路径的裁剪取整规则合一，二者必须一致）、
+      `render::apply_radial_gain`（手动暗角与机内暗角只差 LUT 的构造方式，
+      几何/传输对/遍历合并）、`render::rgb16_source`（三处 `let owned;`
+      延迟初始化的借用-或-转换惯用法 → 一个 `Cow`）、
+      `gui::release_empty_claim`（**五对** worker 失败/panic 尾部，连同逐字
+      重复五遍的 7 行注释）、`gui::sample_5x5_mean`（WB 吸管与颜色范围取样）、
+      `serve::deliverable_source`（export 与 download 的母版解析 + 纪元修复，
+      各 ~30 行逐字相同）、`decode::camera_rendition`（相机自有渲染的三级
+      回退，`preview_only` 与 `embedded_preview` 只差"没有算不算错"）、
+      `retouch::heal_and_save`（heal 与 clone_stamp 的原深度+alpha+暂存写）。
+    - 度量结果：函数总行数 31264 → **31076**，克隆组 83 → **74**。
+    - 未做的取舍：`gui.rs` 五个 `start_*` retouch worker 的外层脚手架仍有
+      ~16 行相似度，但中段各不相同，再抽象需要高阶闭包参数，收益不抵可读性
+      损失；测试夹具的重复（如 `poll_workers` 的两个 AutoshopApp 构造）保留
+      ——每条测试自带前提比共享构造器更易读。
+  - 门禁：**197 lib + 1 cli + 26 gui** 双配置绿、clippy 双零、i18n
+    458 调用点/486 条目/0 未译/0 孤儿、web `node --check` 通过、密钥扫描
+    干净。测试名**集合** diff（`git stash` 取真 HEAD 基线后逐名 `comm`）：
+    删除 **0**、新增 **2**（即上面那两条 XMP 回归），HEAD 的 225 条全部
+    健在——重构未吃掉任何一条测试。
+  - 覆盖度如实标注：**全仓 Rust 源码逐行通读完成**——lib / CLI /
+    `src/bin/gui.rs`（13059 行）/ `src/web/index.html`（1689 行），
+    **含每个文件的 `#[cfg(test)]` 测试模块**、`src/bin/i18n.rs` 的 486 条
+    翻译表、`python/{denoise,segment}.py`、`build.rs`。未读：
+    `python/weights/*`（vendored 上游权重，二进制）。**本轮未跑 Codex
+    独立复审**（本会话禁用子代理）。
+
 - **R12 双路全仓 debug 修复潮（2026-08-04，用户令"你自己和codex进行两路
   全仓debug，收敛后推送，发布新版本"）**——R1 双路扫描（Claude 12 单元
   舰队 + codex 10 单元）132 条原始 → ~93 条去重逐条裁决，七个修复批全部
@@ -124,7 +202,9 @@
     回归）；修复记忆表身份=尺寸+mtime；粘贴路径的 UI 线程估计；
     默认修饰母版 2048px 上限在 4096 偏好下会被整数放大（早于本战役、
     有设计注释）。
-  - **v0.16.0 发布**：51 提交（R11 尾部 D13 键位/U14 弱测试 + R12 全程）。
+  - **v0.16.0 发布**：**101 提交**（`git rev-list --count v0.15.0..v0.16.0`
+    = 101，其中 43 条 `R12 batch` + 7 条 round-N 舰队 + R11 尾部批 22–42
+    + 文档/发版）。此前记的 51 是漏计——发版范围按 tag 区间核定。
     发布说明披露：v0.15.0 的预览/修饰母版/基调估计整体 +0.5 偏白；该期
     首次打开的照片基调曲线来自偏白帧，本版在每条读写路径上自动重估并
     告知。

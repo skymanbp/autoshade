@@ -597,9 +597,6 @@ pub enum RangeMask {
     Color { r: f32, g: f32, b: f32, amount: f32, px: f32, py: f32 },
 }
 
-// `clamp` is used by the render engine + advisors; `is_noop` gates the GUI's
-// sidecar restore (a neutral XMP restores nothing) — keep both warning-free.
-#[allow(dead_code)]
 impl EditRecipe {
     /// Clamp every slider into its documented legal range. The AI is
     /// instructed to stay in range, but we never trust the input blindly —

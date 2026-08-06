@@ -31,6 +31,12 @@ struct UserEdit {
 }
 
 fn parse_user_xmp(xmp: &str) -> UserEdit {
+    // The Description's OWN scope, like every other whole-document reader
+    // (`xmp::crs_own_scope`): a nested creative Look's baked parameters are
+    // the PROFILE's, not the photographer's, and scoring the AI against them
+    // charged it for matching a look no slider in the sidecar states.
+    let xmp = crate::xmp::crs_own_scope(xmp);
+    let xmp = xmp.as_ref();
     // As-shot provenance: under WhiteBalance="As Shot", crs:Temperature/Tint
     // record the CAMERA's values, not a user edit — counting them charged the
     // AI a false "omission" for correctly leaving WB as-shot. Any OTHER value
@@ -187,7 +193,10 @@ fn curve_rmse(a: &[f32; 256], b: &[f32; 256]) -> f64 {
 /// curve. Stores the shape, not the raw point list (averaging point lists is
 /// mush). Reused by `style.rs` so the curve metric has one definition.
 pub(crate) fn user_curve_shape(xmp: &str) -> Option<(f32, f32)> {
-    let pts = parse_tone_curve(xmp, "ToneCurvePV2012");
+    // Scoped like every other whole-document read (`xmp::crs_own_scope`): a
+    // creative profile bakes its OWN ToneCurvePV2012 inside `<crs:Look>`, and
+    // a flat scan learned that curve as the photographer's habit.
+    let pts = parse_tone_curve(&crate::xmp::crs_own_scope(xmp), "ToneCurvePV2012");
     // ANY point counts — even a one-point curve renders (pinned endpoints,
     // the same rule the comparison loop follows). `< 2` silently dropped
     // real one-point curve habits from the style library.
@@ -303,7 +312,11 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         // user curve is a valid comparison baseline — curve_lut of no points
         // is the identity LUT). ANY point counts: even a one-point curve
         // renders (pinned endpoints), so `>= 2` still hid real curves.
-        let user_curve = parse_tone_curve(&xmp_text, "ToneCurvePV2012");
+        // Scoped like `user_curve_shape` and `parse_user_xmp` — the SAME rule
+        // at every read of a whole sidecar, or the report scores the AI
+        // against a curve the profile baked, not the one the user drew.
+        let user_curve =
+            parse_tone_curve(&crate::xmp::crs_own_scope(&xmp_text), "ToneCurvePV2012");
         let ai_curve = ai_tone_curve_points(&ai);
         if !user_curve.is_empty() || !ai_curve.is_empty() {
             let ulut = curve_lut(&user_curve);

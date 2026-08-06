@@ -103,6 +103,14 @@ fn read_settings(xmp: &str) -> BTreeMap<String, f32> {
     // values, not a user edit — learning them taught the style index to
     // "prefer" whatever Kelvin the user's camera metered. Any other value
     // (Custom / a preset) is a user decision; absent = non-LR, kept.
+    // Same scope rule as every other whole-document reader
+    // (`xmp::crs_own_scope`): a nested creative Look's baked parameters belong
+    // to the PROFILE, not the photographer, and learning them would teach the
+    // index that this user "prefers" whatever look Adobe ships — the same
+    // provenance error the as-shot rule above guards against, one container
+    // deeper.
+    let xmp = crate::xmp::crs_own_scope(xmp);
+    let xmp = xmp.as_ref();
     let user_wb = crate::xmp::crs_str(xmp, "WhiteBalance") != Some("As Shot");
     REF_KEYS
         .iter()
@@ -515,12 +523,14 @@ mod tests {
         let mut f = [0.0f32; NDIM];
         f[0] = 120.0_f32.ln(); // tele
         f[5] = 0.7; // bright
+        // The hour rides a (sin, cos) pair: atan2(0, 1) = 0 → hour 0 → night.
         f[3] = 0.0;
-        f[4] = 1.0; // hour ~ 0/12 region → midday-ish via atan2(0,1)=0 → hour 0 = night
+        f[4] = 1.0;
         f[13] = 0.0; // landscape
-        let tag = derive_tag(&f);
-        assert!(tag.starts_with("tele/bright/"), "got {tag}");
-        assert!(tag.ends_with("/landscape"), "got {tag}");
+        // The WHOLE tag: the old starts_with/ends_with pair never read the
+        // time-of-day component, so the one field this fixture sets on purpose
+        // was the one field it could not judge.
+        assert_eq!(derive_tag(&f), "tele/bright/night/landscape");
     }
 
     #[test]

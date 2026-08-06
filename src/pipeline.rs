@@ -1363,11 +1363,6 @@ mod tests {
         // a real neutral is DARK, which is why the base curve exists.
         let tuned = vec![[0.0, 0.0], [0.126, 0.29], [0.31, 0.55], [0.493, 0.78], [1.0, 1.0]];
         assert!(!base_curve_looks_pre_era(1, &tuned), "a legitimate curve must be left alone");
-        // A legitimately HIGH-KEY photo: its darkest 2% really is above
-        // mid-grey, so every interior input clears 0.5 — but the curve still
-        // LIFTS, as a camera base look does. Re-estimating it would replace a
-        // saved look for no reason (the estimator need not reproduce a curve
-        // an older build, or the user, authored).
         // A washed curve whose TOP interior knot clips on both sides: the
         // neutral saturates because of the bias, the camera rendition because
         // the frame really does hold blown highlights. The tie must not read
@@ -1381,6 +1376,11 @@ mod tests {
         // not the bias either.
         let flat = vec![[0.0, 0.0], [0.55, 0.55], [0.80, 0.79], [1.0, 1.0], [1.0, 1.0]];
         assert!(!base_curve_looks_pre_era(1, &flat), "no measurable darkening is no fingerprint");
+        // A legitimately HIGH-KEY photo: its darkest 2% really is above
+        // mid-grey, so every interior input clears 0.5 — but the curve still
+        // LIFTS, as a camera base look does. Re-estimating it would replace a
+        // saved look for no reason (the estimator need not reproduce a curve
+        // an older build, or the user, authored).
         let high_key = vec![[0.0, 0.0], [0.55, 0.68], [0.72, 0.84], [0.93, 0.97], [1.0, 1.0]];
         assert!(
             !base_curve_looks_pre_era(1, &high_key),

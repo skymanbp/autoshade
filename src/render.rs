@@ -15,6 +15,7 @@
 //! (deferred — the XMP→Lightroom path renders those, see [`apply_masks`];
 //! local temperature/tint ARE engine-rendered since batch #2-B).
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -26,7 +27,7 @@ use rawler::rawsource::RawSource;
 use rawler::Orientation;
 use rayon::prelude::*;
 
-use crate::recipe::{EditRecipe, MaskGeometry, RangeMask};
+use crate::recipe::{Crop, EditRecipe, MaskGeometry, RangeMask};
 
 const LUT_N: usize = 4096;
 
@@ -220,19 +221,35 @@ pub fn render_to_image_in(
         dynimg = rotate_straighten(&dynimg, recipe.straighten_deg);
     }
 
-    // --- crop (normalised [0,1] on the displayed frame) ----------------------
-    if let Some(c) = &recipe.crop {
-        let (iw, ih) = (dynimg.width() as f32, dynimg.height() as f32);
-        let x = (c.left.clamp(0.0, 1.0) * iw).round() as u32;
-        let y = (c.top.clamp(0.0, 1.0) * ih).round() as u32;
-        let cw = (((c.right - c.left).clamp(0.0, 1.0)) * iw).round() as u32;
-        let ch = (((c.bottom - c.top).clamp(0.0, 1.0)) * ih).round() as u32;
-        if cw > 0 && ch > 0 {
-            dynimg = dynimg.crop_imm(x, y, cw, ch);
-        }
-    }
+    Ok(apply_crop(dynimg, recipe.crop.as_ref()))
+}
 
-    Ok(dynimg)
+/// The user crop — normalised [0,1] on the DISPLAYED frame, i.e. after
+/// orientation, lens geometry and straighten. Shared by the RAW and the baked
+/// paths so ONE rounding rule serves both (they must agree: the same recipe
+/// exports the same rectangle whichever source it rides). A degenerate
+/// rectangle is a no-op rather than a zero-size image.
+fn apply_crop(img: DynamicImage, crop: Option<&Crop>) -> DynamicImage {
+    let Some(c) = crop else { return img };
+    let (iw, ih) = (img.width() as f32, img.height() as f32);
+    let x = (c.left.clamp(0.0, 1.0) * iw).round() as u32;
+    let y = (c.top.clamp(0.0, 1.0) * ih).round() as u32;
+    let cw = ((c.right - c.left).clamp(0.0, 1.0) * iw).round() as u32;
+    let ch = ((c.bottom - c.top).clamp(0.0, 1.0) * ih).round() as u32;
+    if cw == 0 || ch == 0 {
+        return img;
+    }
+    img.crop_imm(x, y, cw, ch)
+}
+
+/// Borrow an already-16-bit source, converting only when it is not one: the
+/// export path arrives as `ImageRgb16`, where `to_rgb16()` would copy ~366 MB
+/// at 61 MP (A7). Every resampler that reads 16-bit pixels goes through here.
+fn rgb16_source(img: &DynamicImage) -> Cow<'_, ImageBuffer<Rgb<u16>, Vec<u16>>> {
+    match img.as_rgb16() {
+        Some(b) => Cow::Borrowed(b),
+        None => Cow::Owned(img.to_rgb16()),
+    }
 }
 
 /// Develop an already-baked image (the "PNG source" mode: edit an LR/PS-denoised
@@ -285,18 +302,8 @@ pub fn render_baked_to_image(
         dynimg = rotate_straighten(&dynimg, recipe.straighten_deg);
     }
 
-    // Crop (normalised [0,1]) — orientation is already baked into the source.
-    if let Some(c) = &recipe.crop {
-        let (iw, ih) = (dynimg.width() as f32, dynimg.height() as f32);
-        let x = (c.left.clamp(0.0, 1.0) * iw).round() as u32;
-        let y = (c.top.clamp(0.0, 1.0) * ih).round() as u32;
-        let cw = (((c.right - c.left).clamp(0.0, 1.0)) * iw).round() as u32;
-        let ch = (((c.bottom - c.top).clamp(0.0, 1.0)) * ih).round() as u32;
-        if cw > 0 && ch > 0 {
-            dynimg = dynimg.crop_imm(x, y, cw, ch);
-        }
-    }
-    Ok(dynimg)
+    // Orientation is already baked into the source here.
+    Ok(apply_crop(dynimg, recipe.crop.as_ref()))
 }
 
 /// The output pipeline — Lightroom's export page distilled to the controls
@@ -991,57 +998,45 @@ fn luma601(p: &[f32; 3]) -> f32 {
 /// proprietary — this is our documented approximation (XMP carries the raw
 /// slider values, so Lightroom re-renders with its own model).
 fn apply_vignette(data: &mut [[f32; 3]], w: usize, h: usize, amount: f32, midpoint: f32) {
-    if w == 0 || h == 0 {
-        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
-    }
-    let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
-    let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
     let gamma = 0.6 + 2.4 * (midpoint.clamp(0.0, 100.0) / 100.0);
     let k = amount.clamp(-100.0, 100.0) / 100.0;
-    // This stage used to cost 7 powf per pixel (rn^gamma + two transfer curves
-    // × 3 channels) on every preview tick / export. Three LUTs replace them:
-    // the radial gain over rn ∈ [0,1], and the shared transfer pair. Rows are
-    // independent, so the pass is also row-parallel.
     let gain_lut: Vec<f32> = (0..LUT_N)
         .map(|i| 1.0 + k * (i as f32 / (LUT_N - 1) as f32).powf(gamma))
         .collect();
-    let (dec, enc) = transfer_luts();
-    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let dy = y as f32 - cy;
-        for (x, px) in row.iter_mut().enumerate() {
-            let dx = x as f32 - cx;
-            let rn = ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0);
-            let gain = sample_lut(&gain_lut, rn);
-            if (gain - 1.0).abs() < 1e-6 {
-                continue;
-            }
-            for c in px.iter_mut() {
-                *c = sample_lut(enc, (sample_lut(dec, *c) * gain).clamp(0.0, 1.0));
-            }
-        }
-    });
+    apply_radial_gain(data, w, h, &gain_lut);
 }
 
 /// In-camera profile vignetting: per-knot linear-light GAINS over the
 /// normalised corner radius (knot placement (i+0.5)/(n−1) — see `lensmeta`),
-/// linearly interpolated. Same LUT + row-parallel skeleton as the manual
-/// stage below; gains come from the camera, not a slider model.
+/// linearly interpolated. Gains come from the camera, not a slider model.
 fn apply_profile_vignette(data: &mut [[f32; 3]], w: usize, h: usize, knots: &[f32]) {
+    let gain_lut: Vec<f32> = (0..LUT_N)
+        .map(|i| profile_knot_interp(knots, i as f32 / (LUT_N - 1) as f32))
+        .collect();
+    apply_radial_gain(data, w, h, &gain_lut);
+}
+
+/// Apply a radial gain LUT — indexed by the normalised corner radius — in
+/// LINEAR light. The two vignette stages above differ ONLY in how they build
+/// that LUT, so the geometry, the transfer pair and the traversal live here
+/// once and cannot drift apart.
+///
+/// The stage used to cost 7 powf per pixel (rⁿ + two transfer curves × 3
+/// channels) on every preview tick and export; three LUTs replace them. Rows
+/// are independent, so the pass is row-parallel.
+fn apply_radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32]) {
     if w == 0 || h == 0 {
         return; // par_chunks_mut(0) asserts even on an empty slice (U14)
     }
     let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
     let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
-    let gain_lut: Vec<f32> = (0..LUT_N)
-        .map(|i| profile_knot_interp(knots, i as f32 / (LUT_N - 1) as f32))
-        .collect();
     let (dec, enc) = transfer_luts();
     data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         let dy = y as f32 - cy;
         for (x, px) in row.iter_mut().enumerate() {
             let dx = x as f32 - cx;
             let rn = ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0);
-            let gain = sample_lut(&gain_lut, rn);
+            let gain = sample_lut(gain_lut, rn);
             if (gain - 1.0).abs() < 1e-6 {
                 continue;
             }
@@ -1787,11 +1782,17 @@ fn apply_wb(data: &mut [[f32; 3]], as_shot_k: f32, target_k: f32, tint: f32) {
         return;
     }
     let luts = colour_gain_luts(g);
-    for px in data.iter_mut() {
+    // Row-parallel like every other per-pixel stage (the v0.11.0 sweep took
+    // the tone, HSL, grading, curve, dehaze and vignette passes; this one was
+    // left serial and is the stage EVERY Temp/Tint tick runs through, at full
+    // sensor resolution on export). Each pixel reads only itself and the
+    // read-only LUTs, so the result is bit-identical — no accumulation and no
+    // order dependence to change.
+    data.par_iter_mut().for_each(|px| {
         for c in 0..3 {
             px[c] = sample_lut(&luts[c], px[c]);
         }
-    }
+    });
 }
 
 /// The ONE recipe→WB stage, shared by the full-res render, the baked-image
@@ -2695,16 +2696,8 @@ pub fn rotate_straighten(img: &DynamicImage, deg: f32) -> DynamicImage {
     if img.width() == 0 || img.height() == 0 {
         return img.clone();
     }
-    // Borrow an already-16-bit source instead of cloning it (the export path
-    // arrives here as ImageRgb16 — to_rgb16() would copy ~366 MB at 61 MP).
-    let owned;
-    let src = match img.as_rgb16() {
-        Some(b) => b,
-        None => {
-            owned = img.to_rgb16();
-            &owned
-        }
-    };
+    let src = rgb16_source(img);
+    let src = &*src; // the samplers take a plain &ImageBuffer
     let (w, h) = (src.width() as f32, src.height() as f32);
     let (cw, ch) = inscribed_dims(w, h, deg);
     let (ow, oh) = ((cw.floor() as u32).max(1), (ch.floor() as u32).max(1));
@@ -2893,15 +2886,8 @@ pub fn apply_lens_distortion(img: &DynamicImage, amount: f32) -> DynamicImage {
     if img.width() == 0 || img.height() == 0 {
         return img.clone();
     }
-    // Borrow an already-16-bit source (same policy as rotate_straighten).
-    let owned;
-    let src = match img.as_rgb16() {
-        Some(b) => b,
-        None => {
-            owned = img.to_rgb16();
-            &owned
-        }
-    };
+    let src = rgb16_source(img);
+    let src = &*src; // the samplers take a plain &ImageBuffer
     let (w, h) = (src.width() as f32, src.height() as f32);
     let (k, s) = distort_params(amount);
     let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
@@ -3299,14 +3285,8 @@ pub fn apply_lens_geometry(
     if !dist_on && !ca_on {
         return apply_lens_distortion(img, amount);
     }
-    let owned;
-    let src = match img.as_rgb16() {
-        Some(b) => b,
-        None => {
-            owned = img.to_rgb16();
-            &owned
-        }
-    };
+    let src = rgb16_source(img);
+    let src = &*src; // the samplers take a plain &ImageBuffer
     let (w, h) = (src.width() as f32, src.height() as f32);
     let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
     let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
@@ -5501,7 +5481,7 @@ mod tests {
     fn dehaze_negative_adds_a_veil_without_clipping() {
         // Adding haze is a convex blend toward the airlight: black lifts,
         // chroma drops, a neutral ramp stays strictly monotone, nothing clips.
-        let (w, h) = (64usize, 1usize);
+        let w = 64usize;
         let mut data: Vec<[f32; 3]> = (0..w)
             .map(|x| {
                 let v = x as f32 / (w - 1) as f32;
@@ -5523,7 +5503,6 @@ mod tests {
         for p in &data {
             assert!(p[0] < 1.0 && p[0] > 0.0, "veil must not clip: {p:?}");
         }
-        let _ = h;
     }
 
     #[test]

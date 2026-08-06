@@ -1753,7 +1753,6 @@ mod tests {
 
     #[test]
     fn detach_rasters_frees_a_loaded_version_from_its_snapshot() {
-        use crate::recipe::LocalAdjustment;
         let base = std::env::temp_dir().join("autoshop-store-test-detach");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();

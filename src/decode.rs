@@ -310,57 +310,26 @@ pub fn preview_only(path: &Path) -> Result<DynamicImage> {
     if !is_raw(path) {
         return load_image(path);
     }
-    let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
-    let decoder =
-        get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", path.display()))?;
-    let params = RawDecodeParams { image_index: 0 };
-    // Same 3-level fallback as decode_raw: embedded preview → thumbnail →
-    // the embedded full-size camera JPEG (never a sensor develop; see
-    // decode_raw for the rawler-source verification).
-    let img = if let Some(p) = decoder
-        .preview_image(&src, &params)
-        .map_err(|e| anyhow!("preview_image: {e}"))?
-    {
-        p
-    } else if let Some(t) = decoder
-        .thumbnail_image(&src, &params)
-        .map_err(|e| anyhow!("thumbnail_image: {e}"))?
-    {
-        t
-    } else {
-        decoder
-            .full_image(&src, &params)
-            .map_err(|e| anyhow!("full_image: {e}"))?
-            .ok_or_else(|| anyhow!("no preview/thumbnail/full image in {}", path.display()))?
-    };
-    // Embedded previews come back in SENSOR orientation (rawler's ARW path
-    // decodes the JPEG bytes verbatim — verified in the crate source). Orient
-    // here with the render engine's own function so masks / crop / straighten,
-    // which are all defined against the displayed preview, mean the same
-    // thing in the full-res render (it orients before develop now too).
-    // The dummy raw_image decodes metadata only — no sensor decompression.
-    let orientation = decoder
-        .raw_image(&src, &params, true)
-        .map_err(|e| anyhow!("raw_image(dummy): {e}"))?
-        .orientation;
-    Ok(crate::render::oriented(img, orientation))
+    camera_rendition(path)?
+        .ok_or_else(|| anyhow!("no preview/thumbnail/full image in {}", path.display()))
 }
 
-/// The camera's OWN rendition only — embedded preview, thumbnail, or the
-/// embedded full-size JPEG — oriented; `None` when the RAW carries none.
-/// All three rawler levels are camera-baked extractions, never a sensor
-/// develop: `full_image` reads the JPEGInterchangeFormat blob for ARW (and
-/// the analogous embedded image for CR2/CR3/DNG), and its DEFAULT impl
-/// returns `Ok(None)` — verified in the rawler 0.7.2 source. The level-3
-/// call is essential in practice: rawler's ARW decoder implements ONLY
-/// `full_image` (no preview/thumbnail overrides), so every A7RIV file
-/// answers on that level alone. Callers (the base-look estimator) rely on
-/// this "camera pixels or nothing" contract — a neutral develop standing in
-/// would make the camera-vs-neutral CDF comparison meaningless.
-pub fn embedded_preview(path: &Path) -> Result<Option<DynamicImage>> {
-    if !is_raw(path) {
-        return Ok(None);
-    }
+/// The camera's own rendition of a RAW, oriented — `None` when it carries
+/// none. The 3-level fallback (embedded preview → thumbnail → the embedded
+/// full-size camera JPEG) shared by `preview_only` and `embedded_preview`,
+/// which differ only in whether "none" is an error.
+///
+/// All three levels are camera-baked EXTRACTIONS, never a sensor develop
+/// (see `decode_raw` for the rawler-source verification), so the base-look
+/// estimator's camera-vs-neutral CDF comparison stays meaningful.
+///
+/// Embedded previews come back in SENSOR orientation (rawler's ARW path
+/// decodes the JPEG bytes verbatim — verified in the crate source), so they
+/// are oriented here with the render engine's own function: masks, crop and
+/// straighten are all defined against the displayed preview and must mean the
+/// same thing in the full-res render. The dummy `raw_image` that carries the
+/// orientation decodes metadata only — no sensor decompression.
+fn camera_rendition(path: &Path) -> Result<Option<DynamicImage>> {
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
     let decoder =
         get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", path.display()))?;
@@ -388,6 +357,24 @@ pub fn embedded_preview(path: &Path) -> Result<Option<DynamicImage>> {
         .map_err(|e| anyhow!("raw_image(dummy): {e}"))?
         .orientation;
     Ok(Some(crate::render::oriented(img, orientation)))
+}
+
+/// The camera's OWN rendition only — `None` for a non-RAW or a RAW that
+/// carries none.
+///
+/// `full_image` reads the JPEGInterchangeFormat blob for ARW (and the
+/// analogous embedded image for CR2/CR3/DNG), and its DEFAULT impl returns
+/// `Ok(None)` — verified in the rawler 0.7.2 source. That level-3 call is
+/// essential in practice: rawler's ARW decoder implements ONLY `full_image`
+/// (no preview/thumbnail overrides), so every A7RIV file answers there alone.
+/// Callers (the base-look estimator) rely on this "camera pixels or nothing"
+/// contract — a neutral develop standing in would make the camera-vs-neutral
+/// CDF comparison meaningless.
+pub fn embedded_preview(path: &Path) -> Result<Option<DynamicImage>> {
+    if !is_raw(path) {
+        return Ok(None);
+    }
+    camera_rendition(path)
 }
 
 fn compute_histogram(img: &DynamicImage) -> Histogram {

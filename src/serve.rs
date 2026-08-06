@@ -1581,6 +1581,52 @@ fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
         .then(|| DenoiseOpts::from_config(cfg, None, req.denoise_strength.unwrap_or(1.0)))
 }
 
+/// Resolve the pixel source for a DELIVERABLE (export / download) and repair
+/// the recipe's base curve exactly once. `Err` carries the response to return.
+///
+/// A session master wins here as it does in the preview (`api_develop`'s
+/// rule) — the deliverable must match the healed canvas the user just
+/// approved — and a generated master strips the roots that describe the RAW
+/// rather than those pixels. Unlike the preview, a broken master link
+/// REFUSES instead of silently delivering the un-retouched source (A6):
+/// server-side state, so a 500 whose body names the remedy, while an unissued
+/// or forged claim is the client's fault and gets a 400.
+///
+/// The repair is keyed on whether the funnel RAN, never on its note — a None
+/// note also means "tried, inability", and re-running the identical call paid
+/// the failed decode twice per request while holding the HEAVY lock.
+fn deliverable_source(
+    req: &mut DevelopReq,
+    raw: &Path,
+) -> std::result::Result<(PathBuf, Option<String>), ResponseBox> {
+    let mut note: Option<String> = None;
+    let mut funnel_ran = false;
+    let src = match session_master(req.master.as_deref(), raw) {
+        Ok(Some((p, generated))) => {
+            if generated {
+                req.recipe.base_curve = Vec::new();
+                req.recipe.lens_profile = Default::default();
+                req.recipe.as_shot_k = None;
+                req.recipe.as_shot_tint = None;
+            }
+            p
+        }
+        Ok(None) => match crate::store::render_source_checked(raw, &mut req.recipe) {
+            Ok((p, n)) => {
+                note = n;
+                funnel_ran = true;
+                p
+            }
+            Err(msg) => return Err(status_response(500, &msg)),
+        },
+        Err(msg) => return Err(status_response(400, &msg)),
+    };
+    if !funnel_ran {
+        note = crate::pipeline::repair_pre_era_base_curve(raw, &mut req.recipe);
+    }
+    Ok((src, note))
+}
+
 /// Export to ./out (the library stays read-only). Returns the written path.
 fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // Full-resolution work — see HEAVY. Held for the whole handler.
@@ -1594,42 +1640,11 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     };
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
-    // Session master wins here too (api_develop's rule) — the deliverable
-    // must match the healed preview the user just approved, generated-root
-    // strip included.
-    let mut recipe_note: Option<String> = None;
-    let mut funnel_ran = false;
-    let src = match session_master(req.master.as_deref(), &raw) {
-        Ok(Some((p, generated))) => {
-            if generated {
-                req.recipe.base_curve = Vec::new();
-                req.recipe.lens_profile = Default::default();
-                req.recipe.as_shot_k = None;
-                req.recipe.as_shot_tint = None;
-            }
-            p
-        }
-        // DELIVERABLE: a broken master link refuses instead of silently
-        // exporting the un-retouched source (A6). Server-side state, not the
-        // client's request — a 500 whose body names the remedy.
-        Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
-            Ok((p, note)) => {
-                recipe_note = note;
-                funnel_ran = true;
-                p
-            }
-            Err(msg) => return Ok(status_response(500, &msg)),
-        },
-        Err(msg) => return Ok(status_response(400, &msg)),
+    // The client reads X-Recipe-Warning on this fetch too (see api_develop).
+    let (src, recipe_note) = match deliverable_source(&mut req, &raw) {
+        Ok(v) => v,
+        Err(resp) => return Ok(resp),
     };
-    // ONE repair for the session-master arm (the funnel never ran there).
-    // Keyed on whether the funnel RAN, never on the note — a None note also
-    // means "tried, inability", and re-running the identical call paid the
-    // failed decode twice per request while holding the HEAVY lock. The
-    // client reads X-Recipe-Warning on this fetch too (see api_develop).
-    if !funnel_ran {
-        recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
-    }
     // Fixed name BY DESIGN: re-exporting the same photo replaces its own
     // previous deliverable. Recorded residual: two same-stem photos from
     // DIFFERENT folders share this name (the batch-naming avoidance ruling
@@ -1682,37 +1697,10 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     };
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
-    // Session master wins here too (api_develop's rule), generated-root
-    // strip included.
-    let mut recipe_note: Option<String> = None;
-    let mut funnel_ran = false;
-    let src = match session_master(req.master.as_deref(), &raw) {
-        Ok(Some((p, generated))) => {
-            if generated {
-                req.recipe.base_curve = Vec::new();
-                req.recipe.lens_profile = Default::default();
-                req.recipe.as_shot_k = None;
-                req.recipe.as_shot_tint = None;
-            }
-            p
-        }
-        // DELIVERABLE: a broken master link refuses instead of silently
-        // exporting the un-retouched source (A6). Server-side state, not the
-        // client's request — a 500 whose body names the remedy.
-        Ok(None) => match crate::store::render_source_checked(&raw, &mut req.recipe) {
-            Ok((p, note)) => {
-                recipe_note = note;
-                funnel_ran = true;
-                p
-            }
-            Err(msg) => return Ok(status_response(500, &msg)),
-        },
-        Err(msg) => return Ok(status_response(400, &msg)),
+    let (src, recipe_note) = match deliverable_source(&mut req, &raw) {
+        Ok(v) => v,
+        Err(resp) => return Ok(resp),
     };
-    // ONE repair for the session-master arm — see api_export.
-    if !funnel_ran {
-        recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
-    }
     // Config SNAPSHOT — see api_export.
     let cfg = state.config().clone();
     let ext = fmt_ext(&req);

@@ -577,21 +577,29 @@ pub fn heal(
     }
 
     let n = spots.len();
-    // Native-depth heal + alpha carry-through (U30): a 16-bit source must not
-    // quantise to 8 bits just to pass the healer, and transparency is not a
-    // defect — the alpha plane rides through untouched.
+    heal_and_save(base, &spots, out)?;
+    Ok(HealReport { spots: n, rationale, dims: (w, h) })
+}
+
+/// Heal at the source's OWN depth, carry alpha through, and stage the result
+/// as the pixel master (U30).
+///
+/// A 16-bit source must not quantise to 8 bits just to pass the healer, and
+/// transparency is not a defect — the alpha plane rides through untouched.
+/// Shared by `heal` and `clone_stamp`, which differ only in how they build
+/// the spot list.
+fn heal_and_save(base: DynamicImage, spots: &[HealSpot], out: &Path) -> Result<()> {
     let alpha = split_alpha(&base);
     let healed = if deep_color(&base) {
         let mut rgb = base.into_rgb16();
-        heal_image(&mut rgb, &spots);
+        heal_image(&mut rgb, spots);
         DynamicImage::ImageRgb16(rgb)
     } else {
         let mut rgb = base.into_rgb8();
-        heal_image(&mut rgb, &spots);
+        heal_image(&mut rgb, spots);
         DynamicImage::ImageRgb8(rgb)
     };
-    save_master(out, reattach_alpha(healed, alpha))?;
-    Ok(HealReport { spots: n, rationale, dims: (w, h) })
+    save_master(out, reattach_alpha(healed, alpha))
 }
 
 /// 8-bit or deeper? Everything that is not 8-bit heals at 16 bits.
@@ -714,18 +722,7 @@ pub fn clone_stamp(
         s.label = "clone".into();
     }
     let n = spots.len();
-    // Same native-depth + alpha + staged-save contract as `heal` (U30).
-    let alpha = split_alpha(&base);
-    let healed = if deep_color(&base) {
-        let mut rgb = base.into_rgb16();
-        heal_image(&mut rgb, &spots);
-        DynamicImage::ImageRgb16(rgb)
-    } else {
-        let mut rgb = base.into_rgb8();
-        heal_image(&mut rgb, &spots);
-        DynamicImage::ImageRgb8(rgb)
-    };
-    save_master(out, reattach_alpha(healed, alpha))?;
+    heal_and_save(base, &spots, out)?;
     Ok(HealReport { spots: n, rationale: String::new(), dims: (w, h) })
 }
 

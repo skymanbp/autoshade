@@ -243,7 +243,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Blue", "蓝"),
     ("Purple", "紫"),
     ("Magenta", "洋红"),
-    // GRADE_REGIONS labels (Color Grading region picker).
 
     // ── Develop · Crop + Lens ────────────────────────────────────────────────
     ("Crop", "裁剪 · Crop"),
@@ -315,7 +314,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "在图上点击要选取的颜色（亮暗不同的同色也会被选中；再点一次此按钮取消取样）"),
     ("Tolerance", "容差 Tolerance"),
     ("Amount", "强度"),
-    ("Temp", "色温"),
     ("More (XMP/Lightroom only)", "更多 · More（仅 XMP/Lightroom 生效）"),
     ("Texture", "纹理"),
     ("Lightroom-style local adjustments: add a gradient to darken the sky, a radial to brighten the subject. AI Analyze also writes to this list.",
@@ -699,8 +697,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("fetched {n} models ({chat} chat · {img} image)",
         "已拉取 {n} 个模型（{chat} 对话 · {img} 图像）"),
     ("fetch failed: {err}", "拉取失败：{err}"),
-    // (the " · zoned sky pass skipped …" fit note died with the R6 move of
-    //  the zoned/fit gate to persist time — key removed with its call site)
+
     // ── UX batch (toolbar slim-down · AI section · Export section · tools) ──
     ("AI", "AI"),
     ("AI Analyze", "AI 分析"),
@@ -764,9 +761,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("{n} other variant(s) hold edits — of this photo, or of photos you navigated away from. Only the ACTIVE variant of a photo can be saved: Cancel, open each one, and save it.",
         "还有 {n} 个变体存有编辑——本照片的，或你已经切走的照片的。每张照片只有「活动」变体能被保存：请取消，逐一打开并保存。"),
     ("Quit WITHOUT saving — these edits are gone for good", "不保存直接退出——这些编辑将永久丢失"),
-    // --- round-3 audit batch (new / reworded user-facing strings) ------------
-    // ("Save version failed: version namespace exhausted" folded into the
-    //  parametrized "Save version failed: {err}" key — stale twin removed)
+
+    // ── Round-3 audit batch (new / reworded user-facing strings) ─────────────
     ("no photos found in this folder", "此文件夹中没有找到照片"),
     ("AI「{what}」mask refreshed — the existing mask now uses the new selection (its sliders still apply)",
         "AI「{what}」蒙版已刷新——原有蒙版改用新的选区（其滑杆设置仍然生效）"),

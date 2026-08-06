@@ -676,6 +676,115 @@ fn top_level_owned_spans(
     Some(spans)
 }
 
+/// The crs Description's OWN property scope — the text every whole-document
+/// READ below must be restricted to: its opening tag plus the top-level
+/// children that carry ITS settings.
+///
+/// The mirror of [`top_level_owned_spans`], for the reader. Adobe writes a
+/// creative profile's baked parameters as owned-LOOKING children of a NESTED
+/// `rdf:Description` (`<crs:Look><rdf:Description><crs:Parameters>
+/// <rdf:Description><crs:Clarity2012>+50…`), and the scanners here
+/// ([`crs_str`], [`parse_curve`], [`parse_masks`]) match by name anywhere in
+/// the string they are given. Whenever the top-level Description OMITS a key
+/// the Look nests, the flat scan therefore answered from the profile — the
+/// import turned a camera profile's baked look into user slider values, and
+/// the next save persisted them. The WRITER's depth-aware strip exists for
+/// exactly this shape; the reader now shares the rule.
+///
+/// A top-level child that nests an `rdf:Description` is a CONTAINER of
+/// someone else's settings and is dropped. `crs:MaskGroupBasedCorrections`
+/// nests them too but IS this Description's own property (its nested
+/// Descriptions are its mask items), so it is kept by name — dropping it
+/// would blind [`parse_masks`].
+///
+/// `None` = markup this scanner cannot account for; [`crs_own_scope`] then
+/// hands back the whole document, which is exactly the pre-fix behaviour.
+fn crs_scope_inner(doc: &str) -> Option<String> {
+    /// Owned containers that legitimately nest `rdf:Description`.
+    const KEEP_NESTED: [&str; 1] = ["crs:MaskGroupBasedCorrections"];
+    let start = find_crs_description(doc)?;
+    let (gt, self_closing) = scan_tag_end(doc, start)?;
+    let mut out = doc[start..=gt].to_string();
+    if self_closing {
+        return Some(out); // every setting is an attribute — no children at all
+    }
+    let close = find_matching_close(doc, gt + 1)?;
+    let body = &doc[gt + 1..close];
+    let mut depth = 0usize;
+    // The top-level child currently open: (span start, tag name, nests an
+    // rdf:Description).
+    let mut open: Option<(usize, String, bool)> = None;
+    let mut i = 0usize;
+    while let Some(rel) = body[i..].find('<') {
+        let p = i + rel;
+        let rest = &body[p..];
+        // Comments / PIs / CDATA are TEXT — their `<`/`>` are not tags (the
+        // same three skips top_level_owned_spans makes, for the same reason:
+        // counting them unbalances `depth` and bails the whole scope).
+        if let Some(after) = rest.strip_prefix("<!--") {
+            i = p + 4 + after.find("-->")? + 3;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("<?") {
+            i = p + 2 + after.find("?>")? + 2;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            i = p + "<![CDATA[".len() + after.find("]]>")? + 3;
+            continue;
+        }
+        let (gt2, self_closing) = scan_tag_end(body, p)?;
+        let name = tag_name(&body[p..=gt2]).to_string();
+        if rest.starts_with("</") {
+            depth = depth.checked_sub(1)?; // a close with no open: unaccountable
+            if depth == 0
+                && let Some((s, open_name, nested)) = open.take()
+            {
+                if name != open_name {
+                    return None;
+                }
+                if !nested || KEEP_NESTED.contains(&open_name.as_str()) {
+                    out.push('\n');
+                    out.push_str(&body[s..=gt2]);
+                }
+            }
+            i = gt2 + 1;
+            continue;
+        }
+        if depth == 0 {
+            if self_closing {
+                // No children to inspect — a bare property element is ours.
+                out.push('\n');
+                out.push_str(&body[p..=gt2]);
+            } else {
+                open = Some((p, name.clone(), false));
+            }
+        } else if name == "rdf:Description"
+            && let Some(o) = open.as_mut()
+        {
+            o.2 = true; // this top-level child nests a foreign settings block
+        }
+        if !self_closing {
+            depth += 1;
+        }
+        i = gt2 + 1;
+    }
+    if open.is_some() || depth != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// [`crs_scope_inner`] with the whole-document fallback — what every reader
+/// that is handed a complete sidecar must pass to the scanners. Borrowed on
+/// the fallback path, so an unmergeable/unparseable document costs nothing.
+pub(crate) fn crs_own_scope(xmp: &str) -> std::borrow::Cow<'_, str> {
+    match crs_scope_inner(xmp) {
+        Some(s) => std::borrow::Cow::Owned(s),
+        None => std::borrow::Cow::Borrowed(xmp),
+    }
+}
+
 /// Graft `r`'s owned settings INTO an existing sidecar document, preserving
 /// every property Autoshop does not model — Lightroom-only globals
 /// (Texture), the camera profile / creative Look, Lightroom's lens-profile
@@ -906,6 +1015,11 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         "ToneCurveName2012",
         "HasSettings",
     ];
+    // The import's OWN scope (see `crs_own_scope`): a corrupt number inside a
+    // nested creative Look is not a setting this document restores, so
+    // reporting it would promise a loss that never happens — and the contract
+    // below is that this list is decided by what the import actually reads.
+    let scope = crs_own_scope(xmp);
     owned_attr_keys()
         .into_iter()
         .filter(|k| !STRINGY.contains(&k.as_str()))
@@ -914,7 +1028,7 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
             // (crs_f32, including its finiteness filter) so the disclosure
             // can never drift from what the import actually does: anything
             // read as None-while-present becomes a silent neutral.
-            crs_str(xmp, k).is_some() && crs_f32(xmp, k).is_none()
+            crs_str(&scope, k).is_some() && crs_f32(&scope, k).is_none()
         })
         .collect()
 }
@@ -1138,14 +1252,22 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
 /// untrusted recipe input.
 pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     let ours = is_autoshop_sidecar(xmp);
+    // EVERY setting below is read from this Description's OWN scope, never
+    // the raw document: a nested creative Look carries owned-LOOKING crs
+    // properties, and the flat scanners answered from them whenever the top
+    // level omitted the key (see `crs_own_scope`). The provenance reads
+    // (`is_autoshop_sidecar` above, the rationale comment below) deliberately
+    // stay on the whole document — they live OUTSIDE the Description.
+    let scope = crs_own_scope(xmp);
+    let scope = scope.as_ref();
     // Any EXPLICIT white balance is a user decision, not the camera's: ACR
     // writes Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash — each
     // with its own Temperature+Tint — and accepting only "Custom" imported all
     // of them as as-shot, dropping a WB the photographer had chosen. (Absent
     // is treated as explicit for the same reason `eval`/`style` do: a sidecar
     // carrying Temperature without the mode is still a stated value.)
-    let custom_wb = crs_str(xmp, "WhiteBalance") != Some("As Shot");
-    let f = |k: &str| crs_f32(xmp, k).unwrap_or(0.0);
+    let custom_wb = crs_str(scope, "WhiteBalance") != Some("As Shot");
+    let f = |k: &str| crs_f32(scope, k).unwrap_or(0.0);
 
     let mut hsl = Hsl::default();
     for (i, band) in crate::recipe::HSL_BANDS.iter().enumerate() {
@@ -1166,7 +1288,7 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         global_hue: f("ColorGradeGlobalHue"),
         global_sat: f("ColorGradeGlobalSat"),
         global_lum: f("ColorGradeGlobalLum"),
-        blending: crs_f32(xmp, "ColorGradeBlending").unwrap_or(ColorGrade::default().blending),
+        blending: crs_f32(scope, "ColorGradeBlending").unwrap_or(ColorGrade::default().blending),
         balance: f("SplitToningBalance"),
     };
     // Our own comment header carries the AI provenance back (best-effort; the
@@ -1181,7 +1303,7 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         .unwrap_or_default();
 
     let mut r = EditRecipe {
-        temperature_k: custom_wb.then(|| crs_f32(xmp, "Temperature")).flatten(),
+        temperature_k: custom_wb.then(|| crs_f32(scope, "Temperature")).flatten(),
         tint: if custom_wb || ours { f("Tint") } else { 0.0 },
         exposure_ev: f("Exposure2012"),
         contrast: f("Contrast2012"),
@@ -1199,19 +1321,19 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         sharpening: f("Sharpness") * 1.5,
         noise_reduction: f("LuminanceSmoothing"),
         lens_vignette: f("VignetteAmount"),
-        lens_vignette_mid: crs_f32(xmp, "VignetteMidpoint").unwrap_or(50.0),
+        lens_vignette_mid: crs_f32(scope, "VignetteMidpoint").unwrap_or(50.0),
         lens_distortion: f("LensManualDistortionAmount"),
         // Adobe applies CropAngle only under HasCrop="True" (see the crop
         // comment below) — importing a stale angle from a DISABLED crop
         // activated a straighten Adobe itself does not render.
-        straighten_deg: if crs_str(xmp, "HasCrop") == Some("True") { f("CropAngle") } else { 0.0 },
-        crop: (crs_str(xmp, "HasCrop") == Some("True"))
+        straighten_deg: if crs_str(scope, "HasCrop") == Some("True") { f("CropAngle") } else { 0.0 },
+        crop: (crs_str(scope, "HasCrop") == Some("True"))
             .then(|| {
                 Some(Crop {
-                    left: crs_f32(xmp, "CropLeft")?,
-                    top: crs_f32(xmp, "CropTop")?,
-                    right: crs_f32(xmp, "CropRight")?,
-                    bottom: crs_f32(xmp, "CropBottom")?,
+                    left: crs_f32(scope, "CropLeft")?,
+                    top: crs_f32(scope, "CropTop")?,
+                    right: crs_f32(scope, "CropRight")?,
+                    bottom: crs_f32(scope, "CropBottom")?,
                 })
             })
             .flatten()
@@ -1221,11 +1343,11 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
             .filter(|c| {
                 !(c.left <= 0.0 && c.top <= 0.0 && c.right >= 1.0 && c.bottom >= 1.0)
             }),
-        tone_curve: parse_curve(xmp, "ToneCurvePV2012"),
-        red_curve: parse_curve(xmp, "ToneCurvePV2012Red"),
-        green_curve: parse_curve(xmp, "ToneCurvePV2012Green"),
-        blue_curve: parse_curve(xmp, "ToneCurvePV2012Blue"),
-        masks: parse_masks(xmp),
+        tone_curve: parse_curve(scope, "ToneCurvePV2012"),
+        red_curve: parse_curve(scope, "ToneCurvePV2012Red"),
+        green_curve: parse_curve(scope, "ToneCurvePV2012Green"),
+        blue_curve: parse_curve(scope, "ToneCurvePV2012Blue"),
+        masks: parse_masks(scope),
         rationale,
         confidence,
         ..Default::default()
@@ -1250,6 +1372,102 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
 mod tests {
     use super::*;
     use crate::recipe::{CurvePoint, EditRecipe, LocalAdjustment};
+
+    /// A creative profile's baked parameters are the PROFILE's, never the
+    /// photographer's. Adobe nests them as owned-LOOKING crs children of a
+    /// second `rdf:Description` (`<crs:Look><rdf:Description><crs:Parameters>
+    /// <rdf:Description><crs:Clarity2012>…`) — the exact shape the WRITER's
+    /// depth-aware strip was built for. The reader's flat scan answered from
+    /// them whenever the top level omitted the key, so opening such a sidecar
+    /// wrote the profile's look into the user's sliders and the next save
+    /// persisted it.
+    #[test]
+    fn a_nested_look_is_not_a_user_edit() {
+        let doc = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:Version="15.5.1"
+    crs:Exposure2012="+0.20">
+   <crs:Look>
+    <rdf:Description crs:Name="Adobe Landscape">
+     <crs:Parameters>
+      <rdf:Description>
+       <crs:Clarity2012>+50</crs:Clarity2012>
+       <crs:Vibrance>+35</crs:Vibrance>
+       <crs:ToneCurvePV2012>
+        <rdf:Seq>
+         <rdf:li>0, 30</rdf:li>
+         <rdf:li>255, 255</rdf:li>
+        </rdf:Seq>
+       </crs:ToneCurvePV2012>
+      </rdf:Description>
+     </crs:Parameters>
+    </rdf:Description>
+   </crs:Look>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+"#;
+        let r = xmp_to_recipe(doc);
+        assert_eq!(r.exposure_ev, 0.20, "the Description's OWN attribute imports");
+        assert_eq!(r.clarity, 0.0, "the Look's Clarity2012 is not a user edit: {}", r.clarity);
+        assert_eq!(r.vibrance, 0.0, "the Look's Vibrance is not a user edit: {}", r.vibrance);
+        assert!(r.tone_curve.is_empty(), "the Look's baked curve is not a user curve");
+        // The disclosure follows the import: a corrupt number the import never
+        // reads must not be announced as a setting that will be lost.
+        let corrupt = doc.replace("<crs:Clarity2012>+50</crs:Clarity2012>", "<crs:Clarity2012>--</crs:Clarity2012>");
+        assert!(
+            unparsable_crs_numbers(&corrupt).is_empty(),
+            "only settings the import READS may be disclosed: {:?}",
+            unparsable_crs_numbers(&corrupt)
+        );
+        // …and the same key AT top level still imports, in both spellings.
+        for own in [
+            r#"crs:Exposure2012="+0.20" crs:Clarity2012="+12""#.to_string(),
+            r#"crs:Exposure2012="+0.20">
+   <crs:Clarity2012>+12</crs:Clarity2012"#
+                .to_string(),
+        ] {
+            let d = doc.replace(r#"crs:Exposure2012="+0.20""#, &own);
+            assert_eq!(xmp_to_recipe(&d).clarity, 12.0, "own Clarity2012 must import: {own}");
+        }
+    }
+
+    /// The scope keeps what the Description really owns — masks (whose nested
+    /// Descriptions are its own mask items) and plain property elements — and
+    /// falls back to the whole document when the markup cannot be accounted
+    /// for, which is the pre-scope behaviour.
+    #[test]
+    fn the_crs_scope_keeps_owned_children_and_degrades_safely() {
+        let mut r = EditRecipe {
+            exposure_ev: 0.5,
+            tone_curve: vec![CurvePoint { input: 0, output: 12 }, CurvePoint { input: 255, output: 250 }],
+            ..Default::default()
+        };
+        r.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.9, full_x: 0.5, full_y: 0.1 },
+            name: "sky".into(),
+            exposure_ev: -0.4,
+            ..Default::default()
+        });
+        // A full round-trip through the scope: masks and curves are OWNED and
+        // must survive it.
+        let doc = recipe_to_xmp(&r);
+        let back = xmp_to_recipe(&doc);
+        assert_eq!(back.tone_curve, r.tone_curve, "the owned tone curve survives the scope");
+        assert_eq!(back.masks.len(), 1, "owned mask corrections survive the scope");
+        assert_eq!(back.masks[0].name, "sky");
+        // Markup the scanner cannot account for (an unclosed element) falls
+        // back to the whole document rather than losing every setting.
+        let broken = doc.replace("</rdf:Description>", "");
+        assert!(crs_scope_inner(&broken).is_none(), "unaccountable markup yields no scope");
+        assert_eq!(
+            xmp_to_recipe(&broken).exposure_ev,
+            0.5,
+            "the fallback still reads the document"
+        );
+    }
 
     #[test]
     fn straighten_only_activates_crop_and_round_trips_to_no_crop() {
@@ -1352,11 +1570,11 @@ mod tests {
         assert!(!recipe_to_xmp(&EditRecipe::default()).contains("LensManualDistortionAmount"));
     }
 
-    #[test]
-    fn bitmap_masks_are_skipped_by_the_xmp_writer() {
-        use crate::recipe::MaskGeometry;
-        // Mixed parametric + raster: only the parametric mask is written.
-        let mixed = EditRecipe {
+    /// One parametric mask + one raster mask — the fixture behind BOTH halves
+    /// of the raster contract: the writer emits no raster correction, and the
+    /// reader therefore returns no phantom for one.
+    fn mixed_parametric_and_raster() -> EditRecipe {
+        EditRecipe {
             masks: vec![
                 LocalAdjustment {
                     mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.35, full_x: 0.5, full_y: 0.0 },
@@ -1370,7 +1588,13 @@ mod tests {
                 },
             ],
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn bitmap_masks_are_skipped_by_the_xmp_writer() {
+        use crate::recipe::MaskGeometry;
+        let mixed = mixed_parametric_and_raster();
         let xmp = recipe_to_xmp(&mixed);
         assert!(xmp.contains("Mask/Gradient"), "the parametric mask must survive");
         assert_eq!(xmp.matches("crs:What=\"Correction\"").count(), 1, "raster correction skipped");
@@ -2012,21 +2236,7 @@ mod tests {
     fn bitmap_masks_do_not_come_back_from_xmp() {
         // The writer skips raster corrections (no classic-XMP encoding), so the
         // reader must return only the parametric mask — never a phantom.
-        let mixed = EditRecipe {
-            masks: vec![
-                LocalAdjustment {
-                    mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.35, full_x: 0.5, full_y: 0.0 },
-                    exposure_ev: -1.0,
-                    ..Default::default()
-                },
-                LocalAdjustment {
-                    mask: MaskGeometry::Bitmap { path: "out/subject.png".into() },
-                    exposure_ev: 0.6,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
+        let mixed = mixed_parametric_and_raster();
         let back = xmp_to_recipe(&recipe_to_xmp(&mixed));
         assert_eq!(back.masks.len(), 1);
         assert_eq!(back.masks[0].mask, mixed.masks[0].mask);

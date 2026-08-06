@@ -896,6 +896,49 @@ fn unique_out(path: &std::path::Path, tag: &str) -> Option<PathBuf> {
     autoshop::pipeline::unique_out(path, tag)
 }
 
+/// Mean of the 5×5 neighbourhood around a normalised point, as 0..1 sRGB;
+/// `None` when the window falls entirely outside the image.
+///
+/// Both pickers — the WB eyedropper and the colour-range sample — read the
+/// 8-bit texture the user is AIMING at, which is the deliberate choice (U14):
+/// the aim surface IS the display. Per-pixel reads on 25 samples also beat
+/// the full-frame `to_rgb8()` copy the first versions allocated per click.
+fn sample_5x5_mean(img: &image::DynamicImage, nx: f32, ny: f32) -> Option<[f32; 3]> {
+    use image::GenericImageView as _;
+    let (w, h) = img.dimensions();
+    let (cx, cy) = (
+        (nx * (w.saturating_sub(1)) as f32).round() as i64,
+        (ny * (h.saturating_sub(1)) as f32).round() as i64,
+    );
+    let (mut acc, mut n) = ([0.0f32; 3], 0.0f32);
+    for dy in -2..=2i64 {
+        for dx in -2..=2i64 {
+            let (x, y) = (cx + dx, cy + dy);
+            if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
+                let p = img.get_pixel(x as u32, y as u32);
+                for c in 0..3 {
+                    acc[c] += p[c] as f32 / 255.0;
+                }
+                n += 1.0;
+            }
+        }
+    }
+    (n > 0.0).then(|| [acc[0] / n, acc[1] / n, acc[2] / n])
+}
+
+/// Give back an atomically claimed output name when nothing real landed.
+///
+/// The claim is a 0-byte placeholder, so an empty file means the run failed
+/// before writing anything: without this, failed runs consumed the 999-name
+/// cap and littered ./out with empty files. A NON-empty partial is left in
+/// place for diagnosis. Every retouch worker calls this on both failure paths
+/// — the normal error tail and the panic handler, where the tail never ran.
+fn release_empty_claim(p: &std::path::Path) {
+    if std::fs::metadata(p).is_ok_and(|m| m.len() == 0) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Do two spellings name the same baked master?
 ///
 /// An in-session retouch records its ./out artifact RELATIVE
@@ -8436,32 +8479,8 @@ impl AutoshopApp {
         let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
         let px = {
             let Some(base) = &self.base_preview else { return };
-            // Per-pixel reads on 25 samples — the old full-frame to_rgb8 copy
-            // allocated (and converted) the whole preview per click (same fix
-            // the colour-range sampler already carries).
-            use image::GenericImageView as _;
-            let (w, h) = base.dimensions();
-            let (cx, cy) = (
-                (nx * (w.saturating_sub(1)) as f32).round() as i64,
-                (ny * (h.saturating_sub(1)) as f32).round() as i64,
-            );
-            let (mut acc, mut n) = ([0.0f32; 3], 0.0f32);
-            for dy in -2..=2i64 {
-                for dx in -2..=2i64 {
-                    let (x, y) = (cx + dx, cy + dy);
-                    if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
-                        let p = base.get_pixel(x as u32, y as u32);
-                        for c in 0..3 {
-                            acc[c] += p[c] as f32 / 255.0;
-                        }
-                        n += 1.0;
-                    }
-                }
-            }
-            if n == 0.0 {
-                return;
-            }
-            [acc[0] / n, acc[1] / n, acc[2] / n]
+            let Some(px) = sample_5x5_mean(base, nx, ny) else { return };
+            px
         };
         let (k, tint) = autoshop::render::solve_wb_from_neutral(
             px,
@@ -8518,30 +8537,8 @@ impl AutoshopApp {
                 self.overlay_ref = Some((pre, img));
             }
             let reference = &self.overlay_ref.as_ref().expect("range reference cached").1;
-            let (w, h) = (reference.width(), reference.height());
-            let (cx, cy) = (
-                (nx * (w.saturating_sub(1)) as f32).round() as i64,
-                (ny * (h.saturating_sub(1)) as f32).round() as i64,
-            );
-            let (mut acc, mut n) = ([0.0f32; 3], 0.0f32);
-            for dy in -2..=2i64 {
-                for dx in -2..=2i64 {
-                    let (x, y) = (cx + dx, cy + dy);
-                    if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
-                        // Per-pixel conversion on 25 samples beats the old
-                        // full-frame to_rgb8 copy made per click.
-                        let p = reference.get_pixel(x as u32, y as u32);
-                        for c in 0..3 {
-                            acc[c] += p[c] as f32 / 255.0;
-                        }
-                        n += 1.0;
-                    }
-                }
-            }
-            if n == 0.0 {
-                return;
-            }
-            [acc[0] / n, acc[1] / n, acc[2] / n]
+            let Some(smp) = sample_5x5_mean(reference, nx, ny) else { return };
+            smp
         };
         // Keep the tolerance the user already dialled in; only re-key the colour.
         let amount = match self.recipe.masks[mi].range {
@@ -9620,23 +9617,14 @@ impl AutoshopApp {
                     ))
                 })();
                 if res.is_err() {
-                    // Release the atomically claimed output name when nothing
-                    // real landed (the claim is a 0-byte placeholder): failed
-                    // runs used to consume the 999-name cap and litter empty
-                    // files. A non-empty partial stays for diagnosis.
-                    if std::fs::metadata(&out_claim).is_ok_and(|m| m.len() == 0) {
-                        let _ = std::fs::remove_file(&out_claim);
-                    }
+                    release_empty_claim(&out_claim);
                 }
                 Msg::Retouched(epoch, Box::new(res))
             },
             move |e| {
-                // The worker PANICKED (caught by spawn_worker) — the normal
-                // tail cleanup never ran; release an untouched 0-byte claim
-                // here too, or repeated panics eat the unique-name slots.
-                if std::fs::metadata(&out_panic).is_ok_and(|m| m.len() == 0) {
-                    let _ = std::fs::remove_file(&out_panic);
-                }
+                // The worker PANICKED (caught by spawn_worker), so the tail
+                // above never ran — release here too.
+                release_empty_claim(&out_panic);
                 Msg::Retouched(epoch, Box::new(Err(e)))
             },
         );
@@ -9709,23 +9697,14 @@ impl AutoshopApp {
                     ))
                 })();
                 if res.is_err() {
-                    // Release the atomically claimed output name when nothing
-                    // real landed (the claim is a 0-byte placeholder): failed
-                    // runs used to consume the 999-name cap and litter empty
-                    // files. A non-empty partial stays for diagnosis.
-                    if std::fs::metadata(&out_claim).is_ok_and(|m| m.len() == 0) {
-                        let _ = std::fs::remove_file(&out_claim);
-                    }
+                    release_empty_claim(&out_claim);
                 }
                 Msg::Retouched(epoch, Box::new(res))
             },
             move |e| {
-                // The worker PANICKED (caught by spawn_worker) — the normal
-                // tail cleanup never ran; release an untouched 0-byte claim
-                // here too, or repeated panics eat the unique-name slots.
-                if std::fs::metadata(&out_panic).is_ok_and(|m| m.len() == 0) {
-                    let _ = std::fs::remove_file(&out_panic);
-                }
+                // The worker PANICKED (caught by spawn_worker), so the tail
+                // above never ran — release here too.
+                release_empty_claim(&out_panic);
                 Msg::Retouched(epoch, Box::new(Err(e)))
             },
         );
@@ -9780,23 +9759,14 @@ impl AutoshopApp {
                     ))
                 })();
                 if res.is_err() {
-                    // Release the atomically claimed output name when nothing
-                    // real landed (the claim is a 0-byte placeholder): failed
-                    // runs used to consume the 999-name cap and litter empty
-                    // files. A non-empty partial stays for diagnosis.
-                    if std::fs::metadata(&out_claim).is_ok_and(|m| m.len() == 0) {
-                        let _ = std::fs::remove_file(&out_claim);
-                    }
+                    release_empty_claim(&out_claim);
                 }
                 Msg::Retouched(epoch, Box::new(res))
             },
             move |e| {
-                // The worker PANICKED (caught by spawn_worker) — the normal
-                // tail cleanup never ran; release an untouched 0-byte claim
-                // here too, or repeated panics eat the unique-name slots.
-                if std::fs::metadata(&out_panic).is_ok_and(|m| m.len() == 0) {
-                    let _ = std::fs::remove_file(&out_panic);
-                }
+                // The worker PANICKED (caught by spawn_worker), so the tail
+                // above never ran — release here too.
+                release_empty_claim(&out_panic);
                 Msg::Retouched(epoch, Box::new(Err(e)))
             },
         );
@@ -9854,23 +9824,14 @@ impl AutoshopApp {
                     ))
                 })();
                 if res.is_err() {
-                    // Release the atomically claimed output name when nothing
-                    // real landed (the claim is a 0-byte placeholder): failed
-                    // runs used to consume the 999-name cap and litter empty
-                    // files. A non-empty partial stays for diagnosis.
-                    if std::fs::metadata(&out_claim).is_ok_and(|m| m.len() == 0) {
-                        let _ = std::fs::remove_file(&out_claim);
-                    }
+                    release_empty_claim(&out_claim);
                 }
                 Msg::Retouched(epoch, Box::new(res))
             },
             move |e| {
-                // The worker PANICKED (caught by spawn_worker) — the normal
-                // tail cleanup never ran; release an untouched 0-byte claim
-                // here too, or repeated panics eat the unique-name slots.
-                if std::fs::metadata(&out_panic).is_ok_and(|m| m.len() == 0) {
-                    let _ = std::fs::remove_file(&out_panic);
-                }
+                // The worker PANICKED (caught by spawn_worker), so the tail
+                // above never ran — release here too.
+                release_empty_claim(&out_panic);
                 Msg::Retouched(epoch, Box::new(Err(e)))
             },
         );
@@ -9954,23 +9915,14 @@ impl AutoshopApp {
                     Ok((img, msg, out, RetouchKind::NewGenerated))
                 })();
                 if res.is_err() {
-                    // Release the atomically claimed output name when nothing
-                    // real landed (the claim is a 0-byte placeholder): failed
-                    // runs used to consume the 999-name cap and litter empty
-                    // files. A non-empty partial stays for diagnosis.
-                    if std::fs::metadata(&out_claim).is_ok_and(|m| m.len() == 0) {
-                        let _ = std::fs::remove_file(&out_claim);
-                    }
+                    release_empty_claim(&out_claim);
                 }
                 Msg::Retouched(epoch, Box::new(res))
             },
             move |e| {
-                // The worker PANICKED (caught by spawn_worker) — the normal
-                // tail cleanup never ran; release an untouched 0-byte claim
-                // here too, or repeated panics eat the unique-name slots.
-                if std::fs::metadata(&out_panic).is_ok_and(|m| m.len() == 0) {
-                    let _ = std::fs::remove_file(&out_panic);
-                }
+                // The worker PANICKED (caught by spawn_worker), so the tail
+                // above never ran — release here too.
+                release_empty_claim(&out_panic);
                 Msg::Retouched(epoch, Box::new(Err(e)))
             },
         );
