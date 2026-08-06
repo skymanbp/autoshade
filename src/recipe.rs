@@ -607,19 +607,53 @@ impl EditRecipe {
         // collapse to the neutral 0.0 instead, the same corrupt-component-
         // goes-inert rule the crop and range-mask guards below follow.
         let c = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0 };
-        // SIZE limits, not just value limits. Every field below is bounded,
-        // but a recipe is also a set of VECTORS, and a crafted one (hand-
-        // edited JSON, a hostile POST to the local web server) could carry
-        // thousands of masks or curve points: each active mask costs a
-        // full-frame pass and each curve is cloned + sorted per render, so
-        // the render thread can be monopolised without a single
-        // out-of-range number. The caps sit far above any real edit (the GUI
-        // offers a handful of masks; a tone curve has at most a few dozen
-        // points), so they can only ever truncate abuse.
+        // SIZE limits, not just value limits. A recipe is also a set of
+        // VECTORS, and a crafted one (hand-edited JSON, a hostile POST to the
+        // local web server) could carry thousands of masks or curve points:
+        // each active mask costs a full-frame pass and each curve is cloned +
+        // sorted per render, so the render thread can be monopolised without a
+        // single out-of-range number. The caps sit far above any real edit
+        // (the GUI offers a handful of masks; a tone curve has at most a few
+        // dozen points), so they can only ever truncate abuse.
+        //
+        // …and STRINGS, which this comment used to claim were covered ("every
+        // field below is bounded") while bounding none of them. That was not
+        // theoretical. `rationale` is filled from the advisor's failure text,
+        // and an upstream HTTP error body flows into it verbatim
+        // (`AdvisorError::Http{body}` -> `fallback_reason` -> the heuristic's
+        // rationale), so a misbehaving endpoint needed no malice to write a
+        // multi-megabyte string into recipe.json AND into the XMP comment
+        // beside the RAW. Past 16 MiB `store::read_sidecar` then refuses to
+        // read that sidecar back, which silently costs the Lightroom merge its
+        // base. The web route's own 256 MiB body cap is the only other ceiling.
         const MAX_MASKS: usize = 64;
         const MAX_CURVE_POINTS: usize = 256;
         const MAX_BASE_KNOTS: usize = 256;
+        /// Room for a paragraph of explanation, not a transcript.
+        const MAX_RATIONALE: usize = 4096;
+        /// A mask label is a UI affordance; Lightroom's own are far shorter.
+        const MAX_NAME: usize = 256;
+        /// A path, not a payload — comfortably past Windows' extended limit.
+        const MAX_PATH: usize = 4096;
+        /// Truncate on a char boundary: `String::truncate` panics off one, and
+        /// this runs on input nobody validated.
+        fn cap(s: &mut String, max: usize) {
+            if s.len() > max {
+                let mut end = max;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+            }
+        }
+        cap(&mut self.rationale, MAX_RATIONALE);
         self.masks.truncate(MAX_MASKS);
+        for m in &mut self.masks {
+            cap(&mut m.name, MAX_NAME);
+            if let MaskGeometry::Bitmap { path } = &mut m.mask {
+                cap(path, MAX_PATH);
+            }
+        }
         self.base_curve.truncate(MAX_BASE_KNOTS);
         for curve in [
             &mut self.tone_curve,
@@ -900,6 +934,65 @@ impl EditRecipe {
 
 #[cfg(test)]
 mod tests {
+    /// The strings, and the fact that clamping can NEUTRALISE a recipe.
+    ///
+    /// Two defects in one place. `clamp`'s own comment claimed every field was
+    /// bounded while no string was, and `rationale` is fed from the advisor's
+    /// failure text — an upstream HTTP error body reaches it verbatim, so a
+    /// merely broken endpoint could write megabytes into recipe.json and into
+    /// the XMP beside the RAW.
+    ///
+    /// And `serve.rs`'s XMP route asserted that "clamping cannot flip the
+    /// is_noop branch". It can, and that branch DELETES the photo's saved
+    /// edits: a body carrying only a zero-area crop is a real edit on arrival
+    /// and `EditRecipe::default()` afterwards. The route now decides on the
+    /// pre-clamp recipe; this pins the property that makes the order matter,
+    /// so the assertion cannot quietly come back.
+    #[test]
+    fn clamp_bounds_strings_and_can_neutralise_a_recipe() {
+        use super::*;
+        let mut r = EditRecipe {
+            rationale: "r".repeat(50_000),
+            masks: vec![LocalAdjustment {
+                name: "n".repeat(10_000),
+                mask: MaskGeometry::Bitmap { path: "p".repeat(50_000) },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        r.clamp();
+        assert!(r.rationale.len() <= 4096, "rationale unbounded: {}", r.rationale.len());
+        assert!(r.masks[0].name.len() <= 256, "mask name unbounded: {}", r.masks[0].name.len());
+        match &r.masks[0].mask {
+            MaskGeometry::Bitmap { path } => {
+                assert!(path.len() <= 4096, "bitmap path unbounded: {}", path.len())
+            }
+            other => panic!("the bitmap mask was replaced by {other:?}"),
+        }
+
+        // A multi-byte rationale must not be cut mid-character — `String::
+        // truncate` panics off a char boundary, and this input is unvalidated.
+        let mut multi = EditRecipe { rationale: "é".repeat(50_000), ..Default::default() };
+        multi.clamp(); // would panic if the cut ignored char boundaries
+        assert!(multi.rationale.len() <= 4096);
+        assert!(multi.rationale.chars().all(|c| c == 'é'), "cut mid-character");
+
+        // The neutralisation itself: a zero-area crop is an edit on arrival…
+        let mut degenerate = EditRecipe {
+            crop: Some(Crop { left: 0.5, top: 0.5, right: 0.5, bottom: 0.5 }),
+            ..Default::default()
+        };
+        assert!(!degenerate.is_noop(), "a crop-bearing recipe is not a no-op as sent");
+        degenerate.clamp();
+        // …and exactly the recipe that means "clear my saved edits" afterwards.
+        assert!(
+            degenerate.is_noop(),
+            "clamp no longer neutralises a degenerate crop — if this changed on \
+             purpose, re-check serve.rs's api_xmp clear branch, which is ordered \
+             around it"
+        );
+    }
+
     #[test]
     fn clamp_bounds_sizes_and_coordinates_not_just_values() {
         use super::*;

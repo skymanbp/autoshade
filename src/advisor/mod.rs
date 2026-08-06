@@ -196,6 +196,30 @@ pub(crate) fn post_with_stall_timeout(url: &str, stall: std::time::Duration) -> 
         .post(url)
 }
 
+/// The ceiling on any single response body we buffer. A strict-schema recipe
+/// or verdict is a few KB; this is far above any legitimate payload and far
+/// below a runaway. Deliberately the same number `assemble_sse` caps its
+/// stream at — one budget, whichever shape the answer arrives in.
+pub(crate) const BODY_CAP: u64 = 64 * 1024 * 1024;
+
+/// [`ureq::Response::into_json`] with that ceiling.
+///
+/// `into_json` is `serde_json::from_reader(self.into_reader())`, and ureq's
+/// own docs on `into_reader` warn that it is unbounded — "a malicious server
+/// might return enough bytes to exhaust available memory… you should use
+/// `.take()`". This module already follows that advice on the streaming arms
+/// (`for_each_sse_json` takes a `cap`); the two BLOCKING JSON reads were the
+/// ones that skipped it, and the endpoint they read from is user-configurable
+/// (and was briefly attacker-configurable — see the cross-origin guard in
+/// `serve.rs`). An unbounded read is not a recoverable error either: an
+/// allocation failure ABORTS the process, so the desktop app dies with
+/// whatever was unsaved.
+pub(crate) fn into_json_capped(r: ureq::Response) -> std::io::Result<serde_json::Value> {
+    use std::io::Read as _;
+    serde_json::from_reader(r.into_reader().take(BODY_CAP))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// [`transport_error`]'s streaming sibling. Crucially it reports the MEASURED
 /// elapsed time: ureq surfaces both a connect-phase kill (≈10 s) and a real
 /// read stall with the same "timed out reading response" text, and a real
@@ -426,7 +450,7 @@ pub(crate) fn post_ai_json(
                 // buys a second charge for a request that already succeeded
                 // on their side. (The old code retried the read case within
                 // 30 s — exactly the double-billing window.)
-                match r.into_json() {
+                match into_json_capped(r) {
                     Ok(v) => return Ok(v),
                     Err(e) => {
                         let msg = if e.kind() == std::io::ErrorKind::InvalidData {

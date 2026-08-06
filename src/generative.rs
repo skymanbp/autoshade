@@ -593,7 +593,13 @@ fn call_images_edit(
                 let read = if r.content_type().eq_ignore_ascii_case("text/event-stream") {
                     read_sse_image(r.into_reader())
                 } else {
-                    r.into_json().context("parse image API response")
+                    // Capped like the SSE arm beside it: `into_json` reads
+                    // until the server stops, and an allocation failure aborts
+                    // the process rather than raising an error. See
+                    // `advisor::into_json_capped`.
+                    crate::advisor::into_json_capped(r)
+                        .map_err(anyhow::Error::from)
+                        .context("parse image API response")
                 };
                 match read {
                     Ok(v) => break (v, size.to_string()),

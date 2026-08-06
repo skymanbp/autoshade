@@ -69,7 +69,16 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 pub fn photo_key(src: &Path) -> String {
     let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
     let mut s = abs.to_string_lossy().into_owned();
-    let mut stem = crate::pipeline::stem(src).to_string();
+    // BOTH halves normalise, from the SAME string. The hash was taken from
+    // `abs` while the stem was taken from the raw `src`, so a spelling that
+    // `absolute()` rewrites produced one hash and two directory names: Windows
+    // drops a trailing dot when opening, so `…\DSC001.NEF` and `…\DSC001.NEF.`
+    // are one file, yet `file_stem()` answered "DSC001" for the first and
+    // "DSC001.NEF" for the second. The develop saved under one spelling was
+    // then invisible under the other, and the next save built a fresh empty
+    // develop beside it. For every ordinary path the two agree, so this
+    // re-keys nothing that exists.
+    let mut stem = crate::pipeline::stem(&abs).to_string();
     if cfg!(windows) {
         s = s.to_lowercase();
         // ASCII-only for the DIRECTORY NAME half. Rust's full Unicode
@@ -1709,6 +1718,30 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
 mod tests {
     use super::*;
     use crate::recipe::LocalAdjustment;
+
+    /// One file must never produce two develop directories.
+    ///
+    /// `photo_key` is `<stem>-<hash>`, and the two halves were derived from
+    /// DIFFERENT strings: the hash from `std::path::absolute(src)`, the stem
+    /// from the raw `src`. Any spelling `absolute()` rewrites therefore split
+    /// the key while the hash stayed identical — visible proof that the two
+    /// halves disagreed rather than that they described different files.
+    #[test]
+    #[cfg(windows)]
+    fn one_file_spelled_two_ways_is_one_develop_key() {
+        // Windows drops a trailing dot when opening, so these name one file.
+        let plain = photo_key(Path::new(r"D:\photos\DSC001.NEF"));
+        let dotted = photo_key(Path::new(r"D:\photos\DSC001.NEF."));
+        assert_eq!(plain, dotted, "a trailing dot forked the develop directory");
+
+        // The case fold and `..` folding that already worked must keep working.
+        assert_eq!(plain, photo_key(Path::new(r"d:\PHOTOS\dsc001.nef")), "case fold");
+        assert_eq!(plain, photo_key(Path::new(r"D:\photos\sub\..\DSC001.NEF")), "dot-dot fold");
+
+        // …and genuinely different photos must still get different keys.
+        assert_ne!(plain, photo_key(Path::new(r"D:\photos\DSC002.NEF")));
+        assert_ne!(plain, photo_key(Path::new(r"D:\other\DSC001.NEF")));
+    }
 
     #[test]
     fn lightroom_sidecar_newest_intent_wins() {

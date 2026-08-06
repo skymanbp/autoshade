@@ -533,85 +533,136 @@ fn find_crs_description(doc: &str) -> Option<usize> {
 /// before `from` — DEPTH-COUNTED, because Lightroom nests `rdf:Description`
 /// elements inside mask corrections (the batch-3 lesson: naive scans shred
 /// nested structures).
+/// The text constructs whose contents are NOT markup. A `</rdf:Description>`
+/// inside any of them is not a close.
+const CONSTRUCTS: [(&str, &str); 3] = [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")];
+
+/// Every landmark this scanner needs, each cached as "the first hit AT OR
+/// AFTER `from`" and refreshed only once `from` has passed it.
+///
+/// This is the whole performance contract. `from` only ever moves forward, so
+/// a cached hit stays correct until it is crossed, and each refresh resumes
+/// its scan at the new `from` — every landmark therefore sweeps the document
+/// at most once and the loop is linear overall. A cursor that has run out
+/// (`None`) is never searched again: since `from` only advances, a pattern
+/// with no occurrence after `from` has none after any later `from` either.
+/// That last rule is load-bearing — re-searching an absent pattern to the end
+/// of the document on every iteration is itself quadratic.
+struct Landmarks {
+    /// First `</rdf:Description>` at or after `from` — required, so not optional.
+    close: usize,
+    /// First `<rdf:Description` at or after `from`, if any remain.
+    open: Option<usize>,
+    /// First occurrence of each entry of [`CONSTRUCTS`], if any remain.
+    ctor: [Option<usize>; 3],
+}
+
+impl Landmarks {
+    fn new(doc: &str, from: usize) -> Option<Self> {
+        const CLOSE: &str = "</rdf:Description>";
+        const OPEN: &str = "<rdf:Description";
+        Some(Landmarks {
+            close: from + doc[from..].find(CLOSE)?,
+            open: doc[from..].find(OPEN).map(|r| from + r),
+            ctor: std::array::from_fn(|i| doc[from..].find(CONSTRUCTS[i].0).map(|r| from + r)),
+        })
+    }
+
+    /// Advance every cursor the new `from` has overtaken. Returns `None` when
+    /// no close remains, which sinks the whole scope.
+    fn refresh(&mut self, doc: &str, from: usize) -> Option<()> {
+        const CLOSE: &str = "</rdf:Description>";
+        const OPEN: &str = "<rdf:Description";
+        if from > self.close {
+            self.close = from + doc[from..].find(CLOSE)?;
+        }
+        if self.open.is_some_and(|o| from > o) {
+            self.open = doc[from..].find(OPEN).map(|r| from + r);
+        }
+        for (slot, (open, _)) in self.ctor.iter_mut().zip(CONSTRUCTS.iter()) {
+            // A cursor already at or ahead of `from` is still the first hit;
+            // one that has run out (None) stays out, and re-searching it would
+            // sweep to the end of the document on every iteration — the exact
+            // shape of the quadratic this cache exists to remove.
+            if slot.is_some_and(|p| from > p) {
+                *slot = doc[from..].find(open).map(|r| from + r);
+            }
+        }
+        Some(())
+    }
+
+    /// The construct that opens before both the next open tag and the close —
+    /// the only one that is this iteration's business.
+    fn pending_construct(&self) -> Option<(usize, &'static str, &'static str)> {
+        self.ctor
+            .iter()
+            .zip(CONSTRUCTS.iter())
+            .filter_map(|(slot, (open, close))| slot.map(|p| (p, *open, *close)))
+            .filter(|(p, _, _)| *p < self.close && self.open.is_none_or(|o| *p < o))
+            .min_by_key(|(p, _, _)| *p)
+    }
+}
+
 fn find_matching_close(doc: &str, mut from: usize) -> Option<usize> {
     const CLOSE: &str = "</rdf:Description>";
-    const OPEN: &str = "<rdf:Description";
     let mut depth = 0usize;
-    // The next close AT OR AFTER `from`, carried across iterations. Re-running
-    // the close search on every nested open made this Θ(k²) in the nesting
-    // depth: each open advances `from` by one tag while the search restarted
-    // and scanned all the way to the same distant close. A ~10 MB sidecar of
-    // nested <rdf:Description> (a hostile or merely pathological file sitting
-    // beside a RAW) then pegged a core for hours — inside SAVE_LOCK, holding
-    // one of the server's eight request permits. Caching is exact, not an
-    // approximation: no close exists in [old_from, close_abs), so none exists
-    // in [new_from, close_abs) either whenever `from` only moves forward.
-    let mut close_abs = from + doc[from..].find(CLOSE)?;
+    // Two DISTINCT quadratic blowups have lived in this function; both showed
+    // up as a sidecar beside a RAW pegging a core inside SAVE_LOCK, holding
+    // one of the server's eight request permits, on nothing worse than photo
+    // SELECTION. Both are now answered by the same rule — cache every
+    // landmark, never re-scan what `from` has not passed (see [`Landmarks`]).
+    //
+    //   1. Re-running the CLOSE search on every nested open: Θ(depth²).
+    //      Measured 2.8 MB of nesting at 55.97 s.
+    //   2. Re-running the CONSTRUCT search on every skipped comment / PI /
+    //      CDATA — the scan that FIXED (1) introduced this one, and it was
+    //      worse per byte because a body of back-to-back comments re-scanned
+    //      the whole remaining window three times per construct while `from`
+    //      crawled forward one construct at a time. Measured 640 KB of
+    //      comments at 8.47 s, against 51 µs before the construct skip
+    //      existed at all.
+    //
+    // Both shapes are now linear: 2.8 MB nested and 640 KB of comments each
+    // finish in single-digit milliseconds (see the timed test).
+    let mut marks = Landmarks::new(doc, from)?;
     loop {
-        // Comments / PIs / CDATA are TEXT: a `</rdf:Description>` inside one is
-        // not a close. `crs_scope_inner` and `top_level_owned_spans` already
-        // skip all three; this scanner did not, so a sidecar carrying the
-        // literal in a comment reported a bogus close, the body came back
-        // truncated mid-construct, and the whole merge fell back to a fresh
-        // document — dropping every Lightroom-only property it exists to
-        // preserve. (Attribute values cannot trigger it: raw `<` is illegal
-        // there in XML, and `scan_tag_end` is quote-aware regardless.)
-        if let Some(skip) = skip_text_construct(doc, from, close_abs) {
-            from = skip;
-            if from > close_abs {
-                close_abs = from + doc[from..].find(CLOSE)?;
-            }
+        marks.refresh(doc, from)?;
+        // Comments / PIs / CDATA are TEXT. `crs_scope_inner` and
+        // `top_level_owned_spans` already skip all three; this scanner did
+        // not, so a sidecar carrying `</rdf:Description>` in a comment
+        // reported a bogus close, the body came back truncated mid-construct,
+        // and the whole merge fell back to a fresh document — dropping every
+        // Lightroom-only property it exists to preserve. (Attribute values
+        // cannot trigger it: raw `<` is illegal there in XML, and
+        // `scan_tag_end` is quote-aware regardless.)
+        if let Some((at, open, close)) = marks.pending_construct() {
+            let body_at = at + open.len();
+            // An UNTERMINATED construct walks `from` off the end, so the next
+            // refresh finds no close and the scope sinks to the whole-document
+            // fallback: unbalanced markup is never silently read as tags.
+            from = match doc[body_at..].find(close) {
+                Some(end_rel) => body_at + end_rel + close.len(),
+                None => doc.len(),
+            };
             continue;
         }
-        match doc[from..close_abs].find(OPEN) {
-            Some(open_rel) => {
-                let abs = from + open_rel;
-                let (end, self_closing) = scan_tag_end(doc, abs)?;
+        match marks.open {
+            Some(open_at) if open_at < marks.close => {
+                let (end, self_closing) = scan_tag_end(doc, open_at)?;
                 if !self_closing {
                     depth += 1;
                 }
                 from = end + 1;
-                if from > close_abs {
-                    close_abs = from + doc[from..].find(CLOSE)?;
-                }
             }
-            None => {
+            _ => {
                 if depth == 0 {
-                    return Some(close_abs);
+                    return Some(marks.close);
                 }
                 depth -= 1;
-                from = close_abs + CLOSE.len();
-                close_abs = from + doc[from..].find(CLOSE)?;
+                from = marks.close + CLOSE.len();
             }
         }
     }
-}
-
-/// If a comment / PI / CDATA opens in `doc[from..limit)` BEFORE any
-/// `<rdf:Description`, answer the offset just past its terminator so the
-/// caller can resume there. `None` = nothing to skip in that window.
-///
-/// An UNTERMINATED construct answers `doc.len()`, which walks the caller off
-/// the end and makes its next `find(CLOSE)` fail: unbalanced markup must sink
-/// the whole scope (the caller falls back to the full document), never be
-/// silently read as tags.
-fn skip_text_construct(doc: &str, from: usize, limit: usize) -> Option<usize> {
-    const CONSTRUCTS: [(&str, &str); 3] = [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")];
-    let window = &doc[from..limit];
-    // Only a construct that opens before the next `<rdf:Description` matters —
-    // a later one is the NEXT iteration's problem, after this one's tag is
-    // accounted for.
-    let bound = window.find("<rdf:Description").unwrap_or(window.len());
-    let earliest = CONSTRUCTS
-        .iter()
-        .filter_map(|(open, close)| window[..bound].find(open).map(|rel| (rel, *open, *close)))
-        .min_by_key(|(rel, _, _)| *rel)?;
-    let (rel, open, close) = earliest;
-    let body_at = from + rel + open.len();
-    Some(match doc[body_at..].find(close) {
-        Some(end_rel) => body_at + end_rel + close.len(),
-        None => doc.len(),
-    })
 }
 
 /// Re-stamp the Autoshop rationale comment (older saves embedded it) so a
@@ -1487,6 +1538,59 @@ mod tests {
         );
         let gt = doc.find('>').unwrap();
         assert_eq!(find_matching_close(&doc, gt + 1), None);
+    }
+
+    /// The complexity itself, asserted — because the correctness test above
+    /// passes at ANY speed, which is how the second blowup shipped.
+    ///
+    /// The scanner has had two separate quadratic shapes. The cached close
+    /// cursor killed the first (nesting) and the construct skip it shipped
+    /// alongside introduced the second, on a shape half the size: measured
+    /// with release-mode replicas of the committed code, 640 KB of
+    /// back-to-back comments took **8.47 s** and 400 KB of PIs **9.59 s**,
+    /// against 51 µs and 90 µs for the code that predated the construct skip.
+    /// Quadratic scaling (4x bytes -> 16x time) put the 16 MiB `read_sidecar`
+    /// ceiling at roughly an hour and a half — spent inside SAVE_LOCK holding
+    /// one of the server's eight request permits, reachable by SELECTING a
+    /// photo that has such a sidecar beside it.
+    ///
+    /// So both shapes are pinned by wall clock here. The budget is deliberately
+    /// loose (a debug build on a loaded CI box is not a benchmark); it only has
+    /// to separate "linear" from "quadratic", and the gap is five orders of
+    /// magnitude. Keep the SIZES if you edit this test — they are the pin.
+    #[test]
+    fn the_scope_scanner_is_linear_on_both_pathological_shapes() {
+        const BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+        let head = r#"<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">"#;
+
+        // Shape 1 — deep nesting (the first blowup). 80 000 opens, ~2.8 MB.
+        let mut nested = String::from(head);
+        let gt = nested.len() - 1;
+        for _ in 0..80_000 {
+            nested.push_str("<rdf:Description>");
+        }
+        for _ in 0..80_000 {
+            nested.push_str("</rdf:Description>");
+        }
+        nested.push_str("</rdf:Description>");
+
+        // Shape 2 — a body of back-to-back comments (the second blowup),
+        // and 3 — the same with PIs, which took even longer per byte.
+        let commented = format!("{head}{}</rdf:Description>", "<!--x-->".repeat(80_000));
+        let pis = format!("{head}{}</rdf:Description>", "<?p?>".repeat(80_000));
+
+        for (name, doc) in [("nested", &nested), ("comments", &commented), ("PIs", &pis)] {
+            let started = std::time::Instant::now();
+            let close = find_matching_close(doc, gt + 1).expect("the outermost close is found");
+            let elapsed = started.elapsed();
+            assert_eq!(close, doc.len() - 18, "{name}: it is the LAST close, not an inner one");
+            assert!(
+                elapsed < BUDGET,
+                "{name}: {} bytes scanned in {elapsed:?}, over the {BUDGET:?} budget — \
+                 a landmark cursor is being recomputed on every iteration again",
+                doc.len()
+            );
+        }
     }
 
     /// A creative profile's baked parameters are the PROFILE's, never the

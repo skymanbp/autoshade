@@ -148,6 +148,17 @@ visit cannot frame the UI. You can also use `.env`:
 OPENAI_API_KEY=sk-...
 ```
 
+**A settings file in the current directory is not trusted with your key.**
+Autoshop still *reads* a `autoshop.local.json` sitting in the folder it was
+launched from — that is the pre-store layout, kept so old setups keep working —
+but from v0.18.0 such a file may only choose models and providers. Its API-key
+and base-URL fields are ignored, with a warning, because settings resolve per
+**field**: a file supplying just `image_base_url` would have redirected the
+endpoint while your real key still came from `.env`, and the next Analyze would
+have posted that key to whoever wrote the file. Extracting a shared archive of
+photos and running Autoshop inside it was enough. Your own settings, saved from
+the panel into your user profile, are unaffected.
+
 ## AI Denoise setup
 
 The denoiser is a small Python sidecar ([`python/denoise.py`](python/denoise.py))

@@ -207,13 +207,40 @@ fn request_gen(request: &Request) -> Option<u64> {
 /// invisible from outside.
 fn loopback(h: &str, port: u16) -> bool {
     let h = h.trim();
-    // "127.0.0.1:8080" / "localhost" / "[::1]:8080"
-    let (name, p) = match h.rsplit_once(':') {
-        // An IPv6 literal's own colons live INSIDE the brackets.
-        Some((n, p)) if !n.ends_with(']') || p.chars().all(|c| c.is_ascii_digit()) => (n, Some(p)),
-        _ => (h, None),
+    // "127.0.0.1:8080" / "localhost" / "[::1]:8080" / "[::1]"
+    //
+    // Split the BRACKETS first. Splitting on the last colon and then asking
+    // whether the left side ended in `]` mis-parsed a port-less IPv6 literal:
+    // `"[::1]".rsplit_once(':')` cuts at the literal's OWN last colon, giving
+    // name `"[:"`, which matches nothing. That failed closed, so it was never
+    // a bypass — but it meant the rule this function exists to state ("an
+    // absent port is the scheme default, 80") was not implemented for the one
+    // authority form the fix that introduced it called out, and the assertion
+    // covering it passed for the wrong reason.
+    let (name, p): (&str, Option<&str>) = if h.starts_with('[') {
+        let Some(close) = h.find(']') else { return false };
+        let (name, tail) = h.split_at(close + 1);
+        let p = match tail {
+            "" => None,
+            t => match t.strip_prefix(':') {
+                Some(p) => Some(p),
+                // Anything else after the bracket is not an authority.
+                None => return false,
+            },
+        };
+        (name, p)
+    } else {
+        match h.rsplit_once(':') {
+            Some((n, p)) => (n, Some(p)),
+            None => (h, None),
+        }
     };
-    let name_ok = matches!(name, "127.0.0.1" | "localhost" | "[::1]");
+    // Host names are case-insensitive (RFC 3986). Browsers normalise to lower
+    // case before sending, so this only ever admits our own tooling and a
+    // hand-typed `http://LOCALHOST:8080` — never a foreign host.
+    let name_ok = ["127.0.0.1", "localhost", "[::1]"]
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n));
     // An ABSENT port is not a wildcard — it is the scheme default, 80.
     // Treating it as "matches whatever we listen on" made
     // `Origin: http://localhost` same-origin for a server on 8080, so any page
@@ -1837,14 +1864,31 @@ fn sweep_stale_temp_files() {
 fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let stamp = request_gen(request);
     let mut req: XmpReq = read_json(request)?;
+    // "Did the client ask to clear?" is decided on what the client SENT,
+    // BEFORE clamping — because clamping can manufacture a neutral recipe, and
+    // the neutral branch below DELETES the photo's saved edits.
+    //
+    // The previous comment here asserted the opposite ("clamping cannot flip
+    // the is_noop branch — it only ever removes or bounds values a neutral
+    // recipe does not have") and that is false. `EditRecipe` is
+    // `#[serde(default)]`, so a partial body defaults every other field, and
+    // clamp DROPS whole components rather than merely bounding them: a
+    // degenerate crop becomes `None` (`recipe.rs`: under 1e-3 wide or tall), a
+    // non-finite slider collapses to 0.0, a non-finite mask is retained away.
+    // So `POST /api/xmp {"id":0,"recipe":{"crop":{"left":0.5,"top":0.5,
+    // "right":0.5,"bottom":0.5}}}` clamped to exactly `EditRecipe::default()`,
+    // took the clear branch, and answered "cleared — saved edits removed"
+    // after unlinking recipe.json, the XMP and the legacy sidecar. The same
+    // request took the SAVE path before the clamp was added, so this was a
+    // destructive regression introduced with the fix above it.
+    let client_asked_to_clear = req.recipe.is_noop();
     // Untrusted network input — and this is the route that PERSISTS it, so the
     // clamp matters more here than on the render routes that already had it.
     // `EditRecipe::clamp`'s size caps name "a hostile POST to the local web
     // server" as their reason, yet the write path skipped them: a 100 000-mask
     // body landed on disk as the photo's authoritative recipe.json, was
     // re-parsed by every later open, and was copied verbatim into the next
-    // version snapshot. Clamping here cannot flip the is_noop branch below —
-    // it only ever removes or bounds values a neutral recipe does not have.
+    // version snapshot.
     req.recipe.clamp();
     let raw = match state.at_checked(req.id, stamp) {
         Ok(r) => r,
@@ -1883,7 +1927,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // state to consult, so the master's existence is the conservative proxy —
     // detaching a persisted retouch stays a GUI operation, and the
     // fall-through below DISCLOSES that the master was kept.
-    if req.recipe.is_noop() && master.is_none() && !crate::store::has_pixel_source(&raw) {
+    if client_asked_to_clear && master.is_none() && !crate::store::has_pixel_source(&raw) {
         // ONE primitive for every surface (`store::clear_develop`). This branch
         // and the GUI's Ctrl+S each kept their own copy of the file list and
         // drifted twice: the marker landed only in the GUI, and BOTH unlinked
@@ -2515,6 +2559,25 @@ mod tests {
         assert!(!loopback("evil.example:8080", 8080));
         assert!(!loopback("127.0.0.1.evil.example:8080", 8080), "suffix trick");
         assert!(!loopback("[::1]:80", 8080));
+        // The POSITIVE bracketed case, which nothing pinned before: the old
+        // parser cut `"[::1]"` at the literal's own last colon and produced the
+        // name `"[:"`, so `!loopback("[::1]", 8080)` above passed because the
+        // NAME failed, not because the port rule worked. Reverting the port fix
+        // left that assertion green. This one does not survive it.
+        assert!(loopback("[::1]", 80), "a port-less IPv6 literal is port 80, like any other");
+        assert!(loopback("[::1]:8080", 8080));
+        assert!(!loopback("[::1]", 8080));
+        // Host names are case-insensitive; a browser lower-cases them, but our
+        // own tooling and a hand-typed URL need not.
+        assert!(loopback("LOCALHOST:8080", 8080));
+        assert!(loopback("LocalHost", 80));
+        // Malformed bracket forms are refused outright rather than re-parsed.
+        assert!(!loopback("[::1", 8080));
+        assert!(!loopback("[::1]x", 8080));
+        assert!(!loopback("[::1]:8080x", 8080));
+        // A bracketed literal that is not loopback stays refused.
+        assert!(!loopback("[::2]:8080", 8080));
+        assert!(!loopback("[2001:db8::1]:8080", 8080));
     }
 
     /// A request permit must come back even when the handler PANICS: releasing
@@ -2538,6 +2601,50 @@ mod tests {
         assert_eq!(count(), 1);
         drop(p);
         assert_eq!(count(), 0);
+
+        // And now the half the counter cannot see. Everything above runs with
+        // `max = 8` and one permit at a time, so no thread ever enters
+        // `cv.wait` — delete `cv.notify_one()` from Drop and every assertion
+        // above still passes, while the real server wedges permanently after
+        // eight panics. That is the exact bug this test is named for, so pin
+        // the WAKE-UP: with `max = 1` a second acquirer must block, and only a
+        // notify from the panicking permit's Drop can release it.
+        let gate1 = std::sync::Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let g = std::sync::Arc::clone(&gate1);
+            std::thread::spawn(move || {
+                let _permit = Permit::acquire(g, 1);
+                ready_tx.send(()).unwrap();
+                // Give the waiter time to actually reach `cv.wait`. This orders
+                // the two threads, it does not paper over a race: if the waiter
+                // has not blocked yet it would sail through on the count alone
+                // and the missing-notify mutant would survive. The assertion
+                // below is a hard timeout, not a sleep-and-hope.
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                panic!("a third-party parser met a malformed file");
+            })
+        };
+        ready_rx.recv().expect("the holder took the only slot");
+        let waiter = {
+            let g = std::sync::Arc::clone(&gate1);
+            std::thread::spawn(move || {
+                let permit = Permit::acquire(g, 1); // blocks: the slot is taken
+                woke_tx.send(()).unwrap();
+                drop(permit);
+            })
+        };
+        assert!(holder.join().is_err(), "the holder really did panic");
+        woke_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the waiter was never woken — Drop decremented but did not notify");
+        waiter.join().expect("the waiter finished");
+        assert_eq!(
+            *gate1.0.lock().unwrap_or_else(|p| p.into_inner()),
+            0,
+            "both permits came back"
+        );
     }
 
     /// The fresh-open calibration reaches the client through TWO doors

@@ -17,7 +17,18 @@
 > v0.8.1（preview lag root-fix）；v0.8.0 → `1c1ea36`（zoned fit）。
 > 反馈驱动阶段——用户试用 → 报障/提需 → 修复/打磨 → 发布）。
 >
-> **v0.17.0 已发布（2026-08-06）**：**攻击视角安全批**。独立子代理以攻击者立场
+> **v0.18.0 已发布（2026-08-06）**：**五代理分区攻击审计——两个 HIGH 出在"上一轮的
+> 修复"自身**。本轮把整棵树拆给 5 个独立子代理（上轮修复提交、gui.rs、渲染/反推
+> 数值核、store/config/CLI、advisor 网络层），逐条对码复核后修 9 条。要害两条都是
+> 第四轮**修复动作自己引入的**：①XMP 扫描器"O(n) 重写"仍是 Θ(n²)，只是换了形状——
+> 嵌套修好了（2.8MB 55.97s→51ms）但注释/PI 形状**倒退了 16.5 万倍**（640KB 51µs→
+> 8.47s，实测）；②`api_xmp` 新加的 clamp 会把"零面积裁剪"这类请求**夹成中性配方**，
+> 从而落进删除分支——同一个请求在加 clamp 之前走的是保存路径，即**新引入的数据丢失**。
+> 另有渲染引擎 HIGH：普通滑杆值会**整段抹平色调**（`whites -50` 使高光十档从 411 个
+> 16-bit 码降到 75；`highlights +60` 把 18% 动态范围压成纯白），四轮测试没抓到是因为
+> 断言只查"单调 + 端点"，而**平带既单调又保端点**。详见「当前状态」首条。
+>
+> 前版 **v0.17.0（2026-08-06）**：**攻击视角安全批**。独立子代理以攻击者立场
 > 审全仓，8 条发现经逐条对码复核**全部属实**；两条 HIGH 是前三轮自审都没看见的：
 > 跨域门把无端口的 `Origin: http://localhost` 当通配（loopback:80 上的页面可改
 > AI 端点，下次 Analyze 即泄露 API key），以及请求许可在 handler panic 时永久
@@ -37,6 +48,127 @@
 > 故不发新版，已发布的 v0.16.1 二进制不受影响。
 
 ## 当前状态（已完成，勿重做）
+
+- **第五轮：五代理分区攻击审计 → v0.18.0（2026-08-06，用户令"继续，下一轮"）**——
+  按第四轮留下的待办（"下一轮应继续用攻击视角审本轮修复提交自身"）开工，并把上一轮
+  子代理**没够到的面**一并分掉：5 个独立子代理分别攻 ①修复提交 `40a1bdc` 自身、
+  ②`gui.rs`（13082 行，前四轮无人读过）、③`render.rs` + `fit.rs`/`fit_zoned.rs`
+  数值核、④`store.rs`/`config.rs`/`main.rs`/`recipe.rs` 持久化层、⑤`advisor/*` +
+  `generative.rs` 网络层。**结论：上一轮的修复本身就是本轮两个要害的来源**——自审
+  发现不了的东西，独立审计能发现；而"修完就对"同样是幻觉。
+
+  - **HIGH·上一轮的"O(n) 重写"只是换了个形状继续 Θ(n²)**（xmp.rs
+    `skip_text_construct`）：闭合游标缓存确实把**嵌套**形状修好了，但新加的构造跳过
+    每轮都重扫整个窗口（`window.find("<rdf:Description")` + 三次 `find(open)`），
+    而 `from` 每轮只前进一个构造。**实测（release 复制品，本机）**：
+
+    | 形状 | 修复前 | 第四轮后 | 本轮后 |
+    |---|---|---|---|
+    | 2.8 MB 嵌套 | 55.97 s | 51 ms | 51 ms |
+    | 640 KB 注释 | 51 µs | **8.47 s** | 线性 |
+    | 400 KB PI | 90 µs | **9.59 s** | 线性 |
+
+    即第四轮在修一个 DoS 的同时，按字节算引入了一个**更狠**的（16.5 万倍 / 10.7 万
+    倍倒退），且干净的二次律（4× 字节 → 16× 时间）外推到新的 16 MiB 边车上限约
+    **1.6 小时**，跑在 `SAVE_LOCK` 内并占着一个请求许可，**选中照片**即可触发。
+    修：`Landmarks` 把 close/open/三个构造全部做成"只前进"的游标，**跑空的游标永不
+    重搜**（这条是关键——对不存在的模式每轮重扫到文件尾本身就是二次律）。
+    新测试 `the_scope_scanner_is_linear_on_both_pathological_shapes` 三形状全覆盖，
+    变异实证：把构造游标改回每轮重算 → 测试从 0.13 s 变成跑过 60 s 被杀。
+  - **HIGH·渲染引擎：普通滑杆值整段抹平色调**（render.rs `build_tone_lut`）。八个
+    节点间距只有 0.08–0.25，滑杆偏移直接相加且**从不检查偏移放不放得下**；越界后
+    的"修复"是 `prev + 1e-4`，Fritsch–Carlson 随即把两端切线归零，于是整段**精确
+    平坦**；顶端则由 clamp 到 1.0 造成同样后果。**实测（16-bit 灰阶经真实导出路径）**：
+    `whites: -50` 把输入 0.9568–0.9731 压成同一个码、高光十档从 411 个不同码降到
+    75；`highlights: +60` 把 0.8195 以上（18% 动态范围）全部压成纯白（4096 采样里
+    740 个连续输入同值）。这两个都是**日常修图值**，不是滥用。
+    **四轮测试没抓到的原因**：`region_tones_pin_endpoints_and_stay_monotonic` 只断言
+    单调 + 端点不动，而**平带既单调又保端点**——断言选错了不变量。
+    修：新增 `render::limit_tone_sliders`，把整个滑杆向量按最大可行 λ≤1 缩放，使
+    每个区间至少保住自身间隔的 1%（`KEEP`）；**λ=1 时逐位不变**，所以阈值以内的
+    编辑渲染结果完全没变，只有原本正在被摧毁的区间改变（滑杆变成"用尽权限"而不是
+    "抹平细节"）。新测试 `no_slider_setting_collapses_a_tonal_band` 覆盖 12 组配方，
+    变异实证：去掉限幅 → `highlights +60` 报 740 连续输入同值（与子代理独立测得的
+    740 完全一致）。
+    - **调参有代价，记录在案**：`KEEP` 初设 0.05 时会**扰动反推**——实测普通反推结果
+      （contrast +40.4 / shadows −42.8）在 0.10–0.25 区间 λ=0.990，0.34% 的扰动就把
+      `fit` 从"比中性好 3%"（0.08625 vs 0.08918）推过 `err_before`，触发饱和度
+      do-no-harm 循环，最终 0.1286（**比不修还差**）。降到 0.01 后同配方 λ=1.03 不
+      受限，而 `highlights +60`/`whites -50` 仍被限住。**反推侧刻意不调用限幅器**：
+      它用**真实渲染**打分，本来就量到引擎的实际行为，无须预测限幅。
+  - **MED·上一轮新加的 clamp 会让"保存"变成"删除"**（serve.rs `api_xmp`）。原注释
+    断言"clamping here cannot flip the is_noop branch below"，**是错的**：
+    `EditRecipe` 是 `#[serde(default)]`，且 clamp **丢弃整个部件**而不只是夹值——
+    零面积裁剪被置 `None`。于是
+    `POST /api/xmp {"recipe":{"crop":{"left":0.5,"top":0.5,"right":0.5,"bottom":0.5}}}`
+    clamp 后**恰好等于 `EditRecipe::default()`**，落进中性分支 → `clear_develop`
+    删掉 recipe.json / XMP / 旧边车，并回 "cleared — saved edits removed"。
+    **加 clamp 之前同一请求走的是保存路径**，所以这是上一轮引入的破坏性回归。
+    修：清除分支改用**夹紧前**的配方判定（`client_asked_to_clear`），clamp 只管持久化。
+  - **HIGH·GUI 版本面板会删掉另一张照片的快照**（gui.rs）。`open_path` 立刻把
+    `src_path` 指向新照片，但 `self.versions` 只在**解码完成**的 `Msg::Opened` 里刷新，
+    面板也没有任何 busy 门。RAW 解码是数秒级：这段时间里面板显示 A 的 v1/v2/v3、按钮
+    可点，而 `delete_version(&src, n)` 取的 `src` 已是 B → **永久删除 B 的快照**
+    （recipe + 冻结蒙版栅格，无备份无撤销），随后列表按 B 刷新、状态栏报"已删除"，
+    把真相盖掉。"＋保存为版本"是镜像故障：把 A 的画布写成 B 的下一个版本。
+    修：`open_path` 在改 `src_path` 的同一处清空 `versions`（列表描述的就是那个键），
+    并给整节加 `add_enabled_ui(!self.busy)`。
+  - **HIGH·工作目录里的设置文件能改写 API key 的去向**（config.rs）。`serve.rs` 早就
+    把"改 base URL → 下次 Analyze 泄 key"当成 HIGH 并加了跨域门，但**文件系统那条路
+    是敞开的**：解析是**按字段**而非按文件，`pick_opt(image_api_key, env)` 在文件没给
+    key 时回落到环境变量，`pick(image_base_url, …)` 却让文件赢。于是一个只写
+    `image_base_url` 的 `autoshop.local.json` 就能把真 key 送到攻击者端点——解压别人
+    的照片包、在里面运行 Autoshop 即可。**且本机当前生效配置正是这个形状**（实查：
+    `image_api_key` 为空、`image_base_url` 由 cwd 文件提供）。
+    修：`SettingsOrigin` 区分中央件与 cwd 件，cwd 件只保留模型/供应商选择，
+    **key 与 base URL 一律忽略并告警**。用户现有配置的两个 base URL 恰等于默认值，
+    因此**行为零变化**（已实查确认）。
+  - **MED·`clamp()` 一个字符串都不夹，注释却说"每个字段都有界"**（recipe.rs）。
+    `rationale` 由 advisor 失败文本填充，而上游 HTTP 错误体会**原样**流进去
+    （`AdvisorError::Http{body}` → `fallback_reason` → 启发式 rationale），所以
+    一个**只是坏掉**的端点就能把数 MB 写进 recipe.json **和 RAW 旁的 XMP**；超过
+    16 MiB 后 `read_sidecar` 拒读，**又会静默让 Lightroom merge 失去底稿**。
+    修：`rationale`/蒙版 `name`/`Bitmap{path}` 分别加 4096/256/4096 上限，按字符
+    边界截断（`String::truncate` 越界会 panic，而这是无人校验的输入）。
+  - **MED·两处无上限的响应读取**（advisor/mod.rs、generative.rs）。SSE 两条臂都带
+    上限（64 MiB / 512 MiB），**阻塞 JSON 两条臂却直接 `into_json()`**——ureq 自己的
+    文档就写着 `into_reader` 无界、"应当使用 `.take()`"。Rust 分配失败是 **abort**，
+    即桌面端连同未保存工作一起硬崩。修：`advisor::into_json_capped` 统一加 64 MiB 顶。
+  - **MED·一个文件两个 develop 目录**（store.rs `photo_key`）。键是 `<stem>-<hash>`，
+    但 **hash 取自 `absolute(src)`、stem 取自原始 `src`**。Windows 打开时会丢尾点，
+    所以 `…\DSC001.NEF` 与 `…\DSC001.NEF.` 是同一个文件、hash 逐字节相同，
+    `file_stem()` 却分别给出 "DSC001" 与 "DSC001.NEF" → 两个目录，一边存的编辑在
+    另一边**完全不可见**。修：两半都取自 `abs`；普通路径两者一致，故**不重键**任何
+    既有存储。
+  - **LOW·上一轮那条"钉了 11 种权威串"的测试，有一条钉了个寂寞**（serve.rs
+    `loopback`）。`"[::1]".rsplit_once(':')` 会在 IPv6 字面量**自己的**冒号处切开，
+    得到 name=`"[:"`，所以 `assert!(!loopback("[::1]", 8080))` 是因为**名字没匹配**
+    才过的，不是因为端口规则——把端口修复回退掉它照样绿。修：先拆方括号再找端口，
+    并补上**正向**断言 `loopback("[::1]", 80)`（回退端口修复即失败）；顺带按 RFC 3986
+    让主机名大小写不敏感。
+  - **LOW·许可测试同样没钉住"唤醒"**（serve.rs `Permit`）。整个测试都在 `max = 8`
+    下且一次只持一个许可，**没有任何线程进过 `cv.wait`**——把 Drop 里的
+    `cv.notify_one()` 删掉，测试全绿，而真实服务器在 8 次 panic 后永久卡死（正是这
+    条测试命名要防的那个 bug）。修：补一段 `max = 1` 的等待者场景，变异实证：删掉
+    notify → "the waiter was never woken" 超时失败。
+  - **本轮明确未做（下一轮的账）**：`pipeline.rs` 的 merge 失败提示有两个问题——
+    ①对 0 字节或**非 Camera-Raw**边车（exiftool / Bridge / Capture One 的评分关键词
+    XMP）会**每次保存都误报**，且消息里插的是 `out.display()`（store 里的副本），
+    指向的是一个**根本没被动过**的文件；②`read_sidecar` 超 16 MiB 返回 `None` 后，
+    `.or_else` 会**换成我们自己上一次的投影**当底稿，merge 成功 → **真丢属性时反而
+    一声不吭**（正是上一轮加提示要防的那个失败模式，从旁门绕回来了）。另有：流式
+    路径无总时长上限（keep-alive 字节可让 Analyze 永久挂住且 `start_analyze` 未
+    `arm_cancel`）、`decode.rs` 两条 `file:line` 引用指错函数、`part_text` 多部分
+    注入（LOW，两个代理都判为非越权）、`kelvin_to_rgb` 在 6600 K 处不连续（绿通道
+    跳 1.32%，且 6600–6688 K 有 88 K 的色温死区）。
+  - 门禁：**211 lib + 1 cli + 28 gui** 双配置绿、clippy 双零、i18n 458/486/0/0、
+    web JS `node --check` 通过且与上轮逐字节相同、死 pub 项 0（275→280，即本轮新增
+    的 5 个公开项）、克隆组 74（与上轮相同）。测试名按**集合**比对：**删 0 / 增 5 /
+    留 238**。每条修复都有具名变异实证（构造游标不缓存、限幅器去掉、rationale 不夹、
+    stem 取原始 src、cwd 件保留 base URL、Drop 不 notify）。
+  - **未验证**：全程**未启动 GUI**（用户硬指令），桌面侧只到编译+测试级；色调限幅
+    虽逐位证明"λ=1 时不变"，但**未做视觉验收**——建议用户拿一张高光丰富的片子对比
+    `whites -50` / `highlights +60` 的前后表现。
 
 - **第四轮：攻击视角子代理审计 → v0.17.0（2026-08-06，用户令"派遣一个子代理用攻
   击视角全面审阅并debug"）**——首次由**独立子代理以攻击者立场**扫全仓（此前三轮

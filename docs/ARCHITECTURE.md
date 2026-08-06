@@ -1,6 +1,6 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.17.0). The full decode → advise → verify → render
+> Status: **implemented** (v0.18.0). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
@@ -8,9 +8,32 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 206 library + 1 CLI + 28 GUI tests pass in both build configurations.
+> 211 library + 1 CLI + 28 GUI tests pass in both build configurations.
 > This document describes the design; a few historical **[verify]** notes are
 > left in place for provenance.
+>
+> **Two engine rules worth knowing before reading further** (both added in
+> v0.18.0, both after measurement rather than review):
+>
+> * **A tone slider saturates; it never annihilates.** The five region sliders
+>   add offsets to eight fixed knots, and past a threshold an offset overran
+>   the gap to the next knot. The repair — snap to `prev + 1e-4` — made the
+>   whole interval flat, and clamping to 1.0 did the same at the top, so every
+>   input tone in that band rendered to ONE output value. Measured through the
+>   export path on a 16-bit ramp: `whites: -50` cut the top decade from 411
+>   distinct codes to 75, and `highlights: +60` blew 18 % of the range to pure
+>   white. `render::limit_tone_sliders` now scales the whole slider vector by
+>   the largest λ ≤ 1 that keeps every interval separated, so a slider runs out
+>   of authority instead of destroying detail. λ = 1 whenever nothing binds, so
+>   ordinary edits render bit-for-bit as before.
+> * **A settings file in the working directory is ambient input.** It may pick
+>   models and providers; it may not supply an API key or choose the endpoint
+>   one is sent to (`config::LocalSettings::without_ambient_authority`).
+>   Resolution is per FIELD, so a planted `autoshop.local.json` carrying only
+>   `image_base_url` used to redirect the endpoint while the real key still
+>   came from the environment — the filesystem twin of the cross-origin hole
+>   §4.9 describes, and it needed nothing but running Autoshop inside an
+>   extracted archive.
 >
 > Confirmed by the user (2026-06-25): Sony `.ARW`; output = XMP sidecar **and**
 > rendered file (XMP-first); two AI roles behind one unified provider framework —
@@ -246,6 +269,16 @@ XMP carries the global fit only, since classic sidecars cannot hold raster
 masks. The GUI's **反推 / Reverse-fit** action drives the same two entry points
 (`fit_recipe`, `fit_recipe_zoned`) and lands the result as an editable variant.
 
+One deliberate asymmetry: the fit does **not** apply
+`render::limit_tone_sliders` to its proposal, even though the engine applies it
+when rendering. The solve is a linear inversion of the knot model, and the
+acceptance test downstream is a knife edge — on the hazy-to-clean fixture the
+solved recipe is only 3 % better than neutral (0.08625 against 0.08918), so a
+0.34 % nudge to the sliders pushed it over `err_before`, tripped the saturation
+do-no-harm loop, and ended at 0.1286, far worse than doing nothing. The fit
+does not need to predict the limiter, because it scores candidates by
+**rendering** them: it already measures whatever the engine actually does.
+
 ### 4.9 What the local web server refuses
 
 `serve` binds `127.0.0.1`, and that on its own protects nothing: any page the
@@ -264,10 +297,23 @@ the user's own browser*, and the guarantees are:
 - **Bounded inputs.** JSON bodies cap at 256 MiB, uploads at 500 MB, SSE
   assembly at 64 MiB, and XMP sidecars — metadata the user *receives* — at
   16 MiB through one reader ([`store::read_sidecar`](../src/store.rs)).
-- **Bounded work.** `EditRecipe::clamp` caps masks/curves/knots, and the cap is
-  enforced at the persistence boundary (`pipeline::write_recipe` clamps the
-  copy it writes), not only on the render routes — a recipe that reached disk
-  used to escape every later reader's expectations.
+  Responses we *read back* from the AI endpoint are capped too
+  ([`advisor::into_json_capped`](../src/advisor/mod.rs)): the blocking JSON
+  arms used `into_json`, which reads until the server stops, and an allocation
+  failure aborts the process rather than raising an error.
+- **Bounded work.** `EditRecipe::clamp` caps masks/curves/knots **and strings**
+  (`rationale`, mask names, bitmap-mask paths), and the cap is enforced at the
+  persistence boundary (`pipeline::write_recipe` clamps the copy it writes),
+  not only on the render routes — a recipe that reached disk used to escape
+  every later reader's expectations. The strings mattered on their own: an
+  upstream HTTP error body reaches `rationale` verbatim, so a merely broken
+  endpoint could write megabytes into `recipe.json` and into the XMP.
+- **Clamping never decides a deletion.** `POST /api/xmp` treats a neutral
+  recipe as "clear my edits" and unlinks the develop, so that branch is decided
+  on the recipe **as sent**, before clamping. Clamp drops whole components
+  (a zero-area crop becomes `None`), so a body carrying only a degenerate crop
+  clamped to exactly `EditRecipe::default()` and deleted saved work that the
+  same request would have *saved* before the clamp was added.
 - **Bounded concurrency, released on unwind.** Eight request slots, each held
   by an RAII permit: a handler that panics on a malformed image still gives its
   slot back, where the earlier tail-release leaked one per panic and wedged the

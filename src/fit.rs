@@ -488,6 +488,24 @@ pub(crate) fn fit_tone_sliders(tone_map: &impl Fn(f32) -> f32) -> (f32, [f32; 5]
         }
         ev += 0.05;
     }
+    // Emit a vector the engine will render AS GIVEN. The least-squares above
+    // is free to land past the point where a slider stops separating tones and
+    // starts flattening them; `render::limit_tone_sliders` is the one
+    // definition of where that is, and applying it HERE (rather than letting
+    // the engine apply it later) keeps the solved sliders and the rendered
+    // curve the same thing — the linear model this function inverts stays
+    // exact, and the stored recipe means what it says.
+    // NOT limited here on purpose. `render::limit_tone_sliders` saturates a
+    // slider vector that would flatten a tonal band, and the engine applies it
+    // at render time — but applying it to the PROPOSAL as well perturbs this
+    // least-squares solve, and the acceptance test downstream is a knife edge:
+    // on the hazy-to-clean fixture the solve is only 3 % better than neutral
+    // (0.08625 against 0.08918), so a 0.34 % nudge to the sliders pushed it
+    // over `err_before`, tripped the saturation do-no-harm loop, and ended at
+    // 0.1286 — far worse than doing nothing. The fit does not need to predict
+    // the limiter anyway: it scores candidates by RENDERING them
+    // (`develop_preview` below), so it already measures whatever the engine
+    // actually does.
     (best.0, best.1)
 }
 

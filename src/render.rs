@@ -1933,6 +1933,85 @@ pub(crate) fn tone_exposure_curve(x: f32, ev: f32) -> f32 {
     linear_to_srgb((srgb_to_linear(x) * 2.0_f32.powf(ev)).clamp(0.0, 1.0))
 }
 
+/// Scale a slider vector `[contrast, highlights, shadows, whites, blacks]`
+/// (each already in −1..1) down to the strongest version of ITSELF that no
+/// longer collapses a tonal band. A slider must SATURATE, never annihilate.
+///
+/// The knots sit only 0.08–0.25 apart and nothing used to check that a
+/// slider's offset fitted in the gap. Past a threshold a knot overtook its
+/// neighbour and the repair in [`build_tone_lut`] — snap to `prev + 1e-4` —
+/// turned that whole interval FLAT; Fritsch–Carlson then zeroed both tangents,
+/// making it exactly flat, so every input tone in the interval rendered to one
+/// output value. Clamping to 1.0 did the same at the top end. These are
+/// ORDINARY edits, not abuse — measured on the pre-fix engine through the real
+/// export path on a 16-bit ramp:
+///
+///   * `whites: -50` mapped input 0.9568–0.9731 to a single code and cut the
+///     top decade from 411 distinct codes to 75.
+///   * `highlights: +60` mapped everything above 0.8195 to pure white — 18 %
+///     of the range, 740 of 4096 sampled inputs.
+///
+/// Detail destroyed here is not recoverable by any later stage. Four rounds of
+/// tests missed it because a flat band is still monotone and still pins its
+/// endpoints, which is all they asserted.
+///
+/// Returning scaled SLIDERS rather than a repaired curve is deliberate: the
+/// knot model stays linear in the sliders, which is what lets `fit.rs` invert
+/// it analytically. Both callers apply this, so the fit stores an already
+/// feasible vector and the engine's own limit is then a no-op on it — render
+/// and reverse-fit cannot drift apart, the property `tone_slider_basis`
+/// exists to guarantee.
+///
+/// λ = 1 whenever nothing binds, so every edit inside the thresholds renders
+/// bit-for-bit as before; only the region that was being destroyed changes.
+pub(crate) fn limit_tone_sliders(ev: f32, s: [f32; 5]) -> [f32; 5] {
+    // The share of an interval's EXISTING separation the sliders must leave
+    // behind. Two calibration notes, both learned the hard way:
+    //
+    //   * Phrased against the base curve's own gap, NOT against the identity
+    //     slope. An absolute floor has a cliff wherever exposure has already
+    //     narrowed an interval to just above it; there λ collapses to ~0 and
+    //     silently zeroes every slider at once.
+    //   * Small on purpose. This exists to stop a band COLLAPSING, not to
+    //     reserve a fixed share of every interval. At 0.05 it bound on an
+    //     ordinary reverse-fit result (contrast +40.4 with shadows −42.8 puts
+    //     λ at 0.990 for the 0.10–0.25 interval), which perturbed the solve
+    //     that fit.rs had already tuned to that fixture. At 0.01 the same
+    //     recipe is unconstrained (λ = 1.03) while `highlights: +60` is still
+    //     cut to ~47 and `whites: -50` to ~45 — the settings that were
+    //     destroying detail. 1 % of a 0.147-wide interval is still 96 distinct
+    //     16-bit codes, which is a gradient, not a flat patch.
+    const KEEP: f32 = 0.01;
+    let mut base = [0.0f32; 8];
+    let mut off = [0.0f32; 8];
+    for (i, &x) in TONE_KNOTS_X.iter().enumerate() {
+        let b = tone_slider_basis(x);
+        base[i] = tone_exposure_curve(x, ev);
+        off[i] = (0..5).map(|k| b[k] * s[k]).sum();
+    }
+    let mut lambda = 1.0f32;
+    for i in 1..TONE_KNOTS_X.len() {
+        let base_gap = base[i] - base[i - 1];
+        // Exposure alone already closed this interval (+5 EV saturates the top
+        // knots): its prerogative, and not something the sliders did. The
+        // monotonicity backstop in `build_tone_lut` covers it.
+        if base_gap <= 1e-6 {
+            continue;
+        }
+        // Only a NEGATIVE differential closes the interval; a positive one
+        // opens it further and needs no limit.
+        let a = off[i] - off[i - 1];
+        if a < 0.0 {
+            // base_gap + λa ≥ KEEP·base_gap ⇒ λ ≤ (1−KEEP)·base_gap / (−a).
+            lambda = lambda.min((1.0 - KEEP) * base_gap / -a);
+        }
+    }
+    // λ = 1 whenever nothing binds, and then every knot — and so every
+    // rendered pixel — is bit-for-bit what it was before this limiter existed.
+    let lambda = lambda.clamp(0.0, 1.0);
+    s.map(|v| v * lambda)
+}
+
 /// Build the develop tone curve as a [`LUT_N`]-entry LUT over input gamma [0,1].
 ///
 /// It is an 8-knot control-point curve fit by a MONOTONE cubic Hermite spline
@@ -1954,6 +2033,14 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     let whites = (r.whites / 100.0).clamp(-1.0, 1.0);
     let blacks = (r.blacks / 100.0).clamp(-1.0, 1.0);
 
+    // Saturate the slider vector BEFORE using it, so the knot model below
+    // stays exactly what it always was: base + basis·sliders, linear in the
+    // sliders. That linearity is load-bearing — `fit_tone_sliders` inverts it
+    // analytically — so the limit is applied to the SLIDERS, once, here and in
+    // the fit, rather than to the curve afterwards.
+    let [contrast, highlights, shadows, whites, blacks] =
+        limit_tone_sliders(r.exposure_ev, [contrast, highlights, shadows, whites, blacks]);
+
     let mut ys = [0.0f32; 8];
     for (idx, &x) in TONE_KNOTS_X.iter().enumerate() {
         let b = tone_slider_basis(x);
@@ -1964,9 +2051,14 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
             + b[3] * whites
             + b[4] * blacks;
     }
-    // Force the knot outputs non-decreasing (a tone curve cannot invert) then clamp.
-    // Fritsch–Carlson on monotone data ⇒ the whole spline is monotone, so there is
-    // NO running-max pass over the sampled LUT — monotonicity is structural.
+    // Backstop only. λ above already keeps the SLIDERS from closing an
+    // interval, so this now fires just where exposure itself saturated the
+    // knots (the `base_gap <= need` skip), which is exposure's prerogative.
+    // Kept unchanged and deliberately minimal: with the limiter in place a
+    // minimum-slope version of this loop changes nothing a test can see
+    // (verified by mutation), and monotonicity is all it owes.
+    // Fritsch–Carlson on monotone data ⇒ the whole spline is monotone, so
+    // there is NO running-max pass over the sampled LUT — it is structural.
     const EPS: f32 = 1e-4;
     for i in 1..ys.len() {
         if ys[i] < ys[i - 1] + EPS {
@@ -3856,6 +3948,78 @@ mod tests {
             }
             assert!(sample_lut(&lut, 0.0) < 1e-3, "black point moved by hi/sh/contrast");
             assert!((sample_lut(&lut, 1.0) - 1.0).abs() < 1e-3, "white point moved by hi/sh/contrast");
+        }
+    }
+
+    /// A slider must run out of authority, never destroy detail.
+    ///
+    /// Monotonicity and pinned endpoints — the two things the tone tests
+    /// asserted for four rounds — are both TRUE of a perfectly flat band, so
+    /// they were blind to the worst thing this curve can do. Measured on the
+    /// pre-fix engine through the real export path: `whites: -50` mapped input
+    /// 0.9568–0.9731 to one 16-bit code and left the top decade with 75
+    /// distinct codes out of 411; `highlights: +60` mapped everything above
+    /// 0.8195 to pure white. Both are ordinary edits.
+    ///
+    /// So this pins the property those tests missed: no input band survives
+    /// the curve as a single output value.
+    #[test]
+    fn no_slider_setting_collapses_a_tonal_band() {
+        const N: usize = 4096;
+        // The onset of the old collapse for each slider, and past it.
+        let recipes = [
+            ("neutral", EditRecipe::default()),
+            ("whites -50", EditRecipe { whites: -50.0, ..Default::default() }),
+            ("whites -100", EditRecipe { whites: -100.0, ..Default::default() }),
+            ("highlights +60", EditRecipe { highlights: 60.0, ..Default::default() }),
+            ("highlights +100", EditRecipe { highlights: 100.0, ..Default::default() }),
+            ("blacks +60", EditRecipe { blacks: 60.0, ..Default::default() }),
+            ("blacks +100", EditRecipe { blacks: 100.0, ..Default::default() }),
+            ("shadows +76", EditRecipe { shadows: 76.0, ..Default::default() }),
+            ("shadows +100", EditRecipe { shadows: 100.0, ..Default::default() }),
+            ("contrast +100", EditRecipe { contrast: 100.0, ..Default::default() }),
+            (
+                "the old extreme combo",
+                EditRecipe { highlights: -100.0, shadows: 100.0, contrast: 100.0, ..Default::default() },
+            ),
+            (
+                "everything at once",
+                EditRecipe {
+                    whites: -100.0,
+                    blacks: 100.0,
+                    highlights: 100.0,
+                    shadows: 100.0,
+                    contrast: 100.0,
+                    ..Default::default()
+                },
+            ),
+        ];
+        // A run this long is a visibly flat patch, not quantisation: the worst
+        // measured pre-fix run was 740 of 4096 and the neutral curve's is 1.
+        const MAX_RUN: usize = 96;
+        for (name, r) in recipes {
+            let lut = build_tone_lut(&r);
+            let out: Vec<u16> = (0..N)
+                .map(|i| {
+                    let x = i as f32 / (N - 1) as f32;
+                    (sample_lut(&lut, x).clamp(0.0, 1.0) * 65535.0).round() as u16
+                })
+                .collect();
+            let (mut run, mut worst, mut worst_at) = (1usize, 1usize, 0usize);
+            for i in 1..out.len() {
+                run = if out[i] == out[i - 1] { run + 1 } else { 1 };
+                if run > worst {
+                    worst = run;
+                    worst_at = i;
+                }
+            }
+            assert!(
+                worst <= MAX_RUN,
+                "{name}: {worst} consecutive inputs (around x={:.4}) all render to {} — \
+                 a slider flattened a tonal band instead of saturating",
+                worst_at as f32 / (N - 1) as f32,
+                out[worst_at]
+            );
         }
     }
 

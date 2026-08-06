@@ -2068,6 +2068,19 @@ impl AutoshopApp {
         let lang = self.lang;
         self.busy = true;
         self.src_path = Some(path.clone());
+        // The version list describes the photo `src_path` NAMES, so it dies
+        // with the old value of that field — not later, when the decode lands.
+        // `refresh_versions` only runs from the completed `Msg::Opened`, and a
+        // RAW decode is seconds; for that whole window the Versions panel
+        // showed photo A's v1/v2/v3 with live buttons while every action
+        // resolved `self.src_path`, which already pointed at photo B. Clicking
+        // 🗑 on the stale list called `store::delete_version(B, n)` and
+        // PERMANENTLY removed a snapshot of B — recipe and frozen mask
+        // rasters, no backup, no undo — then refreshed the list from B so the
+        // rows visibly changed and the status line confirmed a delete, hiding
+        // what had happened. "＋ Save as version" was the mirror image: it
+        // wrote A's canvas into B's develop as B's next version.
+        self.versions.clear();
         self.status = trf(lang, "decoding {path} …", &[("path", &path.display().to_string())]);
         // Working-preview size is a user choice now (gap batch E): 1280 keeps
         // sliders fluid; 2560/4096 trade tick latency for real 1:1 detail when
@@ -7954,6 +7967,15 @@ impl AutoshopApp {
             .id_salt("sec_versions")
             .default_open(false)
             .show(ui, |ui| {
+                // Clearing the list on open (see `open_path`) already stops a
+                // STALE row from acting on the incoming photo. This is the
+                // second half: while a photo is still decoding, "Save as
+                // version" would snapshot the OUTGOING photo's canvas — the
+                // fresh recipe has not landed yet — into the incoming photo's
+                // develop. Nothing here is meaningful until the open settles,
+                // so the whole section goes inert rather than each button
+                // carrying its own guard.
+                ui.add_enabled_ui(!self.busy, |ui| {
                 if ui
                     .button(tr(lang, "＋ Save as version"))
                     .on_hover_text(tr(lang, "Save all current develop parameters as a numbered snapshot (v<N>.recipe.json in this photo's develop store), reloadable anytime"))
@@ -8008,6 +8030,7 @@ impl AutoshopApp {
                             .small(),
                     );
                 }
+                }); // add_enabled_ui: inert while a photo is still opening
             });
 
         // --- 导出设置 (UX batch): moved out of the toolbar — touched once per
