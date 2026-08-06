@@ -423,3 +423,47 @@ impl Decoded {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `preview_only` and `embedded_preview` share `camera_rendition` and
+    /// differ in EXACTLY two ways. Both differences are load-bearing and
+    /// neither had a test — this module is the first in `decode.rs`.
+    #[test]
+    fn the_two_camera_rendition_callers_differ_only_where_they_must() {
+        let dir = std::env::temp_dir().join(format!("autoshop-decode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // (1) A NON-RAW: `preview_only` loads the raster; `embedded_preview`
+        // answers "no camera rendition" WITHOUT touching it. The base-look
+        // estimator relies on that None — a baked image has no camera JPEG to
+        // compare a neutral develop against, and standing in with the file's
+        // own pixels would make the CDF comparison meaningless.
+        let png = dir.join("baked.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(7, 5)).save(&png).unwrap();
+        let p = preview_only(&png).expect("a baked raster loads");
+        assert_eq!((p.width(), p.height()), (7, 5));
+        assert!(
+            embedded_preview(&png).expect("not an error").is_none(),
+            "a non-RAW carries no CAMERA rendition"
+        );
+
+        // (2) A RAW that cannot be decoded is an INABILITY, not "carries
+        // none": both must Err. Every caller of `embedded_preview`
+        // (pipeline::photo_base_knots_checked, serve) prints a diagnostic on
+        // Err and stays silent on Ok(None), so collapsing the two would hide
+        // a broken file behind a silent skip.
+        let missing = dir.join("nope.arw");
+        assert!(preview_only(&missing).is_err(), "an absent RAW is an error");
+        assert!(embedded_preview(&missing).is_err(), "…and never a silent None");
+        let garbage = dir.join("garbage.arw");
+        std::fs::write(&garbage, b"not a raw file at all").unwrap();
+        assert!(preview_only(&garbage).is_err(), "an undecodable RAW is an error");
+        assert!(embedded_preview(&garbage).is_err(), "…and never a silent None");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

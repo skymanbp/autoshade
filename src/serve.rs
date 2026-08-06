@@ -2411,6 +2411,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The A6 rule for DELIVERABLES, now that export and download share one
+    /// resolver: a broken master link must REFUSE rather than quietly ship the
+    /// un-retouched source. Nothing pinned it before the two handlers were
+    /// merged into `deliverable_source`.
+    #[test]
+    fn a_deliverable_refuses_a_broken_master_instead_of_lying() {
+        let dir = std::env::temp_dir().join(format!("autoshop-serve-deliv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("DSC_DELIV.ARW");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        let req = || DevelopReq {
+            id: 0,
+            recipe: EditRecipe::default(),
+            denoise: false,
+            denoise_strength: None,
+            format: None,
+            master: None,
+        };
+
+        // Nothing recorded: the RAW itself is the source, and the call
+        // succeeds — the baseline the refusals below must be measured against.
+        let (src, _note) =
+            deliverable_source(&mut req(), &raw).unwrap_or_else(|_| panic!("no master = no refusal"));
+        assert_eq!(src, raw);
+
+        // A RECORDED master that is gone: server-side state, so 500 — and
+        // never a silent fall back to the un-retouched RAW.
+        let gone = dir.join("gone.retouch.png");
+        std::fs::write(&gone, b"png").unwrap();
+        crate::store::write_pixel_source(&raw, &gone, false).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+        let err = deliverable_source(&mut req(), &raw)
+            .err()
+            .unwrap_or_else(|| panic!("a dead master link must refuse the deliverable"));
+        assert_eq!(err.status_code().0, 500, "server-side state → 500");
+
+        // A claim this run never issued is the CLIENT's fault → 400.
+        let forged = dir.join("forged.retouch.png");
+        std::fs::write(&forged, b"png").unwrap();
+        let mut r = req();
+        r.master = Some(forged.to_string_lossy().into_owned());
+        let err = deliverable_source(&mut r, &raw)
+            .err()
+            .unwrap_or_else(|| panic!("an unissued claim must be refused"));
+        assert_eq!(err.status_code().0, 400, "unissued/forged claim → 400");
+
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn percent_encode_is_ascii_and_round_trips() {
         // The whole point: whatever goes into a header value is pure ASCII, so

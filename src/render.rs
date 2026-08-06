@@ -3535,6 +3535,53 @@ mod tests {
     }
 
     #[test]
+    fn the_crop_rectangle_is_one_rule_for_both_source_paths() {
+        use crate::recipe::Crop;
+        // `apply_crop` exists BECAUSE the RAW path and the baked path must
+        // agree on the rectangle — but nothing pinned that rule, so the shared
+        // helper's arithmetic was verified by reading only. Pin it three ways.
+        //
+        // (a) The exact rectangle. Origin from left/top, SIZE from the width
+        // and height — an implementation that computed the size from the
+        // right/bottom EDGES instead (a natural slip) yields 80x40 here, not
+        // 60x30, and a swapped x/y yields a 30-tall crop starting at x=20.
+        let img =
+            DynamicImage::ImageRgb8(RgbImage::from_fn(100, 50, |x, y| {
+                image::Rgb([x as u8, y as u8, 0])
+            }));
+        let c = Crop { left: 0.2, top: 0.1, right: 0.8, bottom: 0.7 };
+        let out = apply_crop(img.clone(), Some(&c)).to_rgb8();
+        assert_eq!(out.dimensions(), (60, 30), "size comes from the crop's extent");
+        assert_eq!(out.get_pixel(0, 0).0, [20, 5, 0], "origin = (left, top) of the frame");
+
+        // (b) Degenerate and absent rectangles are no-ops, never a zero-size
+        // image (a zero-size frame reaches par_chunks_mut(0) downstream).
+        let dims = |i: DynamicImage| (i.width(), i.height());
+        assert_eq!(dims(apply_crop(img.clone(), None)), (100, 50));
+        let flat = Crop { left: 0.5, top: 0.1, right: 0.5, bottom: 0.9 };
+        assert_eq!(dims(apply_crop(img.clone(), Some(&flat))), (100, 50));
+        // Out-of-range components clamp instead of overflowing the cast.
+        let wild = Crop { left: -1.0, top: -1.0, right: 2.0, bottom: 2.0 };
+        assert_eq!(dims(apply_crop(img.clone(), Some(&wild))), (100, 50));
+
+        // (c) End to end through the REAL baked pipeline (`render_to_file`
+        // dispatches a non-RAW source to `render_baked_to_image`): the
+        // deliverable's dimensions must equal what the helper predicts, or the
+        // shared rule is not the rule the export actually applies.
+        let dir = std::env::temp_dir().join(format!("autoshop-crop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.png");
+        img.save(&src).unwrap();
+        let out_p = dir.join("cropped.png");
+        let r = EditRecipe { crop: Some(c), ..Default::default() };
+        let (w, h) = render_to_file(&src, &r, &out_p, None, None).unwrap();
+        assert_eq!((w, h), (60, 30), "the baked export applies the SAME rectangle");
+        assert_eq!(image::image_dimensions(&out_p).unwrap(), (60, 30));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn export_publishes_atomically_and_leaves_no_staging_file() {
         let dir = std::env::temp_dir().join("autoshop-export-atomic");
         let _ = std::fs::remove_dir_all(&dir);

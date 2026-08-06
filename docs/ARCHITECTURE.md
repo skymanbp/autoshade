@@ -6,7 +6,7 @@
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
 > baked-source mode, style retrieval, XMP sidecars (global + local masks),
 > experimental generative edits, and an optional pixel-**heal** retouch mode
-> (§4.7). 197 library + 1 CLI + 26 GUI tests pass in both build configurations.
+> (§4.7). 200 library + 1 CLI + 28 GUI tests pass in both build configurations.
 > This document describes the design; a few historical **[verify]** notes are
 > left in place for provenance.
 >

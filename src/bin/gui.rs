@@ -11582,6 +11582,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_pickers_average_their_window_instead_of_point_sampling() {
+        // Shared by the WB eyedropper and the colour-range sample. A point
+        // sampler passes any "the picked colour is about right" probe on a
+        // smooth image, so pin the AVERAGING directly: one lit pixel in a dark
+        // field must come back at 1/25, never 0 (missed it) and never 1 (hit
+        // it). This is what makes a click on noisy pixels usable at all.
+        let mut img = image::RgbImage::new(9, 9);
+        img.put_pixel(4, 4, image::Rgb([255, 255, 255]));
+        let img = image::DynamicImage::ImageRgb8(img);
+        let centre = sample_5x5_mean(&img, 0.5, 0.5).expect("centre is in bounds");
+        assert!(
+            (centre[0] - 1.0 / 25.0).abs() < 1e-4,
+            "one lit pixel must be averaged over the whole 5x5 window: {centre:?}"
+        );
+        // A CORNER click keeps only the in-bounds samples (3x3 = 9 here) and
+        // divides by that count — dividing by a fixed 25 would darken every
+        // edge pick, and reading out of bounds would panic.
+        let mut edge = image::RgbImage::new(9, 9);
+        for (_, _, p) in edge.enumerate_pixels_mut() {
+            *p = image::Rgb([200, 200, 200]);
+        }
+        let edge = image::DynamicImage::ImageRgb8(edge);
+        let corner = sample_5x5_mean(&edge, 0.0, 0.0).expect("a corner is still sampleable");
+        for c in corner {
+            assert!((c - 200.0 / 255.0).abs() < 1e-4, "a flat field reads flat at the corner: {corner:?}");
+        }
+        // A zero-size image has no samples at all — None, not a divide by zero.
+        let empty = image::DynamicImage::ImageRgb8(image::RgbImage::new(0, 0));
+        assert!(sample_5x5_mean(&empty, 0.5, 0.5).is_none());
+    }
+
+    #[test]
+    fn releasing_a_claim_spares_anything_that_actually_landed() {
+        // Five retouch workers call this on two failure paths each, and the
+        // dangerous mutant is the loosest one: dropping the length check turns
+        // "give the reserved NAME back" into "delete the user's partial
+        // result". A non-empty file is evidence and must survive.
+        let dir = std::env::temp_dir().join(format!("autoshop-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("claimed.png");
+        std::fs::write(&empty, b"").unwrap();
+        release_empty_claim(&empty);
+        assert!(!empty.exists(), "a 0-byte claim is a reservation — give it back");
+        let partial = dir.join("partial.png");
+        std::fs::write(&partial, b"half an image").unwrap();
+        release_empty_claim(&partial);
+        assert_eq!(
+            std::fs::read(&partial).unwrap(),
+            b"half an image",
+            "a non-empty partial is the user's result — never delete it"
+        );
+        // A path that was never claimed (or already swept) is not an error.
+        release_empty_claim(&dir.join("never-existed.png"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn dirty_vs_ignores_calibration_provenance() {
         // A repaired canvas (era 2, fresh curve) against an unrepaired
         // baseline (era 1, washed curve) — same user edits — is NOT dirty:
