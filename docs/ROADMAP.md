@@ -180,10 +180,22 @@
     实际二者各有断言（fresh-404 带画布 + 保存后往返）。已对照测试输出核实。
   - 盲区响应：补 `/api/style-info`、`/api/import`（含坏路径 400）、`/api/upload`
     （含穿越名不逃逸）三路由 E2E 与 CLI `style-index`（沙箱 store 建成 1 exemplar）
-    → serve 断言 20→25。**仍未运行时验证**（如实披露）：计费/长任务类
-    `/api/analyze`、`/api/retouch`、`/api/heal`、`/api/download`、`/api/style-build`
-    与 CLI `auto`/`batch`/`reimagine`/`retouch`/`heal`/`analyze`/`eval`；真
-    SCUNet 权重推理（本轮只跑了替身边车）；GUI 全部（政策）。
+    → serve 断言 20→25。
+
+  **⑥ 发布后同日：用户授权小额计费 + GPU 的真端到端（v0.20.0 发布说明的
+  "not verified" 清单据此收窄，见 release 附记）**
+  - 真 SCUNet GPU 去噪：模型加载/分块/写盘全链 7.8 s，输出确为去噪非拷贝
+    （对输入均值差 1.85/255）——本轮的三重拒绝契约也随之过了**真边车**的正例。
+  - 真 `analyze`：GPT-5.6-sol 提案 + Claude 校验 **Accept 0.9**，52 s。
+  - 真 `auto`：提案→校验→9504×5702 全分辨率渲染（AI 提案含裁剪）→XMP 落
+    沙箱 store，44.6 s。
+  - 真 `reimagine --quality low`：gpt-image 3520×2352，1 974 tokens，40.7 s。
+  - 四路径首跑零缺陷。**仍未运行时验证**（如实披露）：CLI `batch`/`eval`/
+    `retouch`/`heal`；serve 的 `/api/analyze`、`/api/retouch`、`/api/heal`、
+    `/api/download`、`/api/style-build`；GUI 全部（政策）。
+  - 用户四项决定（2026-08-07）：①kelvin 四张拼图改邮件送达（SendUserFile
+    看不了），验收结论待回邮；②**下一轮攻色调模型**（残留修复，配真片视觉
+    迭代）；③计费 E2E 即本条，已执行；④Codex 不补（Opus 覆盖已认可）。
 
 - **第六轮：清账 + 再攻自身（2026-08-06，用户令"开工"；已作为 v0.19.0 发布，
   `91320ab`——本条标题原写"未发版"系发版前措辞，第七轮修正）**
