@@ -17,7 +17,27 @@
 > v0.8.1（preview lag root-fix）；v0.8.0 → `1c1ea36`（zoned fit）。
 > 反馈驱动阶段——用户试用 → 报障/提需 → 修复/打磨 → 发布）。
 >
-> **第六轮（2026-08-06，未发版，工作树在 `104a95d` 之上）**：**清账 + 再攻自身**。
+> **v0.20.0 已发布（2026-08-07）**：**第七轮 = 首次运行时端到端验证**。用户解除
+> "只许编译级验证"的限制（"允许运行时、端到端测试"），本轮第一次把真进程、真数据
+> 跑起来：CLI 四命令过 61 MP 真 ARW（decode/apply/match/recipe-schema，全程
+> `AUTOSHOP_DATA_DIR` 沙箱 + 独立 cwd，用户真实 develop 零触碰）；`autoshop serve`
+> 真进程被 20 项 HTTP 断言打满（含 v0.19.0 旗舰修复的实战复验：exiftool 风格
+> 纯评分边车 + `/api/xmp` 保存 → 星级/标签逐字节幸存、58 个 crs 属性拼入、库文件
+> 未动）；安全守卫四件套全部以**真进程 + mock 监听计数**验证（.env 植入六变量、
+> WorkingDir `autoshop.local.json`、设置保存洗白、每个负例配灵敏度正例）。**唯一
+> 抓到的产品缺陷是"成功宣称无人核验"**：denoise 边车 exit 0 但不写产物时，CLI
+> 打印 `denoised -> 路径` 并 exit 0（产物根本不存在）——而 Opus 对抗复审把初版
+> 修复**又击破两次**（陈旧交付物就地冒充本次结果；segment 的 `exists()` 检查对
+> 预先认领的 0 字节文件从不生效，是同缺陷的未修同胞而非先例），最终契约收归
+> `lib.rs::sidecar_wrote` 三重拒绝（缺失/为空/先于本次运行），denoise+segment
+> 同修，五个具名变异全灭，三景真机复验。kelvin 重定标补上了
+> v0.19.0 欠的**视觉+数值双验收**：真片 6590K/6610K 对渲染，旧引擎跨缝 R−0.67/
+> B−1.11（8-bit 均值）真跳变、新引擎 ≤0.10 连续；四张验收拼图已交用户。色调
+> 高曝光残留（contrast −100 @ +1.5EV）在真片高光裁片上**肉眼可见**云纹压平——
+> 材料已交用户裁决，仍刻意未修（动色调模型=美学决策）。详见「当前状态」首条。
+>
+> **第六轮 = v0.19.0 已发布（2026-08-06，`91320ab`；此横幅当时写于发版前，
+> "未发版"三字发布后一直没回改——第七轮文档核对时抓获修正）**：**清账 + 再攻自身**。
 > 用户令"开工"=清掉第五轮明确记下的五条已知缺陷，并继续用攻击视角审第五轮的修复
 > 提交自身。结果**第三次重复同一模式**：本轮最贵的一条 HIGH 又是**本轮自己刚写的
 > 修复**——防 multipart 注入的 `choose_boundary` 每轮追加一个 `-` 并重扫全部分片，
@@ -67,7 +87,106 @@
 
 ## 当前状态（已完成，勿重做）
 
-- **第六轮：清账 + 再攻自身（2026-08-06，用户令"开工"；未发版，工作树在 `104a95d` 之上）**
+- **第七轮：首次运行时端到端验证（2026-08-07，v0.20.0；用户令"目标完美 bug free /
+  允许运行时、端到端测试 / 解决所有问题+全文档+发版"）** —— 六轮以来的"绝不启动
+  GUI"约束仍守（egui 窗口即弹窗，且无法脚本化交互，自动验证价值为零）；解禁的是
+  **无窗口运行时**：CLI 与 serve 真进程、真 61 MP ARW、真 HTTP。
+
+  **① E2E 四层，全部沙箱化（`AUTOSHOP_DATA_DIR` 重定向 store、独立 cwd，用户真实
+  develop 与中央设置零触碰）**
+  - **CLI**：`decode`（Sony A7R4A 元数据/直方图/1536px 预览全对）→ `apply`（用户
+    真配方双 mask，61 MP 6.3 s）→ `match` 反推（look error 0.112→0.027，统计拟合
+    按文档不还原逐滑杆；store XMP 单 Description 带 crs，XML 可解析）→ 反推配方
+    （version 2）回 `apply` 再渲染成功 → `recipe-schema` JSON 有效。
+  - **serve**：真进程 20/20 断言——静态页、`/api/list`+`gen` 代数戳（无戳/错戳
+    mutation 一律 409，这是**正确行为**，测试客户端初版没带戳全军 409 反向证明了
+    防换目录竞态门在工作）、thumb≤256/preview>256 真 JPEG、新 store 首开 404 带
+    fresh-base 画布、`/api/develop` 真渲染 + `exposure_ev:1e30` 被 clamp 不 500 +
+    未知字段 422、跨域 Origin 403、`/api/settings` GET 无 key 泄漏、**外源边车
+    合并旗舰实战**（exiftool 风格 Rating/Label 边车 + 保存 → 星级标签逐字节幸存、
+    `x:xmptk="exiftool"` 文档身份保留、58 个 crs 属性拼入、响应无假损失提示、
+    **库内边车未被写**）、保存后 `/api/recipe` 往返一致、`/api/export` 全分辨率、
+    未知路由 404、`setdir` 非目录 400。
+  - **安全四件套（真进程 + mock HTTP 监听计数，每个负例配灵敏度正例对照）**：
+    ①`.env` 植入 `AUTOSHOP_PYTHON`+`AUTOSHOP_DENOISE_SCRIPT` → canary 未执行（而
+    警告行证明 .env 确被读取，是"拒用"不是"没读"）；正例=同变量走可信父环境 →
+    canary 执行。②`.env` 植入双 base URL → mock 0 命中，请求走真 api.openai.com
+    经假 key 得 401（401 后正确回退启发式基线、confidence 0.4、verdict Revise →
+    拒绝自动保存，整条降级链路披露完整）；正例=父环境设 base URL → mock 记录到
+    `POST /v1/responses`。③WorkingDir `autoshop.local.json` 植入端点+key → 警告
+    打印、0 命中。④被投毒 cwd 里起 serve 存设置 → 中央文件无 `9666`/`sk-planted`、
+    良性字段正常落盘（v0.19.0 洗白修复的实战复验）。
+  - **E2E 花费披露**：②的两次 analyze 意外触发了 Claude (OAuth) verifier 真调用
+    ×2（verifier 与 proposer 是两条配置线，此前未意识到 verifier 会独立走通）；
+    后续所有 analyze E2E 已用不存在的 `AUTOSHOP_CLAUDE_BIN` 掐断。
+
+  **② 本轮唯一产品缺陷：denoise 假成功（E2E canary 直接抓获）**
+  - 症状：边车进程 exit 0 但不写产物 → CLI 打印 `denoised -> 路径` 并 exit 0，
+    该路径上**根本没有文件**。用户会以为照片已去噪保存。
+  - 根因：`denoise::run_sidecar` 只验**进程退出码**，从不验**产物**；`segment.rs`
+    的 `segment_file` 早有 "`sidecar reported success but wrote no mask`" 检查——
+    代码库早知道这条规则，denoise 漏配。`denoise_buffer` 有回读兜底（错误形状是
+    困惑的 "open denoise output 失败"），`denoise_file` 线（CLI 去噪烘焙图、GUI
+    画布去噪 ≤2048 臂）完全裸奔。
+  - 修复（**初版被复审两次击破后的最终版**，见下 ⑤）：契约收归一处
+    `lib.rs::sidecar_wrote(who, output, before)`，三重拒绝——文件缺失、文件为空
+    （GUI 的 `unique_out`/CLI zoned 的 `store::claim_raster` 都先创建 0 字节
+    认领文件，裸 `exists()` 检查对它们**从不生效**）、文件存在但**先于本次运行**
+    （spawn 前快照 `(len, mtime)`，CLI 交付名确定性（`out/<stem>.denoised.tif`）
+    使上次导出可以就地冒充本次结果）。denoise 与 segment 两座桥同修；
+    `denoise_buffer` 另加 spawn 前清孤儿 temp（PID 复用 + 计数器归零可让崩溃
+    残留物顶到同名，同尺寸时会被当本片结果解码）。`python/denoise.py` 无条件写
+    输出（tmp + `os.replace` 原子落盘，连 strength=0 也先混合再写），故无合法
+    "不写"路径，零误伤。
+  - 变异实证 ×5，全灭：M-D1（删 denoise 调用）、M-D2（放行空文件）、M-D3（丢
+    spawn 前快照 → 陈旧交付物放行）、M-D4（无条件拒绝——复审者指出的"杀死全部
+    真去噪但测试照过"变体，由新增的**写入正例对照**捕获）、M-S1（segment 回退
+    裸 `exists()`）。真机复验三景：no-write → exit 1 响亮报错；陈旧交付物在默认
+    `./out` 名 → exit 1 + `predates this run`（初版此处 exit 0）且陈旧文件保全
+    不删；写入正例照常成功。
+  - 教训入账：变异实证后用 `git checkout` 恢复会把**未提交的修复本身**一并回滚
+    （本轮真踩），改用字节精确备份/回写；`os.replace` 保留旧 mtime 会让 cargo
+    增量编译跑**旧的变异二进制**（测试莫名连红两轮），恢复后必须 `touch`；
+    Windows 下 `subprocess(text=True)` 按 GBK 解码 cargo 输出会炸线程——变异
+    驱动脚本自己崩掉时**变异会滞留在源码里**，恢复必须放 `finally`。
+
+  **③ kelvin 重定标：补上 v0.19.0 欠的视觉+数值双验收（真片，非复制品）**
+  - 方法：worktree checkout `104a95d`（v0.18.0 引擎）另行编译，同一 ARW 同一配方
+    双引擎渲染。6600K 接缝对（6590K vs 6610K，950px 均值/8-bit）：旧 R−0.673/
+    G−0.002/B−1.108 **真跳变**，新 R+0.043/G+0.000/B−0.102 **连续**。幅度：7000K
+    新−旧 R+1.473/B+0.968；2000K B−0.980。四张验收拼图（接缝 ×24 差异图、7000K、
+    2000K、色调残留）已交用户——**美学最终裁决仍在用户**，但"分支相接"从公式推导
+    升级为真片实测。
+  - 色调高曝光残留：contrast −100 @ +1.5EV 真片渲染，高光裁片**肉眼可见**云纹
+    压平（对照中性显影同裁片纹理清晰）。仍刻意未修（v0.19.0 台账：四候选实测
+    全劣、真修法在色调模型层）；本轮把"需要视觉验收"这一欠账变成了**已交付的
+    验收材料**。
+
+  **④ 六轮文档漏改（本轮文档核对抓获）**：`91320ab` 给 ROADMAP 加了 164 行六轮
+  台账，但横幅与台账标题的"未发版"写于发版前，v0.19.0 发布后从未回改——上一轮
+  "全部文档已对齐"的宣称在此处不实。本轮修正（横幅与下条标题）。
+
+  **⑤ Opus 对抗复审（Codex 额度至 2026-08-09 未恢复，按用户既往授权以 Opus 替代；
+  独立 Codex 复审本轮未运行）——11 条发现，模式第四次重演：本轮修复自身有洞**
+  - CONFIRMED×7 全修：①陈旧交付物冒充本次结果（复审者用真 CLI 实弹演示：初版
+    检查对预先放置的 33 字节文件 exit 0）→ spawn 前快照；②两条测试存在"杀死全部
+    真去噪但测试照过"的幸存变体（无正例对照）→ 新增写入正例 + M-D4；③"segment
+    早有此检查"的辩护注释**不实**——其 `exists()` 对两处调用点预先创建的 0 字节
+    认领文件从不生效，segment 是同缺陷的**未修同胞**而非先例 → 同修 + M-S1；
+    ④GUI 走认领文件路径只会命中"空文件"臂而该臂无集成测试 → 补；⑤测试夹具
+    固定目录名（并发互删+残留翻转断言）→ pid 唯一化；⑥M-D1 在非 Windows 零覆盖
+    → sh 替身补齐；⑦`denoise_buffer` 孤儿 temp 冒充（PID 复用）→ spawn 前清除。
+  - 复审自身也有一处**过计**：宣称 `/api/recipe`、`/api/fresh-base` 未被 E2E 命中，
+    实际二者各有断言（fresh-404 带画布 + 保存后往返）。已对照测试输出核实。
+  - 盲区响应：补 `/api/style-info`、`/api/import`（含坏路径 400）、`/api/upload`
+    （含穿越名不逃逸）三路由 E2E 与 CLI `style-index`（沙箱 store 建成 1 exemplar）
+    → serve 断言 20→25。**仍未运行时验证**（如实披露）：计费/长任务类
+    `/api/analyze`、`/api/retouch`、`/api/heal`、`/api/download`、`/api/style-build`
+    与 CLI `auto`/`batch`/`reimagine`/`retouch`/`heal`/`analyze`/`eval`；真
+    SCUNet 权重推理（本轮只跑了替身边车）；GUI 全部（政策）。
+
+- **第六轮：清账 + 再攻自身（2026-08-06，用户令"开工"；已作为 v0.19.0 发布，
+  `91320ab`——本条标题原写"未发版"系发版前措辞，第七轮修正）**
   —— 范围=第五轮记下的五条已知缺陷，外加两个独立攻击子代理（一个攻 `104a95d` 自身，
   一个攻本轮尚未提交的 diff）。共修 **15 条**，每条都有具名变异实证或独立复算。
 

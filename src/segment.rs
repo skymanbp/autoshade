@@ -46,6 +46,11 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
         );
     }
     crate::pipeline::ensure_parent(output)?;
+    // BEFORE the spawn: both call sites (`store::claim_raster`,
+    // `pipeline::unique_out`) reserve the name by CREATING a 0-byte file, so
+    // "the mask exists" is true before the sidecar ever runs — the original
+    // `exists()` guard here never fired for them.
+    let before = crate::artifact_state(output);
     let mut cmd = Command::new(&opts.python_bin);
     cmd.arg(&opts.script)
         .arg("--input")
@@ -76,8 +81,55 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
             crate::sidecar_tail(&out.stderr, &out.stdout)
         );
     }
-    if !output.exists() {
-        bail!("sidecar reported success but wrote no mask at {}", output.display());
+    // Exit 0 alone is not success — THIS run must have produced a non-empty
+    // mask (see `crate::sidecar_wrote` for the three refusals).
+    crate::sidecar_wrote("segmentation sidecar", output, before)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M-S1: the `crate::sidecar_wrote` call removed (or reverted to the old
+    /// bare `exists()` guard) — the pre-claimed 0-byte mask file that
+    /// `claim_raster`/`unique_out` create must NOT count as a written mask
+    /// when the sidecar exits 0 without filling it.
+    #[test]
+    fn a_preclaimed_empty_mask_the_sidecar_never_fills_is_refused() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-seg-test-claimed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Exits 0, ignores every argument, writes nothing.
+        #[cfg(windows)]
+        let bin = {
+            let p = dir.join("noop.bat");
+            std::fs::write(&p, "@exit /b 0\r\n").unwrap();
+            p
+        };
+        #[cfg(not(windows))]
+        let bin = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("noop.sh");
+            std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let script = dir.join("segment.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        let opts = SegmentOpts {
+            python_bin: bin.to_string_lossy().into_owned(),
+            script,
+            target: "sky".into(),
+        };
+        let input = dir.join("in.png");
+        std::fs::write(&input, b"not-really-a-png").unwrap();
+        let output = dir.join("mask.png");
+        std::fs::write(&output, b"").unwrap(); // the claim file
+
+        let err = segment_file(&opts, &input, &output).unwrap_err().to_string();
+        assert!(err.contains("is empty"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
-    Ok(())
 }

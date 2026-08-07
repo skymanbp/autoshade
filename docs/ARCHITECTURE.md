@@ -1,6 +1,6 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.19.0). The full decode → advise → verify → render
+> Status: **implemented** (v0.20.0). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
@@ -8,7 +8,11 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 219 library + 1 CLI + 28 GUI tests pass in both build configurations.
+> 225 library + 1 CLI + 28 GUI tests pass in both build configurations, and
+> v0.20.0 added the first RUNTIME end-to-end pass: real CLI processes over a
+> real 61 MP ARW, a live `serve` hit with 20 HTTP assertions, and the ambient
+> `.env`/settings guards exercised as real processes against a recording mock
+> endpoint (all sandboxed via `AUTOSHOP_DATA_DIR`).
 > This document describes the design; a few historical **[verify]** notes are
 > left in place for provenance.
 >
@@ -75,7 +79,17 @@
 > Since shipped, two *opt-in* pixel-level features were added alongside the
 > parametric core: **AI denoise** (a Python/SCUNet GPU sidecar, run before
 > tone/sharpen) and a **baked-source mode** (edit an already-exported PNG/TIFF,
-> e.g. one denoised in Lightroom — auto-detected by file type).
+> e.g. one denoised in Lightroom — auto-detected by file type). Both sidecar
+> bridges share one success contract (`lib.rs::sidecar_wrote`): *exit 0 alone
+> is not success* — THIS run must have produced the artifact, refusing a
+> missing file, an empty file (the callers that pre-claim the output name
+> create a 0-byte file first, which defeated a bare `exists()` check), and an
+> untouched pre-existing file (the CLI's deterministic deliverable names mean
+> a stale earlier export can sit at the path). A v0.20.0 end-to-end canary
+> caught the CLI printing `denoised -> path` for a file that was never
+> written; the adversarial review then broke the first fix twice more (stale
+> deliverable passes; segment's `exists()` guard never fired for pre-claimed
+> names), which is why the contract lives in one place with all three arms.
 
 ## 1. The core idea
 

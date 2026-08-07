@@ -49,6 +49,56 @@ pub fn hide_child_console(cmd: &mut std::process::Command) {
     }
 }
 
+/// Snapshot of a sidecar's promised artifact path BEFORE the sidecar runs:
+/// `None` = nothing there, `Some((len, mtime))` = what already exists — a
+/// stale deliverable from an earlier export (the CLI's `default_out` names
+/// are deterministic and re-export over themselves by design), or the 0-byte
+/// claim file `pipeline::unique_out` / `store::claim_raster` create to
+/// reserve the name. [`sidecar_wrote`] compares against this so a pre-existing
+/// file cannot masquerade as this run's result.
+pub fn artifact_state(p: &std::path::Path) -> Option<(u64, Option<std::time::SystemTime>)> {
+    std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+/// The sidecar success contract, shared by the denoise and segmentation
+/// bridges: **exit 0 alone is not success** — THIS run must have produced the
+/// artifact. Three refusals, each a real failure mode found live:
+/// * missing — a sidecar exited 0 without writing; the CLI then printed
+///   `denoised -> path` for a file that did not exist;
+/// * empty — the callers that pre-claim the name (`unique_out`,
+///   `claim_raster`) hand the sidecar an existing 0-byte file, so a bare
+///   `exists()` check (segment.rs's original guard) passed without a write;
+/// * untouched — the CLI's deterministic output names mean an EARLIER
+///   deliverable can already sit at the path; same length + same mtime as
+///   before the spawn is that stale file, not a result.
+///
+/// `who` names the bridge for the message ("denoise sidecar", …).
+pub fn sidecar_wrote(
+    who: &str,
+    output: &std::path::Path,
+    before: Option<(u64, Option<std::time::SystemTime>)>,
+) -> anyhow::Result<()> {
+    use anyhow::bail;
+    let Some((len, mtime)) = artifact_state(output) else {
+        bail!("{who} exited 0 but wrote no output at {}", output.display());
+    };
+    if len == 0 {
+        bail!("{who} exited 0 but the output at {} is empty", output.display());
+    }
+    if let Some((pre_len, pre_mtime)) = before {
+        // mtime unavailable (exotic filesystem) ⇒ compare length only — a
+        // disclosed weakening, never a false refusal.
+        if pre_len == len && pre_mtime.is_some() && pre_mtime == mtime {
+            bail!(
+                "{who} exited 0 but did not write the output at {} — the file there \
+                 predates this run, and presenting it as the result would hide the failure",
+                output.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Last ~400 chars of a failed sidecar's output, for the `bail!` message.
 ///
 /// The python sidecars report their real cause (a missing dependency prints the
@@ -78,7 +128,49 @@ pub fn sidecar_tail(stderr: &[u8], stdout: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sidecar_tail;
+    use super::{artifact_state, sidecar_tail, sidecar_wrote};
+
+    /// M-D2: the `len == 0` refusal weakened; M-D3: the `before` comparison
+    /// dropped. All four arms of the contract, each on its own unique dir so
+    /// concurrent test processes cannot clobber each other's fixtures.
+    #[test]
+    fn a_sidecar_result_must_be_this_runs_own_nonempty_write() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-lib-test-wrote-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // missing → refused
+        let missing = dir.join("never_written.png");
+        let err = sidecar_wrote("x sidecar", &missing, None).unwrap_err().to_string();
+        assert!(err.contains("wrote no output"), "{err}");
+
+        // empty → refused (the GUI's unique_out claim file is exactly this)
+        let empty = dir.join("claimed.png");
+        std::fs::write(&empty, b"").unwrap();
+        let before = artifact_state(&empty);
+        let err = sidecar_wrote("x sidecar", &empty, before).unwrap_err().to_string();
+        assert!(err.contains("is empty"), "{err}");
+
+        // pre-existing NON-EMPTY file, untouched by the run → refused: this is
+        // the stale-deliverable hole (deterministic out/<stem>.denoised.tif)
+        let stale = dir.join("stale.tif");
+        std::fs::write(&stale, b"an earlier export").unwrap();
+        let before = artifact_state(&stale);
+        let err = sidecar_wrote("x sidecar", &stale, before).unwrap_err().to_string();
+        assert!(err.contains("predates this run"), "{err}");
+
+        // a real write over a stale file → accepted (mtime and/or len moved)
+        std::fs::write(&stale, b"fresh pixels, longer than before").unwrap();
+        assert!(sidecar_wrote("x sidecar", &stale, before).is_ok());
+
+        // a fresh write with no predecessor → accepted
+        let real = dir.join("real.png");
+        std::fs::write(&real, b"png-bytes").unwrap();
+        assert!(sidecar_wrote("x sidecar", &real, None).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sidecar_tail_surfaces_the_real_cause() {
