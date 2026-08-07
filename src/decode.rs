@@ -441,11 +441,14 @@ mod tests {
         // answers "no camera rendition" WITHOUT touching it — a baked image
         // has no camera JPEG to compare a neutral develop against, and
         // standing in with the file's own pixels would make the base-look CDF
-        // comparison meaningless. Every production caller happens to pre-check
-        // `is_raw` itself (pipeline.rs:637, serve.rs:706, gui.rs:2098), so
-        // this branch is reached only from here: pinning it is what keeps the
+        // comparison meaningless. Every production caller happens to gate on
+        // `is_raw` itself (`pipeline::photo_base_knots_checked` and
+        // `serve::fresh_base_knots` at their tops; the GUI open worker's
+        // non-RAW arm never reaches its `embedded_preview` call), so this
+        // branch is reached only from here: pinning it is what keeps the
         // guarantee a CONTRACT rather than an accident the next caller has no
-        // right to rely on.
+        // right to rely on. (Named, not line-numbered: the old line citations
+        // had already drifted onto unrelated functions.)
         let png = dir.join("baked.png");
         image::DynamicImage::ImageRgb8(image::RgbImage::new(7, 5)).save(&png).unwrap();
         let p = preview_only(&png).expect("a baked raster loads");
@@ -457,11 +460,11 @@ mod tests {
 
         // (2) A RAW that cannot be decoded is an INABILITY, not "carries
         // none": both must Err. TWO of the three callers act on that
-        // difference — `pipeline::photo_base_knots_checked` (pipeline.rs:643)
-        // and `serve::fresh_base_knots` (serve.rs:712) print a diagnostic on
-        // Err and stay silent on Ok(None) — so collapsing them would hide a
-        // broken file behind a silent skip. The third, the GUI open
-        // (gui.rs:2160), deliberately reads both as "no base look": an open
+        // difference — `pipeline::photo_base_knots_checked` and
+        // `serve::fresh_base_knots` print a diagnostic on Err and stay silent
+        // on Ok(None) — so collapsing them would hide a broken file behind a
+        // silent skip. The third, the GUI open worker's knots match,
+        // deliberately reads both as "no base look" (its `_` arm): an open
         // never fails over a missing camera rendition.
         let missing = dir.join("nope.arw");
         assert!(preview_only(&missing).is_err(), "an absent RAW is an error");

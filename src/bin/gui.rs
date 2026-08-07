@@ -218,7 +218,12 @@ enum Msg {
     /// A synchronous GUI develop used to block egui's update loop. Preview work
     /// now returns here from a single latest-wins worker.
     Developed(Box<anyhow::Result<PreviewDone>>),
-    Analyzed(Box<anyhow::Result<(EditRecipe, autoshop::advisor::Verdict)>>),
+    /// Carries the gen_epoch it was started under: Analyze is cancellable
+    /// (abandon-only — the advisor has no cancel checkpoints, so ✕ unblocks
+    /// the UI now and the network call dies at its stall/progress deadline),
+    /// and a cancelled call's late result must be discarded, not installed
+    /// and PERSISTED over whatever the user has since done.
+    Analyzed(u64, Box<anyhow::Result<(EditRecipe, autoshop::advisor::Verdict)>>),
     Exported(anyhow::Result<String>),
     /// A folder scan finished: (folder, sorted source paths).
     Folder(Box<anyhow::Result<(PathBuf, Vec<PathBuf>)>>),
@@ -814,6 +819,16 @@ struct AutoshopApp {
     // calls, is polled between events to stop the download itself.
     gen_epoch: u64,
     gen_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// An `Analyze` worker is still on the wire, cancelled or not.
+    ///
+    /// Cancelling an analyze is ABANDON-only — `produce_recipe` takes no
+    /// cancel flag, so nothing stops the HTTP call — and ✕ clears `busy`,
+    /// whose only other job was to gate `start_analyze`. Without this the ✕
+    /// became a "start another one" button: each press spawned a fresh
+    /// high-detail vision request that ran to its stall deadline and was
+    /// BILLED, N deep. The flag is cleared when the worker's message lands,
+    /// whatever its epoch.
+    analyze_inflight: bool,
     // --- variants (版本/变体): parallel renditions of the open photo ---
     // Original + any AI-generated / reverse-fitted versions. The active one
     // drives the sliders, histogram and canvas; switching is lossless (each
@@ -1226,6 +1241,7 @@ impl Default for AutoshopApp {
             clone_fullres: false,
             gen_epoch: 0,
             gen_cancel: None,
+            analyze_inflight: false,
             variants: Vec::new(),
             discard_requested: false,
             active: 0,
@@ -1348,9 +1364,16 @@ impl AutoshopApp {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
             self.gen_epoch = self.gen_epoch.wrapping_add(1);
             self.busy = false;
+            // Honest about BOTH shapes. A generative worker polls the flag
+            // between stream events and really does stop; `produce_recipe`
+            // takes no flag at all, so an Analyze keeps running — and keeps
+            // billing — until it answers or hits its deadline. Claiming a
+            // checkpoint that does not exist for the path the user is most
+            // likely cancelling is the kind of false status this project
+            // treats as a defect.
             self.status = tr(
                 self.lang,
-                "cancelled — the app is free again; the running call stops at its next checkpoint and its late result is discarded",
+                "cancelled — the app is free again and the late result is discarded; a generative call stops at its next checkpoint, while an AI analyze keeps running (and billing) until it finishes or times out",
             )
             .into();
         }
@@ -4459,7 +4482,10 @@ impl AutoshopApp {
 
     fn start_analyze(&mut self, refine: bool) {
         let Some(path) = self.src_path.clone() else { return };
-        if self.busy {
+        // `busy` alone stopped guarding this the moment Analyze became
+        // cancellable: ✕ clears it while the request is still on the wire and
+        // still billing. See `analyze_inflight`.
+        if self.busy || self.analyze_inflight {
             return;
         }
         let lang = self.lang;
@@ -4497,6 +4523,14 @@ impl AutoshopApp {
             // profile (the same defect the web caller had, fixed in B48).
             self.recipe.clone()
         });
+        // Every other network starter arms this; Analyze — the one a stalled
+        // endpoint holds the longest — did not, so a hung stream left no ✕
+        // and only killing the process recovered. Abandon semantics (like the
+        // local-compute starters): the advisor has no cancel checkpoints, so
+        // ✕ frees the UI immediately, the call dies at its stall/progress
+        // deadline, and the stale-epoch result is discarded on arrival.
+        let (epoch, _flag) = self.arm_cancel();
+        self.analyze_inflight = true;
         self.spawn_worker(
             move || {
                 // Config is reloaded in-thread (cheap) so we don't need it to be Clone.
@@ -4509,9 +4543,9 @@ impl AutoshopApp {
                     base.as_ref(),
                     style,
                 );
-                Msg::Analyzed(Box::new(res))
+                Msg::Analyzed(epoch, Box::new(res))
             },
-            |e| Msg::Analyzed(Box::new(Err(e))),
+            move |e| Msg::Analyzed(epoch, Box::new(Err(e))),
         );
     }
 
@@ -6095,7 +6129,20 @@ impl AutoshopApp {
                     }
                 }},
                 Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
-                Msg::Analyzed(boxed) => match *boxed {
+                Msg::Analyzed(epoch, boxed) => {
+                    // Cleared whatever the epoch: the wire is free either way,
+                    // and this is what re-arms the Analyze button.
+                    self.analyze_inflight = false;
+                    if epoch != self.gen_epoch {
+                        // A cancelled Analyze's late result: the user already
+                        // moved on. The Ok arm below also PERSISTS (backup +
+                        // recipe.json + XMP) — a stale install would not just
+                        // repaint the canvas, it would save over the photo's
+                        // develop. Discard entirely (Err is just as silent).
+                        continue;
+                    }
+                    self.gen_cancel = None;
+                    match *boxed {
                     Ok((recipe, verdict)) => {
                         // Sliders stay live while Analyze runs (10-30 s):
                         // flush a rename typed during the wait (the resync
@@ -6280,7 +6327,7 @@ impl AutoshopApp {
                     Err(e) => {
                         self.fail(tr(lang, "analyze failed"), e);
                     }
-                },
+                }}
                 Msg::Exported(Ok(p)) => {
                     self.batch_progress = None; // the bar belongs to ONE batch run
                     self.done(trf(lang, "exported → {path}", &[("path", p.as_str())]));
@@ -6821,7 +6868,14 @@ impl AutoshopApp {
         // four dynamically sized controls in a fixed row clipped at narrow
         // panel widths.
         ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(self.src_path.is_some(), |ui| {
+            // `!busy` like both siblings below. `open_path` re-points
+            // `src_path` immediately but `recipe` only refreshes when the
+            // decode lands, so during an open this pairs photo A's recipe
+            // (below) with photo B's path — and `copied_from` is what
+            // suppresses the "bitmap mask(s) not pasted" warning, so the
+            // mismatch INVERTS that guard and writes A's raster masks into
+            // B's saved develop.
+            ui.add_enabled_ui(self.src_path.is_some() && !self.busy, |ui| {
                 if ui
                     .small_button(tr(lang, "⎘ Copy recipe"))
                     .on_hover_text(tr(lang, "Copy every develop setting from the current photo"))
@@ -7054,13 +7108,31 @@ impl AutoshopApp {
                 // state a button-per-intent design removes. Wrapped so the
                 // Style slider never strands off-panel at narrow widths.
                 ui.horizontal_wrapped(|ui| {
-                    let ready = self.src_path.is_some() && !self.busy;
-                    if ui
+                    // `analyze_inflight` too, or ✕ leaves these ENABLED while
+                    // `start_analyze` silently refuses (it must refuse — the
+                    // cancelled call is still on the wire and still billing).
+                    // A button that looks live and does nothing, for up to the
+                    // 600 s stall budget, with the status line saying the app
+                    // is free, is worse than one that says why it is greyed.
+                    let ready =
+                        self.src_path.is_some() && !self.busy && !self.analyze_inflight;
+                    let waiting = self.analyze_inflight && !self.busy;
+                    let why = |ui: egui::Response| {
+                        if waiting {
+                            ui.on_hover_text(tr(
+                                lang,
+                                "the cancelled AI call is still running (and still billed) — this re-arms when it finishes or times out",
+                            ))
+                        } else {
+                            ui
+                        }
+                    };
+                    if why(ui
                         .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
                         .on_hover_text(tr(lang,
                             "AI proposes a recipe from scratch (GPT proposal + validation), written into \
                              the sliders — undoable. Uses the Direction above; Style steers it.",
-                        ))
+                        )))
                         .clicked()
                     {
                         self.start_analyze(false);
@@ -7068,12 +7140,12 @@ impl AutoshopApp {
                     // Refining a neutral edit IS analyzing — disable the verb
                     // until there is an edit to refine.
                     let has_edit = ready && !self.recipe.is_noop();
-                    if ui
+                    if why(ui
                         .add_enabled(has_edit, egui::Button::new(tr(lang, "AI Refine")))
                         .on_hover_text(tr(lang,
                             "Adjust the CURRENT edit instead of proposing from scratch — your sliders are \
                              the starting point (enabled once the edit is non-neutral).",
-                        ))
+                        )))
                         .clicked()
                     {
                         self.start_analyze(true);
@@ -11114,15 +11186,17 @@ impl eframe::App for AutoshopApp {
             ui.horizontal(|ui| {
                 if self.busy {
                     ui.spinner();
-                    // Only retouch/generative workers are cancellable — the ✕
-                    // appears exactly while one is in flight (busy long-runs
-                    // like a full-res fill / reimagine / sidecar denoise).
+                    // Armed by every cancellable long-run: retouch/generative
+                    // workers (which poll the flag and really stop), local
+                    // compute, and AI analyze — the last two are ABANDON-only,
+                    // which the hover text says rather than promising a
+                    // checkpoint they do not have.
                     if self.gen_cancel.is_some()
                         && ui
                             .small_button(tr(self.lang, "✕ Cancel"))
                             .on_hover_text(tr(
                                 self.lang,
-                                "Stop this retouch/generation: the app unblocks now, the call halts at its next checkpoint, and its late result is discarded",
+                                "Stop waiting: the app unblocks now and the late result is discarded. A generative call halts at its next checkpoint; an AI analyze keeps running (and billing) until it finishes or times out",
                             ))
                             .clicked()
                     {

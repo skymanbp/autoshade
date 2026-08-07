@@ -1977,7 +1977,12 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // reopen that follows "saved". Only ever WRITTEN here: an absent claim
     // must not clear a GUI-persisted master.
     let mut master_note = String::new();
-    if req.recipe.is_noop() && master.is_none() && crate::store::has_pixel_source(&raw) {
+    // The SAME question the clear branch asked, so it must read the SAME
+    // recipe — the one the client sent. Testing the clamped copy here made the
+    // note fire for a body that was routed past the clear branch because it
+    // carried a crop, and then told the user it had been routed past "solely
+    // because of the persisted master".
+    if client_asked_to_clear && master.is_none() && crate::store::has_pixel_source(&raw) {
         // This save was routed PAST the clear branch above solely because of
         // the persisted master — say so, or the 200 reads as "everything is
         // neutral now" while the baked retouch still backs every render.

@@ -69,6 +69,15 @@ const IMAGES_EDIT_STALL_SECS: u64 = 600;
 /// multi-minute generation to a timeout.
 const IMAGES_EDIT_PARTIALS: u32 = 3;
 
+/// Hard sanity ceiling on one images/edits RESPONSE, whichever shape it takes.
+/// Even four full-size base64 frames of an ~8 MP PNG (3 partials + the final)
+/// fit in well under 256 MiB. Beyond this the stream is broken or hostile; the
+/// cap also bounds the SSE framer's per-line String growth instead of letting
+/// one endless line eat all memory. Shared by the streaming and blocking arms
+/// so a server that answers plain JSON is not held to a smaller budget than
+/// one that streams the identical payload.
+const STREAM_CAP: u64 = 512 * 1024 * 1024;
+
 // --- GUI worker wiring (progress heartbeats + cooperative cancel) -----------
 
 /// Hooks a GUI worker installs on ITS OWN thread before a generative call:
@@ -483,17 +492,73 @@ fn encode_png(img: &DynamicImage) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn part_text(buf: &mut Vec<u8>, name: &str, value: &str) {
+/// RFC 2046 §5.1.1: the sender must pick a boundary that does not occur in
+/// any encapsulated part. [`BOUNDARY`] alone cannot honour that — it is a
+/// const in a PUBLIC repo, so a "style prompt" pasted from a stranger could
+/// quote the literal delimiter line and forge parts of the user's own billed
+/// request (override model / size / n). No privilege boundary is crossed —
+/// it is the user's request on the user's key — but pasted text must not get
+/// to rewrite the form.
+///
+/// ONE pass, never a candidate-rescan loop. The first version of this guard
+/// appended one `-` per round and re-scanned every part each time, which is
+/// quadratic in a value the attacker controls on BOTH factors: a 1 MiB prompt
+/// ending in 4 000 dashes measured 7.2 s, and `serve`'s 256 MiB body cap
+/// (`RetouchReq::prompt` carries no length cap of its own) extrapolates to
+/// hours of spinning inside a request permit — the same defect class as the
+/// XMP scanner's, re-introduced by the fix for a different one. Instead:
+/// find the LONGEST run of `-` following any occurrence of the base, then
+/// jump straight to one dash more. Nothing longer can occur by construction,
+/// because such an occurrence would itself be a longer run.
+///
+/// Past RFC 2046's 70-character ceiling the request is REFUSED, not sent: a
+/// boundary that long is invalid, so the server would reject it anyway, and
+/// silently sending a body whose delimiter a part can forge is the one
+/// outcome this function exists to prevent.
+fn choose_boundary(parts: &[&[u8]]) -> Result<String> {
+    const RFC2046_MAX: usize = 70;
+    let base = BOUNDARY.as_bytes();
+    let mut longest: Option<usize> = None;
+    for p in parts {
+        let mut from = 0;
+        while from + base.len() <= p.len() {
+            let Some(rel) = p[from..].windows(base.len()).position(|w| w == base) else { break };
+            // Resume PAST this hit: `from` only advances, so every byte is
+            // examined a bounded number of times and the whole scan is linear.
+            from += rel + base.len();
+            let run = p[from..].iter().take_while(|&&b| b == b'-').count();
+            longest = Some(longest.map_or(run, |m| m.max(run)));
+        }
+    }
+    let Some(run) = longest else { return Ok(String::from(BOUNDARY)) };
+    let len = BOUNDARY.len() + run + 1;
+    if len > RFC2046_MAX {
+        return Err(anyhow!(
+            "the prompt or image quotes this request's multipart delimiter followed by {run} \
+             dashes, and separating them would need a {len}-character boundary (RFC 2046 allows \
+             70) — refusing to send a request whose form fields the content could forge; remove \
+             the long run of dashes from the prompt"
+        ));
+    }
+    let mut b = String::with_capacity(len);
+    b.push_str(BOUNDARY);
+    for _ in 0..=run {
+        b.push('-');
+    }
+    Ok(b)
+}
+
+fn part_text(buf: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
     buf.extend_from_slice(
-        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
             .as_bytes(),
     );
 }
 
-fn part_file(buf: &mut Vec<u8>, name: &str, filename: &str, bytes: &[u8]) {
+fn part_file(buf: &mut Vec<u8>, boundary: &str, name: &str, filename: &str, bytes: &[u8]) {
     buf.extend_from_slice(
         format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: image/png\r\n\r\n"
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: image/png\r\n\r\n"
         )
         .as_bytes(),
     );
@@ -530,24 +595,37 @@ fn call_images_edit(
         .as_ref()
         .ok_or_else(|| anyhow!("OPENAI_API_KEY not set — generative editing needs the OpenAI API"))?;
 
+    // Chosen over EVERY part this request can carry (both bodies of the
+    // negotiation loop draw from this same set) — see choose_boundary for why
+    // the const alone is not enough.
+    let boundary = choose_boundary(&[
+        cfg.openai_image_model.as_bytes(),
+        prompt.as_bytes(),
+        fidelity.as_bytes(),
+        sizes.enum_size.as_bytes(),
+        sizes.flexible.as_deref().unwrap_or_default().as_bytes(),
+        quality.as_bytes(),
+        image_png,
+        mask_png.unwrap_or_default(),
+    ])?;
     let build_body = |include_fidelity: bool, size: &str, stream: bool| -> Vec<u8> {
         let mut body = Vec::new();
-        part_text(&mut body, "model", &cfg.openai_image_model);
-        part_text(&mut body, "prompt", prompt);
+        part_text(&mut body, &boundary, "model", &cfg.openai_image_model);
+        part_text(&mut body, &boundary, "prompt", prompt);
         if include_fidelity {
-            part_text(&mut body, "input_fidelity", fidelity);
+            part_text(&mut body, &boundary, "input_fidelity", fidelity);
         }
-        part_text(&mut body, "size", size);
-        part_text(&mut body, "quality", quality);
+        part_text(&mut body, &boundary, "size", size);
+        part_text(&mut body, &boundary, "quality", quality);
         if stream {
-            part_text(&mut body, "stream", "true");
-            part_text(&mut body, "partial_images", &IMAGES_EDIT_PARTIALS.to_string());
+            part_text(&mut body, &boundary, "stream", "true");
+            part_text(&mut body, &boundary, "partial_images", &IMAGES_EDIT_PARTIALS.to_string());
         }
-        part_file(&mut body, "image", "image.png", image_png);
+        part_file(&mut body, &boundary, "image", "image.png", image_png);
         if let Some(m) = mask_png {
-            part_file(&mut body, "mask", "mask.png", m);
+            part_file(&mut body, &boundary, "mask", "mask.png", m);
         }
-        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
         body
     };
 
@@ -584,20 +662,31 @@ fn call_images_edit(
         let started = std::time::Instant::now();
         let resp = req
             .set("Authorization", &format!("Bearer {key}"))
-            .set("Content-Type", &format!("multipart/form-data; boundary={BOUNDARY}"))
+            .set("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
             .send_bytes(&body);
         match resp {
             Ok(r) => {
                 // A server may accept `stream` yet answer with plain JSON —
                 // dispatch on what actually came back, not on what was asked.
                 let read = if r.content_type().eq_ignore_ascii_case("text/event-stream") {
-                    read_sse_image(r.into_reader())
+                    // Same number the socket's stall timeout was armed with:
+                    // the gate turns "byte-alive but eventless" (keep-alive
+                    // comments) into the same stall the socket calls silence.
+                    read_sse_image(
+                        r.into_reader(),
+                        Some(std::time::Duration::from_secs(
+                            crate::advisor::effective_stall_secs(IMAGES_EDIT_STALL_SECS),
+                        )),
+                    )
                 } else {
-                    // Capped like the SSE arm beside it: `into_json` reads
-                    // until the server stops, and an allocation failure aborts
-                    // the process rather than raising an error. See
-                    // `advisor::into_json_capped`.
-                    crate::advisor::into_json_capped(r)
+                    // Capped like the SSE arm beside it — with the SAME
+                    // number: `into_json` reads until the server stops, and an
+                    // allocation failure aborts the process rather than
+                    // raising an error. The advisor's own 64 MiB is a
+                    // TEXT-response budget; one full-size base64 image frame
+                    // is about that on its own, so borrowing it here threw
+                    // away already-billed generations.
+                    crate::advisor::into_json_capped_at(r, STREAM_CAP)
                         .map_err(anyhow::Error::from)
                         .context("parse image API response")
                 };
@@ -765,18 +854,16 @@ fn extract_b64(value: &serde_json::Value) -> Option<&str> {
 /// `image_generation.*` families parse. Framing (multi-line `data:` payloads,
 /// event boundaries, EOF flush, `[DONE]`) lives in the shared
 /// `advisor::for_each_sse_json` — one SSE implementation for every stream.
-fn read_sse_image(r: impl std::io::Read) -> Result<serde_json::Value> {
+fn read_sse_image(
+    r: impl std::io::Read,
+    progress_budget: Option<std::time::Duration>,
+) -> Result<serde_json::Value> {
     use std::ops::ControlFlow::{Break, Continue};
-    // Hard sanity ceiling: even four full-size base64 frames of an ~8 MP PNG
-    // (3 partials + the final) fit in well under 256 MiB. Beyond this the
-    // stream is broken or hostile; the cap also bounds the framer's per-line
-    // String growth instead of letting one endless line eat all memory.
-    const STREAM_CAP: u64 = 512 * 1024 * 1024;
     let mut partials = 0u32;
     let mut completed: Option<serde_json::Value> = None;
     let mut failure: Option<String> = None;
     let mut was_cancelled = false;
-    crate::advisor::for_each_sse_json(r, STREAM_CAP, |v| {
+    crate::advisor::for_each_sse_json(r, STREAM_CAP, progress_budget, |v| {
         if cancelled() {
             // Cooperative stop between events — the cheapest safe point to
             // abandon a stream (the job is already billed server-side; this
@@ -817,6 +904,58 @@ fn read_sse_image(r: impl std::io::Read) -> Result<serde_json::Value> {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    /// The boundary is a const in a PUBLIC repo, so a pasted prompt could
+    /// quote the delimiter line and forge its own parts (override model /
+    /// size / n on the user's bill). RFC 2046's own rule is the fix: the
+    /// chosen boundary must not occur in any part.
+    #[test]
+    fn a_prompt_quoting_the_boundary_cannot_forge_a_part() {
+        let evil = format!(
+            "nice sunset--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n10\r\n"
+        );
+        let b = choose_boundary(&[evil.as_bytes()]).expect("one extra dash is well inside RFC 2046");
+        assert_ne!(b, BOUNDARY, "a value carrying the const boundary forces a different one");
+        assert!(!evil.contains(&b), "the chosen boundary occurs in no part");
+        // Serialized: the delimiter appears exactly once (our header), never
+        // a second time from inside the hostile value.
+        let mut buf = Vec::new();
+        part_text(&mut buf, &b, "prompt", &evil);
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            s.matches(&format!("--{b}")).count(),
+            1,
+            "one opening delimiter and no forged one: {s}"
+        );
+        // An honest request keeps the well-known boundary unchanged.
+        assert_eq!(
+            choose_boundary(&[b"a plain prompt", &[0x89, b'P', b'N', b'G']]).unwrap(),
+            BOUNDARY
+        );
+
+        // The FIRST version of this guard appended one dash per round and
+        // re-scanned every part each time — quadratic in a value the attacker
+        // supplies, and `RetouchReq::prompt` has no length cap under `serve`'s
+        // 256 MiB body ceiling. This shape took 7.2 s at 1 MiB; it must now be
+        // one linear pass, and the dash run must be jumped in ONE step.
+        let long = format!("{}{}{}", "x".repeat(1 << 20), BOUNDARY, "-".repeat(4000));
+        let started = std::time::Instant::now();
+        let b = choose_boundary(&[long.as_bytes()]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "choose_boundary is not linear: {:?} for a 1 MiB part",
+            started.elapsed()
+        );
+        // 4000 dashes cannot be separated inside RFC 2046's 70-character
+        // ceiling, so the request is REFUSED rather than sent with a
+        // delimiter the prompt can forge — or with an invalid boundary.
+        let e = b.expect_err("a 4036-character boundary is not a legal request").to_string();
+        assert!(e.contains("RFC 2046") || e.contains("70"), "the refusal says why: {e}");
+
+        // A short run is separated in one jump, not one dash per round.
+        let short = format!("{BOUNDARY}---");
+        assert_eq!(choose_boundary(&[short.as_bytes()]).unwrap(), format!("{BOUNDARY}----"));
+    }
 
     #[test]
     fn pick_size_matches_orientation() {
@@ -916,7 +1055,7 @@ mod tests {
             "data: {\"type\":\"image_edit.completed\",\"b64_json\":\"QUJD\",\"usage\":{\"total_tokens\":7}}\n",
             "\n",
         );
-        let v = read_sse_image(body.as_bytes()).unwrap();
+        let v = read_sse_image(body.as_bytes(), None).unwrap();
         assert_eq!(extract_b64(&v), Some("QUJD"));
         assert_eq!(v["usage"]["total_tokens"], 7);
     }
@@ -931,21 +1070,21 @@ mod tests {
             "data: {\"type\":\"image_edit.completed\",\n",
             "data:  \"b64_json\":\"QUJD\"}\n",
         );
-        let v = read_sse_image(body.as_bytes()).unwrap();
+        let v = read_sse_image(body.as_bytes(), None).unwrap();
         assert_eq!(extract_b64(&v), Some("QUJD"));
     }
 
     #[test]
     fn sse_stream_error_event_fails_loudly() {
         let body = "data: {\"type\":\"error\",\"error\":{\"message\":\"boom\"}}\n\n";
-        let err = read_sse_image(body.as_bytes()).unwrap_err().to_string();
+        let err = read_sse_image(body.as_bytes(), None).unwrap_err().to_string();
         assert!(err.contains("boom"), "{err}");
     }
 
     #[test]
     fn sse_stream_without_completed_event_fails_with_partial_count() {
         let body = "data: {\"type\":\"image_edit.partial_image\",\"b64_json\":\"AAAA\"}\n\n";
-        let err = read_sse_image(body.as_bytes()).unwrap_err().to_string();
+        let err = read_sse_image(body.as_bytes(), None).unwrap_err().to_string();
         assert!(err.contains("without a completed event"), "{err}");
         assert!(err.contains("1 partial"), "{err}");
     }

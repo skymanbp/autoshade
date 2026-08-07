@@ -632,24 +632,69 @@ pub enum LrSidecar {
     OlderThanStore,
 }
 
+/// What a bounded sidecar read found. `Missing` and `Unreadable` are NOT the
+/// same thing to a caller choosing a merge base: a missing file carries
+/// nothing, while an unreadable one may carry the user's Lightroom work — and
+/// collapsing both into one "absent" let `write_xmp_disclosed` fall back to
+/// our own previous projection with no note, so an over-the-cap Lightroom
+/// sidecar lost its properties in exactly the silence the merge note was
+/// built to end.
+pub enum SidecarRead {
+    /// No file at the path.
+    Missing,
+    /// The file, in full.
+    Ok(String),
+    /// A file IS there but cannot be used, and this is why (used verbatim in
+    /// user-facing notes).
+    Unreadable(&'static str),
+}
+
 /// Every read of an XMP sidecar, bounded. A sidecar is metadata a user
 /// RECEIVES — from Lightroom, from a shared shoot, from a stranger's delivery —
 /// so its size is not ours to trust: a plain `read_to_string` on a 2 GB file
 /// named `DSC0001.xmp` materialises 2 GB in a request thread just to be handed
 /// to a scanner. Real ones are kilobytes; the biggest Lightroom masks documents
-/// are single-digit megabytes. Over the cap the file is treated as absent,
-/// which every caller already handles (no develop restored, no merge base).
+/// are single-digit megabytes. Over the cap the content is refused — restore
+/// callers treat that as "no develop", and the XMP-writing path DISCLOSES it
+/// (see [`crate::pipeline::write_xmp_disclosed`]) instead of silently merging
+/// against a different base.
 ///
 /// `Read::take` rather than a `metadata()` size check: the length is bounded by
 /// what was actually read, so a file that grows between the two syscalls cannot
 /// widen the allocation.
-pub fn read_sidecar(path: &Path) -> Option<String> {
+pub fn read_sidecar_checked(path: &Path) -> SidecarRead {
     use std::io::Read as _;
     const MAX_SIDECAR: u64 = 16 * 1024 * 1024;
-    let f = std::fs::File::open(path).ok()?;
-    let mut buf = String::new();
-    let n = f.take(MAX_SIDECAR + 1).read_to_string(&mut buf).ok()?;
-    (n as u64 <= MAX_SIDECAR).then_some(buf)
+    let f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SidecarRead::Missing,
+        Err(_) => return SidecarRead::Unreadable("it could not be opened"),
+    };
+    // BYTES first, text second. `read_to_string` on a `Take` that cuts through
+    // a multi-byte character fails with InvalidData BEFORE any size check can
+    // run, so an over-cap sidecar carrying CJK captions or typographic quotes
+    // was reported to the user as "not readable UTF-8 text" — a false reason,
+    // in a note this round exists to make truthful.
+    let mut buf = Vec::new();
+    match f.take(MAX_SIDECAR + 1).read_to_end(&mut buf) {
+        Err(_) => SidecarRead::Unreadable("it could not be read"),
+        Ok(n) if n as u64 > MAX_SIDECAR => {
+            SidecarRead::Unreadable("it is larger than the 16 MiB sidecar limit")
+        }
+        Ok(_) => match String::from_utf8(buf) {
+            Ok(s) => SidecarRead::Ok(s),
+            Err(_) => SidecarRead::Unreadable("it is not readable UTF-8 text"),
+        },
+    }
+}
+
+/// [`read_sidecar_checked`] for the callers to whom missing and unreadable
+/// really are the same (restore: either way there is no develop to restore).
+pub fn read_sidecar(path: &Path) -> Option<String> {
+    match read_sidecar_checked(path) {
+        SidecarRead::Ok(s) => Some(s),
+        SidecarRead::Missing | SidecarRead::Unreadable(_) => None,
+    }
 }
 
 pub fn lightroom_sidecar(src: &Path) -> LrSidecar {

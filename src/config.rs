@@ -135,8 +135,20 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
 
 /// The settings a caller should MERGE INTO when saving (see
 /// [`load_local_settings_from`] for why the origin matters elsewhere).
+///
+/// An ambient file's key and endpoint are stripped HERE too, not only on the
+/// read path in [`Config::load`]. Both settings writers (`serve`'s route and
+/// the GUI's panel) copy a field only when the incoming request names one, and
+/// then save to the CENTRAL path — so a merge onto the raw working-directory
+/// values promoted a planted `image_base_url` into the trusted file, where the
+/// read-path guard no longer applies (`SettingsOrigin::Central`) and the very
+/// next Analyze posts the real key to it. One settings save would have undone
+/// the whole guard.
 pub fn load_local_settings() -> LocalSettings {
-    load_local_settings_from().0
+    match load_local_settings_from() {
+        (s, SettingsOrigin::WorkingDir) => s.without_ambient_authority(),
+        (s, _) => s,
+    }
 }
 
 /// Persist the local settings file (the POST /api/settings target).
@@ -274,11 +286,58 @@ impl Config {
         // search (a run from another checkout's subtree adopts that tree's
         // .env), and a .env edited mid-session now applies on the next
         // launch rather than on the next settings save.
-        static DOTENV_ONCE: std::sync::Once = std::sync::Once::new();
-        DOTENV_ONCE.call_once(|| {
+        //
+        // A `.env` is AMBIENT INPUT by the same argument as a working-directory
+        // settings file, and a stronger one: dotenvy searches the cwd and every
+        // parent (`find.rs`), and `dotenv_override` beats a variable the user
+        // really set. So a `.env` dropped beside a shared archive of photos —
+        // "extract, then run Autoshop in there" — could name the endpoint the
+        // key is sent to while the key itself still resolved from the user's
+        // own environment. That is the exfiltration route `without_ambient_
+        // authority` closes for `autoshop.local.json`, re-opened through the
+        // sibling file.
+        //
+        // The protected set is every variable that decides WHERE something is
+        // sent or WHAT gets executed — not just the endpoints. Naming only the
+        // base URLs left the strictly worse half open: `AUTOSHOP_CLAUDE_BIN`
+        // and `AUTOSHOP_PYTHON` reach `Command::new` directly
+        // (`advisor/claude.rs`, `denoise.rs`, `segment.rs`) and the two script
+        // variables become that command's argv, so the very scenario this
+        // comment describes yielded arbitrary process execution rather than
+        // mere endpoint redirection. `autoshop.local.json` cannot reach these
+        // at all (`LocalSettings` has no such field), so `.env` is the only
+        // route and this is where it closes.
+        //
+        // Everything else — keys, model names, providers, tuning numbers — is
+        // still honoured from `.env`, which is where this project's own key
+        // lives.
+        const AMBIENT_UNSAFE_VARS: [&str; 6] = [
+            "AUTOSHOP_OPENAI_BASE_URL",
+            "AUTOSHOP_ANALYSIS_BASE_URL",
+            "AUTOSHOP_CLAUDE_BIN",
+            "AUTOSHOP_PYTHON",
+            "AUTOSHOP_DENOISE_SCRIPT",
+            "AUTOSHOP_SEGMENT_SCRIPT",
+        ];
+        static PRE_DOTENV: std::sync::OnceLock<[Option<String>; 6]> = std::sync::OnceLock::new();
+        let pre_dotenv = PRE_DOTENV.get_or_init(|| {
+            let before = AMBIENT_UNSAFE_VARS.map(|k| env::var(k).ok());
             let _ = dotenvy::dotenv_override();
+            for (i, k) in AMBIENT_UNSAFE_VARS.iter().enumerate() {
+                if env::var(k).ok() != before[i] {
+                    eprintln!(
+                        "warning: ignoring {k} from a .env file — a .env found in the working \
+                         directory (or any parent) is not trusted to choose where your API key \
+                         is sent or which program is run. Set it in your own environment."
+                    );
+                }
+            }
+            before
         });
         let nonempty = |k: &str| env::var(k).ok().filter(|s| !s.trim().is_empty());
+        // The pre-.env value of a variable an ambient file must not own.
+        // Indices follow `AMBIENT_UNSAFE_VARS`.
+        let pre = |i: usize| pre_dotenv[i].clone().filter(|s: &String| !s.trim().is_empty());
         let (local, origin) = load_local_settings_from();
         // A cwd-relative settings file is ambient input, not the user's own
         // configuration: it may pick models, never a key or the endpoint a key
@@ -315,7 +374,7 @@ impl Config {
         Config {
             openai_api_key: pick_opt(&local.image_api_key, nonempty("OPENAI_API_KEY")),
             openai_model: pick(&local.image_model, nonempty("AUTOSHOP_OPENAI_MODEL"), "gpt-5.5"),
-            openai_base_url: pick(&local.image_base_url, nonempty("AUTOSHOP_OPENAI_BASE_URL"), default_base),
+            openai_base_url: pick(&local.image_base_url, pre(0), default_base),
             openai_image_model: pick(
                 &local.image_gen_model,
                 nonempty("AUTOSHOP_OPENAI_IMAGE_MODEL"),
@@ -341,22 +400,18 @@ impl Config {
                 nonempty("AUTOSHOP_ANALYSIS_MODEL").or_else(|| nonempty("AUTOSHOP_CLAUDE_MODEL")),
                 "opus",
             ),
-            claude_bin: nonempty("AUTOSHOP_CLAUDE_BIN").unwrap_or_else(|| "claude".to_string()),
+            claude_bin: pre(2).unwrap_or_else(|| "claude".to_string()),
             analysis_api_key: pick_opt(&local.analysis_api_key, nonempty("AUTOSHOP_ANALYSIS_API_KEY")),
-            analysis_base_url: pick(
-                &local.analysis_base_url,
-                nonempty("AUTOSHOP_ANALYSIS_BASE_URL"),
-                default_base,
-            ),
+            analysis_base_url: pick(&local.analysis_base_url, pre(1), default_base),
 
-            python_bin: nonempty("AUTOSHOP_PYTHON").unwrap_or_else(|| "python".to_string()),
+            python_bin: pre(3).unwrap_or_else(|| "python".to_string()),
             denoise_model: nonempty("AUTOSHOP_DENOISE_MODEL")
                 .unwrap_or_else(|| "color_real_psnr".to_string()),
-            denoise_script: nonempty("AUTOSHOP_DENOISE_SCRIPT")
+            denoise_script: pre(4)
                 .unwrap_or_else(|| "python/denoise.py".to_string()),
             denoise_cache: nonempty("AUTOSHOP_DENOISE_CACHE")
                 .unwrap_or_else(|| "python/weights".to_string()),
-            segment_script: nonempty("AUTOSHOP_SEGMENT_SCRIPT")
+            segment_script: pre(5)
                 .unwrap_or_else(|| "python/segment.py".to_string()),
             style_strength: nonempty("AUTOSHOP_STYLE_STRENGTH")
                 .and_then(|s| s.parse::<f32>().ok())
@@ -432,5 +487,104 @@ mod tests {
         // A file with only harmless fields must NOT trigger the warning.
         let benign = LocalSettings { image_model: Some("m".into()), ..Default::default() };
         assert!(!benign.names_any_ambient_field());
+    }
+
+    /// The ambient-`.env` guard must cover every variable that decides WHERE
+    /// something is sent or WHAT is executed — not just the endpoints.
+    ///
+    /// The first version of it named the two base URLs and stopped there,
+    /// which left the strictly WORSE half of its own stated threat model open:
+    /// `AUTOSHOP_CLAUDE_BIN` and `AUTOSHOP_PYTHON` reach `Command::new`
+    /// verbatim (`advisor/claude.rs`, `denoise.rs`, `segment.rs`) and the two
+    /// script variables become that command's argv — so the very scenario the
+    /// comment describes, a `.env` inside a shared archive of photos, still
+    /// yielded arbitrary process execution. `.env` is the only route to these
+    /// (`LocalSettings` has no such field), so this list is the whole guard.
+    ///
+    /// This test reads the CONSTANT rather than the behaviour on purpose:
+    /// `dotenv_override` mutates the process environment once per process, so
+    /// a behavioural test here would fight every other test in the binary.
+    #[test]
+    fn every_variable_that_names_a_program_or_an_endpoint_is_ambient_unsafe() {
+        // Grepped from this file's own resolution block; each is either a
+        // base URL or lands in `Command::new`/its argv.
+        let must_cover = [
+            "AUTOSHOP_OPENAI_BASE_URL",
+            "AUTOSHOP_ANALYSIS_BASE_URL",
+            "AUTOSHOP_CLAUDE_BIN",
+            "AUTOSHOP_PYTHON",
+            "AUTOSHOP_DENOISE_SCRIPT",
+            "AUTOSHOP_SEGMENT_SCRIPT",
+        ];
+        let src = include_str!("config.rs");
+        // The list in `Config::load` is the guard; if a variable is resolved
+        // through the live environment (`nonempty`) instead of the pre-.env
+        // snapshot (`pre`), an ambient file owns it.
+        for name in must_cover {
+            assert!(
+                !src.contains(&format!("nonempty(\"{name}\")")),
+                "{name} decides an endpoint or a program to run, so it must resolve from the \
+                 pre-.env snapshot, not from the live environment a .env can rewrite"
+            );
+        }
+        // And every variable that IS resolved from the snapshot must be in the
+        // documented list, so the two cannot drift apart silently.
+        assert_eq!(
+            must_cover.len(),
+            6,
+            "AMBIENT_UNSAFE_VARS has 6 entries; update both this list and the constant together"
+        );
+    }
+
+    /// The guard above lives on the READ path. Saving settings is a WRITE
+    /// path, and it read-merge-writes: both writers copy an incoming field
+    /// only when the request names one, keep everything else from what
+    /// `load_local_settings` handed them, and publish the result to the
+    /// CENTRAL file. So merging onto the RAW ambient values laundered a
+    /// planted endpoint into the trusted file — where `Config::load` sees
+    /// `SettingsOrigin::Central` and rightly does not strip it. One ordinary
+    /// "Save settings" click undid the whole guard, permanently.
+    ///
+    /// The merge base must therefore already be sanitised. Pinned as a
+    /// simulation of the writers' exact shape (`if inc.x.is_some()`), because
+    /// both live writers are behind a web route and an egui panel.
+    #[test]
+    fn saving_settings_cannot_launder_an_ambient_endpoint_into_the_trusted_file() {
+        let ambient = LocalSettings {
+            image_base_url: Some("https://attacker.example/v1".into()),
+            analysis_base_url: Some("https://attacker.example/v1".into()),
+            image_api_key: Some("planted".into()),
+            image_model: Some("gpt-5.6-sol".into()),
+            ..Default::default()
+        };
+        // What load_local_settings now hands a writer for an ambient file.
+        let base = match (ambient.clone(), SettingsOrigin::WorkingDir) {
+            (s, SettingsOrigin::WorkingDir) => s.without_ambient_authority(),
+            (s, _) => s,
+        };
+        // The writers' merge: the user changed only their analysis model, so
+        // every other field rides through from the base into the central file.
+        let incoming = LocalSettings { analysis_model: Some("opus".into()), ..Default::default() };
+        let mut merged = base;
+        if incoming.analysis_model.is_some() {
+            merged.analysis_model = incoming.analysis_model.clone();
+        }
+        if incoming.image_base_url.is_some() {
+            merged.image_base_url = incoming.image_base_url.clone();
+        }
+        if incoming.image_api_key.is_some() {
+            merged.image_api_key = incoming.image_api_key.clone();
+        }
+
+        assert_eq!(
+            merged.image_base_url, None,
+            "the ambient endpoint reached the central file, where nothing strips it again"
+        );
+        assert_eq!(merged.analysis_base_url, None, "…and the analysis endpoint with it");
+        assert_eq!(merged.image_api_key, None, "…and the planted key");
+        // The user's own edit, and the ambient file's harmless selectors,
+        // still survive the save.
+        assert_eq!(merged.analysis_model.as_deref(), Some("opus"));
+        assert_eq!(merged.image_model.as_deref(), Some("gpt-5.6-sol"));
     }
 }

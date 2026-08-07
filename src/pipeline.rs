@@ -801,6 +801,7 @@ pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
 /// loss worth telling the user about. Same single implementation; the two
 /// entry points differ only in whether the caller has somewhere to show it.
 pub fn write_xmp_disclosed(raw: &Path, recipe: &EditRecipe) -> Result<(PathBuf, Option<String>)> {
+    use crate::store::SidecarRead;
     let target = xmp_target(raw);
     // MERGE, never regenerate over Lightroom's work (A11): the base is the
     // sidecar Lightroom itself writes (beside the RAW) when one exists — its
@@ -809,17 +810,75 @@ pub fn write_xmp_disclosed(raw: &Path, recipe: &EditRecipe) -> Result<(PathBuf, 
     // the user copies back beside the RAW keeps them. Else the previous
     // projection at the destination, which carries forward whatever an
     // earlier merge preserved.
-    let base = crate::store::read_sidecar(&raw.with_extension("xmp"))
-        .or_else(|| crate::store::read_sidecar(&target));
-    write_xmp_doc(target, recipe, base)
+    //
+    // The base carries ITS OWN PATH so a failed merge can name the file whose
+    // properties are lost — the note used to name the OUTPUT for every base,
+    // pointing users at a file that was never the problem. And an UNREADABLE
+    // base is a disclosure, never a silent fall-through: `read_sidecar`'s
+    // one-Option shape let an over-the-cap Lightroom sidecar be silently
+    // replaced by our own previous projection as the merge base, so a REAL
+    // loss produced no note — the exact silence this function exists to end.
+    let mut notes: Vec<String> = Vec::new();
+    let mut base: Option<(PathBuf, String)> = None;
+    // Only a camera RAW has a Lightroom-sidecar convention; a baked
+    // PNG/TIFF's neighbouring .xmp is someone else's file (store::
+    // lightroom_sidecar draws the same line for restore). Reading it anyway
+    // meant a foreign sidecar was consulted on every save of a baked photo.
+    if crate::decode::is_raw(raw) {
+        let lr = raw.with_extension("xmp");
+        match crate::store::read_sidecar_checked(&lr) {
+            // A blank file carries nothing to merge and nothing to lose.
+            SidecarRead::Ok(t) if !t.trim().is_empty() => base = Some((lr, t)),
+            SidecarRead::Ok(_) | SidecarRead::Missing => {}
+            // Deliberately says "may not be", not "are not": the save falls
+            // through to the previous projection below, which carries forward
+            // whatever an earlier merge preserved — so some of that sidecar's
+            // properties can survive by that route. What is certain is that
+            // anything added to it SINCE is not represented, and that is the
+            // loss worth naming.
+            SidecarRead::Unreadable(why) => notes.push(format!(
+                "the Lightroom sidecar at {} could not be read ({why}), so this save was \
+                 merged against Autoshop's own previous version instead — anything changed \
+                 in that sidecar since is not in the new file; the sidecar itself is untouched",
+                lr.display()
+            )),
+        }
+    }
+    if base.is_none() {
+        match crate::store::read_sidecar_checked(&target) {
+            SidecarRead::Ok(t) if !t.trim().is_empty() => base = Some((target.clone(), t)),
+            SidecarRead::Ok(_) | SidecarRead::Missing => {}
+            SidecarRead::Unreadable(why) => notes.push(format!(
+                "the previous XMP at {} could not be used as the merge base ({why}) — \
+                 it is replaced by a regenerated file that carries none of its properties",
+                target.display()
+            )),
+        }
+    }
+    write_xmp_doc(target, recipe, base, notes)
 }
 
 /// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
 /// `-o`: the two halves of one develop must stay in the same folder, or the
 /// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
 pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
-    let base = crate::store::read_sidecar(&out);
-    write_xmp_doc(out, recipe, base).map(|(p, _)| p)
+    use crate::store::SidecarRead;
+    let mut notes: Vec<String> = Vec::new();
+    let base = match crate::store::read_sidecar_checked(&out) {
+        SidecarRead::Ok(t) if !t.trim().is_empty() => Some((out.clone(), t)),
+        SidecarRead::Ok(_) | SidecarRead::Missing => None,
+        SidecarRead::Unreadable(why) => {
+            notes.push(format!(
+                "the previous XMP at {} could not be used as the merge base ({why}) — \
+                 it is replaced by a regenerated file that carries none of its properties",
+                out.display()
+            ));
+            None
+        }
+    };
+    // The note return is dropped (this entry point's callers have nowhere to
+    // show it) but write_xmp_doc eprintlns every note, so the CLI still says it.
+    write_xmp_doc(out, recipe, base, notes).map(|(p, _)| p)
 }
 
 /// Returns the published path and, when the merge could not run, a note naming
@@ -837,19 +896,50 @@ pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
 fn write_xmp_doc(
     out: PathBuf,
     recipe: &EditRecipe,
-    merge_base: Option<String>,
+    merge_base: Option<(PathBuf, String)>,
+    mut notes: Vec<String>,
 ) -> Result<(PathBuf, Option<String>)> {
     ensure_parent(&out)?;
-    let had_base = merge_base.is_some();
-    let merged = merge_base.and_then(|b| xmp::merge_recipe_into_xmp(&b, recipe));
-    let regenerated = had_base && merged.is_none();
-    let note = regenerated.then(|| {
-        let msg = format!(
-            "the existing sidecar at {} could not be merged — it was regenerated, \
-             so Lightroom-only properties it carried (Texture, camera profile / Look, \
-             LR lens-profile data) are not in the new file",
-            out.display()
-        );
+    // The same floor `write_recipe` stands on, for the same reason: this is a
+    // persistence boundary, the string caps exist because `rationale` is
+    // filled from an upstream failure body, and the XMP lands BESIDE THE RAW
+    // in the user's library. recipe.json was protected structurally and this
+    // half only by the convention that every caller clamps first.
+    let mut bounded = recipe.clone();
+    bounded.clamp();
+    let recipe = &bounded;
+    let base_path = merge_base.as_ref().map(|(p, _)| p.clone());
+    let merged = merge_base.and_then(|(_, b)| xmp::merge_recipe_into_xmp(&b, recipe));
+    if merged.is_none()
+        && let Some(bp) = base_path
+    {
+        // The note names the file whose properties are LOST — the base — and
+        // is honest about what happened to it: a base at the output path is
+        // genuinely replaced by the regeneration; a base beside the RAW is
+        // not touched at all, only unrepresented in the new file. "Texture,
+        // camera profile / Look, LR lens-profile data" are EXAMPLES of what a
+        // Lightroom base carries, not a claim about this one — a ratings-only
+        // sidecar loses its ratings the same way.
+        notes.push(if bp == out {
+            format!(
+                "the existing sidecar at {} could not be merged — it was regenerated, \
+                 so properties it carried (e.g. Lightroom's Texture, camera profile / \
+                 Look, LR lens-profile data) are not in the new file",
+                out.display()
+            )
+        } else {
+            format!(
+                "the sidecar at {} could not be merged — the new file at {} was \
+                 regenerated without the properties it carried (e.g. Lightroom's \
+                 Texture, camera profile / Look, LR lens-profile data, ratings); \
+                 the sidecar itself is untouched",
+                bp.display(),
+                out.display()
+            )
+        });
+    }
+    let note = (!notes.is_empty()).then(|| {
+        let msg = notes.join("; ");
         eprintln!("⚠ {msg}");
         msg
     });
@@ -1213,6 +1303,207 @@ mod guard_tests {
         let note = note.expect("the loss must be disclosed, not silent");
         assert!(note.contains("regenerated"), "the note names what happened: {note}");
         assert!(note.contains("Texture"), "…and what it cost: {note}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// The disclosure is only worth having if it is TRUE. Three shapes made it
+    /// false: a blank sidecar "lost" properties it never had (a note on every
+    /// save, forever); a baked photo's neighbouring .xmp — someone else's
+    /// file, which store::lightroom_sidecar refuses to interpret — was read
+    /// and warned about anyway; and every note named the OUTPUT path as "the
+    /// existing sidecar that could not be merged", pointing the user at a
+    /// file that was never the problem.
+    #[test]
+    fn the_merge_note_fires_only_for_a_real_loss_and_names_the_base_file() {
+        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-truthful-note");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
+
+        // A blank (0-byte) sidecar beside the RAW: nothing to merge, nothing
+        // to lose, no note.
+        let raw = dir.join("_pipe_note_blank.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::write(dir.join("_pipe_note_blank.xmp"), b"").unwrap();
+        let (_, note) = write_xmp_disclosed(&raw, &r).unwrap();
+        assert!(note.is_none(), "an empty sidecar carries nothing to disclose: {note:?}");
+        // Whitespace-only is the same emptiness.
+        std::fs::write(dir.join("_pipe_note_blank.xmp"), b"  \n\t\n").unwrap();
+        let (_, note) = write_xmp_disclosed(&raw, &r).unwrap();
+        assert!(note.is_none(), "whitespace is not a merge base: {note:?}");
+        let _ = std::fs::remove_dir_all(&dev);
+
+        // A baked photo: its neighbouring .xmp is not ours to interpret, so
+        // even an unmergeable one is no concern of the save.
+        let png = dir.join("_pipe_note_baked.png");
+        std::fs::write(&png, b"png").unwrap();
+        let dev_png = crate::store::develop_dir(&png);
+        let _ = std::fs::remove_dir_all(&dev_png);
+        std::fs::write(
+            dir.join("_pipe_note_baked.xmp"),
+            "<rdf:Description rdf:about=\"\" xmlns:crs=\"c\" crs:Texture=\"+21\">\n",
+        )
+        .unwrap();
+        let (_, note) = write_xmp_disclosed(&png, &r).unwrap();
+        assert!(note.is_none(), "a baked photo's neighbour .xmp is not read: {note:?}");
+        let _ = std::fs::remove_dir_all(&dev_png);
+
+        // A well-formed RATINGS sidecar (no crs at all) beside the RAW — the
+        // population the backlog actually named: exiftool / Bridge / Capture
+        // One keywords and stars. There is nothing of ours to splice into, so
+        // the old code regenerated and reported the loss on EVERY save,
+        // forever, with no action the user could take. It is now a real merge:
+        // the rating survives, our settings land, and there is nothing to
+        // disclose.
+        let raw2 = dir.join("_pipe_note_ratings.arw");
+        std::fs::write(&raw2, b"raw").unwrap();
+        let dev2 = crate::store::develop_dir(&raw2);
+        let _ = std::fs::remove_dir_all(&dev2);
+        let lr2 = dir.join("_pipe_note_ratings.xmp");
+        let ratings = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+             <rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" \
+             xmp:Rating=\"5\" xmp:Label=\"Green\"></rdf:Description>\n \
+             </rdf:RDF>\n</x:xmpmeta>\n";
+        std::fs::write(&lr2, ratings).unwrap();
+        let (out2, note) = write_xmp_disclosed(&raw2, &r).unwrap();
+        assert!(note.is_none(), "a foreign sidecar we CAN merge has no loss to report: {note:?}");
+        let merged = std::fs::read_to_string(&out2).unwrap();
+        assert!(merged.contains("xmp:Rating=\"5\""), "the user's rating survives: {merged}");
+        assert!(merged.contains("xmp:Label=\"Green\""), "…and their label");
+        assert!(merged.contains("crs:Exposure2012=\"0.75\""), "…and our settings landed");
+        assert_eq!(
+            std::fs::read_to_string(&lr2).unwrap(),
+            ratings,
+            "the sidecar beside the RAW is never written"
+        );
+        // Saving AGAIN must not stack a second Description: the merged store
+        // copy now carries crs, so the ordinary merge path takes over.
+        let (out2b, note) = write_xmp_disclosed(&raw2, &r).unwrap();
+        let again = std::fs::read_to_string(&out2b).unwrap();
+        assert!(note.is_none(), "the second save has nothing to disclose either: {note:?}");
+        assert_eq!(again.matches("crs:Exposure2012=").count(), 1, "one settings block, not two");
+        assert!(again.contains("xmp:Rating=\"5\""), "the rating still survives the re-save");
+        let _ = std::fs::remove_dir_all(&dev2);
+
+        // …and the splice point must be real MARKUP. A sidecar whose header
+        // QUOTES the root tag in a comment used to get the settings block
+        // spliced inside that comment: the merge then "succeeded", so no note
+        // fired, and the file Lightroom reads carried none of the develop —
+        // the same silence this test's sibling exists to end. (`xmp.rs`
+        // already pins this property for the close scanner.)
+        let raw4 = dir.join("_pipe_note_quoted.arw");
+        std::fs::write(&raw4, b"raw").unwrap();
+        let dev4 = crate::store::develop_dir(&raw4);
+        let _ = std::fs::remove_dir_all(&dev4);
+        for quoted in [
+            "<!-- template root: <rdf:RDF xmlns:rdf=\"x\"> -->\n",
+            "<![CDATA[ sample: <rdf:RDF xmlns:rdf=\"x\"> ]]>\n",
+            "<?doc <rdf:RDF xmlns:rdf=\"x\"> ?>\n",
+        ] {
+            std::fs::write(
+                dir.join("_pipe_note_quoted.xmp"),
+                format!(
+                    "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n{quoted}\
+                     <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+                     <rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" \
+                     xmp:Rating=\"4\"></rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n"
+                ),
+            )
+            .unwrap();
+            let (out4, _) = write_xmp_disclosed(&raw4, &r).unwrap();
+            let t = std::fs::read_to_string(&out4).unwrap();
+            let settings = t.find("crs:Exposure2012").expect("our settings landed somewhere");
+            let real_root = t.rfind("<rdf:RDF").expect("the real root survives");
+            assert!(
+                settings > real_root,
+                "the settings block was spliced into quoted text, not the document: {t}"
+            );
+            assert!(t.contains("xmp:Rating=\"4\""), "the user's rating survives: {t}");
+            let _ = std::fs::remove_dir_all(&dev4);
+        }
+
+        // A base we genuinely CANNOT account for still regenerates and still
+        // says so — and the note names the SIDECAR, not the output.
+        let raw3 = dir.join("_pipe_note_broken.arw");
+        std::fs::write(&raw3, b"raw").unwrap();
+        let dev3 = crate::store::develop_dir(&raw3);
+        let _ = std::fs::remove_dir_all(&dev3);
+        let lr3 = dir.join("_pipe_note_broken.xmp");
+        std::fs::write(
+            &lr3,
+            "<rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:Texture=\"+21\">\n",
+        )
+        .unwrap();
+        let (_, note) = write_xmp_disclosed(&raw3, &r).unwrap();
+        let note = note.expect("an unaccountable base is a real loss");
+        assert!(
+            note.contains(&lr3.display().to_string()),
+            "the note names the base file, not only the output: {note}"
+        );
+        assert!(note.contains("untouched"), "…and is honest that it was not modified: {note}");
+        let _ = std::fs::remove_dir_all(&dev3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Over the 16 MiB cap the Lightroom sidecar cannot BE the merge base —
+    /// fine — but the one-Option reader turned that refusal into silence: the
+    /// `.or_else` fell back to our own previous projection, the merge
+    /// "succeeded", and the REAL loss (Lightroom's newer work not carried
+    /// into the new file) produced no note at all. The disclosure mechanism
+    /// round four built was defeated by round five's own size cap.
+    #[test]
+    fn an_oversized_lightroom_sidecar_is_disclosed_not_silently_skipped() {
+        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-oversized");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_oversized.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        let lr = dir.join("_pipe_oversized.xmp");
+
+        // First save: a mergeable Lightroom base whose Texture lands in the
+        // projection — the carried-forward property the second save must keep.
+        std::fs::write(
+            &lr,
+            "<rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:Texture=\"+21\"></rdf:Description>\n",
+        )
+        .unwrap();
+        let r1 = EditRecipe { exposure_ev: 0.5, ..Default::default() };
+        let (_, note) = write_xmp_disclosed(&raw, &r1).unwrap();
+        assert!(note.is_none(), "the mergeable base has nothing to disclose: {note:?}");
+
+        // The sidecar balloons past the cap (Lightroom AI masks, or hostile).
+        let mut big = String::with_capacity(16 * 1024 * 1024 + 64);
+        big.push_str("<x:xmpmeta>");
+        while big.len() <= 16 * 1024 * 1024 {
+            big.push_str("<!-- pad -->");
+        }
+        std::fs::write(&lr, &big).unwrap();
+
+        let r2 = EditRecipe { exposure_ev: 0.75, ..Default::default() };
+        let (out, note) = write_xmp_disclosed(&raw, &r2).unwrap();
+        // The fallback itself is CORRECT — the previous projection carries
+        // forward what the first merge preserved, and the save must succeed.
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
+        assert!(text.contains("crs:Texture=\"+21\""), "the projection base carried forward");
+        // Doing it SILENTLY was the defect.
+        let note = note.expect("an unreadable Lightroom sidecar must be disclosed");
+        assert!(
+            note.contains(&lr.display().to_string()) && note.contains("16 MiB"),
+            "the note names the file and the reason: {note}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);

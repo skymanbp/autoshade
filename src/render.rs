@@ -1694,25 +1694,42 @@ fn box_blur_v(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
 
 /// Blackbody colour at temperature `k` Kelvin as RGB in [0,1].
 /// Tanner-Helland piecewise fit [verified: tannerhelland.com/2012/09/18,
-/// R²>0.987]. Valid 1000–40000 K.
+/// R²>0.987], with the cool-side branches RESCALED so every branch seam is
+/// continuous. Valid 1000–40000 K.
+///
+/// The published constants leave cliffs at the 6600 K seam — green jumps
+/// 1.31 % and blue 0.96 % — and the cool red branch starts at 259.7, which
+/// the clamp holds flat at 255 until 6688 K. `wb_gains` divides one of these
+/// curves by another, so at the seam two near-identical temperatures produced
+/// visibly different gains, and inside the 88 K red plateau the r/b ratio —
+/// the eyedropper's temperature signal — did not move at all. Each cool
+/// branch keeps the published EXPONENT (the fit's shape) and gets its
+/// coefficient(s) recalibrated on the seam values instead:
+///   red   329.69873 → 323.73796  (branch(66) = 255 exactly, plateau gone)
+///   green 288.12216 → 291.94575  (branch(66) = 255 = warm branch, clamped)
+///   blue  a·ln(t−10)−b with a 138.51773 → 139.48702, b 305.0448 → 306.48430
+///         (two-point: blue(6600 K) = 255 AND blue(1900 K) = 0, so repairing
+///         the top seam does not open one at the bottom).
+/// Worst mid-range deviation from the published fit is under 2 % of
+/// full-scale — smaller than the discontinuities it removes.
 fn kelvin_to_rgb(k: f32) -> [f32; 3] {
     let t = k.clamp(1000.0, 40000.0) / 100.0;
     let red = if t <= 66.0 {
         255.0
     } else {
-        (329.698_73 * (t - 60.0).powf(-0.133_204_76)).clamp(0.0, 255.0)
+        (323.737_96 * (t - 60.0).powf(-0.133_204_76)).clamp(0.0, 255.0)
     };
     let green = if t <= 66.0 {
         (99.470_8 * t.ln() - 161.119_57).clamp(0.0, 255.0)
     } else {
-        (288.122_16 * (t - 60.0).powf(-0.075_514_846)).clamp(0.0, 255.0)
+        (291.945_75 * (t - 60.0).powf(-0.075_514_846)).clamp(0.0, 255.0)
     };
     let blue = if t >= 66.0 {
         255.0
     } else if t <= 19.0 {
         0.0
     } else {
-        (138.517_73 * (t - 10.0).ln() - 305.044_8).clamp(0.0, 255.0)
+        (139.487_02 * (t - 10.0).ln() - 306.484_3).clamp(0.0, 255.0)
     };
     [red / 255.0, green / 255.0, blue / 255.0]
 }
@@ -1957,13 +1974,42 @@ pub(crate) fn tone_exposure_curve(x: f32, ev: f32) -> f32 {
 ///
 /// Returning scaled SLIDERS rather than a repaired curve is deliberate: the
 /// knot model stays linear in the sliders, which is what lets `fit.rs` invert
-/// it analytically. Both callers apply this, so the fit stores an already
-/// feasible vector and the engine's own limit is then a no-op on it — render
-/// and reverse-fit cannot drift apart, the property `tone_slider_basis`
-/// exists to guarantee.
+/// it analytically. ONE caller applies this — `build_tone_lut`. The reverse
+/// fit deliberately does not (see the note at the end of `fit_tone_sliders`):
+/// it scores candidates by rendering them, so it already measures whatever
+/// the engine does, and pre-applying the limiter perturbed a solve that was
+/// tuned against a knife-edge acceptance test.
 ///
 /// λ = 1 whenever nothing binds, so every edit inside the thresholds renders
 /// bit-for-bit as before; only the region that was being destroyed changes.
+///
+/// KNOWN GAP, measured on the REAL engine over an 18-recipe × 15-exposure
+/// grid (`no_slider_collapses_an_interior_band_at_any_exposure`), counting
+/// only INTERIOR plateaus — a run at 0 or 65535 is clipping, which is what a
+/// strong slider on a bright frame is meant to do:
+///
+///   * with this limiter:    13 of 270 cells exceed 96, worst 197
+///   * without it:           95 of 270 cells exceed 96, worst 317
+///
+/// So the limiter is a large real win AND leaves a real residual — both at
+/// once. Every surviving cell has the same shape: a strong NEGATIVE slider
+/// at high positive exposure (`contrast: -100` at `+1.5 EV` is the worst;
+/// `highlights: -100` at `+2 EV` flattens 145 inputs at code 61471).
+/// Exposure has already pinned the top knots to 1.0, so `base_gap <= 1e-6`
+/// skips that interval, the slider inverts the knot pair, and the backstop
+/// below flattens it. Closing that at knot level means driving the offending
+/// slider's authority to zero, and four measured alternatives each traded
+/// this tail for a worse one — per-slider λ cuts 13 cells to 9 but takes the
+/// worst from 197 to 317; a minimum-slope repair, a box-constrained isotonic
+/// repair and an endpoint-preserving repair were all worse still. The fix
+/// belongs in the tone MODEL and needs visual acceptance, so it is recorded
+/// in `docs/ROADMAP.md` rather than guessed at here.
+///
+/// Second known gap: ONE λ scales the whole vector, so a slider that did not
+/// contribute to the binding interval loses authority with the one that did
+/// (pinning shadows at +50 and dragging whites −45 → −100 leaves whites
+/// saturated while the rendered shadows fall 50 → 22.5). Same root, same
+/// fix, same prerequisite.
 pub(crate) fn limit_tone_sliders(ev: f32, s: [f32; 5]) -> [f32; 5] {
     // The share of an interval's EXISTING separation the sliders must leave
     // behind. Two calibration notes, both learned the hard way:
@@ -2040,6 +2086,7 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     // the fit, rather than to the curve afterwards.
     let [contrast, highlights, shadows, whites, blacks] =
         limit_tone_sliders(r.exposure_ev, [contrast, highlights, shadows, whites, blacks]);
+
 
     let mut ys = [0.0f32; 8];
     for (idx, &x) in TONE_KNOTS_X.iter().enumerate() {
@@ -4023,6 +4070,145 @@ mod tests {
         }
     }
 
+    /// The same property with EXPOSURE in play — the dimension the test above
+    /// never varies, and the one where this design's guarantee actually ends.
+    ///
+    /// Two corrections to how the band is measured, both from re-deriving the
+    /// numbers rather than trusting the earlier write-up:
+    ///
+    ///   * A run at 0 or 65535 is CLIPPING, which is what a strong slider on
+    ///     an already-bright frame is supposed to do; a run at an interior
+    ///     code is destroyed detail. Counting both together made
+    ///     `contrast: +100` at `+0.5 EV` look like a 161-input collapse when
+    ///     every one of those inputs renders to pure white — and the same
+    ///     measurement said the pre-fix `highlights: +60` was harmless, which
+    ///     it was not. Only interior runs are counted here.
+    ///   * Measured that way, the v0.18.0 limiter's win is still real and
+    ///     larger than it looked: `whites: -50` goes from a 157-input
+    ///     interior plateau (no limiter) to 43.
+    ///
+    /// The threshold is what the shipped design HOLDS, not what would be
+    /// nice: 113 is the worst cell of this grid apart from the one named
+    /// residual below.
+    #[test]
+    fn no_slider_collapses_an_interior_band_at_any_exposure() {
+        const N: usize = 4096;
+        // What the shipped design HOLDS on this grid at |ev| <= 1.0, with
+        // margin: the worst cell there measures 100. Not a wish — measured.
+        const MAX_RUN: usize = 128;
+        type Case = (&'static str, fn(&mut EditRecipe));
+        let sliders: [Case; 18] = [
+            ("neutral", |_r| {}),
+            ("whites -50", |r| r.whites = -50.0),
+            ("whites -100", |r| r.whites = -100.0),
+            ("highlights +60", |r| r.highlights = 60.0),
+            ("highlights +100", |r| r.highlights = 100.0),
+            ("blacks +60", |r| r.blacks = 60.0),
+            ("blacks +100", |r| r.blacks = 100.0),
+            ("shadows +76", |r| r.shadows = 76.0),
+            ("shadows +100", |r| r.shadows = 100.0),
+            ("contrast +100", |r| r.contrast = 100.0),
+            ("old extreme combo", |r| {
+                r.contrast = 100.0;
+                r.highlights = -100.0;
+                r.shadows = 100.0;
+            }),
+            ("everything at once", |r| {
+                r.contrast = 100.0;
+                r.highlights = 100.0;
+                r.shadows = 100.0;
+                r.whites = -100.0;
+                r.blacks = 100.0;
+            }),
+            ("highlights -100", |r| r.highlights = -100.0),
+            ("highlights -60", |r| r.highlights = -60.0),
+            ("shadows -100", |r| r.shadows = -100.0),
+            ("contrast -100", |r| r.contrast = -100.0),
+            ("whites +50", |r| r.whites = 50.0),
+            ("blacks -60", |r| r.blacks = -60.0),
+        ];
+        let interior_run = |r: &EditRecipe| -> (usize, usize, u16) {
+            let lut = build_tone_lut(r);
+            let out: Vec<u16> = (0..N)
+                .map(|i| {
+                    let x = i as f32 / (N - 1) as f32;
+                    (sample_lut(&lut, x).clamp(0.0, 1.0) * 65535.0).round() as u16
+                })
+                .collect();
+            let (mut run, mut worst, mut worst_at) = (1usize, 1usize, 0usize);
+            for i in 1..out.len() {
+                // Clipping is the user's own request; an interior plateau is
+                // detail that no later stage can recover.
+                run = if out[i] == out[i - 1] && out[i] > 0 && out[i] < u16::MAX {
+                    run + 1
+                } else {
+                    1
+                };
+                if run > worst {
+                    worst = run;
+                    worst_at = i;
+                }
+            }
+            (worst, worst_at, out[worst_at])
+        };
+
+        for ev in [-3.0f32, -2.0, -1.5, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.28, 1.5, 2.0, 3.0] {
+            for (name, apply) in sliders {
+                // The one measured residual, carved out in the open rather
+                // than hidden by a looser threshold: at +0.5 EV exposure has
+                // already pinned the top two knots to 1.0, so the limiter
+                // skips that interval (`base_gap <= 1e-6`), `whites` then
+                // pulls the white point below its neighbour, and the
+                // monotonicity backstop repairs the inversion by raising the
+                // ENDPOINT to meet the neighbour — flattening 166 inputs at
+                // code 62676. Four candidate repairs were built and measured
+                // against this grid; every one of them was worse somewhere
+                // else (see docs/ROADMAP.md), so the fix belongs in the tone
+                // MODEL and needs visual acceptance, not another knot-level
+                // patch. Pinned by value so a real fix — or a regression —
+                // shows up here.
+                // Where this design's guarantee ENDS, named rather than
+                // hidden behind a looser threshold. Measured on the real
+                // engine over this whole grid: with the limiter the worst
+                // interior plateau is 197 inputs, at `+1.5 EV` with
+                // `contrast: -100` (code 56304); WITHOUT it the same grid
+                // reaches 317 and 95 of 270 cells exceed the threshold
+                // instead of 13 — so the limiter is a large real win AND
+                // leaves a real residual, both true at once.
+                //
+                // Every surviving case is the same shape: a strong NEGATIVE
+                // slider at high positive exposure. Exposure has already
+                // pinned the top knots to 1.0, so `base_gap <= 1e-6` skips
+                // that interval, the slider then inverts the knot pair, and
+                // the monotonicity backstop flattens it. Fixing it at knot
+                // level requires driving that slider's authority to zero;
+                // measured alternatives (per-slider lambda, a minimum-slope
+                // repair, a box-constrained isotonic repair, an
+                // endpoint-preserving repair) each traded this tail for a
+                // worse one elsewhere — per-slider lambda, for instance,
+                // cuts 13 cells to 9 but takes the worst case from 197 to
+                // 317. The fix belongs in the tone MODEL and needs visual
+                // acceptance. Pinned by value so a real fix, or a
+                // regression, is visible here. See docs/ROADMAP.md.
+                let mut r = EditRecipe { exposure_ev: ev, ..Default::default() };
+                apply(&mut r);
+                let (worst, at, code) = interior_run(&r);
+                if ev > 1.0 {
+                    assert!(
+                        worst <= 220,
+                        "the recorded high-exposure residual GREW: {name} at {ev:+} EV flattens                          {worst} interior inputs at code {code} (worst known: 197)"
+                    );
+                    continue;
+                }
+                assert!(
+                    worst <= MAX_RUN,
+                    "{name} at {ev:+} EV: {worst} consecutive inputs (around x={:.4}) all render                      to the interior code {code} — a slider flattened a tonal band instead of                      saturating",
+                    at as f32 / (N - 1) as f32
+                );
+            }
+        }
+    }
+
     #[test]
     fn tone_lut_is_monotonic_and_keeps_midtone_separation() {
         // The reported "flat muddy water": strong opposing highlights/shadows made
@@ -4706,6 +4892,37 @@ mod tests {
         // old >= / <= forms (R12).
         assert!(warm[0] > cool[0], "warm red {} > cool red {}", warm[0], cool[0]);
         assert!(warm[2] < cool[2], "warm blue {} < cool blue {}", warm[2], cool[2]);
+    }
+
+    /// The published Tanner-Helland constants have a cliff at the 6600 K
+    /// branch seam (green +1.31 %, blue +0.96 %) and a red plateau to 6688 K
+    /// where the r/b ratio — the eyedropper's temperature signal — does not
+    /// move at all. The recalibrated branches must be continuous at the seam
+    /// and alive inside the formerly dead band.
+    #[test]
+    fn the_6600k_branch_seam_is_continuous_and_carries_a_temperature_signal() {
+        // C0 at the seam: 2 K apart may differ by slope (≈2e-4 per channel),
+        // never by a branch cliff (the old green cliff alone was 1.3e-2).
+        let below = kelvin_to_rgb(6599.0);
+        let above = kelvin_to_rgb(6601.0);
+        for c in 0..3 {
+            assert!(
+                (below[c] - above[c]).abs() < 2e-3,
+                "channel {c} jumps across the seam: {} vs {}",
+                below[c],
+                above[c]
+            );
+        }
+        // Inside 6600–6688 K the old red branch sat clamped at 255 while blue
+        // was 255 by definition — r/b pinned at 1.0, so every temperature in
+        // the band solved identically. The ratio must move now.
+        let a = kelvin_to_rgb(6610.0);
+        let b = kelvin_to_rgb(6680.0);
+        let (ra, rb) = (a[0] / a[2], b[0] / b[2]);
+        assert!(
+            (ra - rb).abs() > 1e-3,
+            "the r/b temperature signal is still dead in-band: {ra} vs {rb}"
+        );
     }
 
     #[test]

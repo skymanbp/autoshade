@@ -214,10 +214,32 @@ pub(crate) const BODY_CAP: u64 = 64 * 1024 * 1024;
 /// `serve.rs`). An unbounded read is not a recoverable error either: an
 /// allocation failure ABORTS the process, so the desktop app dies with
 /// whatever was unsaved.
-pub(crate) fn into_json_capped(r: ureq::Response) -> std::io::Result<serde_json::Value> {
+/// `cap` is the caller's, not this module's: an images/edits response carries
+/// a base64 frame that the SSE arm beside it budgets 512 MiB for, so the
+/// text-sized [`BODY_CAP`] silently threw away already-billed generations.
+pub(crate) fn into_json_capped_at(
+    r: ureq::Response,
+    cap: u64,
+) -> std::io::Result<serde_json::Value> {
     use std::io::Read as _;
-    serde_json::from_reader(r.into_reader().take(BODY_CAP))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_reader(r.into_reader().take(cap)).map_err(|e| {
+        // PRESERVE the transport kind. ureq 2.12.1 deliberately keeps
+        // `TimedOut` and maps only everything else to `InvalidData`
+        // (`response.rs`), and `post_ai_json` branches on exactly that to
+        // choose between "the endpoint answered with unreadable JSON" and
+        // "the request was accepted (2xx) and may already be billed". Mapping
+        // every error to InvalidData made the second branch — the one that
+        // warns about money — unreachable, and reported a read timeout as bad
+        // JSON.
+        match e.io_error_kind() {
+            Some(k) => std::io::Error::new(k, e),
+            None => std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        }
+    })
+}
+
+pub(crate) fn into_json_capped(r: ureq::Response) -> std::io::Result<serde_json::Value> {
+    into_json_capped_at(r, BODY_CAP)
 }
 
 /// [`transport_error`]'s streaming sibling. Crucially it reports the MEASURED
@@ -266,10 +288,82 @@ pub(crate) const TRANSPORT_RETRY_UNDER_SECS: u64 = 30;
 pub(crate) fn for_each_sse_json(
     r: impl std::io::Read,
     cap: u64,
+    progress_budget: Option<std::time::Duration>,
     mut on_json: impl FnMut(serde_json::Value) -> std::ops::ControlFlow<()>,
 ) -> std::io::Result<()> {
     use std::io::BufRead;
-    let mut rd = std::io::BufReader::new(r.take(cap));
+    // Liveness is CONTENT, not bytes. The transport stall timeout re-arms on
+    // every byte received, and an SSE comment line (": keep-alive") is bytes —
+    // so a server or proxy emitting only comments held the reader FOREVER
+    // while `busy` gated the whole app, and the per-event cancel check never
+    // ran because no event ever arrived. This gate holds the same budget the
+    // socket does, but a COMMENT never re-arms it.
+    //
+    // The distinction is drawn at the byte level, inside the reader, and only
+    // comment (`:`) and blank lines are excluded. Two reasons it is not "data
+    // lines only": `event:` / `id:` lines are real server activity per the SSE
+    // spec, and a single `data:` line carrying a multi-megabyte base64 image
+    // frame can take minutes to arrive — counting it only once complete would
+    // kill a stream in the middle of delivering exactly what was asked for.
+    // What remains excluded is precisely the keep-alive idiom.
+    //
+    // `None` (tests, non-network readers) disables the gate.
+    struct ProgressGate<R> {
+        inner: R,
+        last: std::time::Instant,
+        budget: Option<std::time::Duration>,
+        /// Byte-level line state, so a partially delivered line still counts.
+        at_line_start: bool,
+        line_is_content: bool,
+    }
+    impl<R: std::io::Read> std::io::Read for ProgressGate<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(b) = self.budget
+                && self.last.elapsed() > b
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "no stream content for over {}s — the connection kept sending \
+                         keep-alive comments, so this cannot be told apart from a server or \
+                         proxy that has stopped working; raise AUTOSHOP_HTTP_TIMEOUT_SECS if \
+                         this service really queues that long",
+                        b.as_secs()
+                    ),
+                ));
+            }
+            let n = self.inner.read(buf)?;
+            // No budget, no bookkeeping: the disable knob must disable the
+            // COST, not just the check.
+            let Some(_) = self.budget else { return Ok(n) };
+            let mut saw_content = false;
+            for &byte in &buf[..n] {
+                if self.at_line_start {
+                    // ':' opens a comment; CR/LF is an empty line. Anything
+                    // else (data:, event:, id:, a BOM) is content.
+                    self.line_is_content = byte != b':' && byte != b'\n' && byte != b'\r';
+                }
+                saw_content |= self.line_is_content;
+                self.at_line_start = byte == b'\n' || byte == b'\r';
+            }
+            // ONCE per read, not once per byte. `Instant::now()` costs ~22 ns
+            // here, so re-arming per byte made the reader ~50× slower than the
+            // I/O it was guarding — 6.2 s of pure clock reads on a 256 MiB
+            // stream, on the worker thread, inside `busy`. Read granularity is
+            // 8 KiB against a budget of minutes, so nothing is lost.
+            if saw_content {
+                self.last = std::time::Instant::now();
+            }
+            Ok(n)
+        }
+    }
+    let mut rd = std::io::BufReader::new(ProgressGate {
+        inner: r.take(cap),
+        last: std::time::Instant::now(),
+        budget: progress_budget,
+        at_line_start: true,
+        line_is_content: false,
+    });
     let mut event_data = String::new();
     let mut seg: Vec<u8> = Vec::new();
     // Flush one completed event to the consumer; true = consumer broke.
@@ -433,7 +527,14 @@ pub(crate) fn post_ai_json(
                     // re-billed exactly the calls that died early. The
                     // pre-response transport arm below still absorbs blips
                     // that never produced a response.
-                    return assemble_sse(r.into_reader(), family).map_err(|e| match e {
+                    // The gate gets the SAME number the socket was armed
+                    // with: one budget for silence on the wire and for
+                    // byte-alive-but-eventless stalling, one env knob over
+                    // both.
+                    let gate = std::time::Duration::from_secs(effective_stall_secs(
+                        budget_secs.max(STREAM_STALL_FLOOR_SECS),
+                    ));
+                    return assemble_sse(r.into_reader(), family, Some(gate)).map_err(|e| match e {
                         AdvisorError::Transport(msg) if msg.starts_with("read AI stream:") => {
                             AdvisorError::Transport(format!(
                                 "{msg} — the request was accepted (2xx) and may already be \
@@ -524,6 +625,7 @@ pub(crate) fn post_ai_json(
 fn assemble_sse(
     r: impl std::io::Read,
     family: SseFamily,
+    progress_budget: Option<std::time::Duration>,
 ) -> Result<serde_json::Value, AdvisorError> {
     use std::ops::ControlFlow::{Break, Continue};
     // A strict-schema recipe or verdict is a few KB; token deltas at most
@@ -534,7 +636,7 @@ fn assemble_sse(
         SseFamily::Responses => {
             let mut out: Option<serde_json::Value> = None;
             let mut failure: Option<String> = None;
-            for_each_sse_json(r, CAP, |v| {
+            for_each_sse_json(r, CAP, progress_budget, |v| {
                 if v.get("error").is_some()
                     || v.get("type").and_then(serde_json::Value::as_str) == Some("error")
                 {
@@ -572,7 +674,7 @@ fn assemble_sse(
             // mid-generation) would hand partial JSON downstream — the same
             // strictness the Responses arm gets from response.completed.
             let mut finished = false;
-            let read = for_each_sse_json(r, CAP, |v| {
+            let read = for_each_sse_json(r, CAP, progress_budget, |v| {
                 if v.get("error").is_some() {
                     failure = Some(v.to_string());
                     return Break(());
@@ -797,19 +899,19 @@ mod tests {
             "data: {\"choices\":[],\"usage\":{\"total_tokens\":5}}\n\n",
             "data: [DONE]\n\n",
         );
-        let v = assemble_sse(body.as_bytes(), SseFamily::Chat).unwrap();
+        let v = assemble_sse(body.as_bytes(), SseFamily::Chat, None).unwrap();
         assert_eq!(v["choices"][0]["message"]["content"], "Hello");
 
         // CR-only framing (spec-permitted) must reassemble identically.
         let cr = body.replace('\n', "\r");
-        let v = assemble_sse(cr.as_bytes(), SseFamily::Chat).unwrap();
+        let v = assemble_sse(cr.as_bytes(), SseFamily::Chat, None).unwrap();
         assert_eq!(v["choices"][0]["message"]["content"], "Hello");
 
         // A clean EOF with content but NO terminal finish_reason is a
         // truncated stream, not a success.
         let cut =
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"{\\\"partial\\\":\"}}]}\n\n";
-        let err = assemble_sse(cut.as_bytes(), SseFamily::Chat).unwrap_err();
+        let err = assemble_sse(cut.as_bytes(), SseFamily::Chat, None).unwrap_err();
         assert!(err.to_string().contains("without a terminal finish_reason"), "{err}");
     }
 
@@ -846,7 +948,7 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"content\":\
 [{\"type\":\"output_text\",\"text\":\"FINAL\"}]}]}}\n\n",
         );
-        let v = assemble_sse(body.as_bytes(), SseFamily::Responses).unwrap();
+        let v = assemble_sse(body.as_bytes(), SseFamily::Responses, None).unwrap();
         assert_eq!(v["output"][0]["content"][0]["text"], "FINAL");
     }
 
@@ -854,13 +956,109 @@ mod tests {
     fn sse_streams_fail_loudly_on_failure_and_on_no_result() {
         let failed =
             "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n";
-        let err = assemble_sse(failed.as_bytes(), SseFamily::Responses).unwrap_err().to_string();
+        let err = assemble_sse(failed.as_bytes(), SseFamily::Responses, None).unwrap_err().to_string();
         assert!(err.contains("boom"), "{err}");
         let no_result = "data: {\"type\":\"response.created\",\"response\":{}}\n\n";
-        let err = assemble_sse(no_result.as_bytes(), SseFamily::Responses).unwrap_err().to_string();
+        let err = assemble_sse(no_result.as_bytes(), SseFamily::Responses, None).unwrap_err().to_string();
         assert!(err.contains("without response.completed"), "{err}");
         let empty_chat = "data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\ndata: [DONE]\n\n";
-        let err = assemble_sse(empty_chat.as_bytes(), SseFamily::Chat).unwrap_err().to_string();
+        let err = assemble_sse(empty_chat.as_bytes(), SseFamily::Chat, None).unwrap_err().to_string();
         assert!(err.contains("without any content"), "{err}");
+    }
+
+    /// The stall timeout re-arms on BYTES; an SSE comment is bytes. So a
+    /// server sending only ": keep-alive" lines was indistinguishable from a
+    /// working one — the read ran forever, `busy` held the whole app, and the
+    /// per-event cancel check never ran because no event ever arrived. The
+    /// progress gate measures liveness in EVENTS: comment-only streams die at
+    /// the budget, streams with data lines run as long as they keep talking.
+    #[test]
+    fn a_keep_alive_only_stream_is_a_stall_not_a_healthy_call() {
+        use std::io::Read;
+        use std::ops::ControlFlow::Continue;
+
+        /// Emits `line` every `gap_ms`, at most `max` times — bounded so a
+        /// broken gate FAILS this test (Ok at end-of-drip) instead of
+        /// hanging it.
+        struct Drip {
+            line: &'static [u8],
+            gap_ms: u64,
+            emitted: u32,
+            max: u32,
+        }
+        impl Read for Drip {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.emitted >= self.max {
+                    return Ok(0);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(self.gap_ms));
+                self.emitted += 1;
+                let n = self.line.len().min(buf.len());
+                buf[..n].copy_from_slice(&self.line[..n]);
+                Ok(n)
+            }
+        }
+
+        // Comment-only: byte-alive forever, event-dead. Must fail TimedOut at
+        // roughly the budget, far before the drip runs dry.
+        let started = std::time::Instant::now();
+        let err = for_each_sse_json(
+            Drip { line: b": keep-alive\n", gap_ms: 20, emitted: 0, max: 300 },
+            1024 * 1024,
+            Some(std::time::Duration::from_millis(200)),
+            |_| Continue(()),
+        )
+        .expect_err("a stream with no data events is not healthy");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the gate fires at its budget, not at end-of-stream ({:?})",
+            started.elapsed()
+        );
+
+        // Data lines are progress: gaps of 60 ms under a 200 ms budget, but
+        // total run time far past 200 ms — all six events must arrive.
+        let mut seen = 0;
+        for_each_sse_json(
+            Drip { line: b"data: {\"n\":1}\n\n", gap_ms: 60, emitted: 0, max: 6 },
+            1024 * 1024,
+            Some(std::time::Duration::from_millis(200)),
+            |_| {
+                seen += 1;
+                Continue(())
+            },
+        )
+        .expect("a stream that keeps sending data events runs to completion");
+        assert_eq!(seen, 6, "every event of the healthy slow stream arrived");
+
+        // `event:`/`id:` lines are real server activity per the SSE spec, not
+        // the keep-alive idiom — a server sending them is working, and the
+        // gate must not kill it. (Only `:` comments and blank lines don't
+        // count.) Runs 25 × 30 ms = 750 ms under a 200 ms budget.
+        for_each_sse_json(
+            Drip { line: b"event: ping\n", gap_ms: 30, emitted: 0, max: 25 },
+            1024 * 1024,
+            Some(std::time::Duration::from_millis(200)),
+            |_| Continue(()),
+        )
+        .expect("event:/id: lines are content, not keep-alive");
+
+        // And one `data:` line delivered slowly, byte by byte, is the stream
+        // doing exactly what was asked (a multi-MB base64 image frame is ONE
+        // line): 60 chunks × 30 ms = 1.8 s under a 200 ms budget, and the
+        // event must still be delivered whole.
+        let mut got = None;
+        for_each_sse_json(
+            Drip { line: b"data: {\"n\":1}\n\n", gap_ms: 30, emitted: 0, max: 1 }
+                .chain(Drip { line: b"x", gap_ms: 30, emitted: 0, max: 60 }),
+            1024 * 1024,
+            Some(std::time::Duration::from_millis(200)),
+            |v| {
+                got = Some(v);
+                Continue(())
+            },
+        )
+        .expect("a slowly delivered content line keeps the stream alive");
+        assert!(got.is_some(), "the event arrived");
     }
 }

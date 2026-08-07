@@ -159,6 +159,41 @@ have posted that key to whoever wrote the file. Extracting a shared archive of
 photos and running Autoshop inside it was enough. Your own settings, saved from
 the panel into your user profile, are unaffected.
 
+The same rule now covers two routes that were still open. **Saving settings no
+longer launders an ambient file into your trusted one** — both settings writers
+read-merge-write, so a save used to copy a planted `image_base_url` into your
+user profile, where nothing strips it again and one ordinary "save" undid the
+whole guard. And **a `.env` may no longer choose the endpoint**: `dotenvy`
+searches the working directory *and every parent*, and its override mode beats
+a variable you really set, so a `.env` dropped beside shared photos could
+redirect your key exactly as the settings file could. Keys and model names from
+`.env` still work — that is where this project's own key lives; only
+`AUTOSHOP_OPENAI_BASE_URL` and `AUTOSHOP_ANALYSIS_BASE_URL` are ignored from
+it, with a warning.
+
+**White balance renders slightly differently.** The blackbody curve behind the
+Temp slider is a published piecewise fit whose branches did not meet: at
+6600 K green jumped 1.31 % and blue 0.96 %, and red sat clamped flat from 6600
+to 6688 K, so an 88 K band carried no temperature signal at all for the
+eyedropper to solve against. The branches are now rescaled to meet exactly.
+The cost is that white-balance gains change. Measured against a 5500 K shot,
+as the change in the gain each channel receives:
+
+| Temp target | red | blue |
+|---|---|---|
+| 2000 K (candle — the slider's floor) | 0 % | **−4.43 %** |
+| 2500 K | 0 % | −0.67 % |
+| 3000–5000 K | 0 % | −0.32 % … −0.03 % |
+| 6500 K and below | **0 %** | +0.03 % |
+| above 6600 K (any cool target) | **+3.19 %** | **+2.35 %** |
+
+Red is untouched at and below 6500 K because that branch was already clamped
+there. The two ends move most: cool targets by the seam repair, and the very
+warm end because the blue branch crosses zero at 1900 K, so a small absolute
+change is a large relative one right at the slider's floor. Re-exports of older
+work at those settings will differ by that much, and this change has **not**
+had visual acceptance.
+
 ## AI Denoise setup
 
 The denoiser is a small Python sidecar ([`python/denoise.py`](python/denoise.py))
