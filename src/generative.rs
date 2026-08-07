@@ -707,6 +707,36 @@ fn call_images_edit(
                         // cancels as "cancelled by user" — both pass through
                         // with their own messages.
                         let top = e.to_string();
+                        // ONE exception, found live: a streaming endpoint
+                        // answers 200 and then REFUSES the parameters as an
+                        // SSE error event — the same capability signal the
+                        // 400 arm below negotiates on, but it used to fall
+                        // through here as a terminal "image stream error",
+                        // so the size fallback existed in one mode and not
+                        // the other (`/api/retouch` died on `Invalid size
+                        // '2048x1360'` while the blocking path would have
+                        // retried at 1536x1024). A structured VALIDATION
+                        // refusal means the generation never started, so a
+                        // re-post cannot double-bill. Same knobs, same
+                        // one-shot flags as the 400 arm.
+                        if use_flexible && streamed_refusal_blames(&top, "size") {
+                            eprintln!(
+                                "  note: {} rejected flexible size {size} in-stream — \
+                                 falling back to {}",
+                                cfg.openai_image_model, sizes.enum_size
+                            );
+                            use_flexible = false;
+                            continue;
+                        }
+                        if include_fidelity && streamed_refusal_blames(&top, "input_fidelity") {
+                            eprintln!(
+                                "  note: {} rejected input_fidelity in-stream — retrying \
+                                 without it",
+                                cfg.openai_image_model
+                            );
+                            include_fidelity = false;
+                            continue;
+                        }
                         if top.starts_with("read image stream")
                             || top.starts_with("parse image API response")
                         {
@@ -850,6 +880,19 @@ fn extract_b64(value: &serde_json::Value) -> Option<&str> {
 
 /// Drain an image SSE stream: log partial-image events (the liveness signal),
 /// fail loudly on an `error` event, and return the final `*.completed` JSON
+/// Does a STREAMED image failure (`read_sse_image`'s "image stream error:"
+/// message, whose payload is the SSE error event verbatim) blame `param` as a
+/// structured validation refusal? Attribution reuses the one shared rule
+/// (`advisor::error_blames_param`): a structured `error.param` wins, and only
+/// a QUOTED mention counts as a fallback — a message merely containing a
+/// common word like "size" is not a capability signal. Only messages carrying
+/// the exact prefix qualify; read/parse failures (which may follow a billed
+/// generation) never negotiate.
+fn streamed_refusal_blames(top: &str, param: &str) -> bool {
+    top.strip_prefix("image stream error: ")
+        .is_some_and(|payload| crate::advisor::error_blames_param(payload, param))
+}
+
 /// payload. Matches on the event-type SUFFIX so both the `image_edit.*` and
 /// `image_generation.*` families parse. Framing (multi-line `data:` payloads,
 /// event boundaries, EOF flush, `[DONE]`) lives in the shared
@@ -904,6 +947,35 @@ fn read_sse_image(
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    /// M-G1: `streamed_refusal_blames` prefix check dropped or attribution
+    /// weakened — the negotiation must fire on a STREAMED structured size
+    /// refusal (the live `/api/retouch` failure, payload verbatim) and must
+    /// NOT fire on read/parse failures or unquoted mentions, which may sit
+    /// downstream of an already-billed generation.
+    #[test]
+    fn a_streamed_size_refusal_negotiates_and_a_billed_failure_does_not() {
+        // Captured live 2026-08-07: the API refusing a flexible size in-stream.
+        let live = r#"image stream error: {"error":{"code":"invalid_value","message":"Invalid size '2048x1360'. Supported sizes are 1024x1024, 1024x1536, 1536x1024, and auto.","param":"size","type":"image_generation_user_error"},"sequence_number":0,"type":"error"}"#;
+        assert!(streamed_refusal_blames(live, "size"));
+        assert!(!streamed_refusal_blames(live, "input_fidelity"));
+
+        // A stream that died mid-read is NOT a refusal — no negotiation, the
+        // caller's "may already be billed" arm owns it.
+        assert!(!streamed_refusal_blames("read image stream: connection reset", "size"));
+        // …even when the failure text QUOTES the parameter name: without the
+        // prefix requirement this would negotiate — and re-post — after a
+        // possibly-billed generation.
+        assert!(!streamed_refusal_blames(
+            r#"read image stream: server closed after "size" line"#,
+            "size"
+        ));
+        // An unquoted mention of a common word is not a capability signal.
+        assert!(!streamed_refusal_blames(
+            r#"image stream error: {"message":"the size of the queue exceeded a limit"}"#,
+            "size"
+        ));
+    }
 
     /// The boundary is a const in a PUBLIC repo, so a pasted prompt could
     /// quote the delimiter line and forge its own parts (override model /

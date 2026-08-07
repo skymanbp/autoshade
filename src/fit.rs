@@ -453,6 +453,12 @@ pub(crate) fn fit_tone_sliders(tone_map: &impl Fn(f32) -> f32) -> (f32, [f32; 5]
     let mut ev = -3.0f32;
     while ev <= 3.0 + 1e-6 {
         // Residual after the exposure component, then ridge normal equations.
+        // Knot authority (`tone_knot_weights`) rides the basis rows: it
+        // depends only on the candidate ev, so the system stays linear in the
+        // sliders — and the solve models the SAME engine that will render the
+        // result (an unweighted basis would ask saturated knots to explain
+        // residual they can no longer move).
+        let weights = render::tone_knot_weights(ev);
         let resid: Vec<f64> = render::TONE_KNOTS_X
             .iter()
             .zip(&targets)
@@ -460,12 +466,13 @@ pub(crate) fn fit_tone_sliders(tone_map: &impl Fn(f32) -> f32) -> (f32, [f32; 5]
             .collect();
         let mut ata = [[0.0f64; 5]; 5];
         let mut atb = [0.0f64; 5];
-        for (b, r) in basis.iter().zip(&resid) {
+        for ((b, r), &w) in basis.iter().zip(&resid).zip(&weights) {
             for i in 0..5 {
+                let bi = (w * b[i]) as f64;
                 for j in 0..5 {
-                    ata[i][j] += b[i] as f64 * b[j] as f64;
+                    ata[i][j] += bi * (w * b[j]) as f64;
                 }
-                atb[i] += b[i] as f64 * r;
+                atb[i] += bi * r;
             }
         }
         for (i, row) in ata.iter_mut().enumerate() {
@@ -477,8 +484,9 @@ pub(crate) fn fit_tone_sliders(tone_map: &impl Fn(f32) -> f32) -> (f32, [f32; 5]
         let score: f64 = basis
             .iter()
             .zip(&resid)
-            .map(|(b, r)| {
-                let fit: f64 = (0..5).map(|i| b[i] as f64 * s[i] as f64).sum();
+            .zip(&weights)
+            .map(|((b, r), &w)| {
+                let fit: f64 = (0..5).map(|i| (w * b[i]) as f64 * s[i] as f64).sum();
                 (r - fit) * (r - fit)
             })
             .sum::<f64>()
@@ -937,6 +945,67 @@ fn round2(v: f32) -> f32 {
 mod tests {
     use super::*;
     use image::RgbImage;
+
+    /// M-F1: `fit_tone_sliders` degraded to return neutral (or any solver
+    /// regression that stops beating the ground truth under the engine's own
+    /// penalised objective) — on a look the weighted model can represent
+    /// exactly, the solve must score at least as well as the generating
+    /// parameters themselves.
+    ///
+    /// Recorded honestly: the fit-side knot WEIGHTING itself has no
+    /// test-observable effect — an unweighted inner solve is a worse proposer
+    /// in the saturated regime, but the outer acceptance loop re-scores every
+    /// candidate by real rendering and masks it (verified by running the full
+    /// suite under that mutant). The weights stay in the solve for model
+    /// consistency — three sites, one definition — not because a test pins
+    /// them.
+    #[test]
+    fn the_fit_models_the_same_weighted_engine_it_renders_against() {
+        let ev = 1.5f32;
+        let truth = [-0.6f32, 0.0, 0.35, 0.0, 0.0]; // contrast −60, shadows +35
+        let weights = render::tone_knot_weights(ev);
+        let tone = |x: f32| -> f32 {
+            let i = render::TONE_KNOTS_X
+                .iter()
+                .position(|&k| (k - x).abs() < 1e-6)
+                .expect("fit samples the tone map at the knots only");
+            let b = render::tone_slider_basis(x);
+            render::tone_exposure_curve(x, ev)
+                + weights[i] * (0..5).map(|k| b[k] * truth[k]).sum::<f32>()
+        };
+        let (got_ev, got) = fit_tone_sliders(&tone);
+        // The saturated regime is deliberately non-identifiable (several
+        // (ev, sliders) pairs render the same 8 knots, and the ridge prior
+        // picks the smallest sliders), so the property is NOT parameter
+        // recovery. It is: under the engine's OWN penalised objective — knot
+        // error through the weighted model, plus the magnitude prior — the
+        // solution must be at least as good as the ground truth itself. The
+        // pristine solve minimises exactly this, so it passes structurally;
+        // a solve that dropped the weights optimises a different forward
+        // model and lands on parameters this objective scores worse.
+        let true_score = |cand_ev: f32, s: &[f32; 5]| -> f64 {
+            let w = render::tone_knot_weights(cand_ev);
+            let sse: f64 = render::TONE_KNOTS_X
+                .iter()
+                .enumerate()
+                .map(|(i, &x)| {
+                    let b = render::tone_slider_basis(x);
+                    let rendered = render::tone_exposure_curve(x, cand_ev)
+                        + w[i] * (0..5).map(|k| b[k] * s[k]).sum::<f32>();
+                    let e = (rendered - tone(x)) as f64;
+                    e * e
+                })
+                .sum();
+            sse + s.iter().map(|&v| TONE_PRIOR * v as f64 * v as f64).sum::<f64>()
+        };
+        let (got_score, truth_score) = (true_score(got_ev, &got), true_score(ev, &truth));
+        assert!(
+            got_score <= truth_score + 1e-6,
+            "the fit landed on (ev {got_ev}, {got:?}) scoring {got_score:.6} — WORSE under \
+             the engine's own model than the ground truth's {truth_score:.6}: the solve is \
+             not modelling the engine it renders against"
+        );
+    }
 
     /// Synthetic frame with real tonal + chromatic coverage: a neutral luma ramp
     /// plus orange / blue / green ramps (192×128 — analysis-sized already).

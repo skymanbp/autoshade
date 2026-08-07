@@ -1950,6 +1950,52 @@ pub(crate) fn tone_exposure_curve(x: f32, ev: f32) -> f32 {
     linear_to_srgb((srgb_to_linear(x) * 2.0_f32.powf(ev)).clamp(0.0, 1.0))
 }
 
+/// Per-knot slider AUTHORITY under the current exposure — the tone-model
+/// repair for the residual `limit_tone_sliders` documents below.
+///
+/// The knot model adds `basis(x)·sliders` at knot inputs in the ORIGINAL
+/// tonal axis, so the basis does not know when exposure has already collapsed
+/// the base curve around a knot: at +1.5 EV every knot from x = 0.66 up sits
+/// at base 1.0, `contrast: -100` then writes 1.0 − 0.141 = 0.859 at 0.66 and
+/// a DEEPER dip at 0.82, and the monotone backstop flattens the whole
+/// [0.66, 0.82] interval at an interior grey — the measured 197-input plateau
+/// at code 56304. The λ limiter cannot help: those intervals have
+/// `base_gap ≤ 1e-6` and are rightly its skip case (exposure clipped them;
+/// that is what exposure means).
+///
+/// So authority follows the base curve's own local separation: a knot keeps
+/// full weight while at least one adjacent base interval is still open
+/// (`ramp(0, 0.01, healthiest adjacent gap)`), and fades to zero where
+/// exposure has saturated BOTH sides. A muted knot stays on the base curve,
+/// the saturated run stays at the ceiling/floor, and a strong slider there
+/// now yields honest clipping instead of an interior flat band — Lightroom's
+/// own semantics for a slider aimed at a region exposure already clipped.
+///
+/// Exactness matters twice: at ev = 0 every gap is ≥ 0.08, `ramp` saturates
+/// to exactly 1.0, and every render is bit-for-bit unchanged; the boundary
+/// knot of a saturated run keeps weight through its healthy side, so the
+/// slider's effect on the still-alive interval below is preserved, not
+/// chopped at the run's edge. Endpoint knots have one neighbour — the
+/// missing side counts as closed, so a fully-clipped end loses authority
+/// with the run it belongs to.
+///
+/// Shared by all three model sites (`build_tone_lut`, `limit_tone_sliders`,
+/// `fit.rs::fit_tone_sliders`); weights depend only on `ev`, so the model
+/// stays LINEAR in the sliders and the reverse-fit still inverts it
+/// analytically.
+pub(crate) fn tone_knot_weights(ev: f32) -> [f32; 8] {
+    // Full authority once the healthiest adjacent interval separates by 1 %
+    // of the axis — comfortably under the 0.08 minimum an ev = 0 grid has,
+    // comfortably over the 1e-6 the λ limiter treats as closed.
+    const GAP_FULL: f32 = 0.01;
+    let base: [f32; 8] = std::array::from_fn(|i| tone_exposure_curve(TONE_KNOTS_X[i], ev));
+    std::array::from_fn(|i| {
+        let left = if i > 0 { base[i] - base[i - 1] } else { 0.0 };
+        let right = if i < 7 { base[i + 1] - base[i] } else { 0.0 };
+        ramp(0.0, GAP_FULL, left.max(right))
+    })
+}
+
 /// Scale a slider vector `[contrast, highlights, shadows, whites, blacks]`
 /// (each already in −1..1) down to the strongest version of ITSELF that no
 /// longer collapses a tonal band. A slider must SATURATE, never annihilate.
@@ -1983,33 +2029,25 @@ pub(crate) fn tone_exposure_curve(x: f32, ev: f32) -> f32 {
 /// λ = 1 whenever nothing binds, so every edit inside the thresholds renders
 /// bit-for-bit as before; only the region that was being destroyed changes.
 ///
-/// KNOWN GAP, measured on the REAL engine over an 18-recipe × 15-exposure
-/// grid (`no_slider_collapses_an_interior_band_at_any_exposure`), counting
+/// Both of this design's measured gaps are CLOSED, by different halves of
+/// the model (grid = 18 recipes × 15 exposures on the real engine, counting
 /// only INTERIOR plateaus — a run at 0 or 65535 is clipping, which is what a
-/// strong slider on a bright frame is meant to do:
+/// strong slider on a bright frame is meant to do):
 ///
-///   * with this limiter:    13 of 270 cells exceed 96, worst 197
-///   * without it:           95 of 270 cells exceed 96, worst 317
-///
-/// So the limiter is a large real win AND leaves a real residual — both at
-/// once. Every surviving cell has the same shape: a strong NEGATIVE slider
-/// at high positive exposure (`contrast: -100` at `+1.5 EV` is the worst;
-/// `highlights: -100` at `+2 EV` flattens 145 inputs at code 61471).
-/// Exposure has already pinned the top knots to 1.0, so `base_gap <= 1e-6`
-/// skips that interval, the slider inverts the knot pair, and the backstop
-/// below flattens it. Closing that at knot level means driving the offending
-/// slider's authority to zero, and four measured alternatives each traded
-/// this tail for a worse one — per-slider λ cuts 13 cells to 9 but takes the
-/// worst from 197 to 317; a minimum-slope repair, a box-constrained isotonic
-/// repair and an endpoint-preserving repair were all worse still. The fix
-/// belongs in the tone MODEL and needs visual acceptance, so it is recorded
-/// in `docs/ROADMAP.md` rather than guessed at here.
-///
-/// Second known gap: ONE λ scales the whole vector, so a slider that did not
-/// contribute to the binding interval loses authority with the one that did
-/// (pinning shadows at +50 and dragging whites −45 → −100 leaves whites
-/// saturated while the rendered shadows fall 50 → 22.5). Same root, same
-/// fix, same prerequisite.
+///   * The high-exposure residual (worst cell `contrast: -100` at `+1.5 EV`,
+///     a 197-input plateau at code 56304; grid 13 cells > 96) was the knot
+///     BASIS not knowing exposure had saturated the base curve around a knot
+///     — fixed in the model by [`tone_knot_weights`], not here. Four
+///     knot-level repairs measured before it (including a pre-weights
+///     per-slider λ: 13 cells → 9 but worst 197 → 317) all traded the tail
+///     for a worse one; the model fix took the grid to 6 cells > 96.
+///   * The collateral gap — ONE λ scaled the whole vector, so pinning
+///     shadows +50 while dragging whites −45 → −100 rendered the shadows at
+///     22.5 — is closed by the per-slider iteration below: only the sliders
+///     that CLOSE the worst-violated interval shrink, the single-λ pass
+///     stays as the unconditional backstop, and the grid worst is now 100 —
+///     the same level the ev = 0 design holds
+///     (`a_slider_that_binds_an_interval_no_longer_drags_the_innocent_ones`).
 pub(crate) fn limit_tone_sliders(ev: f32, s: [f32; 5]) -> [f32; 5] {
     // The share of an interval's EXISTING separation the sliders must leave
     // behind. Two calibration notes, both learned the hard way:
@@ -2028,34 +2066,84 @@ pub(crate) fn limit_tone_sliders(ev: f32, s: [f32; 5]) -> [f32; 5] {
     //     destroying detail. 1 % of a 0.147-wide interval is still 96 distinct
     //     16-bit codes, which is a gradient, not a flat patch.
     const KEEP: f32 = 0.01;
+    let weights = tone_knot_weights(ev);
+    // Per-slider differential contribution to each interval: how much slider
+    // k (at full value s[k]) changes the separation of interval i. Weighted —
+    // an unweighted λ would limit against offsets the engine no longer adds.
     let mut base = [0.0f32; 8];
-    let mut off = [0.0f32; 8];
+    let mut wb = [[0.0f32; 5]; 8];
     for (i, &x) in TONE_KNOTS_X.iter().enumerate() {
         let b = tone_slider_basis(x);
         base[i] = tone_exposure_curve(x, ev);
-        off[i] = (0..5).map(|k| b[k] * s[k]).sum();
+        for k in 0..5 {
+            wb[i][k] = weights[i] * b[k] * s[k];
+        }
     }
+
+    // PER-SLIDER λ, iteratively: for the worst-violated interval, shrink only
+    // the sliders whose contribution CLOSES it, by exactly the factor that
+    // interval needs; repeat. Sliders that open the interval — or act
+    // elsewhere — keep their authority (the old single λ scaled the whole
+    // vector, so pinning shadows +50 while dragging whites −45 → −100 pulled
+    // the rendered shadows down to 22.5 with it). A shrink here can deepen a
+    // violation in ANOTHER interval that the shrunk slider was helping to
+    // hold open (contrast is antisymmetric), so this iterates to a fixpoint —
+    // and the single-λ pass below remains as the unconditional backstop, so
+    // the hard guarantee never rests on convergence.
+    let mut lam = [1.0f32; 5];
+    for _ in 0..8 {
+        // Worst violation under the CURRENT per-slider scales.
+        let mut worst: Option<(usize, f32)> = None; // (interval, allowed/actual)
+        for i in 1..8 {
+            let gap = base[i] - base[i - 1];
+            if gap <= 1e-6 {
+                continue; // exposure's own clipping — see tone_knot_weights
+            }
+            let d: f32 = (0..5).map(|k| (wb[i][k] - wb[i - 1][k]) * lam[k]).sum();
+            let allowed = -(1.0 - KEEP) * gap;
+            if d < allowed {
+                let ratio = allowed / d; // in (0,1): fraction of d that fits
+                if worst.is_none_or(|(_, r)| ratio < r) {
+                    worst = Some((i, ratio));
+                }
+            }
+        }
+        let Some((i, _)) = worst else { break };
+        let gap = base[i] - base[i - 1];
+        let allowed = -(1.0 - KEEP) * gap;
+        let (mut open, mut close) = (0.0f32, 0.0f32);
+        for k in 0..5 {
+            let c = (wb[i][k] - wb[i - 1][k]) * lam[k];
+            if c < 0.0 { close += c } else { open += c }
+        }
+        // f·close + open ≥ allowed  ⇒  f = (allowed − open) / close, in [0,1):
+        // `close < allowed − open ≤ 0` here, since the interval is violated
+        // and `allowed − open ≤ allowed < 0`.
+        let f = ((allowed - open) / close).clamp(0.0, 1.0);
+        for k in 0..5 {
+            if (wb[i][k] - wb[i - 1][k]) * lam[k] < 0.0 {
+                lam[k] *= f;
+            }
+        }
+    }
+
+    // Unconditional single-λ backstop over whatever the iteration left: the
+    // band-collapse guarantee is enforced HERE, not by convergence above.
+    // λ = 1 whenever nothing binds, and then every knot — and so every
+    // rendered pixel — is bit-for-bit what the per-slider scales produced.
     let mut lambda = 1.0f32;
-    for i in 1..TONE_KNOTS_X.len() {
-        let base_gap = base[i] - base[i - 1];
-        // Exposure alone already closed this interval (+5 EV saturates the top
-        // knots): its prerogative, and not something the sliders did. The
-        // monotonicity backstop in `build_tone_lut` covers it.
-        if base_gap <= 1e-6 {
+    for i in 1..8 {
+        let gap = base[i] - base[i - 1];
+        if gap <= 1e-6 {
             continue;
         }
-        // Only a NEGATIVE differential closes the interval; a positive one
-        // opens it further and needs no limit.
-        let a = off[i] - off[i - 1];
-        if a < 0.0 {
-            // base_gap + λa ≥ KEEP·base_gap ⇒ λ ≤ (1−KEEP)·base_gap / (−a).
-            lambda = lambda.min((1.0 - KEEP) * base_gap / -a);
+        let d: f32 = (0..5).map(|k| (wb[i][k] - wb[i - 1][k]) * lam[k]).sum();
+        if d < 0.0 {
+            lambda = lambda.min((1.0 - KEEP) * gap / -d);
         }
     }
-    // λ = 1 whenever nothing binds, and then every knot — and so every
-    // rendered pixel — is bit-for-bit what it was before this limiter existed.
     let lambda = lambda.clamp(0.0, 1.0);
-    s.map(|v| v * lambda)
+    std::array::from_fn(|k| s[k] * lam[k] * lambda)
 }
 
 /// Build the develop tone curve as a [`LUT_N`]-entry LUT over input gamma [0,1].
@@ -2089,14 +2177,20 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 
 
     let mut ys = [0.0f32; 8];
+    let weights = tone_knot_weights(r.exposure_ev);
     for (idx, &x) in TONE_KNOTS_X.iter().enumerate() {
         let b = tone_slider_basis(x);
+        // Knot authority fades where exposure saturated BOTH adjacent base
+        // intervals (see tone_knot_weights): a strong slider aimed at a
+        // region exposure already clipped yields honest clipping, not the
+        // interior flat band the backstop below used to manufacture.
         ys[idx] = tone_exposure_curve(x, r.exposure_ev)
-            + b[0] * contrast
-            + b[1] * highlights
-            + b[2] * shadows
-            + b[3] * whites
-            + b[4] * blacks;
+            + weights[idx]
+                * (b[0] * contrast
+                    + b[1] * highlights
+                    + b[2] * shadows
+                    + b[3] * whites
+                    + b[4] * blacks);
     }
     // Backstop only. λ above already keeps the SLIDERS from closing an
     // interval, so this now fires just where exposure itself saturated the
@@ -4088,13 +4182,13 @@ mod tests {
     ///     interior plateau (no limiter) to 43.
     ///
     /// The threshold is what the shipped design HOLDS, not what would be
-    /// nice: 113 is the worst cell of this grid apart from the one named
-    /// residual below.
+    /// nice — see the measured-grid note ahead of the loop below.
     #[test]
     fn no_slider_collapses_an_interior_band_at_any_exposure() {
         const N: usize = 4096;
-        // What the shipped design HOLDS on this grid at |ev| <= 1.0, with
-        // margin: the worst cell there measures 100. Not a wish — measured.
+        // What the shipped design HOLDS on this WHOLE grid, with margin: the
+        // worst cell measures 100 (weighted-knot model + per-slider λ). Not a
+        // wish — measured.
         const MAX_RUN: usize = 128;
         type Case = (&'static str, fn(&mut EditRecipe));
         let sliders: [Case; 18] = [
@@ -4152,54 +4246,27 @@ mod tests {
             (worst, worst_at, out[worst_at])
         };
 
+        // ONE bound for the WHOLE grid. Until the weighted-knot model
+        // (`tone_knot_weights`, M-T1) this test carried a 220-input carve-out
+        // for `ev > 1.0`: the basis added slider offsets at knots whose base
+        // intervals exposure had already saturated (`base_gap <= 1e-6`, the λ
+        // limiter's rightful skip case), a strong negative slider dipped
+        // below the ceiling, and the monotone backstop flattened a whole
+        // interval at an interior grey — `contrast: -100` at `+1.5 EV`
+        // flattened 197 inputs at code 56304. Four knot-LEVEL repairs were
+        // measured and rejected (each traded the tail for a worse one; the
+        // pre-weights per-slider λ took the worst from 197 to 317) before the
+        // tone-MODEL fix landed: knot authority now follows the base curve's
+        // own local separation, a slider aimed at a clipped region yields
+        // honest clipping, and the measured grid is 6 cells > 96 with a
+        // global worst of 100 — the same level the ev = 0 design holds, three
+        // of those six sitting one code below pure white (65534, the
+        // quantisation edge of clipping, not a band).
         for ev in [-3.0f32, -2.0, -1.5, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.28, 1.5, 2.0, 3.0] {
             for (name, apply) in sliders {
-                // The one measured residual, carved out in the open rather
-                // than hidden by a looser threshold: at +0.5 EV exposure has
-                // already pinned the top two knots to 1.0, so the limiter
-                // skips that interval (`base_gap <= 1e-6`), `whites` then
-                // pulls the white point below its neighbour, and the
-                // monotonicity backstop repairs the inversion by raising the
-                // ENDPOINT to meet the neighbour — flattening 166 inputs at
-                // code 62676. Four candidate repairs were built and measured
-                // against this grid; every one of them was worse somewhere
-                // else (see docs/ROADMAP.md), so the fix belongs in the tone
-                // MODEL and needs visual acceptance, not another knot-level
-                // patch. Pinned by value so a real fix — or a regression —
-                // shows up here.
-                // Where this design's guarantee ENDS, named rather than
-                // hidden behind a looser threshold. Measured on the real
-                // engine over this whole grid: with the limiter the worst
-                // interior plateau is 197 inputs, at `+1.5 EV` with
-                // `contrast: -100` (code 56304); WITHOUT it the same grid
-                // reaches 317 and 95 of 270 cells exceed the threshold
-                // instead of 13 — so the limiter is a large real win AND
-                // leaves a real residual, both true at once.
-                //
-                // Every surviving case is the same shape: a strong NEGATIVE
-                // slider at high positive exposure. Exposure has already
-                // pinned the top knots to 1.0, so `base_gap <= 1e-6` skips
-                // that interval, the slider then inverts the knot pair, and
-                // the monotonicity backstop flattens it. Fixing it at knot
-                // level requires driving that slider's authority to zero;
-                // measured alternatives (per-slider lambda, a minimum-slope
-                // repair, a box-constrained isotonic repair, an
-                // endpoint-preserving repair) each traded this tail for a
-                // worse one elsewhere — per-slider lambda, for instance,
-                // cuts 13 cells to 9 but takes the worst case from 197 to
-                // 317. The fix belongs in the tone MODEL and needs visual
-                // acceptance. Pinned by value so a real fix, or a
-                // regression, is visible here. See docs/ROADMAP.md.
                 let mut r = EditRecipe { exposure_ev: ev, ..Default::default() };
                 apply(&mut r);
                 let (worst, at, code) = interior_run(&r);
-                if ev > 1.0 {
-                    assert!(
-                        worst <= 220,
-                        "the recorded high-exposure residual GREW: {name} at {ev:+} EV flattens                          {worst} interior inputs at code {code} (worst known: 197)"
-                    );
-                    continue;
-                }
                 assert!(
                     worst <= MAX_RUN,
                     "{name} at {ev:+} EV: {worst} consecutive inputs (around x={:.4}) all render                      to the interior code {code} — a slider flattened a tonal band instead of                      saturating",
@@ -4207,6 +4274,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// M-T2: the per-slider λ iteration removed (every `lam` left at 1, only
+    /// the single-λ backstop applied) — the slider that binds an interval
+    /// must saturate ALONE; the sliders that did not close it keep their
+    /// authority. This was the model's second known gap: pinning shadows +50
+    /// while dragging whites −100 rendered the shadows at 22.5.
+    #[test]
+    fn a_slider_that_binds_an_interval_no_longer_drags_the_innocent_ones() {
+        // whites −100 alone closes the 0.92–1.0 interval and must saturate
+        // near −0.45 (the value the interval can absorb); shadows was not
+        // involved and keeps exactly what the caller asked.
+        let out = limit_tone_sliders(0.0, [0.0, 0.0, 0.5, -1.0, 0.0]);
+        assert_eq!(out[2], 0.5, "shadows were scaled for a violation they did not cause");
+        assert!(
+            (-0.46..=-0.44).contains(&out[3]),
+            "whites did not saturate at the interval's own capacity: {}",
+            out[3]
+        );
+        // blacks −100 OPENS the bottom interval (black point down) — no limit
+        // applies to it at all, even alongside the binding whites.
+        let out = limit_tone_sliders(0.0, [0.0, 0.0, 0.5, -1.0, -1.0]);
+        assert_eq!(out[4], -1.0, "blacks bind nothing and must pass through untouched");
+        assert_eq!(out[2], 0.5);
+        // And a genuinely unconstrained vector is bit-for-bit untouched.
+        let s = [0.3, -0.2, 0.4, 0.1, -0.25];
+        assert_eq!(limit_tone_sliders(0.0, s), s);
     }
 
     #[test]

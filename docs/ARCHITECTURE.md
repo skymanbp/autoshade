@@ -1,6 +1,6 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.20.0). The full decode → advise → verify → render
+> Status: **implemented** (v0.21.0). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
@@ -8,42 +8,47 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 225 library + 1 CLI + 28 GUI tests pass in both build configurations, and
-> v0.20.0 added the first RUNTIME end-to-end pass: real CLI processes over a
-> real 61 MP ARW, a live `serve` hit with 20 HTTP assertions, and the ambient
+> 228 library + 1 CLI + 28 GUI tests pass in both build configurations.
+> v0.20.0 added the first RUNTIME end-to-end pass (real CLI processes over a
+> real 61 MP ARW, a live `serve` hit with 25 HTTP assertions, the ambient
 > `.env`/settings guards exercised as real processes against a recording mock
-> endpoint (all sandboxed via `AUTOSHOP_DATA_DIR`).
+> endpoint, all sandboxed via `AUTOSHOP_DATA_DIR`); v0.21.0 extended it to the
+> paid and sidecar paths — batch/eval/heal live, the whole serve API surface,
+> and real SCUNet GPU inference.
 > This document describes the design; a few historical **[verify]** notes are
 > left in place for provenance.
 >
 > **Three engine rules worth knowing before reading further** (all added after
 > measurement rather than review):
 >
-> * **A tone slider saturates; it never annihilates — at `exposure_ev = 0`.**
->   The five region sliders add offsets to eight fixed knots, and past a
->   threshold an offset overran the gap to the next knot. The repair — snap to
->   `prev + 1e-4` — made the whole interval flat, and clamping to 1.0 did the
->   same at the top, so every input tone in that band rendered to ONE output
->   value. Measured through the export path on a 16-bit ramp: `whites: -50`
->   cut the top decade from 411 distinct codes to 75, and `highlights: +60`
->   blew 18 % of the range to pure white. `render::limit_tone_sliders` (v0.18.0)
->   scales the slider vector by the largest λ ≤ 1 that keeps every interval
->   separated; λ = 1 whenever nothing binds, so ordinary edits render
->   bit-for-bit as before.
->   **The qualifier is load-bearing, and v0.19.0 measured it properly.** Over
->   an 18-recipe × 15-exposure grid on the real engine, counting only INTERIOR
+> * **A tone slider saturates; it never annihilates.** The five region sliders
+>   add offsets to eight fixed knots, and past a threshold an offset overran
+>   the gap to the next knot; the old repair — snap to `prev + 1e-4` — made
+>   the whole interval flat, so every input tone in that band rendered to ONE
+>   output value (`whites: -50` cut the top decade from 411 distinct codes to
+>   75; `highlights: +60` blew 18 % of the range to pure white). Three layers
+>   now hold the rule, each measured in:
+>   `render::limit_tone_sliders` (v0.18.0) saturates the sliders — per slider
+>   since v0.21.0: only the sliders whose contribution CLOSES the worst
+>   violated interval shrink, so pinning shadows +50 while dragging whites
+>   −100 keeps the rendered shadows at 50 (one λ used to pull them to 22.5),
+>   with a single-λ pass kept as the unconditional backstop.
+>   `render::tone_knot_weights` (v0.21.0) closes what the limiter rightly
+>   skips: where EXPOSURE has already saturated both base intervals around a
+>   knot (`base_gap ≤ 1e-6` — its prerogative), the basis used to add slider
+>   offsets anyway, and the monotone backstop flattened the dip into an
+>   interior grey band — `contrast: -100` at `+1.5 EV` flattened 197 inputs
+>   at code 56304. Knot authority now follows the base curve's own local
+>   separation (exactly 1 at ev = 0, so those renders are bit-for-bit
+>   unchanged); a slider aimed at a clipped region yields honest clipping,
+>   Lightroom's own semantics.
+>   Measured on the 18-recipe × 15-exposure grid, counting only INTERIOR
 >   plateaus (a run at 0 or 65535 is clipping, which a strong slider on a
->   bright frame is meant to produce): with the limiter 13 of 270 cells exceed
->   96 and the worst is 197; without it, 95 cells and 317. So the limiter is a
->   large real win and leaves a real residual, both at once. Every surviving
->   cell is a strong NEGATIVE slider at high positive exposure — exposure has
->   already pinned the top knots, the limiter skips that interval, and the
->   monotonicity backstop flattens the inversion. Four candidate repairs were
->   built and measured; each traded this tail for a worse one, so the fix
->   belongs in the tone model and needs visual acceptance (see ROADMAP). A
->   second known gap with the same root: one λ scales all five sliders, so a
->   slider that did not cause the binding interval loses authority with the
->   one that did.
+>   bright frame is meant to produce): v0.19.0 shipped 13 of 270 cells over
+>   96 with worst 197; v0.21.0 measures 6 cells with worst 100 — the same
+>   level the ev = 0 design holds, three of the six one code below pure
+>   white (65534, the quantisation edge of clipping). The old `ev > 1`
+>   carve-out in the grid test is gone; one 128 bound covers the whole grid.
 > * **A settings file in the working directory is ambient input, and so is a
 >   `.env`.** Either may pick models and providers; neither may supply an API
 >   key, choose the endpoint one is sent to, **or name a program to run**
