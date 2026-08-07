@@ -7,7 +7,9 @@
 > by shipped code (the decode stack is `rawler` alone, config is JSON in the
 > per-user store rather than TOML beside the checkout, the XMP projection lives
 > in that store rather than beside the RAW, and the Kelvin/era rules changed in
-> v0.14–v0.16). Present-tense statements below describe the plan, not today's
+> v0.14–v0.16 and again in v0.19.0, which recalibrated `kelvin_to_rgb`'s
+> cool-side coefficients away from the published Tanner-Helland constants so the
+> branches meet at 6600 K — see V2_PLAN §4a). Present-tense statements below describe the plan, not today's
 > behaviour — for that read [ROADMAP.md](ROADMAP.md), [ARCHITECTURE.md](ARCHITECTURE.md)
 > and the code. Corrections are inlined only where a stale claim would mislead
 > someone changing that subsystem today.
