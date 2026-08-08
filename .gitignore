@@ -30,3 +30,5 @@ desktop.ini
 .idea/
 .gstack/
 .claude/
+
+.ce/
