@@ -92,7 +92,16 @@ pub fn render_to_image_in(
     working: ExportColorSpace,
 ) -> Result<DynamicImage> {
     let mut sanitized_recipe = recipe.clone();
-    sanitized_recipe.clamp();
+    let dropped = sanitized_recipe.clamp();
+    if !dropped.is_empty() {
+        // Entry-point sanitisation must not be SILENT loss: a stored or
+        // imported recipe past the caps otherwise renders "successfully"
+        // minus edits, with nothing anywhere saying so.
+        eprintln!(
+            "warning: recipe limits discarded {} mask(s) and {} mask component(s) before rendering",
+            dropped.dropped_masks, dropped.dropped_components
+        );
+    }
     let recipe = &sanitized_recipe;
     let rasters = load_mask_raster_snapshot(recipe)?;
     // Decode scope: the RawSource holds the entire RAW file in memory
@@ -270,7 +279,16 @@ pub fn render_baked_to_image(
     denoise: Option<&crate::denoise::DenoiseOpts>,
 ) -> Result<DynamicImage> {
     let mut sanitized_recipe = recipe.clone();
-    sanitized_recipe.clamp();
+    let dropped = sanitized_recipe.clamp();
+    if !dropped.is_empty() {
+        // Entry-point sanitisation must not be SILENT loss: a stored or
+        // imported recipe past the caps otherwise renders "successfully"
+        // minus edits, with nothing anywhere saying so.
+        eprintln!(
+            "warning: recipe limits discarded {} mask(s) and {} mask component(s) before rendering",
+            dropped.dropped_masks, dropped.dropped_components
+        );
+    }
     let recipe = &sanitized_recipe;
     let rasters = load_mask_raster_snapshot(recipe)?;
     let rgb = img.to_rgb16();
@@ -733,7 +751,16 @@ pub fn render_to_file(
     export: Option<&ExportOpts>,
 ) -> Result<(u32, u32)> {
     let mut sanitized_recipe = recipe.clone();
-    sanitized_recipe.clamp();
+    let dropped = sanitized_recipe.clamp();
+    if !dropped.is_empty() {
+        // Entry-point sanitisation must not be SILENT loss: a stored or
+        // imported recipe past the caps otherwise renders "successfully"
+        // minus edits, with nothing anywhere saying so.
+        eprintln!(
+            "warning: recipe limits discarded {} mask(s) and {} mask component(s) before rendering",
+            dropped.dropped_masks, dropped.dropped_components
+        );
+    }
     let recipe = &sanitized_recipe;
     let opts = export.copied().unwrap_or_default();
 
@@ -887,7 +914,16 @@ pub fn render_to_file(
 /// feedback; the full-res `render_to_image` path applies crop on export.
 pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicImage {
     let mut sanitized_recipe = recipe.clone();
-    sanitized_recipe.clamp();
+    let dropped = sanitized_recipe.clamp();
+    if !dropped.is_empty() {
+        // Entry-point sanitisation must not be SILENT loss: a stored or
+        // imported recipe past the caps otherwise renders "successfully"
+        // minus edits, with nothing anywhere saying so.
+        eprintln!(
+            "warning: recipe limits discarded {} mask(s) and {} mask component(s) before rendering",
+            dropped.dropped_masks, dropped.dropped_components
+        );
+    }
     let recipe = &sanitized_recipe;
     let rgb = preview.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -1531,7 +1567,7 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
         || m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0])
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct MaskRasterSnapshot {
     images: std::collections::HashMap<String, std::sync::Arc<image::GrayImage>>,
 }
@@ -1573,6 +1609,34 @@ fn load_mask_raster_snapshot_with_budget(
                 continue;
             }
             let label = if mask.name.is_empty() { path.as_str() } else { mask.name.as_str() };
+            // Header-only dimension precheck BEFORE the decode: the budget
+            // used to be charged only after image::open had allocated the
+            // full raster (plus its native RGBA intermediate), so one
+            // compressed large file drove peak memory far past the
+            // advertised cap before being rejected. ×4 = the decoder's
+            // worst-case native intermediate ahead of the grayscale
+            // conversion this snapshot retains.
+            if let Ok(reader) = image::ImageReader::open(std::path::Path::new(path))
+                && let Ok((w, h)) = reader.into_dimensions()
+            {
+                let projected = (w as usize)
+                    .saturating_mul(h as usize)
+                    .saturating_mul(4)
+                    .saturating_add(held_bytes);
+                if projected > budget_bytes {
+                    if strict {
+                        bail!(
+                            "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
+                             loading '{path}' for mask '{label}' — no pixels were rendered"
+                        );
+                    }
+                    eprintln!(
+                        "mask raster '{path}' skipped: the active raster set exceeds the \
+                         {budget_bytes}-byte aggregate budget"
+                    );
+                    continue;
+                }
+            }
             let Some(bitmap) = load_mask_bitmap(geometry) else {
                 if strict {
                     bail!(
@@ -1637,48 +1701,6 @@ fn combined_mask_weight(
         };
     }
     w
-}
-
-/// Display names of ENABLED Bitmap masks whose raster does not decode right
-/// now (missing or corrupt file). The engine contract for those is "render
-/// inert" — right for a live preview (recoverable, warned once by the
-/// loader) — but a DELIVERABLE rendered that way "succeeds" minus an edit
-/// the user made and never says so; `render_to_file` now refuses through its
-/// raster snapshot. Callers must have resolved mask paths first (every render path
-/// already does).
-pub fn unreadable_mask_rasters(recipe: &EditRecipe) -> Vec<String> {
-    recipe
-        .masks
-        .iter()
-        .filter_map(|m| {
-            // A PARKED mask (default amount 1, sliders neutral) whose raster
-            // is lost drops no edit and must not block export; neither does
-            // a muted (eye-toggled) or zero-amount one.
-            if m.amount == 0.0 || !m.enabled || !engine_active(m) {
-                return None;
-            }
-            // Any unreadable raster — the base geometry's OR a component's —
-            // makes the whole adjustment inert (apply_masks' skip contract),
-            // so any of them dropping is a dropped edit worth refusing over.
-            let bad_base = matches!(&m.mask, MaskGeometry::Bitmap { .. })
-                && load_mask_bitmap(&m.mask).is_none();
-            let bad_component = m.components.iter().any(|c| {
-                matches!(&c.geometry, MaskGeometry::Bitmap { .. })
-                    && load_mask_bitmap(&c.geometry).is_none()
-            });
-            if !bad_base && !bad_component {
-                return None;
-            }
-            Some(if m.name.is_empty() {
-                match &m.mask {
-                    MaskGeometry::Bitmap { path } => path.clone(),
-                    _ => "mask".to_string(),
-                }
-            } else {
-                m.name.clone()
-            })
-        })
-        .collect()
 }
 
 /// Decode the raster of a Bitmap mask geometry, greyscale — through a
@@ -5997,8 +6019,8 @@ mod tests {
         use crate::recipe::{EditRecipe, LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
         // A lost Subtract raster contributes 0 coverage — folding that in
         // would WIDEN the effect area, so the whole adjustment must go inert
-        // (apply_masks / mask_coverage) and the export gate must refuse
-        // (unreadable_mask_rasters), exactly like a lost BASE raster.
+        // (apply_masks / mask_coverage) and the strict raster snapshot must
+        // refuse the deliverable, exactly like a lost BASE raster.
         let m = LocalAdjustment {
             exposure_ev: 1.0, // engine-active, so the export gate cares
             mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
@@ -6012,10 +6034,11 @@ mod tests {
             ..Default::default()
         };
         let r = EditRecipe { masks: vec![m], ..Default::default() };
-        assert_eq!(
-            unreadable_mask_rasters(&r),
-            vec!["carved".to_string()],
-            "a component raster counts for the deliverable refusal"
+        let err = load_mask_raster_snapshot(&r)
+            .expect_err("a component raster counts for the deliverable refusal");
+        assert!(
+            err.to_string().contains("carved"),
+            "the refusal names the mask whose edit would be dropped: {err:#}"
         );
         let cov = mask_coverage(&r.masks[0], &DynamicImage::new_rgb8(8, 8));
         assert!(

@@ -877,6 +877,11 @@ struct AutoshopApp {
     /// still-decoding cold card must coalesce, not stack a fresh full-res
     /// decode thread per click.
     master_loads: std::collections::HashSet<(PathBuf, PathBuf)>,
+    /// The open could not READ the saved develop (damaged file, or busy in
+    /// another Autoshop process): the canvas baseline is not that save, so
+    /// the next explicit save must version what it overwrites (save_xmp runs
+    /// the backup gate while this stands).
+    open_unresolved: bool,
     // Paste-to-selected wrote the open photo's store: (path, exact recipe
     // written) so Msg::Pasted can advance the ● baseline on full success.
     pasted_open: Option<(PathBuf, EditRecipe)>,
@@ -1466,6 +1471,7 @@ impl Default for AutoshopApp {
             saved_strip: None,
             nav_stash: HashMap::new(),
             master_loads: std::collections::HashSet::new(),
+            open_unresolved: false,
             pasted_open: None,
             photo_knots: Vec::new(),
             photo_lens: Default::default(),
@@ -2463,6 +2469,10 @@ impl AutoshopApp {
         }
         let lang = self.lang;
         self.busy = true;
+        // Every open starts resolved-until-proven-otherwise; the Opened
+        // handler's Unreadable arm re-arms it for THIS photo when the read
+        // fails.
+        self.open_unresolved = false;
         self.src_path = Some(path.clone());
         // The version list describes the photo `src_path` NAMES, so it dies
         // with the old value of that field — not later, when the decode lands.
@@ -5829,8 +5839,20 @@ impl AutoshopApp {
             &path,
             autoshop::store::DevelopLockMode::NoWait,
             || -> std::io::Result<()> {
+        if self.open_unresolved {
+            // The baseline came from an open that could not READ the saved
+            // develop — snapshot whatever is on disk before overwriting it
+            // (v<N> copy). Refusing on a failed snapshot beats destroying a
+            // save nobody ever looked at.
+            if let Err(e) = autoshop::store::backup_saved_develop(&path, Some(&self.recipe)) {
+                return Err(std::io::Error::other(format!(
+                    "the unread develop could not be backed up ({e}) — nothing was overwritten"
+                )));
+            }
+        }
         match autoshop::pipeline::write_recipe(&path, &self.recipe, None) {
             Ok(rp) => {
+                self.open_unresolved = false;
                 // Pixel identity FIRST — before the badge/baseline/stash are
                 // advanced — so a failed pixels.json write leaves the stash
                 // protection armed instead of declaring everything saved: an
@@ -6531,9 +6553,17 @@ impl AutoshopApp {
                                         restored = Some(kind);
                                         stamp = kind.starts_with("XMP");
                                     }
+                                    // An explicit save over a develop we never
+                                    // successfully READ (damaged file, or busy
+                                    // in another process at open) must version
+                                    // what it overwrites — save_xmp runs the
+                                    // backup gate while this flag stands, so
+                                    // the unread save survives as v<N> instead
+                                    // of being destroyed by a blank baseline.
+                                    self.open_unresolved = true;
                                     open_note = Some(trf(
                                         lang,
-                                        "recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it",
+                                        "recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it (the unread save is backed up as a version first)",
                                         &[("err", &err)],
                                     ));
                                 }
