@@ -653,6 +653,18 @@ fn geometry_is_finite(g: &MaskGeometry) -> bool {
     }
 }
 
+fn range_is_finite(range: &Option<RangeMask>) -> bool {
+    match range {
+        Some(RangeMask::Luminance { lo_outer, lo, hi, hi_outer }) => {
+            lo_outer.is_finite() && lo.is_finite() && hi.is_finite() && hi_outer.is_finite()
+        }
+        Some(RangeMask::Color { r, g, b, amount, px, py }) => {
+            [r, g, b, amount, px, py].iter().all(|v| v.is_finite())
+        }
+        None => true,
+    }
+}
+
 /// Coordinate/fraction clamp for one geometry — shared by the base `mask`
 /// and each component (see the COORD_LIMIT rationale at the call site).
 fn clamp_geometry(g: &mut MaskGeometry) {
@@ -723,11 +735,24 @@ pub enum RangeMask {
     Color { r: f32, g: f32, b: f32, amount: f32, px: f32, py: f32 },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClampSummary {
+    pub dropped_masks: usize,
+    pub dropped_components: usize,
+}
+
+impl ClampSummary {
+    pub fn is_empty(self) -> bool {
+        self.dropped_masks == 0 && self.dropped_components == 0
+    }
+}
+
 impl EditRecipe {
     /// Clamp every slider into its documented legal range. The AI is
     /// instructed to stay in range, but we never trust the input blindly —
     /// an out-of-range value would otherwise corrupt the render downstream.
-    pub fn clamp(&mut self) {
+    pub fn clamp(&mut self) -> ClampSummary {
+        let mut summary = ClampSummary::default();
         // f32::clamp passes a NaN receiver STRAIGHT THROUGH — a non-finite
         // slider from malformed input (hand-edited JSON, foreign XMP) must
         // collapse to the neutral 0.0 instead, the same corrupt-component-
@@ -773,6 +798,7 @@ impl EditRecipe {
             }
         }
         cap(&mut self.rationale, MAX_RATIONALE);
+        summary.dropped_masks = self.masks.len().saturating_sub(MAX_MASKS);
         self.masks.truncate(MAX_MASKS);
         for m in &mut self.masks {
             cap(&mut m.name, MAX_NAME);
@@ -883,13 +909,23 @@ impl EditRecipe {
         // whole mask too: dropping only the component silently changes what
         // the mask covers (a lost Subtract WIDENS the effect area), which is
         // worse than losing the mask outright.
+        let masks_before_retain = self.masks.len();
         self.masks.retain(|m| {
             geometry_is_finite(&m.mask) && m.components.iter().all(|c| geometry_is_finite(&c.geometry))
         });
+        // A corrupt range changes the combined coverage just as surely as corrupt
+        // geometry. Dropping only the range would widen the adjustment.
+        self.masks.retain(|m| range_is_finite(&m.range));
         // Size cap for components, same reasoning as MAX_MASKS: each is a
         // per-pixel weight evaluation inside the render's hot loop.
+        summary.dropped_masks = summary
+            .dropped_masks
+            .saturating_add(masks_before_retain.saturating_sub(self.masks.len()));
         const MAX_MASK_COMPONENTS: usize = 16;
         for m in self.masks.iter_mut() {
+            summary.dropped_components = summary
+                .dropped_components
+                .saturating_add(m.components.len().saturating_sub(MAX_MASK_COMPONENTS));
             m.components.truncate(MAX_MASK_COMPONENTS);
             for c in m.components.iter_mut() {
                 if let MaskGeometry::Bitmap { path } = &mut c.geometry {
@@ -940,23 +976,9 @@ impl EditRecipe {
             // Range mask invariants: everything in 0..=1, and the luminance
             // trapezoid non-decreasing (lo_outer ≤ lo ≤ hi ≤ hi_outer) so the
             // render's ramps and ACR's LumRange both stay well-formed.
-            // Non-finite values first (hand-edited/foreign JSON): a NaN
-            // luminance bound would PANIC f32::clamp below (its min ≤ max
-            // assert sees NaN as the max), and a NaN colour reference feeds
-            // NaN weights into the render — drop the range entirely, the same
-            // policy as a NaN crop.
-            let range_finite = match &m.range {
-                Some(RangeMask::Luminance { lo_outer, lo, hi, hi_outer }) => {
-                    lo_outer.is_finite() && lo.is_finite() && hi.is_finite() && hi_outer.is_finite()
-                }
-                Some(RangeMask::Color { r, g, b, amount, px, py }) => {
-                    [r, g, b, amount, px, py].iter().all(|v| v.is_finite())
-                }
-                None => true,
-            };
-            if !range_finite {
-                m.range = None;
-            }
+            // Non-finite ranges were removed with their whole mask above, so
+            // every remaining value is safe to clamp without widening coverage.
+
             match &mut m.range {
                 Some(RangeMask::Luminance { lo_outer, lo, hi, hi_outer }) => {
                     let a = lo.clamp(0.0, 1.0);
@@ -975,6 +997,7 @@ impl EditRecipe {
                 None => {}
             }
         }
+        summary
     }
 
     /// Taste guardrail for **AI-proposed** recipes (never manual edits): keep a
@@ -1197,8 +1220,7 @@ mod tests {
             ..Default::default()
         });
         r.clamp();
-        assert_eq!(r.masks[0].range, None, "NaN luminance bound drops the range");
-        assert_eq!(r.masks[1].range, None, "NaN colour reference drops the range");
+        assert!(r.masks.is_empty(), "a non-finite range drops its whole mask");
     }
 
     #[test]
@@ -1429,5 +1451,42 @@ mod tests {
         let mut c = back.clone();
         c.clamp();
         assert_eq!(c.masks[0].mask, r.masks[0].mask);
+    }
+
+    #[test]
+    fn clamp_reports_discarded_components_and_zeroes_for_a_clean_recipe() {
+        let mut crowded = EditRecipe {
+            masks: vec![LocalAdjustment {
+                components: vec![MaskComponent::default(); 17],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let dropped = crowded.clamp();
+        assert_eq!(dropped.dropped_masks, 0);
+        assert_eq!(dropped.dropped_components, 1);
+        assert_eq!(crowded.masks[0].components.len(), 16);
+
+        let mut clean = EditRecipe::default();
+        assert_eq!(clean.clamp(), ClampSummary::default());
+    }
+
+    #[test]
+    fn a_non_finite_range_drops_the_whole_mask_on_clamp() {
+        let mut recipe = EditRecipe {
+            masks: vec![LocalAdjustment {
+                range: Some(RangeMask::Luminance {
+                    lo_outer: 0.0,
+                    lo: f32::NAN,
+                    hi: 0.8,
+                    hi_outer: 1.0,
+                }),
+                exposure_ev: 1.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        recipe.clamp();
+        assert!(recipe.masks.is_empty());
     }
 }

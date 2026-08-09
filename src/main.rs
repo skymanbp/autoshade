@@ -90,10 +90,10 @@ enum Command {
         #[arg(long)]
         denoise: bool,
         /// Denoise strength 0..1 (blend with original); default 1.0.
-        #[arg(long)]
+        #[arg(long, requires = "denoise")]
         denoise_strength: Option<f32>,
         /// SCUNet model: color_real_psnr (default) / color_real_gan / color_15|25|50.
-        #[arg(long)]
+        #[arg(long, requires = "denoise")]
         denoise_model: Option<String>,
     },
     /// AI-denoise a RAW or an already-baked image (PNG/TIFF/JPEG) into a clean
@@ -313,9 +313,13 @@ fn decode_cmd(raw: &Path, out: Option<PathBuf>) -> Result<()> {
     pipeline::guard_readonly(&out, raw)?;
     ensure_parent(&out)?;
     let preview = decoded.preview_resized(1536);
-    preview
-        .save(&out)
-        .with_context(|| format!("save preview {}", out.display()))?;
+    let format = image::ImageFormat::from_path(&out)
+        .with_context(|| format!("unsupported preview format {}", out.display()))?;
+    render::stage_and_publish(&out, |staged| {
+        preview
+            .save_with_format(staged, format)
+            .with_context(|| format!("save preview {}", out.display()))
+    })?;
     let (pw, ph) = preview.dimensions();
 
     let m = &decoded.meta;
@@ -503,7 +507,15 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     }
     // Untrusted input, like any other recipe source: an enormous finite
     // exposure (hand-edited JSON) otherwise reaches powf unbounded.
-    recipe.clamp();
+    let dropped = recipe.clamp();
+    if !dropped.is_empty() {
+        eprintln!(
+            "warning: importing {} discarded {} mask(s) and {} mask component(s)",
+            recipe_path.display(),
+            dropped.dropped_masks,
+            dropped.dropped_components
+        );
+    }
     // The guard FIRST: a refused -o must not pay a RAW decode for the repair
     // below, nor print a disclosure for a render that never runs.
     pipeline::guard_readonly(out, raw)?;
@@ -780,6 +792,9 @@ fn match_cmd(
     }
     if style_prompt {
         let cfg = Config::load();
+        let p_out = default_out(raw, "style", "txt");
+        pipeline::guard_readonly(&p_out, raw)?;
+        ensure_parent(&p_out)?;
         // Small uploads are plenty for a style read (and cheap): ~0.5 MP each.
         let jpg = |img: &image::DynamicImage| -> Result<Vec<u8>> {
             let mut buf = Vec::new();
@@ -790,9 +805,10 @@ fn match_cmd(
         };
         println!("extracting a reusable style prompt ({}) …", cfg.openai_model);
         let prompt = autoshop::advisor::describe_style(&cfg, &jpg(&src)?, &jpg(&tgt)?)?;
-        let p_out = default_out(raw, "style", "txt");
-        ensure_parent(&p_out)?;
-        std::fs::write(&p_out, &prompt).with_context(|| format!("write {}", p_out.display()))?;
+        render::stage_and_publish(&p_out, |staged| {
+            std::fs::write(staged, &prompt)
+                .with_context(|| format!("write {}", p_out.display()))
+        })?;
         println!("--- style prompt (reusable as a reimagine Direction) ---");
         println!("{prompt}");
         println!("style  -> {}", p_out.display());
@@ -1058,5 +1074,19 @@ mod tests {
         // A genuinely different absent leaf must stay different.
         assert!(!same_path(&dir.join("recipe.json"), &dir.join("other.json")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_denoise_operands_are_refused_without_the_denoise_flag() {
+        for args in [
+            vec!["autoshop", "auto", "photo.arw", "--denoise-strength", "0.5"],
+            vec!["autoshop", "auto", "photo.arw", "--denoise-model", "color_real_gan"],
+        ] {
+            let Err(error) = Cli::try_parse_from(args) else {
+                panic!("a denoise operand without --denoise must be refused");
+            };
+            let message = error.to_string();
+            assert!(message.contains("--denoise"), "{message}");
+        }
     }
 }

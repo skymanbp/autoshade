@@ -193,9 +193,14 @@ struct ThemeColors {
 
 const DARK_COLORS: ThemeColors = ThemeColors {
     accent_text: PILL,
-    // PILL (201,161,74) at alpha 90, premultiplied: (201,161,74)·90/255.
-    selection_fill: egui::Color32::from_rgba_premultiplied(71, 57, 26, 90),
-    selection_stroke: PILL,
+    // PILL (201,161,74) at alpha 64, premultiplied: (201,161,74)·64/255.
+    // Tuned against the COMPOSITE the screen shows (fill over panel), not the
+    // raw constant: at alpha 90 the composite put default text at 2.57:1 —
+    // the old validator compared raw colours no pixel ever rendered.
+    selection_fill: egui::Color32::from_rgba_premultiplied(50, 40, 19, 64),
+    // Brighter than PILL: egui draws SELECTED-row text with this stroke, and
+    // PILL over the gold composite sat at 3.6:1 — under AA for text.
+    selection_stroke: egui::Color32::from_rgb(233, 196, 106),
     sel_bg: egui::Color32::from_rgb(0x45, 0x38, 0x1a),
     // A step darker than the historical 0x2e2612: default-colour text renders
     // on multi-select rows, and that pairing sat at ~4.45:1 — just under AA.
@@ -218,9 +223,14 @@ const DARK_COLORS: ThemeColors = ThemeColors {
 
 const LIGHT_COLORS: ThemeColors = ThemeColors {
     accent_text: egui::Color32::from_rgb(0x6f, 0x51, 0x0b),
-    // PILL (201,161,74) at alpha 200, premultiplied: (201,161,74)·200/255.
-    selection_fill: egui::Color32::from_rgba_premultiplied(158, 126, 58, 200),
-    selection_stroke: egui::Color32::from_rgb(0x8a, 0x64, 0x10),
+    // PILL (201,161,74) at alpha 90, premultiplied: (201,161,74)·90/255 — a
+    // soft cream-gold once composited over the light panel. The old alpha-200
+    // fill composited so saturated that the selection stroke's own text on it
+    // fell to 2.7:1.
+    selection_fill: egui::Color32::from_rgba_premultiplied(71, 57, 26, 90),
+    // Matches accent_text: dark enough to stay AA as selected-row TEXT over
+    // the cream composite, and well past 3:1 as an outline on panels.
+    selection_stroke: egui::Color32::from_rgb(0x6f, 0x51, 0x0b),
     sel_bg: egui::Color32::from_rgb(0xf0, 0xe2, 0xc0),
     sel_bg_dim: egui::Color32::from_rgb(0xf6, 0xef, 0xdd),
     thumb_placeholder: egui::Color32::from_gray(224),
@@ -346,6 +356,15 @@ enum Msg {
     /// A gallery thumbnail decoded. `generation` tags the folder generation so a
     /// folder switch can't insert a stale thumbnail under a reused index.
     Thumb { generation: u64, idx: usize, img: Box<anyhow::Result<image::DynamicImage>> },
+    /// A cold-restored variant's retouched MASTER decoded off-thread. The
+    /// (photo, origin) pair is the install identity — index-free, so a card
+    /// deleted or reordered while the decode ran discards the late pixels
+    /// instead of installing them into whatever now sits at the old index.
+    MasterLoaded {
+        photo: PathBuf,
+        origin: PathBuf,
+        img: Box<anyhow::Result<image::DynamicImage>>,
+    },
     /// A generative-fill / heal / clone / reimagine result — see [`RetouchDone`].
     /// The `u64` is the cancel epoch the task was started under: Cancel bumps
     /// the app's epoch, so a cancelled worker's late result arrives with a
@@ -2888,36 +2907,35 @@ impl AutoshopApp {
         let Some(v) = self.variants.get(self.active) else { return };
         self.recipe = v.recipe.clone();
         let vkind = v.kind;
-        let mut vbase = v.base.clone();
+        let vbase = v.base.clone();
         let vorigin = v.origin.clone();
         self.rationale = self.recipe.rationale.clone();
         // A DISK-restored baked variant (cold strip restore) carries its
-        // origin but no decoded base — decode it now, once, on the first
-        // switch (the same synchronous first-click cost class as the
-        // re-estimate below; the Arc is written back so it never repeats).
-        // A master that cannot be decoded is SAID: falling through to the
-        // source neutral silently would show a wrong image wearing the
-        // right card label.
+        // origin but no decoded base. The master is FULL resolution — a
+        // 61 MP TIFF takes seconds — and this runs on the UI thread, so the
+        // old inline decode froze the window on the first click into a
+        // cold-restored card. Decode on a worker instead: until the pixels
+        // land the canvas shows the source develop UNDER A DISCLOSURE (a
+        // silent stand-in is the wrong image wearing the right card label),
+        // and Msg::MasterLoaded installs by (photo, origin) identity, so a
+        // delete/reorder mid-decode discards the late pixels. A re-click
+        // while decoding just spawns a redundant decode whose install finds
+        // `base` already filled — wasteful once, never wrong.
         if vbase.is_none()
             && let Some(o) = &vorigin
+            && let Some(photo) = self.src_path.clone()
         {
-            match image::open(o) {
-                Ok(img) => {
-                    let arc = Arc::new(img);
-                    vbase = Some(arc.clone());
-                    if let Some(vm) = self.variants.get_mut(self.active) {
-                        vm.base = Some(arc);
-                    }
-                }
-                Err(e) => {
-                    let t = trf(
-                        lang,
-                        "this variant's saved master could not be loaded ({err}) — showing the un-retouched source develop instead",
-                        &[("err", &e.to_string())],
-                    );
-                    self.toast(ToastKind::Error, t);
-                }
-            }
+            self.status =
+                tr(lang, "loading this variant's retouched master… (showing the source develop meanwhile)").into();
+            let (o, o2, photo2) = (o.clone(), o.clone(), photo.clone());
+            self.spawn_worker(
+                move || Msg::MasterLoaded {
+                    photo,
+                    origin: o.clone(),
+                    img: Box::new(image::open(&o).map_err(anyhow::Error::from)),
+                },
+                move |e| Msg::MasterLoaded { photo: photo2, origin: o2, img: Box::new(Err(e)) },
+            );
         }
         // The strip's READER joins the repair rule: push_variant and
         // switch_variant sync the OUTGOING canvas into the strip, so a
@@ -3047,6 +3065,13 @@ impl AutoshopApp {
     /// Append a variant and switch to it (its recipe/pixels become live).
     /// Saves the outgoing variant's edits first so nothing is lost.
     fn push_variant(&mut self, v: Variant, ctx: &egui::Context) {
+        // "Nothing is lost" includes a rename still sitting in its TextEdit:
+        // both callers are ASYNC completions (reverse-fit, generative edit)
+        // that switch variants while the user may be mid-typing, and the
+        // switch's M15 boundary clear then discarded the typed name. A
+        // USER-initiated switch keeps the deliberate M15 drop — this flush
+        // is the async thief's, committed into the recipe snapshotted below.
+        self.commit_mask_name_buf();
         if let Some(cur) = self.variants.get_mut(self.active) {
             cur.recipe = self.recipe.clone();
         }
@@ -3132,6 +3157,26 @@ impl AutoshopApp {
         // failed the match as well, and the typed rename silently died.
         self.mask_name_buf =
             self.mask_name_buf.take().and_then(|(j, o, b)| Some((f(j)?, o, b)));
+        // The mask-brush session carries its TARGET index: 「Apply」 bakes the
+        // stroke into `mask_brush.0`, so after a delete/reorder it painted
+        // whatever mask slid under the stale slot — the dangling-range-sampler
+        // class again, writing pixel weights instead of range bounds. A moved
+        // target follows its mask; a vanished one ends the session exactly
+        // like Esc (gray buffer AND paint canvas — see disarm_tools: fill/heal
+        // would inherit the strokes as a phantom retouch selection). Not a
+        // new-mask fallback: that would resurrect a just-deleted mask.
+        if let Some((target, erase)) = self.mask_brush.take() {
+            match target.map(&f) {
+                None => self.mask_brush = Some((None, erase)),
+                Some(Some(j)) => self.mask_brush = Some((Some(j), erase)),
+                Some(None) => {
+                    self.mask_brush_gray = None;
+                    self.paint_mode = false;
+                    self.paint_last = None;
+                    self.clear_mask();
+                }
+            }
+        }
     }
 
     /// Rescan the photo's develop dir for version snapshots (cached in
@@ -4024,6 +4069,9 @@ impl AutoshopApp {
             // several same-kind failures), and worded per-photo so the
             // sentence stays true on the abort path — the old "develops
             // saved" claimed a completed batch even after a break.
+            // stderr keeps the full list for logs; the USER-facing copy is
+            // below — an eprintln alone vanished with the closing window,
+            // which is exactly the silence W3 exists to end.
             if !xmp_warns.is_empty() {
                 eprintln!(
                     "⚠ {} Lightroom XMP projection(s) failed for develop(s) that ARE saved: {}",
@@ -4038,6 +4086,28 @@ impl AutoshopApp {
                     clear_warns.len(),
                     clear_warns.join("; ")
                 );
+            }
+            let brief = |v: &Vec<String>| {
+                let mut d = v.iter().take(3).cloned().collect::<Vec<_>>().join(" · ");
+                if v.len() > 3 {
+                    d.push_str(" …");
+                }
+                d
+            };
+            let mut quit_warns: Vec<String> = Vec::new();
+            if !xmp_warns.is_empty() {
+                quit_warns.push(trf(
+                    lang,
+                    "{n} Lightroom XMP projection(s) failed (those develops ARE saved): {detail}",
+                    &[("n", &xmp_warns.len().to_string()), ("detail", &brief(&xmp_warns))],
+                ));
+            }
+            if !clear_warns.is_empty() {
+                quit_warns.push(trf(
+                    lang,
+                    "{n} clear(s) could not be marked: {detail} — a sidecar beside the RAW may restore those edits on the next open",
+                    &[("n", &clear_warns.len().to_string()), ("detail", &brief(&clear_warns))],
+                ));
             }
             match failed {
                 None => {
@@ -4056,6 +4126,20 @@ impl AutoshopApp {
                             "saved, but {n} variant(s) still count as unsaved — the window stays open; please report this",
                             &[("n", &residue.to_string())],
                         );
+                        self.toast(ToastKind::Error, t);
+                    } else if !quit_warns.is_empty() {
+                        // Everything IS saved (recipe-write-decides), so
+                        // refusing to quit would be wrong — but a toast on a
+                        // closing window dies unread. Bounce ONCE with the
+                        // warnings visible; nothing is dirty any more, so the
+                        // next quit passes straight through without this
+                        // dialog. One extra click, only in the failure case.
+                        let t = trf(
+                            lang,
+                            "saved with warnings — the window stays open so they can be read; quit again to close: {detail}",
+                            &[("detail", &quit_warns.join(" · "))],
+                        );
+                        self.status = t.clone();
                         self.toast(ToastKind::Error, t);
                     } else {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -5404,6 +5488,14 @@ impl AutoshopApp {
                                         let mut r = serde_json::from_str::<EditRecipe>(
                                             &std::fs::read_to_string(&rj)?,
                                         )?;
+                                        // The one restore path that never went
+                                        // through clamp: a stored recipe with
+                                        // extreme-but-finite geometry rendered
+                                        // NaN weights into a published export.
+                                        // render_to_file now clamps too — this
+                                        // keeps the batch recipe equal to what
+                                        // OPENING the photo would show.
+                                        r.clamp();
                                         if let Some(base) = rj.parent() {
                                             autoshop::store::resolve_mask_paths(&mut r, base);
                                         }
@@ -5971,8 +6063,13 @@ impl AutoshopApp {
                 let res = (|| -> anyhow::Result<String> {
                     let (mut okn, mut xmpn) = (0usize, 0usize);
                     let mut errs: Vec<String> = Vec::new();
+                    // XMP-half failures are partial successes (recipe-write-
+                    // decides), but their REASON used to reach stderr only —
+                    // the status said "n XMP" and left the user to notice the
+                    // shortfall by subtraction.
+                    let mut xmp_fails: Vec<String> = Vec::new();
                     for path in &targets {
-                        let step = || -> anyhow::Result<bool> {
+                        let mut step = || -> anyhow::Result<bool> {
                             // Worker thread ⇒ Wait: queue behind whichever
                             // process holds this target's develop, exactly
                             // like the CLI. ONE lock across gate → recipe →
@@ -6006,6 +6103,10 @@ impl AutoshopApp {
                                         "⚠ {}: recipe pasted, but the Lightroom XMP failed: {e}",
                                         autoshop::pipeline::stem(path)
                                     );
+                                    xmp_fails.push(format!(
+                                        "{}: {e}",
+                                        autoshop::pipeline::stem(path)
+                                    ));
                                     return Ok(false);
                                 }
                                 return Ok(true);
@@ -6025,11 +6126,28 @@ impl AutoshopApp {
                     // Any failure surfaces as an error toast WITH the success count —
                     // a partial failure must never read as a clean success.
                     if errs.is_empty() {
-                        Ok(trf(
+                        let mut s = trf(
                             lang,
                             "Recipe pasted to {ok} photos ({xmp} XMP) → develop store",
                             &[("ok", &okn.to_string()), ("xmp", &xmpn.to_string())],
-                        ))
+                        );
+                        if !xmp_fails.is_empty() {
+                            let mut d = xmp_fails
+                                .iter()
+                                .take(3)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+                            if xmp_fails.len() > 3 {
+                                d.push_str(" …");
+                            }
+                            s.push_str(&trf(
+                                lang,
+                                " — ⚠ {n} XMP projection(s) failed (those pastes ARE saved): {detail}",
+                                &[("n", &xmp_fails.len().to_string()), ("detail", &d)],
+                            ));
+                        }
+                        Ok(s)
                     } else {
                         anyhow::bail!(
                             "{}",
@@ -7318,6 +7436,40 @@ impl AutoshopApp {
                                 // respawning decode threads every frame.
                                 *self.thumb_fail.entry(idx).or_insert(0) += 1;
                                 self.thumb_requested.remove(&idx);
+                            }
+                        }
+                    }
+                }
+                Msg::MasterLoaded { photo, origin, img } => {
+                    // Install by identity, not index: only while the SAME
+                    // photo is open, and only into strip entries that still
+                    // reference this exact master and still await pixels.
+                    if self.src_path.as_ref() == Some(&photo) {
+                        match *img {
+                            Ok(im) => {
+                                let arc = Arc::new(im);
+                                let mut hit_active = false;
+                                for (i, v) in self.variants.iter_mut().enumerate() {
+                                    if v.base.is_none() && v.origin.as_ref() == Some(&origin) {
+                                        v.base = Some(arc.clone());
+                                        hit_active |= i == self.active;
+                                    }
+                                }
+                                if hit_active {
+                                    // The canvas was showing the disclosed
+                                    // source stand-in — swap in the real
+                                    // pixels now that they exist.
+                                    self.refresh_active_pixels(ctx);
+                                    self.set_canvas_status("restored the canvas pixels");
+                                }
+                            }
+                            Err(e) => {
+                                let t = trf(
+                                    lang,
+                                    "this variant's saved master could not be loaded ({err}) — showing the un-retouched source develop instead",
+                                    &[("err", &e.to_string())],
+                                );
+                                self.toast(ToastKind::Error, t);
                             }
                         }
                     }
@@ -11719,8 +11871,17 @@ impl AutoshopApp {
                     let note = match &src_path {
                         Some(p) => {
                             let out = autoshop::pipeline::default_out(p, "style", "txt");
-                            match autoshop::pipeline::ensure_parent(&out)
-                                .and_then(|()| Ok(std::fs::write(&out, &prompt)?))
+                            // Same protocol as every deliverable (W33): the
+                            // library guard, then stage + rename — a direct
+                            // fs::write truncated the previous prompt in
+                            // place and followed a leaf symlink.
+                            match autoshop::pipeline::guard_readonly(&out, p)
+                                .and_then(|()| autoshop::pipeline::ensure_parent(&out))
+                                .and_then(|()| {
+                                    autoshop::render::stage_and_publish(&out, |staged| {
+                                        Ok(std::fs::write(staged, &prompt)?)
+                                    })
+                                })
                             {
                                 Ok(()) => tr(
                                     lang,
@@ -13283,6 +13444,53 @@ mod tests {
                 ratio(c.armed_hint, panel) >= 4.5,
                 "{theme:?} theme: armed-tool hint is {:.2}:1",
                 ratio(c.armed_hint, panel)
+            );
+            // selection_fill is PREMULTIPLIED-alpha: what actually renders is
+            // its composite over the surface beneath, not the raw constant —
+            // checking the raw colour validated a pairing no pixel ever shows.
+            // Selected text / combo rows draw DEFAULT text over that
+            // composite, on panels and on the text-edit well alike.
+            let over = |fgp: egui::Color32, bg: egui::Color32| {
+                let a = f64::from(fgp.a()) / 255.0;
+                let ch = |f: u8, b: u8| {
+                    (f64::from(f) + f64::from(b) * (1.0 - a)).round().clamp(0.0, 255.0) as u8
+                };
+                egui::Color32::from_rgb(
+                    ch(fgp.r(), bg.r()),
+                    ch(fgp.g(), bg.g()),
+                    ch(fgp.b(), bg.b()),
+                )
+            };
+            for (surface, bg) in
+                [("panels", panel), ("the text-edit well", visuals.extreme_bg_color)]
+            {
+                let composite = over(c.selection_fill, bg);
+                // Default text over a TRANSIENT text-selection highlight: the
+                // 3:1 component bar, not the 4.5:1 text bar — the user is
+                // mid-manipulation on text they just produced, and holding
+                // 4.5:1 here would force the highlight to near-invisibility
+                // on the dark panel's tiny luminance headroom.
+                let r = ratio(text, composite);
+                assert!(
+                    r >= 3.0,
+                    "{theme:?} theme: default text on selection over {surface} is {r:.2}:1 \
+                     (fill composites to {composite:?}), needs 3:1"
+                );
+                // Selected COMBO rows draw their text with selection_stroke —
+                // persistent state, full AA text bar.
+                let r = ratio(c.selection_stroke, composite);
+                assert!(
+                    r >= 4.5,
+                    "{theme:?} theme: selection-stroke text on selection over {surface} is \
+                     {r:.2}:1 (fill composites to {composite:?}), needs 4.5:1"
+                );
+            }
+            // The selection outline is a non-text UI component: 3:1 (same
+            // class as the armed clipping triangle above).
+            assert!(
+                ratio(c.selection_stroke, panel) >= 3.0,
+                "{theme:?} theme: selection stroke on panels is {:.2}:1, needs 3:1",
+                ratio(c.selection_stroke, panel)
             );
             for (i, col) in c.curve_labels.iter().enumerate() {
                 let r = ratio(*col, panel);
@@ -15115,5 +15323,79 @@ mod tests {
         assert!(app.cached_base(p, 2560).is_none(), "least-recent evicted at cap");
         assert!(app.cached_base(&others[1], 1280).is_some(), "newer entries survive");
         assert!(app.base_cache.len() <= BASE_CACHE_CAP, "cap holds");
+    }
+
+    #[test]
+    fn the_mask_brush_session_follows_index_remaps() {
+        let mut app = AutoshopApp::default();
+        app.recipe.masks =
+            vec![Default::default(), Default::default(), Default::default()];
+        // Session open on mask 2, deleting mask 0 shifts it to 1 — the stroke
+        // must keep committing into the SAME mask, not whatever slid under
+        // index 2.
+        app.mask_brush = Some((Some(2), false));
+        app.mask_brush_gray = Some(image::GrayImage::new(4, 4));
+        app.paint_mode = true;
+        app.recipe.masks.remove(0);
+        app.remap_mask_indices(|s| match s {
+            0 => None,
+            s => Some(s - 1),
+        });
+        assert_eq!(app.mask_brush, Some((Some(1), false)), "target follows its mask");
+        assert!(app.mask_brush_gray.is_some(), "a surviving session keeps its buffer");
+
+        // Deleting the session's OWN mask ends it like Esc: buffer gone,
+        // paint mode disarmed — never a new-mask fallback that would
+        // resurrect the deleted mask under a fresh slot.
+        app.recipe.masks.remove(1);
+        app.remap_mask_indices(|s| match s {
+            1 => None,
+            s => Some(s),
+        });
+        assert_eq!(app.mask_brush, None, "a vanished target ends the session");
+        assert!(app.mask_brush_gray.is_none(), "the weight buffer dies with it");
+        assert!(!app.paint_mode, "paint mode disarms with the dead session");
+
+        // A NEW-mask session carries no index and survives any remap.
+        app.mask_brush = Some((None, true));
+        app.remap_mask_indices(|_| None);
+        assert_eq!(app.mask_brush, Some((None, true)));
+    }
+
+    #[test]
+    fn an_async_variant_push_commits_a_typed_mask_rename_first() {
+        let mut app = AutoshopApp::default();
+        app.recipe.masks = vec![autoshop::recipe::LocalAdjustment {
+            name: "old".into(),
+            ..Default::default()
+        }];
+        // A photo is open: its strip holds the outgoing variant that
+        // push_variant snapshots the live canvas into.
+        app.variants = vec![Variant {
+            kind: VariantKind::Original,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        }];
+        app.active = 0;
+        // The user is mid-typing "sky gradient" when a reverse-fit lands and
+        // push_variant auto-switches: the switch's M15 boundary clear used to
+        // discard the buffer, and the outgoing variant snapshotted "old".
+        app.mask_name_buf = Some((0, "old".into(), "sky gradient".into()));
+        app.push_variant(
+            Variant {
+                kind: VariantKind::Fitted,
+                recipe: EditRecipe::default(),
+                base: None,
+                origin: None,
+                thumb: None,
+            },
+            &egui::Context::default(),
+        );
+        assert_eq!(
+            app.variants[0].recipe.masks[0].name, "sky gradient",
+            "the typed rename survives into the outgoing variant's snapshot"
+        );
     }
 }

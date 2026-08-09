@@ -311,7 +311,8 @@ pub fn produce_recipe(
     // REFINE means "adjust MY edit", so it must not delete work the model was
     // never able to return. The strict response schema
     // (advisor::openai::edit_recipe_schema) can express only LINEAR and RADIAL
-    // mask geometry and carries no colour gains, no mask role and none of the
+    // primary geometry; it carries no components, enabled toggle, radial angle,
+    // colour gains or mask role, and it carries none of the
     // manual lens fields — so a round-trip silently dropped every bitmap mask
     // (AI-selected sky/subject, painted, reverse-fit zones) with its recolour
     // gains, plus any manual lens correction. The result then auto-saves.
@@ -326,23 +327,86 @@ pub fn produce_recipe(
 /// base the photographer actually had.
 ///
 /// `advisor::openai::edit_recipe_schema` can encode only LINEAR and RADIAL
-/// mask geometry and carries no colour gains, no mask role and none of the
+/// primary geometry; it carries no components, enabled toggle, radial angle,
+/// colour gains or mask role, and it carries none of the
 /// manual lens fields. A missing bitmap mask in the response therefore
 /// carries NO intent — the model had no way to return one — yet the refined
 /// recipe auto-saves, so every AI-selected sky/subject mask, painted mask,
 /// reverse-fit zone (with its recolour gains) and hand-dialled lens
 /// correction silently disappeared the moment the user clicked Refine.
 pub(crate) fn carry_over_unrepresentable(recipe: &mut EditRecipe, base: &EditRecipe) {
-    let carried: Vec<_> = base
-        .masks
-        .iter()
-        .filter(|m| matches!(m.mask, crate::recipe::MaskGeometry::Bitmap { .. }))
-        .cloned()
-        .collect();
-    if !carried.is_empty() {
-        // Ahead of the proposed ones: the order they were authored in.
+    use crate::recipe::{MaskGeometry, MaskRole};
+
+    let schema_loses = |m: &crate::recipe::LocalAdjustment| {
+        matches!(&m.mask, MaskGeometry::Bitmap { .. })
+            || !m.components.is_empty()
+            || !m.enabled
+            || matches!(&m.mask, MaskGeometry::Radial { angle, .. } if *angle != 0.0)
+            || m.color_gains.is_some()
+            || m.role != MaskRole::Custom
+    };
+
+    let mut carried_indices = Vec::new();
+    let mut fallback_names = Vec::new();
+    for (base_index, original) in base.masks.iter().enumerate().filter(|(_, m)| schema_loses(m)) {
+        let returned_matches: Vec<usize> = recipe
+            .masks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| (m.name == original.name).then_some(i))
+            .collect();
+        let base_name_is_unique = !original.name.is_empty()
+            && base.masks.iter().filter(|m| m.name == original.name).count() == 1;
+
+        if base_name_is_unique && returned_matches.len() == 1 {
+            let refined = &mut recipe.masks[returned_matches[0]];
+            match (&original.mask, &mut refined.mask) {
+                (MaskGeometry::Bitmap { .. }, returned) => {
+                    *returned = original.mask.clone();
+                }
+                (
+                    MaskGeometry::Radial { angle: base_angle, .. },
+                    MaskGeometry::Radial { angle: returned_angle, .. },
+                ) => {
+                    *returned_angle = *base_angle;
+                }
+                (MaskGeometry::Radial { angle, .. }, returned) if *angle != 0.0 => {
+                    *returned = original.mask.clone();
+                }
+                _ => {}
+            }
+            refined.components = original.components.clone();
+            refined.enabled = original.enabled;
+            refined.color_gains = original.color_gains;
+            refined.role = original.role;
+        } else if matches!(&original.mask, MaskGeometry::Bitmap { .. })
+            && original.name.is_empty()
+        {
+            // No schema response can be a round-trip copy of an unnamed Bitmap
+            // selection, so preserve the existing prepend behaviour.
+            carried_indices.push(base_index);
+        } else if !fallback_names.contains(&original.name) {
+            // A duplicate or changed schema-carried name cannot identify which
+            // returned mask owns the state. Preserve that whole base group and
+            // discard its returned group so coverage is never applied twice.
+            fallback_names.push(original.name.clone());
+        }
+    }
+
+    for name in fallback_names {
+        recipe.masks.retain(|m| m.name != name);
+        for (i, _) in base.masks.iter().enumerate().filter(|(_, m)| m.name == name) {
+            if !carried_indices.contains(&i) {
+                carried_indices.push(i);
+            }
+        }
+    }
+    carried_indices.sort_unstable();
+    carried_indices.dedup();
+    if !carried_indices.is_empty() {
         let proposed = std::mem::take(&mut recipe.masks);
-        recipe.masks = carried;
+        recipe.masks =
+            carried_indices.into_iter().map(|i| base.masks[i].clone()).collect();
         recipe.masks.extend(proposed);
     }
     // Manual lens corrections are geometry the photographer dialled in and the
@@ -700,7 +764,13 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // caller's in-memory recipe is untouched (this is the on-disk clone), and
     // the routes that already clamp see a no-op, so this is a floor no future
     // route can forget to stand on.
-    on_disk.clamp();
+    let dropped = on_disk.clamp();
+    if !dropped.is_empty() {
+        eprintln!(
+            "warning: recipe limits discarded {} mask(s) and {} mask component(s)",
+            dropped.dropped_masks, dropped.dropped_components
+        );
+    }
     if let Some(parent) = out.parent() {
         crate::store::relativize_mask_paths(&mut on_disk, parent);
     }
@@ -1935,5 +2005,89 @@ mod tests {
         // cross-clobber the store exists to prevent).
         let other = Path::new("D:/Photography/Raw/2025/DSC0001.ARW");
         assert_ne!(xmp_target(raw), xmp_target(other));
+    }
+
+    #[test]
+    fn refine_preserves_engine_only_mask_state_without_blocking_plain_refinement() {
+        use crate::recipe::{
+            LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry,
+        };
+
+        let component = MaskComponent {
+            geometry: MaskGeometry::Radial {
+                top: 0.2,
+                left: 0.2,
+                bottom: 0.8,
+                right: 0.8,
+                feather: 0.4,
+                roundness: 0.0,
+                flipped: false,
+                angle: 0.0,
+            },
+            mode: MaskCombine::Subtract,
+        };
+        let base = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject".into(),
+                mask: MaskGeometry::Linear {
+                    zero_x: 0.0,
+                    zero_y: 0.5,
+                    full_x: 1.0,
+                    full_y: 0.5,
+                },
+                components: vec![component.clone()],
+                enabled: false,
+                exposure_ev: 0.25,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut proposed = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject".into(),
+                mask: MaskGeometry::Linear {
+                    zero_x: 0.1,
+                    zero_y: 0.4,
+                    full_x: 0.9,
+                    full_y: 0.6,
+                },
+                exposure_ev: 0.75,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        carry_over_unrepresentable(&mut proposed, &base);
+        assert!(!proposed.masks[0].enabled);
+        assert_eq!(proposed.masks[0].components, vec![component]);
+        assert_eq!(
+            proposed.masks[0].exposure_ev, 0.75,
+            "the model's representable slider refinement must survive"
+        );
+
+        let plain_base = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "plain".into(),
+                exposure_ev: 0.2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let expected = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "plain".into(),
+                mask: MaskGeometry::Linear {
+                    zero_x: 0.2,
+                    zero_y: 0.3,
+                    full_x: 0.8,
+                    full_y: 0.7,
+                },
+                exposure_ev: 0.9,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut refined = expected.clone();
+        carry_over_unrepresentable(&mut refined, &plain_base);
+        assert_eq!(refined, expected, "plain masks still take the model response exactly");
     }
 }

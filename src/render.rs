@@ -30,6 +30,7 @@ use rayon::prelude::*;
 use crate::recipe::{Crop, EditRecipe, MaskGeometry, RangeMask};
 
 const LUT_N: usize = 4096;
+const MASK_RASTER_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
 /// Shared, parameter-free transfer-curve LUTs: `[0]` = sRGB→linear, `[1]` =
 /// linear→sRGB. Built once per process (OnceLock). Dehaze and vignette used to
@@ -90,6 +91,10 @@ pub fn render_to_image_in(
     max_edge: Option<u32>,
     working: ExportColorSpace,
 ) -> Result<DynamicImage> {
+    let mut sanitized_recipe = recipe.clone();
+    sanitized_recipe.clamp();
+    let recipe = &sanitized_recipe;
+    let rasters = load_mask_raster_snapshot(recipe)?;
     // Decode scope: the RawSource holds the entire RAW file in memory
     // (~60–120 MB for a 61 MP lossless ARW), and neither it nor the decoder
     // outlives the sensor read — so the file bytes drop HERE instead of
@@ -189,7 +194,7 @@ pub fn render_to_image_in(
     apply_recipe_wb(&mut data, recipe);
 
     // --- tone + clarity + sat/vibrance + NR + sharpen (shared pipeline) -------
-    apply_develop(&mut data, w, h, recipe);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters);
 
     // --- pack to 16-bit (highest precision; JPEG downconverts at encode) ------
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
@@ -264,6 +269,10 @@ pub fn render_baked_to_image(
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
 ) -> Result<DynamicImage> {
+    let mut sanitized_recipe = recipe.clone();
+    sanitized_recipe.clamp();
+    let recipe = &sanitized_recipe;
+    let rasters = load_mask_raster_snapshot(recipe)?;
     let rgb = img.to_rgb16();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     let mut data: Vec<[f32; 3]> = rgb
@@ -281,7 +290,7 @@ pub fn render_baked_to_image(
     }
 
     apply_recipe_wb(&mut data, recipe);
-    apply_develop(&mut data, w, h, recipe);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters);
 
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
@@ -662,6 +671,36 @@ const SRGB_ICC: &[u8] = include_bytes!("../assets/sRGB-v2-magic.icc");
 const DISPLAY_P3_ICC: &[u8] = include_bytes!("../assets/DisplayP3-v2-magic.icc");
 const ADOBE_RGB_ICC: &[u8] = include_bytes!("../assets/AdobeCompat-v2.icc");
 
+fn staging_path(out: &Path) -> std::path::PathBuf {
+    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("");
+    out.with_extension(format!(
+        "{ext}.tmp.{}.{}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ))
+}
+
+fn publish_staged(out: &Path, staged: &Path, written: Result<()>) -> Result<()> {
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(staged);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(staged, out) {
+        let _ = std::fs::remove_file(staged);
+        return Err(error).with_context(|| format!("publish {}", out.display()));
+    }
+    Ok(())
+}
+
+pub fn stage_and_publish(
+    out: &Path,
+    write: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let staged = staging_path(out);
+    let written = write(&staged);
+    publish_staged(out, &staged, written)
+}
+
 /// Tag an encoder's output with the export space's profile. Never fails on
 /// jpeg/png/tiff in image 0.25 (their `set_icc_profile` impls store the
 /// profile unconditionally — verified in the crate source); if a future
@@ -693,20 +732,11 @@ pub fn render_to_file(
     denoise: Option<&crate::denoise::DenoiseOpts>,
     export: Option<&ExportOpts>,
 ) -> Result<(u32, u32)> {
+    let mut sanitized_recipe = recipe.clone();
+    sanitized_recipe.clamp();
+    let recipe = &sanitized_recipe;
     let opts = export.copied().unwrap_or_default();
-    // DELIVERABLE gate (every export surface funnels through here): an
-    // unloadable Bitmap raster renders INERT, so this file would "succeed"
-    // minus an edit the user made — and nothing would say so (A6). Refuse
-    // with the mask named; the remedies (delete the mask / restore the
-    // raster) are one step away in the app.
-    let broken = unreadable_mask_rasters(recipe);
-    if !broken.is_empty() {
-        bail!(
-            "mask raster(s) unreadable: {} — the export would silently drop those edits; \
-             delete the mask(s) or restore the raster file(s), then export again",
-            broken.join(", ")
-        );
-    }
+
     let ext = out
         .extension()
         .and_then(|e| e.to_str())
@@ -783,11 +813,7 @@ pub fn render_to_file(
     // export destroyed the previous deliverable before knowing the new one
     // would even encode. Every other artifact in this app stages and renames;
     // the one the photographer actually delivers was the exception.
-    let staged = out.with_extension(format!(
-        "{ext}.tmp.{}.{}",
-        std::process::id(),
-        crate::store::next_tmp_seq()
-    ));
+    let staged = staging_path(out);
     let create = |p: &Path| {
         std::fs::File::create(p)
             .map(std::io::BufWriter::new)
@@ -848,16 +874,8 @@ pub fn render_to_file(
     }
         Ok(())
     })();
-    if let Err(e) = encoded {
-        let _ = std::fs::remove_file(&staged); // never leave a partial behind
-        return Err(e);
-    }
-    // fs::rename REPLACES the destination on every platform we support, so the
-    // previous deliverable survives right up to the instant the new one lands.
-    if let Err(e) = std::fs::rename(&staged, out) {
-        let _ = std::fs::remove_file(&staged);
-        return Err(e).with_context(|| format!("publish {}", out.display()));
-    }
+    publish_staged(out, &staged, encoded)?;
+
     Ok((w, h))
 }
 
@@ -868,6 +886,9 @@ pub fn render_to_file(
 /// Crop is intentionally NOT applied here so sliders give immediate full-frame
 /// feedback; the full-res `render_to_image` path applies crop on export.
 pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicImage {
+    let mut sanitized_recipe = recipe.clone();
+    sanitized_recipe.clamp();
+    let recipe = &sanitized_recipe;
     let rgb = preview.to_rgb8();
     let (w, h) = rgb.dimensions();
     let mut data: Vec<[f32; 3]> = rgb
@@ -891,6 +912,17 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
 /// ACR: tone → clarity → saturation/vibrance → noise reduction → sharpening.
 /// Operates in place on sRGB-gamma RGB in [0,1].
 fn apply_develop(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
+    let rasters = best_effort_mask_raster_snapshot(r);
+    apply_develop_with_rasters(data, w, h, r, &rasters);
+}
+
+fn apply_develop_with_rasters(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    r: &EditRecipe,
+    rasters: &MaskRasterSnapshot,
+) {
     // 0a) in-camera lens profile vignetting (lensmeta): the manufacturer's own
     //     falloff map for THIS shot, a radial gain in LINEAR light. Runs before
     //     the manual stage — both are multiplicative gains, so order between
@@ -982,7 +1014,7 @@ fn apply_develop(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
     }
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
-        apply_masks(data, w, h, r);
+        apply_masks(data, w, h, r, rasters);
     }
 }
 
@@ -1161,7 +1193,13 @@ fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
 /// requests). Local clarity/dehaze/texture are deferred (the XMP→Lightroom
 /// path renders those). Mask coords are normalised so this works at any
 /// resolution.
-fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
+fn apply_masks(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    r: &EditRecipe,
+    rasters: &MaskRasterSnapshot,
+) {
     if w == 0 || h == 0 {
         return; // both passes below chunk by w; rayon asserts chunk_size != 0
     }
@@ -1202,9 +1240,9 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
         // Bitmap geometry: decode each raster ONCE per mask per develop
         // (never inside the pixel loop); both the tone and the NR pass share
         // them. Components load alongside the base.
-        let bmp = load_mask_bitmap(&m.mask);
-        let comp_bmps: Vec<Option<std::sync::Arc<image::GrayImage>>> =
-            m.components.iter().map(|c| load_mask_bitmap(&c.geometry)).collect();
+        let bmp = rasters.get(&m.mask);
+        let comp_bmps: Vec<Option<&image::GrayImage>> =
+            m.components.iter().map(|c| rasters.get(&c.geometry)).collect();
         // An unloadable raster carries NO coverage, so its weight must never
         // reach the inversion below: 0 with `inverted` would apply this
         // adjustment to the WHOLE frame at full strength. Skipping the whole
@@ -1222,7 +1260,7 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
         // combined mask coverage × master amount at a pixel (with inversion).
         let weight_at = |x: usize, y: usize| -> f32 {
             let (nx, ny) = (x as f32 / w as f32, y as f32 / h as f32);
-            let mut wgt = combined_mask_weight(m, nx, ny, bmp.as_deref(), &comp_bmps);
+            let mut wgt = combined_mask_weight(m, nx, ny, bmp, &comp_bmps);
             if m.inverted {
                 wgt = 1.0 - wgt;
             }
@@ -1493,6 +1531,90 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
         || m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0])
 }
 
+#[derive(Default)]
+struct MaskRasterSnapshot {
+    images: std::collections::HashMap<String, std::sync::Arc<image::GrayImage>>,
+}
+
+impl MaskRasterSnapshot {
+    fn get(&self, geometry: &MaskGeometry) -> Option<&image::GrayImage> {
+        let MaskGeometry::Bitmap { path } = geometry else { return None };
+        self.images.get(path).map(std::sync::Arc::as_ref)
+    }
+}
+
+fn load_mask_raster_snapshot(recipe: &EditRecipe) -> Result<MaskRasterSnapshot> {
+    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, true)
+}
+
+fn best_effort_mask_raster_snapshot(recipe: &EditRecipe) -> MaskRasterSnapshot {
+    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, false)
+        .unwrap_or_default()
+}
+
+fn load_mask_raster_snapshot_with_budget(
+    recipe: &EditRecipe,
+    budget_bytes: usize,
+    strict: bool,
+) -> Result<MaskRasterSnapshot> {
+    let mut snapshot = MaskRasterSnapshot::default();
+    let mut held_bytes = 0usize;
+
+    for mask in recipe
+        .masks
+        .iter()
+        .filter(|m| m.enabled && m.amount != 0.0 && engine_active(m))
+    {
+        for geometry in
+            std::iter::once(&mask.mask).chain(mask.components.iter().map(|c| &c.geometry))
+        {
+            let MaskGeometry::Bitmap { path } = geometry else { continue };
+            if snapshot.images.contains_key(path) {
+                continue;
+            }
+            let label = if mask.name.is_empty() { path.as_str() } else { mask.name.as_str() };
+            let Some(bitmap) = load_mask_bitmap(geometry) else {
+                if strict {
+                    bail!(
+                        "mask raster '{path}' for mask '{label}' is unreadable — no pixels were rendered"
+                    );
+                }
+                continue;
+            };
+            let incoming = bitmap.as_raw().len();
+            let Some(next_bytes) = held_bytes.checked_add(incoming) else {
+                if strict {
+                    bail!(
+                        "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
+                         loading '{path}' for mask '{label}' — no pixels were rendered"
+                    );
+                }
+                eprintln!(
+                    "mask raster '{path}' skipped: the active raster set exceeds the \
+                     {budget_bytes}-byte aggregate budget"
+                );
+                continue;
+            };
+            if next_bytes > budget_bytes {
+                if strict {
+                    bail!(
+                        "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
+                         loading '{path}' for mask '{label}' — no pixels were rendered"
+                    );
+                }
+                eprintln!(
+                    "mask raster '{path}' skipped: the active raster set exceeds the \
+                     {budget_bytes}-byte aggregate budget"
+                );
+                continue;
+            }
+            held_bytes = next_bytes;
+            snapshot.images.insert(path.clone(), bitmap);
+        }
+    }
+    Ok(snapshot)
+}
+
 /// The adjustment's COMBINED coverage at normalised (nx, ny): the base
 /// geometry's weight folded with each component in list order (Lightroom's
 /// Add / Subtract / Intersect grammar — the algebra is documented on
@@ -1503,11 +1625,11 @@ fn combined_mask_weight(
     nx: f32,
     ny: f32,
     base: Option<&image::GrayImage>,
-    comp_bmps: &[Option<std::sync::Arc<image::GrayImage>>],
+    comp_bmps: &[Option<&image::GrayImage>],
 ) -> f32 {
     let mut w = mask_weight(&m.mask, nx, ny, base);
     for (c, bmp) in m.components.iter().zip(comp_bmps) {
-        let cw = mask_weight(&c.geometry, nx, ny, bmp.as_deref());
+        let cw = mask_weight(&c.geometry, nx, ny, *bmp);
         w = match c.mode {
             crate::recipe::MaskCombine::Add => 1.0 - (1.0 - w) * (1.0 - cw),
             crate::recipe::MaskCombine::Subtract => w * (1.0 - cw),
@@ -1521,8 +1643,8 @@ fn combined_mask_weight(
 /// now (missing or corrupt file). The engine contract for those is "render
 /// inert" — right for a live preview (recoverable, warned once by the
 /// loader) — but a DELIVERABLE rendered that way "succeeds" minus an edit
-/// the user made and never says so; `render_to_file` refuses on a non-empty
-/// answer. Callers must have resolved mask paths first (every render path
+/// the user made and never says so; `render_to_file` now refuses through its
+/// raster snapshot. Callers must have resolved mask paths first (every render path
 /// already does).
 pub fn unreadable_mask_rasters(recipe: &EditRecipe) -> Vec<String> {
     recipe
@@ -1612,14 +1734,19 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
         // LRU bookkeeping on this hot path. Budgeted in BYTES as well
         // as entries: sixteen full-res 61 MP rasters would otherwise
         // pin ~1 GB for the life of the process.
-        const MASK_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
         let held: usize =
             map.values().filter_map(|(_, i)| i.as_ref()).map(|i| i.as_raw().len()).sum();
         let incoming = decoded.as_ref().map_or(0, |i| i.as_raw().len());
-        if map.len() > 16 || held + incoming > MASK_CACHE_BUDGET_BYTES {
+        if incoming <= MASK_RASTER_BUDGET_BYTES {
+            if map.len() > 16
+                || held.saturating_add(incoming) > MASK_RASTER_BUDGET_BYTES
+            {
+                map.clear();
+            }
+            map.insert(path.clone(), (ident, decoded.clone()));
+        } else {
             map.clear();
         }
-        map.insert(path.clone(), (ident, decoded.clone()));
     }
     decoded
 }
@@ -1683,6 +1810,8 @@ pub fn mask_coverage(
     {
         return image::GrayImage::new(w, h);
     }
+    let comp_refs: Vec<Option<&image::GrayImage>> =
+        comp_bmps.iter().map(|bmp| bmp.as_deref()).collect();
     let amount = m.amount.clamp(0.0, 1.0);
     let mut out = image::GrayImage::new(w, h);
     for (x, y, px) in out.enumerate_pixels_mut() {
@@ -1692,7 +1821,7 @@ pub fn mask_coverage(
             x as f32 / w as f32,
             y as f32 / h as f32,
             bmp.as_deref(),
-            &comp_bmps,
+            &comp_refs,
         );
         if m.inverted {
             wgt = 1.0 - wgt;
@@ -6698,5 +6827,146 @@ mod tests {
             );
         }
         std::fs::remove_file(&mask_path).ok();
+    }
+
+    #[test]
+    fn render_to_file_clamps_extreme_finite_mask_geometry_before_pixel_work() {
+        use crate::recipe::MaskGeometry;
+
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-render-clamp-{}-{}",
+            std::process::id(),
+            crate::store::next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.png");
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 4, image::Rgb([120, 120, 120])))
+            .save(&src)
+            .unwrap();
+
+        let wild = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Linear {
+                    zero_x: 1e30,
+                    zero_y: 1e30,
+                    full_x: -1e30,
+                    full_y: -1e30,
+                },
+                exposure_ev: 1.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut clamped = wild.clone();
+        clamped.clamp();
+        let wild_out = dir.join("wild.png");
+        let clamped_out = dir.join("clamped.png");
+        render_to_file(&src, &wild, &wild_out, None, None).unwrap();
+        render_to_file(&src, &clamped, &clamped_out, None, None).unwrap();
+
+        let got = image::open(&wild_out).unwrap().to_rgb16();
+        let expected = image::open(&clamped_out).unwrap().to_rgb16();
+        assert_eq!(got.as_raw(), expected.as_raw());
+        assert!(got.as_raw().iter().all(|&channel| channel != 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_active_raster_set_over_its_budget_is_refused_before_pixel_work() {
+        use crate::recipe::MaskGeometry;
+
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-raster-budget-{}-{}",
+            std::process::id(),
+            crate::store::next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.png");
+        let second = dir.join("second.png");
+        image::GrayImage::from_pixel(1, 1, image::Luma([255])).save(&first).unwrap();
+        image::GrayImage::from_pixel(1, 1, image::Luma([255])).save(&second).unwrap();
+        let recipe = EditRecipe {
+            masks: vec![
+                LocalAdjustment {
+                    name: "first".into(),
+                    mask: MaskGeometry::Bitmap { path: first.display().to_string() },
+                    exposure_ev: 1.0,
+                    ..Default::default()
+                },
+                LocalAdjustment {
+                    name: "second".into(),
+                    mask: MaskGeometry::Bitmap { path: second.display().to_string() },
+                    exposure_ev: 1.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let Err(error) = load_mask_raster_snapshot_with_budget(&recipe, 1, true) else {
+            panic!("two decoded bytes must exceed a one-byte snapshot budget");
+        };
+        assert!(
+            error.to_string().contains("1-byte aggregate budget"),
+            "{error:#}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_raster_after_snapshot_construction_does_not_change_the_render() {
+        use crate::recipe::MaskGeometry;
+
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-raster-snapshot-{}-{}",
+            std::process::id(),
+            crate::store::next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mask = dir.join("mask.png");
+        image::GrayImage::from_pixel(2, 2, image::Luma([255])).save(&mask).unwrap();
+        let recipe = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: mask.display().to_string() },
+                exposure_ev: 1.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let snapshot = load_mask_raster_snapshot(&recipe).unwrap();
+        let untouched = vec![[0.25, 0.25, 0.25]; 4];
+        let mut before_delete = untouched.clone();
+        apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot);
+        std::fs::remove_file(&mask).unwrap();
+        let mut after_delete = untouched.clone();
+        apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot);
+        assert_eq!(after_delete, before_delete);
+        assert_ne!(after_delete, untouched, "the retained white mask must still apply");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_staged_encode_leaves_the_existing_target_intact() {
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-staged-failure-{}-{}",
+            std::process::id(),
+            crate::store::next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("preview.jpg");
+        std::fs::write(&target, b"previous deliverable").unwrap();
+
+        let result = stage_and_publish(&target, |staged| {
+            std::fs::write(staged, b"partial new bytes")?;
+            Err(anyhow::anyhow!("encoder failed"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"previous deliverable");
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp."))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
