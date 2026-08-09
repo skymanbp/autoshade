@@ -1,6 +1,6 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.21.0). The full decode → advise → verify → render
+> Status: **implemented** (v0.22.0). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
@@ -8,13 +8,19 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 228 library + 1 CLI + 28 GUI tests pass in both build configurations.
+> 233 library + 1 CLI + 30 GUI tests pass in both build configurations.
 > v0.20.0 added the first RUNTIME end-to-end pass (real CLI processes over a
 > real 61 MP ARW, a live `serve` hit with 25 HTTP assertions, the ambient
 > `.env`/settings guards exercised as real processes against a recording mock
 > endpoint, all sandboxed via `AUTOSHOP_DATA_DIR`); v0.21.0 extended it to the
 > paid and sidecar paths — batch/eval/heal live, the whole serve API surface,
-> and real SCUNet GPU inference.
+> and real SCUNet GPU inference. v0.22.0 (user-feedback round) persisted the
+> GUI's variant strip (`variants.json` — fixes the quit-dialog livelock and
+> variant-kind loss) and grew the mask system: shape composition
+> (add/subtract/intersect), rotatable radials, a per-mask eye toggle,
+> duplicate, a free-form brush mask, editable AI rasters
+> (brush/feather/expand/contract + full-resolution guided refine) and
+> LR-aligned 0-100 display scales.
 > This document describes the design; a few historical **[verify]** notes are
 > left in place for provenance.
 >
@@ -139,6 +145,20 @@ excludes the engine-only fields the recipe carries for calibration
 (`base_curve`, `as_shot_k`/`as_shot_tint`, the lens-profile block) — an advisor
 must never emit those.
 
+Local masks (`LocalAdjustment`, v0.22): base geometry (linear / rotatable
+radial / bitmap raster) + optional extra **shape components** composed in
+order with Lightroom's Add / Subtract / Intersect grammar
+(`MaskComponent`/`MaskCombine`, rendered by `render::combined_mask_weight`),
+an `enabled` eye toggle (a lossless mute — engine, coverage overlay, export
+gate and XMP writer all skip a disabled mask consistently), and an optional
+Range Mask refinement. Components, the radial `angle`, `color_gains` and
+`role` are **engine-only**: the classic-ACR XMP projection carries the base
+geometry alone (crs `MaskBlendMode`/`Angle` semantics have no verified
+reference sidecar — the roundness rule: never reshape Lightroom masks on a
+guess). Bitmap rasters are immutable once referenced: every raster edit
+(brush add/erase, feather, expand/contract, the full-resolution guided
+refine) bakes a freshly claimed file and repoints the recipe.
+
 ## 3. The unified AI provider framework (统一 API 框架)
 
 A Rust trait abstracts the two RECIPE-producing calls — `propose` and `verify` —
@@ -256,9 +276,16 @@ Since v0.13.0 Autoshop does **not** write it next to the `.ARW`: the source
 library is read-only, so the projection lands in the per-user develop store
 (`<AUTOSHOP_DATA_DIR | %LOCALAPPDATA%/autoshop>/develops/<stem>-<hash of the
 absolute path>/<stem>.xmp`), alongside `recipe.json` (the authoritative develop
-state), version snapshots and mask rasters. Copy it beside the RAW when you want
-Lightroom to pick it up. A Lightroom sidecar that already sits beside the RAW is
-READ on open — the newer intent wins — and never overwritten.
+state), version snapshots, mask rasters, `pixels.json` (the baked pixel-master
+link) and, since v0.22.0, `variants.json` — the GUI's variant strip
+(background variants' kind/recipe/raster origin + the active card's
+three-valued kind), which is what lets a 「反推 Reverse-fit」 or 「AI 生成」
+card survive a reopen and lets the quit dialog's Save-all genuinely save
+background variants instead of livelocking. Copy the XMP beside the RAW when
+you want Lightroom to pick it up. A Lightroom sidecar that already sits beside
+the RAW is READ on open — the newer intent wins — and never overwritten (mask
+corrections it carries that classic import can't represent — brush / AI /
+depth — are counted and disclosed, not silently dropped).
 
 ### 4.6 Style / eval harness (M4)
 

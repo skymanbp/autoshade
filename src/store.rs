@@ -14,6 +14,8 @@
 //!     <stem>.xmp           Lightroom projection (name kept: LR needs <stem>.xmp)
 //!     v<N>.recipe.json     numbered snapshots
 //!     <kind>.png           mask rasters (mask-sky, mask-zone-sky, …)
+//!     pixels.json          baked pixel-master link (retouch/reimagine origin)
+//!     variants.json        GUI variant strip (background variants + active kind)
 //!     source.txt           breadcrumb: which photo this dir belongs to
 //! ```
 //!
@@ -30,7 +32,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::recipe::{EditRecipe, MaskGeometry};
+// Bitmap raster paths are walked through `LocalAdjustment::bitmap_paths_mut`
+// (base geometry + components in one place), so this module no longer
+// pattern-matches `MaskGeometry` directly.
+use crate::recipe::EditRecipe;
 
 /// Per-user store root: `AUTOSHOP_DATA_DIR` env override (tests, portable
 /// setups) → `%LOCALAPPDATA%/autoshop` → `<temp>/autoshop`. Absolute, so keys
@@ -206,17 +211,18 @@ pub fn claim_raster(src: &Path, prefix: &str) -> std::io::Result<PathBuf> {
 /// than failing the whole load.
 pub fn detach_rasters(src: &Path, r: &mut EditRecipe, prefix: &str) {
     for m in r.masks.iter_mut() {
-        let MaskGeometry::Bitmap { path } = &mut m.mask else { continue };
-        let from = PathBuf::from(path.as_str());
-        if !from.exists() {
-            continue;
-        }
-        let Ok(dst) = claim_raster(src, prefix) else { continue };
-        if copy_atomic(&from, &dst).is_ok() {
-            *path = dst.to_string_lossy().into_owned();
-        } else {
-            // Release the claim we could not fill.
-            let _ = std::fs::remove_file(&dst);
+        for path in m.bitmap_paths_mut() {
+            let from = PathBuf::from(path.as_str());
+            if !from.exists() {
+                continue;
+            }
+            let Ok(dst) = claim_raster(src, prefix) else { continue };
+            if copy_atomic(&from, &dst).is_ok() {
+                *path = dst.to_string_lossy().into_owned();
+            } else {
+                // Release the claim we could not fill.
+                let _ = std::fs::remove_file(&dst);
+            }
         }
     }
 }
@@ -246,21 +252,30 @@ pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io
         "origin": stored.to_string_lossy(),
         "kind": if generated { "generated" } else { "inplace" },
     });
-    // Same publish discipline as recipe.json: per-process AND per-call tmp
-    // name (the web server threads requests), and the old file is RETIRED to
-    // .bak rather than deleted before the rename — a crash in the window
-    // then leaves the previous linkage recoverable beside the photo, never
-    // nothing at all.
-    let target = pixel_source_path(src);
-    let tmp = dir.join(format!(
-        "pixels.json.tmp.{}.{}",
-        std::process::id(),
-        next_tmp_seq()
-    ));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)?)?;
+    publish_json_sidecar(
+        src,
+        "pixels.json",
+        serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)?,
+    )
+}
+
+/// The ONE retire-and-publish primitive for the small per-photo JSON sidecars
+/// (`pixels.json`, `variants.json`). Same publish discipline as recipe.json:
+/// per-process AND per-call tmp name (the web server threads requests), and
+/// the old file is RETIRED to `<name>.bak` rather than deleted before the
+/// rename — a crash in the window then leaves the previous record recoverable
+/// beside the photo, never nothing at all. Both consumers must keep a
+/// matching entry in [`recover_orphan_baks`]'s pair list, or the crash-window
+/// `.bak` this leaves behind is never republished.
+fn publish_json_sidecar(src: &Path, name: &str, bytes: Vec<u8>) -> std::io::Result<()> {
+    let dir = develop_dir(src);
+    std::fs::create_dir_all(&dir)?;
+    let target = dir.join(name);
+    let tmp = dir.join(format!("{name}.tmp.{}.{}", std::process::id(), next_tmp_seq()));
+    std::fs::write(&tmp, bytes)?;
     let mut retired = false;
     if target.exists() {
-        let bak = dir.join("pixels.json.bak");
+        let bak = dir.join(format!("{name}.bak"));
         // Belt-and-braces clear (fs::rename would replace it anyway — see
         // next_tmp_seq's probe note). Losing an OLD .bak to a concurrent
         // writer is last-writer-wins by design — the same stance recipe.json
@@ -279,15 +294,15 @@ pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io
     }
     if let Err(e) = std::fs::rename(&tmp, &target) {
         // The publish failed AFTER the old file was retired — put it back so
-        // the previous linkage stays the live one, not a .bak orphan. A
+        // the previous record stays the live one, not a .bak orphan. A
         // failed restore must be SAID: the error then names where the
-        // previous linkage survives instead of pretending it is live.
+        // previous record survives instead of pretending it is live.
         let mut restore_note = String::new();
         if retired {
-            let bak = dir.join("pixels.json.bak");
+            let bak = dir.join(format!("{name}.bak"));
             if std::fs::rename(&bak, &target).is_err() {
                 restore_note = format!(
-                    " (restoring the previous pixels.json ALSO failed — it survives at {})",
+                    " (restoring the previous {name} ALSO failed — it survives at {})",
                     bak.display()
                 );
             }
@@ -322,6 +337,141 @@ pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
     };
     rm(develop_dir(src).join("pixels.json.bak"))?;
     rm(pixel_source_path(src))
+}
+
+/// GUI-only sidecar persisting the photo's VARIANT STRIP beyond the single
+/// saved develop: `variants.json`. recipe.json + pixels.json stay the
+/// cross-surface authority for the ACTIVE develop (CLI, web and export never
+/// read this file); what THEY cannot carry is the rest of the strip — the
+/// three-valued per-variant kind and each background variant's own recipe +
+/// baked-raster origin. Before this file existed, every reopen collapsed the
+/// strip to one card whose kind was guessed from the 2-valued pixels.json
+/// flag (a `Fitted` card silently reopened as `Original`), and background
+/// variants counted as permanently-unsavable work that pinned the quit
+/// guard's dialog forever.
+pub fn variants_path(src: &Path) -> PathBuf {
+    develop_dir(src).join("variants.json")
+}
+
+/// One BACKGROUND variant in a [`VariantsRecord`]: three-valued kind
+/// ("original" | "generated" | "fitted"), the variant's full develop recipe,
+/// and its baked raster origin when the variant is pixel-based. Base pixels
+/// are NOT stored — they re-decode from `origin`; source-based variants
+/// re-develop the shared source.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct VariantEntry {
+    pub kind: String,
+    pub recipe: EditRecipe,
+    #[serde(default)]
+    pub origin: Option<PathBuf>,
+}
+
+/// The strip minus the active variant (whose develop recipe.json owns),
+/// mirroring the GUI's navigation-stash shape: `others` + where the active
+/// card sits + the active card's kind (the ONE fact about the active variant
+/// recipe.json cannot express).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct VariantsRecord {
+    /// Format version; readers refuse a future major they cannot honour.
+    pub v: u32,
+    pub active_kind: String,
+    pub active_pos: usize,
+    pub others: Vec<VariantEntry>,
+}
+
+/// Persist the strip record. Origins inside the develop dir are stored by
+/// bare name and each entry's Bitmap mask references are relativized — the
+/// same relocatability rules recipe.json and pixels.json follow.
+pub fn write_variants(src: &Path, rec: &VariantsRecord) -> std::io::Result<()> {
+    let dir = develop_dir(src);
+    let mut stored = VariantsRecord {
+        v: rec.v,
+        active_kind: rec.active_kind.clone(),
+        active_pos: rec.active_pos,
+        others: Vec::with_capacity(rec.others.len()),
+    };
+    for e in &rec.others {
+        let origin = match &e.origin {
+            Some(o) if o.parent() == Some(dir.as_path()) => {
+                Some(o.file_name().map(PathBuf::from).unwrap_or_else(|| o.clone()))
+            }
+            Some(o) => Some(std::path::absolute(o)?),
+            None => None,
+        };
+        let mut recipe = e.recipe.clone();
+        relativize_mask_paths(&mut recipe, &dir);
+        stored.others.push(VariantEntry { kind: e.kind.clone(), recipe, origin });
+    }
+    publish_json_sidecar(
+        src,
+        "variants.json",
+        serde_json::to_vec_pretty(&stored).map_err(std::io::Error::other)?,
+    )
+}
+
+/// The photo's persisted strip record, if one exists and parses. Origins and
+/// Bitmap mask references come back resolved against the develop dir; their
+/// EXISTENCE is deliberately not checked here — the GUI restore is the one
+/// place that can degrade per-variant honestly (toast + neutral develop)
+/// instead of silently dropping a variant's recipe with its raster.
+/// A missing file is silent (the normal single-card case); an existing file
+/// that cannot be honoured warns on stderr and degrades to None, exactly like
+/// [`read_pixel_source`].
+pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
+    let _ = recover_orphan_baks(src);
+    let sidecar = variants_path(src);
+    let bytes = match std::fs::read(&sidecar) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!(
+                "⚠ {} exists but cannot be read ({e}) — the variant strip is not restored",
+                sidecar.display()
+            );
+            return None;
+        }
+    };
+    let mut rec = match serde_json::from_slice::<VariantsRecord>(&bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "⚠ {} is unreadable ({e}) — the variant strip is not restored",
+                sidecar.display()
+            );
+            return None;
+        }
+    };
+    if rec.v != 1 {
+        eprintln!(
+            "⚠ {} has format v{} (this build reads v1) — the variant strip is not restored",
+            sidecar.display(),
+            rec.v
+        );
+        return None;
+    }
+    let dir = develop_dir(src);
+    for e in &mut rec.others {
+        if let Some(o) = &e.origin
+            && o.is_relative()
+        {
+            e.origin = Some(dir.join(o));
+        }
+        resolve_mask_paths(&mut e.recipe, &dir);
+    }
+    Some(rec)
+}
+
+/// Forget the persisted strip (the photo went back to a single card). Same
+/// two-step as [`clear_pixel_source`], `.bak` first, so a crash between the
+/// removals leaves the live record intact instead of resurrection bait.
+pub fn clear_variants(src: &Path) -> std::io::Result<()> {
+    let rm = |p: PathBuf| match std::fs::remove_file(p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    };
+    rm(develop_dir(src).join("variants.json.bak"))?;
+    rm(variants_path(src))
 }
 
 /// THE develop's render source, shared by every surface (CLI, GUI export and
@@ -424,6 +574,7 @@ pub fn recover_orphan_baks(src: &Path) -> std::io::Result<()> {
     for (live, bak) in [
         (recipe_target(src), dev.join("recipe.json.bak")),
         (pixel_source_path(src), dev.join("pixels.json.bak")),
+        (variants_path(src), dev.join("variants.json.bak")),
     ] {
         if live.exists() || !bak.exists() {
             continue;
@@ -826,6 +977,11 @@ pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
         develop_dir(src).join("recipe.json.bak"),
         recipe_target(src),
         xmp_target(src),
+        // The strip record goes with the develop it describes — a surviving
+        // variants.json would resurrect background variants over a develop
+        // the user explicitly cleared.
+        develop_dir(src).join("variants.json.bak"),
+        variants_path(src),
         legacy_recipe(src),
         legacy_xmp(src),
     ]
@@ -881,7 +1037,7 @@ pub fn list_versions(src: &Path) -> Vec<u32> {
 /// "out/…" references keep resolving exactly as before this module existed.
 pub fn resolve_mask_paths(r: &mut EditRecipe, base: &Path) {
     for m in &mut r.masks {
-        if let MaskGeometry::Bitmap { path } = &mut m.mask {
+        for path in m.bitmap_paths_mut() {
             let p = Path::new(path.as_str());
             if p.is_relative() {
                 // A BARE name is the store's own convention and can only mean
@@ -907,7 +1063,7 @@ pub fn resolve_mask_paths(r: &mut EditRecipe, base: &Path) {
 /// the develop dir relocatable. Paths elsewhere are stored as given.
 pub fn relativize_mask_paths(r: &mut EditRecipe, base: &Path) {
     for m in &mut r.masks {
-        if let MaskGeometry::Bitmap { path } = &mut m.mask {
+        for path in m.bitmap_paths_mut() {
             let p = Path::new(path.as_str());
             if p.is_absolute()
                 && p.parent() == Some(base)
@@ -1179,7 +1335,7 @@ fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
 /// snapshot must never silently keep pointing at a mutable live raster.
 pub fn snapshot_rasters(r: &mut EditRecipe, dev: &Path, n: u32) -> std::io::Result<()> {
     for m in &mut r.masks {
-        if let MaskGeometry::Bitmap { path } = &mut m.mask {
+        for path in m.bitmap_paths_mut() {
             let p = Path::new(path.as_str());
             // Bare name (the store convention) or absolute path inside dev.
             let name = if p.is_absolute() {
@@ -1667,7 +1823,7 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
     // boundary.
     let mut legacy_rasters: Vec<PathBuf> = Vec::new();
     for m in &mut r.masks {
-        if let MaskGeometry::Bitmap { path } = &mut m.mask {
+        for path in m.bitmap_paths_mut() {
             let mut p = PathBuf::from(path.as_str());
             if p.is_absolute() {
                 continue; // foreign reference — not ours to move
@@ -1762,7 +1918,10 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recipe::LocalAdjustment;
+    // MaskGeometry left the module-level imports when the raster-path walks
+    // moved to `LocalAdjustment::bitmap_paths_mut`; the fixtures here still
+    // construct geometries directly.
+    use crate::recipe::{LocalAdjustment, MaskGeometry};
 
     /// One file must never produce two develop directories.
     ///
@@ -2017,6 +2176,11 @@ mod tests {
         std::fs::write(recipe_target(&photo), b"{}").unwrap();
         std::fs::write(dev.join("recipe.json.bak"), b"{\"contrast\":30.0}").unwrap();
         std::fs::write(xmp_target(&photo), b"<x:xmpmeta/>").unwrap();
+        // The strip record is a removal target too — live AND retired: a
+        // surviving variants.json(.bak) resurrects background variants over
+        // a develop the user explicitly cleared.
+        std::fs::write(variants_path(&photo), b"{\"v\":1}").unwrap();
+        std::fs::write(dev.join("variants.json.bak"), b"{\"v\":1}").unwrap();
         let _ = std::fs::create_dir_all("out");
         std::fs::write(legacy_recipe(&photo), b"{}").unwrap();
         std::fs::write(legacy_xmp(&photo), b"<x:xmpmeta/>").unwrap();
@@ -2041,9 +2205,88 @@ mod tests {
         // Non-vacuous now: a recipe.json.bak DID exist before the clear, so
         // this really exercises the recovery's recipe row.
         assert!(!has_develop(&photo), "and nothing resurrects the cleared recipe");
+        assert!(
+            !variants_path(&photo).exists() && !dev.join("variants.json.bak").exists(),
+            "the strip record goes with the develop — live and retired"
+        );
         // Clearing an already-clean develop is a no-op, not an error.
         let again = clear_develop(&photo).expect("idempotent");
         assert!(!again.removed, "nothing left to remove");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn variants_record_round_trips_relocatable_and_recovers_its_bak() {
+        let base = std::env::temp_dir().join("autoshop-store-test-variants");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let photo = base.join("DSC_VARS.ARW");
+        std::fs::write(&photo, b"raw").unwrap();
+        let dev = develop_dir(&photo);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        // Nothing persisted yet — the normal single-card case is silent None.
+        assert!(read_variants(&photo).is_none(), "no record, no strip");
+        // A generated background variant: raster origin inside the develop
+        // dir, recipe carrying a Bitmap mask that also lives there.
+        let master = dev.join("reimagine-1.png");
+        std::fs::write(&master, b"png").unwrap();
+        std::fs::write(dev.join("mask-sky.png"), b"png").unwrap();
+        let mut gen_recipe = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        gen_recipe.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: dev.join("mask-sky.png").to_string_lossy().into_owned() },
+            ..Default::default()
+        });
+        let rec = VariantsRecord {
+            v: 1,
+            active_kind: "fitted".into(),
+            active_pos: 2,
+            others: vec![
+                VariantEntry {
+                    kind: "original".into(),
+                    recipe: EditRecipe { contrast: 12.0, ..Default::default() },
+                    origin: None,
+                },
+                VariantEntry {
+                    kind: "generated".into(),
+                    recipe: gen_recipe,
+                    origin: Some(master.clone()),
+                },
+            ],
+        };
+        write_variants(&photo, &rec).unwrap();
+        // RELOCATABLE on disk: in-dev origin and mask stored by bare name.
+        let raw = std::fs::read_to_string(variants_path(&photo)).unwrap();
+        assert!(raw.contains("\"reimagine-1.png\""), "origin stored bare, got:\n{raw}");
+        assert!(raw.contains("\"mask-sky.png\""), "mask raster stored bare, got:\n{raw}");
+        assert!(!raw.contains(&dev.to_string_lossy().replace('\\', "\\\\")), "no absolute dev paths leak");
+        // Reader resolves both back to absolute in-dev paths.
+        let back = read_variants(&photo).expect("record parses");
+        assert_eq!(back.active_kind, "fitted");
+        assert_eq!(back.active_pos, 2);
+        assert_eq!(back.others.len(), 2);
+        assert_eq!(back.others[0].kind, "original");
+        assert_eq!(back.others[0].recipe.contrast, 12.0);
+        assert_eq!(back.others[0].origin, None);
+        assert_eq!(back.others[1].origin.as_deref(), Some(master.as_path()));
+        let MaskGeometry::Bitmap { path } = &back.others[1].recipe.masks[0].mask else { panic!() };
+        assert_eq!(Path::new(path), dev.join("mask-sky.png"), "mask ref resolved to the dev dir");
+        // Crash-window recovery: a second write retires the first to .bak;
+        // losing the live file must republish it (the recover_orphan_baks
+        // pair registered for variants.json).
+        write_variants(&photo, &rec).unwrap();
+        assert!(dev.join("variants.json.bak").exists(), "precondition: a retired record exists");
+        std::fs::remove_file(variants_path(&photo)).unwrap();
+        assert!(read_variants(&photo).is_some(), "the .bak republishes through the reader");
+        // Explicit clear detaches BOTH copies and stays silent-idempotent.
+        clear_variants(&photo).unwrap();
+        assert!(read_variants(&photo).is_none(), "cleared means gone");
+        assert!(!dev.join("variants.json.bak").exists(), "no resurrection bait left");
+        clear_variants(&photo).unwrap();
+        // A future format version is refused, not misread.
+        std::fs::write(variants_path(&photo), b"{\"v\":9,\"active_kind\":\"original\",\"active_pos\":0,\"others\":[]}").unwrap();
+        assert!(read_variants(&photo).is_none(), "future major refused");
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&base);
     }

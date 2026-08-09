@@ -80,20 +80,27 @@ fn mask_geom_xml(g: &MaskGeometry) -> Option<(&'static str, String)> {
                 " crs:ZeroX=\"{zero_x}\" crs:ZeroY=\"{zero_y}\" crs:FullX=\"{full_x}\" crs:FullY=\"{full_y}\""
             ),
         )),
-        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, flipped } => Some((
-            "Mask/CircularGradient",
-            {
-                // Lightroom's crs:Feather lives on a 0..100 scale (reference
-                // sidecars carry integers like 50 / 72); the engine's is 0..1.
-                // The old writer emitted the raw 0..1 value, which Lightroom
-                // read as a nearly hard edge — convert on the boundary.
-                let lr_feather = (feather.clamp(0.0, 1.0) * 100.0).round();
-                format!(
-                    " crs:Top=\"{top}\" crs:Left=\"{left}\" crs:Bottom=\"{bottom}\" crs:Right=\"{right}\" \
+        // `angle: _` — deliberately NOT projected onto crs:Angle: its
+        // sign/pivot semantics are unverified (the roundness rule — never
+        // reshape Lightroom masks on a guess), so a rotated radial exports as
+        // its UNROTATED ellipse: the same superset-approximation stance the
+        // radial placement takes under straighten. See MaskGeometry::Radial.
+        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, flipped, angle: _ } => {
+            Some((
+                "Mask/CircularGradient",
+                {
+                    // Lightroom's crs:Feather lives on a 0..100 scale (reference
+                    // sidecars carry integers like 50 / 72); the engine's is 0..1.
+                    // The old writer emitted the raw 0..1 value, which Lightroom
+                    // read as a nearly hard edge — convert on the boundary.
+                    let lr_feather = (feather.clamp(0.0, 1.0) * 100.0).round();
+                    format!(
+                        " crs:Top=\"{top}\" crs:Left=\"{left}\" crs:Bottom=\"{bottom}\" crs:Right=\"{right}\" \
 crs:Feather=\"{lr_feather}\" crs:Roundness=\"{roundness}\" crs:Flipped=\"{flipped}\""
-                )
-            },
-        )),
+                    )
+                },
+            ))
+        }
         MaskGeometry::Bitmap { .. } => None,
     }
 }
@@ -167,6 +174,15 @@ fn masks_xml(r: &EditRecipe) -> String {
     }
     let mut items = String::new();
     for (i, m) in r.masks.iter().enumerate() {
+        // The eye toggle: a disabled mask applies nothing, so projecting it
+        // as an active correction would make Lightroom render an edit the
+        // app does not. Skipped like a Bitmap mask (lossy projection —
+        // recipe.json keeps it; re-enable is one click). The alternative,
+        // crs:CorrectionActive="false", is unverified against a real
+        // sidecar, and the writer's "true" above is a fixed literal.
+        if !m.enabled {
+            continue;
+        }
         let name = if m.name.is_empty() { format!("Autoshop {}", i + 1) } else { m.name.clone() };
         let corr_id = guid(&format!("corr-{i}-{name}"));
         let mask_id = guid(&format!("mask-{i}-{name}"));
@@ -1306,6 +1322,30 @@ fn parse_masks(xmp: &str) -> Vec<LocalAdjustment> {
     out
 }
 
+/// How many corrections in this sidecar the import CANNOT represent (LR
+/// brush / AI / depth masks — no `Mask/Gradient` / `Mask/CircularGradient`
+/// component). The skip itself is by design (the writer skips symmetrically);
+/// what was missing is the DISCLOSURE: a user importing their own Lightroom
+/// work lost every brush mask with no indication anything was dropped. The
+/// GUI surfaces this count when it reads a sidecar.
+pub fn unsupported_corrections(xmp: &str) -> usize {
+    let Some(block) =
+        block_between(xmp, "<crs:MaskGroupBasedCorrections>", "</crs:MaskGroupBasedCorrections>")
+    else {
+        return 0;
+    };
+    let starts: Vec<usize> =
+        block.match_indices("crs:What=\"Correction\"").map(|(i, _)| i).collect();
+    starts
+        .iter()
+        .enumerate()
+        .filter(|(n, s)| {
+            let end = starts.get(n + 1).copied().unwrap_or(block.len());
+            parse_one_correction(&block[**s..end]).is_none()
+        })
+        .count()
+}
+
 /// One `crs:What="Correction"` segment → a [`LocalAdjustment`]. Slider scales
 /// invert the writer's: exposure ×4 (a power-of-two rescale, exact in binary
 /// FP), every other slider ×100 snapped to 4 decimals so `"0.3" → 30.0` lands
@@ -1358,6 +1398,10 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
                 feather,
                 roundness: crs_f32(g, "Roundness")?,
                 flipped: crs_str(g, "Flipped") == Some("true"),
+                // A Lightroom crs:Angle is deliberately NOT mapped onto our
+                // engine angle (unverified sign/pivot — the roundness rule);
+                // the import reads the axis-aligned ellipse, as before.
+                angle: 0.0,
             },
             p,
         )
@@ -1806,7 +1850,7 @@ mod tests {
                 LocalAdjustment {
                     mask: MaskGeometry::Radial {
                         top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
-                        feather: 0.5, roundness: 0.0, flipped: false,
+                        feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
                     },
                     name: "subject".into(),
                     shadows: 20.0,      // ÷100 → 0.2
@@ -1927,7 +1971,7 @@ mod tests {
                 LocalAdjustment {
                     mask: MaskGeometry::Radial {
                         top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
-                        feather: 0.5, roundness: 0.0, flipped: false,
+                        feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
                     },
                     range: Some(RangeMask::Color { r: 0.9, g: 0.6, b: 0.2, amount: 0.5, px: 0.4, py: 0.7 }),
                     name: "subject".into(),
@@ -2400,6 +2444,7 @@ mod tests {
                     feather: 0.5,
                     roundness: 0.0,
                     flipped: false,
+                    angle: 0.0,
                 },
                 exposure_ev: 1.0,
                 ..Default::default()
@@ -2520,7 +2565,7 @@ mod tests {
                 LocalAdjustment {
                     mask: MaskGeometry::Radial {
                         top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
-                        feather: 0.5, roundness: 0.0, flipped: true,
+                        feather: 0.5, roundness: 0.0, flipped: true, angle: 0.0,
                     },
                     range: Some(RangeMask::Color { r: 0.9, g: 0.6, b: 0.2, amount: 0.5, px: 0.4, py: 0.7 }),
                     name: "subject".into(),

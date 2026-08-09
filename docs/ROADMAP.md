@@ -25,6 +25,31 @@
 > → 合成落盘 exit 0）。唯一剩余披露=GUI 运行时验证（用户"绝不弹窗"标令，唯
 > 用户可解禁）。后续若重启开发：先读本文件「当前状态」首条 + 项目记忆
 > `autoshop-roadmap.md`。
+> **（2026-08-08 起开发已重启：用户试用报三问题，第九轮 v0.22.0 见下条。）**
+>
+> **v0.22.0 已完成（2026-08-09，未发布）**：**第九轮 = 用户反馈三连修 + 蒙版大改**。
+> 用户试用报三问题：①变体名"自己会变"；②蒙版要打磨（点名"蒙版本身的调整"，追加
+> 增加/排除/交叉）；③AI 整图生成→反推→保存后退出仍提示未保存、「保存并退出」死键。
+> 诊断（三路调查工作流 + 8 条根因全部对抗验证 CONFIRMED + Codex 只读复核）：①③同根
+> ——**变体带是纯会话态**：三值 kind 被 stash 的 bool 与 pixels.json 的 2 值标志压扁
+> （Fitted 无处表示 →「◭ 反推」回来变「▣ 原片」），非活动变体拿自己的 origin 与整
+> 照片唯一的 master 记录比对 → generate→fit 后**结构性永脏**，Save-all 只写活动画布
+> 且无 Discard 式逃生口 → Close/CancelClose 活锁（"保存并退出"死键）。修法=
+> **variants.json 变体带边车**（store 读/写/清三原语 + 共享 publish_json_sidecar +
+> recover_orphan_baks/clear_develop 全覆盖；GUI saved_strip 镜像重写背景变体脏判定；
+> StashEntry 补三值 kind；Ctrl+S/Save-all 写整条带；成功臂残留复查点名，绝不无声弹回）。
+> ②蒙版八件套：components **增加/排除/交叉**（引擎 combined_mask_weight；engine-only
+> ——crs MaskBlendMode 无验证参考边车，XMP 只投基形状，面板如实披露）；径向 **angle**
+> （引擎旋转 + 旋转手柄 id5 + 滑杆；XMP 投未旋转椭圆=放置 bbox 同款近似）；**眼睛开关**
+> enabled（引擎/覆盖/导出门/XMP 四处一致跳过）；**复制蒙版**（栅格 detach 独立生命
+> 周期）；列表**活跃 ●**（render::engine_active 与引擎同一条规则）；**笔刷蒙版**（新建
+> + 位图栅格编辑：灰度权重缓冲防 8-bit 往返漂移、擦除、羽化/扩展/收缩烘焙、**引导滤波
+> 全分辨率精修** worker——预览分辨率 AI 蒙版导出边界发糊的正修）；显示刻度 **0-100
+> 对齐 LR**（存储仍 0..1）；XMP 导入**丢弃计数披露**（LR 笔刷/AI/景深蒙版不再无声
+> 消失）。验证：clippy 清零、233+30+1 全绿（新增 store 往返/崩溃恢复、GUI 两条回归
+> 钉死活锁与 stash kind、引擎组合代数/形态学/引导滤波共 4 测试）；Codex 只读评审 2
+> 发现（MaskRefined 需索引+路径双验证防同栅格双引用误指；refine eps 需正下限）已修
+> 并复验。详见「当前状态」首条。
 >
 > **v0.21.0 已发布（2026-08-07）**：**第八轮 = 色调模型正修 + 剩余项清零**。用户令
 > "开始下一轮，把所有剩余项清空"。**六轮悬账的色调模型残留正式修掉**：根因=滑杆
@@ -116,6 +141,92 @@
 > 故不发新版，已发布的 v0.16.1 二进制不受影响。
 
 ## 当前状态（已完成，勿重做）
+
+- **第九轮：用户反馈三连修 + 蒙版大改（2026-08-08~09，v0.22.0；用户勾选全量修复：
+  问题3退出活锁 + 问题1变体身份 + 蒙版打磨全项含追加的增加/排除/交叉）**
+
+  **① 变体身份 + 退出活锁（用户问题 ①③，同一结构性根源）**
+  - 诊断：三路调查工作流（11 代理），8 条根因主张全部独立对抗验证 CONFIRMED，
+    Codex 只读复核确认并修正两处表述（"永脏"限定于保留变体的正常保存操作；
+    Save-all 逃生口必须语义化为保存而非丢弃授权）。
+  - 根源：变体带纯会话态。`StashEntry.generated: bool` 压扁三值 kind（导航回来
+    「◭ 反推」→「▣ 原片」）；pixels.json 的 `kind: generated|inplace` 2 值标志
+    无法表示 Fitted（冷重开同病）；`open_dirty_variants` 拿非活动变体的 origin 与
+    **整照片唯一** master 记录、recipe 与**活动画布的** saved_recipe 比对 →
+    generate→fit 后背景 Generated 变体结构性永脏；quit 对话框 Save-all 只写
+    pending（手动 Ctrl+S 后为空），发 Close 而无 discard_requested 式逃生口 →
+    守卫下一帧再拦 → Close/CancelClose 死循环 =「保存并退出」死键。
+  - 修法：`store::variants.json`（`VariantsRecord`：others[kind/recipe/origin] +
+    active_kind/active_pos；写侧 relativize、读侧 resolve；publish_json_sidecar
+    从 write_pixel_source 抽出共享；recover_orphan_baks + clear_develop 注册
+    variants 对）。GUI：`saved_strip` 镜像；`open_dirty_variants` 重写为
+    live-vs-mirror 位置逐一比对（kind/recipe/origin/删除/活动卡漂移全计）；
+    StashEntry 补 kind；冷重开从 variants.json 重建整条带（active_kind=fitted
+    直接恢复；generated 仍走 baked pixels 臂；背景变体 base 在 load_active 首次
+    切换时惰性解码，失败 toast 降级）；Ctrl+S `persist_strip`（失败=镜像不推进=
+    保护仍在）；Save-all pending 四元组带 strip、noop 清除臂加 strip 平凡门、
+    成功臂 `inactive_dirty_variants` 残留复查（>0 点名 toast，绝不无声弹回）。
+  - 回归钉死：`fitted_kind_survives_the_navigation_stash`、
+    `a_persisted_strip_makes_background_variants_saved_work`（前置=修前的死锁态，
+    断言=persist 后守卫必放行）；store 侧 `variants_record_round_trips_…`。
+  - 语言切换仍会即时改卡片文字（派生标签的固有行为，非 bug）；跨面（serve/CLI）
+    对同库照片写 pixels.json 的旧影响不变（variants.json 为 GUI 专属）。
+
+  **② 蒙版八件套（用户问题 ②全量勾选）**
+  - **组合**：`LocalAdjustment.components: Vec<MaskComponent{geometry, mode}>`，
+    Add=屏并 `1-(1-w)(1-c)` / Subtract=`w(1-c)` / Intersect=`wc` 按序折叠
+    （`combined_mask_weight`）；不可读组件栅格=整调整惰性（丢 Subtract 会扩大
+    效果区）；三处对称（apply_masks/mask_coverage/unreadable_mask_rasters）；
+    consumers 经 `bitmap_paths_mut()` 单一遍历（store 五处 raster 路径处理共用，
+    新载体永不漏）。ENGINE-ONLY：crs MaskBlendMode 语义无验证参考边车（roundness
+    同律），XMP 只投基形状，面板灰字披露。GUI：Shapes 区（模式选择+▭/◯ 布置、
+    行内改模式/删除/选中编辑手柄 sel_component）。
+  - **径向旋转**：`Radial.angle`（serde default 0，±180 wrap 消毒）；引擎逆旋
+    采样点；手柄=旋转轴端点 + 旋转手柄 id5（顶轴外侧）；拖拽沿旋转轴投影
+    (du,dv)，angle=0 时逐位退化为旧行为；描边参数化采样含旋转；XMP 写出
+    未旋转椭圆（放置 bbox 同款超集近似，文档+注释双披露；crs:Angle 不映射）。
+  - **眼睛开关**：`enabled`（默认 true；引擎跳过、覆盖归零、导出门跳过、XMP
+    写出跳过禁用项——CorrectionActive="false" 无验证不猜）；列表行 👁 + 禁用行
+    弱化显示。
+  - **复制蒙版**：⧉ 按钮，克隆经 `detach_rasters` 拿独立栅格副本，64 上限有提示。
+  - **活跃 ●**：`render::engine_active` 提为 pub，列表行与导出门同一条规则。
+  - **笔刷蒙版**（新建+编辑）：`mask_brush` 会话骑现有画笔基建（paint_mode 全
+    联动）；灰度权重缓冲 `mask_brush_gray` 为真值（RGBA 画布仅显示，防 8-bit
+    往返漂移）；擦除=双缓冲清写；Apply 烘焙进 claim_raster 新栅格（输入文件
+    永不变——版本快照引用安全）；「编辑栅格」把现有位图播种进会话。
+  - **栅格烘焙**：羽化（高斯）/扩展/收缩（可分离 max/min 形态学）每档新栅格；
+    **全分辨率精修**=worker 解码全尺寸原图 + He 引导滤波（box 均值走 NR 的
+    blur_plane），landing 以索引+存储引用双验证（Codex R9-1），refine eps 引擎
+    侧正下限（R9-2）。测试：组合代数逐点、顺序敏感、形态学 5×5/3×3/恒等、
+    引导滤波边界贴合。
+  - **刻度 0-100**：`slider_pct`（Amount/边缘羽化/亮度范围三杆/容差显示 ×100，
+    存储不变=XMP 契约；≥20 宽规则自动整数吸附）。
+  - **导入丢弃计数**：`xmp::unsupported_corrections` + `read_saved_develop` 第三
+    返回值（独立通道，不混入 xmp_bad 的"数字不可读"语义），打开时 toast 点名
+    N 个 LR 笔刷/AI/景深蒙版未导入、边车原样保留。
+  - i18n：本轮 40+ 新字符串全部补中文；serve 的 XMP 损失披露措辞已覆盖
+    engine-only 编辑（核对无需改）。
+
+  **验证与披露**
+  - clippy --all-features --all-targets 0 警告；测试 233(lib)+30(gui)+1 全绿。
+  - Codex 只读评审（全 diff）：(a)-(f)(h) 维度明确 cleared；2 发现已修复并复验。
+  - **E2E（2026-08-09，用户解禁运行时测试；18/18 PASS，全部 release exe 真进程 +
+    `AUTOSHOP_DATA_DIR` 沙箱 + 中性 cwd，脚本=会话 scratchpad `e2e_round9.py`）**：
+    - CLI `apply`（像素级断言，512×384 均匀灰 128 合成源）：enabled=false 全帧
+      +2EV 蒙版 → 输出与基线**逐字节相同**；排除组件雕刻 → 被雕面 128==基线、
+      外侧 205；radial angle 0°/90° → 探针精确对换（0° 时 H=239/V=128，90° 时
+      H=128/V=239）。
+    - `serve` 真进程（/api/list → gen → POST /api/xmp）：200；沙箱店内产出
+      `<stem>.xmp` + recipe.json；XMP 三纪律验实——禁用蒙版整条跳过、组件不投影
+      （CircularGradient 计数=1 仅基形状）、无 Angle 属性；recipe.json 无损
+      round-trip（angle=37.0、subtract 组件、enabled=false 逐字段还原）。
+    - 覆盖边界如实：variants.json 为 GUI 专属消费（真实文件系统级由
+      `variants_record_round_trips_…` 等单测覆盖）；蒙版笔刷/精修的 worker 流程
+      为 GUI 交互路径，逻辑层由无头 GUI 测试 + 引擎测试覆盖——GUI **窗口**仍未
+      启动（"绝不弹窗"标令按 v0.20 先例解释为 CLI/serve 级运行时解禁）。
+  - 披露：组件/旋转的 XMP 投影限制见上（解锁条件=一份带 MaskBlendMode/Angle 的
+    真实 LR 参考边车）；变体带 persist 只在保存时发生（fit/reimagine 推卡后带未存，
+    守卫如实提示直至 Ctrl+S——语义即"未保存"，非缺陷）。
 
 - **第八轮：色调模型正修 + 剩余项清零（2026-08-07，v0.21.0；用户令"开始下一轮，
   把所有剩余项清空"，此前已确认 kelvin 验收、色调下轮攻、计费/GPU 已授权）**

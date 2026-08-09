@@ -425,8 +425,20 @@ impl ColorGrade {
 #[serde(default, deny_unknown_fields)]
 pub struct LocalAdjustment {
     pub mask: MaskGeometry,
-    /// Optional Range Mask refinement intersected with `mask` (final weight =
-    /// geometry × range). `None` = pure geometry (v1-compatible).
+    /// Extra shapes composed onto `mask` in order (Add / Subtract /
+    /// Intersect — Lightroom's mask-component grammar). Empty = the base
+    /// geometry alone (v1-compatible). ENGINE-ONLY: see [`MaskComponent`].
+    pub components: Vec<MaskComponent>,
+    /// Lightroom's per-mask eye toggle: `false` mutes the adjustment without
+    /// touching its tuned Amount (dragging Amount to 0 as a mute DESTROYED
+    /// the tuned value). Disabled masks render nothing, show no coverage,
+    /// don't gate exports, and are SKIPPED by the XMP projection (the recipe
+    /// keeps them; a re-enable is one click — same lossy-projection stance
+    /// as Bitmap masks).
+    pub enabled: bool,
+    /// Optional Range Mask refinement intersected with the COMBINED coverage
+    /// (final weight = combined geometry × range). `None` = pure geometry
+    /// (v1-compatible).
     pub range: Option<RangeMask>,
     /// Human label → `crs:CorrectionName` / `crs:MaskName`.
     pub name: String,
@@ -475,6 +487,8 @@ impl Default for LocalAdjustment {
     fn default() -> Self {
         Self {
             mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 0.5 },
+            components: Vec::new(),
+            enabled: true,
             range: None,
             name: String::new(),
             amount: 1.0,
@@ -556,6 +570,13 @@ pub enum MaskGeometry {
     /// rendered: the engine draws a pure ellipse. Its scale and sign are
     /// unverified (docs/V2_PLAN.md §7 item 1), so honouring it would reshape
     /// imported and AI-authored masks on a guess; see `mask_weight` in render.rs.
+    /// `angle` (degrees, ENGINE convention: counter-clockwise about the bbox
+    /// centre in normalised frame coords, 0 = axis-aligned) IS rendered and
+    /// GUI-editable, but is OUR OWN field, not `crs:Angle`: the XMP writer
+    /// emits the UNROTATED ellipse (the same superset-approximation stance as
+    /// radial placement under straighten) because crs:Angle's sign/pivot
+    /// semantics are unverified — mapping our angle onto it would rotate
+    /// Lightroom masks on a guess.
     Radial {
         top: f32,
         left: f32,
@@ -564,6 +585,8 @@ pub enum MaskGeometry {
         feather: f32,
         roundness: f32,
         flipped: bool,
+        #[serde(default)]
+        angle: f32,
     },
     /// Free-form raster mask — the carrier for AI subject/sky segmentation and
     /// any painted selection. `path` names an 8-bit image whose LUMINANCE is
@@ -575,6 +598,109 @@ pub enum MaskGeometry {
     /// §B retouch-master limitation). A missing/unreadable file renders the
     /// mask inert (weight 0) with a stderr warning rather than failing.
     Bitmap { path: String },
+}
+
+/// How one extra [`MaskComponent`] composes onto the coverage built so far
+/// (Lightroom's Add / Subtract / Intersect grammar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskCombine {
+    /// Union: `w = 1 − (1−w)(1−c)` — smooth screen-union, so two feathered
+    /// shapes overlap without a hard seam (plain `max` creases the gradient
+    /// where the shapes cross).
+    #[default]
+    Add,
+    /// Carve out: `w = w · (1 − c)` — "everything so far, minus this shape".
+    Subtract,
+    /// Restrict: `w = w · c` — "everything so far, only where this shape is".
+    Intersect,
+}
+
+/// One extra shape composed onto a [`LocalAdjustment`]'s base `mask`, in list
+/// order: coverage starts at the base geometry's weight and each component
+/// folds in via its [`MaskCombine`] mode. ENGINE-ONLY like `color_gains`: the
+/// classic-ACR XMP writer projects only the base geometry (a multi-component
+/// `crs:CorrectionMasks` group needs `crs:MaskBlendMode` semantics we have no
+/// verified reference sidecar for — the roundness rule: never reshape masks
+/// on a guess), so combinations round-trip in recipe.json only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MaskComponent {
+    pub geometry: MaskGeometry,
+    pub mode: MaskCombine,
+}
+
+impl Default for MaskComponent {
+    fn default() -> Self {
+        Self {
+            geometry: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 0.5 },
+            mode: MaskCombine::Add,
+        }
+    }
+}
+
+/// Every finite-coordinate check the sanitizer needs for one geometry —
+/// shared by the base `mask` and each component.
+fn geometry_is_finite(g: &MaskGeometry) -> bool {
+    match g {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+            [zero_x, zero_y, full_x, full_y].iter().all(|v| v.is_finite())
+        }
+        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, angle, .. } => {
+            [top, left, bottom, right, feather, roundness, angle].iter().all(|v| v.is_finite())
+        }
+        MaskGeometry::Bitmap { .. } => true,
+    }
+}
+
+/// Coordinate/fraction clamp for one geometry — shared by the base `mask`
+/// and each component (see the COORD_LIMIT rationale at the call site).
+fn clamp_geometry(g: &mut MaskGeometry) {
+    const COORD_LIMIT: f32 = 8.0;
+    match g {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+            for v in [zero_x, zero_y, full_x, full_y] {
+                *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
+            }
+        }
+        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, angle, .. } => {
+            for v in [top, left, bottom, right] {
+                *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
+            }
+            // feather/roundness are 0..1 fractions everywhere that reads
+            // them (render, XMP); a stored 2.0 was a value the engine
+            // silently treated as 1.0 but persistence kept.
+            *feather = feather.clamp(0.0, 1.0);
+            *roundness = roundness.clamp(0.0, 1.0);
+            // Rotation wraps — ±180° covers every ellipse orientation twice
+            // over (the shape has 180° symmetry), and an unbounded stored
+            // angle would feed sin/cos a huge argument for no extra shapes.
+            *angle = angle.rem_euclid(360.0);
+            if *angle > 180.0 {
+                *angle -= 360.0;
+            }
+        }
+        MaskGeometry::Bitmap { .. } => {}
+    }
+}
+
+impl LocalAdjustment {
+    /// Mutable references to every Bitmap raster path this adjustment holds
+    /// (base geometry + components) — the ONE walk the store's path
+    /// relativize/resolve/detach/snapshot helpers share, so a new geometry
+    /// carrier can never be forgotten by one of them.
+    pub fn bitmap_paths_mut(&mut self) -> Vec<&mut String> {
+        let mut out = Vec::new();
+        if let MaskGeometry::Bitmap { path } = &mut self.mask {
+            out.push(path);
+        }
+        for c in self.components.iter_mut() {
+            if let MaskGeometry::Bitmap { path } = &mut c.geometry {
+                out.push(path);
+            }
+        }
+        out
+    }
 }
 
 /// Lightroom's Range Mask: a per-pixel refinement INTERSECTED with the mask's
@@ -753,41 +879,34 @@ impl EditRecipe {
         // foreign input) makes mask_weight return NaN, which defeats the
         // weight early-out and paints corrupt pixels — drop the whole mask,
         // the same policy as a NaN crop (an unusable geometry has no
-        // sensible neutral to collapse to).
-        self.masks.retain(|m| match &m.mask {
-            MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
-                [zero_x, zero_y, full_x, full_y].iter().all(|v| v.is_finite())
-            }
-            MaskGeometry::Radial { top, left, bottom, right, feather, roundness, .. } => {
-                [top, left, bottom, right, feather, roundness].iter().all(|v| v.is_finite())
-            }
-            MaskGeometry::Bitmap { .. } => true,
+        // sensible neutral to collapse to). A corrupt COMPONENT drops the
+        // whole mask too: dropping only the component silently changes what
+        // the mask covers (a lost Subtract WIDENS the effect area), which is
+        // worse than losing the mask outright.
+        self.masks.retain(|m| {
+            geometry_is_finite(&m.mask) && m.components.iter().all(|c| geometry_is_finite(&c.geometry))
         });
+        // Size cap for components, same reasoning as MAX_MASKS: each is a
+        // per-pixel weight evaluation inside the render's hot loop.
+        const MAX_MASK_COMPONENTS: usize = 16;
+        for m in self.masks.iter_mut() {
+            m.components.truncate(MAX_MASK_COMPONENTS);
+            for c in m.components.iter_mut() {
+                if let MaskGeometry::Bitmap { path } = &mut c.geometry {
+                    cap(path, MAX_PATH);
+                }
+            }
+        }
         // Finite is NOT sufficient. Mask coordinates are NORMALISED (0..1
         // over the frame, a little outside for handles dragged past the
         // edge), and the engine squares differences: a legal-looking 1e30
         // overflows to Inf, Inf/Inf yields NaN weights, and those pixels
         // quantise to black. Bound the magnitude to the range the UI can
         // actually produce.
-        const COORD_LIMIT: f32 = 8.0;
         for m in self.masks.iter_mut() {
-            match &mut m.mask {
-                MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
-                    for v in [zero_x, zero_y, full_x, full_y] {
-                        *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
-                    }
-                }
-                MaskGeometry::Radial { top, left, bottom, right, feather, roundness, .. } => {
-                    for v in [top, left, bottom, right] {
-                        *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
-                    }
-                    // feather/roundness are 0..1 fractions everywhere that
-                    // reads them (render, XMP); a stored 2.0 was a value the
-                    // engine silently treated as 1.0 but persistence kept.
-                    *feather = feather.clamp(0.0, 1.0);
-                    *roundness = roundness.clamp(0.0, 1.0);
-                }
-                MaskGeometry::Bitmap { .. } => {}
+            clamp_geometry(&mut m.mask);
+            for c in m.components.iter_mut() {
+                clamp_geometry(&mut c.geometry);
             }
         }
         // Clamp each local adjustment to the same UI ranges as the globals.
@@ -1204,7 +1323,7 @@ mod tests {
                 LocalAdjustment {
                     mask: MaskGeometry::Radial {
                         top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
-                        feather: 0.5, roundness: 0.0, flipped: false,
+                        feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
                     },
                     range: Some(RangeMask::Color { r: 0.9, g: 0.6, b: 0.2, amount: 1.7, px: 0.5, py: 0.5 }),
                     name: "subject".into(),

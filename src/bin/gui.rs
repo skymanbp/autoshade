@@ -194,6 +194,11 @@ struct OverlayKey {
     base: usize,
     target: usize,
     mask: MaskGeometry,
+    // Coverage inputs the combined weight adds (v0.22): the component list
+    // (each geometry + mode) and the eye toggle — without them an added /
+    // re-moded / muted shape reused the stale wash.
+    components: Vec<autoshop::recipe::MaskComponent>,
+    enabled: bool,
     range: Option<RangeMask>,
     amount: f32,
     inverted: bool,
@@ -243,6 +248,12 @@ enum Msg {
     /// AI segmentation finished: (mask display name, grayscale raster path)
     /// — attached to the recipe as a `MaskGeometry::Bitmap` local mask.
     Segmented(anyhow::Result<(String, PathBuf)>),
+    /// Full-res mask refine finished: (the initiating mask index, the stored
+    /// raster reference the job started from, the refined raster's path).
+    /// Landing validates index AND reference together — the list may have
+    /// changed mid-flight, and a bare path search could repoint the WRONG
+    /// mask when two masks legitimately reference one raster (Codex R9-1).
+    MaskRefined(anyhow::Result<(usize, String, PathBuf)>),
     /// Batch render advanced: `done` of `total` photos finished (ok or err).
     BatchProgress { done: usize, total: usize },
     /// Reverse-fit finished: the fitted recipe + a status note (fit.rs).
@@ -362,11 +373,29 @@ fn draw_mask_overlay(
             p.circle_filled(full, 4.0, ACCENT); // full-effect end
             p.circle_stroke(zero, 4.0, stroke); // untouched end
         }
-        MaskGeometry::Radial { top, left, bottom, right, flipped, .. } => {
-            let c = xf.to_screen((left + right) / 2.0, (top + bottom) / 2.0);
-            let rx = (xf.to_screen(*right, 0.0).x - xf.to_screen(*left, 0.0).x).abs() / 2.0;
-            let ry = (xf.to_screen(0.0, *bottom).y - xf.to_screen(0.0, *top).y).abs() / 2.0;
-            p.add(egui::Shape::ellipse_stroke(c, egui::vec2(rx, ry), stroke));
+        MaskGeometry::Radial { top, left, bottom, right, flipped, angle, .. } => {
+            let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
+            let c = xf.to_screen(cx, cy);
+            if *angle == 0.0 {
+                let rx = (xf.to_screen(*right, 0.0).x - xf.to_screen(*left, 0.0).x).abs() / 2.0;
+                let ry = (xf.to_screen(0.0, *bottom).y - xf.to_screen(0.0, *top).y).abs() / 2.0;
+                p.add(egui::Shape::ellipse_stroke(c, egui::vec2(rx, ry), stroke));
+            } else {
+                // Rotated ellipse: sample parametrically in NORMALISED frame
+                // coords — the same space the engine rotates in (recipe.rs
+                // `MaskGeometry::Radial`), so the outline is the true weight
+                // boundary on any frame aspect.
+                let (rx, ry) = ((right - left) / 2.0, (bottom - top) / 2.0);
+                let (s, co) = angle.to_radians().sin_cos();
+                let pts: Vec<egui::Pos2> = (0..48)
+                    .map(|k| {
+                        let th = k as f32 / 48.0 * std::f32::consts::TAU;
+                        let (ex, ey) = (rx * th.cos(), ry * th.sin());
+                        xf.to_screen(cx + ex * co - ey * s, cy + ex * s + ey * co)
+                    })
+                    .collect();
+                p.add(egui::Shape::closed_line(pts, stroke));
+            }
             // Filled centre = the effect fills the INSIDE; hollow = the
             // geometry's own `flipped` and/or the adjustment's Invert put the
             // effect OUTSIDE the ellipse (the two compose, matching the engine).
@@ -394,11 +423,23 @@ fn draw_mask_overlay(
 /// Pick radius (px) for on-image mask knobs — matches the crop handles' feel.
 const HANDLE_HIT: f32 = 12.0;
 
+/// What the next image drag defines (armed by the mask panel's buttons):
+/// a brand-new mask, a redraw of mask `i`'s base area, or a new COMPONENT
+/// appended to mask `i` with the given combine mode.
+#[derive(Clone, Copy, PartialEq)]
+enum PlaceTarget {
+    NewMask,
+    Redraw(usize),
+    Component(usize, autoshop::recipe::MaskCombine),
+}
+
 /// Screen-space knob positions for on-image mask editing (geometry given in
 /// VIEW space, i.e. already through geom_to_view). Handle ids: 0 = move
 /// (linear midpoint / radial centre); linear 1 = zero end, 2 = full end;
-/// radial 1..4 = left/top/right/bottom edge midpoints. Bitmap masks carry no
-/// parametric knobs (empty).
+/// radial 1..4 = left/top/right/bottom AXIS endpoints (rotated with the
+/// mask's own angle) and 5 = the rotation grip, parked outside the top axis
+/// endpoint so it never shadows it. Bitmap masks carry no parametric knobs
+/// (empty).
 fn mask_handle_points(geom: &MaskGeometry, xf: ViewXform) -> Vec<(u8, egui::Pos2)> {
     match *geom {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
@@ -406,14 +447,27 @@ fn mask_handle_points(geom: &MaskGeometry, xf: ViewXform) -> Vec<(u8, egui::Pos2
             let b = xf.to_screen(full_x, full_y);
             vec![(0, a + (b - a) * 0.5), (1, a), (2, b)]
         }
-        MaskGeometry::Radial { top, left, bottom, right, .. } => {
+        MaskGeometry::Radial { top, left, bottom, right, angle, .. } => {
             let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
+            // Rotate about the centre in NORMALISED coords — the engine's own
+            // rotation space, so knobs sit on the true weight boundary.
+            let (s, c) = angle.to_radians().sin_cos();
+            let rot = |x: f32, y: f32| {
+                let (dx, dy) = (x - cx, y - cy);
+                (cx + dx * c - dy * s, cy + dx * s + dy * c)
+            };
+            let l = rot(left, cy);
+            let t = rot(cx, top);
+            let r = rot(right, cy);
+            let b = rot(cx, bottom);
+            let grip = rot(cx, top - (bottom - top).abs() * 0.18);
             vec![
                 (0, xf.to_screen(cx, cy)),
-                (1, xf.to_screen(left, cy)),
-                (2, xf.to_screen(cx, top)),
-                (3, xf.to_screen(right, cy)),
-                (4, xf.to_screen(cx, bottom)),
+                (1, xf.to_screen(l.0, l.1)),
+                (2, xf.to_screen(t.0, t.1)),
+                (3, xf.to_screen(r.0, r.1)),
+                (4, xf.to_screen(b.0, b.1)),
+                (5, xf.to_screen(grip.0, grip.1)),
             ]
         }
         MaskGeometry::Bitmap { .. } => Vec::new(),
@@ -574,7 +628,7 @@ fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist: &LensArg)
             let b = orig_norm_to_view(full_x, full_y, dims, deg, dist);
             MaskGeometry::Linear { zero_x: a.0, zero_y: a.1, full_x: b.0, full_y: b.1 }
         }
-        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, flipped } => {
+        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, flipped, angle } => {
             let pts = [
                 orig_norm_to_view(left, top, dims, deg, dist),
                 orig_norm_to_view(right, top, dims, deg, dist),
@@ -588,7 +642,19 @@ fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist: &LensArg)
                 r = r.max(x);
                 b = b.max(y);
             }
-            MaskGeometry::Radial { top: t, left: l, bottom: b, right: r, feather, roundness, flipped }
+            // The bbox is the straighten/distortion approximation (see the
+            // placement comment); the mask's OWN rotation rides through
+            // unchanged — the outline sampler and handles re-apply it.
+            MaskGeometry::Radial {
+                top: t,
+                left: l,
+                bottom: b,
+                right: r,
+                feather,
+                roundness,
+                flipped,
+                angle,
+            }
         }
     }
 }
@@ -665,6 +731,14 @@ struct AutoshopApp {
     // decision points (close guard, quit dialog, navigation stash) still read
     // the disk — the authority.
     pixels_on_disk: Option<PathBuf>,
+    /// Mirror of the photo's persisted `variants.json` (resolved form), the
+    /// baseline the background-variant dirty test compares the live strip
+    /// against. `None` = nothing persisted (the trivial single-card case).
+    /// Updated at open and on every strip persist; comparing background
+    /// variants against the ACTIVE canvas's `saved_recipe`/`pixels_on_disk`
+    /// instead (the pre-v0.22 rule) made any two-origin strip permanently
+    /// "unsaved" — the quit dialog then re-armed forever.
+    saved_strip: Option<autoshop::store::VariantsRecord>,
     nav_stash: HashMap<PathBuf, StashEntry>,
     // Paste-to-selected wrote the open photo's store: (path, exact recipe
     // written) so Msg::Pasted can advance the ● baseline on full success.
@@ -746,6 +820,17 @@ struct AutoshopApp {
     mask_dirty_rect: Option<[u32; 4]>,
     mask_tex_built: Instant, // last full rebuild — throttles mid-stroke geometry remaps
     paint_last: Option<(f32, f32)>,        // last brush point in mask px (line fill)
+    /// A LOCAL-ADJUSTMENT brush session rides the same paint canvas as
+    /// fill/heal: `(target, erase)` — target `None` = the strokes become a
+    /// NEW Bitmap mask on Apply; `Some(i)` = they edit mask `i`'s raster
+    /// (seeded below). While `Some`, `paint_mode` is also true so every
+    /// existing paint affordance (dispatch, cursor, Esc, `[`/`]`) works.
+    mask_brush: Option<(Option<usize>, bool)>,
+    /// The brush session's WEIGHT buffer — greyscale source of truth the
+    /// Apply bakes to a raster. The RGBA canvas is only its display: seeding
+    /// an existing raster through the canvas' 8-bit alpha and back would
+    /// drift soft edges by a rounding step per edit cycle.
+    mask_brush_gray: Option<image::GrayImage>,
     fill_prompt: String,                   // generative-fill instruction
     fill_quality: usize,                   // 0=high 1=medium 2=low
     fill_fullres: bool,                    // composite onto the full-res develop
@@ -788,7 +873,12 @@ struct AutoshopApp {
     mask_drag: Option<(u8, (f32, f32))>, // on-image mask knob drag: (handle, last pos in ORIG norm)
     // --- manual local adjustments (masks) ---
     sel_mask: Option<usize>,               // selected recipe.masks index (overlay + sliders)
-    placing_mask: Option<(MaskKind, Option<usize>)>, // next image drag defines a mask (replace idx)
+    placing_mask: Option<(MaskKind, PlaceTarget)>, // next image drag defines a mask / redraw / component
+    /// Which of the selected mask's COMPONENTS the canvas tools target:
+    /// `None` = the base geometry. Reset whenever the mask selection moves.
+    sel_component: Option<usize>,
+    /// The combine mode the panel's "add shape" buttons will arm next.
+    component_mode: autoshop::recipe::MaskCombine,
     place_start: Option<(f32, f32)>,       // placement drag origin, full-frame normalized
     // --- tone-curve editor ---
     curve_channel: usize,                  // CURVE_CHANNELS index: 0=master 1=R 2=G 3=B
@@ -836,10 +926,12 @@ struct AutoshopApp {
     // when you touch a slider — you're editing that variant's own base.
     variants: Vec<Variant>,
     /// The user answered "Discard & quit". The close guard must then stop
-    /// re-testing unsaved state: background variants cannot be rebaselined
-    /// (they have nowhere to be saved — that is why the guard exists), so
-    /// without this the guard cancelled the close and re-raised the dialog
-    /// every frame and the app could not be quit at all.
+    /// re-testing unsaved state: discarding by definition leaves the state
+    /// dirty, so without this the guard cancelled the close and re-raised
+    /// the dialog every frame and the app could not be quit at all. (The
+    /// SAVE path needs no such flag since v0.22 — Save-all persists each
+    /// photo's whole strip to variants.json, so the way-out re-check finds
+    /// the state genuinely clean.)
     discard_requested: bool,
     active: usize,                         // index into `variants` (always valid once a photo is open)
     keep_recipe: bool,                     // one-shot: next Opened keeps recipe/variants (preview-res re-decode)
@@ -901,8 +993,34 @@ impl UndoStep {
 }
 
 /// One photo the quit dialog would save: path + canvas recipe + its baked
-/// pixel identity (`origin`, is_generated) when one exists.
-type PendingSave = (PathBuf, EditRecipe, Option<(PathBuf, bool)>);
+/// pixel identity (`origin`, is_generated) when one exists + the photo's
+/// strip record (background variants + active kind/position) when the strip
+/// is non-trivial — Save-all persists the WHOLE strip, exactly like Ctrl+S.
+type PendingSave =
+    (PathBuf, EditRecipe, Option<(PathBuf, bool)>, Option<autoshop::store::VariantsRecord>);
+
+/// A [`StashEntry`]'s strip as a persistable record — the quit dialog's
+/// Save-all writes one per stashed photo so background variants survive the
+/// quit (before v0.22 they were "unsavable" and pinned the dialog forever).
+fn stash_strip_record(st: &StashEntry) -> Option<autoshop::store::VariantsRecord> {
+    if st.others.is_empty() && st.kind == VariantKind::Original {
+        return None;
+    }
+    Some(autoshop::store::VariantsRecord {
+        v: 1,
+        active_kind: st.kind.store_str().to_string(),
+        active_pos: st.active_pos,
+        others: st
+            .others
+            .iter()
+            .map(|sv| autoshop::store::VariantEntry {
+                kind: sv.kind.store_str().to_string(),
+                recipe: sv.recipe.clone(),
+                origin: sv.origin.clone(),
+            })
+            .collect(),
+    })
+}
 
 /// First FREE ./out artifact path for `tag` — the SHARED atomic claim
 /// (`pipeline::unique_out`, also used by the web fill/heal handlers so the
@@ -1014,7 +1132,11 @@ struct StashEntry {
     recipe: EditRecipe,
     base: Option<Arc<image::DynamicImage>>,
     origin: Option<PathBuf>,
-    generated: bool,
+    /// The ACTIVE variant's three-valued kind — a plain `generated: bool`
+    /// here collapsed `Fitted` onto `Original`, so a 「◭ 反推」 card came back
+    /// from navigation renamed 「▣ 原片」 (the strip's only rename bug that
+    /// needed no disk at all).
+    kind: VariantKind,
     /// The rest of the variant strip (everything but the active variant),
     /// so navigation restores the WHOLE session: a dirty BACKGROUND variant
     /// used to die silently on nav (H4) — the quit dialog discloses that
@@ -1057,7 +1179,7 @@ struct Variant {
     thumb: Option<egui::TextureHandle>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum VariantKind {
     Original,  // 原片 — the loaded RAW / image, your develop
     Generated, // AI 生成 — a whole-frame gpt-image restyle (look in the pixels)
@@ -1071,6 +1193,25 @@ impl VariantKind {
             VariantKind::Original => "▣ Original",
             VariantKind::Generated => "✨ AI generated",
             VariantKind::Fitted => "◭ Reverse-fit",
+        }
+    }
+
+    /// The `variants.json` spelling — persisted, so these strings are a
+    /// FORMAT, not display text: never localise or rename them.
+    fn store_str(self) -> &'static str {
+        match self {
+            VariantKind::Original => "original",
+            VariantKind::Generated => "generated",
+            VariantKind::Fitted => "fitted",
+        }
+    }
+
+    fn from_store_str(s: &str) -> Option<Self> {
+        match s {
+            "original" => Some(VariantKind::Original),
+            "generated" => Some(VariantKind::Generated),
+            "fitted" => Some(VariantKind::Fitted),
+            _ => None,
         }
     }
 }
@@ -1183,6 +1324,7 @@ impl Default for AutoshopApp {
             base_cache: Vec::new(),
             saved_recipe: EditRecipe::default(),
             pixels_on_disk: None,
+            saved_strip: None,
             nav_stash: HashMap::new(),
             pasted_open: None,
             photo_knots: Vec::new(),
@@ -1225,6 +1367,10 @@ impl Default for AutoshopApp {
             mask_drag: None,
             sel_mask: None,
             placing_mask: None,
+            sel_component: None,
+            component_mode: autoshop::recipe::MaskCombine::Add,
+            mask_brush: None,
+            mask_brush_gray: None,
             place_start: None,
             curve_channel: 0,
             curve_drag: None,
@@ -1559,7 +1705,9 @@ fn build_preview(
 }
 
 /// Stamp a filled brush dot into the paint mask (painted = translucent red).
-fn stamp_dot(m: &mut image::RgbaImage, c: (f32, f32), r: f32) {
+/// One brush dot writing an arbitrary pixel — the shared kernel behind the
+/// classic red paint stamp and the mask-brush ERASE stamp (fully clear).
+fn stamp_dot_px(m: &mut image::RgbaImage, c: (f32, f32), r: f32, px: image::Rgba<u8>) {
     let (w, h) = (m.width() as i32, m.height() as i32);
     let (cx, cy) = c;
     let r2 = r * r;
@@ -1571,19 +1719,55 @@ fn stamp_dot(m: &mut image::RgbaImage, c: (f32, f32), r: f32) {
         for x in x0..=x1 {
             let (dx, dy) = (x as f32 - cx, y as f32 - cy);
             if dx * dx + dy * dy <= r2 {
-                m.put_pixel(x as u32, y as u32, image::Rgba([255, 64, 64, 160]));
+                m.put_pixel(x as u32, y as u32, px);
+            }
+        }
+    }
+}
+
+/// The mask-brush gray-buffer twin of [`stamp_dot_px`]: same disc, writing
+/// the WEIGHT (255 = selected, 0 = erased) into the greyscale source of
+/// truth the Apply bakes to a raster.
+fn stamp_dot_gray(g: &mut image::GrayImage, c: (f32, f32), r: f32, v: u8) {
+    let (w, h) = (g.width() as i32, g.height() as i32);
+    let (cx, cy) = c;
+    let r2 = r * r;
+    let x0 = (cx - r).floor().max(0.0) as i32;
+    let x1 = ((cx + r).ceil() as i32).min(w - 1);
+    let y0 = (cy - r).floor().max(0.0) as i32;
+    let y1 = ((cy + r).ceil() as i32).min(h - 1);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+            if dx * dx + dy * dy <= r2 {
+                g.put_pixel(x as u32, y as u32, image::Luma([v]));
             }
         }
     }
 }
 
 /// Stamp a brush stroke between two points (interpolated dots — no gaps).
-fn stamp_line(m: &mut image::RgbaImage, a: (f32, f32), b: (f32, f32), r: f32) {
+fn stamp_line_px(
+    m: &mut image::RgbaImage,
+    a: (f32, f32),
+    b: (f32, f32),
+    r: f32,
+    px: image::Rgba<u8>,
+) {
     let dist = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
     let steps = (dist / (r * 0.5).max(1.0)).ceil().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
-        stamp_dot(m, (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), r);
+        stamp_dot_px(m, (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), r, px);
+    }
+}
+
+fn stamp_line_gray(g: &mut image::GrayImage, a: (f32, f32), b: (f32, f32), r: f32, v: u8) {
+    let dist = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    let steps = (dist / (r * 0.5).max(1.0)).ceil().max(1.0) as i32;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        stamp_dot_gray(g, (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), r, v);
     }
 }
 
@@ -1739,7 +1923,13 @@ enum SavedDevelop {
 /// the legacy cwd-relative ./out are migrated in on first touch; a file the
 /// migration could not move keeps being read in place, and the `kind` string
 /// says which file actually answered.
-fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
+///
+/// The third return is the count of mask corrections the restoring XMP
+/// carried that the import CANNOT represent (LR brush / AI / depth masks) —
+/// its own channel, NOT `xmp_bad`: appended there it rendered as "unreadable
+/// numeric setting(s)", a warning about something else entirely. 0 whenever
+/// the restore came from recipe.json (which carries no LR-only masks).
+fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>, usize) {
     autoshop::store::migrate_legacy(src);
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
     // Newest intent wins (store::lightroom_sidecar): a sidecar Lightroom
@@ -1769,7 +1959,8 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         // exactly as before.
         if !r.is_noop() {
             r.clamp();
-            return (SavedDevelop::Restored(r, kind), xmp_bad);
+            let dropped = autoshop::xmp::unsupported_corrections(&text);
+            return (SavedDevelop::Restored(r, kind), xmp_bad, dropped);
         }
     }
     let mut any = false;
@@ -1818,9 +2009,10 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         // recipe.json restored: lossless truth — a corrupt number in the
         // subordinate XMP is REPLACED by the next save's owned-attr merge,
         // so there is nothing to disclose on this path.
-        return (SavedDevelop::Restored(r, kind), Vec::new());
+        return (SavedDevelop::Restored(r, kind), Vec::new(), 0);
     }
     let mut fallback = None;
+    let mut dropped_masks = 0usize;
     for (xp, kind) in [
         (autoshop::pipeline::xmp_target(src), "XMP"),
         (autoshop::store::legacy_xmp(src), "XMP (legacy ./out)"),
@@ -1848,17 +2040,18 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>) {
         // it would only produce a misleading status line.
         if !r.is_noop() {
             r.clamp();
+            dropped_masks = autoshop::xmp::unsupported_corrections(&text);
             fallback = Some((r, kind));
         }
         break; // same rule: the file that answered decides
     }
     if let Some(err) = parse_err {
-        return (SavedDevelop::Unreadable { err, fallback }, xmp_bad);
+        return (SavedDevelop::Unreadable { err, fallback }, xmp_bad, dropped_masks);
     }
     match (fallback, any) {
-        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), xmp_bad),
-        (None, true) => (SavedDevelop::NoopOnly, xmp_bad),
-        (None, false) => (SavedDevelop::Nothing, xmp_bad),
+        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), xmp_bad, dropped_masks),
+        (None, true) => (SavedDevelop::NoopOnly, xmp_bad, 0),
+        (None, false) => (SavedDevelop::Nothing, xmp_bad, 0),
     }
 }
 
@@ -2081,7 +2274,7 @@ impl AutoshopApp {
                         recipe: self.recipe.clone(),
                         base: self.active_variant().and_then(|v| v.base.clone()),
                         origin,
-                        generated: self.active_is_generated(),
+                        kind: self.active_variant().map_or(VariantKind::Original, |v| v.kind),
                         others,
                         active_pos,
                     },
@@ -2291,46 +2484,111 @@ impl AutoshopApp {
 
     /// How many BACKGROUND variants hold work that quitting would discard.
     ///
-    /// A photo has ONE saved develop and every save path (Ctrl+S, Save-all)
-    /// writes the ACTIVE canvas, so a variant the user switched away from can
-    /// hold real work with nowhere to put it. Both the navigation stash and
-    /// the close guard used to consider only the active canvas, so switching
-    /// from an edited Generated variant to a clean Original made the ● vanish
-    /// and the app exited without a word. This cannot make those edits
-    /// saveable — it makes their loss an informed choice.
+    /// Dirty means: the live strip minus the active card differs from the
+    /// photo's persisted `variants.json` mirror ([`Self::saved_strip`]) — in
+    /// kind, recipe, raster origin, count, or in the active card's own
+    /// identity (kind/position, which the record also persists). A `None`
+    /// mirror means nothing is persisted, so every background card is
+    /// unsaved work. The OPEN photo's strip only — the per-photo half of
+    /// [`Self::inactive_dirty_variants`]; the stash decision in `open_path`
+    /// keys on THIS (summing other photos' stashed variants into the gate
+    /// chain-stashed every clean photo the user merely visited).
     ///
-    /// Dirty means: the variant's recipe differs from the photo's disk
-    /// baseline, or its raster origin is not the master recorded on disk.
-    /// The OPEN photo's strip only — the per-photo half of
-    /// [`Self::inactive_dirty_variants`]. The stash decision in `open_path`
-    /// keys on THIS: summing other photos' stashed variants into the gate
-    /// chain-stashed every clean photo the user merely visited (one photo
-    /// with a dirty background variant armed it), the quit dialog then
-    /// listed them all, and Save-all wrote sidecars — or cleared and MARKED
-    /// develops — for photos with zero user edits.
+    /// The pre-v0.22 rule compared each background variant against the
+    /// ACTIVE canvas's `saved_recipe`/`pixels_on_disk`. Those describe a
+    /// DIFFERENT variant, so any strip whose cards disagree in origin (every
+    /// generate→fit flow) counted dirty forever, no save could clear it, and
+    /// the quit dialog re-armed until 「Discard」.
     fn open_dirty_variants(&self) -> usize {
-        let recorded = self.pixels_on_disk.clone();
-        self.variants
+        let live: Vec<&Variant> = self
+            .variants
             .iter()
             .enumerate()
-            .filter(|(i, v)| {
-                *i != self.active
-                    && (dirty_vs(&v.recipe, &self.saved_recipe)
-                        || !same_master_opt(v.origin.as_deref(), recorded.as_deref()))
-            })
-            .count()
+            .filter(|(i, _)| *i != self.active)
+            .map(|(_, v)| v)
+            .collect();
+        let Some(rec) = &self.saved_strip else {
+            return live.len();
+        };
+        let mut n = 0usize;
+        for (i, v) in live.iter().enumerate() {
+            let matches = rec.others.get(i).is_some_and(|e| {
+                VariantKind::from_store_str(&e.kind) == Some(v.kind)
+                    && !dirty_vs(&v.recipe, &e.recipe)
+                    && same_master_opt(v.origin.as_deref(), e.origin.as_deref())
+            });
+            if !matches {
+                n += 1;
+            }
+        }
+        // Cards persisted but no longer live: the deletion is unsaved too —
+        // quitting now would resurrect them on the next open.
+        n += rec.others.len().saturating_sub(live.len());
+        // Active-card identity drift: a changed kind or position reopens as
+        // a different strip even when every background card matches.
+        let ak = self.active_variant().map_or(VariantKind::Original, |v| v.kind);
+        if VariantKind::from_store_str(&rec.active_kind) != Some(ak)
+            || rec.active_pos != self.active
+        {
+            n = n.max(1);
+        }
+        n
     }
 
     fn inactive_dirty_variants(&self) -> usize {
         // Photos NAVIGATED AWAY FROM count too. Since batch 47 a photo is
         // stashed when only a BACKGROUND variant is dirty, so the quit dialog
-        // lists it — while Save-all writes just the stashed ACTIVE canvas and
-        // then clears the stash. Counting only the open photo's strip meant
-        // the dialog promised a save that destroyed that work without a word.
-        // (The quit surfaces keep this widened count; the per-photo stash
-        // gate must NOT — see `open_dirty_variants`.)
+        // lists it. Save-all persists each stashed photo's strip record along
+        // with its active canvas (v0.22), so these are savable — the count
+        // deliberately stays conservative (every stashed background variant,
+        // not only those differing from their photo's on-disk record: that
+        // comparison would cost a disk read per stash entry per check).
         let stashed: usize = self.nav_stash.values().map(|st| st.others.len()).sum();
         self.open_dirty_variants() + stashed
+    }
+
+    /// The live strip as a persistable [`store::VariantsRecord`]: `None` when
+    /// the strip is trivial (one Original card — recipe.json + pixels.json
+    /// already say everything, and a record would be pure sidecar noise).
+    fn current_strip_record(&self) -> Option<autoshop::store::VariantsRecord> {
+        let ak = self.active_variant().map_or(VariantKind::Original, |v| v.kind);
+        if self.variants.len() <= 1 && ak == VariantKind::Original {
+            return None;
+        }
+        Some(autoshop::store::VariantsRecord {
+            v: 1,
+            active_kind: ak.store_str().to_string(),
+            active_pos: self.active,
+            others: self
+                .variants
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != self.active)
+                .map(|(_, v)| autoshop::store::VariantEntry {
+                    kind: v.kind.store_str().to_string(),
+                    recipe: v.recipe.clone(),
+                    origin: v.origin.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    /// Persist the open photo's strip beside recipe.json/pixels.json and
+    /// advance the mirror. Trivial strip ⇒ clear (no noise file). An error
+    /// leaves the mirror untouched, so the unsaved protection stays armed —
+    /// callers surface the error, never swallow it.
+    fn persist_strip(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        match self.current_strip_record() {
+            Some(rec) => {
+                autoshop::store::write_variants(path, &rec)?;
+                self.saved_strip = Some(rec);
+            }
+            None => {
+                autoshop::store::clear_variants(path)?;
+                self.saved_strip = None;
+            }
+        }
+        Ok(())
     }
 
     /// The active variant, if a photo is open.
@@ -2485,8 +2743,37 @@ impl AutoshopApp {
         let Some(v) = self.variants.get(self.active) else { return };
         self.recipe = v.recipe.clone();
         let vkind = v.kind;
-        let vbase = v.base.clone();
+        let mut vbase = v.base.clone();
+        let vorigin = v.origin.clone();
         self.rationale = self.recipe.rationale.clone();
+        // A DISK-restored baked variant (cold strip restore) carries its
+        // origin but no decoded base — decode it now, once, on the first
+        // switch (the same synchronous first-click cost class as the
+        // re-estimate below; the Arc is written back so it never repeats).
+        // A master that cannot be decoded is SAID: falling through to the
+        // source neutral silently would show a wrong image wearing the
+        // right card label.
+        if vbase.is_none()
+            && let Some(o) = &vorigin
+        {
+            match image::open(o) {
+                Ok(img) => {
+                    let arc = Arc::new(img);
+                    vbase = Some(arc.clone());
+                    if let Some(vm) = self.variants.get_mut(self.active) {
+                        vm.base = Some(arc);
+                    }
+                }
+                Err(e) => {
+                    let t = trf(
+                        lang,
+                        "this variant's saved master could not be loaded ({err}) — showing the un-retouched source develop instead",
+                        &[("err", &e.to_string())],
+                    );
+                    self.toast(ToastKind::Error, t);
+                }
+            }
+        }
         // The strip's READER joins the repair rule: push_variant and
         // switch_variant sync the OUTGOING canvas into the strip, so a
         // washed Original displaced by an AI push comes back through HERE
@@ -2555,6 +2842,7 @@ impl AutoshopApp {
         self.region = None;
         self.region_drag = None;
         self.sel_mask = None;
+        self.sel_component = None;
         // Same boundary rule as open_path: the rename buffer belongs to the
         // variant it was typed on (M15).
         self.mask_name_buf = None;
@@ -2669,9 +2957,30 @@ impl AutoshopApp {
     /// forgotten: a dangling index used to make the range sampler write into
     /// whatever mask slid under it.
     fn remap_mask_indices(&mut self, f: impl Fn(usize) -> Option<usize>) {
+        let sel_before = self.sel_mask;
         self.sel_mask = self.sel_mask.and_then(&f);
+        // Component selection is meaningful only while the SAME mask stays
+        // selected under the same index-space; a moved/vanished mask drops it
+        // (its component list travelled with the mask, but every canvas tool
+        // re-derives from sel_mask — a stale pair here was the same class of
+        // bug as the dangling range sampler).
+        if self.sel_mask != sel_before || self.sel_mask.is_none() {
+            self.sel_component = None;
+        }
         self.range_picking = self.range_picking.and_then(&f);
-        self.placing_mask = self.placing_mask.take().map(|(k, r)| (k, r.and_then(&f)));
+        self.placing_mask = self.placing_mask.take().and_then(|(k, t)| match t {
+            PlaceTarget::NewMask => Some((k, PlaceTarget::NewMask)),
+            // A vanished redraw target degrades to a NEW mask placement (the
+            // pre-v0.22 `Option<usize>` behaviour, kept); a vanished
+            // component target must NOT — appending a component to nothing
+            // has no sensible fallback, so the arm disarms.
+            PlaceTarget::Redraw(i) => {
+                Some((k, f(i).map_or(PlaceTarget::NewMask, PlaceTarget::Redraw)))
+            }
+            PlaceTarget::Component(i, mode) => {
+                f(i).map(|j| (k, PlaceTarget::Component(j, mode)))
+            }
+        });
         // The pending-rename buffer is index-carrying too: after a delete /
         // reorder its seed-guard (name-at-seed must still match) correctly
         // refused to cross-commit — but the SAME mask at its new index then
@@ -2923,6 +3232,15 @@ impl AutoshopApp {
         self.crop_drag = None;
         self.mask_drag = None;
         self.paint_last = None;
+        // The mask-brush session dies with its paint mode (Esc = cancel):
+        // strokes live in the canvas + gray buffer only until 「Apply」bakes
+        // them into a claimed raster, so dropping both IS the cancel. The
+        // canvas is cleared too — fill/heal would otherwise inherit the
+        // brush-mask strokes as a phantom retouch selection.
+        if self.mask_brush.take().is_some() {
+            self.mask_brush_gray = None;
+            self.clear_mask();
+        }
         // A preset change armed for the crop tool must die with it — the
         // flag survived Esc / Done / a hold-B detour and rewrote the box as
         // a surprise on the next crop entry (CX5-4).
@@ -2976,6 +3294,13 @@ impl AutoshopApp {
         // Same-index-different-mask after undo is a known cosmetic residue —
         // mask identity isn't tracked across history steps.
         self.sel_mask = self.sel_mask.filter(|&i| i < self.recipe.masks.len());
+        // The component selection rides on the mask's OWN list, which the
+        // swap can also reshape — same deterministic bound.
+        self.sel_component = self.sel_component.filter(|&c| {
+            self.sel_mask
+                .and_then(|i| self.recipe.masks.get(i))
+                .is_some_and(|m| c < m.components.len())
+        });
     }
 
     /// Apply a history step: recipe always; the active variant's pixels only
@@ -3228,7 +3553,12 @@ impl AutoshopApp {
             .nav_stash
             .iter()
             .map(|(p, st)| {
-                (p.clone(), st.recipe.clone(), st.origin.clone().map(|o| (o, st.generated)))
+                (
+                    p.clone(),
+                    st.recipe.clone(),
+                    st.origin.clone().map(|o| (o, st.kind == VariantKind::Generated)),
+                    stash_strip_record(st),
+                )
             })
             .collect();
         // Live-canvas override — skipped while a photo OPEN is in flight:
@@ -3255,15 +3585,23 @@ impl AutoshopApp {
                 origin.as_deref(),
             ) && recorded.as_ref().map(|(_, g)| *g)
                 == origin.as_ref().map(|_| live_generated));
-            if dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved {
+            // The strip counts as unsaved work of the OPEN photo too — a
+            // clean canvas over an unpersisted strip must still be listed,
+            // or Save-all had nothing to write and the guard's re-check
+            // bounced the close forever (the v0.21 dead-button livelock).
+            if dirty_vs(&self.recipe, &self.saved_recipe)
+                || pixels_unsaved
+                || self.open_dirty_variants() > 0
+            {
                 let pix = origin.map(|o| (o, self.active_is_generated()));
-                pending.push((p, self.recipe.clone(), pix));
+                pending.push((p, self.recipe.clone(), pix, self.current_strip_record()));
             }
         }
-        // Background variants are NOT in `pending` and cannot be: Save-all
-        // writes one develop per photo, the active canvas. They still count as
-        // work quitting destroys, so they keep this layer up (and get their own
-        // honest line below) instead of letting the empty-pending branch close.
+        // Background variants ride IN `pending` since v0.22: each entry
+        // carries its photo's strip record, and Save-all persists it to
+        // variants.json beside the develop. The count still gates the
+        // empty-pending close below (defence-in-depth — a strip-dirty photo
+        // is also pushed into `pending` above).
         let orphan_variants = self.inactive_dirty_variants();
         if pending.is_empty() && orphan_variants == 0 {
             // Saved (or discarded) since the guard fired — nothing to protect.
@@ -3336,19 +3674,18 @@ impl AutoshopApp {
                     }
                 });
                 if orphan_variants > 0 {
-                    // Said plainly, because Save-all CANNOT rescue these: one
-                    // photo keeps one saved develop and every save path writes
-                    // the ACTIVE canvas. Promising otherwise would be worse
-                    // than the silent exit this dialog now prevents.
+                    // Informational since v0.22: Save-all persists each
+                    // photo's whole variant strip (variants.json), so these
+                    // are rescued WITH their photo, not lost.
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(trf(
                             lang,
-                            "{n} other variant(s) hold edits — of this photo, or of photos you navigated away from. Only the ACTIVE variant of a photo can be saved: Cancel, open each one, and save it.",
+                            "{n} other variant(s) hold edits — 「Save all」 saves each photo's whole variant strip along with its develop.",
                             &[("n", &orphan_variants.to_string())],
                         ))
                         .small()
-                        .color(ui.visuals().warn_fg_color),
+                        .weak(),
                     );
                 }
                 ui.add_space(6.0);
@@ -3376,16 +3713,25 @@ impl AutoshopApp {
             // Collected, not fatal — reported on the way out (see below).
             let mut xmp_warns: Vec<String> = Vec::new();
             let mut clear_warns: Vec<String> = Vec::new();
-            for (p, r, pix) in &pending {
-                // Neutral + no pixel identity = Ctrl+S's "clear my edits":
-                // WRITING neutral files here pinned the existence-keyed ●
-                // badge that a direct Ctrl+S removes.
-                if r.is_noop() && pix.is_none() {
+            for (p, r, pix, strip) in &pending {
+                // Neutral + no pixel identity + trivial strip = Ctrl+S's
+                // "clear my edits": WRITING neutral files here pinned the
+                // existence-keyed ● badge that a direct Ctrl+S removes. A
+                // non-trivial strip takes the save path below instead —
+                // clear_develop would destroy the OTHER cards' work.
+                if r.is_noop() && pix.is_none() && strip.is_none() {
                     // The store's ONE clear primitive (both surfaces): it takes
                     // the retired pixels.json.bak with it, which a bare unlink
                     // left behind for the next open to republish.
                     match autoshop::store::clear_develop(p) {
                         Ok(o) => {
+                            // clear_develop took variants.json with it — the
+                            // open photo's mirror must follow, or the guard's
+                            // way-out re-check compares live-trivial against
+                            // a stale record and bounces the close.
+                            if self.src_path.as_deref() == Some(p.as_path()) {
+                                self.saved_strip = None;
+                            }
                             // Cleared, but not MARKED — same channel as the XMP
                             // half: quitting silently would let a projection
                             // copied beside the RAW undo this clear unannounced.
@@ -3455,6 +3801,25 @@ impl AutoshopApp {
                     failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
                     break;
                 }
+                // The strip record saves/clears with the recipe (the Ctrl+S
+                // pairing): without it the background variants this dialog
+                // just listed die with the quit anyway — a fatal result, not
+                // a warning.
+                let strip_res = match strip {
+                    Some(rec) => autoshop::store::write_variants(p, rec),
+                    None => autoshop::store::clear_variants(p),
+                };
+                match strip_res {
+                    Ok(()) => {
+                        if self.src_path.as_deref() == Some(p.as_path()) {
+                            self.saved_strip = strip.clone();
+                        }
+                    }
+                    Err(e) => {
+                        failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                        break;
+                    }
+                }
                 // NO XMP for a generated entry — Ctrl+S refuses those for the
                 // same reason: the look lives in baked pixels no parametric
                 // sidecar can reproduce, and writing one here overwrote a real
@@ -3498,7 +3863,22 @@ impl AutoshopApp {
                     self.nav_stash.clear();
                     self.saved_recipe = self.recipe.clone();
                     self.confirm_quit = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    // The close guard re-checks on the way out. Everything
+                    // above just persisted, so the re-check passes — but if
+                    // anything is STILL dirty (logic drift, a future writer
+                    // this loop misses), the bounce must be SAID: a silently
+                    // re-armed dialog is the v0.21 dead-button livelock.
+                    let residue = self.inactive_dirty_variants();
+                    if residue > 0 {
+                        let t = trf(
+                            lang,
+                            "saved, but {n} variant(s) still count as unsaved — the window stays open; please report this",
+                            &[("n", &residue.to_string())],
+                        );
+                        self.toast(ToastKind::Error, t);
+                    } else {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
                 Some(e) => {
                     // Stay open: a failed save on quit must never quietly quit.
@@ -4037,6 +4417,8 @@ impl AutoshopApp {
             base: Arc::as_ptr(base) as usize,
             target: i,
             mask: mask.mask.clone(),
+            components: mask.components.clone(),
+            enabled: mask.enabled,
             range: mask.range,
             amount: mask.amount,
             inverted: mask.inverted,
@@ -4778,7 +5160,10 @@ impl AutoshopApp {
             .map(|(p, st)| {
                 (
                     p.clone(),
-                    (st.recipe.clone(), st.origin.clone().map(|o| (o, st.generated))),
+                    (
+                        st.recipe.clone(),
+                        st.origin.clone().map(|o| (o, st.kind == VariantKind::Generated)),
+                    ),
                 )
             })
             .collect();
@@ -4996,7 +5381,15 @@ impl AutoshopApp {
         // heal on an untouched photo must take the SAVE path (recipe.json +
         // pixels.json), not report "nothing to save" while deleting the very
         // linkage the retouch needs to survive a reopen.
-        if self.recipe.is_noop() && self.active_variant().is_none_or(|v| v.origin.is_none()) {
+        // A NON-TRIVIAL STRIP is an edit too: clear_develop removes
+        // variants.json with everything else, so a neutral canvas sitting in
+        // a multi-variant strip must take the save path (noop recipe + strip
+        // record) — "clear my edits" must not silently destroy the OTHER
+        // cards.
+        if self.recipe.is_noop()
+            && self.active_variant().is_none_or(|v| v.origin.is_none())
+            && self.current_strip_record().is_none()
+        {
             match autoshop::store::clear_develop(&path) {
                 Ok(o) => {
                     self.edited_badge.clear();
@@ -5006,6 +5399,7 @@ impl AutoshopApp {
                     // forever — a permanent ● with quit prompts (R4-8).
                     self.saved_recipe = self.recipe.clone();
                     self.pixels_on_disk = None;
+                    self.saved_strip = None;
                     self.nav_stash.remove(&path);
                     self.forget_open_base();
                     match o.marker_warning {
@@ -5157,6 +5551,22 @@ impl AutoshopApp {
                         }
                     },
                 };
+                // The strip record saves/clears WITH the recipe (same pairing
+                // as the pixel link): a failed write keeps the mirror — and
+                // with it the background-variant unsaved protection — armed.
+                let strip_err = self.persist_strip(&path).err();
+                if let Some(e) = &strip_err {
+                    let t = trf(
+                        lang,
+                        "could not save the variant strip ({err}) — background variants will not survive a reopen",
+                        &[("err", &e.to_string())],
+                    );
+                    self.toast(ToastKind::Error, t.clone());
+                    pixel_note = Some(match pixel_note {
+                        Some(n) => format!("{n} · {t}"),
+                        None => format!(" · {t}"),
+                    });
+                }
                 self.edited_badge.clear(); // the open photo just gained its badge
                 self.saved_recipe = self.recipe.clone();
                 if pixels_ok {
@@ -5648,11 +6058,25 @@ impl AutoshopApp {
                             // recipe's own base_curve.
                             self.source_preview = Some(base.clone());
                             self.base_preview = Some(base);
-                            let (saved, xmp_bad) = self
+                            let (saved, xmp_bad, dropped_masks) = self
                                 .src_path
                                 .as_deref()
                                 .map(read_saved_develop)
-                                .unwrap_or((SavedDevelop::Nothing, Vec::new()));
+                                .unwrap_or((SavedDevelop::Nothing, Vec::new(), 0));
+                            // LR brush / AI / depth masks have no engine
+                            // equivalent — the import skips them BY DESIGN
+                            // (the writer skips symmetrically); what was
+                            // missing is telling the user their Lightroom
+                            // work arrived incomplete. The sidecar keeps
+                            // them; only the in-app render lacks them.
+                            if dropped_masks > 0 {
+                                let t = trf(
+                                    lang,
+                                    "{n} Lightroom mask(s) (brush/AI/depth) have no engine equivalent and were not imported — they stay in the sidecar untouched",
+                                    &[("n", &dropped_masks.to_string())],
+                                );
+                                self.toast(ToastKind::Error, t);
+                            }
                             let mut restored: Option<&'static str> = None;
                             let mut open_note: Option<String> = None;
                             let mut recipe = EditRecipe::default();
@@ -5844,12 +6268,22 @@ impl AutoshopApp {
                             let mut pixels: Option<BakedBase> = baked;
                             let mut stash_others: Vec<StashedVariant> = Vec::new();
                             let mut stash_active_pos = 0usize;
+                            // The ACTIVE card's three-valued kind, whichever
+                            // authority supplies it: the session stash below,
+                            // or the persisted strip record read further down
+                            // (`Fitted` is source-based, so it has no pixels
+                            // arm to ride back on — without this the card
+                            // reopened renamed 「▣ 原片」).
+                            let mut active_kind = VariantKind::Original;
                             if let Some(st) =
                                 self.src_path.as_ref().and_then(|p| self.nav_stash.remove(p))
                             {
                                 recipe = st.recipe;
+                                active_kind = st.kind;
                                 pixels = match (st.base, st.origin) {
-                                    (Some(b), Some(o)) => Some((b, o, st.generated)),
+                                    (Some(b), Some(o)) => {
+                                        Some((b, o, st.kind == VariantKind::Generated))
+                                    }
                                     _ => None,
                                 };
                                 stash_others = st.others;
@@ -5890,7 +6324,7 @@ impl AutoshopApp {
                                 // beats leaning on six unrelated call
                                 // sites.
                                 if let Some(p) = self.src_path.clone() {
-                                    let mut relooked = !st.generated
+                                    let mut relooked = active_kind != VariantKind::Generated
                                         && autoshop::pipeline::repair_pre_era_base_curve(
                                             &p, &mut recipe,
                                         )
@@ -5918,10 +6352,35 @@ impl AutoshopApp {
                                     }
                                 }
                             }
+                            // The persisted strip record — the disk half of
+                            // the session stash. Read even when the stash
+                            // outranks it wholesale: it is also the mirror
+                            // the background-variant dirty test compares
+                            // against (see `open_dirty_variants`).
+                            let disk_strip = self
+                                .src_path
+                                .as_deref()
+                                .and_then(autoshop::store::read_variants);
+                            if !from_stash
+                                && let Some(rec) = &disk_strip
+                                && rec.active_kind == "fitted"
+                            {
+                                // Fitted is source-based — it has no pixels
+                                // arm to ride back on; without this the card
+                                // cold-reopened renamed 「▣ 原片」. A recorded
+                                // "generated" needs no hand here: the baked
+                                // pixels arm below upgrades the card exactly
+                                // when the master really decoded.
+                                active_kind = VariantKind::Fitted;
+                            }
                             self.recipe = recipe.clone();
                             self.rationale = recipe.rationale.clone();
                             self.variants = vec![Variant {
-                                kind: VariantKind::Original,
+                                kind: if active_kind == VariantKind::Fitted {
+                                    VariantKind::Fitted
+                                } else {
+                                    VariantKind::Original
+                                },
                                 recipe,
                                 base: None,
                                 origin: None,
@@ -6015,7 +6474,60 @@ impl AutoshopApp {
                                 strip.insert(pos, active_v);
                                 self.variants = strip;
                                 self.active = pos;
+                            } else if !from_stash
+                                && let Some(rec) = &disk_strip
+                                && !rec.others.is_empty()
+                            {
+                                // Cold restore of the persisted strip: the
+                                // background variants come back with their
+                                // recipes and raster origins; base pixels
+                                // re-decode lazily on first switch
+                                // (`load_active`), the same deal a stash
+                                // restore gets from its held Arcs. Pre-era
+                                // curves heal exactly like the stash arm
+                                // above — a strip entry is one click from
+                                // BEING the canvas. (dirty_vs neutralises
+                                // version/base_curve, so healing the live
+                                // strip never lights ● against the mirror.)
+                                let active_v = self.variants.remove(0);
+                                let mut strip: Vec<Variant> = rec
+                                    .others
+                                    .iter()
+                                    .filter_map(|e| {
+                                        let Some(kind) =
+                                            VariantKind::from_store_str(&e.kind)
+                                        else {
+                                            eprintln!(
+                                                "⚠ variants.json entry with unknown kind {:?} — that variant is not restored",
+                                                e.kind
+                                            );
+                                            return None;
+                                        };
+                                        Some(Variant {
+                                            kind,
+                                            recipe: e.recipe.clone(),
+                                            base: None,
+                                            origin: e.origin.clone(),
+                                            thumb: None,
+                                        })
+                                    })
+                                    .collect();
+                                if let Some(p) = self.src_path.clone() {
+                                    for v in strip.iter_mut() {
+                                        if v.kind != VariantKind::Generated {
+                                            let _ = autoshop::pipeline::repair_pre_era_base_curve(
+                                                &p,
+                                                &mut v.recipe,
+                                            );
+                                        }
+                                    }
+                                }
+                                let pos = rec.active_pos.min(strip.len());
+                                strip.insert(pos, active_v);
+                                self.variants = strip;
+                                self.active = pos;
                             }
+                            self.saved_strip = disk_strip;
                             self.last_rgb = None; // retained frame was the old photo's
                             self.reset_history(); // a new photo starts a fresh undo history
                             self.region = None; // and a fresh local-edit selection
@@ -6029,6 +6541,7 @@ impl AutoshopApp {
                             // with every tool locked out (M21).
                             self.before_latch = false;
                             self.sel_mask = None;
+                            self.sel_component = None;
                             self.overlay_ref = None; // the reference develop belongs to ONE base
                             self.overlay_stale = true;
                             self.curve_drag = None; // curve_channel is a UI pref, keep it
@@ -6438,6 +6951,62 @@ impl AutoshopApp {
                         self.fail(tr(lang, "AI segmentation failed"), e);
                     }
                 },
+                Msg::MaskRefined(res) => match res {
+                    Ok((idx, stored_ref, out)) => {
+                        // Index + stored reference validated TOGETHER: the
+                        // strip may have been edited while the worker decoded
+                        // the full-res source, and a bare path search could
+                        // repoint the wrong mask when two masks share one
+                        // raster. Index-with-matching-path wins; else the
+                        // unique path match; else say so — never guess.
+                        let out_s = out.to_string_lossy().into_owned();
+                        let at = |m: &autoshop::recipe::LocalAdjustment| {
+                            matches!(&m.mask, MaskGeometry::Bitmap { path } if *path == stored_ref)
+                        };
+                        let hit = match self.recipe.masks.get(idx) {
+                            Some(m) if at(m) => Some(idx),
+                            _ => {
+                                let matches: Vec<usize> = self
+                                    .recipe
+                                    .masks
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, m)| at(m))
+                                    .map(|(i, _)| i)
+                                    .collect();
+                                // Only an UNAMBIGUOUS survivor is adopted.
+                                (matches.len() == 1).then(|| matches[0])
+                            }
+                        };
+                        match hit {
+                            Some(i) => {
+                                self.recipe.masks[i].mask = MaskGeometry::Bitmap { path: out_s };
+                                self.sel_mask = Some(i);
+                                self.dirty = true;
+                                self.overlay_stale = true;
+                                self.busy = false;
+                                self.status = tr(
+                                    lang,
+                                    "mask refined to full resolution — boundaries now follow the source's own edges",
+                                )
+                                .into();
+                            }
+                            None => {
+                                self.busy = false;
+                                let t = trf(
+                                    lang,
+                                    "the mask changed while refining — the result was saved at {path} but not applied",
+                                    &[("path", &out.display().to_string())],
+                                );
+                                self.toast(ToastKind::Error, t.clone());
+                                self.status = t;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.fail(tr(lang, "mask refine failed"), e);
+                    }
+                },
                 Msg::Folder(boxed) => match *boxed {
                     Ok((dir, list)) => {
                         let n = list.len();
@@ -6739,6 +7308,29 @@ impl AutoshopApp {
         let feel =
             if max - min >= 20.0 { SliderFeel::Int } else { SliderFeel::Frac };
         Self::slider_impl(ui, lang, label, value, min, max, default, feel)
+    }
+
+    /// A 0..=1-stored fraction shown on Lightroom's 0..100 track (Amount,
+    /// feathers, range tolerance): the panel used to mix "Amount 0.65" with
+    /// "Shadows 40" in one column, which read as two unit systems. Storage
+    /// stays the fraction (the XMP contract); only the display scales. The
+    /// ×100 track crosses the ≥ 20 width rule above, so these snap to whole
+    /// numbers exactly like LR's.
+    fn slider_pct(
+        ui: &mut egui::Ui,
+        lang: Lang,
+        label: &str,
+        value: &mut f32,
+        max: f32,
+        default: f32,
+    ) -> bool {
+        let mut disp = *value * 100.0;
+        let changed =
+            Self::slider(ui, lang, label, &mut disp, 0.0, max * 100.0, default * 100.0);
+        if changed {
+            *value = disp / 100.0;
+        }
+        changed
     }
 
     /// Sub-unit precision variant (Straighten °): the whole-number snap of the
@@ -7600,23 +8192,59 @@ impl AutoshopApp {
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let lin_armed = matches!(self.placing_mask, Some((MaskKind::Linear, None)));
+                let lin_armed = matches!(self.placing_mask, Some((MaskKind::Linear, PlaceTarget::NewMask)));
                 if ui.selectable_label(lin_armed, tr(lang, "＋ Linear gradient")).on_hover_text(tr(lang, "Drag on the image: start = fully-applied side, end = unaffected side (Shift = horizontal/vertical)")).clicked() {
                     self.disarm_tools();
                     if !lin_armed {
-                        self.placing_mask = Some((MaskKind::Linear, None));
+                        self.placing_mask = Some((MaskKind::Linear, PlaceTarget::NewMask));
                         self.status = tr(lang, "Drag on the image to draw a linear gradient (start fully applied → end unaffected; Shift = axis lock)").into();
                     }
                 }
-                let rad_armed = matches!(self.placing_mask, Some((MaskKind::Radial, None)));
+                let rad_armed = matches!(self.placing_mask, Some((MaskKind::Radial, PlaceTarget::NewMask)));
                 if ui.selectable_label(rad_armed, tr(lang, "＋ Radial gradient")).on_hover_text(tr(lang, "Drag on the image to draw an elliptical area")).clicked() {
                     self.disarm_tools();
                     if !rad_armed {
-                        self.placing_mask = Some((MaskKind::Radial, None));
+                        self.placing_mask = Some((MaskKind::Radial, PlaceTarget::NewMask));
                         self.status = tr(lang, "Drag on the image to draw a radial (elliptical) area").into();
                     }
                 }
+                // LR's most-used local tool, finally: free-form brush →
+                // Bitmap mask (the raster carrier + bilinear sampler + cache
+                // all pre-existed; this wires the paint canvas into
+                // recipe.masks — see start_mask_brush / commit_mask_brush).
+                let brush_armed = matches!(self.mask_brush, Some((None, _)));
+                if ui
+                    .selectable_label(brush_armed, tr(lang, "🖌 Brush"))
+                    .on_hover_text(tr(lang, "Paint a free-form mask ([ ] = brush size); 「Apply」 bakes it into a new mask"))
+                    .clicked()
+                {
+                    if brush_armed {
+                        self.disarm_tools();
+                    } else if self.base_preview.is_some() {
+                        self.start_mask_brush(None);
+                    }
+                }
             });
+            // Brush-session controls (create OR raster-edit): erase toggle +
+            // the bake/cancel pair. Lives up here so it is visible whichever
+            // row armed the session.
+            if let Some((target, erase)) = self.mask_brush {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(erase, tr(lang, "⌫ Erase"))
+                        .on_hover_text(tr(lang, "Strokes remove from the selection instead of adding"))
+                        .clicked()
+                    {
+                        self.mask_brush = Some((target, !erase));
+                    }
+                    if ui.button(tr(lang, "✓ Apply")).clicked() {
+                        self.commit_mask_brush();
+                    }
+                    if ui.button(tr(lang, "✕ Cancel")).clicked() {
+                        self.disarm_tools();
+                    }
+                });
+            }
             // --- AI segmentation → bitmap masks (gap batch A②) ---------------
             ui.horizontal(|ui| {
                 let can_seg = !self.busy && self.base_preview.is_some();
@@ -7655,6 +8283,7 @@ impl AutoshopApp {
             // flight `hovered()` is false everywhere, so the hover preview
             // pauses instead of churning the coverage overlay.
             let mut delete: Option<usize> = None;
+            let mut toggle_eye: Option<usize> = None;
             let mut dropped: Option<(usize, usize)> = None; // (from, insert-before)
             for i in 0..n_masks {
                 let row_resp = ui
@@ -7674,12 +8303,38 @@ impl AutoshopApp {
                         } else {
                             tr(self.lang, "mask")
                         };
-                        let label = format!("{base} · {kind}");
+                        // The activity dot IS the engine's own rule
+                        // (render::engine_active): a parked mask looks parked,
+                        // a working one shows ● — a 64-row list where the two
+                        // were indistinguishable was a real navigation cost.
+                        let active = m.enabled && autoshop::render::engine_active(m);
+                        let enabled = m.enabled;
+                        let label = format!(
+                            "{base} · {kind}{}",
+                            if active { "  ●" } else { "" }
+                        );
+                        let label = if enabled {
+                            egui::RichText::new(label)
+                        } else {
+                            egui::RichText::new(label).weak()
+                        };
                         ui.dnd_drag_source(ui.id().with(("mask_row", i)), i, |ui| {
                             ui.label("☰");
                         })
                         .response
                         .on_hover_text(tr(self.lang, "Drag to reorder"));
+                        // The eye: Lightroom's lossless mute. Amount-to-0 as a
+                        // mute destroyed the tuned value; this keeps it.
+                        if ui
+                            .selectable_label(enabled, "👁")
+                            .on_hover_text(tr(
+                                self.lang,
+                                "Show/mute this mask without losing its settings",
+                            ))
+                            .clicked()
+                        {
+                            toggle_eye = Some(i);
+                        }
                         let row = ui.selectable_label(self.sel_mask == Some(i), label);
                         if row.hovered() {
                             self.hover_mask = Some(i);
@@ -7687,6 +8342,8 @@ impl AutoshopApp {
                         if row.clicked() {
                             self.sel_mask =
                                 if self.sel_mask == Some(i) { None } else { Some(i) };
+                            // Component selection belongs to ONE mask's list.
+                            self.sel_component = None;
                             self.overlay_stale = true; // coverage follows the selection
                             // The colour sampler is INDEX-armed: left live
                             // across a selection change, the next canvas click
@@ -7736,6 +8393,13 @@ impl AutoshopApp {
                 let m = self.recipe.masks.remove(from);
                 self.recipe.masks.insert(to, m);
                 self.remap_mask_indices(|s| Some(remap(s)));
+                self.overlay_stale = true;
+                changed = true;
+            }
+            if let Some(i) = toggle_eye {
+                // A recipe mutation like any slider: develop + overlay follow,
+                // and commit_if_settled makes it one undo step.
+                self.recipe.masks[i].enabled = !self.recipe.masks[i].enabled;
                 self.overlay_stale = true;
                 changed = true;
             }
@@ -7804,8 +8468,10 @@ impl AutoshopApp {
                         MaskGeometry::Bitmap { .. } => None,
                     };
                     if let Some(kind) = kind {
-                        let redraw_armed =
-                            matches!(self.placing_mask, Some((k, Some(j))) if k == kind && j == i);
+                        let redraw_armed = matches!(
+                            self.placing_mask,
+                            Some((k, PlaceTarget::Redraw(j))) if k == kind && j == i
+                        );
                         if ui
                             .selectable_label(redraw_armed, tr(lang, "↻ Redraw"))
                             .on_hover_text(tr(lang, "Re-drag this mask's area on the image"))
@@ -7813,7 +8479,7 @@ impl AutoshopApp {
                         {
                             self.disarm_tools();
                             if !redraw_armed {
-                                self.placing_mask = Some((kind, Some(i)));
+                                self.placing_mask = Some((kind, PlaceTarget::Redraw(i)));
                                 self.status =
                                     tr(lang, "Re-drag this mask's area on the image").into();
                             }
@@ -7861,22 +8527,49 @@ impl AutoshopApp {
                         self.overlay_stale = true;
                         changed = true;
                     }
+                    // Duplicate: a second gradient with the same tuned ten
+                    // sliders used to mean re-dragging and re-typing every
+                    // value. Rasters are DETACHED copies (the version-load
+                    // rule), so the twins never share a mutable file.
+                    if ui
+                        .small_button("⧉")
+                        .on_hover_text(tr(lang, "Duplicate this mask (bitmap rasters are copied, so the copies stay independent)"))
+                        .clicked()
+                    {
+                        if self.recipe.masks.len() >= 64 {
+                            let t = tr(lang, "mask limit reached (64) — delete one first");
+                            self.toast(ToastKind::Error, t.to_string());
+                        } else {
+                            let mut clone = self.recipe.masks[i].clone();
+                            if let Some(p) = self.src_path.as_deref() {
+                                let mut tmp = EditRecipe { masks: vec![clone], ..Default::default() };
+                                autoshop::store::detach_rasters(p, &mut tmp, "mask-dup");
+                                clone = tmp.masks.remove(0);
+                            }
+                            if !clone.name.is_empty() {
+                                clone.name = format!("{} 2", clone.name);
+                            }
+                            self.recipe.masks.insert(i + 1, clone);
+                            self.remap_mask_indices(|s| Some(if s > i { s + 1 } else { s }));
+                            self.sel_mask = Some(i + 1);
+                            self.sel_component = None;
+                            self.overlay_stale = true;
+                            changed = true;
+                        }
+                    }
                 });
-                // Radial geometry: edge feather + inside/outside flip — both
-                // engine-rendered, but neither had a control before (placement
-                // hardcodes feather 0.5; only an XMP import or the AI could
-                // ever change either).
-                if let MaskGeometry::Radial { feather, flipped, .. } =
+                // Radial geometry: edge feather (shown 0..100, LR's track) +
+                // rotation + inside/outside flip — all engine-rendered.
+                if let MaskGeometry::Radial { feather, flipped, angle, .. } =
                     &mut self.recipe.masks[i].mask
                 {
                     let mut geo_ch = false;
                     ui.horizontal(|ui| {
-                        geo_ch |= Self::slider(
+                        geo_ch |= Self::slider_pct(
                             ui,
                             lang,
                             tr(lang, "Edge feather"),
                             feather,
-                            0.0,
                             1.0,
                             0.5,
                         );
@@ -7888,9 +8581,212 @@ impl AutoshopApp {
                             ))
                             .changed();
                     });
+                    // Rotation: the on-image grip (the knob parked above the
+                    // ellipse) drags it too; the slider gives numeric entry.
+                    geo_ch |= Self::slider(
+                        ui,
+                        lang,
+                        tr(lang, "Angle"),
+                        angle,
+                        -180.0,
+                        180.0,
+                        0.0,
+                    );
                     if geo_ch {
                         self.overlay_stale = true;
                         changed = true;
+                    }
+                }
+                // Bitmap (AI / brush) raster tools: before these, a raster
+                // mask was completely un-editable after creation — a clipped
+                // treeline's only recourse was re-running the model to get
+                // the same raster. Every op BAKES a freshly claimed raster
+                // and repoints (never mutates the input file).
+                if matches!(self.recipe.masks[i].mask, MaskGeometry::Bitmap { .. }) {
+                    ui.horizontal_wrapped(|ui| {
+                        let edit_armed = matches!(self.mask_brush, Some((Some(j), _)) if j == i);
+                        if ui
+                            .selectable_label(edit_armed, tr(lang, "🖌 Edit raster"))
+                            .on_hover_text(tr(lang, "Brush-edit this mask: paint adds, 「Erase」 removes, 「Apply」 bakes"))
+                            .clicked()
+                        {
+                            if edit_armed {
+                                self.disarm_tools();
+                            } else {
+                                self.start_mask_brush(Some(i));
+                            }
+                        }
+                        if ui
+                            .button(tr(lang, "◌ Feather"))
+                            .on_hover_text(tr(lang, "Soften the mask boundary one step (bakes a new raster; repeat for more)"))
+                            .clicked()
+                        {
+                            self.bake_mask_raster(
+                                i,
+                                |g| {
+                                    let s = (g.width().max(g.height()) as f32 / 400.0).max(1.0);
+                                    autoshop::render::feather_mask(g, s)
+                                },
+                                "mask-edit",
+                            );
+                        }
+                        if ui
+                            .button(tr(lang, "⊕ Expand"))
+                            .on_hover_text(tr(lang, "Grow the selection one step (bakes a new raster)"))
+                            .clicked()
+                        {
+                            self.bake_mask_raster(
+                                i,
+                                |g| {
+                                    let r = (g.width().max(g.height()) / 500).max(2) as i32;
+                                    autoshop::render::morph_mask(g, r)
+                                },
+                                "mask-edit",
+                            );
+                        }
+                        if ui
+                            .button(tr(lang, "⊖ Contract"))
+                            .on_hover_text(tr(lang, "Shrink the selection one step (bakes a new raster)"))
+                            .clicked()
+                        {
+                            self.bake_mask_raster(
+                                i,
+                                |g| {
+                                    let r = (g.width().max(g.height()) / 500).max(2) as i32;
+                                    autoshop::render::morph_mask(g, -r)
+                                },
+                                "mask-edit",
+                            );
+                        }
+                        if ui
+                            .add_enabled(!self.busy, egui::Button::new(tr(lang, "⇱ Full-res refine")))
+                            .on_hover_text(tr(lang, "Re-cut this mask against the FULL-resolution source (guided filter). Preview-res AI masks smear their boundary at export — this snaps it to real edges. Decodes the full-size source; takes a few seconds."))
+                            .clicked()
+                        {
+                            self.start_mask_refine(i);
+                        }
+                    });
+                }
+                // --- Shapes（组件）: compose extra geometry onto this mask —
+                // Lightroom's Add / Subtract / Intersect grammar. ENGINE-ONLY
+                // (recipe.rs MaskComponent): the XMP projection carries the
+                // base shape alone.
+                {
+                    ui.horizontal(|ui| {
+                        ui.label(tr(lang, "Shapes"));
+                        let mode_label = |m: autoshop::recipe::MaskCombine| match m {
+                            autoshop::recipe::MaskCombine::Add => tr(lang, "＋ Add"),
+                            autoshop::recipe::MaskCombine::Subtract => tr(lang, "－ Subtract"),
+                            autoshop::recipe::MaskCombine::Intersect => tr(lang, "∩ Intersect"),
+                        };
+                        egui::ComboBox::from_id_salt("comp_mode")
+                            .selected_text(mode_label(self.component_mode))
+                            .width(96.0)
+                            .show_ui(ui, |ui| {
+                                for m in [
+                                    autoshop::recipe::MaskCombine::Add,
+                                    autoshop::recipe::MaskCombine::Subtract,
+                                    autoshop::recipe::MaskCombine::Intersect,
+                                ] {
+                                    ui.selectable_value(&mut self.component_mode, m, mode_label(m));
+                                }
+                            });
+                        let mode = self.component_mode;
+                        let lin_armed = matches!(
+                            self.placing_mask,
+                            Some((MaskKind::Linear, PlaceTarget::Component(j, _))) if j == i
+                        );
+                        if ui
+                            .selectable_label(lin_armed, tr(lang, "▭ Linear"))
+                            .on_hover_text(tr(lang, "Drag on the image to add a linear shape to THIS mask"))
+                            .clicked()
+                        {
+                            self.disarm_tools();
+                            if !lin_armed {
+                                self.placing_mask =
+                                    Some((MaskKind::Linear, PlaceTarget::Component(i, mode)));
+                                self.status = tr(lang, "Drag on the image: the new shape composes onto this mask").into();
+                            }
+                        }
+                        let rad_armed = matches!(
+                            self.placing_mask,
+                            Some((MaskKind::Radial, PlaceTarget::Component(j, _))) if j == i
+                        );
+                        if ui
+                            .selectable_label(rad_armed, tr(lang, "◯ Radial"))
+                            .on_hover_text(tr(lang, "Drag on the image to add an elliptical shape to THIS mask"))
+                            .clicked()
+                        {
+                            self.disarm_tools();
+                            if !rad_armed {
+                                self.placing_mask =
+                                    Some((MaskKind::Radial, PlaceTarget::Component(i, mode)));
+                                self.status = tr(lang, "Drag on the image: the new shape composes onto this mask").into();
+                            }
+                        }
+                    });
+                    let n_comp = self.recipe.masks[i].components.len();
+                    let mut del_comp: Option<usize> = None;
+                    for c in 0..n_comp {
+                        ui.horizontal(|ui| {
+                            let comp = &self.recipe.masks[i].components[c];
+                            let icon = match comp.mode {
+                                autoshop::recipe::MaskCombine::Add => "＋",
+                                autoshop::recipe::MaskCombine::Subtract => "－",
+                                autoshop::recipe::MaskCombine::Intersect => "∩",
+                            };
+                            let kind = match comp.geometry {
+                                MaskGeometry::Linear { .. } => tr(lang, "Linear"),
+                                MaskGeometry::Radial { .. } => tr(lang, "Radial"),
+                                MaskGeometry::Bitmap { .. } => tr(lang, "Bitmap"),
+                            };
+                            let selected = self.sel_component == Some(c);
+                            if ui
+                                .selectable_label(selected, format!("{icon} {kind}"))
+                                .on_hover_text(tr(lang, "Select to drag this shape's knobs on the image (the base mask's knobs come back when deselected)"))
+                                .clicked()
+                            {
+                                self.sel_component = if selected { None } else { Some(c) };
+                            }
+                            let mut mode = comp.mode;
+                            egui::ComboBox::from_id_salt(("comp_row_mode", c))
+                                .selected_text(match mode {
+                                    autoshop::recipe::MaskCombine::Add => tr(lang, "Add"),
+                                    autoshop::recipe::MaskCombine::Subtract => tr(lang, "Subtract"),
+                                    autoshop::recipe::MaskCombine::Intersect => tr(lang, "Intersect"),
+                                })
+                                .width(88.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut mode, autoshop::recipe::MaskCombine::Add, tr(lang, "Add"));
+                                    ui.selectable_value(&mut mode, autoshop::recipe::MaskCombine::Subtract, tr(lang, "Subtract"));
+                                    ui.selectable_value(&mut mode, autoshop::recipe::MaskCombine::Intersect, tr(lang, "Intersect"));
+                                });
+                            if mode != comp.mode {
+                                self.recipe.masks[i].components[c].mode = mode;
+                                self.overlay_stale = true;
+                                changed = true;
+                            }
+                            if ui.small_button("🗑").clicked() {
+                                del_comp = Some(c);
+                            }
+                        });
+                    }
+                    if let Some(c) = del_comp {
+                        self.recipe.masks[i].components.remove(c);
+                        self.sel_component = match self.sel_component {
+                            Some(s) if s == c => None,
+                            Some(s) if s > c => Some(s - 1),
+                            other => other,
+                        };
+                        self.overlay_stale = true;
+                        changed = true;
+                    }
+                    if n_comp > 0 {
+                        ui.label(
+                            egui::RichText::new(tr(lang, "Shapes compose in order onto the base mask. In-app render + export only — the Lightroom XMP carries the base shape alone."))
+                                .weak()
+                                .small(),
+                        );
                     }
                 }
                 // --- Range Mask（LR 范围蒙版）: refines WHERE the geometry applies —
@@ -7947,10 +8843,12 @@ impl AutoshopApp {
                             // GUI shows lo/hi + one symmetric feather; the recipe keeps
                             // ACR's 4-number trapezoid (asymmetric AI trapezoids show
                             // their averaged feather until a slider is touched).
+                            // All three on LR's 0..100 display track (storage
+                            // stays the 0..1 fraction — see slider_pct).
                             let mut f = ((*lo - *lo_outer) + (*hi_outer - *hi)) * 0.5;
-                            let ch_lo = Self::slider(ui, lang, tr(lang, "Lum. low"), lo, 0.0, 1.0, 0.0);
-                            let ch_hi = Self::slider(ui, lang, tr(lang, "Lum. high"), hi, 0.0, 1.0, 1.0);
-                            let ch_f = Self::slider(ui, lang, tr(lang, "Feather"), &mut f, 0.0, 0.5, 0.1);
+                            let ch_lo = Self::slider_pct(ui, lang, tr(lang, "Lum. low"), lo, 1.0, 0.0);
+                            let ch_hi = Self::slider_pct(ui, lang, tr(lang, "Lum. high"), hi, 1.0, 1.0);
+                            let ch_f = Self::slider_pct(ui, lang, tr(lang, "Feather"), &mut f, 0.5, 0.1);
                             if ch_lo || ch_hi || ch_f {
                                 // CLAMP the edited endpoint at the other, never
                                 // swap: the active slider stays bound to its
@@ -7976,7 +8874,7 @@ impl AutoshopApp {
                                     want_pick = true;
                                 }
                             });
-                            changed |= Self::slider(ui, lang, tr(lang, "Tolerance"), amount, 0.0, 1.0, 0.5);
+                            changed |= Self::slider_pct(ui, lang, tr(lang, "Tolerance"), amount, 1.0, 0.5);
                         }
                         None => {}
                     }
@@ -7989,7 +8887,8 @@ impl AutoshopApp {
                     }
                 }
                 let m = &mut self.recipe.masks[i];
-                changed |= Self::slider(ui, lang, tr(lang, "Amount"), &mut m.amount, 0.0, 1.0, 1.0);
+                // LR's 0..100 display track (storage stays 0..1 — slider_pct).
+                changed |= Self::slider_pct(ui, lang, tr(lang, "Amount"), &mut m.amount, 1.0, 1.0);
                 // Any edit up to here — geometry, range, Amount — can move the
                 // coverage wash (the overlay key carries them all); the key
                 // compare inside refresh_mask_overlay dedupes rebuilds, so
@@ -8253,7 +9152,11 @@ impl AutoshopApp {
         } else if self.clone_mode {
             tr(lang, "Stamp — Alt+click to set the source · drag to brush the area to cover · Esc to exit")
         } else if self.paint_mode {
-            tr(lang, "Brush — paint over the area to fill / heal · Esc to exit")
+            if self.mask_brush.is_some() {
+                tr(lang, "Mask brush — paint to select · 「Erase」 removes · 「Apply」 bakes · Esc cancels")
+            } else {
+                tr(lang, "Brush — paint over the area to fill / heal · Esc to exit")
+            }
         } else {
             tr(lang, "After — drag a box = local AI · scroll to zoom · space/middle-drag to pan · hold B to compare")
         };
@@ -8413,14 +9316,16 @@ impl AutoshopApp {
             && ui.input(|i| i.key_down(egui::Key::Space));
         let ctrl = ui.input(|i| i.modifiers.command);
         let over_knob = self.mask_drag.is_some()
-            || self.sel_mask.and_then(|i| self.recipe.masks.get(i)).is_some_and(|m| {
+            || self.sel_target_geometry().is_some_and(|g| {
                 let (dims, deg, dist) = self.geom_ctx();
                 // Probe BOTH positions: egui reports drag_started only
                 // after ~6 px of travel, so a fast flick's CURRENT pointer
                 // has already left the knob while its press origin is still
                 // on it — `or_else` (origin only when hover was None) still
-                // let pan steal an in-canvas flick.
-                let handles = mask_handle_points(&geom_to_view(&m.mask, dims, deg, &dist), xf);
+                // let pan steal an in-canvas flick. The knobs probed are the
+                // ones actually shown: the selected COMPONENT's when one is
+                // selected (sel_target_geometry), matching handle_mask_edit.
+                let handles = mask_handle_points(&geom_to_view(g, dims, deg, &dist), xf);
                 let hits = |p: egui::Pos2| handles.iter().any(|(_, hp)| hp.distance(p) <= HANDLE_HIT);
                 resp.hover_pos().is_some_and(hits)
                     || ui.input(|i| i.pointer.press_origin()).is_some_and(hits)
@@ -8516,30 +9421,41 @@ impl AutoshopApp {
         // Selected mask stays visualised so its sliders have visual feedback
         // (geometry is stored in the original frame → map into the view),
         // with the editing knobs on top (drag = reshape/move, handle_mask_edit).
+        // When one of the mask's COMPONENTS is selected, the outline and
+        // knobs target THAT shape — the same geometry the edit handler
+        // mutates (sel_target_geometry).
         if !self.crop_mode
             && self.placing_mask.is_none()
             && let Some(m) = self.sel_mask.and_then(|i| self.recipe.masks.get(i))
         {
+            let target = match self.sel_component {
+                Some(c) if c < m.components.len() => &m.components[c].geometry,
+                _ => &m.mask,
+            };
             let (dims, deg, dist) = self.geom_ctx();
-            let vg = geom_to_view(&m.mask, dims, deg, &dist);
+            let vg = geom_to_view(target, dims, deg, &dist);
             let geom_active = dist.amount != 0.0
                 || (dist.profile.distortion_on && !dist.profile.distortion.is_empty());
-            if let MaskGeometry::Radial { top, left, bottom, right, flipped, .. } = &m.mask
+            if let MaskGeometry::Radial { top, left, bottom, right, flipped, angle, .. } = target
                 && (deg != 0.0 || geom_active)
             {
                 // The engine evaluates the ellipse in the ORIGINAL frame; under
                 // straighten/distortion its image is a rotated/warped curve —
                 // not the axis-aligned ellipse the bbox mapping yields. Sample
-                // it parametrically and draw the true outline. (Knobs keep the
-                // bbox positions; HANDLE_HIT absorbs the difference.)
+                // it parametrically — the mask's OWN rotation folded in first,
+                // the same order the engine applies — and draw the true
+                // outline. (Knobs keep the bbox positions; HANDLE_HIT absorbs
+                // the difference.)
                 let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
                 let (rx, ry) = ((right - left) / 2.0, (bottom - top) / 2.0);
+                let (s_a, c_a) = angle.to_radians().sin_cos();
                 let pts: Vec<egui::Pos2> = (0..48)
                     .map(|k| {
                         let th = k as f32 / 48.0 * std::f32::consts::TAU;
+                        let (ex, ey) = (rx * th.cos(), ry * th.sin());
                         let (vx, vy) = orig_norm_to_view(
-                            cx + rx * th.cos(),
-                            cy + ry * th.sin(),
+                            cx + ex * c_a - ey * s_a,
+                            cy + ex * s_a + ey * c_a,
                             dims,
                             deg,
                             &dist,
@@ -8678,16 +9594,37 @@ impl AutoshopApp {
     /// doesn't also react; a box-select drag already in flight keeps
     /// priority (else its live rectangle would freeze mid-air whenever the
     /// pointer crossed a knob).
+    /// The geometry the canvas tools currently target: the selected mask's
+    /// selected COMPONENT when one is selected (and still in bounds), else
+    /// the selected mask's base geometry.
+    fn sel_target_geometry(&self) -> Option<&MaskGeometry> {
+        let i = self.sel_mask.filter(|&i| i < self.recipe.masks.len())?;
+        let m = &self.recipe.masks[i];
+        match self.sel_component {
+            Some(c) if c < m.components.len() => Some(&m.components[c].geometry),
+            _ => Some(&m.mask),
+        }
+    }
+
+    fn sel_target_geometry_mut(&mut self) -> Option<&mut MaskGeometry> {
+        let i = self.sel_mask.filter(|&i| i < self.recipe.masks.len())?;
+        let m = &mut self.recipe.masks[i];
+        match self.sel_component {
+            Some(c) if c < m.components.len() => Some(&mut m.components[c].geometry),
+            _ => Some(&mut m.mask),
+        }
+    }
+
     fn handle_mask_edit(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) -> bool {
         if self.region_drag.is_some() {
             return false;
         }
-        let Some(i) = self.sel_mask.filter(|&i| i < self.recipe.masks.len()) else {
+        let Some(target_geom) = self.sel_target_geometry().cloned() else {
             self.mask_drag = None;
             return false;
         };
         let (dims, deg, dist) = self.geom_ctx();
-        let view_geom = geom_to_view(&self.recipe.masks[i].mask, dims, deg, &dist);
+        let view_geom = geom_to_view(&target_geom, dims, deg, &dist);
         let handles = mask_handle_points(&view_geom, xf);
         if handles.is_empty() {
             self.mask_drag = None; // bitmap: nothing parametric to drag
@@ -8737,8 +9674,8 @@ impl AutoshopApp {
             // LR allows geometry to start off-canvas; a generous band keeps
             // knobs recoverable instead of letting them fly to infinity.
             let cl = |v: f32| v.clamp(-0.5, 1.5);
-            match &mut self.recipe.masks[i].mask {
-                MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => match h {
+            match self.sel_target_geometry_mut() {
+                Some(MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }) => match h {
                     1 => (*zero_x, *zero_y) = (cl(cur.0), cl(cur.1)),
                     2 => (*full_x, *full_y) = (cl(cur.0), cl(cur.1)),
                     _ => {
@@ -8748,7 +9685,7 @@ impl AutoshopApp {
                         *full_y = cl(*full_y + dy);
                     }
                 },
-                MaskGeometry::Radial { top, left, bottom, right, .. } => {
+                Some(MaskGeometry::Radial { top, left, bottom, right, angle, .. }) => {
                     const MIN_SIZE: f32 = 0.01;
                     // Edges move by the pointer's original-space DELTA, not to
                     // its absolute position: the displayed handles sit on the
@@ -8756,11 +9693,31 @@ impl AutoshopApp {
                     // under straighten/distortion), so an absolute assign made
                     // the edge jump to close that gap on the first drag frame.
                     // Under neutral geometry the two are identical.
+                    //
+                    // With a rotated mask the four knobs sit on the ROTATED
+                    // axis endpoints, so the delta is projected onto the
+                    // mask's own axes first — at angle 0 (du, dv) ≡ (dx, dy).
+                    let (s_a, c_a) = angle.to_radians().sin_cos();
+                    let du = dx * c_a + dy * s_a;
+                    let dv = -dx * s_a + dy * c_a;
                     match h {
-                        1 => *left = cl(*left + dx).min(*right - MIN_SIZE),
-                        2 => *top = cl(*top + dy).min(*bottom - MIN_SIZE),
-                        3 => *right = cl(*right + dx).max(*left + MIN_SIZE),
-                        4 => *bottom = cl(*bottom + dy).max(*top + MIN_SIZE),
+                        1 => *left = cl(*left + du).min(*right - MIN_SIZE),
+                        2 => *top = cl(*top + dv).min(*bottom - MIN_SIZE),
+                        3 => *right = cl(*right + du).max(*left + MIN_SIZE),
+                        4 => *bottom = cl(*bottom + dv).max(*top + MIN_SIZE),
+                        5 => {
+                            // Rotation grip: it is parked toward the TOP axis
+                            // endpoint, so the ellipse angle is the pointer's
+                            // bearing from the centre + 90° (same rotation
+                            // convention as the engine — recipe.rs Radial).
+                            let (cx, cy) = ((*left + *right) / 2.0, (*top + *bottom) / 2.0);
+                            let th =
+                                (cur.1 - cy).atan2(cur.0 - cx).to_degrees() + 90.0;
+                            *angle = th.rem_euclid(360.0);
+                            if *angle > 180.0 {
+                                *angle -= 360.0;
+                            }
+                        }
                         _ => {
                             // Clamp the SHIFT, not each edge — independent
                             // clamps at the band boundary squashed the
@@ -8776,7 +9733,7 @@ impl AutoshopApp {
                         }
                     }
                 }
-                MaskGeometry::Bitmap { .. } => {}
+                _ => {}
             }
             self.mask_drag = Some((h, cur));
             self.dirty = true; // masks are develop stages — live preview
@@ -9234,7 +10191,7 @@ impl AutoshopApp {
     /// bounding box of a radial. Commits into `recipe.masks` — the SAME field
     /// the AI writes, so render + XMP need nothing new.
     fn handle_place_mask(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
-        let Some((kind, replace)) = self.placing_mask else { return };
+        let Some((kind, target)) = self.placing_mask else { return };
         // Mask geometry lives in the ORIGINAL frame (the engine composites
         // masks before the geometric remap) — map pointer positions out of the view.
         let (dims, deg, dist) = self.geom_ctx();
@@ -9318,26 +10275,28 @@ impl AutoshopApp {
                     feather: 0.5,
                     roundness: 0.0,
                     flipped: false,
+                    angle: 0.0,
                 }
             }
         };
         // Live placement preview: no owning adjustment yet → markers upright.
         draw_mask_overlay(ui, xf, &geom_to_view(&geom, dims, deg, &dist), false, self.lang);
         if resp.drag_stopped() {
-            match replace {
-                Some(i) if i < self.recipe.masks.len() => {
+            let status: String = match target {
+                PlaceTarget::Redraw(i) if i < self.recipe.masks.len() => {
                     // Redraw replaces the AREA only — a radial's tuned feather /
-                    // roundness / flipped are slider state, and silently
-                    // resetting them made ↻ Redraw destructive.
+                    // roundness / flipped / angle are slider+handle state, and
+                    // silently resetting them made ↻ Redraw destructive.
                     let mut geom = geom;
                     if let (
                         autoshop::recipe::MaskGeometry::Radial {
-                            feather, roundness, flipped, ..
+                            feather, roundness, flipped, angle, ..
                         },
                         autoshop::recipe::MaskGeometry::Radial {
                             feather: kept_f,
                             roundness: kept_r,
                             flipped: kept_fl,
+                            angle: kept_a,
                             ..
                         },
                     ) = (&mut geom, &self.recipe.masks[i].mask)
@@ -9345,9 +10304,25 @@ impl AutoshopApp {
                         *feather = *kept_f;
                         *roundness = *kept_r;
                         *flipped = *kept_fl;
+                        *angle = *kept_a;
                     }
                     self.recipe.masks[i].mask = geom;
+                    // A REDRAW kept the mask's existing (possibly nonzero)
+                    // sliders — the "all 0 now" line below is only true for a
+                    // brand-new mask.
+                    tr(self.lang, "mask area redrawn — its existing adjustments now apply to the new area").into()
                 }
+                PlaceTarget::Component(i, mode) if i < self.recipe.masks.len() => {
+                    let m = &mut self.recipe.masks[i];
+                    m.components.push(autoshop::recipe::MaskComponent { geometry: geom, mode });
+                    self.sel_mask = Some(i);
+                    self.sel_component = Some(m.components.len() - 1);
+                    tr(self.lang, "shape added to this mask — drag its knobs to adjust; the shape list is under the mask's row").into()
+                }
+                // NewMask — and the two index-carrying targets whose mask
+                // vanished mid-drag (an async recipe replace): a redraw
+                // degrades to a fresh mask (pre-v0.22 behaviour); a component
+                // with no owner joins it rather than vanishing silently.
                 _ => {
                     let n = self.recipe.masks.len();
                     let name = trf(self.lang, "Manual {n}", &[("n", &(n + 1).to_string())]);
@@ -9357,18 +10332,15 @@ impl AutoshopApp {
                         ..Default::default()
                     });
                     self.sel_mask = Some(n);
+                    self.sel_component = None;
+                    tr(self.lang, "mask placed — pull its sliders in 「Local Masks」 at left (all 0 now, no visible effect yet)").into()
                 }
-            }
+            };
             self.placing_mask = None;
             self.place_start = None;
             self.dirty = true;
-            // A REDRAW kept the mask's existing (possibly nonzero) sliders —
-            // the "all 0 now" line is only true for a brand-new mask.
-            self.status = if replace.is_some() {
-                tr(self.lang, "mask area redrawn — its existing adjustments now apply to the new area").into()
-            } else {
-                tr(self.lang, "mask placed — pull its sliders in 「Local Masks」 at left (all 0 now, no visible effect yet)").into()
-            };
+            self.overlay_stale = true;
+            self.status = status;
         }
     }
 
@@ -9407,6 +10379,206 @@ impl AutoshopApp {
             self.mask_dirty_rect = None;
         }
         self.paint_last = None;
+    }
+
+    /// Arm a mask-brush session: `target = None` paints a NEW Bitmap mask on
+    /// Apply; `Some(i)` edits mask `i`'s raster — seeded into the canvas (as
+    /// the red display wash) and the greyscale weight buffer, at canvas
+    /// resolution, so the session bakes exactly what it shows.
+    fn start_mask_brush(&mut self, target: Option<usize>) {
+        self.disarm_tools();
+        let Some(base) = self.base_preview.as_ref() else { return };
+        let (mw, mh) = base.dimensions();
+        let mut gray = image::GrayImage::new(mw, mh);
+        let mut canvas = image::RgbaImage::new(mw, mh);
+        if let Some(i) = target
+            && let Some(MaskGeometry::Bitmap { path }) = self.recipe.masks.get(i).map(|m| &m.mask)
+        {
+            match image::open(path) {
+                Ok(img) => {
+                    let g = image::imageops::resize(
+                        &img.to_luma8(),
+                        mw,
+                        mh,
+                        image::imageops::FilterType::Triangle,
+                    );
+                    for (x, y, p) in g.enumerate_pixels() {
+                        if p[0] > 0 {
+                            let a = (p[0] as u16 * 160 / 255) as u8;
+                            canvas.put_pixel(x, y, image::Rgba([255, 64, 64, a]));
+                        }
+                    }
+                    gray = g;
+                }
+                Err(e) => {
+                    let t = trf(
+                        self.lang,
+                        "could not load this mask's raster ({err}) — starting from an empty brush canvas",
+                        &[("err", &e.to_string())],
+                    );
+                    self.toast(ToastKind::Error, t);
+                }
+            }
+        }
+        self.mask_paint = Some(canvas);
+        self.mask_dirty = true;
+        self.mask_dirty_rect = None;
+        self.mask_brush_gray = Some(gray);
+        self.mask_brush = Some((target, false));
+        self.paint_mode = true;
+        self.status = tr(
+            self.lang,
+            "Brush mask — paint to select; 「Erase」 removes; 「Apply」 bakes it · Esc cancels",
+        )
+        .into();
+    }
+
+    /// Bake the brush session: the greyscale weight buffer becomes a freshly
+    /// CLAIMED raster (the input file is never mutated — saved recipes and
+    /// version snapshots keep rendering what they rendered), then the target
+    /// mask repoints at it, or a new Bitmap mask is pushed.
+    fn commit_mask_brush(&mut self) {
+        let Some((target, _)) = self.mask_brush else { return };
+        let Some(gray) = self.mask_brush_gray.clone() else { return };
+        let Some(src) = self.src_path.clone() else { return };
+        let lang = self.lang;
+        if target.is_none() {
+            if gray.pixels().all(|p| p[0] == 0) {
+                let t = tr(lang, "nothing painted yet — drag on the image first");
+                self.toast(ToastKind::Error, t.to_string());
+                return;
+            }
+            if self.recipe.masks.len() >= 64 {
+                let t = tr(lang, "mask limit reached (64) — delete one first");
+                self.toast(ToastKind::Error, t.to_string());
+                return;
+            }
+        }
+        let written = autoshop::store::claim_raster(&src, "mask-brush")
+            .map_err(anyhow::Error::from)
+            .and_then(|p| gray.save(&p).map(|()| p).map_err(anyhow::Error::from));
+        match written {
+            Ok(path) => {
+                let path_s = path.to_string_lossy().into_owned();
+                match target {
+                    Some(i) if i < self.recipe.masks.len() => {
+                        self.recipe.masks[i].mask = MaskGeometry::Bitmap { path: path_s };
+                        self.sel_mask = Some(i);
+                        self.status = tr(lang, "mask raster updated — its adjustments now apply to the edited area").into();
+                    }
+                    _ => {
+                        let n = self.recipe.masks.len();
+                        self.recipe.masks.push(autoshop::recipe::LocalAdjustment {
+                            mask: MaskGeometry::Bitmap { path: path_s },
+                            name: trf(lang, "Brush {n}", &[("n", &(n + 1).to_string())]),
+                            ..Default::default()
+                        });
+                        self.sel_mask = Some(n);
+                        self.status = tr(lang, "brush mask created — pull its sliders in 「Local Masks」 (all 0 now, no visible effect yet)").into();
+                    }
+                }
+                self.sel_component = None;
+                self.dirty = true;
+                self.overlay_stale = true;
+                self.disarm_tools(); // ends the session and clears the canvas
+            }
+            Err(e) => {
+                let t = trf(
+                    lang,
+                    "could not save the brush mask ({err})",
+                    &[("err", &e.to_string())],
+                );
+                self.toast(ToastKind::Error, t);
+            }
+        }
+    }
+
+    /// Bake one raster op (feather / expand / contract) on mask `i`'s bitmap:
+    /// load → transform → claim a fresh raster → repoint (immutability rule —
+    /// see commit_mask_brush). Synchronous at the raster's own resolution.
+    fn bake_mask_raster(
+        &mut self,
+        i: usize,
+        op: impl FnOnce(&image::GrayImage) -> image::GrayImage,
+        tag: &str,
+    ) {
+        let Some(src) = self.src_path.clone() else { return };
+        let Some(MaskGeometry::Bitmap { path }) =
+            self.recipe.masks.get(i).map(|m| m.mask.clone())
+        else {
+            return;
+        };
+        let lang = self.lang;
+        let done = image::open(&path)
+            .map_err(anyhow::Error::from)
+            .map(|img| op(&img.to_luma8()))
+            .and_then(|g| {
+                let p = autoshop::store::claim_raster(&src, tag).map_err(anyhow::Error::from)?;
+                g.save(&p).map_err(anyhow::Error::from)?;
+                Ok(p)
+            });
+        match done {
+            Ok(p) => {
+                self.recipe.masks[i].mask =
+                    MaskGeometry::Bitmap { path: p.to_string_lossy().into_owned() };
+                self.dirty = true;
+                self.overlay_stale = true;
+                self.status =
+                    tr(lang, "mask raster updated — its adjustments now apply to the edited area")
+                        .into();
+            }
+            Err(e) => {
+                let t = trf(
+                    lang,
+                    "could not edit this mask's raster ({err})",
+                    &[("err", &e.to_string())],
+                );
+                self.toast(ToastKind::Error, t);
+            }
+        }
+    }
+
+    /// Refine mask `i`'s raster to FULL resolution: decode the full-res
+    /// source in a worker, guided-filter the raster against it
+    /// (render::refine_mask_guided), save under a fresh claim. The result is
+    /// matched back by the stored raster reference — the strip may have
+    /// changed while the worker ran.
+    fn start_mask_refine(&mut self, i: usize) {
+        if self.busy {
+            return;
+        }
+        let Some(src) = self.src_path.clone() else { return };
+        let Some(MaskGeometry::Bitmap { path }) =
+            self.recipe.masks.get(i).map(|m| m.mask.clone())
+        else {
+            return;
+        };
+        let lang = self.lang;
+        self.busy = true;
+        self.status = tr(lang, "Refining the mask to full resolution (decoding the full-size source) …").into();
+        let stored_ref = path.clone();
+        self.spawn_worker(
+            move || {
+                let res = (|| {
+                    let mask = image::open(&path)
+                        .map_err(|e| anyhow::anyhow!("load mask raster {path}: {e}"))?
+                        .to_luma8();
+                    let full = autoshop::decode::load_image(&src)?;
+                    let long = full.width().max(full.height());
+                    let refined = autoshop::render::refine_mask_guided(
+                        &mask,
+                        &full,
+                        (long / 500).max(4) as usize,
+                        1e-4,
+                    );
+                    let out = autoshop::store::claim_raster(&src, "mask-refined")?;
+                    refined.save(&out)?;
+                    Ok((i, stored_ref, out))
+                })();
+                Msg::MaskRefined(res)
+            },
+            |e| Msg::MaskRefined(Err(e)),
+        );
     }
 
     fn ensure_mask_tex(&mut self, ctx: &egui::Context) {
@@ -9521,7 +10693,20 @@ impl AutoshopApp {
     fn handle_paint(&mut self, resp: &egui::Response, xf: ViewXform) {
         let brush = self.brush;
         let (dims, deg, dist) = self.geom_ctx();
-        let Some(m) = self.mask_paint.as_mut() else { return };
+        // Mask-brush session: strokes write the display canvas AND the
+        // greyscale weight buffer; erase clears both.
+        let erase = self.mask_brush.is_some_and(|(_, e)| e);
+        let display_px = if erase {
+            image::Rgba([0, 0, 0, 0])
+        } else {
+            image::Rgba([255, 64, 64, 160])
+        };
+        let gray_v: u8 = if erase { 0 } else { 255 };
+        let mut gray = self.mask_brush_gray.take();
+        let Some(m) = self.mask_paint.as_mut() else {
+            self.mask_brush_gray = gray;
+            return;
+        };
         let (mw, mh) = (m.width() as f32, m.height() as f32);
         // The canvas lives in the ORIGINAL frame (fill/heal edit source
         // pixels), so pointer positions map out of the transformed view.
@@ -9577,13 +10762,21 @@ impl AutoshopApp {
                 let cur = to_mask(p);
                 let r = brush_at(p);
                 match self.paint_last {
-                    Some(prev) => stamp_line(m, prev, cur, r),
+                    Some(prev) => {
+                        stamp_line_px(m, prev, cur, r, display_px);
+                        if let Some(g) = gray.as_mut() {
+                            stamp_line_gray(g, prev, cur, r, gray_v);
+                        }
+                    }
                     // First stroke event: connect from the PRESS ORIGIN —
                     // drag_started fires ~6 px in, and a lone dot at the
                     // current pointer dropped the stroke's lead-in.
                     None => {
                         let start = ui_press_origin(resp).map(&to_mask).unwrap_or(cur);
-                        stamp_line(m, start, cur, r);
+                        stamp_line_px(m, start, cur, r, display_px);
+                        if let Some(g) = gray.as_mut() {
+                            stamp_line_gray(g, start, cur, r, gray_v);
+                        }
                         grow(&mut self.mask_dirty_rect, start, cur, r);
                     }
                 }
@@ -9599,7 +10792,10 @@ impl AutoshopApp {
             {
                 let cur = to_mask(p);
                 let r = brush_at(p);
-                stamp_dot(m, cur, r);
+                stamp_dot_px(m, cur, r, display_px);
+                if let Some(g) = gray.as_mut() {
+                    stamp_dot_gray(g, cur, r, gray_v);
+                }
                 grow(&mut self.mask_dirty_rect, cur, cur, r);
                 self.mask_dirty = true;
             }
@@ -9610,6 +10806,7 @@ impl AutoshopApp {
             // that drew a full-width connecting streak into the next stroke.
             self.paint_last = None;
         }
+        self.mask_brush_gray = gray;
     }
 
     /// Clone-stamp interaction: Alt+click picks the SOURCE point (stored in
@@ -10873,18 +12070,18 @@ impl eframe::App for AutoshopApp {
                 self.paint_mode = on;
             }
             if do_linear && self.src_path.is_some() {
-                let armed = matches!(self.placing_mask, Some((MaskKind::Linear, None)));
+                let armed = matches!(self.placing_mask, Some((MaskKind::Linear, PlaceTarget::NewMask)));
                 self.disarm_tools();
                 if !armed {
-                    self.placing_mask = Some((MaskKind::Linear, None));
+                    self.placing_mask = Some((MaskKind::Linear, PlaceTarget::NewMask));
                     self.status = tr(self.lang, "Drag on the image to draw a linear gradient (start fully applied → end unaffected; Shift = axis lock)").into();
                 }
             }
             if do_radial && self.src_path.is_some() {
-                let armed = matches!(self.placing_mask, Some((MaskKind::Radial, None)));
+                let armed = matches!(self.placing_mask, Some((MaskKind::Radial, PlaceTarget::NewMask)));
                 self.disarm_tools();
                 if !armed {
-                    self.placing_mask = Some((MaskKind::Radial, None));
+                    self.placing_mask = Some((MaskKind::Radial, PlaceTarget::NewMask));
                     self.status = tr(self.lang, "Drag on the image to draw a radial (elliptical) area").into();
                 }
             }
@@ -12111,7 +13308,7 @@ mod tests {
                 recipe: app.recipe.clone(),
                 base: None,
                 origin: None,
-                generated: false,
+                kind: VariantKind::Original,
                 others: vec![StashedVariant {
                     kind: VariantKind::Generated,
                     recipe: EditRecipe { contrast: 33.0, ..Default::default() },
@@ -12318,7 +13515,7 @@ mod tests {
             .replace("crs:Exposure2012=\"0.00\"", "crs:Exposure2012=\"broken\"");
         assert!(doc.contains("broken"), "fixture: the corrupt attribute must exist");
         std::fs::write(&xp, &doc).unwrap();
-        let (saved, warn) = read_saved_develop(src);
+        let (saved, warn, _) = read_saved_develop(src);
         assert!(matches!(saved, SavedDevelop::NoopOnly), "corrupt-only still restores nothing");
         assert!(warn.contains(&"Exposure2012".to_string()), "{warn:?}");
 
@@ -12727,16 +13924,147 @@ mod tests {
             pixels_on_disk: Some(std::path::absolute(&master).unwrap()),
             ..Default::default()
         };
+        // Not persisted yet (no mirror): the background card IS unsaved work.
+        assert_eq!(app.open_dirty_variants(), 1, "premise: unsaved until the strip persists");
+        // The persisted record spells the master ABSOLUTIZED (read_variants
+        // resolves to the dev dir / absolute), the live variant holds the
+        // relative ./out spelling — same_master_opt must bridge them, or a
+        // fully saved strip re-reports as unsaved (the original regression,
+        // re-expressed against the v0.22 mirror).
+        app.saved_strip = Some(autoshop::store::VariantsRecord {
+            v: 1,
+            active_kind: VariantKind::Original.store_str().to_string(),
+            active_pos: 0,
+            others: vec![autoshop::store::VariantEntry {
+                kind: VariantKind::Original.store_str().to_string(),
+                recipe: EditRecipe::default(),
+                origin: Some(std::path::absolute(&master).unwrap()),
+            }],
+        });
         assert_eq!(
             app.open_dirty_variants(),
             0,
-            "a background variant on the RECORDED master is not unsaved work"
+            "a background variant matching the persisted strip record is not unsaved work"
         );
         app.variants.truncate(1);
+        // Mirror follows the trivial strip (as a save would persist it) —
+        // this half of the test pins the PIXELS spelling comparison in the
+        // stash gate, not strip dirtiness.
+        app.saved_strip = None;
         app.open_path(PathBuf::from("D:/library/__autoshop_masterid_next__.ARW"));
         assert!(
             !app.nav_stash.contains_key(src),
             "a saved retouch must not stash as unsaved just because the store spells its master absolutely"
+        );
+    }
+
+    #[test]
+    fn fitted_kind_survives_the_navigation_stash() {
+        // Round-9 issue 1 (variant "renames itself"): StashEntry carried the
+        // active card only as `generated: bool`, so a 「◭ Reverse-fit」 card
+        // came back from navigation as 「▣ 原片」. The three-valued kind must
+        // round-trip through the stash write verbatim.
+        let (mut app, _scrub) = app_with_masked_photo("stashkind");
+        let src = PathBuf::from("D:/library/__autoshop_stashkind__.ARW");
+        app.src_path = Some(src.clone());
+        app.variants.push(Variant {
+            kind: VariantKind::Fitted,
+            recipe: EditRecipe { contrast: 21.0, ..Default::default() },
+            base: None,
+            origin: None,
+            thumb: None,
+        });
+        app.active = 1;
+        app.recipe = EditRecipe { contrast: 21.0, ..Default::default() };
+        app.open_path(PathBuf::from("D:/library/__autoshop_stashkind_next__.ARW"));
+        let st = app.nav_stash.get(&src).expect("a dirty strip stashes on nav-away");
+        assert_eq!(
+            st.kind,
+            VariantKind::Fitted,
+            "the stash records the ACTIVE card's real kind, not a generated bool"
+        );
+    }
+
+    #[test]
+    fn a_persisted_strip_makes_background_variants_saved_work() {
+        // Round-9 issue 3 (quit livelock): after generate→fit the inactive
+        // Generated card's origin can NEVER equal the photo's single recorded
+        // master, so the old dirty rule held the quit guard armed forever and
+        // 「Save all & quit」 bounced closed→cancelled every frame. The fix:
+        // dirtiness compares the strip against the persisted variants.json
+        // mirror, and persisting the strip is what Ctrl+S / Save-all now do —
+        // after it, the guard's `inactive_dirty_variants() > 0` term is 0 and
+        // the close goes through.
+        let src = std::path::Path::new("D:/library/__autoshop_striprec__.ARW");
+        let dev = autoshop::store::develop_dir(src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dev.clone()]);
+        let master = dev.join("reimagine-1.png");
+        std::fs::write(&master, b"png").unwrap();
+        let mut app = AutoshopApp {
+            src_path: Some(src.to_path_buf()),
+            variants: vec![
+                Variant {
+                    kind: VariantKind::Original,
+                    recipe: EditRecipe::default(),
+                    base: None,
+                    origin: None,
+                    thumb: None,
+                },
+                Variant {
+                    kind: VariantKind::Generated,
+                    recipe: EditRecipe::default(),
+                    base: Some(Arc::new(image::DynamicImage::new_rgb8(4, 3))),
+                    origin: Some(master.clone()),
+                    thumb: None,
+                },
+                Variant {
+                    kind: VariantKind::Fitted,
+                    recipe: EditRecipe { contrast: 40.0, ..Default::default() },
+                    base: None,
+                    origin: None,
+                    thumb: None,
+                },
+            ],
+            active: 2,
+            pixels_on_disk: None,
+            ..Default::default()
+        };
+        // The exact pre-fix trap: unsaved strip, guard armed…
+        assert!(app.inactive_dirty_variants() > 0, "premise: the strip is unsaved work");
+        // …then the save persists the strip (what Ctrl+S / Save-all do now)…
+        app.persist_strip(src).expect("strip persists");
+        // …and the guard's orphan term must be genuinely clean: this is the
+        // assertion whose absence was the livelock.
+        assert_eq!(
+            app.inactive_dirty_variants(),
+            0,
+            "after a save the close guard must let the window go"
+        );
+        // The record really is on disk and restores the three-valued kinds.
+        let rec = autoshop::store::read_variants(src).expect("record on disk");
+        assert_eq!(rec.active_kind, "fitted");
+        assert_eq!(rec.others.len(), 2);
+        assert_eq!(rec.others[0].kind, "original");
+        assert_eq!(rec.others[1].kind, "generated");
+        assert_eq!(rec.others[1].origin.as_deref(), Some(master.as_path()));
+        // Any strip mutation re-arms the protection: deleting the Generated
+        // card is unsaved again until the next persist.
+        app.variants.remove(1);
+        app.active = 1;
+        assert!(
+            app.inactive_dirty_variants() > 0,
+            "a deleted background variant is unsaved work against the mirror"
+        );
+        // …and switching the active card (identity drift) counts too.
+        app.persist_strip(src).expect("re-persist");
+        assert_eq!(app.inactive_dirty_variants(), 0);
+        app.active = 0;
+        app.variants.swap(0, 1);
+        assert!(
+            app.open_dirty_variants() > 0,
+            "active-card identity drift reopens as a different strip"
         );
     }
 

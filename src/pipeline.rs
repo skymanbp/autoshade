@@ -1105,7 +1105,7 @@ mod guard_tests {
                 LocalAdjustment {
                     mask: MaskGeometry::Radial {
                         top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
-                        feather: 0.5, roundness: 0.0, flipped: false,
+                        feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
                     },
                     ..Default::default()
                 },
@@ -1240,6 +1240,7 @@ mod guard_tests {
                         feather: 0.5,
                         roundness: 0.0,
                         flipped: false,
+                        angle: 0.0,
                     },
                     exposure_ev: 1.0,
                     ..Default::default()

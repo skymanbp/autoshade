@@ -1166,6 +1166,11 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
         return; // both passes below chunk by w; rayon asserts chunk_size != 0
     }
     for m in &r.masks {
+        // The eye toggle: a disabled mask renders nothing at any Amount —
+        // the lossless mute (recipe.rs `LocalAdjustment::enabled`).
+        if !m.enabled {
+            continue;
+        }
         let local = EditRecipe {
             exposure_ev: m.exposure_ev,
             contrast: m.contrast,
@@ -1194,19 +1199,30 @@ fn apply_masks(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
         if amount == 0.0 {
             continue;
         }
-        // Bitmap geometry: decode the raster ONCE per mask per develop (never
-        // inside the pixel loop); both the tone and the NR pass share it.
+        // Bitmap geometry: decode each raster ONCE per mask per develop
+        // (never inside the pixel loop); both the tone and the NR pass share
+        // them. Components load alongside the base.
         let bmp = load_mask_bitmap(&m.mask);
+        let comp_bmps: Vec<Option<std::sync::Arc<image::GrayImage>>> =
+            m.components.iter().map(|c| load_mask_bitmap(&c.geometry)).collect();
         // An unloadable raster carries NO coverage, so its weight must never
         // reach the inversion below: 0 with `inverted` would apply this
         // adjustment to the WHOLE frame at full strength. Skipping the whole
-        // adjustment is the inert contract (recipe.rs `MaskGeometry::Bitmap`).
-        if bmp.is_none() && matches!(m.mask, MaskGeometry::Bitmap { .. }) {
+        // adjustment is the inert contract (recipe.rs `MaskGeometry::Bitmap`)
+        // — and it covers COMPONENTS for the same reason: a lost Subtract
+        // raster contributes 0 and silently WIDENS the effect area.
+        if (bmp.is_none() && matches!(m.mask, MaskGeometry::Bitmap { .. }))
+            || m.components
+                .iter()
+                .zip(&comp_bmps)
+                .any(|(c, b)| b.is_none() && matches!(c.geometry, MaskGeometry::Bitmap { .. }))
+        {
             continue;
         }
-        // mask coverage × master amount at a pixel (with optional inversion).
+        // combined mask coverage × master amount at a pixel (with inversion).
         let weight_at = |x: usize, y: usize| -> f32 {
-            let mut wgt = mask_weight(&m.mask, x as f32 / w as f32, y as f32 / h as f32, bmp.as_deref());
+            let (nx, ny) = (x as f32 / w as f32, y as f32 / h as f32);
+            let mut wgt = combined_mask_weight(m, nx, ny, bmp.as_deref(), &comp_bmps);
             if m.inverted {
                 wgt = 1.0 - wgt;
             }
@@ -1318,12 +1334,21 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // clamped to fully feathered; both XMP directions now convert on the
         // boundary (xmp.rs). Test radial_roundness_is_a_documented_no_op pins
         // the roundness no-op until a real sidecar fixes the mapping.
-        MaskGeometry::Radial { top, left, bottom, right, feather, roundness: _, flipped } => {
+        MaskGeometry::Radial { top, left, bottom, right, feather, roundness: _, flipped, angle } => {
             let cx = (left + right) / 2.0;
             let cy = (top + bottom) / 2.0;
             let rx = ((right - left) / 2.0).abs().max(1e-4);
             let ry = ((bottom - top) / 2.0).abs().max(1e-4);
-            let d = (((nx - cx) / rx).powi(2) + ((ny - cy) / ry).powi(2)).sqrt();
+            // Rotation (engine convention, recipe.rs `MaskGeometry::Radial`):
+            // rotate the SAMPLE POINT about the bbox centre by −angle, in
+            // normalised frame coords — equivalent to rotating the ellipse
+            // by +angle (counter-clockwise, y-down screen sense).
+            let (mut px, mut py) = (nx - cx, ny - cy);
+            if *angle != 0.0 {
+                let (s, c) = (-angle.to_radians()).sin_cos();
+                (px, py) = (px * c - py * s, px * s + py * c);
+            }
+            let d = ((px / rx).powi(2) + (py / ry).powi(2)).sqrt();
             let f = feather.clamp(0.0, 1.0);
             // Guarded ramp, not raw `smoothstep`: feather 0 makes the edges
             // equal, and 0/0 would be NaN exactly on the ellipse boundary
@@ -1345,6 +1370,153 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
     }
 }
 
+// --- bitmap-mask BAKE operations (the GUI's raster editing) -----------------
+// Every op returns a NEW image; the GUI writes it under a freshly CLAIMED
+// raster name and repoints the recipe — the input file is never mutated, so
+// saved recipes and version snapshots referencing it keep rendering what they
+// rendered (the same immutability rule start_segment follows).
+
+/// Soften a mask's boundary: gaussian blur of the raster. `sigma` in mask
+/// pixels.
+pub fn feather_mask(g: &image::GrayImage, sigma: f32) -> image::GrayImage {
+    image::imageops::blur(g, sigma.max(0.1))
+}
+
+/// Grow (`radius > 0`, dilate) or shrink (`radius < 0`, erode) a mask by
+/// `|radius|` pixels — separable max/min filter, the morphological pair
+/// behind Lightroom's Expand/Contract. Square structuring element: visually
+/// indistinguishable from a disc at the small radii the GUI uses, and O(r)
+/// cheaper to reason about.
+pub fn morph_mask(g: &image::GrayImage, radius: i32) -> image::GrayImage {
+    if radius == 0 || g.width() == 0 || g.height() == 0 {
+        return g.clone();
+    }
+    let r = radius.unsigned_abs() as usize;
+    let dilate = radius > 0;
+    let (w, h) = (g.width() as usize, g.height() as usize);
+    let src = g.as_raw();
+    let pick = |acc: u8, v: u8| if dilate { acc.max(v) } else { acc.min(v) };
+    let seed = if dilate { 0u8 } else { 255u8 };
+    // Horizontal pass…
+    let mut tmp = vec![0u8; w * h];
+    for y in 0..h {
+        let row = &src[y * w..y * w + w];
+        for x in 0..w {
+            let (lo, hi) = (x.saturating_sub(r), (x + r).min(w - 1));
+            tmp[y * w + x] = row[lo..=hi].iter().fold(seed, |a, &v| pick(a, v));
+        }
+    }
+    // …then vertical.
+    let mut out = vec![0u8; w * h];
+    for x in 0..w {
+        for y in 0..h {
+            let (lo, hi) = (y.saturating_sub(r), (y + r).min(h - 1));
+            let mut v = seed;
+            for yy in lo..=hi {
+                v = pick(v, tmp[yy * w + x]);
+            }
+            out[y * w + x] = v;
+        }
+    }
+    image::GrayImage::from_raw(w as u32, h as u32, out).expect("dims preserved")
+}
+
+/// Upsample `mask` to the guide image's resolution and snap its soft
+/// boundary onto the guide's real edges — He et al.'s guided filter, box
+/// means via the NR pass's own `blur_plane`. This is the honest fix for
+/// AI-segmentation rasters baked at preview resolution: bilinear upsampling
+/// keeps their PLACEMENT resolution-independent but not their DETAIL (a
+/// 1280 px mask on a 9504 px export smears every boundary ~7 px), while the
+/// guide-driven output follows hair/foliage/architecture edges at the
+/// guide's own resolution.
+pub fn refine_mask_guided(
+    mask: &image::GrayImage,
+    guide: &DynamicImage,
+    radius: usize,
+    eps: f32,
+) -> image::GrayImage {
+    // A zero / negative / non-finite eps divides by (near-)zero variance and
+    // quantises NaN to black pixels — floor it here, this fn is pub.
+    let eps = if eps.is_finite() { eps.max(1e-6) } else { 1e-6 };
+    let rgb = guide.to_rgb8();
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    if w == 0 || h == 0 {
+        return mask.clone();
+    }
+    let i_plane: Vec<f32> = rgb
+        .pixels()
+        .map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0)
+        .collect();
+    let up =
+        image::imageops::resize(mask, w as u32, h as u32, image::imageops::FilterType::Triangle);
+    let p_plane: Vec<f32> = up.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
+    let r = radius.max(1);
+    let mean_i = blur_plane(&i_plane, w, h, r);
+    let mean_p = blur_plane(&p_plane, w, h, r);
+    let ip: Vec<f32> = i_plane.iter().zip(&p_plane).map(|(a, b)| a * b).collect();
+    let ii: Vec<f32> = i_plane.iter().map(|a| a * a).collect();
+    let mean_ip = blur_plane(&ip, w, h, r);
+    let mean_ii = blur_plane(&ii, w, h, r);
+    let mut a = vec![0f32; w * h];
+    let mut b = vec![0f32; w * h];
+    for k in 0..w * h {
+        let var = (mean_ii[k] - mean_i[k] * mean_i[k]).max(0.0);
+        let cov = mean_ip[k] - mean_i[k] * mean_p[k];
+        a[k] = cov / (var + eps);
+        b[k] = mean_p[k] - a[k] * mean_i[k];
+    }
+    let mean_a = blur_plane(&a, w, h, r);
+    let mean_b = blur_plane(&b, w, h, r);
+    let out: Vec<u8> = (0..w * h)
+        .map(|k| ((mean_a[k] * i_plane[k] + mean_b[k]).clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
+    image::GrayImage::from_raw(w as u32, h as u32, out).expect("dims preserved")
+}
+
+/// The ENGINE's own activity rule for one local adjustment (mirrors
+/// `apply_masks`): identity tone/sat + no local WB/recolour + no local NR
+/// renders nothing even with a healthy raster — local clarity/dehaze/texture
+/// are XMP-only. Shared by the export gate (`unreadable_mask_rasters`) and
+/// the GUI's mask-list activity marker, so the dot the user sees IS the rule
+/// the render applies.
+pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
+    m.exposure_ev != 0.0
+        || m.contrast != 0.0
+        || m.highlights != 0.0
+        || m.shadows != 0.0
+        || m.whites != 0.0
+        || m.blacks != 0.0
+        || m.saturation != 0.0
+        || m.temperature != 0.0
+        || m.tint != 0.0
+        || m.noise_reduction != 0.0
+        || m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0])
+}
+
+/// The adjustment's COMBINED coverage at normalised (nx, ny): the base
+/// geometry's weight folded with each component in list order (Lightroom's
+/// Add / Subtract / Intersect grammar — the algebra is documented on
+/// [`crate::recipe::MaskCombine`]). Inversion / amount / range are the
+/// caller's layers, exactly as with the single-geometry `mask_weight`.
+fn combined_mask_weight(
+    m: &crate::recipe::LocalAdjustment,
+    nx: f32,
+    ny: f32,
+    base: Option<&image::GrayImage>,
+    comp_bmps: &[Option<std::sync::Arc<image::GrayImage>>],
+) -> f32 {
+    let mut w = mask_weight(&m.mask, nx, ny, base);
+    for (c, bmp) in m.components.iter().zip(comp_bmps) {
+        let cw = mask_weight(&c.geometry, nx, ny, bmp.as_deref());
+        w = match c.mode {
+            crate::recipe::MaskCombine::Add => 1.0 - (1.0 - w) * (1.0 - cw),
+            crate::recipe::MaskCombine::Subtract => w * (1.0 - cw),
+            crate::recipe::MaskCombine::Intersect => w * cw,
+        };
+    }
+    w
+}
+
 /// Display names of ENABLED Bitmap masks whose raster does not decode right
 /// now (missing or corrupt file). The engine contract for those is "render
 /// inert" — right for a live preview (recoverable, warned once by the
@@ -1357,27 +1529,32 @@ pub fn unreadable_mask_rasters(recipe: &EditRecipe) -> Vec<String> {
         .masks
         .iter()
         .filter_map(|m| {
-            let MaskGeometry::Bitmap { path } = &m.mask else { return None };
-            // The ENGINE's own activity rule (apply_masks): identity
-            // tone/sat + no local WB/recolour + no local NR renders nothing
-            // even with a healthy raster — local clarity/dehaze/texture are
-            // XMP-only. A PARKED mask (default amount 1, sliders neutral)
-            // whose raster is lost drops no edit and must not block export.
-            let engine_active = m.exposure_ev != 0.0
-                || m.contrast != 0.0
-                || m.highlights != 0.0
-                || m.shadows != 0.0
-                || m.whites != 0.0
-                || m.blacks != 0.0
-                || m.saturation != 0.0
-                || m.temperature != 0.0
-                || m.tint != 0.0
-                || m.noise_reduction != 0.0
-                || m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0]);
-            if m.amount == 0.0 || !engine_active || load_mask_bitmap(&m.mask).is_some() {
+            // A PARKED mask (default amount 1, sliders neutral) whose raster
+            // is lost drops no edit and must not block export; neither does
+            // a muted (eye-toggled) or zero-amount one.
+            if m.amount == 0.0 || !m.enabled || !engine_active(m) {
                 return None;
             }
-            Some(if m.name.is_empty() { path.clone() } else { m.name.clone() })
+            // Any unreadable raster — the base geometry's OR a component's —
+            // makes the whole adjustment inert (apply_masks' skip contract),
+            // so any of them dropping is a dropped edit worth refusing over.
+            let bad_base = matches!(&m.mask, MaskGeometry::Bitmap { .. })
+                && load_mask_bitmap(&m.mask).is_none();
+            let bad_component = m.components.iter().any(|c| {
+                matches!(&c.geometry, MaskGeometry::Bitmap { .. })
+                    && load_mask_bitmap(&c.geometry).is_none()
+            });
+            if !bad_base && !bad_component {
+                return None;
+            }
+            Some(if m.name.is_empty() {
+                match &m.mask {
+                    MaskGeometry::Bitmap { path } => path.clone(),
+                    _ => "mask".to_string(),
+                }
+            } else {
+                m.name.clone()
+            })
         })
         .collect()
 }
@@ -1488,17 +1665,35 @@ pub fn mask_coverage(
 ) -> image::GrayImage {
     let rgb = reference.to_rgb8();
     let (w, h) = rgb.dimensions();
+    // A muted (eye-toggled) mask applies nothing — advertise nothing.
+    if !m.enabled {
+        return image::GrayImage::new(w, h);
+    }
     let bmp = load_mask_bitmap(&m.mask);
-    // Same load-failure contract as `apply_masks` (inert, inversion included),
-    // so the overlay never advertises coverage the render will not apply.
-    if bmp.is_none() && matches!(m.mask, MaskGeometry::Bitmap { .. }) {
+    let comp_bmps: Vec<Option<std::sync::Arc<image::GrayImage>>> =
+        m.components.iter().map(|c| load_mask_bitmap(&c.geometry)).collect();
+    // Same load-failure contract as `apply_masks` (inert, inversion included,
+    // components included), so the overlay never advertises coverage the
+    // render will not apply.
+    if (bmp.is_none() && matches!(m.mask, MaskGeometry::Bitmap { .. }))
+        || m.components
+            .iter()
+            .zip(&comp_bmps)
+            .any(|(c, b)| b.is_none() && matches!(c.geometry, MaskGeometry::Bitmap { .. }))
+    {
         return image::GrayImage::new(w, h);
     }
     let amount = m.amount.clamp(0.0, 1.0);
     let mut out = image::GrayImage::new(w, h);
     for (x, y, px) in out.enumerate_pixels_mut() {
         // Same normalisation as apply_masks' weight_at (x/w, not x/(w-1)).
-        let mut wgt = mask_weight(&m.mask, x as f32 / w as f32, y as f32 / h as f32, bmp.as_deref());
+        let mut wgt = combined_mask_weight(
+            m,
+            x as f32 / w as f32,
+            y as f32 / h as f32,
+            bmp.as_deref(),
+            &comp_bmps,
+        );
         if m.inverted {
             wgt = 1.0 - wgt;
         }
@@ -5492,6 +5687,7 @@ mod tests {
             feather: 0.0,
             roundness: 0.0,
             flipped: false,
+            angle: 0.0,
         };
         assert_eq!(mask_weight(&g, 0.0, 0.5, None), 0.0, "hard edge: boundary is outside");
         assert_eq!(mask_weight(&g, 0.5, 0.5, None), 1.0, "hard edge: centre is inside");
@@ -5531,6 +5727,7 @@ mod tests {
             feather: 0.5,
             roundness,
             flipped: false,
+            angle: 0.0,
         };
         for i in 0..=10 {
             for j in 0..=10 {
@@ -5545,6 +5742,157 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn mask_components_compose_add_subtract_intersect() {
+        use crate::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
+        // Two orthogonal linear gradients give exact hand-computable weights:
+        // base = nx (horizontal ramp), component = ny (vertical ramp). The
+        // algebra is the MaskCombine doc contract — union without a seam,
+        // subtract carves, intersect restricts.
+        let with = |mode| LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
+            components: vec![MaskComponent {
+                geometry: MaskGeometry::Linear {
+                    zero_x: 0.5,
+                    zero_y: 0.0,
+                    full_x: 0.5,
+                    full_y: 1.0,
+                },
+                mode,
+            }],
+            ..Default::default()
+        };
+        for i in 0..=4 {
+            for j in 0..=4 {
+                let (nx, ny) = (i as f32 / 4.0, j as f32 / 4.0);
+                let (b, c) = (nx, ny);
+                for (mode, want) in [
+                    (MaskCombine::Add, 1.0 - (1.0 - b) * (1.0 - c)),
+                    (MaskCombine::Subtract, b * (1.0 - c)),
+                    (MaskCombine::Intersect, b * c),
+                ] {
+                    let got = combined_mask_weight(&with(mode), nx, ny, None, &[None]);
+                    assert!(
+                        (got - want).abs() < 1e-6,
+                        "{mode:?} at ({nx},{ny}): got {got}, want {want}"
+                    );
+                }
+            }
+        }
+        // No components = exactly the base geometry (v1 compatibility).
+        let plain = LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
+            ..Default::default()
+        };
+        assert_eq!(combined_mask_weight(&plain, 0.3, 0.9, None, &[]), 0.3);
+        // Components fold IN LIST ORDER: subtract-then-add differs from
+        // add-then-subtract, so a reorder is a real semantic change.
+        let vertical = MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0 };
+        let sub_then_add = LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
+            components: vec![
+                MaskComponent { geometry: vertical.clone(), mode: MaskCombine::Subtract },
+                MaskComponent { geometry: vertical.clone(), mode: MaskCombine::Add },
+            ],
+            ..Default::default()
+        };
+        let (nx, ny) = (0.5, 0.75);
+        let want = {
+            let w = nx * (1.0 - ny);
+            1.0 - (1.0 - w) * (1.0 - ny)
+        };
+        let got = combined_mask_weight(&sub_then_add, nx, ny, None, &[None, None]);
+        assert!((got - want).abs() < 1e-6, "sequential fold: got {got}, want {want}");
+    }
+
+    #[test]
+    fn morph_mask_grows_and_shrinks_by_the_given_radius() {
+        // A single white pixel in an 9×9 black field: dilate(+2) must produce
+        // a 5×5 white block (square element), erode(−1) of that block must
+        // shrink it back to 3×3, and radius 0 is the identity.
+        let mut g = image::GrayImage::new(9, 9);
+        g.put_pixel(4, 4, image::Luma([255]));
+        let grown = morph_mask(&g, 2);
+        let white = |img: &image::GrayImage| {
+            img.enumerate_pixels().filter(|(_, _, p)| p[0] == 255).count()
+        };
+        assert_eq!(white(&grown), 25, "dilate r=2: 5×5 block");
+        let shrunk = morph_mask(&grown, -1);
+        assert_eq!(white(&shrunk), 9, "erode r=1: back to 3×3");
+        assert_eq!(morph_mask(&g, 0), g, "radius 0 is the identity");
+        // Erode of the single dot wipes it — no wraparound resurrection.
+        assert_eq!(white(&morph_mask(&g, -1)), 0, "erode kills a 1px dot");
+    }
+
+    #[test]
+    fn refine_mask_guided_snaps_a_soft_boundary_onto_the_guide_edge() {
+        // Guide: hard vertical edge (left black, right white) at full res.
+        // Mask: LOW-RES version of the same selection whose upsampled
+        // boundary would smear across ~8 px. The guided output must be
+        // decisively dark left of the edge and bright right of it — i.e.
+        // the boundary re-attaches to the guide's edge.
+        let (w, h) = (64u32, 32u32);
+        let guide = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, _| {
+            if x < w / 2 { image::Rgb([10, 10, 10]) } else { image::Rgb([245, 245, 245]) }
+        }));
+        // 8× smaller mask of the same half-split (boundary lands between
+        // texels — the upsample alone leaves a wide gray ramp).
+        let small = image::GrayImage::from_fn(w / 8, h / 8, |x, _| {
+            if x < w / 16 { image::Luma([0]) } else { image::Luma([255]) }
+        });
+        let refined = refine_mask_guided(&small, &guide, 4, 1e-4);
+        assert_eq!(refined.dimensions(), (w, h), "output at guide resolution");
+        // Sample rows away from borders; 4 px from the edge on each side.
+        let y = h / 2;
+        let far_l = refined.get_pixel(w / 2 - 4, y)[0];
+        let far_r = refined.get_pixel(w / 2 + 4, y)[0];
+        assert!(
+            far_l < 40,
+            "left of the guide edge must read as deselected, got {far_l}"
+        );
+        assert!(
+            far_r > 215,
+            "right of the guide edge must read as selected, got {far_r}"
+        );
+        // …and feather_mask is a smoke-checked smoothing: the hard edge
+        // gains intermediate values without moving the extremes.
+        let feathered = feather_mask(&refined, 2.0);
+        assert_eq!(feathered.dimensions(), (w, h));
+        assert!(feathered.get_pixel(2, y)[0] < 40 && feathered.get_pixel(w - 3, y)[0] > 215);
+    }
+
+    #[test]
+    fn a_missing_component_raster_makes_the_whole_adjustment_inert() {
+        use crate::recipe::{EditRecipe, LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
+        // A lost Subtract raster contributes 0 coverage — folding that in
+        // would WIDEN the effect area, so the whole adjustment must go inert
+        // (apply_masks / mask_coverage) and the export gate must refuse
+        // (unreadable_mask_rasters), exactly like a lost BASE raster.
+        let m = LocalAdjustment {
+            exposure_ev: 1.0, // engine-active, so the export gate cares
+            mask: MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 },
+            components: vec![MaskComponent {
+                geometry: MaskGeometry::Bitmap {
+                    path: "Z:/__autoshop_definitely_missing__/raster.png".into(),
+                },
+                mode: MaskCombine::Subtract,
+            }],
+            name: "carved".into(),
+            ..Default::default()
+        };
+        let r = EditRecipe { masks: vec![m], ..Default::default() };
+        assert_eq!(
+            unreadable_mask_rasters(&r),
+            vec!["carved".to_string()],
+            "a component raster counts for the deliverable refusal"
+        );
+        let cov = mask_coverage(&r.masks[0], &DynamicImage::new_rgb8(8, 8));
+        assert!(
+            cov.pixels().all(|p| p[0] == 0),
+            "the overlay must not advertise coverage the render will not apply"
+        );
     }
 
     #[test]

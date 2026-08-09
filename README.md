@@ -47,8 +47,12 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
 - **Desktop app (native GUI)** — `autoshop-gui`: a library grid that marks which
   photos already have a saved develop, the full develop panel (tone, presence,
   curves, 8-band HSL, colour grading), local masks (linear / radial / brush /
-  AI-selected), crop & straighten, spot heal, reverse-fit, before/after,
-  per-photo version snapshots, and Ctrl+S to a Lightroom XMP. English / 中文.
+  AI-selected — rotatable radials, add/subtract/intersect shape composition,
+  per-mask eye toggle & duplicate, brush-editable AI rasters with
+  feather/expand/contract and full-resolution guided refine), crop &
+  straighten, spot heal, reverse-fit, before/after, per-photo version
+  snapshots and variant strips that survive a reopen (`variants.json`), and
+  Ctrl+S to a Lightroom XMP. English / 中文.
 - **Web UI** — `serve` opens a local gallery: pick a photo, Analyze, tweak the
   develop sliders (tone, presence, curves, 8-band HSL, colour grading) with live
   before/after, give a text direction, export.
@@ -68,8 +72,9 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
 - **Batch** the whole library, **eval** the AI against your own edits.
 - **Your library stays read-only** — the engine refuses to write into a source
   RAW's folder. Exports (developed/heal/retouch images) go to `./out`; develop
-  STATE (recipes, Lightroom XMP, version snapshots, mask rasters) lives in a
-  per-user develop store (`AUTOSHOP_DATA_DIR`, else
+  STATE (recipes, Lightroom XMP, version snapshots, mask rasters, the baked
+  pixel-master link and the GUI's variant strip) lives in a per-user develop
+  store (`AUTOSHOP_DATA_DIR`, else
   `%LOCALAPPDATA%/autoshop/develops/<stem>-<path hash>/`), so two same-named
   photos never collide and edits survive launching from any directory.
 
