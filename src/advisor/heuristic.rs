@@ -81,7 +81,10 @@ impl Advisor for HeuristicProposer {
         // rationale that contradicts the recipe's own values reads as a bug —
         // a real verifier run flagged exactly that mismatch.
         let why = match &self.fallback_reason {
-            Some(e) => format!("AI vision unavailable: {e}"),
+            Some(e) => {
+                let e = super::BoundedUntrustedText::new(e, 512, &[]);
+                format!("AI vision unavailable (untrusted provider diagnostic): {e}")
+            }
             None => "no AI vision; OPENAI_API_KEY unset".to_string(),
         };
         r.rationale = format!(

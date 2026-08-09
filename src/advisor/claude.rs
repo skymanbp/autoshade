@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::decode::{Histogram, Meta};
 use crate::recipe::EditRecipe;
 
-use super::{balanced_objects, build_verify_prompt, strip_code_fence, Advisor, AdvisorError, Verdict};
+use super::{build_verify_prompt, parse_verdict, Advisor, AdvisorError, Verdict};
 
 pub struct ClaudeProvider {
     bin: String,
@@ -174,7 +174,9 @@ impl Advisor for ClaudeProvider {
             if let Ok(env) = serde_json::from_slice::<Envelope>(&output.stdout)
                 && env.is_error
             {
-                return Err(AdvisorError::ClaudeError(env.result));
+                return Err(AdvisorError::ClaudeError(
+                    super::BoundedUntrustedText::diagnostic(&env.result, &[]).into_string(),
+                ));
             }
             let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             if stderr.is_empty() {
@@ -185,16 +187,22 @@ impl Advisor for ClaudeProvider {
             return Err(AdvisorError::CliFailed {
                 bin: self.bin.clone(),
                 code: output.status.code(),
-                stderr,
+                stderr: super::BoundedUntrustedText::diagnostic(&stderr, &[]).into_string(),
             });
         }
         let env: Envelope =
             serde_json::from_slice(&output.stdout).map_err(|source| AdvisorError::BadEnvelope {
                 source,
-                head: String::from_utf8_lossy(&output.stdout).chars().take(300).collect(),
+                head: super::BoundedUntrustedText::diagnostic(
+                    &String::from_utf8_lossy(&output.stdout),
+                    &[],
+                )
+                .into_string(),
             })?;
         if env.is_error {
-            return Err(AdvisorError::ClaudeError(env.result));
+            return Err(AdvisorError::ClaudeError(
+                super::BoundedUntrustedText::diagnostic(&env.result, &[]).into_string(),
+            ));
         }
 
         // `result` is the model's text — instructed to be exactly the Verdict
@@ -202,22 +210,6 @@ impl Advisor for ClaudeProvider {
         // the bare (fence-stripped) text first; otherwise scan every balanced
         // {...} object and keep the LAST one that parses as a Verdict (the
         // model's final answer, past any example/prose objects).
-        let cleaned = strip_code_fence(&env.result);
-        let verdict: Verdict = match serde_json::from_str::<Verdict>(cleaned) {
-            Ok(v) => v,
-            Err(first_err) => {
-                let mut found = None;
-                for cand in balanced_objects(&env.result) {
-                    if let Ok(v) = serde_json::from_str::<Verdict>(cand) {
-                        found = Some(v);
-                    }
-                }
-                found.ok_or_else(|| AdvisorError::BadVerdict {
-                    source: first_err,
-                    got: env.result.chars().take(400).collect(),
-                })?
-            }
-        };
-        Ok(verdict)
+        parse_verdict(&env.result, &[])
     }
 }

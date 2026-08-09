@@ -6,33 +6,63 @@ use anyhow::{anyhow, Context, Result};
 
 /// Fetch the sorted, de-duplicated list of model ids from `{base_url}/models`.
 /// `base_url` is the OpenAI-compatible API root (e.g. `https://api.openai.com/v1`).
+const MODELS_RESPONSE_CAP: u64 = 4 * 1024 * 1024;
+const MODEL_ITEM_MAX: usize = 4096;
+const MODEL_ID_MAX_BYTES: usize = 256;
+
+fn extract_model_ids(value: &serde_json::Value) -> Result<Vec<String>> {
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("no data[] in /models response"))?;
+    if data.len() > MODEL_ITEM_MAX {
+        return Err(anyhow!(
+            "/models returned {} items; maximum is {MODEL_ITEM_MAX}",
+            data.len()
+        ));
+    }
+
+    let mut ids = Vec::with_capacity(data.len());
+    for id in data
+        .iter()
+        .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+    {
+        let projected =
+            crate::advisor::BoundedUntrustedText::new(id, MODEL_ID_MAX_BYTES, &[]);
+        if projected.as_str() != id {
+            return Err(anyhow!(
+                "/models returned an identifier longer than {MODEL_ID_MAX_BYTES} bytes \
+                 or containing control characters"
+            ));
+        }
+        ids.push(projected.into_string());
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
     if api_key.trim().is_empty() {
         return Err(anyhow!("no API key — set one in Settings (save first), then fetch"));
     }
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let resp = ureq::get(&url)
-        .timeout(std::time::Duration::from_secs(20)) // don't hang the UI on a dead endpoint
+        .timeout(std::time::Duration::from_secs(20))
         .set("Authorization", &format!("Bearer {api_key}"))
         .call();
     let value: serde_json::Value = match resp {
-        Ok(r) => r.into_json().context("parse /models response")?,
+        Ok(r) => crate::advisor::into_json_capped_at(r, MODELS_RESPONSE_CAP)
+            .context("parse bounded /models response")?,
         Err(ureq::Error::Status(code, r)) => {
-            let b = r.into_string().unwrap_or_default();
-            return Err(anyhow!("models API {code}: {b}"));
+            let body = r.into_string().unwrap_or_default();
+            let safe =
+                crate::advisor::BoundedUntrustedText::diagnostic(&body, &[api_key]);
+            return Err(anyhow!("models API {code}: {safe}"));
         }
         Err(ureq::Error::Transport(t)) => return Err(anyhow!("transport: {t}")),
     };
-    let mut ids: Vec<String> = value
-        .get("data")
-        .and_then(|d| d.as_array())
-        .ok_or_else(|| anyhow!("no data[] in /models response: {value}"))?
-        .iter()
-        .filter_map(|m| m.get("id").and_then(|s| s.as_str()).map(str::to_string))
-        .collect();
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
+    extract_model_ids(&value)
 }
 
 /// True if `id` looks like an image-generation model (gpt-image-*, *image*).
@@ -70,4 +100,24 @@ mod tests {
         assert!(!is_chat_model("text-embedding-3-large"));
         assert!(!is_image_model("gpt-5.5"));
     }
+
+        #[test]
+        fn model_catalogues_bound_items_and_identifiers_before_sorting() {
+            let excessive = serde_json::json!({
+                "data": (0..=MODEL_ITEM_MAX)
+                    .map(|i| serde_json::json!({"id": format!("gpt-{i}")}))
+                    .collect::<Vec<_>>()
+            });
+            assert!(extract_model_ids(&excessive).is_err());
+
+            let long = serde_json::json!({
+                "data": [{"id": "x".repeat(MODEL_ID_MAX_BYTES + 1)}]
+            });
+            assert!(extract_model_ids(&long).is_err());
+
+            let controlled = serde_json::json!({"data": [{"id": "gpt-safe\nforged"}]});
+            assert!(extract_model_ids(&controlled).is_err());
+        }
+
+    // FILE: src/config.rs  (append inside the existing `mod tests`)
 }

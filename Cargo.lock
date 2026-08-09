@@ -558,6 +558,7 @@ dependencies = [
  "dotenvy",
  "eframe",
  "egui",
+ "getrandom 0.3.4",
  "image",
  "qcms",
  "rawler",

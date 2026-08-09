@@ -43,6 +43,11 @@ base64 = "0.22"
 bytemuck = "1"
 clap = { version = "4.6.1", features = ["derive"] }
 dotenvy = "0.15"
+# The `serve` session token gating the image URLs (a page the user visits must
+# not be able to drive full-resolution decodes). It has to be CSPRNG bytes —
+# anything seeded from the clock is guessable, which is the whole attack.
+# Already in the tree transitively, so this adds no new dependency.
+getrandom = "0.3.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 rawler = "0.7.2"
 # ICC → sRGB for baked imports (the LR "Edit in…" round-trip exports ProPhoto

@@ -49,9 +49,7 @@ const BOUNDARY: &str = "----autoshopBoundaryX7MA4YWxkTrZu0gW";
 /// (see `advisor::post_with_timeout`).
 const IMAGES_EDIT_TIMEOUT_SECS: u64 = 600;
 
-/// Retry an image edit only when the transport died this fast — see the
-/// retry site for why this is far below the advisor's equivalent.
-const IMAGE_TRANSPORT_RETRY_UNDER_SECS: u64 = 3;
+
 
 /// Inactivity (stall) deadline for a STREAMING `images/edits` POST — the
 /// primary path. The request asks for `partial_images` progress frames, so a
@@ -492,6 +490,37 @@ fn encode_png(img: &DynamicImage) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+fn canonical_generated_png(bytes: &[u8], expected_size: &str) -> Result<Vec<u8>> {
+    let format = image::guess_format(bytes).context("identify generated image")?;
+    if format != image::ImageFormat::Png {
+        return Err(anyhow!(
+            "image API returned {format:?}; the generated-image contract requires PNG"
+        ));
+    }
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .context("fully decode generated PNG")?;
+    let expected = parse_size(expected_size);
+    if image.dimensions() != expected {
+        return Err(anyhow!(
+            "image API returned {}x{} for requested {}x{}",
+            image.width(),
+            image.height(),
+            expected.0,
+            expected.1
+        ));
+    }
+    if !matches!(
+        &image,
+        DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_)
+    ) {
+        return Err(anyhow!(
+            "image API returned {:?}; generated output must be 8-bit RGB or RGBA",
+            image.color()
+        ));
+    }
+    encode_png(&image)
+}
+
 /// RFC 2046 §5.1.1: the sender must pick a boundary that does not occur in
 /// any encapsulated part. [`BOUNDARY`] alone cannot honour that — it is a
 /// const in a PUBLIC repo, so a "style prompt" pasted from a stranger could
@@ -633,7 +662,7 @@ fn call_images_edit(
     let mut include_fidelity = true;
     let mut use_flexible = sizes.flexible.is_some();
     let mut use_stream = true;
-    let mut transport_retried = false;
+
     let (value, used_size): (serde_json::Value, String) = loop {
         if cancelled() {
             return Err(anyhow!("cancelled by user"));
@@ -740,12 +769,18 @@ fn call_images_edit(
                         if top.starts_with("read image stream")
                             || top.starts_with("parse image API response")
                         {
-                            return Err(e.context(
-                                "the request was accepted (2xx) and may already be billed — \
-                                 not re-posting automatically; run the operation again to retry",
+                            let safe = crate::advisor::BoundedUntrustedText::diagnostic(
+                                &top,
+                                &[key],
+                            );
+                            return Err(anyhow!(
+                                "{safe}: the request was accepted (2xx) and may already be billed — \
+                                 not re-posting automatically; run the operation again to retry"
                             ));
                         }
-                        return Err(e);
+                        let safe =
+                            crate::advisor::BoundedUntrustedText::diagnostic(&top, &[key]);
+                        return Err(anyhow!(safe.into_string()));
                     }
                 }
             }
@@ -794,30 +829,14 @@ fn call_images_edit(
                     use_flexible = false;
                     continue;
                 }
-                return Err(anyhow!("image API {code}: {b}"));
+                let safe = crate::advisor::BoundedUntrustedText::diagnostic(&b, &[key]);
+                return Err(anyhow!("image API {code}: {safe}"));
             }
             Err(ureq::Error::Transport(t)) => {
                 let elapsed = started.elapsed().as_secs();
-                // A fast transport failure is a connection blip, not
-                // generation time — retry once before surfacing (same
-                // real-world failure mode as advisor::post_ai_json).
-                //
-                // The window is MUCH tighter here than the advisor's 30 s:
-                // an image edit is NOT idempotent and is billed per
-                // generation. A socket that dies 25 s in was almost
-                // certainly accepted, with the provider already generating
-                // (and billing) — reposting then buys a second charge and a
-                // second image. Only a failure inside the connect/TLS/send
-                // phase, before the provider could have started work, is
-                // safe to repeat blindly.
-                if !transport_retried && elapsed < IMAGE_TRANSPORT_RETRY_UNDER_SECS {
-                    transport_retried = true;
-                    eprintln!(
-                        "  note: transport failed after {elapsed}s ({t}) — retrying once \
-                         (a fast failure is a connection blip, not generation time)"
-                    );
-                    continue;
-                }
+                // Even a fast failure can follow server acceptance: elapsed
+                // time cannot establish that a paid generation was uncommitted.
+                // Surface the ambiguity and let the user decide whether to retry.
                 let mut msg = format!("transport: {t}");
                 // A read timeout means different things per mode — and the
                 // MEASURED elapsed time tells connection failures apart from
@@ -856,13 +875,18 @@ fn call_images_edit(
     };
 
     if let Some(u) = value.get("usage") {
-        eprintln!("  usage: {u}");
+        let safe = crate::advisor::BoundedUntrustedText::diagnostic(&u.to_string(), &[key]);
+        eprintln!("  usage: {safe}");
     }
-    let b64 = extract_b64(&value)
-        .ok_or_else(|| anyhow!("no image payload (b64_json) in response: {value}"))?;
+    let b64 = extract_b64(&value).ok_or_else(|| {
+        let safe =
+            crate::advisor::BoundedUntrustedText::diagnostic(&value.to_string(), &[key]);
+        anyhow!("no image payload (b64_json) in response: {safe}")
+    })?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .context("decode b64_json")?;
+    let bytes = canonical_generated_png(&bytes, &used_size)?;
     Ok((bytes, used_size))
 }
 
@@ -1171,4 +1195,17 @@ mod tests {
         assert_eq!(extract_b64(&streamed), Some("YmFy"));
         assert_eq!(extract_b64(&serde_json::json!({"ok": true})), None);
     }
+
+        #[test]
+        fn generated_images_must_match_the_requested_contract() {
+            let one = DynamicImage::ImageRgba8(RgbaImage::new(1, 1));
+            let png = encode_png(&one).unwrap();
+            let err = canonical_generated_png(&png, "1024x1024")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("returned 1x1"), "{err}");
+
+            let canonical = canonical_generated_png(&png, "1x1").unwrap();
+            assert_eq!(image::guess_format(&canonical).unwrap(), image::ImageFormat::Png);
+        }
 }

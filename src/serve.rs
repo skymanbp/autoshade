@@ -34,6 +34,32 @@ const INDEX_HTML: &str = include_str!("web/index.html");
 const LIST_CAP: usize = 1000; // cap thumbnails shown
 const PREVIEW_EDGE: u32 = 1200; // max edge of the cached develop/preview base
 
+/// A fresh, unguessable capability for this server run. It lives only in
+/// memory and in the same-origin HTML that needs it.
+fn session_token() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow!("generate web session token: {e}"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Put the run's capability only on the two URLs browsers load as images.
+fn tokenized_index(token: &str) -> String {
+    INDEX_HTML
+        .replace("/api/thumb?id=", &format!("/api/thumb?token={token}&id="))
+        .replace("/api/preview?id=", &format!("/api/preview?token={token}&id="))
+}
+
+/// Browsers with Fetch Metadata identify a request initiated by another site.
+/// Missing is accepted deliberately: curl and other local non-browser clients
+/// do not send this header.
+fn fetch_site_is_cross_site(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("cross-site"))
+}
+
+fn image_token_matches(url: &str, expected: &str) -> bool {
+    query_param(url, "token").as_deref() == Some(expected)
+}
+
 struct AppState {
     /// The working directory the gallery lists from. Behind a lock so the UI can
     /// switch folders at runtime (POST /api/setdir re-scans and swaps it + `raws`).
@@ -104,6 +130,14 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
     // Sources = RAWs + already-baked PNG/TIFF/JPEG (the PNG-source edit mode).
     let raws = pipeline::find_sources(dir)?;
     let n = raws.len();
+    let image_token = Arc::new(session_token()?);
+    let requested_addr = format!("127.0.0.1:{port}");
+    let server = Server::http(&requested_addr)
+        .map_err(|e| anyhow!("start server on {requested_addr}: {e}"))?;
+    // Preserve the useful `--port 0` convention: the socket is already bound,
+    // so this is the single authoritative port for the banner and all guards.
+    let port = server_port(&server)?;
+    let addr = format!("127.0.0.1:{port}");
     let state = Arc::new(AppState {
         dir: RwLock::new(dir.to_path_buf()),
         raws: RwLock::new(raws),
@@ -112,8 +146,6 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
         installed_gen: std::sync::atomic::AtomicU64::new(0),
         port,
     });
-    let addr = format!("127.0.0.1:{port}");
-    let server = Server::http(&addr).map_err(|e| anyhow!("start server on {addr}: {e}"))?;
     // Reclaim download/mask temp files a previous run failed to unlink —
     // Windows has no automatic %TEMP% cleaner, so nobody else ever would.
     sweep_stale_temp_files();
@@ -133,15 +165,24 @@ pub fn serve(dir: &Path, port: u16) -> Result<()> {
     let gate = Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
     for request in server.incoming_requests() {
         let state = Arc::clone(&state);
+        let image_token = Arc::clone(&image_token);
         let permit = Permit::acquire(Arc::clone(&gate), MAX_CONCURRENT);
         std::thread::spawn(move || {
             let _permit = permit;
-            if let Err(e) = handle(request, &state) {
+            if let Err(e) = handle(request, &state, image_token.as_str()) {
                 eprintln!("request error: {e}");
             }
         });
     }
     Ok(())
+}
+
+fn server_port(server: &Server) -> Result<u16> {
+    server
+        .server_addr()
+        .to_ip()
+        .map(|addr| addr.port())
+        .ok_or_else(|| anyhow!("local HTTP server did not bind an IP socket"))
 }
 
 /// One of the eight request slots, released on DROP.
@@ -257,16 +298,20 @@ fn loopback(h: &str, port: u16) -> bool {
 
 /// Refuse anything a HOSTILE WEB PAGE could send us.
 ///
-/// Binding 127.0.0.1 protects nothing on its own: any page the user visits
-/// can POST to `http://127.0.0.1:<port>` without a preflight (simple
-/// requests), and a DNS-rebinding host — a name that resolves to the
-/// attacker first and to 127.0.0.1 seconds later — becomes "same origin" and
-/// can READ the answers too (gallery paths, photos, settings incl. the API
-/// key). Both attacks necessarily carry a foreign `Host` (the rebound name)
-/// or a foreign `Origin`, so requiring the literal loopback host and a
-/// same-origin (or absent — same-origin GETs and our own tooling) Origin
-/// removes the entire class. Returns the refusal to send, or None to accept.
+/// Binding 127.0.0.1 protects nothing on its own: another page can address
+/// that socket directly, and cross-site image GETs need not carry `Origin`.
+/// Browsers that implement Fetch Metadata identify those requests with
+/// `Sec-Fetch-Site: cross-site`; an absent header remains accepted so curl
+/// and other local tooling keep working. The literal loopback `Host` and
+/// same-origin (or absent) `Origin` checks still stop DNS rebinding and
+/// cross-origin API requests. Returns the refusal to send, or None to accept.
 fn foreign_origin(request: &Request, port: u16) -> Option<ResponseBox> {
+    if fetch_site_is_cross_site(req_header(request, "Sec-Fetch-Site").as_deref()) {
+        return Some(status_response(
+            403,
+            "refused: this request was initiated by a cross-site web page",
+        ));
+    }
     if let Some(host) = req_header(request, "Host")
         && !loopback(&host, port)
     {
@@ -322,13 +367,22 @@ fn stale_generation(request: &Request, state: &AppState) -> Option<ResponseBox> 
     }
 }
 
-fn handle(mut request: Request, state: &AppState) -> Result<()> {
+fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<()> {
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("/");
     let is_post = request.method() == &tiny_http::Method::Post;
 
     if let Some(refusal) = foreign_origin(&request, state.port) {
         return request.respond(refusal).map_err(Into::into);
+    }
+    if matches!(path, "/api/thumb" | "/api/preview") && !image_token_matches(&url, image_token) {
+        return request
+            .respond(status_response(
+                403,
+                "this image link belongs to another Autoshop server session; reopen the printed \
+                 Autoshop UI URL to refresh the page and its image links",
+            ))
+            .map_err(Into::into);
     }
     if id_bound_mutation(path)
         && let Some(stale) = stale_generation(&request, state)
@@ -339,7 +393,7 @@ fn handle(mut request: Request, state: &AppState) -> Result<()> {
     // Handlers BUILD a response instead of consuming the request, so the request
     // is still ours when one of them fails.
     let reply = match (is_post, path) {
-        (false, "/") => Ok(html_response(INDEX_HTML)),
+        (false, "/") => Ok(html_response(&tokenized_index(image_token))),
         (false, "/api/list") => api_list(&request, state),
         (false, "/api/thumb") => api_image(&request, state, 256),
         (false, "/api/preview") => api_image(&request, state, PREVIEW_EDGE),
@@ -1653,6 +1707,117 @@ fn denoise_opts(req: &DevelopReq, cfg: &Config) -> Option<DenoiseOpts> {
         .then(|| DenoiseOpts::from_config(cfg, None, req.denoise_strength.unwrap_or(1.0)))
 }
 
+fn export_slot_path(
+    out_dir: &Path,
+    stem: &str,
+    suffix: u32,
+    kind: &str,
+    ext: &str,
+) -> PathBuf {
+    let named_stem =
+        if suffix == 1 { stem.to_string() } else { format!("{stem} ({suffix})") };
+    out_dir.join(format!("{named_stem}.{kind}.{ext}"))
+}
+
+/// Assign one persistent output slot to this lexical `photo_key`. Registry
+/// entries are atomically claimed, so parallel server processes cannot assign
+/// the same suffix to different photos.
+fn registered_export_out(
+    raw: &Path,
+    kind: &str,
+    ext: &str,
+    out_dir: &Path,
+) -> Result<PathBuf> {
+    let stem = pipeline::stem(raw);
+    let registry_stem =
+        if cfg!(windows) { stem.to_ascii_lowercase() } else { stem.to_string() };
+    let group = out_dir
+        .join(".autoshop-export-registry")
+        .join(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry_stem.as_bytes()));
+    std::fs::create_dir_all(&group)
+        .with_context(|| format!("create export registry {}", group.display()))?;
+
+    // Use the store's standing lexical identity exactly as decided. The
+    // absolute source line is only a human-readable breadcrumb analogous to
+    // the develop store's source.txt; it is never canonicalized or compared.
+    let photo_key = crate::store::photo_key(raw);
+    let source = std::path::absolute(raw).unwrap_or_else(|_| raw.to_path_buf());
+    let owner_record = format!("{photo_key}\n{}\n", source.display());
+
+    for suffix in 1..=999u32 {
+        let entry = group.join(format!("{suffix}.owner"));
+        loop {
+            match std::fs::read_to_string(&entry) {
+                Ok(text) => {
+                    if text.lines().next() == Some(photo_key.as_str()) {
+                        return Ok(export_slot_path(out_dir, stem, suffix, kind, ext));
+                    }
+                    // Another photo, an unregistered legacy artifact, or a
+                    // malformed-but-readable claim owns this slot. Never
+                    // reinterpret it from request order after a restart.
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let out = export_slot_path(out_dir, stem, suffix, kind, ext);
+                    // One suffix owns both formats. Otherwise a pre-registry
+                    // TIFF could be preserved today but overwritten when the
+                    // same assigned photo later switched from JPEG to TIFF.
+                    let disk_occupied = ["jpg", "tif"].into_iter().any(|candidate_ext| {
+                        export_slot_path(out_dir, stem, suffix, kind, candidate_ext).exists()
+                    });
+                    let claim =
+                        if disk_occupied { "unclaimed\n".to_string() } else { owner_record.clone() };
+
+                    use std::io::Write as _;
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&entry)
+                    {
+                        Ok(mut file) => {
+                            if let Err(write_err) =
+                                file.write_all(claim.as_bytes()).and_then(|()| file.sync_all())
+                            {
+                                drop(file);
+                                let _ = std::fs::remove_file(&entry);
+                                return Err(write_err).with_context(|| {
+                                    format!("write export owner {}", entry.display())
+                                });
+                            }
+                            if disk_occupied {
+                                // An artifact with no ownership record cannot
+                                // safely be attributed to whichever photo
+                                // happened to export first after the upgrade.
+                                break;
+                            }
+                            return Ok(out);
+                        }
+                        Err(claim_err)
+                            if claim_err.kind() == std::io::ErrorKind::AlreadyExists =>
+                        {
+                            // A parallel process decided this slot; reread its
+                            // completed or conservative partial claim.
+                            continue;
+                        }
+                        Err(claim_err) => {
+                            return Err(claim_err).with_context(|| {
+                                format!("claim export owner {}", entry.display())
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Guessing past an unreadable ownership record could make
+                    // the same photo change suffix after a transient I/O error.
+                    return Err(e)
+                        .with_context(|| format!("read export owner {}", entry.display()));
+                }
+            }
+        }
+    }
+    anyhow::bail!("no free export name for {stem} (999 persistent slots in ./out)")
+}
+
 /// Resolve the pixel source for a DELIVERABLE (export / download) and repair
 /// the recipe's base curve exactly once. `Err` carries the response to return.
 ///
@@ -1717,12 +1882,16 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(v) => v,
         Err(resp) => return Ok(resp),
     };
-    // Fixed name BY DESIGN: re-exporting the same photo replaces its own
-    // previous deliverable. Recorded residual: two same-stem photos from
-    // DIFFERENT folders share this name (the batch-naming avoidance ruling
-    // covered CLI batches; single exports mirror the GUI's policy).
-    let out = pipeline::default_out(&raw, "developed", fmt_ext(&req));
-    pipeline::ensure_parent(&out)?;
+    // Re-exporting one photo replaces its own persistent slot, while a
+    // different same-stem photo keeps the lowest separately-owned suffix.
+    // Claims land before rendering, so failure cannot let a later run assign
+    // this photo's name to another source.
+    let out = registered_export_out(
+        &raw,
+        "developed",
+        fmt_ext(&req),
+        Path::new("out"),
+    )?;
     // Config SNAPSHOT: the read guard held across a multi-minute render
     // blocked every settings save (same rule as api_retouch/api_heal).
     let cfg = state.config().clone();
@@ -2758,4 +2927,95 @@ mod tests {
         assert_eq!(percent_decode("bad%ZZ"), "bad%ZZ"); // invalid escape passes through
         assert_eq!(percent_decode("tail%E6"), "tail\u{fffd}"); // truncated UTF-8 → replacement
     }
+
+        #[test]
+        fn cross_site_fetches_and_stale_image_links_are_refused_without_breaking_local_tools() {
+            assert!(fetch_site_is_cross_site(Some("cross-site")));
+            assert!(fetch_site_is_cross_site(Some(" Cross-Site ")));
+            assert!(!fetch_site_is_cross_site(Some("same-origin")));
+            assert!(
+                !fetch_site_is_cross_site(None),
+                "curl and other non-browser clients omit Fetch Metadata"
+            );
+
+            let token = "this-server-session";
+            let html = tokenized_index(token);
+            assert!(html.contains("/api/thumb?token=this-server-session&id="));
+            assert!(html.contains("/api/preview?token=this-server-session&id="));
+            assert!(!html.contains("/api/thumb?id="));
+            assert!(!html.contains("/api/preview?id="));
+
+            assert!(image_token_matches(
+                "/api/thumb?token=this-server-session&id=3",
+                token
+            ));
+            assert!(!image_token_matches("/api/thumb?id=3", token));
+            assert!(!image_token_matches(
+                "/api/thumb?token=an-earlier-session&id=3",
+                token
+            ));
+
+            let first = session_token().unwrap();
+            let second = session_token().unwrap();
+            assert_eq!(first.len(), 43, "32 random bytes in unpadded base64url");
+            assert!(first.is_ascii());
+            assert_ne!(first, second, "each server start gets a fresh capability");
+        }
+
+        #[test]
+        fn same_stem_exports_keep_their_persistent_slots_and_preserve_unknown_artifacts() {
+            let dir = std::env::temp_dir().join(format!(
+                "autoshop-serve-export-registry-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let out = dir.join("out");
+
+            let photo_a = dir.join("roll-a").join("DSC001.ARW");
+            let photo_b = dir.join("roll-b").join("DSC001.ARW");
+            let a = registered_export_out(&photo_a, "developed", "tif", &out).unwrap();
+            assert_eq!(a, out.join("DSC001.developed.tif"));
+            std::fs::write(&a, b"photo A").unwrap();
+
+            let b = registered_export_out(&photo_b, "developed", "tif", &out).unwrap();
+            assert_eq!(b, out.join("DSC001 (2).developed.tif"));
+            // Simulate the opposite request order after a restart: ownership is
+            // read from disk, not reassigned from encounter order.
+            assert_eq!(
+                registered_export_out(&photo_b, "developed", "tif", &out).unwrap(),
+                b
+            );
+            assert_eq!(
+                registered_export_out(&photo_a, "developed", "tif", &out).unwrap(),
+                a
+            );
+
+            // A pre-registry artifact has no trustworthy photo identity. It stays
+            // untouched and permanently reserves the bare slot.
+            let unknown = out.join("DSC002.developed.tif");
+            std::fs::write(&unknown, b"an earlier unknown artifact").unwrap();
+            let photo_c = dir.join("roll-c").join("DSC002.ARW");
+            assert_eq!(
+                registered_export_out(&photo_c, "developed", "tif", &out).unwrap(),
+                out.join("DSC002 (2).developed.tif")
+            );
+            assert_eq!(
+                std::fs::read(&unknown).unwrap(),
+                b"an earlier unknown artifact"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn an_ephemeral_bind_reports_and_checks_the_actual_port() {
+            let server = Server::http("127.0.0.1:0").unwrap();
+            let port = server_port(&server).unwrap();
+            assert_ne!(port, 0, "the OS assigned a usable ephemeral port");
+            assert!(
+                loopback(&format!("127.0.0.1:{port}"), port),
+                "the authority printed to the browser must pass the same origin guard"
+            );
+        }
 }

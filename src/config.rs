@@ -104,6 +104,45 @@ impl LocalSettings {
 /// as hand-editable, so a typo is the expected vector, and the loss was
 /// permanent and unannounced. Now the bytes are preserved beside the original
 /// and the reader moves on to the next candidate.
+fn preserve_corrupt_settings(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
+
+    static CORRUPT_SEQ: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    for _ in 0..16 {
+        let kept = path.with_extension(format!(
+            "json.corrupt.{}-{}",
+            std::process::id(),
+            CORRUPT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut file = match opts.open(&kept) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&kept);
+            return Err(e);
+        }
+        drop(file);
+        // The unique copy now owns the bytes; removing the malformed live
+        // file avoids rescuing the same incident again on every launch.
+        let _ = std::fs::remove_file(path);
+        return Ok(kept);
+    }
+    Err(std::io::Error::other(
+        "could not claim a corrupt-settings rescue file",
+    ))
+}
+
 pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
     for (p, origin) in [
         (local_settings_path(), SettingsOrigin::Central),
@@ -116,12 +155,11 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
                 // Keep the bytes: they hold the user's API keys, and a save is
                 // about to overwrite this path. Best-effort and once — a
                 // second launch must not clobber the first rescue.
-                let kept = p.with_extension("json.corrupt");
-                let saved = !kept.exists() && std::fs::rename(&p, &kept).is_ok();
+                let kept = preserve_corrupt_settings(&p, s.as_bytes()).ok();
                 eprintln!(
                     "warning: {} is not valid JSON ({e}) — ignoring it{}",
                     p.display(),
-                    if saved {
+                    if let Some(kept) = &kept {
                         format!("; your settings were preserved at {}", kept.display())
                     } else {
                         String::new()
@@ -311,15 +349,23 @@ impl Config {
         // Everything else — keys, model names, providers, tuning numbers — is
         // still honoured from `.env`, which is where this project's own key
         // lives.
-        const AMBIENT_UNSAFE_VARS: [&str; 6] = [
+        const AMBIENT_UNSAFE_VARS: [&str; 14] = [
             "AUTOSHOP_OPENAI_BASE_URL",
             "AUTOSHOP_ANALYSIS_BASE_URL",
             "AUTOSHOP_CLAUDE_BIN",
             "AUTOSHOP_PYTHON",
             "AUTOSHOP_DENOISE_SCRIPT",
             "AUTOSHOP_SEGMENT_SCRIPT",
+            "PATH",
+            "AUTOSHOP_DATA_DIR",
+            "AUTOSHOP_ANALYSIS_PROVIDER",
+            "AUTOSHOP_ANALYSIS_MODEL",
+            "AUTOSHOP_CLAUDE_MODEL",
+            "AUTOSHOP_OPENAI_MODEL",
+            "AUTOSHOP_OPENAI_IMAGE_MODEL",
+            "AUTOSHOP_IMAGE_PROVIDER",
         ];
-        static PRE_DOTENV: std::sync::OnceLock<[Option<String>; 6]> = std::sync::OnceLock::new();
+        static PRE_DOTENV: std::sync::OnceLock<[Option<String>; 14]> = std::sync::OnceLock::new();
         let pre_dotenv = PRE_DOTENV.get_or_init(|| {
             let before = AMBIENT_UNSAFE_VARS.map(|k| env::var(k).ok());
             let _ = dotenvy::dotenv_override();
@@ -330,6 +376,20 @@ impl Config {
                          directory (or any parent) is not trusted to choose where your API key \
                          is sent or which program is run. Set it in your own environment."
                     );
+                }
+            }
+            // Reading protected values from the snapshot is insufficient for
+            // PATH and the data root: their consumers consult the live process
+            // environment. Restore every protected variable so later consumers
+            // see exactly the authority the process started with.
+            for (k, value) in AMBIENT_UNSAFE_VARS.iter().zip(before.iter()) {
+                // This is the same one-time, pre-worker initialization window
+                // in which dotenv_override above mutates the environment.
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(k, value),
+                        None => env::remove_var(k),
+                    }
                 }
             }
             before
@@ -373,11 +433,11 @@ impl Config {
         let default_base = "https://api.openai.com/v1";
         Config {
             openai_api_key: pick_opt(&local.image_api_key, nonempty("OPENAI_API_KEY")),
-            openai_model: pick(&local.image_model, nonempty("AUTOSHOP_OPENAI_MODEL"), "gpt-5.5"),
+            openai_model: pick(&local.image_model, pre(11), "gpt-5.5"),
             openai_base_url: pick(&local.image_base_url, pre(0), default_base),
             openai_image_model: pick(
                 &local.image_gen_model,
-                nonempty("AUTOSHOP_OPENAI_IMAGE_MODEL"),
+                pre(12),
                 "gpt-image-1.5",
             ),
             openai_image_quality: nonempty("AUTOSHOP_IMAGE_QUALITY").unwrap_or_else(|| "high".to_string()),
@@ -386,18 +446,18 @@ impl Config {
                 .unwrap_or(8_294_400),
             image_provider: pick(
                 &local.image_provider,
-                nonempty("AUTOSHOP_IMAGE_PROVIDER"),
+                pre(13),
                 "api",
             ),
 
             analysis_provider: pick(
                 &local.analysis_provider,
-                nonempty("AUTOSHOP_ANALYSIS_PROVIDER"),
+                pre(8),
                 "oauth",
             ),
             analysis_model: pick(
                 &local.analysis_model,
-                nonempty("AUTOSHOP_ANALYSIS_MODEL").or_else(|| nonempty("AUTOSHOP_CLAUDE_MODEL")),
+                pre(9).or_else(|| pre(10)),
                 "opus",
             ),
             claude_bin: pre(2).unwrap_or_else(|| "claude".to_string()),
@@ -515,6 +575,14 @@ mod tests {
             "AUTOSHOP_PYTHON",
             "AUTOSHOP_DENOISE_SCRIPT",
             "AUTOSHOP_SEGMENT_SCRIPT",
+            "PATH",
+            "AUTOSHOP_DATA_DIR",
+            "AUTOSHOP_ANALYSIS_PROVIDER",
+            "AUTOSHOP_ANALYSIS_MODEL",
+            "AUTOSHOP_CLAUDE_MODEL",
+            "AUTOSHOP_OPENAI_MODEL",
+            "AUTOSHOP_OPENAI_IMAGE_MODEL",
+            "AUTOSHOP_IMAGE_PROVIDER",
         ];
         let src = include_str!("config.rs");
         // The list in `Config::load` is the guard; if a variable is resolved
@@ -531,8 +599,8 @@ mod tests {
         // documented list, so the two cannot drift apart silently.
         assert_eq!(
             must_cover.len(),
-            6,
-            "AMBIENT_UNSAFE_VARS has 6 entries; update both this list and the constant together"
+            14,
+            "AMBIENT_UNSAFE_VARS has 14 entries; update both this list and the constant together"
         );
     }
 
@@ -587,4 +655,86 @@ mod tests {
         assert_eq!(merged.analysis_model.as_deref(), Some("opus"));
         assert_eq!(merged.image_model.as_deref(), Some("gpt-5.6-sol"));
     }
+
+        #[test]
+        fn a_dotenv_cannot_rewrite_process_search_data_or_billing_authority() {
+            const CHILD: &str = "AUTOSHOP_DOTENV_AUTHORITY_TEST_CHILD";
+            if env::var_os(CHILD).is_some() {
+                let path_before = env::var_os("PATH");
+                let data_before = env::var_os("AUTOSHOP_DATA_DIR");
+                let cfg = Config::load();
+
+                assert_eq!(env::var_os("PATH"), path_before, "dotenv rewrote executable search");
+                assert_eq!(
+                    env::var_os("AUTOSHOP_DATA_DIR"),
+                    data_before,
+                    "dotenv redirected the trusted settings root"
+                );
+                assert_eq!(cfg.analysis_provider, "oauth", "dotenv initiated an API verifier call");
+                assert_eq!(
+                    cfg.analysis_api_key.as_deref(),
+                    Some("dotenv-key"),
+                    "ordinary secret keys in the user's dotenv remain supported"
+                );
+                return;
+            }
+
+            let dir = env::temp_dir().join(format!(
+                "autoshop-dotenv-authority-{}-{}",
+                std::process::id(),
+                crate::store::next_tmp_seq()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(".env"),
+                "PATH=.\n\
+                 AUTOSHOP_DATA_DIR=.\n\
+                 AUTOSHOP_ANALYSIS_PROVIDER=api\n\
+                 AUTOSHOP_ANALYSIS_API_KEY=dotenv-key\n",
+            )
+            .unwrap();
+            let trusted_data = dir.join("trusted-data");
+            let output = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::a_dotenv_cannot_rewrite_process_search_data_or_billing_authority",
+                    "--nocapture",
+                ])
+                .current_dir(&dir)
+                .env(CHILD, "1")
+                .env("PATH", "trusted-search-path")
+                .env("AUTOSHOP_DATA_DIR", &trusted_data)
+                .env_remove("AUTOSHOP_ANALYSIS_PROVIDER")
+                .env_remove("AUTOSHOP_ANALYSIS_API_KEY")
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                output.status.success(),
+                "child failed:\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[test]
+        fn repeated_corrupt_settings_incidents_get_distinct_rescue_files() {
+            let dir = env::temp_dir().join(format!(
+                "autoshop-corrupt-settings-{}-{}",
+                std::process::id(),
+                crate::store::next_tmp_seq()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("autoshop.local.json");
+
+            let first = preserve_corrupt_settings(&path, b"{first").unwrap();
+            let second = preserve_corrupt_settings(&path, b"{second").unwrap();
+            assert_ne!(first, second, "a later incident reused the old rescue name");
+            assert_eq!(std::fs::read(first).unwrap(), b"{first");
+            assert_eq!(std::fs::read(second).unwrap(), b"{second");
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+    // FILE: src/generative.rs  (append inside the existing `mod tests`)
 }

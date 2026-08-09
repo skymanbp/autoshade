@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::decode::{Histogram, Meta};
 use crate::recipe::EditRecipe;
 
-use super::{balanced_objects, build_verify_prompt, strip_code_fence, Advisor, AdvisorError, Verdict};
+use super::{build_verify_prompt, parse_verdict, Advisor, AdvisorError, Verdict};
 
 pub struct OpenAiVerifier {
     api_key: Option<String>,
@@ -88,28 +88,16 @@ impl Advisor for OpenAiVerifier {
             .and_then(|m| m.get("content"))
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                AdvisorError::Transport(format!(
-                    "no choices[0].message.content in chat response: {value}"
-                ))
+                AdvisorError::ModelFailure(
+                    super::BoundedUntrustedText::diagnostic(
+                        &format!("no choices[0].message.content in chat response: {value}"),
+                        &[key],
+                    )
+                    .into_string(),
+                )
             })?;
 
-        // The model is told to emit bare Verdict JSON; tolerate a fence/preamble
-        // exactly like the Claude path (try bare, then the last balanced object).
-        let cleaned = strip_code_fence(text);
-        match serde_json::from_str::<Verdict>(cleaned) {
-            Ok(v) => Ok(v),
-            Err(first_err) => {
-                let mut found = None;
-                for cand in balanced_objects(text) {
-                    if let Ok(v) = serde_json::from_str::<Verdict>(cand) {
-                        found = Some(v);
-                    }
-                }
-                found.ok_or_else(|| AdvisorError::BadVerdict {
-                    source: first_err,
-                    got: text.chars().take(400).collect(),
-                })
-            }
-        }
+        // The shared parser bounds both recovery work and every returned string.
+        parse_verdict(text, &[key])
     }
 }
