@@ -63,18 +63,34 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
         // and has NO console, so inherited handles discard the sidecar's output —
         // the reason a missing dependency used to surface as a bare exit code.
         // The tail goes into the error instead, which reaches the GUI toast.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Don't flash a console window when the windowed GUI spawns the sidecar.
     crate::hide_child_console(&mut cmd);
-    let out = cmd.output().with_context(|| {
-        format!(
-            "launch segmentation sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
-            opts.python_bin,
-            opts.script.display()
+    let run = (|| -> Result<std::process::Output> {
+        let child = cmd.spawn().with_context(|| {
+            format!(
+                "launch segmentation sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
+                opts.python_bin,
+                opts.script.display()
+            )
+        })?;
+        crate::denoise::bounded_child_output(
+            child,
+            "segmentation sidecar",
+            crate::denoise::sidecar_timeout(),
         )
-    })?;
+    })();
+    let out = match run {
+        Ok(out) => out,
+        Err(error) => {
+            crate::denoise::discard_failed_output(output, before);
+            return Err(error);
+        }
+    };
     if !out.status.success() {
+        crate::denoise::discard_failed_output(output, before);
         bail!(
             "segmentation sidecar exited with {}: {}",
             out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
@@ -83,7 +99,11 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
     }
     // Exit 0 alone is not success — THIS run must have produced a non-empty
     // mask (see `crate::sidecar_wrote` for the three refusals).
-    crate::sidecar_wrote("segmentation sidecar", output, before)
+    let wrote = crate::sidecar_wrote("segmentation sidecar", output, before);
+    if wrote.is_err() {
+        crate::denoise::discard_failed_output(output, before);
+    }
+    wrote
 }
 
 #[cfg(test)]

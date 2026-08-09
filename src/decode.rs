@@ -98,6 +98,67 @@ pub fn is_raw(path: &Path) -> bool {
     })
 }
 
+/// Transform profiled pixels into the sRGB working space the whole pipeline
+/// assumes. A baked import that carries an ICC profile (LR "Edit in…" exports
+/// ProPhoto 16-bit TIFFs by default) used to be read as if it were sRGB, so
+/// the histogram, tone and HSL decisions were all computed on wrong numbers.
+/// Unsupported layouts and unparseable profiles are hard errors, not a silent
+/// fall-through to "assume sRGB" — that fall-through IS the bug, and in a
+/// batch run it would pay for a grade computed from incorrect colors.
+fn apply_icc_profile(img: &mut DynamicImage, profile: &[u8], path: &Path) -> Result<()> {
+    let input = qcms::Profile::new_from_slice(profile, false)
+        .ok_or_else(|| anyhow!("invalid ICC profile in {}", path.display()))?;
+    let output = qcms::Profile::new_sRGB();
+    let color_type = img.color();
+    let (pixels, data_type): (&mut [u8], qcms::DataType) = match img {
+        DynamicImage::ImageRgb8(rgb) => {
+            (rgb.as_flat_samples_mut().samples, qcms::DataType::RGB8)
+        }
+        DynamicImage::ImageRgba8(rgba) => {
+            (rgba.as_flat_samples_mut().samples, qcms::DataType::RGBA8)
+        }
+        _ => anyhow::bail!(
+            "ICC profile in {} accompanies {color_type:?} pixels, but qcms has no matching \
+             transform that preserves this image's channel layout and bit depth",
+            path.display()
+        ),
+    };
+    let transform = qcms::Transform::new(
+        &input,
+        &output,
+        data_type,
+        qcms::Intent::Perceptual,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "ICC profile in {} cannot transform {color_type:?} pixels into sRGB",
+            path.display()
+        )
+    })?;
+    transform.apply(pixels);
+    Ok(())
+}
+
+const MAX_ALLOC: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Peak output-buffer bytes for a decode followed by `apply_orientation`: the
+/// four rotating variants allocate a SECOND full buffer (`rotate90()` /
+/// `rotate270()` return new images; 180°/flips are in-place), so the old
+/// `total_bytes()`-only check let peak storage reach twice the 4 GiB ceiling.
+fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u64 {
+    if matches!(
+        orientation,
+        image::metadata::Orientation::Rotate90
+            | image::metadata::Orientation::Rotate270
+            | image::metadata::Orientation::Rotate90FlipH
+            | image::metadata::Orientation::Rotate270FlipH
+    ) {
+        need.saturating_mul(2)
+    } else {
+        need
+    }
+}
+
 /// Load a baked raster (PNG/TIFF/JPEG) with a RAISED (not lifted) decoder
 /// memory limit — a 60 MP export trips the image crate's default cap, but
 /// `no_limits()` let a corrupt header with absurd declared dimensions drive an
@@ -115,28 +176,58 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
     limits.max_image_height = Some(65_536);
     limits.max_alloc = Some(4 * 1024 * 1024 * 1024);
     reader.limits(limits);
-    let mut decoder = reader
+    let reader = reader
         .with_guessed_format()
-        .with_context(|| format!("probe image {}", path.display()))?
+        .with_context(|| format!("probe image {}", path.display()))?;
+    let format = reader.format();
+    let mut decoder = reader
         .into_decoder()
         .with_context(|| format!("decode image {}", path.display()))?;
     // into_decoder enforces the DIMENSION limits but skips decode()'s
     // total_bytes reservation — without this check max_alloc never bounded
     // the OUTPUT buffer (a 65536² 16-bit RGBA header passes the dimension
     // gate yet decodes to ~32 GiB).
-    let need = decoder.total_bytes();
-    const MAX_ALLOC: u64 = 4 * 1024 * 1024 * 1024;
-    if need > MAX_ALLOC {
-        anyhow::bail!(
-            "image {} decodes to {need} bytes — over the {MAX_ALLOC}-byte ceiling",
-            path.display()
-        );
-    }
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let decoded_bytes = decoder.total_bytes();
+    let need = decode_peak_bytes(decoded_bytes, orientation);
+    if need >= MAX_ALLOC {
+        anyhow::bail!(
+            "image {} needs {need} bytes at peak (decode {decoded_bytes}, then orientation) \
+             — at or over the {MAX_ALLOC}-byte ceiling",
+            path.display()
+        );
+    }
+    let icc_profile = decoder
+        .icc_profile()
+        .with_context(|| format!("read ICC profile {}", path.display()))?;
+    // image 0.25's TiffDecoder::set_limits breaks IFD tag-value reads: the
+    // tiff crate accounts a tag read as count × size_of::<Value>() (~32 bytes
+    // per profile BYTE) against `decoding_buffer_size`, which set_limits pins
+    // to the image's own byte size — probed empirically ("decoder limits
+    // exceeded", swallowed by `.ok()` inside the codec into a silent None).
+    // Big LR exports clear the budget; small profiled TIFFs would silently
+    // skip the transform — the exact assume-sRGB bug this function fixes. Ask
+    // a fresh, header-only decoder instead; its tag reads run under the tiff
+    // crate's own 1 MiB per-value default, and NO pixel is ever decoded here.
+    let icc_profile = match icc_profile {
+        Some(p) => Some(p),
+        None if format == Some(image::ImageFormat::Tiff) => {
+            image::codecs::tiff::TiffDecoder::new(std::io::BufReader::new(
+                std::fs::File::open(path)
+                    .with_context(|| format!("open image {}", path.display()))?,
+            ))
+            .ok()
+            .and_then(|mut d| d.icc_profile().ok().flatten())
+        }
+        None => None,
+    };
     let mut img = DynamicImage::from_decoder(decoder)
         .with_context(|| format!("decode image {}", path.display()))?;
+    if let Some(profile) = icc_profile {
+        apply_icc_profile(&mut img, &profile, path)?;
+    }
     img.apply_orientation(orientation);
     Ok(img)
 }
@@ -475,5 +566,162 @@ mod tests {
         assert!(embedded_preview(&garbage).is_err(), "…and never a silent None");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A minimal ICC v2 RGB matrix/TRC profile, built byte-by-byte so the
+    /// test needs no binary asset (Adobe's sRGB profile is not
+    /// redistributable). sRGB D50-adapted primaries, linear TRCs (count=0
+    /// curv) — enough for qcms to build an RGB8 transform.
+    fn build_test_icc() -> Vec<u8> {
+        let mut p = vec![0u8; 128];
+        let be = |v: u32| v.to_be_bytes();
+        p[8] = 0x02; // version 2.0; bytes 10..12 stay 0 (qcms checks them)
+        p[12..16].copy_from_slice(b"mntr");
+        p[16..20].copy_from_slice(b"RGB ");
+        p[20..24].copy_from_slice(b"XYZ ");
+        p[36..40].copy_from_slice(b"acsp");
+        // rendering intent @64 already 0 = Perceptual
+        // D50 illuminant @68 (s15Fixed16), read by some CMMs; harmless if not
+        p[68..72].copy_from_slice(&be(0x0000F6D6));
+        p[72..76].copy_from_slice(&be(0x00010000));
+        p[76..80].copy_from_slice(&be(0x0000D32D));
+
+        let xyz = |x: u32, y: u32, z: u32| {
+            let mut t = Vec::new();
+            t.extend_from_slice(b"XYZ ");
+            t.extend_from_slice(&be(0));
+            for v in [x, y, z] {
+                t.extend_from_slice(&be(v));
+            }
+            t
+        };
+        // linear TRC: 'curv' + reserved + count=0
+        let curv: Vec<u8> = [b"curv".as_slice(), &be(0), &be(0)].concat();
+        // sRGB primaries adapted to D50, in s15Fixed16 (value * 65536)
+        let tags: [(&[u8; 4], Vec<u8>); 6] = [
+            (b"rXYZ", xyz(28573, 14582, 911)),
+            (b"gXYZ", xyz(25238, 46982, 6364)),
+            (b"bXYZ", xyz(9378, 3972, 46786)),
+            (b"rTRC", curv.clone()),
+            (b"gTRC", curv.clone()),
+            (b"bTRC", curv),
+        ];
+        p.extend_from_slice(&be(tags.len() as u32));
+        let mut offset = 128 + 4 + 12 * tags.len() as u32;
+        let mut data = Vec::new();
+        for (sig, body) in &tags {
+            p.extend_from_slice(*sig);
+            p.extend_from_slice(&be(offset));
+            p.extend_from_slice(&be(body.len() as u32));
+            offset += body.len() as u32;
+            data.extend_from_slice(body);
+        }
+        p.extend_from_slice(&data);
+        let len = be(p.len() as u32);
+        p[0..4].copy_from_slice(&len);
+        p
+    }
+
+    #[test]
+    fn embedded_icc_profiles_are_processed_or_rejected_loudly() {
+        use image::ImageEncoder as _;
+
+        let dir =
+            std::env::temp_dir().join(format!("autoshop-decode-icc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // PNG: the one format whose image-crate encoder round-trips an ICC
+        // blob (the TIFF encoder writes a tag its own decoder reads as None —
+        // probed; see the tiff dev-dependency note in Cargo.toml).
+        let write = |path: &std::path::Path, profile: &[u8]| {
+            let file = std::fs::File::create(path).unwrap();
+            let mut encoder = image::codecs::png::PngEncoder::new(file);
+            encoder.set_icc_profile(profile.to_vec()).unwrap();
+            encoder
+                .write_image(
+                    &[32, 128, 240],
+                    1,
+                    1,
+                    image::ExtendedColorType::Rgb8,
+                )
+                .unwrap();
+        };
+
+        let valid = dir.join("valid-profile.png");
+        write(&valid, &build_test_icc());
+        load_image(&valid).expect("a supported embedded profile is transformed");
+
+        let invalid = dir.join("invalid-profile.png");
+        write(&invalid, b"not an ICC profile");
+        assert!(
+            load_image(&invalid).is_err(),
+            "an invalid profile must not fall through to assumed sRGB"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The TIFF path is the one README's LR/Topaz round-trip actually takes,
+    /// and it needs the fallback query: image's `TiffDecoder::set_limits`
+    /// makes IFD tag-value reads fail ("decoder limits exceeded" — the tiff
+    /// crate charges ~32 bytes of budget per profile byte against the image's
+    /// own byte size), and the codec swallows that into `None`. Without the
+    /// fallback this fixture loads Ok with the profile silently ignored.
+    #[test]
+    fn a_profiled_tiff_reaches_the_transform_despite_the_limits_bug() {
+        let dir =
+            std::env::temp_dir().join(format!("autoshop-decode-icctiff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let write = |path: &std::path::Path, profile: &[u8]| {
+            let f = std::fs::File::create(path).unwrap();
+            let mut enc =
+                tiff::encoder::TiffEncoder::new(std::io::BufWriter::new(f)).unwrap();
+            let mut img = enc
+                .new_image::<tiff::encoder::colortype::RGB8>(1, 1)
+                .unwrap();
+            img.encoder()
+                .write_tag(tiff::tags::Tag::IccProfile, profile)
+                .unwrap();
+            img.write_data(&[32u8, 128, 240]).unwrap();
+        };
+
+        let valid = dir.join("valid-profile.tiff");
+        write(&valid, &build_test_icc());
+        load_image(&valid).expect("a profiled TIFF is transformed via the fallback query");
+
+        // The load-bearing half: an unparseable profile must ERROR. If the
+        // fallback is removed, the profile is never seen and this loads Ok.
+        let invalid = dir.join("invalid-profile.tiff");
+        write(&invalid, b"not an ICC profile");
+        assert!(
+            load_image(&invalid).is_err(),
+            "a TIFF profile must reach the parser, not vanish into the limits bug"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copying_orientations_fit_two_buffers_strictly_below_the_ceiling() {
+        use image::metadata::Orientation;
+
+        assert_eq!(
+            decode_peak_bytes(MAX_ALLOC / 2, Orientation::Rotate90),
+            MAX_ALLOC
+        );
+        assert!(
+            decode_peak_bytes(MAX_ALLOC / 2 - 1, Orientation::Rotate270FlipH) < MAX_ALLOC
+        );
+        assert_eq!(
+            decode_peak_bytes(MAX_ALLOC - 1, Orientation::Rotate180),
+            MAX_ALLOC - 1
+        );
+        assert_eq!(
+            decode_peak_bytes(MAX_ALLOC, Orientation::NoTransforms),
+            MAX_ALLOC
+        );
     }
 }

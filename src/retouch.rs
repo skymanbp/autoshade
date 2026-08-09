@@ -27,6 +27,47 @@ use serde_json::json;
 use crate::config::Config;
 use crate::decode;
 
+/// Runtime-only shape of one painted component. The pixels are bit-packed
+/// relative to the component's own bounding box, while the mask dimensions
+/// preserve the normalised mapping to any heal-image resolution.
+#[derive(Debug, Clone)]
+pub struct SpotCoverage {
+    mask_width: u32,
+    mask_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    bits: Vec<u64>,
+}
+
+impl SpotCoverage {
+    fn pixel(&self, x: i32, y: i32) -> f32 {
+        let lx = x - self.x as i32;
+        let ly = y - self.y as i32;
+        if lx < 0 || ly < 0 || lx >= self.width as i32 || ly >= self.height as i32 {
+            return 0.0;
+        }
+        let i = ly as usize * self.width as usize + lx as usize;
+        ((self.bits[i / 64] >> (i % 64)) & 1) as f32
+    }
+
+    /// Bilinear sampling makes boundary pixels fractional when the painted
+    /// canvas and healed image differ in resolution.
+    fn alpha_at(&self, nx: f32, ny: f32) -> f32 {
+        let x = nx.clamp(0.0, 1.0) * self.mask_width as f32 - 0.5;
+        let y = ny.clamp(0.0, 1.0) * self.mask_height as f32 - 0.5;
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+        let top = self.pixel(x0, y0) * (1.0 - fx) + self.pixel(x0 + 1, y0) * fx;
+        let bottom =
+            self.pixel(x0, y0 + 1) * (1.0 - fx) + self.pixel(x0 + 1, y0 + 1) * fx;
+        (top * (1.0 - fy) + bottom * fy).clamp(0.0, 1.0)
+    }
+}
+
 /// One heal target: a normalised circular region to repair by sampling nearby
 /// real pixels. `cx`/`cy` are 0..1 of the frame; `radius` is a fraction of the
 /// SHORT side. `source` is an optional explicit donor offset (normalised frame
@@ -39,6 +80,11 @@ pub struct HealSpot {
     pub radius: f32,
     pub feather: f32,
     pub source: Option<[f32; 2]>,
+    /// Exact painted component shape. AI-proposed circular spots leave this
+    /// unset; a saved manual retouch persists its finished pixel master, so
+    /// the raster never needs to survive serialisation.
+    #[serde(skip)]
+    pub coverage: Option<SpotCoverage>,
     /// CLONE semantics: copy the donor verbatim (feathered edge only), skipping
     /// the border tone-matching that makes a *heal* blend. This is Photoshop's
     /// clone stamp vs its healing brush — texture transplant vs seamless repair.
@@ -54,6 +100,7 @@ impl Default for HealSpot {
             radius: 0.02,
             feather: 0.4,
             source: None,
+            coverage: None,
             clone_raw: false,
             label: String::new(),
         }
@@ -126,7 +173,17 @@ where
             Some([sx, sy]) => ((sx * w as f32).round() as i32, (sy * h as f32).round() as i32),
             None => find_donor(&src, cx, cy, r),
         };
-        heal_one(&src, img, cx, cy, r, s.feather.clamp(0.0, 1.0), off, s.clone_raw);
+        heal_one(
+            &src,
+            img,
+            cx,
+            cy,
+            r,
+            s.feather.clamp(0.0, 1.0),
+            off,
+            s.clone_raw,
+            s.coverage.as_ref(),
+        );
     }
 }
 
@@ -216,6 +273,7 @@ fn heal_one<T: HealDepth>(
     feather: f32,
     off: (i32, i32),
     clone_raw: bool,
+    coverage: Option<&SpotCoverage>,
 ) where
     Rgb<T>: image::Pixel<Subpixel = T>,
 {
@@ -251,7 +309,7 @@ fn heal_one<T: HealDepth>(
                 continue;
             }
             // feathered weight: 1 inside `inner`, ramping to 0 at the edge.
-            let alpha = if d <= inner {
+            let mut alpha = if d <= inner {
                 1.0
             } else if r > inner {
                 (r - d) / (r - inner)
@@ -261,6 +319,17 @@ fn heal_one<T: HealDepth>(
             let (tx, ty) = (cx as i32 + dx, cy as i32 + dy);
             if tx < 0 || ty < 0 || tx >= w || ty >= h {
                 continue;
+            }
+            // A painted spot heals only its actual raster coverage — the
+            // enclosing disk was rewriting up to ~50x a thin stroke's area.
+            if let Some(coverage) = coverage {
+                alpha *= coverage.alpha_at(
+                    (tx as f32 + 0.5) / w as f32,
+                    (ty as f32 + 0.5) / h as f32,
+                );
+                if alpha <= 0.0 {
+                    continue;
+                }
             }
             let donor = px(src, tx + ox, ty + oy);
             let base = px(src, tx, ty);
@@ -337,12 +406,32 @@ pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
         let cxp = (sx / cnt as f64) as f32;
         let cyp = (sy / cnt as f64) as f32;
         let mut rad = 0f32;
+        let (mut min_x, mut min_y) = (u32::MAX, u32::MAX);
+        let (mut max_x, mut max_y) = (0u32, 0u32);
         for i in &pts {
-            let (x, y) = ((*i as usize % wu) as f32, (*i as usize / wu) as f32);
-            let dd = ((x - cxp).powi(2) + (y - cyp).powi(2)).sqrt();
+            let (x, y) = (*i as usize % wu, *i as usize / wu);
+            min_x = min_x.min(x as u32);
+            min_y = min_y.min(y as u32);
+            max_x = max_x.max(x as u32);
+            max_y = max_y.max(y as u32);
+            let dd = ((x as f32 - cxp).powi(2) + (y as f32 - cyp).powi(2)).sqrt();
             if dd > rad {
                 rad = dd;
             }
+        }
+        // bbox-local bit-packed raster (same u64-bitset rationale as `painted`
+        // above) — the circle stays as the search/feather envelope, the raster
+        // limits which pixels actually change.
+        let coverage_width = max_x - min_x + 1;
+        let coverage_height = max_y - min_y + 1;
+        let coverage_len = coverage_width as usize * coverage_height as usize;
+        let mut coverage_bits = vec![0u64; coverage_len.div_ceil(64)];
+        for i in &pts {
+            let x = (*i as usize % wu) as u32;
+            let y = (*i as usize / wu) as u32;
+            let local =
+                (y - min_y) as usize * coverage_width as usize + (x - min_x) as usize;
+            coverage_bits[local / 64] |= 1u64 << (local % 64);
         }
         rad = (rad * 1.1).max(2.0);
         spots.push(HealSpot {
@@ -351,6 +440,15 @@ pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
             radius: rad / short,
             feather: 0.4,
             source: None,
+            coverage: Some(SpotCoverage {
+                mask_width: w,
+                mask_height: h,
+                x: min_x,
+                y: min_y,
+                width: coverage_width,
+                height: coverage_height,
+                bits: coverage_bits,
+            }),
             clone_raw: false,
             label: "painted".into(),
         });
@@ -808,7 +906,7 @@ mod tests {
         }
         let spots = vec![HealSpot {
             cx: 0.5, cy: 0.5, radius: 7.0 / 64.0, feather: 0.4, source: None,
-            clone_raw: false, label: "x".into(),
+            coverage: None, clone_raw: false, label: "x".into(),
         }];
         heal_image(&mut img, &spots);
         let c = img.get_pixel(32, 32).0;
@@ -828,7 +926,8 @@ mod tests {
         }
         let spots = vec![HealSpot {
             cx: 30.0 / 40.0, cy: 0.5, radius: 4.0 / 20.0, feather: 0.2,
-            source: Some([-0.3, 0.0]), clone_raw: false, label: "spot".into(),
+            source: Some([-0.3, 0.0]), coverage: None,
+            clone_raw: false, label: "spot".into(),
         }];
         heal_image(&mut img, &spots);
         let c = img.get_pixel(30, 10).0;
@@ -853,6 +952,7 @@ mod tests {
             radius: 3.0 / 20.0,
             feather: 0.2,
             source: Some([(10.0 - 45.0) / 60.0, 0.0]), // donor centre at (10, 10)
+            coverage: None,
             clone_raw,
             label: "clone".into(),
         };
@@ -889,5 +989,46 @@ mod tests {
         assert_eq!(img, before, "no spots → image unchanged");
         let clean = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255])); // nothing painted
         assert!(plan_from_mask(&clean).is_empty());
+    }
+
+    #[test]
+    fn a_thin_painted_stroke_does_not_heal_its_bounding_disk() {
+        let mut mask = RgbaImage::from_pixel(100, 100, Rgba([0, 0, 0, 255]));
+        for y in 49..=50 {
+            for x in 20..80 {
+                mask.put_pixel(x, y, Rgba([255, 0, 0, 0]));
+            }
+        }
+        let mut spots = plan_from_mask(&mask);
+        assert_eq!(spots.len(), 1);
+        spots[0].source = Some([0.0, 0.3]);
+        spots[0].clone_raw = true;
+        spots[0].feather = 0.0;
+
+        let encoded = serde_json::to_value(&spots[0]).unwrap();
+        assert!(
+            encoded.get("coverage").is_none(),
+            "runtime raster coverage must not change the saved HealSpot shape"
+        );
+
+        let mut img = RgbImage::from_fn(100, 100, |_x, y| {
+            let v = (y * 2) as u8;
+            Rgb([v, v, v])
+        });
+        let unpainted_before = *img.get_pixel(50, 25);
+        let painted_before = *img.get_pixel(50, 50);
+
+        heal_image(&mut img, &spots);
+
+        assert_eq!(
+            *img.get_pixel(50, 25),
+            unpainted_before,
+            "an unpainted pixel inside the stroke's bounding disk must remain untouched"
+        );
+        assert_ne!(
+            *img.get_pixel(50, 50),
+            painted_before,
+            "the painted stroke itself must still receive donor pixels"
+        );
     }
 }

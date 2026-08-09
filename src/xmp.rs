@@ -10,6 +10,10 @@
 
 use crate::recipe::{ColorGrade, Crop, CurvePoint, EditRecipe, Hsl, LocalAdjustment, MaskGeometry, RangeMask};
 
+const MAX_XMP_BYTES: usize = 16 * 1024 * 1024;
+
+
+
 /// Format an integer-valued slider the way ACR writes it: explicit `+` for
 /// positives (`"+14"`, `"-12"`, `"0"`).
 fn signed(v: f32) -> String {
@@ -21,27 +25,44 @@ fn signed(v: f32) -> String {
     }
 }
 
-fn xml_escape(s: &str) -> String {
-    // Strip XML-1.0-forbidden characters FIRST (an AI rationale or a pasted
-    // mask name can carry them; escaped or not, they make the whole sidecar
-    // unparsable): control chars except tab/newline/CR, plus the non-character
-    // code points U+FFFE/U+FFFF, which are equally illegal in XML 1.0 but are
-    // NOT `char::is_control`.
-    s.chars()
-        .filter(|c| {
-            (!c.is_control() || matches!(c, '\t' | '\n' | '\r'))
-                && !matches!(c, '\u{FFFE}' | '\u{FFFF}')
-        })
-        .collect::<String>()
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+fn xml_char_allowed(c: char) -> bool {
+    (!c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+        && !matches!(c, '\u{FFFE}' | '\u{FFFF}')
+}
+
+fn xml_text_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars().filter(|&c| xml_char_allowed(c)) {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn xml_attr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars().filter(|&c| xml_char_allowed(c)) {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn attr(buf: &mut String, key: &str, val: &str) {
+    let val = xml_attr_escape(val);
     buf.push_str(&format!("\n    crs:{key}=\"{val}\""));
 }
+
+
 
 /// Format a LOCAL adjustment value the way ACR writes it: a bare decimal, no
 /// forced `+` (e.g. `"-0.075"`, `"0"`). Distinct from the global `signed()`.
@@ -216,7 +237,9 @@ fn masks_xml(r: &EditRecipe) -> String {
      </rdf:li>\n",
             range = range_mask_xml(&m.range, &guid(&format!("range-{i}-{name}"))),
             amount = local_fmt(m.amount),
-            name = xml_escape(&name),
+            name = xml_attr_escape(&name),
+
+
             corr_id = corr_id,
             sat = local_fmt(m.saturation / 100.0),
             exp = local_fmt(m.exposure_ev / 4.0),
@@ -232,7 +255,9 @@ fn masks_xml(r: &EditRecipe) -> String {
             tex = local_fmt(m.texture / 100.0),
             nr = local_fmt(m.noise_reduction / 100.0),
             what = what,
-            mname = xml_escape(&format!("{name} mask")),
+            mname = xml_attr_escape(&format!("{name} mask")),
+
+
             inv = m.inverted,
             mask_id = mask_id,
             geom = geom,
@@ -389,7 +414,9 @@ fn owned_attrs(r: &EditRecipe) -> String {
 
 /// Every child ELEMENT the writer owns (tone curves + mask corrections),
 /// shared by the fresh-document writer and the merge path.
-fn owned_children(r: &EditRecipe) -> String {
+fn owned_children(r: &EditRecipe, include_masks: bool) -> String {
+
+
     // Tone curves are child elements (rdf:Seq of "x, y" strings), not attributes.
     // One builder for the master + the three per-channel curves (verified key
     // names against the user's sidecar: ToneCurvePV2012Red/Green/Blue).
@@ -409,7 +436,9 @@ fn owned_children(r: &EditRecipe) -> String {
         curve_elem("ToneCurvePV2012Red", &r.red_curve),
         curve_elem("ToneCurvePV2012Green", &r.green_curve),
         curve_elem("ToneCurvePV2012Blue", &r.blue_curve),
-        masks_xml(r),
+        if include_masks { masks_xml(r) } else { String::new() },
+
+
     )
 }
 
@@ -419,7 +448,9 @@ fn owned_children(r: &EditRecipe) -> String {
 /// positions for U+2011 (display-only text; xml_escape has already run, so
 /// no raw markup survives either).
 fn safe_rationale(r: &EditRecipe) -> String {
-    let s = xml_escape(&r.rationale).replace("--", "‑‑");
+    let s = xml_text_escape(&r.rationale).replace("--", "‑‑");
+
+
     s.strip_suffix('-').map(|p| format!("{p}‑")).unwrap_or(s)
 }
 
@@ -448,7 +479,9 @@ fn crs_description(r: &EditRecipe) -> String {
     xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"{attrs}>{children}\n\
   </rdf:Description>",
         attrs = owned_attrs(r),
-        children = owned_children(r),
+        children = owned_children(r, true),
+
+
     )
 }
 
@@ -602,21 +635,121 @@ fn scan_tag_end(doc: &str, start: usize) -> Option<(usize, bool)> {
     None
 }
 
+struct XmlAttribute<'a> {
+    name: &'a str,
+    value: &'a str,
+    span: std::ops::Range<usize>,
+}
+
+fn next_xml_attribute<'a>(tag: &'a str, cursor: &mut usize) -> Option<XmlAttribute<'a>> {
+    let bytes = tag.as_bytes();
+    let mut i = *cursor;
+    if i == 0 && bytes.first() == Some(&b'<') {
+        i = 1;
+        if bytes.get(i) == Some(&b'/') {
+            i += 1;
+        }
+        while i < bytes.len()
+            && !bytes[i].is_ascii_whitespace()
+            && !matches!(bytes[i], b'/' | b'>')
+        {
+            i += 1;
+        }
+    }
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || matches!(bytes[i], b'/' | b'>') {
+        return None;
+    }
+
+    let start = i;
+    while i < bytes.len()
+        && !bytes[i].is_ascii_whitespace()
+        && !matches!(bytes[i], b'=' | b'/' | b'>')
+    {
+        i += 1;
+    }
+    let name_end = i;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'=') {
+        return None;
+    }
+    i += 1;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let quote = *bytes.get(i)?;
+    if !matches!(quote, b'"' | b'\'') {
+        return None;
+    }
+    i += 1;
+    let value_start = i;
+    while i < bytes.len() && bytes[i] != quote {
+        i += 1;
+    }
+    let value_end = i;
+    i += 1;
+    *cursor = i;
+    Some(XmlAttribute {
+        name: &tag[start..name_end],
+        value: &tag[value_start..value_end],
+        span: start..i,
+    })
+}
+
+fn xml_attribute_raw<'a>(
+    tag: &'a str,
+    key: &str,
+) -> Option<(std::ops::Range<usize>, &'a str)> {
+    let mut cursor = 0;
+    while let Some(a) = next_xml_attribute(tag, &mut cursor) {
+        if a.name == key {
+            return Some((a.span, a.value));
+        }
+    }
+    None
+}
+
+fn next_xml_tag(doc: &str, mut from: usize) -> Option<(usize, usize, bool)> {
+    'scan: loop {
+        let start = from + doc[from..].find('<')?;
+        let rest = &doc[start..];
+        for &(open, close) in &CONSTRUCTS {
+            if let Some(after) = rest.strip_prefix(open) {
+                from = start + open.len() + after.find(close)? + close.len();
+                continue 'scan;
+            }
+        }
+        let (end, self_closing) = scan_tag_end(doc, start)?;
+        return Some((start, end, self_closing));
+    }
+}
+
+
+
 /// The first `rdf:Description` opening tag that carries camera-raw settings
 /// (declares `xmlns:crs` or holds a `crs:` attribute).
 fn find_crs_description(doc: &str) -> Option<usize> {
     let mut from = 0;
-    while let Some(rel) = doc[from..].find("<rdf:Description") {
-        let start = from + rel;
-        let (end, _) = scan_tag_end(doc, start)?;
+    while let Some((start, end, _)) = next_xml_tag(doc, from) {
         let tag = &doc[start..=end];
-        if tag.contains("xmlns:crs=") || tag.contains(" crs:") {
-            return Some(start);
+        if !tag.starts_with("</") && tag_name(tag) == "rdf:Description" {
+            let mut cursor = 0;
+            while let Some(a) = next_xml_attribute(tag, &mut cursor) {
+                if a.name == "xmlns:crs" || a.name.starts_with("crs:") {
+                    return Some(start);
+                }
+            }
         }
         from = end + 1;
     }
     None
 }
+
+
 
 /// The `</rdf:Description>` closing the element whose opening tag ended just
 /// before `from` — DEPTH-COUNTED, because Lightroom nests `rdf:Description`
@@ -975,11 +1108,16 @@ fn crs_scope_inner(doc: &str) -> Option<String> {
 /// that is handed a complete sidecar must pass to the scanners. Borrowed on
 /// the fallback path, so an unmergeable/unparseable document costs nothing.
 pub(crate) fn crs_own_scope(xmp: &str) -> std::borrow::Cow<'_, str> {
+    if xmp.len() > MAX_XMP_BYTES {
+        return std::borrow::Cow::Borrowed("");
+    }
     match crs_scope_inner(xmp) {
         Some(s) => std::borrow::Cow::Owned(s),
         None => std::borrow::Cow::Borrowed(xmp),
     }
 }
+
+
 
 /// Graft `r`'s owned settings INTO an existing sidecar document, preserving
 /// every property Autoshop does not model — Lightroom-only globals
@@ -992,10 +1130,12 @@ pub(crate) fn crs_own_scope(xmp: &str) -> std::borrow::Cow<'_, str> {
 /// scanner cannot splice) — the caller falls back to a fresh document,
 /// which is exactly the old behaviour.
 ///
-/// Boundary, disclosed: MASKS are replaced wholesale as one block.
-/// Lightroom extras INSIDE individual mask items (LocalHue / LocalMoire /
-/// range-mask Invert flags, …) do not survive a re-save; parametric mask
-/// geometry does, via the normal recipe round-trip. Owned scalar crs
+/// Fully supported masks are replaced wholesale as one block. If any correction
+/// is unsupported or partial, the original block remains byte-for-byte in the
+/// existing body and no mask projection is prepended; mixing the two would
+/// silently turn an unknown composition into an approximation.
+///
+/// Owned scalar crs
 /// properties are stripped in BOTH forms — attribute and property-element
 /// (`<crs:Exposure2012>…</crs:Exposure2012>`, a form Lightroom really
 /// writes and the reader really accepts); unowned properties survive in
@@ -1005,7 +1145,12 @@ pub(crate) fn crs_own_scope(xmp: &str) -> std::borrow::Cow<'_, str> {
 /// every interop tool use these) is judged unmergeable and regenerated,
 /// which is exactly the pre-merge behaviour.
 pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
+    if existing.len() > MAX_XMP_BYTES {
+        return None;
+    }
     let Some(desc_start) = find_crs_description(existing) else {
+
+
         // A well-formed sidecar that simply carries no camera-raw settings —
         // exiftool / Bridge / Capture One ratings and keywords are the common
         // case. Regenerating over it drops those properties, which the loss
@@ -1022,19 +1167,17 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
     // one behind would duplicate the attribute we append.
     let mut tag = existing[desc_start..=gt].to_string();
     for key in owned_attr_keys() {
-        for q in ['"', '\''] {
-            let pat = format!("crs:{key}={q}");
-            while let Some(p) = tag.find(&pat) {
-                let vstart = p + pat.len();
-                let vend = vstart + tag[vstart..].find(q)?;
-                let mut left = p;
-                while left > 0 && tag.as_bytes()[left - 1].is_ascii_whitespace() {
-                    left -= 1;
-                }
-                tag.replace_range(left..=vend, "");
+        let name = format!("crs:{key}");
+        while let Some((span, _)) = xml_attribute_raw(&tag, &name) {
+            let mut left = span.start;
+            while left > 0 && tag.as_bytes()[left - 1].is_ascii_whitespace() {
+                left -= 1;
             }
+            tag.replace_range(left..span.end, "");
         }
     }
+
+
     let closing_len = if self_closing { 2 } else { 1 };
     let head = tag[..tag.len() - closing_len].trim_end().to_string();
     let new_tag = format!("{head}{}>", owned_attrs(r));
@@ -1054,17 +1197,24 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
     // sidecars (crs_str reads that form for exactly that reason), so an
     // attribute-only strip left the old element value in the body beside
     // the attribute we append — one document, two conflicting answers.
-    let owned_elements: std::collections::HashSet<String> = [
+    let mask_scope = crs_own_scope(existing);
+    let preserve_masks =
+        mask_summary(mask_scope.as_ref(), is_autoshop_sidecar(existing)).preserve_original;
+    let mut owned_elements: std::collections::HashSet<String> = [
         "ToneCurvePV2012",
         "ToneCurvePV2012Red",
         "ToneCurvePV2012Green",
         "ToneCurvePV2012Blue",
-        "MaskGroupBasedCorrections",
     ]
     .into_iter()
     .map(str::to_string)
     .chain(owned_attr_keys())
     .collect();
+    if !preserve_masks {
+        owned_elements.insert("MaskGroupBasedCorrections".to_string());
+    }
+
+
     // TOP LEVEL ONLY (see `top_level_owned_spans`): the previous flat scan
     // also stripped identically-named children out of the nested Look this
     // merge exists to preserve. Reverse document order — earlier spans keep
@@ -1076,7 +1226,9 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
     let mut out = String::with_capacity(existing.len() + 256);
     out.push_str(&existing[..desc_start]);
     out.push_str(&new_tag);
-    out.push_str(&owned_children(r));
+    out.push_str(&owned_children(r, !preserve_masks));
+
+
     out.push_str(body.trim_end());
     out.push_str("\n  </rdf:Description>");
     out.push_str(&existing[tail_start..]);
@@ -1186,24 +1338,70 @@ fn upgrade_era_marker(doc: String) -> String {
 /// inside `crs:LocalTint`). pub(crate): the style index shares the
 /// WhiteBalance="Custom" provenance rule (as-shot Temperature/Tint are camera
 /// values, not user edits) — see `style::read_settings`.
-pub(crate) fn crs_str<'a>(xmp: &'a str, key: &str) -> Option<&'a str> {
-    for quote in ['"', '\''] {
-        let needle = format!("crs:{key}={quote}");
-        if let Some(at) = xmp.find(&needle) {
-            let rest = &xmp[at + needle.len()..];
-            return Some(&rest[..rest.find(quote)?]);
-        }
+pub(crate) fn crs_str<'a>(
+    xmp: &'a str,
+    key: &str,
+) -> Option<std::borrow::Cow<'a, str>> {
+    if xmp.len() > MAX_XMP_BYTES {
+        return None;
     }
-    // PROPERTY-ELEMENT form: Lightroom serialises the very same settings as
-    // `<crs:Exposure2012>+0.65</crs:Exposure2012>` in plenty of real
-    // sidecars, and reading only the attribute form imported those files as
-    // UNEDITED — which then let an explicit save overwrite them.
-    let open = format!("<crs:{key}>");
-    let close = format!("</crs:{key}>");
-    let at = xmp.find(&open)? + open.len();
-    let rest = &xmp[at..];
-    Some(rest[..rest.find(&close)?].trim())
+    let name = format!("crs:{key}");
+    if !xmp.trim_start().starts_with('<')
+        && let Some((_, raw)) = xml_attribute_raw(xmp, &name)
+    {
+        return Some(xml_unescape(raw));
+    }
+
+    let mut from = 0;
+    while let Some((start, end, self_closing)) = next_xml_tag(xmp, from) {
+        let tag = &xmp[start..=end];
+        if !tag.starts_with("</") {
+            if let Some((_, raw)) = xml_attribute_raw(tag, &name) {
+                return Some(xml_unescape(raw));
+            }
+            if tag_name(tag) == name {
+                if self_closing {
+                    return Some(std::borrow::Cow::Borrowed(""));
+                }
+                let close = format!("</{name}>");
+                let body_start = end + 1;
+                let close_at =
+                    body_start + find_outside_constructs(&xmp[body_start..], &close)?;
+                return Some(xml_unescape(xmp[body_start..close_at].trim()));
+            }
+        }
+        from = end + 1;
+    }
+    None
 }
+
+fn find_crs_value_at(xmp: &str, key: &str, wanted: &str) -> Option<usize> {
+    if xmp.len() > MAX_XMP_BYTES {
+        return None;
+    }
+    let name = format!("crs:{key}");
+    if !xmp.trim_start().starts_with('<')
+        && let Some((_, raw)) = xml_attribute_raw(xmp, &name)
+        && xml_unescape(raw).as_ref() == wanted
+    {
+        return Some(0);
+    }
+
+    let mut from = 0;
+    while let Some((start, end, _)) = next_xml_tag(xmp, from) {
+        let tag = &xmp[start..=end];
+        if !tag.starts_with("</")
+            && let Some((_, raw)) = xml_attribute_raw(tag, &name)
+            && xml_unescape(raw).as_ref() == wanted
+        {
+            return Some(start);
+        }
+        from = end + 1;
+    }
+    None
+}
+
+
 
 /// Owned crs settings PRESENT in a document whose value does not parse as a
 /// number under [`crs_f32`]'s exact rule. Each of these imports as a SILENT
@@ -1220,23 +1418,54 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         "ToneCurveName2012",
         "HasSettings",
     ];
-    // The import's OWN scope (see `crs_own_scope`): a corrupt number inside a
-    // nested creative Look is not a setting this document restores, so
-    // reporting it would promise a loss that never happens — and the contract
-    // below is that this list is decided by what the import actually reads.
+    if xmp.len() > MAX_XMP_BYTES {
+        return vec!["XMP document exceeds the 16 MiB limit".to_string()];
+    }
+
     let scope = crs_own_scope(xmp);
-    owned_attr_keys()
+    let mut bad: Vec<String> = owned_attr_keys()
         .into_iter()
         .filter(|k| !STRINGY.contains(&k.as_str()))
         .filter(|k| {
-            // Present-but-unreadable, decided BY the import's own reader
-            // (crs_f32, including its finiteness filter) so the disclosure
-            // can never drift from what the import actually does: anything
-            // read as None-while-present becomes a silent neutral.
-            crs_str(&scope, k).is_some() && crs_f32(&scope, k).is_none()
+            crs_str(&scope, k).is_some()
+                && crs_f32(&scope, k)
+                    .is_none_or(|v| !crs_number_is_in_recipe_range(k, v))
         })
-        .collect()
+        .collect();
+    for tag in [
+        "ToneCurvePV2012",
+        "ToneCurvePV2012Red",
+        "ToneCurvePV2012Green",
+        "ToneCurvePV2012Blue",
+    ] {
+        if parse_curve_checked(&scope, tag).is_err() {
+            bad.push(tag.to_string());
+        }
+    }
+    bad
 }
+
+fn crs_number_is_in_recipe_range(key: &str, value: f32) -> bool {
+    let (lo, hi) = match key {
+        "Temperature" => (2000.0, 40000.0),
+        "Exposure2012" => (-5.0, 5.0),
+        "Sharpness" | "LuminanceSmoothing" | "VignetteMidpoint"
+        | "SplitToningShadowSaturation" | "SplitToningHighlightSaturation"
+        | "ColorGradeMidtoneSat" | "ColorGradeGlobalSat" | "ColorGradeBlending" => {
+            (0.0, 100.0)
+        }
+        "SplitToningShadowHue"
+        | "SplitToningHighlightHue"
+        | "ColorGradeMidtoneHue"
+        | "ColorGradeGlobalHue" => (0.0, 360.0),
+        "CropTop" | "CropLeft" | "CropBottom" | "CropRight" => (0.0, 1.0),
+        "CropAngle" => (-45.0, 45.0),
+        _ => (-100.0, 100.0),
+    };
+    (lo..=hi).contains(&value)
+}
+
+
 
 /// Numeric `crs:` attribute, tolerating ACR's explicit `+` (`"+22"`). `None`
 /// if the key is absent, unparsable, or NON-FINITE: Rust's f32 parser accepts
@@ -1253,11 +1482,55 @@ pub(crate) fn crs_f32(xmp: &str, key: &str) -> Option<f32> {
         .filter(|v| v.is_finite())
 }
 
-/// Undo [`xml_escape`]. `&amp;` is decoded LAST so an escaped `&lt;` cannot
-/// cascade into a second decode.
-fn xml_unescape(s: &str) -> String {
-    s.replace("&quot;", "\"").replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
+/// Decode XML character references in one pass. Decoding `&amp;lt;` yields
+/// `&lt;`, not `<`, because the logical value must be unescaped exactly once.
+fn xml_unescape(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('&') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut at = 0;
+    while let Some(rel) = s[at..].find('&') {
+        let amp = at + rel;
+        out.push_str(&s[at..amp]);
+        let Some(semi_rel) = s[amp + 1..].find(';') else {
+            out.push_str(&s[amp..]);
+            return std::borrow::Cow::Owned(out);
+        };
+        let semi = amp + 1 + semi_rel;
+        let entity = &s[amp + 1..semi];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => {
+                let value = if let Some(hex) =
+                    entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X"))
+                {
+                    u32::from_str_radix(hex, 16).ok()
+                } else if let Some(decimal) = entity.strip_prefix('#') {
+                    decimal.parse::<u32>().ok()
+                } else {
+                    None
+                };
+                value.and_then(char::from_u32).filter(|&c| xml_char_allowed(c))
+            }
+        };
+        if let Some(c) = decoded {
+            out.push(c);
+        } else {
+            out.push_str(&s[amp..=semi]);
+        }
+        at = semi + 1;
+    }
+    out.push_str(&s[at..]);
+    std::borrow::Cow::Owned(out)
 }
+
+
 
 /// The text between `open` and `close` (first occurrence of each, in order).
 fn block_between<'a>(xmp: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -1271,55 +1544,55 @@ fn block_between<'a>(xmp: &'a str, open: &str, close: &str) -> Option<&'a str> {
 /// Lightroom ALWAYS writes the master curve (even "Linear"), while our writer
 /// omits empty curves — collapsing keeps a re-import equal to a recipe that
 /// never touched the curve.
-fn parse_curve(xmp: &str, tag: &str) -> Vec<CurvePoint> {
+fn parse_curve_checked(xmp: &str, tag: &str) -> Result<Vec<CurvePoint>, ()> {
+    const MAX_CURVE_POINTS_FROM_XMP: usize = 256;
     let Some(body) = block_between(xmp, &format!("<crs:{tag}>"), &format!("</crs:{tag}>")) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
+
     let mut pts = Vec::new();
     for chunk in body.split("<rdf:li>").skip(1) {
-        let Some(end) = chunk.find("</rdf:li>") else { continue };
-        let mut it = chunk[..end].split(',');
-        if let (Some(x), Some(y)) = (it.next(), it.next())
-            && let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>())
-        {
-            pts.push(CurvePoint {
-                input: x.clamp(0.0, 255.0).round() as u8,
-                output: y.clamp(0.0, 255.0).round() as u8,
-            });
+        if pts.len() >= MAX_CURVE_POINTS_FROM_XMP {
+            return Err(());
         }
+        let end = chunk.find("</rdf:li>").ok_or(())?;
+        let mut it = chunk[..end].split(',');
+        let x = it.next().ok_or(())?.trim().parse::<f32>().map_err(|_| ())?;
+        let y = it.next().ok_or(())?.trim().parse::<f32>().map_err(|_| ())?;
+        if it.next().is_some() || !x.is_finite() || !y.is_finite() {
+            return Err(());
+        }
+        pts.push(CurvePoint {
+            input: x.clamp(0.0, 255.0).round() as u8,
+            output: y.clamp(0.0, 255.0).round() as u8,
+        });
     }
+
     let identity = [CurvePoint { input: 0, output: 0 }, CurvePoint { input: 255, output: 255 }];
-    if pts == identity { Vec::new() } else { pts }
+    Ok(if pts == identity { Vec::new() } else { pts })
 }
+
+fn parse_curve(xmp: &str, tag: &str) -> Vec<CurvePoint> {
+    parse_curve_checked(xmp, tag).unwrap_or_default()
+}
+
+
 
 /// Local-mask corrections back from `<crs:MaskGroupBasedCorrections>` —
 /// parametric geometries only, exactly what [`masks_xml`] can emit (LR brush /
 /// AI masks and our own Bitmap rasters have no classic-XMP encoding; those
 /// corrections are skipped, matching the writer's own skip rule).
-fn parse_masks(xmp: &str) -> Vec<LocalAdjustment> {
+fn parse_masks(xmp: &str, authored_by_autoshop: bool) -> Vec<LocalAdjustment> {
+
+
     let Some(block) =
         block_between(xmp, "<crs:MaskGroupBasedCorrections>", "</crs:MaskGroupBasedCorrections>")
     else {
         return Vec::new();
     };
-    // Corrections are split on their `What="Correction"` attribute. This DOES
-    // make attribute order significant (XML says it is not), but the obvious
-    // alternative — splitting on `<rdf:li` — is WRONG here: a correction
-    // CONTAINS its own `<crs:CorrectionMasks>` rdf:li list, so naive element
-    // splitting shreds each correction into pieces (proved by the round-trip
-    // tests below). Order-independent splitting needs real XML parsing, which
-    // this module deliberately does not do; every serializer seen in the wild
-    // (ACR, Lightroom, our writer) puts What first.
-    let starts: Vec<usize> =
-        block.match_indices("crs:What=\"Correction\"").map(|(i, _)| i).collect();
-    let mut out = Vec::new();
-    for (n, &s) in starts.iter().enumerate() {
-        let end = starts.get(n + 1).copied().unwrap_or(block.len());
-        if let Some(m) = parse_one_correction(&block[s..end]) {
-            out.push(m);
-        }
-    }
-    out
+    mask_summary_from_block(block, authored_by_autoshop).supported
+
+
 }
 
 /// How many corrections in this sidecar the import CANNOT represent (LR
@@ -1329,22 +1602,336 @@ fn parse_masks(xmp: &str) -> Vec<LocalAdjustment> {
 /// work lost every brush mask with no indication anything was dropped. The
 /// GUI surfaces this count when it reads a sidecar.
 pub fn unsupported_corrections(xmp: &str) -> usize {
+    if xmp.len() > MAX_XMP_BYTES {
+        return 0;
+    }
+    let authored_by_autoshop = is_autoshop_sidecar(xmp);
+    let scope = crs_own_scope(xmp);
+    mask_summary(scope.as_ref(), authored_by_autoshop).loss_count
+}
+
+enum MaskCorrectionParse {
+    FullySupported(LocalAdjustment),
+    Unsupported,
+    Partial,
+}
+
+#[derive(Default)]
+struct MaskSummary {
+    supported: Vec<LocalAdjustment>,
+    loss_count: usize,
+    preserve_original: bool,
+}
+
+impl MaskSummary {
+    fn record_loss(&mut self) {
+        self.loss_count = self.loss_count.saturating_add(1);
+        self.preserve_original = true;
+    }
+}
+
+fn mask_summary(xmp: &str, authored_by_autoshop: bool) -> MaskSummary {
     let Some(block) =
         block_between(xmp, "<crs:MaskGroupBasedCorrections>", "</crs:MaskGroupBasedCorrections>")
     else {
-        return 0;
+        return MaskSummary::default();
     };
-    let starts: Vec<usize> =
-        block.match_indices("crs:What=\"Correction\"").map(|(i, _)| i).collect();
-    starts
-        .iter()
-        .enumerate()
-        .filter(|(n, s)| {
-            let end = starts.get(n + 1).copied().unwrap_or(block.len());
-            parse_one_correction(&block[**s..end]).is_none()
-        })
-        .count()
+    mask_summary_from_block(block, authored_by_autoshop)
 }
+
+fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSummary {
+    const MAX_MASKS_FROM_XMP: usize = 64;
+    const DESCRIPTION_CLOSE: &str = "</rdf:Description>";
+
+    let mut summary = MaskSummary::default();
+    let mut at = 0;
+    let mut saw_correction = false;
+    while let Some((start, gt, self_closing)) = next_xml_tag(block, at) {
+        let tag = &block[start..=gt];
+        let correction = tag_name(tag) == "rdf:Description"
+            && !tag.starts_with("</")
+            && xml_attribute_raw(tag, "crs:What")
+                .is_some_and(|(_, raw)| xml_unescape(raw).as_ref() == "Correction");
+        if !correction {
+            at = gt + 1;
+            continue;
+        }
+
+        saw_correction = true;
+        if self_closing {
+            summary.record_loss();
+            at = gt + 1;
+            continue;
+        }
+        let Some(close) = find_matching_close(block, gt + 1) else {
+            summary.record_loss();
+            break;
+        };
+        let end = close + DESCRIPTION_CLOSE.len();
+        let seg = &block[start..end];
+        match classify_correction(seg, authored_by_autoshop) {
+            MaskCorrectionParse::FullySupported(mask)
+                if summary.supported.len() < MAX_MASKS_FROM_XMP =>
+            {
+                summary.supported.push(mask);
+            }
+            MaskCorrectionParse::FullySupported(_)
+            | MaskCorrectionParse::Unsupported
+            | MaskCorrectionParse::Partial => summary.record_loss(),
+        }
+        at = end;
+    }
+    if !saw_correction && find_crs_value_at(block, "What", "Correction").is_some() {
+        summary.record_loss();
+    }
+    summary
+}
+
+fn optional_scaled_number_in(
+    seg: &str,
+    key: &str,
+    scale: f32,
+    lo: f32,
+    hi: f32,
+) -> bool {
+    match crs_str(seg, key) {
+        None => true,
+        Some(_) => crs_f32(seg, key)
+            .map(|v| v * scale)
+            .is_some_and(|v| (lo..=hi).contains(&v)),
+    }
+}
+
+fn optional_number_is(seg: &str, key: &str, expected: f32) -> bool {
+    match crs_str(seg, key) {
+        None => true,
+        Some(_) => crs_f32(seg, key).is_some_and(|v| (v - expected).abs() <= 1e-6),
+    }
+}
+
+fn correction_values_are_supported(seg: &str) -> bool {
+    const KNOWN_LOCAL: [&str; 25] = [
+        "LocalExposure",
+        "LocalHue",
+        "LocalSaturation",
+        "LocalContrast",
+        "LocalClarity",
+        "LocalSharpness",
+        "LocalBrightness",
+        "LocalToningHue",
+        "LocalToningSaturation",
+        "LocalExposure2012",
+        "LocalContrast2012",
+        "LocalHighlights2012",
+        "LocalShadows2012",
+        "LocalWhites2012",
+        "LocalBlacks2012",
+        "LocalClarity2012",
+        "LocalDehaze",
+        "LocalLuminanceNoise",
+        "LocalMoire",
+        "LocalDefringe",
+        "LocalTemperature",
+        "LocalTint",
+        "LocalTexture",
+        "LocalGrain",
+        "LocalCurveRefineSaturation",
+    ];
+    const INERT_LOCAL: [&str; 11] = [
+        "LocalExposure",
+        "LocalHue",
+        "LocalContrast",
+        "LocalClarity",
+        "LocalSharpness",
+        "LocalBrightness",
+        "LocalToningHue",
+        "LocalToningSaturation",
+        "LocalMoire",
+        "LocalDefringe",
+        "LocalGrain",
+    ];
+
+    if !matches!(
+        crs_str(seg, "CorrectionActive").as_deref(),
+        None | Some("true")
+    ) || !optional_scaled_number_in(seg, "CorrectionAmount", 1.0, 0.0, 1.0)
+        || !optional_scaled_number_in(seg, "LocalExposure2012", 4.0, -5.0, 5.0)
+        || !optional_scaled_number_in(seg, "LocalLuminanceNoise", 100.0, 0.0, 100.0)
+    {
+        return false;
+    }
+
+    for key in [
+        "LocalContrast2012",
+        "LocalHighlights2012",
+        "LocalShadows2012",
+        "LocalWhites2012",
+        "LocalBlacks2012",
+        "LocalClarity2012",
+        "LocalDehaze",
+        "LocalTexture",
+        "LocalSaturation",
+        "LocalTemperature",
+        "LocalTint",
+    ] {
+        if !optional_scaled_number_in(seg, key, 100.0, -100.0, 100.0) {
+            return false;
+        }
+    }
+    if INERT_LOCAL.iter().any(|key| !optional_number_is(seg, key, 0.0))
+        || !optional_number_is(seg, "LocalCurveRefineSaturation", 100.0)
+    {
+        return false;
+    }
+
+    let Some((_, gt, _)) = next_xml_tag(seg, 0) else {
+        return false;
+    };
+    let mut cursor = 0;
+    while let Some(a) = next_xml_attribute(&seg[..=gt], &mut cursor) {
+        if let Some(local) = a.name.strip_prefix("crs:")
+            && local.starts_with("Local")
+            && !KNOWN_LOCAL.contains(&local)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn component_tag_is_supported(tag: &str, what: &str, authored_by_autoshop: bool) -> bool {
+    let expected_mode = if what == "Mask/RangeMask" { "1" } else { "0" };
+    let expected_value = if what == "Mask/RangeMask" { 0.0 } else { 1.0 };
+
+    if crs_str(tag, "Angle").is_some()
+        || !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true"))
+        || !optional_number_is(tag, "MaskValue", expected_value)
+    {
+        return false;
+    }
+    if let Some(mode) = crs_str(tag, "MaskBlendMode")
+        && (!authored_by_autoshop || mode.as_ref() != expected_mode)
+    {
+        return false;
+    }
+
+    match what {
+        "Mask/Gradient" => {
+            matches!(
+                crs_str(tag, "MaskInverted").as_deref(),
+                None | Some("true") | Some("false")
+            ) && ["ZeroX", "ZeroY", "FullX", "FullY"]
+                .iter()
+                .all(|key| crs_f32(tag, key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
+        }
+        "Mask/CircularGradient" => {
+            if !matches!(
+                crs_str(tag, "MaskInverted").as_deref(),
+                None | Some("true") | Some("false")
+            ) || !matches!(
+                crs_str(tag, "Flipped").as_deref(),
+                None | Some("true") | Some("false")
+            ) || !["Top", "Left", "Bottom", "Right"]
+                .iter()
+                .all(|key| crs_f32(tag, key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
+                || !crs_f32(tag, "Roundness").is_some_and(|v| (0.0..=1.0).contains(&v))
+            {
+                return false;
+            }
+            let Some(raw) = crs_f32(tag, "Feather") else {
+                return false;
+            };
+            let feather = if raw > 1.0 || raw == raw.trunc() { raw / 100.0 } else { raw };
+            (0.0..=1.0).contains(&feather)
+        }
+        "Mask/RangeMask" => {
+            authored_by_autoshop
+                && matches!(crs_str(tag, "MaskInverted").as_deref(), None | Some("true"))
+        }
+        _ => false,
+    }
+}
+
+fn range_values_are_supported(range: &RangeMask) -> bool {
+    match range {
+        RangeMask::Luminance { lo_outer, lo, hi, hi_outer } => {
+            [lo_outer, lo, hi, hi_outer].iter().all(|v| v.is_finite())
+                && 0.0 <= *lo_outer
+                && *lo_outer <= *lo
+                && *lo <= *hi
+                && *hi <= *hi_outer
+                && *hi_outer <= 1.0
+        }
+        RangeMask::Color { r, g, b, amount, px, py } => {
+            [r, g, b, amount, px, py]
+                .iter()
+                .all(|v| v.is_finite() && (0.0..=1.0).contains(*v))
+        }
+    }
+}
+
+fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionParse {
+    let mut geometry_count = 0usize;
+    let mut range_count = 0usize;
+    let mut unknown_component = false;
+    let mut component_loss = false;
+    let Some(mask_block) =
+        block_between(seg, "<crs:CorrectionMasks>", "</crs:CorrectionMasks>")
+    else {
+        return if parse_one_correction(seg).is_some() {
+            MaskCorrectionParse::Partial
+        } else {
+            MaskCorrectionParse::Unsupported
+        };
+    };
+
+    let mut at = 0;
+    while let Some((start, end, _)) = next_xml_tag(mask_block, at) {
+        let tag = &mask_block[start..=end];
+        if !tag.starts_with("</")
+            && let Some((_, raw)) = xml_attribute_raw(tag, "crs:What")
+        {
+            let what = xml_unescape(raw);
+            match what.as_ref() {
+                "Mask/Gradient" | "Mask/CircularGradient" => geometry_count += 1,
+                "Mask/RangeMask" => range_count += 1,
+                _ => unknown_component = true,
+            }
+            if !component_tag_is_supported(tag, what.as_ref(), authored_by_autoshop) {
+                component_loss = true;
+            }
+        }
+        at = end + 1;
+    }
+
+    if geometry_count == 0 {
+        return MaskCorrectionParse::Unsupported;
+    }
+    if geometry_count != 1
+        || range_count > 1
+        || unknown_component
+        || component_loss
+        || !correction_values_are_supported(seg)
+        || (range_count != 0 && !authored_by_autoshop)
+    {
+        return MaskCorrectionParse::Partial;
+    }
+
+    let Some(parsed) = parse_one_correction(seg) else {
+        return MaskCorrectionParse::Partial;
+    };
+    if range_count == 1
+        && parsed
+            .range
+            .as_ref()
+            .is_none_or(|range| !range_values_are_supported(range))
+    {
+        return MaskCorrectionParse::Partial;
+    }
+    MaskCorrectionParse::FullySupported(parsed)
+}
+
+
 
 /// One `crs:What="Correction"` segment → a [`LocalAdjustment`]. Slider scales
 /// invert the writer's: exposure ×4 (a power-of-two rescale, exact in binary
@@ -1355,7 +1942,9 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         |k: &str| crs_f32(seg, k).map_or(0.0, |v| (v * 100.0 * 10_000.0).round() / 10_000.0);
     // The geometry component decides the mask shape; a correction with no
     // parametric geometry is not representable here.
-    let (mask, geom_at) = if let Some(p) = seg.find("crs:What=\"Mask/Gradient\"") {
+    let (mask, geom_at) = if let Some(p) = find_crs_value_at(seg, "What", "Mask/Gradient") {
+
+
         let g = &seg[p..];
         (
             MaskGeometry::Linear {
@@ -1366,7 +1955,9 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
             },
             p,
         )
-    } else if let Some(p) = seg.find("crs:What=\"Mask/CircularGradient\"") {
+    } else if let Some(p) = find_crs_value_at(seg, "What", "Mask/CircularGradient") {
+
+
         let g = &seg[p..];
         // Lightroom's Feather is 0..100 (reference sidecars: 50 / 72 …); the
         // engine's is 0..1. Three writers share this attribute, disambiguated
@@ -1397,7 +1988,7 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
                 right: crs_f32(g, "Right")?,
                 feather,
                 roundness: crs_f32(g, "Roundness")?,
-                flipped: crs_str(g, "Flipped") == Some("true"),
+                flipped: crs_str(g, "Flipped").as_deref() == Some("true"),
                 // A Lightroom crs:Angle is deliberately NOT mapped onto our
                 // engine angle (unverified sign/pivot — the roundness rule);
                 // the import reads the axis-aligned ellipse, as before.
@@ -1411,7 +2002,9 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
     // Optional range component. Its head repeats `MaskInverted="true"` as part
     // of the intersect ENCODING (see `range_mask_xml`), so user intent is read
     // from the geometry component only — hence the `geom_at`-anchored scan.
-    let range = seg.find("crs:What=\"Mask/RangeMask\"").and_then(|p| {
+    let range = find_crs_value_at(seg, "What", "Mask/RangeMask").and_then(|p| {
+
+
         let r = &seg[p..];
         // STRICT token parse (`collect::<Option<…>>`), not filter_map: a
         // malformed token used to vanish, letting the remaining values shift
@@ -1446,13 +2039,15 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         // user-given name froze the placeholder and hid the localised
         // role/label. Round-trip it back to "unnamed".
         name: crs_str(seg, "CorrectionName")
-            .map(xml_unescape)
+            .map(|v| v.into_owned())
+
+
             .filter(|n| {
                 n.strip_prefix("Autoshop ").is_none_or(|rest| rest.parse::<u32>().is_err())
             })
             .unwrap_or_default(),
         amount: crs_f32(seg, "CorrectionAmount").unwrap_or(1.0),
-        inverted: crs_str(&seg[geom_at..], "MaskInverted") == Some("true"),
+        inverted: crs_str(&seg[geom_at..], "MaskInverted").as_deref() == Some("true"),
         exposure_ev: crs_f32(seg, "LocalExposure2012").unwrap_or(0.0) * 4.0,
         contrast: q100("LocalContrast2012"),
         highlights: q100("LocalHighlights2012"),
@@ -1481,10 +2076,15 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
 ///   * Same for `Tint`, except sidecars we wrote ourselves (marked
 ///     `x:xmptk="Autoshop"`), whose Tint is always a real edit.
 ///
-/// Callers should [`EditRecipe::clamp`] the result before use, like any other
-/// untrusted recipe input.
+/// The returned recipe is clamped before it crosses the parser boundary, using
+/// the same ranges and size caps as every other untrusted recipe input.
 pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
+    if xmp.len() > MAX_XMP_BYTES {
+        return EditRecipe::default();
+    }
     let ours = is_autoshop_sidecar(xmp);
+
+
     // EVERY setting below is read from this Description's OWN scope, never
     // the raw document: a nested creative Look carries owned-LOOKING crs
     // properties, and the flat scanners answered from them whenever the top
@@ -1499,7 +2099,7 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     // of them as as-shot, dropping a WB the photographer had chosen. (Absent
     // is treated as explicit for the same reason `eval`/`style` do: a sidecar
     // carrying Temperature without the mode is still a stated value.)
-    let custom_wb = crs_str(scope, "WhiteBalance") != Some("As Shot");
+    let custom_wb = crs_str(scope, "WhiteBalance").as_deref() != Some("As Shot");
     let f = |k: &str| crs_f32(scope, k).unwrap_or(0.0);
 
     let mut hsl = Hsl::default();
@@ -1531,7 +2131,7 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
             let cut = body.rfind(" (confidence ")?;
             let conf =
                 body[cut + " (confidence ".len()..].trim_end_matches(')').parse::<f32>().ok()?;
-            Some((xml_unescape(&body[..cut]), conf))
+            Some((xml_unescape(&body[..cut]).into_owned(), conf))
         })
         .unwrap_or_default();
 
@@ -1559,15 +2159,21 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         // Adobe applies CropAngle only under HasCrop="True" (see the crop
         // comment below) — importing a stale angle from a DISABLED crop
         // activated a straighten Adobe itself does not render.
-        straighten_deg: if crs_str(scope, "HasCrop") == Some("True") { f("CropAngle") } else { 0.0 },
-        crop: (crs_str(scope, "HasCrop") == Some("True"))
+        straighten_deg: if crs_str(scope, "HasCrop").as_deref() == Some("True") { f("CropAngle") } else { 0.0 },
+        crop: (crs_str(scope, "HasCrop").as_deref() == Some("True"))
             .then(|| {
-                Some(Crop {
+                let crop = Crop {
                     left: crs_f32(scope, "CropLeft")?,
                     top: crs_f32(scope, "CropTop")?,
                     right: crs_f32(scope, "CropRight")?,
                     bottom: crs_f32(scope, "CropBottom")?,
-                })
+                };
+                ([crop.left, crop.top, crop.right, crop.bottom]
+                    .iter()
+                    .all(|v| (0.0..=1.0).contains(v))
+                    && crop.left < crop.right
+                    && crop.top < crop.bottom)
+                    .then_some(crop)
             })
             .flatten()
             // A full-frame rectangle is the writer's straighten-only carrier
@@ -1576,11 +2182,15 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
             .filter(|c| {
                 !(c.left <= 0.0 && c.top <= 0.0 && c.right >= 1.0 && c.bottom >= 1.0)
             }),
+
+
         tone_curve: parse_curve(scope, "ToneCurvePV2012"),
         red_curve: parse_curve(scope, "ToneCurvePV2012Red"),
         green_curve: parse_curve(scope, "ToneCurvePV2012Green"),
         blue_curve: parse_curve(scope, "ToneCurvePV2012Blue"),
-        masks: parse_masks(scope),
+        masks: parse_masks(scope, ours),
+
+
         rationale,
         confidence,
         ..Default::default()
@@ -1598,6 +2208,11 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     if ours && !is_autoshop_era2(xmp) && r.temperature_k.is_some() {
         r.as_shot_k = Some(5500.0);
     }
+    // Independent scalar controls saturate at the recipe contract and are
+    // named by `unparsable_crs_numbers` when that changes a foreign value.
+    // Compound crop and mask data are rejected earlier because clamping only
+    // part of their geometry would silently change coverage.
+    r.clamp();
     r
 }
 
@@ -2416,11 +3031,11 @@ mod tests {
    <crs:MaskGroupBasedCorrections>\n\
     <rdf:Seq>\n\
      <rdf:li>\n\
-      <rdf:Description crs:What=\"Correction\" crs:LocalHue=\"0.1\">\n\
+      <rdf:Description crs:What=\"Correction\" crs:LocalExposure2012=\"0.1\">\n\
        <crs:CorrectionMasks>\n\
         <rdf:Seq>\n\
          <rdf:li>\n\
-          <rdf:Description crs:What=\"Mask/Gradient\" crs:ZeroX=\"0.5\"/>\n\
+          <rdf:Description crs:What=\"Mask/Gradient\" crs:ZeroX=\"0.5\" crs:ZeroY=\"0.4\" crs:FullX=\"0.5\" crs:FullY=\"0.0\"/>\n\
          </rdf:li>\n\
         </rdf:Seq>\n\
        </crs:CorrectionMasks>\n\
@@ -2458,10 +3073,12 @@ mod tests {
             "one mask block — OURS"
         );
         assert!(merged.contains("Mask/CircularGradient"), "our radial mask is in");
-        // Our own correction block legitimately emits crs:LocalHue="0" (all 26
-        // Local* fields, as Lightroom expects) — what must be GONE is the old
-        // block's VALUE.
-        assert!(!merged.contains("crs:LocalHue=\"0.1\""), "LR's old mask block fully replaced");
+        // The fully supported old correction is replaceable; its old local
+        // exposure value must not survive beside the new radial correction.
+        assert!(
+            !merged.contains("crs:LocalExposure2012=\"0.1\""),
+            "LR's fully supported old mask block is replaced"
+        );
         assert!(!merged.contains("crs:ZeroX=\"0.5\""), "…including its nested gradient");
         assert!(
             merged.contains("crs:Name=\"Adobe Landscape\""),
@@ -2629,5 +3246,177 @@ mod tests {
         let rc = xmp_to_recipe(&custom);
         assert_eq!(rc.temperature_k, Some(5150.0));
         assert_eq!(rc.tint, 10.0);
+    }
+
+    #[test]
+    fn xml_values_round_trip_hostile_text_and_foreign_references_exactly_once() {
+        let hostile = r#"& < > " ' literal &lt; masks\Bob's "sky".xmp"#;
+        let r = EditRecipe {
+            rationale: hostile.into(),
+            masks: vec![LocalAdjustment { name: hostile.into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let xmp = recipe_to_xmp(&r);
+        assert!(xmp.contains("&quot;sky&quot;"), "attribute quotes are escaped: {xmp}");
+        let back = xmp_to_recipe(&xmp);
+        assert_eq!(back.rationale, hostile);
+        assert_eq!(back.masks[0].name, hostile);
+
+        let foreign = r#"<rdf:Description crs:CorrectionName = "Bob&apos;s &#x3C;sky&#62; &#38; &quot;sea&quot;"/>"#;
+        assert_eq!(
+            crs_str(foreign, "CorrectionName").as_deref(),
+            Some(r#"Bob's <sky> & "sea""#)
+        );
+    }
+
+    #[test]
+    fn comments_and_whitespace_cannot_hijack_the_crs_description_or_merge() {
+        let fake = r#"<!-- <rdf:Description xmlns:crs="urn:fake" crs:Exposure2012="9"/> -->"#;
+        let doc = format!(
+            "{fake}\n<rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:Exposure2012 = \"+0.65\" crs:HasSettings=\"True\">\
+             </rdf:Description>"
+        );
+        assert_eq!(xmp_to_recipe(&doc).exposure_ev, 0.65);
+        let merged = merge_recipe_into_xmp(
+            &doc,
+            &EditRecipe { exposure_ev: 0.25, ..Default::default() },
+        )
+        .expect("the real description is mergeable");
+        assert!(merged.contains(fake), "the foreign comment survives verbatim");
+        assert_eq!(xmp_to_recipe(&merged).exposure_ev, 0.25);
+    }
+
+    #[test]
+    fn partial_and_unsupported_masks_are_not_rendered_and_their_group_is_preserved() {
+        let doc = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core">
+     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description rdf:about=""
+        xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+        crs:HasSettings="True">
+       <crs:MaskGroupBasedCorrections>
+        <rdf:Seq>
+         <rdf:li><rdf:Description crs:What="Correction" crs:CorrectionActive="true">
+          <crs:CorrectionMasks><rdf:Seq>
+           <rdf:li crs:What="Mask/Gradient" crs:ZeroX="0.5" crs:ZeroY="0.8" crs:FullX="0.5" crs:FullY="0.2"/>
+           <rdf:li crs:What="Mask/Brush"/>
+          </rdf:Seq></crs:CorrectionMasks>
+         </rdf:Description></rdf:li>
+         <rdf:li><rdf:Description crs:What="Correction" crs:CorrectionActive="false">
+          <crs:CorrectionMasks><rdf:Seq>
+           <rdf:li crs:What="Mask/Gradient" crs:ZeroX="0.4" crs:ZeroY="0.8" crs:FullX="0.4" crs:FullY="0.2"/>
+          </rdf:Seq></crs:CorrectionMasks>
+         </rdf:Description></rdf:li>
+         <rdf:li><rdf:Description crs:What="Correction">
+          <crs:CorrectionMasks><rdf:Seq>
+           <rdf:li crs:What="Mask/CircularGradient" crs:Top="0.2" crs:Left="0.2" crs:Bottom="0.8" crs:Right="0.8" crs:Feather="50" crs:Roundness="0" crs:Flipped="false" crs:Angle="12"/>
+          </rdf:Seq></crs:CorrectionMasks>
+         </rdf:Description></rdf:li>
+         <rdf:li><rdf:Description crs:What="Correction">
+          <crs:CorrectionMasks><rdf:Seq>
+           <rdf:li crs:What="Mask/Gradient" crs:MaskBlendMode="0" crs:ZeroX="0.3" crs:ZeroY="0.8" crs:FullX="0.3" crs:FullY="0.2"/>
+          </rdf:Seq></crs:CorrectionMasks>
+         </rdf:Description></rdf:li>
+         <rdf:li><rdf:Description crs:What="Correction">
+          <crs:CorrectionMasks><rdf:Seq>
+           <rdf:li crs:What="Mask/Brush"/>
+          </rdf:Seq></crs:CorrectionMasks>
+         </rdf:Description></rdf:li>
+        </rdf:Seq>
+       </crs:MaskGroupBasedCorrections>
+      </rdf:Description>
+     </rdf:RDF>
+    </x:xmpmeta>"#;
+
+        let parsed = xmp_to_recipe(doc);
+        assert!(parsed.masks.is_empty(), "partial masks must not render as approximations");
+        assert_eq!(unsupported_corrections(doc), 5);
+
+        let start = doc.find("<crs:MaskGroupBasedCorrections>").unwrap();
+        let end = doc.find("</crs:MaskGroupBasedCorrections>").unwrap()
+            + "</crs:MaskGroupBasedCorrections>".len();
+        let original = &doc[start..end];
+        let merged = merge_recipe_into_xmp(
+            doc,
+            &EditRecipe { exposure_ev: 0.25, ..Default::default() },
+        )
+        .expect("the surrounding document remains mergeable");
+        assert!(merged.contains(original), "the original mask group is retained verbatim");
+        assert!(merged.contains("Mask/Brush"));
+        assert!(merged.contains(r#"crs:CorrectionActive="false""#));
+        assert!(merged.contains(r#"crs:Angle="12""#));
+        assert!(merged.contains(r#"crs:MaskBlendMode="0""#));
+    }
+
+    #[test]
+    fn xmp_input_is_bounded_and_numeric_groups_follow_recipe_boundaries() {
+        let doc = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core">
+     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description rdf:about=""
+        xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+        crs:WhiteBalance="Custom"
+        crs:Temperature="90000"
+        crs:Exposure2012="99"
+        crs:Contrast2012="-500"
+        crs:Sharpness="200"
+        crs:HasCrop="True"
+        crs:CropLeft="-1"
+        crs:CropTop="0"
+        crs:CropRight="1"
+        crs:CropBottom="1"
+        crs:HasSettings="True">
+       <crs:ToneCurvePV2012><rdf:Seq>
+        <rdf:li>999, -5</rdf:li>
+       </rdf:Seq></crs:ToneCurvePV2012>
+       <crs:ToneCurvePV2012Red><rdf:Seq>
+        <rdf:li>broken</rdf:li>
+       </rdf:Seq></crs:ToneCurvePV2012Red>
+       <crs:MaskGroupBasedCorrections><rdf:Seq>
+        <rdf:li><rdf:Description crs:What="Correction" crs:LocalExposure2012="9">
+         <crs:CorrectionMasks><rdf:Seq>
+          <rdf:li crs:What="Mask/Gradient" crs:ZeroX="0.5" crs:ZeroY="0.8" crs:FullX="0.5" crs:FullY="0.2"/>
+         </rdf:Seq></crs:CorrectionMasks>
+        </rdf:Description></rdf:li>
+       </rdf:Seq></crs:MaskGroupBasedCorrections>
+      </rdf:Description>
+     </rdf:RDF>
+    </x:xmpmeta>"#;
+
+        let r = xmp_to_recipe(doc);
+        assert_eq!(r.temperature_k, Some(40000.0));
+        assert_eq!(r.exposure_ev, 5.0);
+        assert_eq!(r.contrast, -100.0);
+        assert_eq!(r.sharpening, 150.0);
+        assert_eq!(r.crop, None, "invalid compound crop geometry is rejected");
+        assert_eq!(
+            r.tone_curve,
+            vec![CurvePoint { input: 255, output: 0 }],
+            "finite curve coordinates retain the existing u8 saturation policy"
+        );
+        assert!(r.red_curve.is_empty(), "a malformed curve is rejected as a group");
+        assert!(r.masks.is_empty(), "an out-of-range local correction is rejected as partial");
+        assert_eq!(unsupported_corrections(doc), 1);
+
+        let bad = unparsable_crs_numbers(doc);
+        for key in [
+            "Temperature",
+            "Exposure2012",
+            "Contrast2012",
+            "Sharpness",
+            "CropLeft",
+            "ToneCurvePV2012Red",
+        ] {
+            assert!(bad.iter().any(|v| v == key), "{key} must be disclosed: {bad:?}");
+        }
+
+        let oversized = "x".repeat(MAX_XMP_BYTES + 1);
+        assert!(crs_own_scope(&oversized).is_empty());
+        assert_eq!(xmp_to_recipe(&oversized), EditRecipe::default());
+        assert!(merge_recipe_into_xmp(&oversized, &EditRecipe::default()).is_none());
+        assert_eq!(
+            unparsable_crs_numbers(&oversized),
+            vec!["XMP document exceeds the 16 MiB limit".to_string()]
+        );
     }
 }

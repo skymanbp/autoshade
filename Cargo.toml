@@ -45,6 +45,10 @@ clap = { version = "4.6.1", features = ["derive"] }
 dotenvy = "0.15"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 rawler = "0.7.2"
+# ICC → sRGB for baked imports (the LR "Edit in…" round-trip exports ProPhoto
+# 16-bit TIFFs; treating those pixels as sRGB fed every tone decision wrong
+# numbers). Pure Rust — this tree has no C build dependency and keeps none.
+qcms = "0.3"
 # The develop pipeline's per-pixel stages are row-parallel (rayon was already in
 # the tree — rawler's demosaic uses it; this lets OUR serial tail use the same
 # pool). Every conversion is per-pixel independent, so outputs stay bit-identical.
@@ -66,3 +70,10 @@ ab_glyph = { version = "0.2", optional = true }
 # Embeds the Windows app icon into the executables (see build.rs).
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+[dev-dependencies]
+# Same version `image` already locks (0.11.3) — its own TIFF *encoder* cannot
+# round-trip an IccProfile tag (probed: written tag reads back None), so the
+# ICC regression tests write their TIFF fixture through the tiff crate
+# directly, the way Lightroom-style writers produce real profiled TIFFs.
+tiff = "0.11"

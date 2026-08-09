@@ -21,6 +21,126 @@ use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 
 use crate::config::Config;
 
+const SIDECAR_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
+const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
+
+/// The sidecar budget is its OWN variable, not `AUTOSHOP_HTTP_TIMEOUT_SECS`:
+/// that one tunes API latency, while a sidecar's first run legitimately spends
+/// many minutes downloading a model — a user shortening API timeouts must not
+/// silently cap the model download at the same number.
+pub(crate) fn sidecar_timeout() -> std::time::Duration {
+    let seconds = std::env::var("AUTOSHOP_SIDECAR_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|s: &u64| *s > 0)
+        .unwrap_or(SIDECAR_DEFAULT_TIMEOUT_SECS);
+    std::time::Duration::from_secs(seconds)
+}
+
+/// Wait for a piped child without allowing either time or captured bytes to
+/// grow without bound (`Command::output()` offered neither — a stalled helper
+/// hung the CLI or GUI worker forever). Keeping the TAIL of each stream
+/// preserves the traceback line `sidecar_tail` reports.
+pub(crate) fn bounded_child_output(
+    mut child: std::process::Child,
+    who: &str,
+    budget: std::time::Duration,
+) -> Result<std::process::Output> {
+    fn drain<R: std::io::Read + Send + 'static>(
+        reader: Option<R>,
+    ) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
+        std::thread::spawn(move || {
+            let Some(mut reader) = reader else {
+                return (Vec::new(), false);
+            };
+            let mut tail = std::collections::VecDeque::with_capacity(SIDECAR_OUTPUT_CAP);
+            // 8 KiB reads: each chunk is far below the cap, so the tail logic
+            // below never sees a single over-cap read.
+            let mut chunk = [0u8; 8192];
+            let mut truncated = false;
+            loop {
+                let count = match reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => count,
+                };
+                let excess =
+                    tail.len().saturating_add(count).saturating_sub(SIDECAR_OUTPUT_CAP);
+                if excess > 0 {
+                    tail.drain(..excess);
+                    truncated = true;
+                }
+                tail.extend(&chunk[..count]);
+            }
+            (tail.into_iter().collect(), truncated)
+        })
+    }
+
+    fn mark_truncated(mut bytes: Vec<u8>, truncated: bool) -> Vec<u8> {
+        if !truncated {
+            return bytes;
+        }
+        const MARKER: &[u8] = b"[... output exceeded 1 MiB; tail follows ...]\n";
+        let trim = bytes
+            .len()
+            .saturating_add(MARKER.len())
+            .saturating_sub(SIDECAR_OUTPUT_CAP);
+        if trim > 0 {
+            bytes.drain(..trim);
+        }
+        let mut marked = Vec::with_capacity(MARKER.len() + bytes.len());
+        marked.extend_from_slice(MARKER);
+        marked.extend_from_slice(&bytes);
+        marked
+    }
+
+    let stdout_thread = drain(child.stdout.take());
+    let stderr_thread = drain(child.stderr.take());
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() >= budget => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                bail!(
+                    "{who} timed out after {:.1}s and was killed \
+                     (raise AUTOSHOP_SIDECAR_TIMEOUT_SECS if the first model download is legitimately slower)",
+                    budget.as_secs_f32()
+                );
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(error).with_context(|| format!("poll {who}"));
+            }
+        }
+    };
+
+    let (stdout, stdout_truncated) = stdout_thread.join().unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_thread.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout: mark_truncated(stdout, stdout_truncated),
+        stderr: mark_truncated(stderr, stderr_truncated),
+    })
+}
+
+/// A failed run may remove a fresh file or a zero-byte claim, but must never
+/// delete a pre-existing nonempty deliverable the user could still recover.
+pub(crate) fn discard_failed_output(
+    output: &Path,
+    before: Option<(u64, Option<std::time::SystemTime>)>,
+) {
+    if matches!(before, None | Some((0, _))) {
+        let _ = std::fs::remove_file(output);
+    }
+}
+
 /// Everything the sidecar needs for one run. Built from [`Config`] so the render
 /// engine stays decoupled from config/env.
 pub struct DenoiseOpts {
@@ -59,13 +179,14 @@ pub fn denoise_buffer(opts: &DenoiseOpts, data: &mut [[f32; 3]], w: usize, h: us
     if data.len() != w * h {
         bail!("denoise_buffer: buffer {} != {}x{}", data.len(), w, h);
     }
-    let tmp_in = temp_path("autoshop_dn_in");
-    let tmp_out = temp_path("autoshop_dn_out");
-    // PIDs recycle and the unique() counter restarts at 0, so a crash-orphaned
-    // tmp_out from a dead process can sit at exactly this path — and a
-    // same-dimension orphan would be decoded as this photo's result. Clear it
-    // so anything read back is provably this run's write.
-    let _ = std::fs::remove_file(&tmp_out);
+    let tmp_in = temp_path("autoshop_dn_in")?;
+    let tmp_out = match temp_path("autoshop_dn_out") {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp_in);
+            return Err(error);
+        }
+    };
 
     // pack [f32;3] -> 16-bit RGB PNG (see temp_path) — clamps to [0,1]
     let mut buf16: Vec<u16> = Vec::with_capacity(w * h * 3);
@@ -81,12 +202,14 @@ pub fn denoise_buffer(opts: &DenoiseOpts, data: &mut [[f32; 3]], w: usize, h: us
             .save(&tmp_in)
             .with_context(|| format!("write denoise input {}", tmp_in.display()))?;
         run_sidecar(opts, &tmp_in, &tmp_out)?;
-        // read 16-bit result back into the buffer
-        // A 60 MP 16-bit image exceeds the decoder's default memory cap, so lift
-        // the limit explicitly for this trusted, self-produced file.
+        // read 16-bit result back into the buffer. The expected dimensions
+        // are already known, so derive real limits from them instead of
+        // lifting every limit — a wrong-shaped helper output is rejected by
+        // the decoder instead of allocated first (the old `no_limits()` let a
+        // lying header drive an aborting allocation before the size check).
         let mut reader = image::ImageReader::open(&tmp_out)
             .with_context(|| format!("open denoise output {}", tmp_out.display()))?;
-        reader.limits(image::Limits::no_limits());
+        reader.limits(denoise_output_limits(w, h));
         reader
             .decode()
             .with_context(|| format!("decode denoise output {}", tmp_out.display()))
@@ -151,7 +274,7 @@ pub fn denoise_active(
             None,
             Some(2048),
         )?;
-        let tmp = temp_path("autoshop_denoise_base");
+        let tmp = temp_path("autoshop_denoise_base")?;
         if let Err(e) = img.save(&tmp) {
             // A failed save can still have created a partial file — don't
             // leak it into the temp dir.
@@ -169,7 +292,7 @@ pub fn denoise_active(
         // the same full-or-≤2048 contract as the RAW arm.
         let img = crate::decode::load_image(input)?;
         let img = if full_res { img } else { img.thumbnail(2048, 2048) };
-        let tmp = temp_path("autoshop_denoise_base");
+        let tmp = temp_path("autoshop_denoise_base")?;
         if let Err(e) = img.save(&tmp) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e).with_context(|| format!("write denoise input {}", tmp.display()));
@@ -181,6 +304,15 @@ pub fn denoise_active(
 }
 
 fn run_sidecar(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {
+    run_sidecar_with_budget(opts, input, output, sidecar_timeout())
+}
+
+fn run_sidecar_with_budget(
+    opts: &DenoiseOpts,
+    input: &Path,
+    output: &Path,
+    budget: std::time::Duration,
+) -> Result<()> {
     if !opts.script.exists() {
         bail!(
             "denoise sidecar not found at {} — run from the project dir or set \
@@ -207,20 +339,32 @@ fn run_sidecar(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {
         // release GUI has no console, so inherited handles silently discard the
         // sidecar's reason for failing. Cost of the capture: the CLI no longer
         // sees the live model-download progress, only the tail on failure.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Don't flash a console window when the windowed GUI spawns the sidecar.
     crate::hide_child_console(&mut cmd);
-    let out = cmd
-        .output()
-        .with_context(|| {
+    let run = (|| -> Result<std::process::Output> {
+        let child = cmd.spawn().with_context(|| {
             format!(
                 "launch denoise sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
                 opts.python_bin,
                 opts.script.display()
             )
         })?;
+        bounded_child_output(child, "denoise sidecar", budget)
+    })();
+    let out = match run {
+        Ok(out) => out,
+        Err(error) => {
+            // A killed/failed run must not leave the store holding a claim no
+            // recipe references (nor a partial write at the promised name).
+            discard_failed_output(output, before);
+            return Err(error);
+        }
+    };
     if !out.status.success() {
+        discard_failed_output(output, before);
         bail!(
             "denoise sidecar exited with {}: {}",
             out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
@@ -232,15 +376,49 @@ fn run_sidecar(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {
     // that wrote nothing still "succeeded" whenever the deterministic
     // deliverable name already held an EARLIER export — the check passed on
     // the stale file and the CLI presented last week's pixels as this run's.
-    crate::sidecar_wrote("denoise sidecar", output, before)
+    let wrote = crate::sidecar_wrote("denoise sidecar", output, before);
+    if wrote.is_err() {
+        discard_failed_output(output, before);
+    }
+    wrote
 }
 
-fn temp_path(tag: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    // 16-bit PNG interchange: unambiguous for both cv2 and the image crate (no
-    // TIFF predictor-tag mismatch), still lossless and full bit depth.
-    p.push(format!("{tag}_{}_{}.png", std::process::id(), unique()));
-    p
+fn temp_path(tag: &str) -> Result<PathBuf> {
+    for _ in 0..1024 {
+        let mut path = std::env::temp_dir();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        // 16-bit PNG interchange: unambiguous for both cv2 and the image crate
+        // (no TIFF predictor-tag mismatch), still lossless and full bit depth.
+        // `create_new` CLAIMS the name atomically — a predictable PID+counter
+        // path in the shared temp dir could be pre-created by another local
+        // account (and a crash-orphaned twin from a recycled PID could be
+        // read back as this photo's result).
+        path.push(format!(
+            "{tag}_{}_{}_{}.png",
+            std::process::id(),
+            stamp,
+            unique()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("claim denoise temp {}", path.display()));
+            }
+        }
+    }
+    bail!("could not claim a unique denoise temporary file after 1024 attempts")
 }
 
 /// Monotonic-ish suffix so two buffers in one process don't collide (no RNG dep).
@@ -248,6 +426,25 @@ fn unique() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     N.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Decoder limits derived from the frame we EXPECT back — a wrong-shaped or
+/// lying-header helper output is refused by the decoder instead of allocated.
+fn denoise_output_limits(w: usize, h: usize) -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(u32::try_from(w).unwrap_or(u32::MAX));
+    limits.max_image_height = Some(u32::try_from(h).unwrap_or(u32::MAX));
+    let pixels = u64::try_from(w)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(h).unwrap_or(u64::MAX));
+    // Six bytes hold RGB16; the remaining allowance covers decoder staging
+    // without returning to the old unlimited allocation policy.
+    limits.max_alloc = Some(
+        pixels
+            .saturating_mul(16)
+            .saturating_add(16 * 1024 * 1024),
+    );
+    limits
 }
 
 fn to_u16(v: f32) -> u16 {
@@ -378,5 +575,73 @@ mod tests {
         let err = run_sidecar(&opts, &input, &output).unwrap_err().to_string();
         assert!(err.contains("is empty"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stalled_sidecar_is_killed_and_its_claim_is_released() {
+        let dir = tdir("timeout");
+        #[cfg(windows)]
+        let stalled = {
+            let path = dir.join("stalled.bat");
+            std::fs::write(&path, "@echo off\r\n:again\r\ngoto again\r\n").unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        #[cfg(not(windows))]
+        let stalled = {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join("stalled.sh");
+            std::fs::write(&path, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+
+        let mut opts = opts_for(&dir, false);
+        opts.python_bin = stalled;
+        let input = dir.join("in.png");
+        std::fs::write(&input, b"not-really-a-png").unwrap();
+        let output = dir.join("out.png");
+        std::fs::write(&output, b"").unwrap();
+
+        let started = std::time::Instant::now();
+        let error = run_sidecar_with_budget(
+            &opts,
+            &input,
+            &output,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(
+            !output.exists(),
+            "a killed run must release its unreferenced output claim"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn denoise_decode_limits_are_derived_from_the_expected_frame() {
+        let limits = denoise_output_limits(320, 200);
+        assert_eq!(limits.max_image_width, Some(320));
+        assert_eq!(limits.max_image_height, Some(200));
+        assert_eq!(
+            limits.max_alloc,
+            Some(320u64 * 200 * 16 + 16 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn denoise_temp_paths_are_atomically_claimed() {
+        let path = temp_path("autoshop-dn-test-claim").unwrap();
+        assert!(path.exists(), "temp_path must return an already-owned claim");
+        let error = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        let _ = std::fs::remove_file(path);
     }
 }

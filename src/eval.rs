@@ -42,7 +42,7 @@ fn parse_user_xmp(xmp: &str) -> UserEdit {
     // AI a false "omission" for correctly leaving WB as-shot. Any OTHER value
     // (Custom, Daylight, …) is a user decision; an absent attribute (non-LR /
     // hand-trimmed sidecar) keeps the Kelvin as intentional.
-    let user_wb = crate::xmp::crs_str(xmp, "WhiteBalance") != Some("As Shot");
+    let user_wb = crate::xmp::crs_str(xmp, "WhiteBalance").as_deref() != Some("As Shot");
     let wb = |k: &str| if user_wb { crs_f32(xmp, k) } else { None };
     UserEdit {
         fields: vec![
@@ -75,16 +75,35 @@ fn ai_field(r: &EditRecipe, name: &str) -> Option<f32> {
         "shadows" => r.shadows,
         "whites" => r.whites,
         "blacks" => r.blacks,
-        "tint" => r.tint,
+        // The engine's tint is a DELTA from the as-shot green balance
+        // (render::apply_wb anchors at as_shot); LR's crs:Tint is absolute.
+        // Compare absolutes on both sides.
+        "tint" => r.as_shot_tint.unwrap_or(0.0) + r.tint,
         "vibrance" => r.vibrance,
         "saturation" => r.saturation,
         "clarity" => r.clarity,
         "dehaze" => r.dehaze,
         "sharpening" => r.sharpening,
         "noise_reduction" => r.noise_reduction,
-        "temperature_k" => return r.temperature_k,
+        // As-shot resolves through the recipe's own stamp, with the engine's
+        // historical 5500 K fallback (render.rs uses the same anchor).
+        "temperature_k" => r
+            .temperature_k
+            .unwrap_or_else(|| r.as_shot_k.unwrap_or(5500.0)),
         _ => return None,
     })
+}
+
+/// The user's EFFECTIVE value for a field: an absent ordinary slider means
+/// they left it at 0, an absent white balance means they kept as-shot — so a
+/// one-sided disagreement still compares two real numbers instead of being
+/// dropped from the aggregate (which understated the gap score).
+fn effective_user_field(r: &EditRecipe, name: &str, value: Option<f32>) -> f32 {
+    match name {
+        "temperature_k" => value.unwrap_or_else(|| r.as_shot_k.unwrap_or(5500.0)),
+        "tint" => value.unwrap_or_else(|| r.as_shot_tint.unwrap_or(0.0)),
+        _ => value.unwrap_or(0.0),
+    }
 }
 
 /// Parse an ACR tone-curve `<rdf:Seq>` of `<rdf:li>x, y</rdf:li>` points (each
@@ -104,6 +123,13 @@ fn parse_tone_curve(xmp: &str, tag: &str) -> Vec<(f32, f32)> {
         let mut it = chunk[..end].split(',');
         if let (Some(xs), Some(ys)) = (it.next(), it.next())
             && let (Ok(x), Ok(y)) = (xs.trim().parse::<f32>(), ys.trim().parse::<f32>())
+            // Same domain xmp::parse_curve enforces by clamping to u8: a
+            // NaN/inf/out-of-range point from a foreign sidecar would poison
+            // the LUT and print a NaN gap score.
+            && x.is_finite()
+            && y.is_finite()
+            && (0.0..=255.0).contains(&x)
+            && (0.0..=255.0).contains(&y)
         {
             pts.push((x, y));
         }
@@ -266,22 +292,21 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
             }
         };
         for (name, user_val) in &user.fields {
-            // Only judge controls YOU actually used; skip ones you left neutral.
-            let u = match user_val {
-                Some(u) => *u,
-                None => continue,
-            };
             let eps = if *name == "exposure_ev" { 0.05 } else { 0.5 };
+            let user_used = user_val.is_some_and(|u| u.abs() > eps);
+            let ai_used = match *name {
+                "temperature_k" => ai.temperature_k.is_some(),
+                "tint" => ai.tint.abs() > eps,
+                _ => ai_field(&ai, name).is_some_and(|a| a.abs() > eps),
+            };
+            let u = effective_user_field(&ai, name, *user_val);
             let ai_val = ai_field(&ai, name);
             // A both-neutral row is not a comparison: Lightroom writes EVERY
             // slider explicitly (Contrast2012="0"), so counting 0↔0 rows
             // inflated n and diluted each control's MAE toward zero — the gap
             // score understated real divergence. A row where EITHER side
             // moved still counts (that disagreement is the signal).
-            if let Some(a) = ai_val
-                && u.abs() <= eps
-                && a.abs() <= eps
-            {
+            if !user_used && !ai_used {
                 continue;
             }
             let e = acc.entry(name).or_default();
@@ -292,12 +317,12 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
                     e.sum_signed += d;
                     e.n += 1;
                     // You moved it; the AI parked it at neutral → a miss.
-                    if u.abs() > eps && a.abs() <= eps {
+                    if user_used && !ai_used {
                         e.omit += 1;
                     }
                 }
-                // AI left the field unset (e.g. WB as-shot) while you set it: a
-                // real omission the old both-set gate dropped without counting.
+                // Unreachable for the 14 known fields now that WB resolves
+                // through the as-shot stamp; kept for an unknown name.
                 None => {
                     if u.abs() > eps {
                         e.omit += 1;
@@ -489,5 +514,38 @@ mod tests {
 
         // Absent tag → empty (so the eval simply skips the curve comparison).
         assert!(parse_tone_curve("<x:y/>", "ToneCurvePV2012").is_empty());
+    }
+
+    #[test]
+    fn one_sided_controls_use_neutral_and_stamped_effective_values() {
+        let ai = EditRecipe {
+            contrast: 25.0,
+            as_shot_k: Some(4800.0),
+            as_shot_tint: Some(7.0),
+            tint: 3.0,
+            ..Default::default()
+        };
+
+        assert_eq!(effective_user_field(&ai, "contrast", None), 0.0);
+        assert_eq!(ai_field(&ai, "contrast"), Some(25.0));
+        assert_eq!(effective_user_field(&ai, "temperature_k", None), 4800.0);
+        assert_eq!(ai_field(&ai, "temperature_k"), Some(4800.0));
+        assert_eq!(effective_user_field(&ai, "tint", None), 7.0);
+        assert_eq!(ai_field(&ai, "tint"), Some(10.0));
+    }
+
+    #[test]
+    fn tone_curve_parser_rejects_non_finite_and_out_of_range_points() {
+        let xmp = r#"<crs:ToneCurvePV2012><rdf:Seq>
+            <rdf:li>NaN, 1</rdf:li>
+            <rdf:li>1, inf</rdf:li>
+            <rdf:li>-1, 20</rdf:li>
+            <rdf:li>20, 256</rdf:li>
+            <rdf:li>64, 64</rdf:li>
+        </rdf:Seq></crs:ToneCurvePV2012>"#;
+        assert_eq!(
+            parse_tone_curve(xmp, "ToneCurvePV2012"),
+            vec![(64.0, 64.0)]
+        );
     }
 }
