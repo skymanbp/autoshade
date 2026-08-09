@@ -91,18 +91,12 @@ pub fn render_to_image_in(
     max_edge: Option<u32>,
     working: ExportColorSpace,
 ) -> Result<DynamicImage> {
-    let mut sanitized_recipe = recipe.clone();
-    let dropped = sanitized_recipe.clamp();
-    if !dropped.is_empty() {
-        // Entry-point sanitisation must not be SILENT loss: a stored or
-        // imported recipe past the caps otherwise renders "successfully"
-        // minus edits, with nothing anywhere saying so.
-        eprintln!(
-            "warning: recipe limits discarded {} mask(s) and {} mask component(s) before rendering",
-            dropped.dropped_masks, dropped.dropped_components
-        );
-    }
-    let recipe = &sanitized_recipe;
+    // Entry-point sanitisation: ONE construction, ONE disclosure — the
+    // ValidatedRecipe token (arch item c) replaces four hand-rolled
+    // clone+clamp+eprintln triplets that had already drifted apart.
+    let validated = crate::recipe::ValidatedRecipe::new(recipe);
+    validated.disclose();
+    let recipe = &*validated;
     let rasters = load_mask_raster_snapshot(recipe)?;
     // Decode scope: the RawSource holds the entire RAW file in memory
     // (~60–120 MB for a 61 MP lossless ARW), and neither it nor the decoder
@@ -278,18 +272,12 @@ pub fn render_baked_to_image(
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
 ) -> Result<DynamicImage> {
-    let mut sanitized_recipe = recipe.clone();
-    let dropped = sanitized_recipe.clamp();
-    if !dropped.is_empty() {
-        // Entry-point sanitisation must not be SILENT loss: a stored or
-        // imported recipe past the caps otherwise renders "successfully"
-        // minus edits, with nothing anywhere saying so.
-        eprintln!(
-            "warning: recipe limits discarded {} mask(s) and {} mask component(s) before rendering",
-            dropped.dropped_masks, dropped.dropped_components
-        );
-    }
-    let recipe = &sanitized_recipe;
+    // Entry-point sanitisation: ONE construction, ONE disclosure — the
+    // ValidatedRecipe token (arch item c) replaces four hand-rolled
+    // clone+clamp+eprintln triplets that had already drifted apart.
+    let validated = crate::recipe::ValidatedRecipe::new(recipe);
+    validated.disclose();
+    let recipe = &*validated;
     let rasters = load_mask_raster_snapshot(recipe)?;
     let rgb = img.to_rgb16();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
@@ -750,18 +738,12 @@ pub fn render_to_file(
     denoise: Option<&crate::denoise::DenoiseOpts>,
     export: Option<&ExportOpts>,
 ) -> Result<(u32, u32)> {
-    let mut sanitized_recipe = recipe.clone();
-    let dropped = sanitized_recipe.clamp();
-    if !dropped.is_empty() {
-        // Entry-point sanitisation must not be SILENT loss: a stored or
-        // imported recipe past the caps otherwise renders "successfully"
-        // minus edits, with nothing anywhere saying so.
-        eprintln!(
-            "warning: recipe limits discarded {} mask(s) and {} mask component(s) before rendering",
-            dropped.dropped_masks, dropped.dropped_components
-        );
-    }
-    let recipe = &sanitized_recipe;
+    // Entry-point sanitisation: ONE construction, ONE disclosure — the
+    // ValidatedRecipe token (arch item c) replaces four hand-rolled
+    // clone+clamp+eprintln triplets that had already drifted apart.
+    let validated = crate::recipe::ValidatedRecipe::new(recipe);
+    validated.disclose();
+    let recipe = &*validated;
     let opts = export.copied().unwrap_or_default();
 
     let ext = out
@@ -913,18 +895,12 @@ pub fn render_to_file(
 /// Crop is intentionally NOT applied here so sliders give immediate full-frame
 /// feedback; the full-res `render_to_image` path applies crop on export.
 pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicImage {
-    let mut sanitized_recipe = recipe.clone();
-    let dropped = sanitized_recipe.clamp();
-    if !dropped.is_empty() {
-        // Entry-point sanitisation must not be SILENT loss: a stored or
-        // imported recipe past the caps otherwise renders "successfully"
-        // minus edits, with nothing anywhere saying so.
-        eprintln!(
-            "warning: recipe limits discarded {} mask(s) and {} mask component(s) before rendering",
-            dropped.dropped_masks, dropped.dropped_components
-        );
-    }
-    let recipe = &sanitized_recipe;
+    // Entry-point sanitisation: ONE construction, ONE disclosure — the
+    // ValidatedRecipe token (arch item c) replaces four hand-rolled
+    // clone+clamp+eprintln triplets that had already drifted apart.
+    let validated = crate::recipe::ValidatedRecipe::new(recipe);
+    validated.disclose();
+    let recipe = &*validated;
     let rgb = preview.to_rgb8();
     let (w, h) = rgb.dimensions();
     let mut data: Vec<[f32; 3]> = rgb

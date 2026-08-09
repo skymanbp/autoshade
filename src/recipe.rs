@@ -739,11 +739,59 @@ pub enum RangeMask {
 pub struct ClampSummary {
     pub dropped_masks: usize,
     pub dropped_components: usize,
+    /// Points cut from the tone/RGB/base curves past their caps — a curve
+    /// truncation changes rendered TONE exactly as a dropped mask changes
+    /// coverage, and it used to vanish without a count.
+    pub truncated_curve_points: usize,
+    /// Bytes cut from rationale / mask names / raster paths. A truncated
+    /// PATH is load-bearing (the raster stops resolving); the count keeps
+    /// the disclosure honest even for the cosmetic strings.
+    pub truncated_string_bytes: usize,
 }
 
 impl ClampSummary {
     pub fn is_empty(self) -> bool {
-        self.dropped_masks == 0 && self.dropped_components == 0
+        self == ClampSummary::default()
+    }
+}
+
+/// Proof-of-sanitisation token (arch item c): constructing it is the ONE
+/// place entry-point clamping happens, so the public render surfaces stop
+/// hand-rolling clone+clamp+disclose triplets that had already drifted.
+/// Derefs to the recipe — internal render functions keep their signatures.
+pub struct ValidatedRecipe {
+    recipe: EditRecipe,
+    pub dropped: ClampSummary,
+}
+
+impl ValidatedRecipe {
+    pub fn new(r: &EditRecipe) -> Self {
+        let mut recipe = r.clone();
+        let dropped = recipe.clamp();
+        ValidatedRecipe { recipe, dropped }
+    }
+
+    /// Say what sanitisation cost, on stderr — entry points call this once;
+    /// silence is reserved for the recipe that lost nothing.
+    pub fn disclose(&self) {
+        let d = self.dropped;
+        if !d.is_empty() {
+            eprintln!(
+                "warning: recipe limits discarded {} mask(s) and {} mask component(s), \
+                 truncated {} curve point(s) and {} string byte(s) before rendering",
+                d.dropped_masks,
+                d.dropped_components,
+                d.truncated_curve_points,
+                d.truncated_string_bytes
+            );
+        }
+    }
+}
+
+impl std::ops::Deref for ValidatedRecipe {
+    type Target = EditRecipe;
+    fn deref(&self) -> &EditRecipe {
+        &self.recipe
     }
 }
 
@@ -787,8 +835,10 @@ impl EditRecipe {
         /// A path, not a payload — comfortably past Windows' extended limit.
         const MAX_PATH: usize = 4096;
         /// Truncate on a char boundary: `String::truncate` panics off one, and
-        /// this runs on input nobody validated.
-        fn cap(s: &mut String, max: usize) {
+        /// this runs on input nobody validated. Returns the bytes cut so the
+        /// summary can report string loss instead of hiding it.
+        fn cap(s: &mut String, max: usize) -> usize {
+            let before = s.len();
             if s.len() > max {
                 let mut end = max;
                 while end > 0 && !s.is_char_boundary(end) {
@@ -796,16 +846,19 @@ impl EditRecipe {
                 }
                 s.truncate(end);
             }
+            before - s.len()
         }
-        cap(&mut self.rationale, MAX_RATIONALE);
+        summary.truncated_string_bytes += cap(&mut self.rationale, MAX_RATIONALE);
         summary.dropped_masks = self.masks.len().saturating_sub(MAX_MASKS);
         self.masks.truncate(MAX_MASKS);
         for m in &mut self.masks {
-            cap(&mut m.name, MAX_NAME);
+            summary.truncated_string_bytes += cap(&mut m.name, MAX_NAME);
             if let MaskGeometry::Bitmap { path } = &mut m.mask {
-                cap(path, MAX_PATH);
+                summary.truncated_string_bytes += cap(path, MAX_PATH);
             }
         }
+        summary.truncated_curve_points +=
+            self.base_curve.len().saturating_sub(MAX_BASE_KNOTS);
         self.base_curve.truncate(MAX_BASE_KNOTS);
         for curve in [
             &mut self.tone_curve,
@@ -813,6 +866,7 @@ impl EditRecipe {
             &mut self.green_curve,
             &mut self.blue_curve,
         ] {
+            summary.truncated_curve_points += curve.len().saturating_sub(MAX_CURVE_POINTS);
             curve.truncate(MAX_CURVE_POINTS);
         }
         // Base-curve knots are (x, y) in 0..1 and are composed UNDER the user
@@ -929,7 +983,7 @@ impl EditRecipe {
             m.components.truncate(MAX_MASK_COMPONENTS);
             for c in m.components.iter_mut() {
                 if let MaskGeometry::Bitmap { path } = &mut c.geometry {
-                    cap(path, MAX_PATH);
+                    summary.truncated_string_bytes += cap(path, MAX_PATH);
                 }
             }
         }
@@ -1469,6 +1523,21 @@ mod tests {
 
         let mut clean = EditRecipe::default();
         assert_eq!(clean.clamp(), ClampSummary::default());
+    }
+
+    #[test]
+    fn clamp_counts_curve_and_string_truncation() {
+        let mut r = EditRecipe {
+            tone_curve: (0..300u32)
+                .map(|i| CurvePoint { input: (i % 256) as u8, output: 0 })
+                .collect(),
+            rationale: "x".repeat(5000),
+            ..Default::default()
+        };
+        let d = r.clamp();
+        assert_eq!(d.truncated_curve_points, 44, "300 points over the 256 cap");
+        assert_eq!(d.truncated_string_bytes, 5000 - 4096, "rationale past its cap");
+        assert!(!d.is_empty(), "curve/string loss alone must flip is_empty");
     }
 
     #[test]

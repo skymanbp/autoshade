@@ -2090,7 +2090,14 @@ enum SavedDevelop {
 /// its own channel, NOT `xmp_bad`: appended there it rendered as "unreadable
 /// numeric setting(s)", a warning about something else entirely. 0 whenever
 /// the restore came from recipe.json (which carries no LR-only masks).
-fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>, usize) {
+// The fourth element is what the restore-time clamps DISCARDED (mask and
+// component counts past the recipe limits): W20's contract — sanitisation
+// must not be silent loss — applies to restores exactly as it does to the
+// CLI import and the render entry points, and this is the channel the
+// Opened handler surfaces it through.
+fn read_saved_develop(
+    src: &std::path::Path,
+) -> (SavedDevelop, Vec<String>, usize, autoshop::recipe::ClampSummary) {
     // The whole restore — legacy migration plus the multi-file precedence
     // walk — runs under ONE develop lock, so another process's mid-compound
     // save cannot hand back half-old, half-new answers. NoWait: this runs on
@@ -2111,11 +2118,15 @@ fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>, usiz
             },
             Vec::new(),
             0,
+            Default::default(),
         ),
     }
 }
 
-fn read_saved_develop_locked(src: &std::path::Path) -> (SavedDevelop, Vec<String>, usize) {
+fn read_saved_develop_locked(
+    src: &std::path::Path,
+) -> (SavedDevelop, Vec<String>, usize, autoshop::recipe::ClampSummary) {
+    let mut clamp_dropped = autoshop::recipe::ClampSummary::default();
     autoshop::store::migrate_legacy(src);
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
     // Newest intent wins (store::lightroom_sidecar): a sidecar Lightroom
@@ -2144,9 +2155,11 @@ fn read_saved_develop_locked(src: &std::path::Path) -> (SavedDevelop, Vec<String
         // Neutral / foreign content restores nothing — the store answers
         // exactly as before.
         if !r.is_noop() {
-            r.clamp();
+            let d = r.clamp();
+            clamp_dropped.dropped_masks += d.dropped_masks;
+            clamp_dropped.dropped_components += d.dropped_components;
             let dropped = autoshop::xmp::unsupported_corrections(&text);
-            return (SavedDevelop::Restored(r, kind), xmp_bad, dropped);
+            return (SavedDevelop::Restored(r, kind), xmp_bad, dropped, clamp_dropped);
         }
     }
     let mut any = false;
@@ -2174,7 +2187,9 @@ fn read_saved_develop_locked(src: &std::path::Path) -> (SavedDevelop, Vec<String
         match serde_json::from_str::<EditRecipe>(&text) {
             Ok(mut r) => {
                 if !r.is_noop() {
-                    r.clamp();
+                    let d = r.clamp();
+                    clamp_dropped.dropped_masks += d.dropped_masks;
+                    clamp_dropped.dropped_components += d.dropped_components;
                     // Store recipes reference rasters by bare file name —
                     // anchor them to the file they were loaded beside.
                     if let Some(base) = rj.parent() {
@@ -2195,7 +2210,7 @@ fn read_saved_develop_locked(src: &std::path::Path) -> (SavedDevelop, Vec<String
         // recipe.json restored: lossless truth — a corrupt number in the
         // subordinate XMP is REPLACED by the next save's owned-attr merge,
         // so there is nothing to disclose on this path.
-        return (SavedDevelop::Restored(r, kind), Vec::new(), 0);
+        return (SavedDevelop::Restored(r, kind), Vec::new(), 0, clamp_dropped);
     }
     let mut fallback = None;
     let mut dropped_masks = 0usize;
@@ -2225,19 +2240,21 @@ fn read_saved_develop_locked(src: &std::path::Path) -> (SavedDevelop, Vec<String
         // A foreign / neutral sidecar parses to a no-op recipe — "restoring"
         // it would only produce a misleading status line.
         if !r.is_noop() {
-            r.clamp();
+            let d = r.clamp();
+            clamp_dropped.dropped_masks += d.dropped_masks;
+            clamp_dropped.dropped_components += d.dropped_components;
             dropped_masks = autoshop::xmp::unsupported_corrections(&text);
             fallback = Some((r, kind));
         }
         break; // same rule: the file that answered decides
     }
     if let Some(err) = parse_err {
-        return (SavedDevelop::Unreadable { err, fallback }, xmp_bad, dropped_masks);
+        return (SavedDevelop::Unreadable { err, fallback }, xmp_bad, dropped_masks, clamp_dropped);
     }
     match (fallback, any) {
-        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), xmp_bad, dropped_masks),
-        (None, true) => (SavedDevelop::NoopOnly, xmp_bad, 0),
-        (None, false) => (SavedDevelop::Nothing, xmp_bad, 0),
+        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), xmp_bad, dropped_masks, clamp_dropped),
+        (None, true) => (SavedDevelop::NoopOnly, xmp_bad, 0, clamp_dropped),
+        (None, false) => (SavedDevelop::Nothing, xmp_bad, 0, clamp_dropped),
     }
 }
 
@@ -2924,6 +2941,32 @@ impl AutoshopApp {
         self.before_curve = curve.to_vec();
     }
 
+    /// Uniform failure disclosure for a foreground persist compound — the
+    /// single mapper the NoWait develop-lock wrappers report through
+    /// (arch item b: five hand-rolled copies had already drifted into
+    /// wording bugs). TYPED: `WouldBlock` really is "another Autoshop
+    /// process owns this develop right now", so it gets the caller's busy
+    /// wording with its retry hint; any other error is real I/O and must
+    /// not wear the busy costume — a full disk used to read as "another
+    /// process is working on this photo".
+    fn persist_postponed(
+        &mut self,
+        e: &std::io::Error,
+        busy_key: &'static str,
+        args: &[(&str, &str)],
+    ) {
+        let es = e.to_string();
+        let mut a: Vec<(&str, &str)> = args.to_vec();
+        a.push(("err", &es));
+        let t = if e.kind() == std::io::ErrorKind::WouldBlock {
+            trf(self.lang, busy_key, &a)
+        } else {
+            trf(self.lang, "not saved — a develop-store write failed: {err}", &a)
+        };
+        self.status = t.clone();
+        self.toast(ToastKind::Error, t);
+    }
+
     /// Decode a variant's retouched master off-thread. FULL resolution — a
     /// 61 MP TIFF takes seconds — so the UI thread never does this inline.
     /// One in-flight decode per (photo, origin): repeat entries (re-clicks
@@ -3295,9 +3338,7 @@ impl AutoshopApp {
             },
         );
         if let Err(e) = locked {
-            let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
-            self.status = t.clone();
-            self.toast(ToastKind::Error, t);
+            self.persist_postponed(&e, "Save version failed: {err}", &[]);
         }
     }
 
@@ -3311,7 +3352,20 @@ impl AutoshopApp {
             .and_then(|s| Ok(serde_json::from_str::<EditRecipe>(&s)?))
         {
             Ok(mut r) => {
-                r.clamp();
+                let dropped = r.clamp();
+                if !dropped.is_empty() {
+                    // Same W20 disclosure as the open restore: a snapshot
+                    // past the caps loads minus edits, never silently.
+                    let t = trf(
+                        lang,
+                        "recipe limits discarded {n} mask(s) and {m} component(s) on restore — the saved file exceeds the app's caps",
+                        &[
+                            ("n", &dropped.dropped_masks.to_string()),
+                            ("m", &dropped.dropped_components.to_string()),
+                        ],
+                    );
+                    self.toast(ToastKind::Error, t);
+                }
                 // Snapshots name their rasters by bare file name, like the
                 // working recipe — re-anchor them to the develop dir.
                 if let Some(base) = p.parent() {
@@ -5757,13 +5811,7 @@ impl AutoshopApp {
                     }
                 }
                 Err(e) => {
-                    let t = trf(
-                        lang,
-                        "could not clear the saved edits: {err}",
-                        &[("err", &e.to_string())],
-                    );
-                    self.status = t.clone();
-                    self.toast(ToastKind::Error, t);
+                    self.persist_postponed(&e, "could not clear the saved edits: {err}", &[]);
                 }
             }
             return;
@@ -6000,13 +6048,11 @@ impl AutoshopApp {
             },
         );
         if let Err(e) = locked_save {
-            let t = trf(
-                lang,
+            self.persist_postponed(
+                &e,
                 "save postponed: this photo is being changed by another Autoshop process ({err}); your canvas remains unsaved — retry",
-                &[("err", &e.to_string())],
+                &[],
             );
-            self.status = t.clone();
-            self.toast(ToastKind::Error, t);
         }
     }
 
@@ -6450,11 +6496,25 @@ impl AutoshopApp {
                             // recipe's own base_curve.
                             self.source_preview = Some(base.clone());
                             self.base_preview = Some(base);
-                            let (saved, xmp_bad, dropped_masks) = self
+                            let (saved, xmp_bad, dropped_masks, clamp_dropped) = self
                                 .src_path
                                 .as_deref()
                                 .map(read_saved_develop)
-                                .unwrap_or((SavedDevelop::Nothing, Vec::new(), 0));
+                                .unwrap_or((SavedDevelop::Nothing, Vec::new(), 0, Default::default()));
+                            // W20: restore-time sanitisation is not allowed to
+                            // be silent loss — a stored recipe past the caps
+                            // opens minus edits, and the user must hear it.
+                            if !clamp_dropped.is_empty() {
+                                let t = trf(
+                                    lang,
+                                    "recipe limits discarded {n} mask(s) and {m} component(s) on restore — the saved file exceeds the app's caps",
+                                    &[
+                                        ("n", &clamp_dropped.dropped_masks.to_string()),
+                                        ("m", &clamp_dropped.dropped_components.to_string()),
+                                    ],
+                                );
+                                self.toast(ToastKind::Error, t);
+                            }
                             // LR brush / AI / depth masks have no engine
                             // equivalent — the import skips them BY DESIGN
                             // (the writer skips symmetrically); what was
@@ -7282,13 +7342,12 @@ impl AutoshopApp {
                             ) {
                                 Ok(status) => status,
                                 Err(e) => {
-                                    let t = trf(
-                                        lang,
+                                    self.persist_postponed(
+                                        &e,
                                         "AI develop applied — but NOT saved: this photo is being changed by another Autoshop process ({err}); Ctrl+S retries",
-                                        &[("err", &e.to_string())],
+                                        &[],
                                     );
-                                    self.toast(ToastKind::Error, t.clone());
-                                    t
+                                    self.status.clone()
                                 }
                             },
                             None => tr(lang, "AI develop applied").into(),
@@ -9487,13 +9546,11 @@ impl AutoshopApp {
                                 trf(lang, "Version v{n} deleted", &[("n", &n.to_string())]);
                         }
                         Err(e) => {
-                            let t = trf(
-                                lang,
+                            self.persist_postponed(
+                                &e,
                                 "Delete v{n} failed: {err}",
-                                &[("n", &n.to_string()), ("err", &e.to_string())],
+                                &[("n", &n.to_string())],
                             );
-                            self.status = t.clone();
-                            self.toast(ToastKind::Error, t);
                         }
                     }
                 }
@@ -14415,7 +14472,7 @@ mod tests {
             .replace("crs:Exposure2012=\"0.00\"", "crs:Exposure2012=\"broken\"");
         assert!(doc.contains("broken"), "fixture: the corrupt attribute must exist");
         std::fs::write(&xp, &doc).unwrap();
-        let (saved, warn, _) = read_saved_develop(src);
+        let (saved, warn, _, _) = read_saved_develop(src);
         assert!(matches!(saved, SavedDevelop::NoopOnly), "corrupt-only still restores nothing");
         assert!(warn.contains(&"Exposure2012".to_string()), "{warn:?}");
 

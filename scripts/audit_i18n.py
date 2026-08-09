@@ -57,6 +57,7 @@ DYNAMIC_SITES = [
     (r"^name\b", "named rows (CURVE_CHANNELS / HSL_BANDS / GRADE_REGIONS / MaskRole)"),
     (r"^label\b", "AI segmentation labels"),
     (r"^en\b", "MaskRole::en_name"),
+    (r"^busy_key\b", "persist_postponed keys"),
     (r"^\[", "inline literal array"),
 ]
 
@@ -76,6 +77,10 @@ DYNAMIC_SOURCES = [
     ("impl_fn", "gui", "impl ThemePref", "fn label"),
     ("impl_fn", "recipe", "impl MaskRole", "fn en_name"),
     ("calls", "gui", "set_canvas_status("),
+    # persist_postponed's key is its SECOND argument (after the error), so
+    # the plain first-arg collector cannot see it: this kind takes the first
+    # string literal ANYWHERE inside each call's parens.
+    ("call_str", "gui", "persist_postponed("),
 ]
 
 # Dynamic keys whose Rust source offers nothing mechanical to anchor on
@@ -273,7 +278,7 @@ def extract_source_keys() -> tuple[set[str], list[str]]:
                 problems.append(f"{src_name}: {spec[3]!r} not found inside {anchor!r}")
                 continue
             got = block_literals(src, fn_at, "{", "}")
-        else:  # calls: literal FIRST arguments only
+        elif kind == "calls":  # literal FIRST arguments only
             got = set()
             for m in re.finditer(re.escape(anchor), src):
                 i = m.end()
@@ -283,6 +288,25 @@ def extract_source_keys() -> tuple[set[str], list[str]]:
                     lit, _ = parse_literal(src, i)
                     if lettered(lit):
                         got.add(lit)
+        else:  # call_str: first string literal ANYWHERE inside the call parens
+            got = set()
+            for m in re.finditer(re.escape(anchor), src):
+                i, depth = m.end(), 1
+                while i < len(src) and depth:
+                    c = src[i]
+                    if src.startswith("//", i):
+                        i = src.index("\n", i)
+                        continue
+                    if c == '"':
+                        lit, _ = parse_literal(src, i)
+                        if lettered(lit):
+                            got.add(lit)
+                        break
+                    if c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                    i += 1
         if not got:
             problems.append(f"{src_name}: {anchor!r} extracted no keys (drift?)")
         wanted |= got
