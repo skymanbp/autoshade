@@ -873,6 +873,10 @@ struct AutoshopApp {
     /// "unsaved" — the quit dialog then re-armed forever.
     saved_strip: Option<autoshop::store::VariantsRecord>,
     nav_stash: HashMap<PathBuf, StashEntry>,
+    /// Master decodes in flight, keyed (photo, origin): repeat clicks into a
+    /// still-decoding cold card must coalesce, not stack a fresh full-res
+    /// decode thread per click.
+    master_loads: std::collections::HashSet<(PathBuf, PathBuf)>,
     // Paste-to-selected wrote the open photo's store: (path, exact recipe
     // written) so Msg::Pasted can advance the ● baseline on full success.
     pasted_open: Option<(PathBuf, EditRecipe)>,
@@ -1461,6 +1465,7 @@ impl Default for AutoshopApp {
             pixels_on_disk: None,
             saved_strip: None,
             nav_stash: HashMap::new(),
+            master_loads: std::collections::HashSet::new(),
             pasted_open: None,
             photo_knots: Vec::new(),
             photo_lens: Default::default(),
@@ -1693,6 +1698,17 @@ impl AutoshopApp {
             let _ = tx.send(msg);
         });
     }
+}
+
+/// First three entries joined by " · ", an ellipsis when more were cut — the
+/// bounded form every multi-failure status/toast shares (a 40-photo batch
+/// must not pour 40 error lines into one toast).
+fn brief_list(v: &[String]) -> String {
+    let mut d = v.iter().take(3).cloned().collect::<Vec<_>>().join(" · ");
+    if v.len() > 3 {
+        d.push_str(" …");
+    }
+    d
 }
 
 /// 256-bin RGB+luma histogram of the already-packed preview (one bin per
@@ -2898,6 +2914,32 @@ impl AutoshopApp {
         self.before_curve = curve.to_vec();
     }
 
+    /// Decode a variant's retouched master off-thread. FULL resolution — a
+    /// 61 MP TIFF takes seconds — so the UI thread never does this inline.
+    /// One in-flight decode per (photo, origin): repeat entries (re-clicks
+    /// into a still-decoding card, a stash restore) coalesce instead of
+    /// stacking a fresh full-resolution decode thread each time. And
+    /// `decode::load_image`, not `image::open`: the master rides the same
+    /// 4 GiB decode budget and orientation handling as every other source.
+    fn spawn_master_load(&mut self, photo: PathBuf, origin: PathBuf) {
+        if !self.master_loads.insert((photo.clone(), origin.clone())) {
+            return;
+        }
+        self.status = tr(
+            self.lang,
+            "loading this variant's retouched master… (showing the source develop meanwhile)",
+        )
+        .into();
+        let (p2, o2) = (photo.clone(), origin.clone());
+        self.spawn_worker(
+            move || {
+                let img = autoshop::decode::load_image(&origin);
+                Msg::MasterLoaded { photo, origin, img: Box::new(img) }
+            },
+            move |e| Msg::MasterLoaded { photo: p2, origin: o2, img: Box::new(Err(e)) },
+        );
+    }
+
     /// Make `self.active`'s recipe + base pixels the live working state and
     /// rebuild the before texture. Per-variant transient state (undo history,
     /// local selection, view) restarts — like a soft re-open; what persists is
@@ -2925,17 +2967,7 @@ impl AutoshopApp {
             && let Some(o) = &vorigin
             && let Some(photo) = self.src_path.clone()
         {
-            self.status =
-                tr(lang, "loading this variant's retouched master… (showing the source develop meanwhile)").into();
-            let (o, o2, photo2) = (o.clone(), o.clone(), photo.clone());
-            self.spawn_worker(
-                move || Msg::MasterLoaded {
-                    photo,
-                    origin: o.clone(),
-                    img: Box::new(image::open(&o).map_err(anyhow::Error::from)),
-                },
-                move |e| Msg::MasterLoaded { photo: photo2, origin: o2, img: Box::new(Err(e)) },
-            );
+            self.spawn_master_load(photo, o.clone());
         }
         // The strip's READER joins the repair rule: push_variant and
         // switch_variant sync the OUTGOING canvas into the strip, so a
@@ -4087,26 +4119,19 @@ impl AutoshopApp {
                     clear_warns.join("; ")
                 );
             }
-            let brief = |v: &Vec<String>| {
-                let mut d = v.iter().take(3).cloned().collect::<Vec<_>>().join(" · ");
-                if v.len() > 3 {
-                    d.push_str(" …");
-                }
-                d
-            };
             let mut quit_warns: Vec<String> = Vec::new();
             if !xmp_warns.is_empty() {
                 quit_warns.push(trf(
                     lang,
                     "{n} Lightroom XMP projection(s) failed (those develops ARE saved): {detail}",
-                    &[("n", &xmp_warns.len().to_string()), ("detail", &brief(&xmp_warns))],
+                    &[("n", &xmp_warns.len().to_string()), ("detail", &brief_list(&xmp_warns))],
                 ));
             }
             if !clear_warns.is_empty() {
                 quit_warns.push(trf(
                     lang,
                     "{n} clear(s) could not be marked: {detail} — a sidecar beside the RAW may restore those edits on the next open",
-                    &[("n", &clear_warns.len().to_string()), ("detail", &brief(&clear_warns))],
+                    &[("n", &clear_warns.len().to_string()), ("detail", &brief_list(&clear_warns))],
                 ));
             }
             match failed {
@@ -6132,15 +6157,7 @@ impl AutoshopApp {
                             &[("ok", &okn.to_string()), ("xmp", &xmpn.to_string())],
                         );
                         if !xmp_fails.is_empty() {
-                            let mut d = xmp_fails
-                                .iter()
-                                .take(3)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(" · ");
-                            if xmp_fails.len() > 3 {
-                                d.push_str(" …");
-                            }
+                            let d = brief_list(&xmp_fails);
                             s.push_str(&trf(
                                 lang,
                                 " — ⚠ {n} XMP projection(s) failed (those pastes ARE saved): {detail}",
@@ -6619,6 +6636,12 @@ impl AutoshopApp {
                                 self.toast(ToastKind::Error, t);
                             }
                             let mut pixels: Option<BakedBase> = baked;
+                            // The stashed active card's master when its decode
+                            // was still IN FLIGHT at navigate-away: origin
+                            // known, pixels not yet — the identity must
+                            // survive the reopen even though the image is not
+                            // here yet.
+                            let mut pending_master: Option<PathBuf> = None;
                             let mut stash_others: Vec<StashedVariant> = Vec::new();
                             let mut stash_active_pos = 0usize;
                             // The ACTIVE card's three-valued kind, whichever
@@ -6636,6 +6659,17 @@ impl AutoshopApp {
                                 pixels = match (st.base, st.origin) {
                                     (Some(b), Some(o)) => {
                                         Some((b, o, st.kind == VariantKind::Generated))
+                                    }
+                                    // Navigated away while the cold master was
+                                    // still decoding: the ORIGIN is the pixel
+                                    // link's identity — dropping it here let
+                                    // the next Ctrl+S clear pixels.json and
+                                    // persist a generated recipe as a source-
+                                    // based develop. The base re-decodes
+                                    // below; the link and the kind survive.
+                                    (None, Some(o)) => {
+                                        pending_master = Some(o);
+                                        None
                                     }
                                     _ => None,
                                 };
@@ -6729,7 +6763,13 @@ impl AutoshopApp {
                             self.recipe = recipe.clone();
                             self.rationale = recipe.rationale.clone();
                             self.variants = vec![Variant {
-                                kind: if active_kind == VariantKind::Fitted {
+                                // A PENDING master keeps its stashed kind: the
+                                // Fitted-or-Original collapse renamed a still-
+                                // decoding Generated card to 「▣ 原片」, and a
+                                // save then persisted that lie.
+                                kind: if pending_master.is_some() {
+                                    active_kind
+                                } else if active_kind == VariantKind::Fitted {
                                     VariantKind::Fitted
                                 } else {
                                     VariantKind::Original
@@ -6806,6 +6846,19 @@ impl AutoshopApp {
                                 self.set_before(ctx, &bimg, &curve);
                                 self.base_preview = Some(bimg);
                                 self.mask_paint = Some(image::RgbaImage::new(bw, bh));
+                            }
+                            if let Some(o) = pending_master.clone() {
+                                // Re-attach the surviving identity and re-arm
+                                // the worker decode (coalesced if the earlier
+                                // one is somehow still in flight). Until it
+                                // lands the canvas shows the source develop
+                                // under spawn_master_load's disclosure.
+                                if let Some(v) = self.variants.get_mut(0) {
+                                    v.origin = Some(o.clone());
+                                }
+                                if let Some(photo) = self.src_path.clone() {
+                                    self.spawn_master_load(photo, o);
+                                }
                             }
                             // Restore the BACKGROUND variants the stash
                             // carried (H4): the strip used to collapse to
@@ -7441,6 +7494,10 @@ impl AutoshopApp {
                     }
                 }
                 Msg::MasterLoaded { photo, origin, img } => {
+                    // The in-flight marker clears on EVERY outcome — photo
+                    // mismatch included — or one failed decode would block
+                    // all retries for the rest of the session.
+                    self.master_loads.remove(&(photo.clone(), origin.clone()));
                     // Install by identity, not index: only while the SAME
                     // photo is open, and only into strip entries that still
                     // reference this exact master and still await pixels.

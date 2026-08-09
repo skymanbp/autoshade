@@ -566,13 +566,6 @@ fn auto_cmd(
     let style = style.unwrap_or(cfg.style_strength);
     let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
     let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
-    if accepted {
-        // Same backup gate as analyze: `auto` is a programmatic canonical writer.
-        if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
-            anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
-        }
-        write_recipe(raw, &recipe, None)?;
-    }
     ensure_parent(&out)?;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
@@ -604,10 +597,36 @@ fn auto_cmd(
     // untouched RAW silently dropped every baked pixel edit and produced a
     // file that disagreed with what reopening the photo shows.
     let mut render_recipe = recipe.clone();
+    // ONE lock across the persistence compound — the gate, recipe.json, the
+    // XMP projection AND the render-source capture. Each store call locks
+    // internally, but separately: another process's save could land between
+    // the gate and the write (overwritten unversioned), or between the write
+    // and the XMP (their newer sidecar stomped by ours), and the source could
+    // change under the multi-minute render. The render itself runs OUTSIDE,
+    // on the source captured here; its result is printed below in the same
+    // order as before.
     // DELIVERABLE: a recorded master that cannot be honoured refuses with the
     // remedy instead of silently rendering the un-retouched RAW (A6).
-    let (src, relook) = autoshop::store::render_source_checked(raw, &mut render_recipe)
-        .map_err(|m| anyhow::anyhow!(m))?;
+    let (src, relook, xmp_result) = autoshop::store::with_develop_lock(
+        raw,
+        autoshop::store::DevelopLockMode::Wait,
+        || -> Result<_> {
+            if accepted {
+                // Same backup gate as analyze: `auto` is a programmatic
+                // canonical writer.
+                if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe)) {
+                    anyhow::bail!(
+                        "refusing to overwrite the saved develop: backing it up failed ({e})"
+                    );
+                }
+                write_recipe(raw, &recipe, None)?;
+            }
+            let (src, relook) = autoshop::store::render_source_checked(raw, &mut render_recipe)
+                .map_err(|m| anyhow::anyhow!(m))?;
+            let xmp_result = (accepted && decode::is_raw(raw)).then(|| write_xmp(raw, &recipe));
+            Ok((src, relook, xmp_result))
+        },
+    )?;
     if let Some(note) = relook {
         // Normally None — produce_recipe already repaired through
         // saved_recipe_snapshot — but a recipe that slipped past still gets
@@ -629,13 +648,13 @@ fn auto_cmd(
         println!("develop NOT saved: verdict {:?} — a non-Accept verdict never auto-saves.", verdict.decision);
         println!("--- proposed recipe (render it again via  autoshop apply) ---");
         println!("{}", serde_json::to_string_pretty(&recipe)?);
-    } else if decode::is_raw(raw) {
-        match write_xmp(raw, &recipe) {
-            Ok(xmp_path) => println!("xmp    -> {}", xmp_path.display()),
-            Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
-        }
     } else {
-        println!("(baked source — recipe.json only, no XMP)");
+        // Written under the lock above; only SAID here, in the old order.
+        match xmp_result {
+            Some(Ok(xmp_path)) => println!("xmp    -> {}", xmp_path.display()),
+            Some(Err(e)) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
+            None => println!("(baked source — recipe.json only, no XMP)"),
+        }
     }
     Ok(())
 }
@@ -731,6 +750,12 @@ fn match_cmd(
 
     let out = out.unwrap_or_else(|| default_out(raw, "matched", "json"));
     pipeline::guard_readonly(&out, raw)?;
+    // ONE lock across the whole persistence compound (both recipe homes, the
+    // pixel-link clear, the XMP): the gates and writers each lock internally
+    // but separately, so another process's save could land between a gate and
+    // its write and be overwritten unversioned — or leave recipe, master link
+    // and sidecar written around a foreign writer's output.
+    autoshop::store::with_develop_lock(raw, autoshop::store::DevelopLockMode::Wait, || -> Result<()> {
     // `-o` spelled AS the canonical path is a canonical overwrite: the
     // canonical branch below then SKIPS (recipe_path == canonical), so its
     // gate must run HERE, before the first write destroys the save.
@@ -782,6 +807,8 @@ fn match_cmd(
             Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
         }
     }
+    Ok(())
+    })?;
     if render_full {
         let img_out = default_out(raw, "matched", "tif");
         pipeline::guard_readonly(&img_out, raw)?;
