@@ -93,6 +93,34 @@ pub(crate) fn bounded_child_output(
         marked
     }
 
+    // Join a drain thread, but never forever: the DIRECT child being gone
+    // does not close the pipes — a descendant it spawned (a launcher script's
+    // python, a library worker) inherits them and can hold them open
+    // indefinitely, and an unconditional join then hung this caller exactly
+    // like the un-deadlined child this function exists to bound. Past the
+    // grace the thread is DETACHED (it parks in a blocking read and dies
+    // with the pipe or the process); its output is forfeited, disclosed as
+    // truncated, to keep the deadline honest. std has no join-with-timeout,
+    // so this polls is_finished the same way the try_wait loop below polls
+    // the child.
+    let join_bounded = |handle: std::thread::JoinHandle<(Vec<u8>, bool)>,
+                        stream: &str|
+     -> (Vec<u8>, bool) {
+        let grace = std::time::Duration::from_secs(2);
+        let start = std::time::Instant::now();
+        while !handle.is_finished() {
+            if start.elapsed() >= grace {
+                eprintln!(
+                    "⚠ a descendant process still holds the sidecar's {stream} after it exited — \
+                     abandoning the drain (output truncated)"
+                );
+                return (Vec::new(), true);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        handle.join().unwrap_or_default()
+    };
+
     let stdout_thread = drain(child.stdout.take());
     let stderr_thread = drain(child.stderr.take());
     let start = std::time::Instant::now();
@@ -102,8 +130,8 @@ pub(crate) fn bounded_child_output(
             Ok(None) if start.elapsed() >= budget => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
+                let _ = join_bounded(stdout_thread, "stdout");
+                let _ = join_bounded(stderr_thread, "stderr");
                 bail!(
                     "{who} timed out after {:.1}s and was killed \
                      (raise AUTOSHOP_SIDECAR_TIMEOUT_SECS if the first model download is legitimately slower)",
@@ -114,15 +142,15 @@ pub(crate) fn bounded_child_output(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
+                let _ = join_bounded(stdout_thread, "stdout");
+                let _ = join_bounded(stderr_thread, "stderr");
                 return Err(error).with_context(|| format!("poll {who}"));
             }
         }
     };
 
-    let (stdout, stdout_truncated) = stdout_thread.join().unwrap_or_default();
-    let (stderr, stderr_truncated) = stderr_thread.join().unwrap_or_default();
+    let (stdout, stdout_truncated) = join_bounded(stdout_thread, "stdout");
+    let (stderr, stderr_truncated) = join_bounded(stderr_thread, "stderr");
     Ok(std::process::Output {
         status,
         stdout: mark_truncated(stdout, stdout_truncated),

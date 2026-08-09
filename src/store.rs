@@ -1085,7 +1085,14 @@ fn suppressed_legacy_path(src: &Path, name: &str) -> PathBuf {
 /// Existence-only (no parse): the gallery badge and the web list call this per
 /// photo per refresh.
 pub fn has_develop(src: &Path) -> bool {
-    recipe_target(src).exists()
+    // recipe.json.bak covers the retire window: a crash between retire and
+    // publish leaves ONLY the .bak — recover_orphan_baks republishes it on
+    // the next real read — so answering "nothing saved" here was a lie that
+    // could send a caller into a second paid analysis over a save the
+    // recovery machinery still guarantees.
+    let recipe = recipe_target(src);
+    recipe.exists()
+        || recipe.with_extension("json.bak").exists()
         || xmp_target(src).exists()
         || legacy_recipe(src).exists()
         || legacy_xmp(src).exists()

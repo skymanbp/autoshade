@@ -609,6 +609,12 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
 /// The pre-era repair happens HERE, in the one funnel every library consumer
 /// shares, so no surface can render a washed-frame curve by forgetting to ask.
 fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
+    // A crashed publish's survivor is a save like any other — republish it
+    // BEFORE reading, or this snapshot returns None inside the retire window
+    // and the caller stamps fresh calibration over the survivor's (the same
+    // touch-time rule migrate_legacy follows; a failed recovery is re-decided
+    // by the backup gate downstream).
+    let _ = crate::store::recover_orphan_baks(raw);
     for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
         if let Ok(text) = std::fs::read_to_string(&p)
             && let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
@@ -797,14 +803,23 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // last-writer-wins by design; one photo has one interactive writer in
     // practice.)
     let bytes = serde_json::to_vec_pretty(&on_disk)?;
-    crate::store::durable_retire_and_write(
-        &out,
-        &out.with_extension("json.bak"),
-        &bytes,
-    )
-    .with_context(|| format!("publish recipe {}", out.display()))?;
     if out == crate::store::recipe_target(raw) {
+        crate::store::durable_retire_and_write(
+            &out,
+            &out.with_extension("json.bak"),
+            &bytes,
+        )
+        .with_context(|| format!("publish recipe {}", out.display()))?;
         crate::store::note_source(raw); // breadcrumb for the hashed store dir
+    } else {
+        // A redirected `-o` (and every v<N> snapshot) is OUTSIDE
+        // recover_orphan_baks' pair list: retiring here stranded the old
+        // bytes as an unrecoverable `.bak` beside a MISSING live file when a
+        // crash hit the retire window — `apply` then saw no recipe at all.
+        // Stage+rename replaces the previous bytes atomically instead: no
+        // missing-file window, no orphan a reader will never republish.
+        crate::store::durable_write(&out, &bytes)
+            .with_context(|| format!("publish recipe {}", out.display()))?;
     }
     Ok(out)
 }
