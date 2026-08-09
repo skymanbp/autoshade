@@ -43,7 +43,9 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   frames. Off by default, triggered by a flag, a CLI command, or a UI button.
 - **PNG/TIFF source mode** — feed an already-processed image (e.g. denoised in
   Lightroom/Photoshop) and Autoshop grades it directly. Auto-detected by file
-  type; no RAW required.
+  type; no RAW required. Embedded ICC profiles (LR "Edit in…" exports ProPhoto
+  16-bit by default) are normalised into the sRGB working space — 16-bit depth
+  preserved — instead of being read as if they were sRGB.
 - **Desktop app (native GUI)** — `autoshop-gui`: a library grid that marks which
   photos already have a saved develop, the full develop panel (tone, presence,
   curves, 8-band HSL, colour grading), local masks (linear / radial / brush /

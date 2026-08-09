@@ -1,6 +1,6 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.22.0). The full decode → advise → verify → render
+> Status: **implemented** (v0.23.0). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
@@ -8,7 +8,20 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 233 library + 1 CLI + 30 GUI tests pass in both build configurations.
+> 273 library + 2 CLI + 37 GUI tests pass in both build configurations.
+> v0.23.0 (adversarial-review round) hardened the whole crate: a per-photo
+> OS develop lock (`store::with_develop_lock`, Wait/NoWait + thread-local
+> reentrancy) now wraps every persistence compound across GUI, CLI and serve;
+> recipe publishes are power-safe (retire-to-`.bak` + recovery at every read
+> boundary); decode normalises embedded ICC profiles into sRGB (qcms — 8-bit
+> direct, 16-bit via a 33³ lattice + trilinear interpolation that preserves
+> bit depth); renders clamp at every public entry and load their mask rasters
+> through one budgeted per-render snapshot (gate and pixels observe the same
+> bytes); sidecar subprocesses are deadline-killed with bounded pipe drains;
+> the GUI embeds five Noto font subsets (symbols + the Chinese UI's own
+> hanzi) with a coverage gate, ships light/dark themes checked against the
+> COMPOSITED colours the screen shows, and `scripts/audit_i18n.py` is a
+> release gate (dynamic keys extracted from source, `tr()` bypasses flagged).
 > v0.20.0 added the first RUNTIME end-to-end pass (real CLI processes over a
 > real 61 MP ARW, a live `serve` hit with 25 HTTP assertions, the ambient
 > `.env`/settings guards exercised as real processes against a recording mock

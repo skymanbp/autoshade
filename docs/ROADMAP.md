@@ -27,9 +27,15 @@
 > `autoshop-roadmap.md`。
 > **（2026-08-08 起开发已重启：用户试用报三问题，第九轮 v0.22.0 见下条。）**
 >
+> **v0.23.0（2026-08-09，第十轮 = GUI 打磨五项 + 双轨攻击式审阅收敛）**：
+> Phase 1 五项（字体嵌入/双主题/排版/按钮/i18n）+ Codex gpt-5.6-sol xhigh 三批
+> 全 crate 审计 92 发现 → 36 工作项 35 项落地（W22 余项用户拍板推迟）+ Codex
+> 只读全差异 debug 复审 11 发现全闭合。测试 266→312 总，clippy 0，i18n 审计门
+> 强制化。详见「当前状态」首条。⚠ GUI 视觉验收待用户（禁启动纪律）。
+>
 > **v0.22.0 已发布（2026-08-09，tag `v0.22.0` → `84be2cf`，assets 字节验证
 > gui 35840472 / cli 27572908，Latest；E2E 18/18 用户解禁后真进程通过——见
-> 「当前状态」首条 E2E 段）**：**第九轮 = 用户反馈三连修 + 蒙版大改**。
+> 「当前状态」次条 E2E 段）**：**第九轮 = 用户反馈三连修 + 蒙版大改**。
 > 用户试用报三问题：①变体名"自己会变"；②蒙版要打磨（点名"蒙版本身的调整"，追加
 > 增加/排除/交叉）；③AI 整图生成→反推→保存后退出仍提示未保存、「保存并退出」死键。
 > 诊断（三路调查工作流 + 8 条根因全部对抗验证 CONFIRMED + Codex 只读复核）：①③同根
@@ -142,7 +148,7 @@
 > ARCHITECTURE 与代码对齐（补上此前完全缺席的桌面 GUI 与 `match` 反推）。
 > 故不发新版，已发布的 v0.16.1 二进制不受影响。
 
-## 第十轮计划（🔒 用户锁定 2026-08-09 —— 范围不得擅改，任何变更须经用户确认）
+## 第十轮计划（🔒 用户锁定 2026-08-09 —— ✅ 已完成，v0.23.0；执行记录见「当前状态」首条）
 
 > 用户原话（2026-08-09）："GUI更进一步打磨……完成后，进行一次cct插件的代码攻击式
 > 审阅，你负责统筹规划和监督，任务交给gpt 5.6 sol最高推理等级来执行。攻击面要广，
@@ -174,7 +180,61 @@
   与攻击审阅结果交叉比对，发现全修 + 回归钉死。
 - 收口照旧：clippy/全测试/文档五份+记忆同步/发版（预定 v0.23.0）。
 
+## 下轮队列（第十一轮候选 · 未锁定，须用户确认范围）
+
+- **W22 余项**：瓦片化引导滤波（全分辨率 refine 数 GB 临时平面；含 C11/F1 的
+  8 GiB 解码+旋转峰值并入同一工作集预算）——用户 2026-08-09 拍板推迟至此。
+- **ValidatedRecipe**（debug 复审架构议题 c，双方同意）：信任边界构造一次校验
+  型配方，内部渲染函数免重复 clone+clamp；ClampSummary 扩展到曲线/字符串截断。
+- **GUI 持久化协调器**（架构议题 b，双方同意）：统一各保存复合的锁包裹、
+  Busy/Io 分型错误与忙碌文案映射（现为 save_xmp/Save-all/Analyze 三处同构闭包）。
+- **W20 GUI 恢复路径披露**：read_saved_develop/load_version/粘贴的 ClampSummary
+  计数上屏（CLI 与批量导出已披露；恢复路径判超本轮最小变更）。
+- **C1/F10 词法路径身份**：盘符/UNC/symlink 迁移库 → develop"失踪"——维持既有
+  取舍（source.txt 面包屑），改身份模型=大型设计变更，仅登记。
+
 ## 当前状态（已完成，勿重做）
+
+- **第十轮：GUI 打磨五项 + 双轨攻击式审阅收敛（2026-08-09，v0.23.0）**
+
+  **Phase 1（`86d3dcc` + `c3b7f92`）**：五项全落——嵌入五个 Noto 子集字体
+  （符号+CJK 663 码点，`embedded_fonts_cover_every_ui_symbol` 门禁钉死，
+  scripts/subset_gui_fonts.py 从源码字面量自动提取）；亮暗双主题（Prefs 持久
+  化）；排版/按钮打磨；i18n 对齐。⚠ **视觉验收只能用户做**（GUI 禁启动纪律）。
+
+  **Phase 2 审计**：Codex gpt-5.6-sol xhigh 三批全 crate（C1-C6 + MARGINAL 16
+  + 补扫 C7-C11）= 92 发现 44 确认/48 降级/0 误驳；Claude 结构审 B1-B9 并行；
+  合并 36 工作项 W1-W36，13 项设计取舍全部 AskUserQuestion 拍板。
+
+  **修复六提交**：`a9769af`（W6-8 XMP 原语/W22 面/W30-32 含 qcms ICC/W35 边车
+  限时限量/W36 修瑕覆盖栅格）→ `c3b7f92`（W18 CJK 嵌入/W28 转义盲区）→
+  `b7d4eb2`（W14 serve 身份/W15 导出名注册/W26/W5 .env 信任边界/W21/W23）→
+  `f122914`（W11 耐掉电发布/W12 stem 误伤/W13/W25/W24 store 侧 OS 显影锁
+  Wait/NoWait+线程本地重入）→ `b75e18b`（W24 GUI 九位点手写：Ctrl+S 复合/
+  Save-all 逐照/save_version/Analyze/粘贴 Wait/反推 Wait/delete_version；
+  W17/W27 trf 单趟/W29 审计门=动态键源码机械提取+tr() 旁路检测，当场抓 4 个
+  存量漏翻）→ `bba3e9c`（W2 refine 携带引擎态/W9 渲染入口净化+range 整组退役/
+  W10 栅格快照+总量预算关 TOCTOU/W20 ClampSummary/W33 stage_and_publish/W34
+  clap requires；GUI W1 笔刷重排/W3 警告弹回/W4 worker 解码/W16 合成色对比度
+  检验——当场抓出暗色选中文字 2.57:1 真缺陷并重调两主题/W19 异步改名提交）。
+  **W22 余项（瓦片化引导滤波）用户拍板推迟**（见上方下轮队列）。
+
+  **Debug 轮（用户五步收官令第 4 步）**：Codex gpt-5.6-sol xhigh 只读全差异
+  复审（558k tok）11 发现，逐条亲证后全闭合五提交：`e481667`（#1 auto/match
+  持一把 Wait 锁罩住 backup→recipe→清链→XMP、渲染锁外；#2 W4 引入的回归=
+  stash (base,origin) 双 Some 门丢 origin→Ctrl+S 清 pixels.json 存谎，改
+  pending-master 路径保身份保 kind 并重掖解码；#6 解码在途集合+load_image
+  限额）、`cbcc0de`（#4 16 位 ICC：qcms 仅 8 位（源码实证）→ 33³ 格 LUT+三线
+  性插值 f32 保位深，LR "Edit in…" ProPhoto 16-bit 真正可开）、`601dbd3`
+  （#3 模型改名蒙版可双涂→未匹配即保守整体回退+rationale 披露+提示词钉名为
+  身份）、`408f6e6`（#5 未决开照→保存先过备份门；#7 栅格解码前尺寸预检×4；
+  #10 渲染入口披露丢弃；#11 删 unreadable_mask_rasters 死门、测试迁快照）、
+  `e318939`（#8 has_develop 认 .bak/saved_recipe_snapshot 先恢复/自定义 -o 改
+  stage+rename 免孤儿 bak；#9 drain 线程 2s 宽限有界 join+披露截断）。架构
+  议题 a 删除、b/c 双方同意进下轮队列。
+
+  **终态**：273 lib + 2 CLI + 37 GUI 全绿（第十轮起点 233+1+32），clippy 0
+  （--all-targets --features gui），audit_i18n.py 强制门 0。
 
 - **第九轮：用户反馈三连修 + 蒙版大改（2026-08-08~09，v0.22.0 已发布：tag
   `v0.22.0` → 提交 `84be2cf`，release assets 字节验证 autoshop-gui.exe 35840472 /
