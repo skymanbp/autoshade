@@ -104,6 +104,10 @@ gradient — clouds stay protected below the horizon line); {{\"kind\":\"color\"
 0..1, amount 0..1 tolerance (0.5 default), px,py sample point}} keeps only pixels of a similar \
 colour at any brightness (e.g. deepen only the blues in a sky gradient). Prefer a plain mask; add \
 `range` when the geometry alone would spill onto things the edit must not touch. \
+When REFINING an edit that already carries masks, keep each existing mask's `name` EXACTLY as \
+given — the name is that mask's identity: a renamed mask cannot be merged with the engine-only \
+state (components, toggles, colour gains) the schema does not carry, and your mask edits are then \
+discarded wholesale in favour of the original masks. \
 Local slider values use the same scale as the globals. METADATA: {meta_json}  HISTOGRAM: {hist}",
             meta_json = meta_json,
             hist = hist_summary(hist),

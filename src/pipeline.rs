@@ -347,7 +347,7 @@ pub(crate) fn carry_over_unrepresentable(recipe: &mut EditRecipe, base: &EditRec
     };
 
     let mut carried_indices = Vec::new();
-    let mut fallback_names = Vec::new();
+    let mut unmatched = false;
     for (base_index, original) in base.masks.iter().enumerate().filter(|(_, m)| schema_loses(m)) {
         let returned_matches: Vec<usize> = recipe
             .masks
@@ -385,29 +385,37 @@ pub(crate) fn carry_over_unrepresentable(recipe: &mut EditRecipe, base: &EditRec
             // No schema response can be a round-trip copy of an unnamed Bitmap
             // selection, so preserve the existing prepend behaviour.
             carried_indices.push(base_index);
-        } else if !fallback_names.contains(&original.name) {
-            // A duplicate or changed schema-carried name cannot identify which
-            // returned mask owns the state. Preserve that whole base group and
-            // discard its returned group so coverage is never applied twice.
-            fallback_names.push(original.name.clone());
+        } else {
+            // A state-bearing mask the response did not identifiably return.
+            // The returned list may hold its RENAMED refined copy — keeping
+            // both applies the coverage twice, and a same-name discard only
+            // covered the obedient half: a renamed copy sailed through it.
+            // No guess is safe, so the wholesale fallback below takes over.
+            unmatched = true;
         }
     }
 
-    for name in fallback_names {
-        recipe.masks.retain(|m| m.name != name);
-        for (i, _) in base.masks.iter().enumerate().filter(|(_, m)| m.name == name) {
-            if !carried_indices.contains(&i) {
-                carried_indices.push(i);
-            }
+    if unmatched {
+        // Conservative wholesale fallback: the base masks stand unchanged and
+        // the response's MASK edits are discarded (its global refinements
+        // stay). The prompt pins mask names, so this is the disobedient-
+        // response path — and the rationale says what happened, because a
+        // silent revert here reads as "the model ignored my masks".
+        recipe.masks = base.masks.clone();
+        recipe.rationale.push_str(
+            "\n⚠ the response did not preserve mask identities (a mask was renamed or \
+             duplicated) — your masks were kept unchanged and the model's mask edits were \
+             discarded",
+        );
+    } else {
+        carried_indices.sort_unstable();
+        carried_indices.dedup();
+        if !carried_indices.is_empty() {
+            let proposed = std::mem::take(&mut recipe.masks);
+            recipe.masks =
+                carried_indices.into_iter().map(|i| base.masks[i].clone()).collect();
+            recipe.masks.extend(proposed);
         }
-    }
-    carried_indices.sort_unstable();
-    carried_indices.dedup();
-    if !carried_indices.is_empty() {
-        let proposed = std::mem::take(&mut recipe.masks);
-        recipe.masks =
-            carried_indices.into_iter().map(|i| base.masks[i].clone()).collect();
-        recipe.masks.extend(proposed);
     }
     // Manual lens corrections are geometry the photographer dialled in and the
     // model never saw; defaulting them silently re-warped the frame.
@@ -2089,5 +2097,56 @@ mod tests {
         let mut refined = expected.clone();
         carry_over_unrepresentable(&mut refined, &plain_base);
         assert_eq!(refined, expected, "plain masks still take the model response exactly");
+    }
+
+    #[test]
+    fn a_renamed_state_bearing_mask_falls_back_to_the_base_masks() {
+        use crate::recipe::{
+            LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry,
+        };
+
+        // The user's mask carries engine-only state (a Subtract component).
+        let base = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject".into(),
+                components: vec![MaskComponent {
+                    geometry: MaskGeometry::Radial {
+                        top: 0.2,
+                        left: 0.2,
+                        bottom: 0.8,
+                        right: 0.8,
+                        feather: 0.4,
+                        roundness: 0.0,
+                        flipped: false,
+                        angle: 0.0,
+                    },
+                    mode: MaskCombine::Subtract,
+                }],
+                exposure_ev: 0.25,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // The model returned its refined copy under a NEW name — the exact
+        // case the old same-name discard sailed past: keeping it alongside
+        // the carried base would apply the coverage twice.
+        let mut proposed = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject refined".into(),
+                exposure_ev: 0.9,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        carry_over_unrepresentable(&mut proposed, &base);
+        assert_eq!(
+            proposed.masks, base.masks,
+            "identity lost ⇒ the base masks stand, the response's mask edits are discarded"
+        );
+        assert!(
+            proposed.rationale.contains("did not preserve mask identities"),
+            "the silent revert must be disclosed: {:?}",
+            proposed.rationale
+        );
     }
 }
