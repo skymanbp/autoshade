@@ -56,11 +56,36 @@ pub fn tr(lang: Lang, en: &'static str) -> &'static str {
 /// A placeholder a translation happens to drop is simply left as-is (visible),
 /// never a panic.
 pub fn trf(lang: Lang, en: &'static str, args: &[(&str, &str)]) -> String {
-    let mut s = tr(lang, en).to_string();
-    for (name, value) in args {
-        s = s.replace(&format!("{{{name}}}"), value);
+    // ONE pass over the TEMPLATE, never over inserted values: the old
+    // sequential replace rescanned everything already substituted, so a value
+    // that happened to contain placeholder syntax — a directory literally
+    // named `{count}`, an OS error quoting a braced path — was reinterpreted
+    // as markup by the next argument's pass and silently rewritten.
+    let template = tr(lang, en);
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open..];
+        match after.find('}') {
+            Some(close) => {
+                let name = &after[1..close];
+                match args.iter().find(|(n, _)| *n == name) {
+                    Some((_, value)) => out.push_str(value),
+                    // A placeholder a translation drops (or a caller does not
+                    // supply) stays visible as-is — the existing contract.
+                    None => out.push_str(&after[..=close]),
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(after);
+                rest = "";
+            }
+        }
     }
-    s
+    out.push_str(rest);
+    out
 }
 
 /// Lazily materialise the English→Chinese lookup from the flat [`ZH_ENTRIES`]
@@ -92,6 +117,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("no key set", "未设密钥"),
     ("Image — the vision proposer + generative edits", "图像 · 视觉提案 + 生成式编辑"),
     ("OAuth (Codex bridge / ChatGPT sub)", "OAuth (Codex 桥 / ChatGPT 订阅)"),
+    ("OAuth (Claude CLI)", "OAuth（Claude CLI）"),
+    ("API (OpenAI-compatible)", "API（兼容 OpenAI）"),
     ("fetching…", "拉取中… / fetching…"),
     ("🔄 Fetch models", "🔄 拉取可用模型 / Fetch models"),
     ("List the models this endpoint serves (GET /models) so you can pick instead of guess — and a live reachability check for the bridge/API. Uses the key/token typed below, or the saved one if blank.",
@@ -353,6 +380,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "After — 拖框=局部AI · 滚轮缩放 · 空格/中键平移 · 按住B对比"),
     ("Preview pixels 1:1 (double-click the image to toggle)", "预览像素 1:1（双击图片可切换）"),
     ("Fit the whole image to the canvas (double-click the image to toggle)", "整图适配画布（双击图片可切换）"),
+    ("Fit", "适配"),
+    ("Fit ↔ 1:1", "适配 ↔ 1:1"),
     ("Clipping warning (J): red = highlight clip, blue = shadow crush (judged on export pixels)",
         "削波警告 (J)：红 = 高光溢出，蓝 = 阴影死黑（按导出像素判定）"),
     ("1280px · fluid", "1280px 流畅"),
@@ -506,6 +535,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("recipe saved — but the Lightroom XMP failed: {err}",
         "配方已保存 — 但 Lightroom XMP 写入失败：{err}"),
     ("could not clear the saved edits: {err}", "无法清除已保存的编辑：{err}"),
+    ("save postponed: this photo is being changed by another Autoshop process ({err}); your canvas remains unsaved — retry",
+        "保存已推迟：另一个 Autoshop 进程正在修改这张照片（{err}）；画布上的编辑尚未保存 — 请稍后重试"),
     ("neutral recipe — saved edits cleared (saved files removed)",
         "中性配方 — 已清除保存的编辑（存档文件已删除）"),
     ("neutral recipe — nothing to save", "中性配方 — 无需保存"),
@@ -546,6 +577,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "AI 显影已应用 — 但未保存：备份你已有的保存失败（{err}）；Ctrl+S 可显式覆盖"),
     (" · NOT persisted: backing up your existing save failed ({err}) — Ctrl+S to save explicitly",
         " · 未持久化：备份你已有的保存失败（{err}）— Ctrl+S 可显式保存"),
+    ("AI develop applied — but NOT saved: this photo is being changed by another Autoshop process ({err}); Ctrl+S retries",
+        "AI 显影已应用 — 但未保存：另一个 Autoshop 进程正在修改这张照片（{err}）；Ctrl+S 可重试"),
+    (" · NOT persisted: the develop store could not be locked ({err}) — Ctrl+S to save explicitly",
+        " · 未持久化：显影库无法加锁（{err}）— Ctrl+S 可显式保存"),
     ("Open a photo, or open a folder to browse your library.",
         "打开一张照片，或打开文件夹浏览图库。"),
     ("busy — variants unlock when the current task finishes",
@@ -871,3 +906,34 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Dark", "深色"),
     ("Light", "浅色"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_value_containing_placeholder_syntax_is_not_reinterpreted() {
+        // The old sequential replace expanded {dir} first, then the {count}
+        // pass rewrote the placeholder-looking text INSIDE the directory name.
+        let s = trf(
+            Lang::En,
+            "{dir} · {count} photos",
+            &[("dir", "D:/packs/{count}"), ("count", "3")],
+        );
+        assert_eq!(s, "D:/packs/{count} · 3 photos");
+    }
+
+    #[test]
+    fn a_dropped_or_unknown_placeholder_stays_visible() {
+        let s = trf(Lang::En, "saved → {path}", &[]);
+        assert_eq!(s, "saved → {path}");
+        let s = trf(Lang::En, "brace {", &[]);
+        assert_eq!(s, "brace {");
+    }
+
+    #[test]
+    fn repeated_placeholders_all_expand() {
+        let s = trf(Lang::En, "{n} of {n}", &[("n", "2")]);
+        assert_eq!(s, "2 of 2");
+    }
+}

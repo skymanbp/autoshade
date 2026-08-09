@@ -2050,6 +2050,31 @@ enum SavedDevelop {
 /// numeric setting(s)", a warning about something else entirely. 0 whenever
 /// the restore came from recipe.json (which carries no LR-only masks).
 fn read_saved_develop(src: &std::path::Path) -> (SavedDevelop, Vec<String>, usize) {
+    // The whole restore — legacy migration plus the multi-file precedence
+    // walk — runs under ONE develop lock, so another process's mid-compound
+    // save cannot hand back half-old, half-new answers. NoWait: this runs on
+    // photo open (UI thread); a busy develop must report, not freeze the
+    // window behind a lock with no cancel.
+    match autoshop::store::with_develop_lock(
+        src,
+        autoshop::store::DevelopLockMode::NoWait,
+        || Ok::<_, std::io::Error>(read_saved_develop_locked(src)),
+    ) {
+        Ok(answer) => answer,
+        Err(e) => (
+            SavedDevelop::Unreadable {
+                err: format!(
+                    "the develop is busy in another Autoshop process ({e}); retry opening the photo"
+                ),
+                fallback: None,
+            },
+            Vec::new(),
+            0,
+        ),
+    }
+}
+
+fn read_saved_develop_locked(src: &std::path::Path) -> (SavedDevelop, Vec<String>, usize) {
     autoshop::store::migrate_legacy(src);
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
     // Newest intent wins (store::lightroom_sidecar): a sidecar Lightroom
@@ -3125,6 +3150,14 @@ impl AutoshopApp {
         self.commit_mask_name_buf();
         let lang = self.lang;
         let Some(src) = self.src_path.clone() else { return };
+        // ONE NoWait lock across claim → raster freeze → recipe write:
+        // another process's delete_version sweeping the just-claimed slot
+        // mid-snapshot is a real interleave — and this is a foreground
+        // button, so busy must report, not hang the UI.
+        let locked = autoshop::store::with_develop_lock(
+            &src,
+            autoshop::store::DevelopLockMode::NoWait,
+            || -> std::io::Result<()> {
         // ATOMICALLY reserved number (store::claim_version): disk-list+1
         // raced the auto-backup (and the web/CLI) to the same N — the later
         // publish silently replaced the earlier snapshot.
@@ -3134,7 +3167,7 @@ impl AutoshopApp {
                 let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t);
-                return;
+                return Ok(());
             }
         };
         // Freeze referenced rasters under THIS version (the backup gate's
@@ -3147,7 +3180,7 @@ impl AutoshopApp {
             let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
             self.status = t.clone();
             self.toast(ToastKind::Error, t);
-            return;
+            return Ok(());
         }
         let res = autoshop::pipeline::write_recipe(&src, &snap, Some(vpath.clone()));
         if res.is_err() {
@@ -3170,6 +3203,14 @@ impl AutoshopApp {
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t);
             }
+        }
+                Ok(())
+            },
+        );
+        if let Err(e) = locked {
+            let t = trf(lang, "Save version failed: {err}", &[("err", &e.to_string())]);
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
         }
     }
 
@@ -3835,6 +3876,14 @@ impl AutoshopApp {
             let mut xmp_warns: Vec<String> = Vec::new();
             let mut clear_warns: Vec<String> = Vec::new();
             for (p, r, pix, strip) in &pending {
+                // ONE NoWait lock per photo across its whole persist compound
+                // (the Ctrl+S pairing). A develop busy in another process
+                // fails THIS photo — the quit bounces and reports below —
+                // instead of freezing the dialog behind an unbounded Wait.
+                let locked: std::io::Result<()> = autoshop::store::with_develop_lock(
+                    p,
+                    autoshop::store::DevelopLockMode::NoWait,
+                    || {
                 // Neutral + no pixel identity + trivial strip = Ctrl+S's
                 // "clear my edits": WRITING neutral files here pinned the
                 // existence-keyed ● badge that a direct Ctrl+S removes. A
@@ -3862,10 +3911,9 @@ impl AutoshopApp {
                         }
                         Err(e) => {
                             failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
-                            break;
                         }
                     }
-                    continue;
+                    return Ok(());
                 }
                 // A GENERATED entry's recipe is the STRIPPED canvas form —
                 // persisting it verbatim erased the RAW's calibration from
@@ -3920,7 +3968,7 @@ impl AutoshopApp {
                 }
                 if let Err(e) = res {
                     failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
-                    break;
+                    return Ok(());
                 }
                 // The strip record saves/clears with the recipe (the Ctrl+S
                 // pairing): without it the background variants this dialog
@@ -3938,7 +3986,7 @@ impl AutoshopApp {
                     }
                     Err(e) => {
                         failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
-                        break;
+                        return Ok(());
                     }
                 }
                 // NO XMP for a generated entry — Ctrl+S refuses those for the
@@ -3956,6 +4004,18 @@ impl AutoshopApp {
                     && let Err(e) = autoshop::pipeline::write_xmp(p, &disk)
                 {
                     xmp_warns.push(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                }
+                        Ok(())
+                    },
+                );
+                if let Err(e) = locked {
+                    failed = Some(format!(
+                        "{}: the photo is being changed by another Autoshop process ({e})",
+                        autoshop::pipeline::stem(p)
+                    ));
+                }
+                if failed.is_some() {
+                    break;
                 }
             }
             // ALL said regardless of a later photo's failure (the
@@ -4149,8 +4209,8 @@ impl AutoshopApp {
             ui.heading(tr(lang, "Analysis — the verifier"));
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Provider"));
-                let r1 = ui.radio_value(&mut f.analysis_provider_api, false, "OAuth (Claude CLI)");
-                let r2 = ui.radio_value(&mut f.analysis_provider_api, true, "API (OpenAI-compatible)");
+                let r1 = ui.radio_value(&mut f.analysis_provider_api, false, tr(lang, "OAuth (Claude CLI)"));
+                let r2 = ui.radio_value(&mut f.analysis_provider_api, true, tr(lang, "API (OpenAI-compatible)"));
                 if r1.changed() || r2.changed() {
                     // Without this the OTHER provider's model id stays in the
                     // field and the picker presents it as the current choice
@@ -4197,7 +4257,7 @@ impl AutoshopApp {
             ui.heading(tr(lang, "Image — the vision proposer + generative edits"));
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Provider"));
-                ui.radio_value(&mut f.image_provider_oauth, false, "API (OpenAI-compatible)");
+                ui.radio_value(&mut f.image_provider_oauth, false, tr(lang, "API (OpenAI-compatible)"));
                 ui.radio_value(&mut f.image_provider_oauth, true, tr(lang, "OAuth (Codex bridge / ChatGPT sub)"));
             });
             // Flipping into OAuth while the endpoint is still empty or the stock
@@ -5527,7 +5587,14 @@ impl AutoshopApp {
             && self.active_variant().is_none_or(|v| v.origin.is_none())
             && self.current_strip_record().is_none()
         {
-            match autoshop::store::clear_develop(&path) {
+            // NoWait wrapper: clear_develop locks internally, but with Wait —
+            // on this UI thread a develop held by another process must fail
+            // into the error arm below, not freeze the window.
+            match autoshop::store::with_develop_lock(
+                &path,
+                autoshop::store::DevelopLockMode::NoWait,
+                || autoshop::store::clear_develop(&path),
+            ) {
                 Ok(o) => {
                     self.edited_badge.clear();
                     // The CANVAS is the baseline, not default(): Reset leaves
@@ -5636,6 +5703,15 @@ impl AutoshopApp {
             }
             self.dirty = true;
         }
+        // ONE lock across the whole compound save: recipe.json, the
+        // pixels.json link, the strip record and the XMP projection publish
+        // as a unit, so another process cannot interleave between the halves.
+        // NoWait — a busy develop postpones the save, ● stays lit, the canvas
+        // loses nothing, and Ctrl+S retries.
+        let locked_save = autoshop::store::with_develop_lock(
+            &path,
+            autoshop::store::DevelopLockMode::NoWait,
+            || -> std::io::Result<()> {
         match autoshop::pipeline::write_recipe(&path, &self.recipe, None) {
             Ok(rp) => {
                 // Pixel identity FIRST — before the badge/baseline/stash are
@@ -5781,6 +5857,18 @@ impl AutoshopApp {
                 self.toast(ToastKind::Error, t); // a failed save must be seen
             }
         }
+                Ok(())
+            },
+        );
+        if let Err(e) = locked_save {
+            let t = trf(
+                lang,
+                "save postponed: this photo is being changed by another Autoshop process ({err}); your canvas remains unsaved — retry",
+                &[("err", &e.to_string())],
+            );
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
+        }
     }
 
     /// Paste the copied recipe onto every Ctrl+click-selected photo on a worker
@@ -5885,6 +5973,14 @@ impl AutoshopApp {
                     let mut errs: Vec<String> = Vec::new();
                     for path in &targets {
                         let step = || -> anyhow::Result<bool> {
+                            // Worker thread ⇒ Wait: queue behind whichever
+                            // process holds this target's develop, exactly
+                            // like the CLI. ONE lock across gate → recipe →
+                            // XMP so the pasted pair publishes as a unit.
+                            autoshop::store::with_develop_lock(
+                                path,
+                                autoshop::store::DevelopLockMode::Wait,
+                                || {
                             // Per-target base-look resolution (paste_recipe_for):
                             // paste copies the user edit, never the source
                             // photo's camera calibration over a saved one. The
@@ -5915,6 +6011,8 @@ impl AutoshopApp {
                                 return Ok(true);
                             }
                             Ok(false)
+                                },
+                            )
                         };
                         match step() {
                             Ok(wrote_xmp) => {
@@ -6863,7 +6961,15 @@ impl AutoshopApp {
                             // the analyze result stays on the canvas only.
                             // Persist `stamped`, not the canvas copy: the
                             // sidecar is the RAW's develop and keeps its curve.
-                            Some(p) => match autoshop::store::backup_saved_develop(&p, Some(&stamped)) {
+                            // ONE NoWait lock across gate → recipe → pixel
+                            // link → XMP (the Ctrl+S pairing): busy must
+                            // degrade to "applied but NOT saved", never hang
+                            // the UI thread behind another process.
+                            Some(p) => match autoshop::store::with_develop_lock(
+                                &p,
+                                autoshop::store::DevelopLockMode::NoWait,
+                                || -> std::io::Result<String> {
+                                    Ok(match autoshop::store::backup_saved_develop(&p, Some(&stamped)) {
                                 Err(e) => {
                                     let t = trf(
                                         lang,
@@ -6969,6 +7075,19 @@ impl AutoshopApp {
                                             t
                                         }
                                     }
+                                }
+                                    })
+                                },
+                            ) {
+                                Ok(status) => status,
+                                Err(e) => {
+                                    let t = trf(
+                                        lang,
+                                        "AI develop applied — but NOT saved: this photo is being changed by another Autoshop process ({err}); Ctrl+S retries",
+                                        &[("err", &e.to_string())],
+                                    );
+                                    self.toast(ToastKind::Error, t.clone());
+                                    t
                                 }
                             },
                             None => tr(lang, "AI develop applied").into(),
@@ -9115,7 +9234,14 @@ impl AutoshopApp {
                 if let Some(n) = delete
                     && let Some(src) = self.src_path.clone()
                 {
-                    match autoshop::store::delete_version(&src, n) {
+                    // NoWait wrapper: delete_version locks internally with
+                    // Wait — a foreground 🗑 click must fail into the error
+                    // arm when another process holds the develop, not hang.
+                    match autoshop::store::with_develop_lock(
+                        &src,
+                        autoshop::store::DevelopLockMode::NoWait,
+                        || autoshop::store::delete_version(&src, n),
+                    ) {
                         Ok(()) => {
                             self.refresh_versions();
                             self.status =
@@ -9315,7 +9441,10 @@ impl AutoshopApp {
                     // ppp: 1:1 means one texel per PHYSICAL pixel (see `scale`).
                     self.zoom = (vis_px.x * self.zoom / (disp.x * ppp)).clamp(1.0, 12.0);
                 }
-                if ui.small_button("Fit").on_hover_text(tr(lang, "Fit the whole image to the canvas (double-click the image to toggle)")).clicked() {
+                // "Fit" is natural language, unlike its "1:1" sibling — it
+                // must route through `tr` like every user-facing literal
+                // (the i18n module contract; the audit now flags bypasses).
+                if ui.small_button(tr(lang, "Fit")).on_hover_text(tr(lang, "Fit the whole image to the canvas (double-click the image to toggle)")).clicked() {
                     self.zoom = 1.0;
                     self.pan = egui::vec2(0.5, 0.5);
                 }
@@ -11445,9 +11574,16 @@ impl AutoshopApp {
                     }
                     let mut persisted = false;
                     if let Some(p) = &src_path {
-                        // Immediately before the write — the narrowest gate
-                        // window. Identical-content skip keeps this from
+                        // Worker thread ⇒ Wait, ONE lock across gate →
+                        // recipe → pixel-link clear → XMP: still the
+                        // narrowest gate window, now with no other process
+                        // interleaving between the halves. The
+                        // identical-content skip keeps the gate from
                         // spamming versions on repeated fits.
+                        let persist = autoshop::store::with_develop_lock(
+                            p,
+                            autoshop::store::DevelopLockMode::Wait,
+                            || -> std::io::Result<()> {
                         let backed = autoshop::store::backup_saved_develop(p, Some(&rep.recipe));
                         // Persist the fit losslessly: recipe.json carries the
                         // bitmap zone masks + recolour gains the XMP cannot,
@@ -11529,6 +11665,16 @@ impl AutoshopApp {
                                     &[("err", &e.to_string())],
                                 ));
                             }
+                        }
+                                Ok(())
+                            },
+                        );
+                        if let Err(e) = persist {
+                            note.push_str(&trf(
+                                lang,
+                                " · NOT persisted: the develop store could not be locked ({err}) — Ctrl+S to save explicitly",
+                                &[("err", &e.to_string())],
+                            ));
                         }
                     }
                     Ok((rep.recipe, note, persisted))
@@ -12771,7 +12917,7 @@ impl eframe::App for AutoshopApp {
                 .open(&mut open)
                 .show(ctx, |ui| {
                     // Runtime table (not `const`): the ZH column is resolved by
-                    // `tr` at draw time. ASCII key combos + "Fit ↔ 1:1" carry no
+                    // `tr` at draw time. ASCII key combos carry no
                     // natural-language words, so they stay literal.
                     let rows: [(&str, &str); 30] = [
                         ("Ctrl/⌘+O", tr(lang, "Open photo")),
@@ -12797,7 +12943,7 @@ impl eframe::App for AutoshopApp {
                         ("Esc", tr(lang, "Exit tool / close this window")),
                         ("F1 / ?", tr(lang, "This cheat-sheet")),
                         (tr(lang, "Scroll"), tr(lang, "Zoom (toward cursor)")),
-                        (tr(lang, "Double-click canvas"), "Fit ↔ 1:1"),
+                        (tr(lang, "Double-click canvas"), tr(lang, "Fit ↔ 1:1")),
                         (tr(lang, "Space+drag / middle-drag"), tr(lang, "Pan")),
                         (tr(lang, "Drag when zoomed"), tr(lang, "Pan (Ctrl+drag = box-select)")),
                         (tr(lang, "Alt+click"), tr(lang, "Sample clone source")),
