@@ -84,6 +84,7 @@ struct Prefs {
     preview_edge: u32,
     show_clipping: bool,
     lang: Lang,
+    theme: ThemePref,
 }
 
 impl Default for Prefs {
@@ -106,6 +107,7 @@ impl Default for Prefs {
             preview_edge: PREVIEW_EDGE,
             show_clipping: false,
             lang: Lang::En, // English is the default / skeleton language
+            theme: ThemePref::Dark, // the historical look
         }
     }
 }
@@ -133,17 +135,126 @@ const GRADE_REGIONS: [&str; 4] = ["Shadows", "Midtones", "Highlights", "Global"]
 
 // Two-tier colour rule (deliberate, not drift):
 //  * PILL gold is the ONE chrome accent — panel selections, badges, active
-//    variant, theme selection stroke all use the gold family below.
+//    variant, theme selection stroke all use the gold family below. Text-sized
+//    gold goes through `ThemeColors::accent_text` (dark gold on the light
+//    theme — #c9a14a on near-white fails contrast).
 //  * ACCENT blue is for ON-CANVAS tool overlays ONLY (mask knobs, region
 //    box): they sit on arbitrary photo content, and gold vanishes on warm
 //    frames (a golden canyon) exactly where masks get drawn most — a colour
-//    the theme never uses reads as "tool, not photo, not chrome".
+//    the theme never uses reads as "tool, not photo, not chrome". Overlays
+//    are theme-independent for the same reason: they sit on the photo.
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x4c, 0x8b, 0xf5);
 const PILL: egui::Color32 = egui::Color32::from_rgb(0xc9, 0xa1, 0x4a);
-/// Gallery selected-row fill: the PILL family at panel-background depth.
-const SEL_BG: egui::Color32 = egui::Color32::from_rgb(0x45, 0x38, 0x1a);
-/// Multi-select row fill — dimmer than [`SEL_BG`], same family.
-const SEL_BG_DIM: egui::Color32 = egui::Color32::from_rgb(0x2e, 0x26, 0x12);
+
+/// The persisted UI look. Dark is the historical default; Light is a full
+/// second scheme, not an inversion. Both route every theme-dependent chrome
+/// colour through [`ThemeColors`], and both must pass the contrast test
+/// (`both_themes_pass_contrast_checks`) — that is the guard that keeps a
+/// future tweak from shipping unreadable text on one theme.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+enum ThemePref {
+    #[default]
+    Dark,
+    Light,
+}
+
+/// Every chrome colour that must differ between the two themes. Plot
+/// interiors (histogram, tone curve) are NOT here on purpose: they stay dark
+/// in both themes, the pro-imaging convention that keeps colour judgement
+/// stable while the chrome around them changes.
+struct ThemeColors {
+    /// Gold accent at text size — readable on this theme's panels.
+    accent_text: egui::Color32,
+    /// Widget selection fill / stroke (combo rows, text selection).
+    selection_fill: egui::Color32,
+    selection_stroke: egui::Color32,
+    /// Gallery selected-row fill: the gold family at panel depth.
+    sel_bg: egui::Color32,
+    /// Multi-select row fill — dimmer than `sel_bg`, same family.
+    sel_bg_dim: egui::Color32,
+    /// Undecoded gallery-thumbnail placeholder block.
+    thumb_placeholder: egui::Color32,
+    /// Histogram clipping triangles: armed-but-clean / disarmed.
+    clip_tri_on: egui::Color32,
+    clip_tri_off: egui::Color32,
+    /// Toast pill colours (bg, fg) per kind.
+    toast_ok_bg: egui::Color32,
+    toast_ok_fg: egui::Color32,
+    toast_err_bg: egui::Color32,
+    toast_err_fg: egui::Color32,
+    /// Curve-editor channel PICKER labels (Master/R/G/B) — they sit on panel
+    /// chrome, unlike the plot colours in [`CURVE_CHANNELS`] which stay on
+    /// the always-dark curve square.
+    curve_labels: [egui::Color32; 4],
+    /// The armed-tool hint line: ACCENT-family text on chrome, darkened on
+    /// the light theme where the canvas blue fails AA at text size.
+    armed_hint: egui::Color32,
+}
+
+const DARK_COLORS: ThemeColors = ThemeColors {
+    accent_text: PILL,
+    // PILL (201,161,74) at alpha 90, premultiplied: (201,161,74)·90/255.
+    selection_fill: egui::Color32::from_rgba_premultiplied(71, 57, 26, 90),
+    selection_stroke: PILL,
+    sel_bg: egui::Color32::from_rgb(0x45, 0x38, 0x1a),
+    // A step darker than the historical 0x2e2612: default-colour text renders
+    // on multi-select rows, and that pairing sat at ~4.45:1 — just under AA.
+    sel_bg_dim: egui::Color32::from_rgb(0x24, 0x1e, 0x0c),
+    thumb_placeholder: egui::Color32::from_gray(24),
+    clip_tri_on: egui::Color32::from_gray(130),
+    clip_tri_off: egui::Color32::from_gray(60),
+    toast_ok_bg: egui::Color32::from_rgb(22, 58, 34),
+    toast_ok_fg: egui::Color32::from_rgb(150, 230, 170),
+    toast_err_bg: egui::Color32::from_rgb(70, 26, 26),
+    toast_err_fg: egui::Color32::from_rgb(255, 165, 165),
+    curve_labels: [
+        egui::Color32::from_gray(225),
+        egui::Color32::from_rgb(235, 90, 90),
+        egui::Color32::from_rgb(90, 205, 90),
+        egui::Color32::from_rgb(90, 130, 240),
+    ],
+    armed_hint: ACCENT,
+};
+
+const LIGHT_COLORS: ThemeColors = ThemeColors {
+    accent_text: egui::Color32::from_rgb(0x6f, 0x51, 0x0b),
+    // PILL (201,161,74) at alpha 200, premultiplied: (201,161,74)·200/255.
+    selection_fill: egui::Color32::from_rgba_premultiplied(158, 126, 58, 200),
+    selection_stroke: egui::Color32::from_rgb(0x8a, 0x64, 0x10),
+    sel_bg: egui::Color32::from_rgb(0xf0, 0xe2, 0xc0),
+    sel_bg_dim: egui::Color32::from_rgb(0xf6, 0xef, 0xdd),
+    thumb_placeholder: egui::Color32::from_gray(224),
+    clip_tri_on: egui::Color32::from_gray(95),
+    clip_tri_off: egui::Color32::from_gray(190),
+    toast_ok_bg: egui::Color32::from_rgb(0xdf, 0xf0, 0xe2),
+    toast_ok_fg: egui::Color32::from_rgb(0x14, 0x52, 0x2a),
+    toast_err_bg: egui::Color32::from_rgb(0xf9, 0xe3, 0xe3),
+    toast_err_fg: egui::Color32::from_rgb(0x8c, 0x1d, 0x1d),
+    curve_labels: [
+        egui::Color32::from_gray(60),
+        egui::Color32::from_rgb(0xb3, 0x24, 0x24),
+        egui::Color32::from_rgb(0x1b, 0x6e, 0x2e),
+        egui::Color32::from_rgb(0x2b, 0x4f, 0xc0),
+    ],
+    armed_hint: egui::Color32::from_rgb(0x24, 0x56, 0xb0),
+};
+
+impl ThemePref {
+    fn colors(self) -> &'static ThemeColors {
+        match self {
+            ThemePref::Dark => &DARK_COLORS,
+            ThemePref::Light => &LIGHT_COLORS,
+        }
+    }
+
+    /// English label — the i18n skeleton key (zh comes from `tr`).
+    fn label(self) -> &'static str {
+        match self {
+            ThemePref::Dark => "Dark",
+            ThemePref::Light => "Light",
+        }
+    }
+}
 
 /// How a finished retouch enters the variant strip.
 #[derive(Clone, Copy, PartialEq)]
@@ -493,8 +604,11 @@ fn section_title(base: &str, active: bool) -> String {
     }
 }
 
-/// Curve-editor channels: label + draw colour, indexed by `curve_channel`
+/// Curve-editor channels: label + PLOT draw colour, indexed by `curve_channel`
 /// (0 = master, then R/G/B — the recipe's tone/red/green/blue_curve fields).
+/// The plot colours are theme-independent — the curve square stays dark on
+/// both themes (see [`ThemeColors`]); the PICKER LABELS above the plot sit on
+/// panel chrome and take their colours from `ThemeColors::curve_labels`.
 // Tone-curve channel picker labels — skeleton keys, localized with `tr` at the
 // render site (curve_editor). Colours are the on-curve accent, not localized.
 const CURVE_CHANNELS: [(&str, egui::Color32); 4] = [
@@ -785,6 +899,7 @@ struct AutoshopApp {
     defocus_next: bool,
     settings: SettingsForm, // editable buffers for that window
     lang: Lang,             // UI language: English skeleton / Chinese overlay (i18n.rs)
+    theme: ThemePref,       // dark/light chrome — applied via install_theme, kept in Prefs
     // --- library / gallery ---
     gallery: Vec<PathBuf>,          // sources in the working folder (sorted)
     gallery_dir: Option<PathBuf>,   // the working folder
@@ -1312,6 +1427,7 @@ impl Default for AutoshopApp {
             // English is the default / skeleton language; a persisted pref
             // (restored in `new`) overrides this on launch.
             lang: Lang::En,
+            theme: ThemePref::Dark,
             gallery: Vec::new(),
             gallery_dir: None,
             gallery_gen: 0,
@@ -1437,6 +1553,10 @@ impl AutoshopApp {
             // Restore the UI language (an older save without this key decoded to
             // `Lang::En` via `#[serde(default)]`, so this is always valid).
             app.lang = prefs.lang;
+            // Restore the theme and re-apply it — main() installed the Dark
+            // default before prefs were readable (same shape as the greeting).
+            app.theme = prefs.theme;
+            install_theme(&cc.egui_ctx, app.theme);
             // The greeting was set by default() BEFORE the language was known —
             // re-issue it, or a Chinese install opens with one English line.
             app.status =
@@ -3545,6 +3665,7 @@ impl AutoshopApp {
     /// the state clean so the close guard lets the next close through.
     fn confirm_quit_layer(&mut self, ctx: &egui::Context) {
         let lang = self.lang;
+        let accent = self.theme.colors().accent_text; // Copy — safe in closures
         // Everything quitting would lose: the stash + the open photo's canvas
         // (the live canvas outranks its own stale stash entry). Each entry
         // carries its pixel identity so 「Save all」 persists a baked retouch's
@@ -3703,7 +3824,7 @@ impl AutoshopApp {
                         .on_hover_text(tr(lang, "Quit WITHOUT saving — these edits are gone for good"))
                         .clicked();
                     save_quit |= ui
-                        .button(egui::RichText::new(tr(lang, "Save all & quit")).color(PILL))
+                        .button(egui::RichText::new(tr(lang, "Save all & quit")).color(accent))
                         .on_hover_text(tr(lang, "Enter · save every listed develop, then quit"))
                         .clicked();
                 });
@@ -3967,6 +4088,21 @@ impl AutoshopApp {
                 ui.selectable_value(&mut self.lang, Lang::En, Lang::En.label());
                 ui.selectable_value(&mut self.lang, Lang::Zh, Lang::Zh.label());
             });
+        ui.separator();
+        ui.heading(tr(lang, "Theme"));
+        // Two complete looks (see ThemeColors) — switching re-installs the
+        // egui style this frame and persists with the other prefs.
+        let before_theme = self.theme;
+        egui::ComboBox::from_id_salt("theme_picker")
+            .selected_text(tr(lang, self.theme.label()))
+            .show_ui(ui, |ui| {
+                for t in [ThemePref::Dark, ThemePref::Light] {
+                    ui.selectable_value(&mut self.theme, t, tr(lang, t.label()));
+                }
+            });
+        if self.theme != before_theme {
+            install_theme(ui.ctx(), self.theme);
+        }
         ui.separator();
         ui.heading(tr(lang, "Reverse-fit"));
         ui.checkbox(&mut self.zoned_fit, tr(lang, "Zoned fit (sky)")).on_hover_text(tr(
@@ -4664,9 +4800,9 @@ impl AutoshopApp {
                 .interact(tri, ui.id().with(("clip_tri", right)), egui::Sense::click())
                 .on_hover_text(tip);
             let color = lit.unwrap_or(if self.show_clipping {
-                egui::Color32::from_gray(130)
+                self.theme.colors().clip_tri_on
             } else {
-                egui::Color32::from_gray(60)
+                self.theme.colors().clip_tri_off
             });
             p.add(egui::Shape::convex_polygon(
                 vec![
@@ -4696,13 +4832,14 @@ impl AutoshopApp {
     /// gestures. Returns true when the recipe changed this frame.
     fn curve_editor(&mut self, ui: &mut egui::Ui) -> bool {
         let lang = self.lang;
+        let label_colors = self.theme.colors().curve_labels;
         let mut changed = false;
         ui.horizontal(|ui| {
-            for (i, (name, color)) in CURVE_CHANNELS.iter().enumerate() {
+            for (i, (name, _)) in CURVE_CHANNELS.iter().enumerate() {
                 if ui
                     .selectable_label(
                         self.curve_channel == i,
-                        egui::RichText::new(tr(lang, name)).color(*color).small(),
+                        egui::RichText::new(tr(lang, name)).color(label_colors[i]).small(),
                     )
                     .clicked()
                 {
@@ -7527,6 +7664,7 @@ impl AutoshopApp {
         let gallery = &self.gallery;
         let selected = self.selected;
         let multi_sel = &self.multi_sel;
+        let colors = self.theme.colors();
         let mut to_open: Option<usize> = None;
         let mut to_toggle: Option<usize> = None;
         let mut to_request: Vec<usize> = Vec::new();
@@ -7549,9 +7687,9 @@ impl AutoshopApp {
                     let is_sel = selected == Some(i);
                     let is_multi = multi_sel.contains(&i);
                     let fill = if is_sel {
-                        SEL_BG
+                        colors.sel_bg
                     } else if is_multi {
-                        SEL_BG_DIM
+                        colors.sel_bg_dim
                     } else {
                         egui::Color32::TRANSPARENT
                     };
@@ -7574,13 +7712,13 @@ impl AutoshopApp {
                                         egui::vec2(THUMB_W, THUMB_H),
                                         egui::Sense::hover(),
                                     );
-                                    ui.painter().rect_filled(rect, 3.0, egui::Color32::from_gray(24));
+                                    ui.painter().rect_filled(rect, 3.0, colors.thumb_placeholder);
                                     to_request.push(i);
                                 }
                                 ui.vertical(|ui| {
                                     let mut name = egui::RichText::new(autoshop::pipeline::stem(path)).small();
                                     if is_sel {
-                                        name = name.strong().color(PILL);
+                                        name = name.strong().color(colors.accent_text);
                                     }
                                     // Truncate, never wrap: show_rows assumes
                                     // every row is exactly GALLERY_ROW_H, and a
@@ -7600,13 +7738,13 @@ impl AutoshopApp {
                                     let baked = !autoshop::decode::is_raw(path);
                                     ui.horizontal(|ui| {
                                         if is_multi {
-                                            ui.label(egui::RichText::new(tr(lang, "✓ selected")).color(PILL).small());
+                                            ui.label(egui::RichText::new(tr(lang, "✓ selected")).color(colors.accent_text).small());
                                         }
                                         if baked {
-                                            ui.label(egui::RichText::new("PNG/TIFF").color(PILL).small());
+                                            ui.label(egui::RichText::new("PNG/TIFF").color(colors.accent_text).small());
                                         }
                                         if edited {
-                                            ui.label(egui::RichText::new(tr(lang, "● edited")).color(PILL).small());
+                                            ui.label(egui::RichText::new(tr(lang, "● edited")).color(colors.accent_text).small());
                                         }
                                     });
                                 });
@@ -9166,7 +9304,7 @@ impl AutoshopApp {
         let armed = !comparing && self.tool_armed();
         ui.horizontal(|ui| {
             if armed {
-                ui.label(egui::RichText::new(hint).color(ACCENT).small());
+                ui.label(egui::RichText::new(hint).color(self.theme.colors().armed_hint).small());
             } else {
                 ui.label(egui::RichText::new(hint).weak().small());
             }
@@ -11470,6 +11608,7 @@ impl AutoshopApp {
     /// selector that makes an AI develop a first-class, non-reverting version.
     fn variant_strip(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
+        let accent = self.theme.colors().accent_text; // Copy — safe in closures
         let mut switch_to: Option<usize> = None;
         let mut delete: Option<usize> = None;
         ui.horizontal(|ui| {
@@ -11518,7 +11657,7 @@ impl AutoshopApp {
                             }
                             ui.horizontal(|ui| {
                                 let label = egui::RichText::new(tr(lang, kind.label())).small();
-                                ui.label(if active { label.strong().color(PILL) } else { label });
+                                ui.label(if active { label.strong().color(accent) } else { label });
                                 // Any variant except the sole Original can be dropped.
                                 if self.variants.len() > 1
                                     && kind != VariantKind::Original
@@ -12625,6 +12764,7 @@ impl eframe::App for AutoshopApp {
         if self.show_shortcuts {
             let mut open = true;
             let lang = self.lang;
+            let accent = self.theme.colors().accent_text;
             egui::Window::new(tr(lang, "⌨ Shortcuts"))
                 .collapsible(false)
                 .resizable(false)
@@ -12674,7 +12814,7 @@ impl eframe::App for AutoshopApp {
                             ui,
                             |ui| {
                                 for (keys, what) in rows {
-                                    ui.label(egui::RichText::new(keys).monospace().color(PILL));
+                                    ui.label(egui::RichText::new(keys).monospace().color(accent));
                                     ui.label(what);
                                     ui.end_row();
                                 }
@@ -12715,16 +12855,11 @@ impl eframe::App for AutoshopApp {
                 .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -40.0))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
+                    let c = self.theme.colors();
                     for t in &self.toasts {
                         let (bg, fg) = match t.kind {
-                            ToastKind::Success => (
-                                egui::Color32::from_rgb(22, 58, 34),
-                                egui::Color32::from_rgb(150, 230, 170),
-                            ),
-                            ToastKind::Error => (
-                                egui::Color32::from_rgb(70, 26, 26),
-                                egui::Color32::from_rgb(255, 165, 165),
-                            ),
+                            ToastKind::Success => (c.toast_ok_bg, c.toast_ok_fg),
+                            ToastKind::Error => (c.toast_err_bg, c.toast_err_fg),
                         };
                         egui::Frame::none()
                             .fill(bg)
@@ -12766,19 +12901,33 @@ impl eframe::App for AutoshopApp {
                 preview_edge: self.preview_edge,
                 show_clipping: self.show_clipping,
                 lang: self.lang,
+                theme: self.theme,
             },
         );
     }
 }
 
-/// Register a system CJK font so Chinese / Japanese UI text renders — egui ships
-/// no CJK glyphs, so without this every non-Latin character is a tofu box (□).
-///
-/// Reads the user's installed font at runtime (no ~16 MB binary bloat) and
-/// pre-validates it with `ab_glyph` (egui's own backend) before handing it over —
+/// Embedded symbol-font subsets (see assets/fonts/README.md): egui's bundled
+/// fonts lack most of the toolbar/panel symbols (⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 …), and
+/// leaning on system fonts made rendering machine-dependent — a stock Windows
+/// install shows tofu boxes because DengXian lacks them too. ~450 KB total buys
+/// identical symbol rendering on every OS. Order = lookup priority; the
+/// `embedded_fonts_cover_every_ui_symbol` test pins full-chain coverage.
+const EMBEDDED_SYMBOL_FONTS: &[(&str, &[u8])] = &[
+    ("symbols2", include_bytes!("../../assets/fonts/NotoSansSymbols2-autoshop.ttf")),
+    ("symbols", include_bytes!("../../assets/fonts/NotoSansSymbols-autoshop.ttf")),
+    ("math", include_bytes!("../../assets/fonts/NotoSansMath-autoshop.ttf")),
+    ("emoji-extra", include_bytes!("../../assets/fonts/NotoEmoji-autoshop.ttf")),
+];
+
+/// Build the GUI font chain: egui defaults → embedded symbol subsets → system
+/// CJK. The embedded subsets are compile-time constants; the CJK face is read
+/// from the user's OS at runtime (no ~16 MB binary bloat for ideographs), and
+/// pre-validated with `ab_glyph` (egui's own backend) before handing it over —
 /// egui PANICS on a font it can't parse, so a missing/odd font must be skipped,
-/// not registered. Appended as a FALLBACK so Latin keeps egui's default look.
-fn install_cjk_font(ctx: &egui::Context) {
+/// not registered. Everything is appended as FALLBACKS so Latin text keeps
+/// egui's default look and egui's own icon glyphs keep theirs.
+fn install_fonts(ctx: &egui::Context) {
     // Single-face TTFs first (always parse); TTC collections (face 0) last.
     // System font directories per OS (not user-specific paths); a miss just
     // falls through to the next candidate, so distro variance is harmless.
@@ -12805,34 +12954,58 @@ fn install_cjk_font(ctx: &egui::Context) {
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
     ];
-    let Some(bytes) = CANDIDATES.iter().find_map(|p| {
+    let cjk = CANDIDATES.iter().find_map(|p| {
         let b = std::fs::read(p).ok()?;
         // Only accept it if egui's backend can actually parse face 0 (no panic).
         ab_glyph::FontVec::try_from_vec_and_index(b.clone(), 0).ok()?;
         Some(b)
-    }) else {
-        return; // no usable CJK font found — Latin text still renders fine
-    };
+    });
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
+    for (name, bytes) in EMBEDDED_SYMBOL_FONTS {
+        fonts
+            .font_data
+            .insert((*name).to_owned(), egui::FontData::from_static(bytes));
+    }
+    if let Some(bytes) = cjk.clone() {
+        fonts.font_data.insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
+    }
     for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts.families.entry(fam).or_default().push("cjk".to_owned());
+        let list = fonts.families.entry(fam).or_default();
+        for (name, _) in EMBEDDED_SYMBOL_FONTS {
+            list.push((*name).to_owned());
+        }
+        if cjk.is_some() {
+            // Last: CJK faces carry some symbol glyphs too, and the embedded
+            // subsets must win those so rendering stays machine-independent.
+            list.push("cjk".to_owned());
+        }
     }
     ctx.set_fonts(fonts);
 }
 
-/// A unified visual theme: warm-gold accent (shared with the variant-strip
-/// highlight), rounder widgets, a little more breathing room, and headings a
-/// step down from egui's chunky default so section titles group instead of
-/// shouting. One tasteful pass over egui's dark base — not a full reskin.
-fn install_theme(ctx: &egui::Context) {
+/// Install the full UI style for one theme: a fresh egui dark/light Visuals
+/// base (so toggling is idempotent — no residue from the other theme), the
+/// warm-gold accent family from [`ThemeColors`], softer rounding, a calmer
+/// type scale, and restrained hover feedback. Geometry and typography are
+/// shared between themes; only colours differ. Idempotent — called at
+/// startup, after prefs restore, and on every picker change.
+fn install_theme(ctx: &egui::Context, theme: ThemePref) {
     use egui::{FontFamily, FontId, Rounding, Stroke, TextStyle};
+    let c = theme.colors();
     let mut style = (*ctx.style()).clone();
-    style.visuals.selection.bg_fill =
-        egui::Color32::from_rgba_unmultiplied(0xc9, 0xa1, 0x4a, 90);
-    style.visuals.selection.stroke = Stroke::new(1.0, PILL);
-    style.visuals.hyperlink_color = PILL;
-    let rounding = Rounding::same(5.0);
+    style.visuals = match theme {
+        ThemePref::Dark => egui::Visuals::dark(),
+        ThemePref::Light => egui::Visuals::light(),
+    };
+    style.visuals.selection.bg_fill = c.selection_fill;
+    style.visuals.selection.stroke = Stroke::new(1.0, c.selection_stroke);
+    style.visuals.hyperlink_color = c.accent_text;
+    // Hover reads as a whisper of the accent, not a colour change — the
+    // stroke carries the feedback so fills stay calm on both themes.
+    style.visuals.widgets.hovered.bg_stroke =
+        Stroke::new(1.0, c.selection_stroke.gamma_multiply(0.55));
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, c.selection_stroke);
+    let rounding = Rounding::same(6.0);
     for w in [
         &mut style.visuals.widgets.noninteractive,
         &mut style.visuals.widgets.inactive,
@@ -12842,14 +13015,26 @@ fn install_theme(ctx: &egui::Context) {
     ] {
         w.rounding = rounding;
     }
-    style.visuals.window_rounding = Rounding::same(8.0);
-    style.visuals.menu_rounding = Rounding::same(6.0);
+    style.visuals.window_rounding = Rounding::same(10.0);
+    style.visuals.menu_rounding = Rounding::same(8.0);
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(8.0, 4.0);
-    style.spacing.interact_size.y = 24.0;
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.interact_size.y = 26.0;
+    // Type scale: headings one step DOWN from egui's shouty 18 so sections
+    // group instead of competing; body/buttons half a step UP from 12.5 —
+    // CJK at 12.5 px is where the "看着有点晕" complaint lives. Small stays
+    // proportionally readable instead of egui's 9 px squint.
+    for (ts, size) in [
+        (TextStyle::Heading, 16.5),
+        (TextStyle::Body, 13.0),
+        (TextStyle::Button, 13.0),
+        (TextStyle::Small, 10.5),
+    ] {
+        style.text_styles.insert(ts, FontId::new(size, FontFamily::Proportional));
+    }
     style
         .text_styles
-        .insert(TextStyle::Heading, FontId::new(17.0, FontFamily::Proportional));
+        .insert(TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace));
     ctx.set_style(style);
 }
 
@@ -12877,8 +13062,10 @@ fn main() -> eframe::Result<()> {
         "Autoshop",
         opts,
         Box::new(|cc| {
-            install_cjk_font(&cc.egui_ctx); // CJK glyphs so Chinese labels aren't tofu
-            install_theme(&cc.egui_ctx); // unified accent / spacing / rounding pass
+            install_fonts(&cc.egui_ctx); // embedded symbol subsets + system CJK
+            // Dark before prefs are readable; AutoshopApp::new re-installs the
+            // saved choice one call later (same shape as the greeting string).
+            install_theme(&cc.egui_ctx, ThemePref::Dark);
             Ok(Box::new(AutoshopApp::new(cc))) // restores prefs + last library
         }),
     )
@@ -12887,6 +13074,222 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both themes must keep every text-on-chrome pairing at WCAG AA (4.5:1
+    /// for text, 3:1 for the armed indicator glyph). This is the contract the
+    /// Light scheme was tuned against, and the guard that keeps a future
+    /// colour tweak from shipping unreadable text on one theme. Pairings
+    /// tested = pairings actually rendered (see each line's comment);
+    /// `clip_tri_off` is deliberately dim (disarmed state) and exempt.
+    #[test]
+    fn both_themes_pass_contrast_checks() {
+        // WCAG 2.x relative luminance + contrast ratio.
+        fn lum(c: egui::Color32) -> f64 {
+            let ch = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
+        }
+        fn ratio(a: egui::Color32, b: egui::Color32) -> f64 {
+            let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
+            (hi + 0.05) / (lo + 0.05)
+        }
+        for theme in [ThemePref::Dark, ThemePref::Light] {
+            let c = theme.colors();
+            let visuals = match theme {
+                ThemePref::Dark => egui::Visuals::dark(),
+                ThemePref::Light => egui::Visuals::light(),
+            };
+            let panel = visuals.panel_fill;
+            let text = visuals.widgets.noninteractive.fg_stroke.color;
+            let checks: [(&str, egui::Color32, egui::Color32, f64); 7] = [
+                // (what, fg, bg, minimum). The selected row carries ONLY
+                // accent-coloured text (name + badges — see the gallery row),
+                // so text-on-sel_bg is not a rendered pairing; multi-select
+                // rows DO render default-colour names on sel_bg_dim.
+                ("default text on panels", text, panel, 4.5),
+                ("gold accent text on panels", c.accent_text, panel, 4.5),
+                ("gold accent text on the selected row", c.accent_text, c.sel_bg, 4.5),
+                ("default text on a multi-select row", text, c.sel_bg_dim, 4.5),
+                ("success toast", c.toast_ok_fg, c.toast_ok_bg, 4.5),
+                ("error toast", c.toast_err_fg, c.toast_err_bg, 4.5),
+                // Non-text indicator: WCAG AA for UI components is 3:1.
+                ("armed clipping triangle", c.clip_tri_on, panel, 3.0),
+            ];
+            for (what, fg, bg, min) in checks {
+                let r = ratio(fg, bg);
+                assert!(
+                    r >= min,
+                    "{theme:?} theme: {what} is {r:.2}:1, needs {min}:1"
+                );
+            }
+            // Coloured text that sits on panel chrome (not on the dark plot).
+            assert!(
+                ratio(c.armed_hint, panel) >= 4.5,
+                "{theme:?} theme: armed-tool hint is {:.2}:1",
+                ratio(c.armed_hint, panel)
+            );
+            for (i, col) in c.curve_labels.iter().enumerate() {
+                let r = ratio(*col, panel);
+                assert!(
+                    r >= 4.5,
+                    "{theme:?} theme: curve label {i} is {r:.2}:1, needs 4.5:1"
+                );
+            }
+        }
+    }
+
+    /// Every symbol the GUI renders must have a glyph in the guaranteed font
+    /// chain (egui's bundle + the embedded subsets) — system fonts vary, and
+    /// this is exactly how the v0.22 tofu boxes (⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 …)
+    /// shipped: those glyphs existed only on SOME machines. Scans STRING
+    /// LITERALS of gui.rs + i18n.rs (comments never render); CJK ranges are
+    /// exempt — ideographs come from the runtime system-font fallback by
+    /// design. Fails ⇒ re-run scripts/subset_gui_fonts.py and commit the
+    /// refreshed assets/fonts/.
+    #[test]
+    fn embedded_fonts_cover_every_ui_symbol() {
+        use ab_glyph::Font as _;
+        // Non-ASCII chars inside Rust string/char literals only. Mirrors the
+        // extractor in scripts/subset_gui_fonts.py — keep the two in sync.
+        fn literal_chars(src: &str, out: &mut std::collections::BTreeSet<char>) {
+            let b: Vec<char> = src.chars().collect();
+            let n = b.len();
+            let mut i = 0;
+            while i < n {
+                match b[i] {
+                    '/' if i + 1 < n && b[i + 1] == '/' => {
+                        while i < n && b[i] != '\n' {
+                            i += 1;
+                        }
+                    }
+                    '/' if i + 1 < n && b[i + 1] == '*' => {
+                        let mut depth = 1;
+                        i += 2;
+                        while i < n && depth > 0 {
+                            if i + 1 < n && b[i] == '/' && b[i + 1] == '*' {
+                                depth += 1;
+                                i += 2;
+                            } else if i + 1 < n && b[i] == '*' && b[i + 1] == '/' {
+                                depth -= 1;
+                                i += 2;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    }
+                    'r' if i + 1 < n && (b[i + 1] == '#' || b[i + 1] == '"') => {
+                        let mut j = i + 1;
+                        let mut hashes = 0;
+                        while j < n && b[j] == '#' {
+                            hashes += 1;
+                            j += 1;
+                        }
+                        if j < n && b[j] == '"' {
+                            j += 1;
+                            while j < n {
+                                if b[j] == '"' {
+                                    let mut k = 0;
+                                    while k < hashes && j + 1 + k < n && b[j + 1 + k] == '#' {
+                                        k += 1;
+                                    }
+                                    if k == hashes {
+                                        j += 1 + hashes;
+                                        break;
+                                    }
+                                }
+                                if !b[j].is_ascii() {
+                                    out.insert(b[j]);
+                                }
+                                j += 1;
+                            }
+                            i = j;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    '"' => {
+                        i += 1;
+                        while i < n {
+                            if b[i] == '\\' {
+                                i += 2;
+                            } else if b[i] == '"' {
+                                i += 1;
+                                break;
+                            } else {
+                                if !b[i].is_ascii() {
+                                    out.insert(b[i]);
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                    '\'' => {
+                        // 'x' char literal (possibly non-ASCII); '\n'-style
+                        // escapes; anything else is a lifetime — skip the quote.
+                        if i + 2 < n && b[i + 1] != '\\' && b[i + 2] == '\'' {
+                            if !b[i + 1].is_ascii() {
+                                out.insert(b[i + 1]);
+                            }
+                            i += 3;
+                        } else if i + 3 < n && b[i + 1] == '\\' && b[i + 3] == '\'' {
+                            i += 4;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+        }
+
+        let mut syms = std::collections::BTreeSet::new();
+        literal_chars(include_str!("gui.rs"), &mut syms);
+        literal_chars(include_str!("i18n.rs"), &mut syms);
+        let is_cjk = |c: char| {
+            matches!(c as u32, 0x2E80..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF)
+        };
+        // Premise: the GUI uses dozens of symbols. Finding almost none means
+        // the extractor broke, and the assertions below would pass vacuously.
+        assert!(
+            syms.iter().filter(|&&c| !is_cjk(c)).count() >= 40,
+            "literal extractor found too few symbols — it is broken"
+        );
+
+        let defaults = egui::FontDefinitions::default();
+        let mut faces: Vec<ab_glyph::FontVec> = Vec::new();
+        for data in defaults.font_data.values() {
+            faces.push(
+                ab_glyph::FontVec::try_from_vec_and_index(data.font.to_vec(), data.index)
+                    .expect("egui bundled font parses"),
+            );
+        }
+        for (name, bytes) in EMBEDDED_SYMBOL_FONTS {
+            faces.push(
+                ab_glyph::FontVec::try_from_vec_and_index(bytes.to_vec(), 0)
+                    .unwrap_or_else(|_| panic!("embedded font {name} parses")),
+            );
+        }
+        let covered = |c: char| faces.iter().any(|f| f.glyph_id(c).0 != 0);
+        // Negative control: an unassigned codepoint must read as uncovered —
+        // this is what makes `glyph_id().0 == 0` trustworthy as "no glyph".
+        assert!(
+            !covered('\u{0378}'),
+            "notdef sentinel covered?! the coverage probe is meaningless"
+        );
+
+        let missing: Vec<String> = syms
+            .iter()
+            .filter(|&&c| !is_cjk(c) && !covered(c))
+            .map(|&c| format!("U+{:04X} {c}", c as u32))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "UI symbols with no glyph in the guaranteed font chain \
+             (re-run scripts/subset_gui_fonts.py): {missing:?}"
+        );
+    }
 
     #[test]
     fn the_pickers_average_their_window_instead_of_point_sampling() {

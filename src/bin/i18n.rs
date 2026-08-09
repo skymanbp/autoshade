@@ -670,9 +670,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Drag & drop overlay ──────────────────────────────────────────────────
     ("Drop to open", "松开打开 · Drop to open"),
 
-    // ── Round-2 polish batch (AI verdict / quit guard / develop store /
+    // ── Round-2 polish batch (quit guard / develop store /
     //    versions delete / settings statuses) ─────────────────────────────────
-    ("AI verdict", "AI 判定 · Verdict"),
+    // ("AI verdict") retired in round 10: the section title has been the bare
+    // "AI" key since the UX batch — the old key matched no call site.
     ("No photo open.", "未打开照片。"),
     ("Before (source)", "原图（源）· Before"),
     ("Delete this snapshot (its frozen mask rasters go with it)",
@@ -864,4 +865,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "蒙版笔刷——涂抹选取 · 「擦除」移除 · 「应用」固化 · Esc 取消"),
     ("{n} Lightroom mask(s) (brush/AI/depth) have no engine equivalent and were not imported — they stay in the sidecar untouched",
         "{n} 个 Lightroom 蒙版（笔刷/AI/景深）没有引擎等价物，未被导入——它们原样保留在边车文件中"),
+
+    // ── Round-10 batch: theme picker (Settings) ──────────────────────────────
+    ("Theme", "主题"),
+    ("Dark", "深色"),
+    ("Light", "浅色"),
 ];
