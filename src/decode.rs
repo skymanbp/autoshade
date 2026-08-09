@@ -258,7 +258,9 @@ fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u6
 /// memory limit — a 60 MP export trips the image crate's default cap, but
 /// `no_limits()` let a corrupt header with absurd declared dimensions drive an
 /// unbounded allocation straight into OOM. 61 MP 16-bit RGBA is ~0.5 GiB;
-/// 4 GiB leaves headroom without trusting arbitrary headers.
+/// 4 GiB leaves headroom without trusting arbitrary headers; guided-mask
+/// refinement keeps its derived planes tile-bounded, so the two limits no
+/// longer stack into an unbudgeted full-frame peak.
 /// Also applies the EXIF orientation: phone/Lightroom JPEGs store rotation as
 /// metadata the decoder does NOT apply — imported photos rendered sideways
 /// (the RAW path already orients via the sensor metadata).

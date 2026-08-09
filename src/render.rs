@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
-use image::{DynamicImage, ImageBuffer, ImageEncoder, Rgb, RgbImage};
+use image::{DynamicImage, GenericImageView, ImageBuffer, ImageEncoder, Rgb, RgbImage};
 use rawler::decoders::RawDecodeParams;
 use rawler::get_decoder;
 use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
@@ -1471,6 +1471,11 @@ pub fn morph_mask(g: &image::GrayImage, radius: i32) -> image::GrayImage {
     image::GrayImage::from_raw(w as u32, h as u32, out).expect("dims preserved")
 }
 
+// Seven f32 planes are live at the peak over an input tile whose side is at
+// most 1024 + 12r: 7 × (1024 + 12r)² × 4 bytes, plus one column scratch row
+// and the required u8 output. That is about 42 MiB at the GUI's usual r=19.
+const GUIDED_REFINE_TILE_EDGE: usize = 1024;
+
 /// Upsample `mask` to the guide image's resolution and snap its soft
 /// boundary onto the guide's real edges — He et al.'s guided filter, box
 /// means via the NR pass's own `blur_plane`. This is the honest fix for
@@ -1488,39 +1493,121 @@ pub fn refine_mask_guided(
     // A zero / negative / non-finite eps divides by (near-)zero variance and
     // quantises NaN to black pixels — floor it here, this fn is pub.
     let eps = if eps.is_finite() { eps.max(1e-6) } else { 1e-6 };
-    let rgb = guide.to_rgb8();
-    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    refine_mask_guided_tiled(mask, guide, radius, eps, GUIDED_REFINE_TILE_EDGE)
+}
+
+fn refine_mask_guided_tiled(
+    mask: &image::GrayImage,
+    guide: &DynamicImage,
+    radius: usize,
+    eps: f32,
+    tile_edge: usize,
+) -> image::GrayImage {
+    let (w, h) = (guide.width() as usize, guide.height() as usize);
     if w == 0 || h == 0 {
         return mask.clone();
     }
-    let i_plane: Vec<f32> = rgb
-        .pixels()
-        .map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0)
-        .collect();
-    let up =
-        image::imageops::resize(mask, w as u32, h as u32, image::imageops::FilterType::Triangle);
-    let p_plane: Vec<f32> = up.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
+
     let r = radius.max(1);
-    let mean_i = blur_plane(&i_plane, w, h, r);
-    let mean_p = blur_plane(&p_plane, w, h, r);
-    let ip: Vec<f32> = i_plane.iter().zip(&p_plane).map(|(a, b)| a * b).collect();
-    let ii: Vec<f32> = i_plane.iter().map(|a| a * a).collect();
-    let mean_ip = blur_plane(&ip, w, h, r);
-    let mean_ii = blur_plane(&ii, w, h, r);
-    let mut a = vec![0f32; w * h];
-    let mut b = vec![0f32; w * h];
-    for k in 0..w * h {
-        let var = (mean_ii[k] - mean_i[k] * mean_i[k]).max(0.0);
-        let cov = mean_ip[k] - mean_i[k] * mean_p[k];
-        a[k] = cov / (var + eps);
-        b[k] = mean_p[k] - a[k] * mean_i[k];
+    let support = r.saturating_mul(3);
+    let tile_edge = tile_edge.max(1);
+    let mut out = image::GrayImage::new(guide.width(), guide.height());
+
+    let guide_luma = |x: usize, y: usize| {
+        let p = guide.get_pixel(x as u32, y as u32);
+        (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0
+    };
+    // Global pixel-centre coordinates preserve Triangle resize's continuous
+    // mapping; tile-local coordinates never enter, so adjoining tiles sample
+    // exactly the same low-resolution mask function.
+    let mask_value = |x: usize, y: usize| {
+        let u = (x as f32 + 0.5) / w as f32;
+        let v = (y as f32 + 0.5) / h as f32;
+        image::imageops::sample_bilinear(mask, u, v).map_or(0.0, |p| p[0] as f32 / 255.0)
+    };
+
+    for tile_y in (0..h).step_by(tile_edge) {
+        let tile_y1 = tile_y.saturating_add(tile_edge).min(h);
+        for tile_x in (0..w).step_by(tile_edge) {
+            let tile_x1 = tile_x.saturating_add(tile_edge).min(w);
+
+            // The coefficient blur needs a 3r halo around the output tile.
+            // Computing those coefficients needs another 3r halo from the
+            // guide and mask, so neither serial blur sees an artificial edge.
+            let coeff_x0 = tile_x.saturating_sub(support);
+            let coeff_y0 = tile_y.saturating_sub(support);
+            let coeff_x1 = tile_x1.saturating_add(support).min(w);
+            let coeff_y1 = tile_y1.saturating_add(support).min(h);
+            let input_x0 = coeff_x0.saturating_sub(support);
+            let input_y0 = coeff_y0.saturating_sub(support);
+            let input_x1 = coeff_x1.saturating_add(support).min(w);
+            let input_y1 = coeff_y1.saturating_add(support).min(h);
+            let input_w = input_x1 - input_x0;
+            let input_h = input_y1 - input_y0;
+
+            let mut i_plane = Vec::with_capacity(input_w * input_h);
+            let mut p_plane = Vec::with_capacity(input_w * input_h);
+            for y in input_y0..input_y1 {
+                for x in input_x0..input_x1 {
+                    i_plane.push(guide_luma(x, y));
+                    p_plane.push(mask_value(x, y));
+                }
+            }
+
+            let ip: Vec<f32> = i_plane.iter().zip(&p_plane).map(|(i, p)| i * p).collect();
+            let ii: Vec<f32> = i_plane.iter().map(|i| i * i).collect();
+            let mut a = blur_plane(&ip, input_w, input_h, r);
+            drop(ip);
+            let mut b = blur_plane(&ii, input_w, input_h, r);
+            drop(ii);
+            let mean_i = blur_plane(&i_plane, input_w, input_h, r);
+            let mean_p = blur_plane(&p_plane, input_w, input_h, r);
+
+            for k in 0..a.len() {
+                let var = (b[k] - mean_i[k] * mean_i[k]).max(0.0);
+                let cov = a[k] - mean_i[k] * mean_p[k];
+                a[k] = cov / (var + eps);
+                b[k] = mean_p[k] - a[k] * mean_i[k];
+            }
+            drop(i_plane);
+            drop(p_plane);
+            drop(mean_i);
+            drop(mean_p);
+
+            let coeff_w = coeff_x1 - coeff_x0;
+            let coeff_h = coeff_y1 - coeff_y0;
+            let coeff_offset_x = coeff_x0 - input_x0;
+            let coeff_offset_y = coeff_y0 - input_y0;
+            let mut a_inner = Vec::with_capacity(coeff_w * coeff_h);
+            let mut b_inner = Vec::with_capacity(coeff_w * coeff_h);
+            for y in 0..coeff_h {
+                let start = (coeff_offset_y + y) * input_w + coeff_offset_x;
+                a_inner.extend_from_slice(&a[start..start + coeff_w]);
+                b_inner.extend_from_slice(&b[start..start + coeff_w]);
+            }
+            drop(a);
+            drop(b);
+
+            let mean_a = blur_plane(&a_inner, coeff_w, coeff_h, r);
+            drop(a_inner);
+            let mean_b = blur_plane(&b_inner, coeff_w, coeff_h, r);
+            drop(b_inner);
+
+            let tile_offset_x = tile_x - coeff_x0;
+            let tile_offset_y = tile_y - coeff_y0;
+            for (local_y, y) in (tile_y..tile_y1).enumerate() {
+                for (local_x, x) in (tile_x..tile_x1).enumerate() {
+                    let k = (tile_offset_y + local_y) * coeff_w + tile_offset_x + local_x;
+                    let value = ((mean_a[k] * guide_luma(x, y) + mean_b[k]).clamp(0.0, 1.0)
+                        * 255.0)
+                        .round() as u8;
+                    out.put_pixel(x as u32, y as u32, image::Luma([value]));
+                }
+            }
+        }
     }
-    let mean_a = blur_plane(&a, w, h, r);
-    let mean_b = blur_plane(&b, w, h, r);
-    let out: Vec<u8> = (0..w * h)
-        .map(|k| ((mean_a[k] * i_plane[k] + mean_b[k]).clamp(0.0, 1.0) * 255.0).round() as u8)
-        .collect();
-    image::GrayImage::from_raw(w as u32, h as u32, out).expect("dims preserved")
+
+    out
 }
 
 /// The ENGINE's own activity rule for one local adjustment (mirrors
@@ -6967,5 +7054,43 @@ mod tests {
                 .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp."))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tiled_guided_refine_matches_the_whole_frame_result_across_every_seam() {
+        let (w, h) = (53u32, 47u32);
+        let tile_edge = 19usize;
+        assert!(
+            w as usize > 2 * tile_edge && h as usize > 2 * tile_edge,
+            "the fixture must cross two tile seams in each axis"
+        );
+
+        let guide = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let base: u8 = if x + y / 3 < w / 2 { 28 } else { 210 };
+            image::Rgb([
+                base,
+                base.saturating_add(((x * 5 + y * 3) % 17) as u8),
+                base.saturating_sub(((x * 2 + y * 7) % 13) as u8),
+            ])
+        }));
+        let small = image::GrayImage::from_fn(9, 7, |x, y| {
+            image::Luma([((x * 37 + y * 53 + (x * y % 7) * 19) % 256) as u8])
+        });
+
+        let tiled = refine_mask_guided_tiled(&small, &guide, 2, 1e-2, tile_edge);
+        let reference =
+            refine_mask_guided_tiled(&small, &guide, 2, 1e-2, w.max(h) as usize);
+
+        for (k, (&got, &want)) in tiled.as_raw().iter().zip(reference.as_raw().iter()).enumerate() {
+            let x = k % w as usize;
+            let y = k / w as usize;
+            let delta = (got as i16 - want as i16).abs();
+            let on_seam = (x != 0 && x.is_multiple_of(tile_edge))
+                || (y != 0 && y.is_multiple_of(tile_edge));
+            assert!(
+                delta <= 1,
+                "pixel ({x}, {y}), seam={on_seam}: tiled {got}, whole-frame {want}"
+            );
+        }
     }
 }
