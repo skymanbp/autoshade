@@ -453,12 +453,7 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
 /// SAVE_LOCK first and then this, so the two cannot deadlock.
 static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Serializes the backup-gate + sidecar writes WITHIN this process: two
-/// threaded requests saving the same photo could interleave between
-/// `backup_saved_develop` and `write_recipe`, overwriting a save that never
-/// got its v<N> snapshot. (Cross-PROCESS races remain the recorded v0.13
-/// trade-off.)
-static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 
 /// Marker for client-caused failures — `handle` maps these to HTTP 400.
 #[derive(Debug)]
@@ -859,15 +854,16 @@ fn fresh_base_knots(raw: &Path) -> Vec<[f32; 2]> {
 
 fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let raw = raw_for(request, state)?;
-    // Under SAVE_LOCK: migration MUTATES the central store, and racing a
-    // concurrent /api/xmp neutral-clear could republish the legacy recipe
-    // right after the clear deleted both homes — resurrecting the cleared
-    // edit. The lock also keeps the read below coherent with any in-flight
-    // save.
-    let _save = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    return crate::store::with_develop_lock(
+        &raw,
+        crate::store::DevelopLockMode::Wait,
+        || api_recipe_locked(&raw),
+    );
+
+    fn api_recipe_locked(raw: &Path) -> Result<ResponseBox> {
     // One-time, per-photo migration of pre-store ./out sidecars into the
     // central develop dir (no-op when nothing legacy remains).
-    crate::store::migrate_legacy(&raw);
+    crate::store::migrate_legacy(raw);
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes —
     // newest intent wins, the same contract as the GUI's read_saved_develop
     // (store::lightroom_sidecar: our own copied projection is skipped, ties
@@ -879,7 +875,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // next save then overwrites it. The warning rides every answer below,
     // the 404 "not analyzed yet" included.
     let mut xmp_warn: Option<Header> = None;
-    match crate::store::lightroom_sidecar(&raw) {
+    match crate::store::lightroom_sidecar(raw) {
         crate::store::LrSidecar::NewerThanStore(text) | crate::store::LrSidecar::Only(text) => {
             let mut r = crate::xmp::xmp_to_recipe(&text);
             xmp_warn = recipe_warning_header(&text);
@@ -887,13 +883,13 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 r.clamp();
                 // Same stamp rule as the XMP fallback below: Lightroom tuned
                 // this file over its own profile-corrected base.
-                r.base_curve = fresh_base_knots(&raw);
-                r.lens_profile = pipeline::fresh_lens_profile(&raw);
+                r.base_curve = fresh_base_knots(raw);
+                r.lens_profile = pipeline::fresh_lens_profile(raw);
                 // Stamp-if-None: an old-era Autoshop projection arrives with
                 // the 5500 anchor PINNED by xmp_to_recipe (its Kelvin was
                 // tuned relative) — overwriting the pin would reinterpret it.
                 if r.as_shot_k.is_none() {
-                    let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
+                    let (ask, ast) = pipeline::fresh_as_shot_wb(raw);
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
@@ -910,7 +906,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     }
     // Central first; then any legacy file a failed migration left behind.
     let mut parse_err: Option<String> = None;
-    for path in [crate::store::recipe_target(&raw), crate::store::legacy_recipe(&raw)] {
+    for path in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             // Missing IS absence; any OTHER read failure (permissions, I/O)
@@ -959,7 +955,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         // Re-serialised only when the repair actually fired; an untouched
         // recipe still goes out byte-for-byte, forward-schema fields and all.
         if let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
-            && let Some(note) = crate::pipeline::repair_pre_era_base_curve(&raw, &mut r)
+            && let Some(note) = crate::pipeline::repair_pre_era_base_curve(raw, &mut r)
             && let Ok(fixed) = serde_json::to_string(&r)
         {
             // SAID, not just done: the photo renders differently than it did
@@ -979,7 +975,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // and "restoring" that would only produce a misleading SAVED tag. An XMP
     // was tuned in Lightroom over ITS camera-profile base, so it gets the
     // photo's fresh base look — the same rule the GUI applies on open.
-    for path in [pipeline::xmp_target(&raw), crate::store::legacy_xmp(&raw)] {
+    for path in [pipeline::xmp_target(raw), crate::store::legacy_xmp(raw)] {
         if let Ok(text) = std::fs::read_to_string(&path) {
             let mut r = crate::xmp::xmp_to_recipe(&text);
             // First consulted file wins the disclosure slot (GUI accumulates
@@ -989,13 +985,13 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             }
             if !r.is_noop() {
                 r.clamp();
-                r.base_curve = fresh_base_knots(&raw);
+                r.base_curve = fresh_base_knots(raw);
                 // Same stamp rule as the GUI's XMP-only restore: Lightroom
                 // tuned this file over its own profile-corrected base.
-                r.lens_profile = pipeline::fresh_lens_profile(&raw);
+                r.lens_profile = pipeline::fresh_lens_profile(raw);
                 // Stamp-if-None — same era rule as the sidecar branch above.
                 if r.as_shot_k.is_none() {
-                    let (ask, ast) = pipeline::fresh_as_shot_wb(&raw);
+                    let (ask, ast) = pipeline::fresh_as_shot_wb(raw);
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
@@ -1036,7 +1032,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // but the body carries the photo's camera-matched base look so the fresh
     // web canvas starts as bright as a fresh GUI open instead of jumping
     // only after the first Analyze.
-    let body = fresh_base_payload(&raw);
+    let body = fresh_base_payload(raw);
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static ASCII header");
     let mut resp = Response::from_string(body).with_status_code(404).with_header(ct);
@@ -1044,6 +1040,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         resp = resp.with_header(w);
     }
     Ok(resp.boxed())
+    }
 }
 
 /// A6 disclosure header for XMP-derived recipes: numeric settings the import
@@ -1558,8 +1555,10 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // that FAILS (locked / unreadable existing save) means we must not write at
     // all: handing back an unsaved proposal beats overwriting a save we could
     // not protect.
-    let _save = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    match crate::store::backup_saved_develop(&raw, Some(&recipe)) {
+    crate::store::with_develop_lock(
+        &raw,
+        crate::store::DevelopLockMode::Wait,
+        || match crate::store::backup_saved_develop(&raw, Some(&recipe)) {
         Ok(backed_up) => {
             pipeline::write_recipe(&raw, &recipe, None)?;
             // The recipe write ALONE decides the saved state (the GUI/CLI
@@ -1586,7 +1585,8 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                  save explicitly to overwrite"
             ),
         }))),
-    }
+    },
+    )
 }
 
 // The photo's RENDER INPUT is store::render_source_checked everywhere here:
@@ -2063,8 +2063,10 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(r) => r,
         Err(resp) => return Ok(resp),
     };
-    // Same intra-process save serialization as api_analyze.
-    let _save = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    crate::store::with_develop_lock(
+        &raw,
+        crate::store::DevelopLockMode::Wait,
+        || {
     // Resolve the session master FIRST: a rejected master must fail the save
     // BEFORE the recipe commits, or the client baselines (markSaved) on a
     // 200 whose pixels never landed — and a later navigation discards the
@@ -2200,6 +2202,8 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{save_note}{master_note}"
         ))),
     }
+        },
+    )
 }
 
 /// Generative fill (Phase 4 in the UI): the browser posts a painted RGBA mask

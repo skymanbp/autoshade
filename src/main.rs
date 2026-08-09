@@ -424,6 +424,7 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     // REFUSED when the snapshot fails — the GUI and web already do this; the
     // CLI used to overwrite ungated. A redirected -o write leaves the
     // canonical develop untouched and needs no gate.
+    let save = || -> Result<()> {
     if !redirected
         && let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&recipe))
     {
@@ -478,6 +479,16 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
         println!("  (baked source — recipe JSON only; XMP applies to RAW in Lightroom)");
     }
     Ok(())
+    };
+    if redirected {
+        save()
+    } else {
+        autoshop::store::with_develop_lock(
+            raw,
+            autoshop::store::DevelopLockMode::Wait,
+            save,
+        )
+    }
 }
 
 fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
@@ -968,6 +979,10 @@ fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Ver
     // Sidecar persistence, shared by the success path and the failed-render
     // path below: once the verdict is Accept, the PAID analysis must land.
     let persist = |recipe: &EditRecipe| -> Result<()> {
+        autoshop::store::with_develop_lock(
+            raw,
+            autoshop::store::DevelopLockMode::Wait,
+            || {
         // Backup gate, same as every surface: cheap Ok(None) in the batch's
         // usual no-develop-yet case, and a save created mid-batch by another
         // process can no longer be silently destroyed.
@@ -982,6 +997,8 @@ fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Ver
             eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e}");
         }
         Ok(())
+            },
+        )
     };
     if let Some(out) = render_to {
         // 16-bit master at the batch-claimed name — claimed up front by the

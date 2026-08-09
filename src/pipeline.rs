@@ -718,48 +718,13 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // (.bak stays shared — the retire/restore pair below is
     // last-writer-wins by design; one photo has one interactive writer in
     // practice.)
-    let tmp = out.with_extension(format!(
-        "json.tmp.{}.{}",
-        std::process::id(),
-        crate::store::next_tmp_seq()
-    ));
-    std::fs::write(&tmp, serde_json::to_string_pretty(&on_disk)?)
-        .with_context(|| format!("write recipe {}", tmp.display()))?;
-    // Retire the old file to .bak instead of deleting it: if the publish
-    // rename then fails (AV lock, racing writer), the authoritative recipe
-    // is RESTORED, not lost. On success the .bak is dropped. A STALE .bak
-    // (crash in that window) is cleared first — belt-and-braces so the
-    // retire can never trip over an undeletable leftover and wedge every
-    // later save (retire fails, had_old reads false, the publish then fails
-    // on the still-present target).
-    let bak = out.with_extension("json.bak");
-    if out.exists() {
-        // Clearing a stale .bak is safe ONLY while the live target exists —
-        // after a crashed publish whose restore ALSO failed, the .bak is the
-        // sole surviving copy of the previous develop, and the unconditional
-        // pre-clear deleted it forever.
-        let _ = std::fs::remove_file(&bak);
-    } else if bak.exists() {
-        // Orphaned survivor: put it back as the live file first — the retire
-        // below then re-bak's it through the normal recovery chain.
-        let _ = std::fs::rename(&bak, &out);
-    }
-    let had_old = std::fs::rename(&out, &bak).is_ok();
-    if let Err(e) = std::fs::rename(&tmp, &out) {
-        // A failed restore must be SAID, not swallowed — the authoritative
-        // file is then missing and the save survives only at the .bak path.
-        let restore_note = if had_old && std::fs::rename(&bak, &out).is_err() {
-            format!(" (restoring the previous file ALSO failed — it survives at {})", bak.display())
-        } else {
-            String::new()
-        };
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e)
-            .with_context(|| format!("publish recipe {}{restore_note}", out.display()));
-    }
-    if had_old {
-        let _ = std::fs::remove_file(&bak);
-    }
+    let bytes = serde_json::to_vec_pretty(&on_disk)?;
+    crate::store::durable_retire_and_write(
+        &out,
+        &out.with_extension("json.bak"),
+        &bytes,
+    )
+    .with_context(|| format!("publish recipe {}", out.display()))?;
     if out == crate::store::recipe_target(raw) {
         crate::store::note_source(raw); // breadcrumb for the hashed store dir
     }
@@ -949,16 +914,8 @@ fn write_xmp_doc(
     // writer left a truncated file where a valid Lightroom sidecar used to
     // be — the previous projection destroyed by the failed attempt to
     // replace it. (fs::rename replaces the destination on every platform.)
-    let tmp = out.with_extension(format!(
-        "xmp.tmp.{}.{}",
-        std::process::id(),
-        crate::store::next_tmp_seq()
-    ));
-    std::fs::write(&tmp, doc).with_context(|| format!("write xmp {}", tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, &out) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("publish xmp {}", out.display()));
-    }
+    crate::store::durable_write(&out, doc.as_bytes())
+        .with_context(|| format!("publish xmp {}", out.display()))?;
     Ok((out, note))
 }
 

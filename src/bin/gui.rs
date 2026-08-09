@@ -14003,10 +14003,13 @@ mod tests {
 
         // A pre-store legacy ./out sidecar is migrated in on FIRST read and
         // then restores from the CENTRAL copy (kind says recipe.json, not the
-        // legacy fallback — the file physically moved). A SEPARATE photo path:
-        // migrate_legacy memoizes per photo per process, so `src` (already
-        // touched above with nothing legacy) would correctly skip the scan —
-        // which is the production contract, not a test bug.
+        // legacy fallback). Migration COPIES and then suppresses the legacy
+        // fallback with a tombstone rather than unlinking it: a `./out` name is
+        // keyed by stem alone, so two photos with the same stem in different
+        // folders share it and deleting one photo's legacy bytes destroyed the
+        // other's. A SEPARATE photo path: migrate_legacy memoizes per photo per
+        // process, so `src` (already touched above with nothing legacy) would
+        // correctly skip the scan — the production contract, not a test bug.
         let src2 = std::path::Path::new("D:/library/_sidecar_prio_test_legacy.ARW");
         let dev2 = autoshop::store::develop_dir(src2);
         let _ = std::fs::remove_dir_all(&dev2);
@@ -14019,7 +14022,11 @@ mod tests {
             panic!("a legacy ./out recipe restores");
         };
         assert_eq!((r.contrast, kind), (-11.0, "recipe.json"));
-        assert!(!legacy_rj2.exists(), "legacy file consumed by the migration");
+        assert!(
+            legacy_rj2.exists(),
+            "the stem-keyed legacy file is COPIED, never unlinked — another \
+             photo with the same stem may still need it"
+        );
         assert!(
             autoshop::store::recipe_target(src2).exists(),
             "…and now lives in the central store"

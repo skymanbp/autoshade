@@ -30,12 +30,259 @@
 //! write time ([`relativize_mask_paths`]) — so a develop dir is relocatable
 //! and legacy cwd-relative "out/…" references keep working unchanged.
 
-use std::path::{Path, PathBuf};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    fs::{File, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
 // Bitmap raster paths are walked through `LocalAdjustment::bitmap_paths_mut`
 // (base geometry + components in one place), so this module no longer
 // pattern-matches `MaskGeometry` directly.
 use crate::recipe::EditRecipe;
+
+/// How a surface responds when another process is mutating this photo.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DevelopLockMode {
+    /// CLI, server, and worker threads queue behind the current mutation.
+    Wait,
+    /// Foreground GUI actions return `WouldBlock` and leave the canvas dirty.
+    NoWait,
+}
+
+thread_local! {
+    /// OS locks are not recursively lockable through independent handles.
+    /// Compound surface saves call lower-level store writers, so same-thread
+    /// nesting reuses the outer lock while other threads and processes still
+    /// contend through the kernel.
+    static HELD_DEVELOP_LOCKS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+}
+
+struct DevelopLockGuard {
+    path: PathBuf,
+    file: File,
+}
+
+impl Drop for DevelopLockGuard {
+    fn drop(&mut self) {
+        os_develop_lock::unlock(&self.file);
+        HELD_DEVELOP_LOCKS.with(|held| {
+            held.borrow_mut().remove(&self.path);
+        });
+    }
+}
+
+/// Run one coherent per-photo store operation under a kernel-owned file lock.
+/// The `.develop.lock` directory entry is persistent, but lock ownership is
+/// not: the OS releases it when a process exits or is killed, so a crash
+/// cannot leave a stale PID file or a permanent wait.
+pub fn with_develop_lock<T, E>(
+    src: &Path,
+    mode: DevelopLockMode,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<io::Error>,
+{
+    with_develop_lock_in(&store_root(), src, mode, f)
+}
+
+fn with_develop_lock_in<T, E>(
+    root: &Path,
+    src: &Path,
+    mode: DevelopLockMode,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<io::Error>,
+{
+    let dev = develop_dir_in(root, src);
+    std::fs::create_dir_all(&dev).map_err(E::from)?;
+    let path = dev.join(".develop.lock");
+    if HELD_DEVELOP_LOCKS.with(|held| held.borrow().contains(&path)) {
+        return f();
+    }
+
+    // truncate(false) is the INTENT, not a default: the lock lives in the
+    // kernel, not in the bytes, so this file's content is irrelevant and
+    // truncating it would be a pointless write against a path another process
+    // may hold open. `write(true)` is required because Windows needs write
+    // access on the handle it locks.
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(E::from)?;
+    os_develop_lock::lock(&file, mode).map_err(E::from)?;
+    HELD_DEVELOP_LOCKS.with(|held| {
+        held.borrow_mut().insert(path.clone());
+    });
+    let _guard = DevelopLockGuard { path, file };
+    f()
+}
+
+#[cfg(unix)]
+mod os_develop_lock {
+    use super::{DevelopLockMode, File};
+    use std::{
+        io,
+        os::fd::{AsRawFd as _, RawFd},
+    };
+
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    const LOCK_UN: i32 = 8;
+
+    #[link(name = "c")]
+    unsafe extern "C" {
+        #[link_name = "flock"]
+        fn libc_flock(fd: RawFd, operation: i32) -> i32;
+    }
+
+    pub(super) fn lock(file: &File, mode: DevelopLockMode) -> io::Result<()> {
+        let operation =
+            LOCK_EX | if mode == DevelopLockMode::NoWait { LOCK_NB } else { 0 };
+        loop {
+            // SAFETY: the descriptor remains owned by `DevelopLockGuard` for
+            // the complete lock lifetime and `flock` does not retain pointers.
+            if unsafe { libc_flock(file.as_raw_fd(), operation) } == 0 {
+                return Ok(());
+            }
+            let e = io::Error::last_os_error();
+            if e.kind() != io::ErrorKind::Interrupted {
+                return Err(e);
+            }
+        }
+    }
+
+    pub(super) fn unlock(file: &File) {
+        // SAFETY: this is the same live descriptor successfully locked above.
+        let _ = unsafe { libc_flock(file.as_raw_fd(), LOCK_UN) };
+    }
+}
+
+#[cfg(windows)]
+mod os_develop_lock {
+    use super::{DevelopLockMode, File};
+    use std::{
+        ffi::c_void,
+        io,
+        os::windows::io::AsRawHandle as _,
+        ptr,
+    };
+
+    const LOCKFILE_FAIL_IMMEDIATELY: u32 = 1;
+    const LOCKFILE_EXCLUSIVE_LOCK: u32 = 2;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+
+    #[repr(C)]
+    struct Overlapped {
+        _internal: usize,
+        _internal_high: usize,
+        _offset: u32,
+        _offset_high: u32,
+        _event: *mut c_void,
+    }
+
+    impl Overlapped {
+        fn zeroed() -> Self {
+            Self {
+                _internal: 0,
+                _internal_high: 0,
+                _offset: 0,
+                _offset_high: 0,
+                _event: ptr::null_mut(),
+            }
+        }
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "LockFileEx"]
+        fn lock_file_ex(
+            file: *mut c_void,
+            flags: u32,
+            reserved: u32,
+            bytes_low: u32,
+            bytes_high: u32,
+            overlapped: *mut Overlapped,
+        ) -> i32;
+        #[link_name = "UnlockFileEx"]
+        fn unlock_file_ex(
+            file: *mut c_void,
+            reserved: u32,
+            bytes_low: u32,
+            bytes_high: u32,
+            overlapped: *mut Overlapped,
+        ) -> i32;
+    }
+
+    pub(super) fn lock(file: &File, mode: DevelopLockMode) -> io::Result<()> {
+        let mut overlapped = Overlapped::zeroed();
+        let flags = LOCKFILE_EXCLUSIVE_LOCK
+            | if mode == DevelopLockMode::NoWait {
+                LOCKFILE_FAIL_IMMEDIATELY
+            } else {
+                0
+            };
+        // SAFETY: the handle and OVERLAPPED remain valid for the synchronous
+        // call; the guard keeps the handle open until the matching unlock.
+        let ok = unsafe {
+            lock_file_ex(
+                file.as_raw_handle(),
+                flags,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if mode == DevelopLockMode::NoWait && e.raw_os_error() == Some(ERROR_LOCK_VIOLATION) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "this photo is being saved by another Autoshop process",
+            ));
+        }
+        Err(e)
+    }
+
+    pub(super) fn unlock(file: &File) {
+        let mut overlapped = Overlapped::zeroed();
+        // SAFETY: this is the same live handle and byte range locked above.
+        let _ = unsafe {
+            unlock_file_ex(
+                file.as_raw_handle(),
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod os_develop_lock {
+    use super::{DevelopLockMode, File};
+    use std::io;
+
+    pub(super) fn lock(_: &File, _: DevelopLockMode) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "develop locking is unsupported on this platform",
+        ))
+    }
+
+    pub(super) fn unlock(_: &File) {}
+}
 
 /// Per-user store root: `AUTOSHOP_DATA_DIR` env override (tests, portable
 /// setups) → `%LOCALAPPDATA%/autoshop` → `<temp>/autoshop`. Absolute, so keys
@@ -103,7 +350,27 @@ pub fn photo_key(src: &Path) -> String {
         // under it.
         stem = stem.to_ascii_lowercase();
     }
-    format!("{}-{:016x}", stem, fnv1a64(s.as_bytes()))
+    let suffix = format!("-{:016x}", fnv1a64(s.as_bytes()));
+    // Leave headroom for filesystem metadata and keep the same key for every
+    // existing ordinary stem. Enforce both byte-oriented Unix limits and
+    // UTF-16-oriented Windows limits without splitting a scalar value.
+    const MAX_COMPONENT_UNITS: usize = 240;
+    let mut prefix = String::new();
+    let mut bytes = 0usize;
+    let mut wide = 0usize;
+    for ch in stem.chars() {
+        let next_bytes = bytes + ch.len_utf8();
+        let next_wide = wide + ch.len_utf16();
+        if next_bytes + suffix.len() > MAX_COMPONENT_UNITS
+            || next_wide + suffix.encode_utf16().count() > MAX_COMPONENT_UNITS
+        {
+            break;
+        }
+        prefix.push(ch);
+        bytes = next_bytes;
+        wide = next_wide;
+    }
+    format!("{prefix}{suffix}")
 }
 
 /// Two spellings of the same photo must land in the same develop dir on a
@@ -241,6 +508,16 @@ pub fn pixel_source_path(src: &Path) -> PathBuf {
 /// otherwise ABSOLUTIZED — an `out/`-relative master would silently stop
 /// resolving the moment the app is launched from a different directory.
 pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io::Result<()> {
+    with_develop_lock(src, DevelopLockMode::Wait, || {
+        write_pixel_source_unlocked(src, origin, generated)
+    })
+}
+
+fn write_pixel_source_unlocked(
+    src: &Path,
+    origin: &Path,
+    generated: bool,
+) -> std::io::Result<()> {
     let dir = develop_dir(src);
     std::fs::create_dir_all(&dir)?;
     let stored: PathBuf = if origin.parent() == Some(dir.as_path()) {
@@ -270,50 +547,11 @@ pub fn write_pixel_source(src: &Path, origin: &Path, generated: bool) -> std::io
 fn publish_json_sidecar(src: &Path, name: &str, bytes: Vec<u8>) -> std::io::Result<()> {
     let dir = develop_dir(src);
     std::fs::create_dir_all(&dir)?;
-    let target = dir.join(name);
-    let tmp = dir.join(format!("{name}.tmp.{}.{}", std::process::id(), next_tmp_seq()));
-    std::fs::write(&tmp, bytes)?;
-    let mut retired = false;
-    if target.exists() {
-        let bak = dir.join(format!("{name}.bak"));
-        // Belt-and-braces clear (fs::rename would replace it anyway — see
-        // next_tmp_seq's probe note). Losing an OLD .bak to a concurrent
-        // writer is last-writer-wins by design — the same stance recipe.json
-        // documents for its shared .bak.
-        let _ = std::fs::remove_file(&bak);
-        match std::fs::rename(&target, &bak) {
-            Ok(()) => retired = true,
-            // Target vanished mid-race (another writer retired it): nothing
-            // left to retire — this write's publish still proceeds.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e);
-            }
-        }
-    }
-    if let Err(e) = std::fs::rename(&tmp, &target) {
-        // The publish failed AFTER the old file was retired — put it back so
-        // the previous record stays the live one, not a .bak orphan. A
-        // failed restore must be SAID: the error then names where the
-        // previous record survives instead of pretending it is live.
-        let mut restore_note = String::new();
-        if retired {
-            let bak = dir.join(format!("{name}.bak"));
-            if std::fs::rename(&bak, &target).is_err() {
-                restore_note = format!(
-                    " (restoring the previous {name} ALSO failed — it survives at {})",
-                    bak.display()
-                );
-            }
-        }
-        let _ = std::fs::remove_file(&tmp);
-        if restore_note.is_empty() {
-            return Err(e);
-        }
-        return Err(std::io::Error::new(e.kind(), format!("{e}{restore_note}")));
-    }
-    Ok(())
+    durable_retire_and_write(
+        &dir.join(name),
+        &dir.join(format!("{name}.bak")),
+        &bytes,
+    )
 }
 
 /// Forget the baked pixel source (the develop went back to parametric-only).
@@ -330,6 +568,10 @@ fn publish_json_sidecar(src: &Path, name: &str, bytes: Vec<u8>) -> std::io::Resu
 /// reach the caller — a surviving pixels.json silently resurrects an obsolete
 /// retouched canvas on the next open.
 pub fn clear_pixel_source(src: &Path) -> std::io::Result<()> {
+    with_develop_lock(src, DevelopLockMode::Wait, || clear_pixel_source_unlocked(src))
+}
+
+fn clear_pixel_source_unlocked(src: &Path) -> std::io::Result<()> {
     let rm = |p: PathBuf| match std::fs::remove_file(p) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -379,10 +621,18 @@ pub struct VariantsRecord {
     pub others: Vec<VariantEntry>,
 }
 
+fn known_variant_kind(kind: &str) -> bool {
+    matches!(kind, "original" | "generated" | "fitted")
+}
+
 /// Persist the strip record. Origins inside the develop dir are stored by
 /// bare name and each entry's Bitmap mask references are relativized — the
 /// same relocatability rules recipe.json and pixels.json follow.
 pub fn write_variants(src: &Path, rec: &VariantsRecord) -> std::io::Result<()> {
+    with_develop_lock(src, DevelopLockMode::Wait, || write_variants_unlocked(src, rec))
+}
+
+fn write_variants_unlocked(src: &Path, rec: &VariantsRecord) -> std::io::Result<()> {
     let dir = develop_dir(src);
     let mut stored = VariantsRecord {
         v: rec.v,
@@ -449,12 +699,28 @@ pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
         );
         return None;
     }
+    if !known_variant_kind(&rec.active_kind)
+        || rec.others.iter().any(|entry| !known_variant_kind(&entry.kind))
+    {
+        eprintln!(
+            "⚠ {} contains a variant kind this build does not understand — the variant strip is not restored and the file is left untouched",
+            sidecar.display()
+        );
+        return None;
+    }
     let dir = develop_dir(src);
     for e in &mut rec.others {
         if let Some(o) = &e.origin
             && o.is_relative()
         {
-            e.origin = Some(dir.join(o));
+            let Some(origin) = contained_join(&dir, o) else {
+                eprintln!(
+                    "⚠ {} contains a variant origin outside its develop directory — the variant strip is not restored",
+                    sidecar.display()
+                );
+                return None;
+            };
+            e.origin = Some(origin);
         }
         resolve_mask_paths(&mut e.recipe, &dir);
     }
@@ -465,6 +731,10 @@ pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
 /// two-step as [`clear_pixel_source`], `.bak` first, so a crash between the
 /// removals leaves the live record intact instead of resurrection bait.
 pub fn clear_variants(src: &Path) -> std::io::Result<()> {
+    with_develop_lock(src, DevelopLockMode::Wait, || clear_variants_unlocked(src))
+}
+
+fn clear_variants_unlocked(src: &Path) -> std::io::Result<()> {
     let rm = |p: PathBuf| match std::fs::remove_file(p) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -569,6 +839,10 @@ pub fn render_source_checked(
 /// as absence (the same "unreadable is not absent" rule the backup gate
 /// applies to the recipe itself).
 pub fn recover_orphan_baks(src: &Path) -> std::io::Result<()> {
+    with_develop_lock(src, DevelopLockMode::Wait, || recover_orphan_baks_unlocked(src))
+}
+
+fn recover_orphan_baks_unlocked(src: &Path) -> std::io::Result<()> {
     let dev = develop_dir(src);
     let mut failure: Option<std::io::Error> = None;
     for (live, bak) in [
@@ -676,10 +950,34 @@ pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
         );
         return None;
     };
-    let generated = doc.get("kind").and_then(|k| k.as_str()) == Some("generated");
+    let generated = match doc.get("kind").and_then(|k| k.as_str()) {
+        Some("generated") => true,
+        Some("inplace") => false,
+        Some(kind) => {
+            eprintln!(
+                "⚠ {} uses unknown baked-master kind {kind:?} — the master is not restored and the file is left untouched",
+                sidecar.display()
+            );
+            return None;
+        }
+        None => {
+            eprintln!(
+                "⚠ {} has no kind field — the baked retouch master is not restored",
+                sidecar.display()
+            );
+            return None;
+        }
+    };
     let mut path = PathBuf::from(origin);
     if path.is_relative() {
-        path = develop_dir(src).join(path);
+        let Some(contained) = contained_join(&develop_dir(src), &path) else {
+            eprintln!(
+                "⚠ {} contains a baked-master origin outside its develop directory — the master is not restored",
+                sidecar.display()
+            );
+            return None;
+        };
+        path = contained;
     }
     if !path.exists() {
         eprintln!(
@@ -731,11 +1029,21 @@ fn legacy_out_roots() -> Vec<PathBuf> {
 /// The photo's legacy recipe path: the first candidate root that actually
 /// holds one (else the cwd-relative default, so error messages stay sensible).
 pub fn legacy_recipe(src: &Path) -> PathBuf {
-    legacy_file(&format!("{}.recipe.json", crate::pipeline::stem(src)))
+    let name = format!("{}.recipe.json", crate::pipeline::stem(src));
+    if legacy_suppressed(src) {
+        suppressed_legacy_path(src, &name)
+    } else {
+        legacy_file(&name)
+    }
 }
 
 pub fn legacy_xmp(src: &Path) -> PathBuf {
-    legacy_file(&format!("{}.xmp", crate::pipeline::stem(src)))
+    let name = format!("{}.xmp", crate::pipeline::stem(src));
+    if legacy_suppressed(src) {
+        suppressed_legacy_path(src, &name)
+    } else {
+        legacy_file(&name)
+    }
 }
 
 fn legacy_file(name: &str) -> PathBuf {
@@ -748,6 +1056,29 @@ fn legacy_file(name: &str) -> PathBuf {
         fallback.get_or_insert(p);
     }
     fallback.unwrap_or_else(|| PathBuf::from("out").join(name))
+}
+
+const LEGACY_TOMBSTONE: &[u8] =
+    b"{\"v\":1,\"legacy_fallback\":\"suppressed\",\"reason\":\"explicit_clear\"}\n";
+
+fn legacy_tombstone_in(root: &Path, src: &Path) -> PathBuf {
+    develop_dir_in(root, src).join("legacy.tombstone")
+}
+
+fn legacy_tombstone(src: &Path) -> PathBuf {
+    legacy_tombstone_in(&store_root(), src)
+}
+
+fn legacy_suppressed(src: &Path) -> bool {
+    legacy_tombstone(src).exists()
+}
+
+fn suppress_legacy(src: &Path) -> std::io::Result<()> {
+    durable_write(&legacy_tombstone(src), LEGACY_TOMBSTONE)
+}
+
+fn suppressed_legacy_path(src: &Path, name: &str) -> PathBuf {
+    develop_dir(src).join(".legacy-suppressed").join(name)
 }
 
 /// Does this photo have ANY saved develop — central or legacy, recipe or XMP?
@@ -903,8 +1234,8 @@ pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
 pub fn mark_develop_cleared(src: &Path) -> std::io::Result<()> {
     let dir = develop_dir(src);
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(
-        dir.join("cleared.txt"),
+    durable_write(
+        &dir.join("cleared.txt"),
         b"develop cleared by an explicit neutral save\n",
     )
 }
@@ -937,6 +1268,10 @@ pub struct ClearOutcome {
 /// A file already missing IS the desired end state; any OTHER removal failure
 /// reaches the caller — a surviving sidecar resurrects the edits on reopen.
 pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
+    with_develop_lock(src, DevelopLockMode::Wait, || clear_develop_unlocked(src))
+}
+
+fn clear_develop_unlocked(src: &Path) -> std::io::Result<ClearOutcome> {
     let del = |p: &Path| match std::fs::remove_file(p) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -967,12 +1302,17 @@ pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
     // path; leaving a root unswept does not avoid it, it only makes the clear
     // fail while the same shared file resurrects the edits on the next read.
     let stem = crate::pipeline::stem(src);
-    let legacy: Vec<PathBuf> = legacy_out_roots()
-        .into_iter()
-        .flat_map(|root| {
-            [root.join(format!("{stem}.recipe.json")), root.join(format!("{stem}.xmp"))]
-        })
-        .collect();
+    let legacy_was_visible = !legacy_suppressed(src)
+        && legacy_out_roots().into_iter().any(|root| {
+            root.join(format!("{stem}.recipe.json")).exists()
+                || root.join(format!("{stem}.xmp")).exists()
+        });
+    // The marker lands BEFORE central files are removed. A crash can therefore
+    // leave the old central develop visible, or leave it cleared with legacy
+    // already suppressed, but cannot expose the ambiguous fallback in between.
+    suppress_legacy(src)?;
+    removed |= legacy_was_visible;
+
     for p in [
         develop_dir(src).join("recipe.json.bak"),
         recipe_target(src),
@@ -982,12 +1322,7 @@ pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
         // the user explicitly cleared.
         develop_dir(src).join("variants.json.bak"),
         variants_path(src),
-        legacy_recipe(src),
-        legacy_xmp(src),
-    ]
-    .into_iter()
-    .chain(legacy)
-    {
+    ] {
         match del(&p) {
             Ok(b) => removed |= b,
             Err(e) => {
@@ -1035,23 +1370,63 @@ pub fn list_versions(src: &Path) -> Vec<u32> {
 /// was loaded from). Only rewrites a reference whose file actually EXISTS
 /// under `base` — anything else is left untouched, so legacy cwd-relative
 /// "out/…" references keep resolving exactly as before this module existed.
+fn contained_join(base: &Path, relative: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    if relative.is_absolute()
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+
+    let candidate = base.join(relative);
+    let mut existing = candidate.as_path();
+    while !existing.exists() {
+        existing = existing.parent()?;
+        if !existing.starts_with(base) {
+            return None;
+        }
+    }
+
+    if base.exists() {
+        let canonical_base = std::fs::canonicalize(base).ok()?;
+        let canonical_existing = std::fs::canonicalize(existing).ok()?;
+        if !canonical_existing.starts_with(canonical_base) {
+            return None;
+        }
+    }
+    Some(candidate)
+}
 pub fn resolve_mask_paths(r: &mut EditRecipe, base: &Path) {
     for m in &mut r.masks {
         for path in m.bitmap_paths_mut() {
             let p = Path::new(path.as_str());
             if p.is_relative() {
                 // A BARE name is the store's own convention and can only mean
-                // "this develop dir" — anchor it even when the file is GONE,
-                // or a missing raster would stay process-relative and could
-                // silently pick up an unrelated same-named file from the
-                // launch cwd. Multi-component legacy refs ("out/…") keep the
-                // exists-gated rewrite: cwd resolution IS their pre-store
-                // contract, and rewriting a missing one would break a launch
-                // from the original directory.
+                // "this develop dir" — anchor it even when the file is GONE.
+                // Safe multi-component legacy refs retain their old
+                // exists-gated cwd behavior.
                 let bare = p.parent().is_none_or(|x| x.as_os_str().is_empty());
-                let cand = base.join(p);
-                if bare || cand.exists() {
-                    *path = cand.to_string_lossy().into_owned();
+                match contained_join(base, p) {
+                    Some(cand) if bare || cand.exists() => {
+                        *path = cand.to_string_lossy().into_owned();
+                    }
+                    Some(_) => {}
+                    None => {
+                        eprintln!(
+                            "⚠ bitmap mask reference {path:?} escapes {} — it is disabled",
+                            base.display()
+                        );
+                        *path = base
+                            .join(".invalid-mask-reference")
+                            .to_string_lossy()
+                            .into_owned();
+                    }
                 }
             }
         }
@@ -1096,6 +1471,15 @@ pub fn relativize_mask_paths(r: &mut EditRecipe, base: &Path) {
 /// leave it untouched, because overwriting without the promised backup is
 /// exactly the silent destruction this function exists to prevent.
 pub fn backup_saved_develop(
+    src: &Path,
+    incoming: Option<&EditRecipe>,
+) -> std::io::Result<Option<u32>> {
+    with_develop_lock(src, DevelopLockMode::Wait, || {
+        backup_saved_develop_unlocked(src, incoming)
+    })
+}
+
+fn backup_saved_develop_unlocked(
     src: &Path,
     incoming: Option<&EditRecipe>,
 ) -> std::io::Result<Option<u32>> {
@@ -1179,8 +1563,9 @@ pub fn backup_saved_develop(
             }
             let publish = (|| {
                 let json = serde_json::to_string_pretty(&r).map_err(std::io::Error::other)?;
-                std::fs::write(&tmp, json)?;
-                std::fs::rename(&tmp, &dst)
+                write_staged(&tmp, json.as_bytes())?;
+                durable_os::replace(&tmp, &dst)?;
+                durable_os::finish_parent(&dst)
             })();
             if let Err(e) = publish {
                 let _ = std::fs::remove_file(&tmp);
@@ -1194,7 +1579,11 @@ pub fn backup_saved_develop(
         // wearing the final v<n>.recipe.json name (list_versions would then
         // count a corrupt snapshot as real).
         None => {
-            if let Err(e) = std::fs::copy(&rj, &tmp).and_then(|_| std::fs::rename(&tmp, &dst)) {
+            if let Err(e) = std::fs::copy(&rj, &tmp)
+                .and_then(|_| sync_staged(&tmp))
+                .and_then(|_| durable_os::replace(&tmp, &dst))
+                .and_then(|_| durable_os::finish_parent(&dst))
+            {
                 let _ = std::fs::remove_file(&tmp);
                 let _ = std::fs::remove_file(&dst); // release the claim
                 return Err(e);
@@ -1305,22 +1694,13 @@ fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
         derived.as_shot_tint = ast;
     }
     let (n, dst) = claim_version(src)?;
-    let seq = next_tmp_seq; // ONE shared process-wide counter (see next_tmp_seq)
-    let publish = |dst: &Path, bytes: &[u8], seq: u64| -> std::io::Result<()> {
-        let tmp = dst.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
-        if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dst)) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-        Ok(())
-    };
     let xmp_dst = dev.join(format!("v{n}.{stem}.xmp"));
-    if let Err(e) = publish(&xmp_dst, text.as_bytes(), seq()) {
+    if let Err(e) = durable_write(&xmp_dst, text.as_bytes()) {
         let _ = std::fs::remove_file(&dst); // release the claim
         return Err(e);
     }
     let json = serde_json::to_string_pretty(&derived).map_err(std::io::Error::other)?;
-    if let Err(e) = publish(&dst, json.as_bytes(), seq()) {
+    if let Err(e) = durable_write(&dst, json.as_bytes()) {
         let _ = std::fs::remove_file(&xmp_dst);
         let _ = std::fs::remove_file(&dst); // release the claim
         return Err(e);
@@ -1400,6 +1780,10 @@ pub fn rollback_frozen_rasters(dev: &Path, n: u32) {
 
 /// Delete snapshot `n`: its recipe file plus any `v<n>.*` frozen rasters.
 pub fn delete_version(src: &Path, n: u32) -> std::io::Result<()> {
+    with_develop_lock(src, DevelopLockMode::Wait, || delete_version_unlocked(src, n))
+}
+
+fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
     // Sweep the frozen rasters FIRST, recipe LAST: with the old order a
     // raster-removal failure was silently discarded after the recipe was
     // already gone, and a retry returned early on the missing recipe —
@@ -1461,7 +1845,7 @@ pub fn note_source(src: &Path) {
     }
     let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
     if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(&marker, format!("{}\n", abs.display()));
+        let _ = durable_write(&marker, format!("{}\n", abs.display()).as_bytes());
     }
 }
 
@@ -1471,18 +1855,14 @@ pub fn note_source(src: &Path) {
 /// forever. Clobbers an existing `to` (callers gate on their own semantics).
 fn copy_atomic(from: &Path, to: &Path) -> std::io::Result<()> {
     let tmp = sibling_tmp(to);
-    if let Err(e) = std::fs::copy(from, &tmp) {
+    let result = std::fs::copy(from, &tmp)
+        .and_then(|_| sync_staged(&tmp))
+        .and_then(|_| durable_os::replace(&tmp, to))
+        .and_then(|_| durable_os::finish_parent(to));
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
     }
-    // NO pre-remove: fs::rename REPLACES an existing destination on Windows
-    // too (MOVEFILE_REPLACE_EXISTING semantics — verified empirically); the
-    // old remove-then-rename left a gap in which `to` did not exist at all.
-    if let Err(e) = std::fs::rename(&tmp, to) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
+    result.map(|_| ())
 }
 
 /// Process-wide sequence for temporary-file names. EVERY tmp minter that
@@ -1506,6 +1886,188 @@ fn sibling_tmp(to: &Path) -> PathBuf {
     to.with_file_name(name)
 }
 
+fn write_staged(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Flush a staged file we did not write ourselves. The handle must carry
+/// WRITE access: Windows backs `sync_all` with `FlushFileBuffers`, which
+/// returns ERROR_ACCESS_DENIED on a read-only handle (probed) — unlike
+/// `fsync`, which Unix accepts on a read-only fd.
+fn sync_staged(path: &Path) -> std::io::Result<()> {
+    OpenOptions::new().write(true).open(path)?.sync_all()
+}
+
+/// Publish complete bytes through the one durable write protocol.
+pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = sibling_tmp(path);
+    let result = (|| {
+        write_staged(&tmp, bytes)?;
+        durable_os::replace(&tmp, path)?;
+        durable_os::finish_parent(path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Retire the live file to `<name>.bak`, durably publish its replacement, and
+/// restore the retired bytes if publication fails.
+///
+/// The retired copy SURVIVES a successful publish. It is not a rollback buffer
+/// that has served its purpose — it is this store's crash-recovery contract:
+/// [`recover_orphan_baks`] republishes `<name>.bak` whenever the live file is
+/// missing, which is precisely the state a crash mid-publish leaves behind.
+/// Removing it on success would reinstate the "a crash leaves nothing at all"
+/// case the retire step exists to prevent. Only [`clear_develop`] and
+/// [`clear_pixel_source`] delete one, and they must — otherwise a develop the
+/// user explicitly cleared is resurrected on the next read. Each retire
+/// supersedes the previous `.bak` rather than accumulating.
+pub(crate) fn durable_retire_and_write(
+    path: &Path,
+    bak: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut retired = false;
+    if path.exists() {
+        if bak.exists() {
+            std::fs::remove_file(bak)?;
+            durable_os::finish_parent(bak)?;
+        }
+        durable_os::replace(path, bak)?;
+        durable_os::finish_parent(bak)?;
+        retired = true;
+    } else if bak.exists() {
+        // Live missing but a survivor present: adopt it as the retired copy
+        // through a round trip so the publish below still has something to
+        // restore, and so a crash here cannot leave BOTH names empty.
+        durable_os::replace(bak, path)?;
+        durable_os::finish_parent(path)?;
+        durable_os::replace(path, bak)?;
+        durable_os::finish_parent(bak)?;
+        retired = true;
+    }
+
+    if let Err(e) = durable_write(path, bytes) {
+        let mut note = String::new();
+        if retired
+            && (durable_os::replace(bak, path).is_err()
+                || durable_os::finish_parent(path).is_err())
+        {
+            note = format!(
+                " (restoring the previous file ALSO failed — it survives at {})",
+                bak.display()
+            );
+        }
+        return Err(std::io::Error::new(e.kind(), format!("{e}{note}")));
+    }
+
+    // The retired copy STAYS. It is not a rollback buffer that has served its
+    // purpose — it is this store's crash-recovery contract: `recover_orphan_baks`
+    // republishes `<name>.bak` whenever the live file is missing, which is
+    // exactly the state a crash mid-publish leaves behind. Deleting it here
+    // reinstated the "crash leaves nothing at all" case the retire step exists
+    // to prevent, and `clear_develop` / `clear_pixel_source` are the only
+    // things allowed to remove one (they must, or a cleared develop
+    // resurrects). Each retire supersedes the previous `.bak` above.
+    let _ = retired;
+    Ok(())
+}
+
+#[cfg(unix)]
+mod durable_os {
+    use std::{fs::File, io, path::Path};
+
+    pub(super) fn replace(from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    pub(super) fn finish_parent(path: &Path) -> io::Result<()> {
+        let Some(parent) = path.parent() else { return Ok(()) };
+        File::open(parent)?.sync_all()
+    }
+}
+
+#[cfg(windows)]
+mod durable_os {
+    use std::{
+        io,
+        os::windows::ffi::OsStrExt as _,
+        path::Path,
+    };
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 8;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "MoveFileExW"]
+        fn move_file_ex_w(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+
+    fn wide(path: &Path) -> io::Result<Vec<u16>> {
+        let mut out: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if out.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains an embedded NUL",
+            ));
+        }
+        out.push(0);
+        Ok(out)
+    }
+
+    pub(super) fn replace(from: &Path, to: &Path) -> io::Result<()> {
+        let from = wide(from)?;
+        let to = wide(to)?;
+        // SAFETY: both buffers are NUL-terminated and remain live through the
+        // synchronous call.
+        let ok = unsafe {
+            move_file_ex_w(
+                from.as_ptr(),
+                to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn finish_parent(_: &Path) -> io::Result<()> {
+        // Windows does not expose a useful `File::open(directory).sync_all()`
+        // equivalent here. `replace` therefore uses MOVEFILE_WRITE_THROUGH,
+        // which waits for the move operation to be flushed before returning.
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod durable_os {
+    use std::{io, path::Path};
+
+    pub(super) fn replace(from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    pub(super) fn finish_parent(_: &Path) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "durable directory publication is unsupported on this platform",
+        ))
+    }
+}
+
 /// Publish `tmp` at `to` WITHOUT ever replacing another writer's file.
 /// `fs::rename` REPLACES an existing destination on every platform (verified
 /// empirically on Windows), so the previous create_new claim + rename kept a
@@ -1517,19 +2079,42 @@ fn sibling_tmp(to: &Path) -> PathBuf {
 /// microsecond residual. `tmp` is consumed on every path. Ok(true) =
 /// published, Ok(false) = someone else owns `to`.
 fn publish_no_clobber(tmp: &Path, to: &Path) -> std::io::Result<bool> {
-    match std::fs::hard_link(tmp, to) {
+    #[cfg(unix)]
+    let link = |from: &Path, dest: &Path| std::fs::hard_link(from, dest);
+    #[cfg(not(unix))]
+    let link = |_: &Path, _: &Path| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "use the write-through claim fallback",
+        ))
+    };
+    publish_no_clobber_with(tmp, to, &link)
+}
+
+fn publish_no_clobber_with(
+    tmp: &Path,
+    to: &Path,
+    link: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    if let Err(e) = sync_staged(tmp) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(e);
+    }
+    match link(tmp, to) {
         Ok(()) => {
             let _ = std::fs::remove_file(tmp);
+            durable_os::finish_parent(to)?;
             return Ok(true);
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = std::fs::remove_file(tmp);
             return Ok(false);
         }
-        Err(_) => {} // no hard-link support here — claim fallback below
+        Err(_) => {}
     }
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(to) {
-        Ok(_) => {}
+
+    match OpenOptions::new().write(true).create_new(true).open(to) {
+        Ok(file) => drop(file),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = std::fs::remove_file(tmp);
             return Ok(false);
@@ -1539,17 +2124,14 @@ fn publish_no_clobber(tmp: &Path, to: &Path) -> std::io::Result<bool> {
             return Err(e);
         }
     }
-    match std::fs::rename(tmp, to) {
+
+    match durable_os::replace(tmp, to).and_then(|_| durable_os::finish_parent(to)) {
         Ok(()) => Ok(true),
         Err(e) => {
             let _ = std::fs::remove_file(tmp);
-            // Release the claim ONLY while it is still our empty placeholder:
-            // a concurrent save may have replaced it, and a blind removal
-            // here deleted that newer file. (The len==0 re-check has its own
-            // tiny window — but only on no-hardlink filesystems, after a
-            // failed rename, against a same-instant save: accepted.)
-            if std::fs::metadata(to).map(|m| m.len() == 0).unwrap_or(false) {
+            if std::fs::metadata(to).is_ok_and(|m| m.len() == 0) {
                 let _ = std::fs::remove_file(to);
+                let _ = durable_os::finish_parent(to);
             }
             Err(e)
         }
@@ -1560,20 +2142,15 @@ fn publish_no_clobber(tmp: &Path, to: &Path) -> std::io::Result<bool> {
 /// beside `to` (copying also covers the routine cross-volume case — project
 /// on D:, %LOCALAPPDATA% on C:), then [`publish_no_clobber`] it. `Ok(false)`
 /// = someone else owns `to` — exactly the "already migrated" outcome. The
-/// source is deleted best-effort only AFTER the copy landed; a survivor is
-/// the accepted copy-skip residue, never data loss.
+/// source is deliberately retained: its stem-only identity is ambiguous, so
+/// this photo cannot prove that it owns the legacy bytes.
 fn move_file_no_clobber(from: &Path, to: &Path) -> std::io::Result<bool> {
     let tmp = sibling_tmp(to);
     if let Err(e) = std::fs::copy(from, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    if publish_no_clobber(&tmp, to)? {
-        let _ = std::fs::remove_file(from);
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    publish_no_clobber(&tmp, to)
 }
 
 /// One-time, per-photo migration of legacy ./out sidecars into the central
@@ -1592,6 +2169,24 @@ fn move_file_no_clobber(from: &Path, to: &Path) -> std::io::Result<bool> {
 /// resumability finish any remainder on the next touch. No lock: the store is
 /// single-user by construction, and identical-content races cannot corrupt.
 pub fn migrate_legacy(src: &Path) -> bool {
+    if legacy_suppressed(src) {
+        return false;
+    }
+    match with_develop_lock(src, DevelopLockMode::Wait, || {
+        Ok::<_, std::io::Error>(migrate_legacy_unlocked(src))
+    }) {
+        Ok(moved) => moved,
+        Err(e) => {
+            eprintln!(
+                "⚠ legacy develops for {} could not be migrated under the develop lock ({e})",
+                src.display()
+            );
+            false
+        }
+    }
+}
+
+fn migrate_legacy_unlocked(src: &Path) -> bool {
     // Ahead of the memo: this is the "touching this photo" hook every reader
     // (GUI read_saved_develop, web api_recipe) already calls, and a crashed
     // publish must be repaired on EVERY touch, not once per process. A failed
@@ -1637,7 +2232,10 @@ pub fn migrate_legacy(src: &Path) -> bool {
 /// Explicit migration from a user-picked old ./out folder (the GUI Settings
 /// 「Import develops」 button) — no memo, the user asked for this scan NOW.
 pub fn migrate_legacy_from(legacy_out: &Path, src: &Path) -> bool {
-    migrate_legacy_in(&store_root(), legacy_out, src).0
+    with_develop_lock(src, DevelopLockMode::Wait, || {
+        Ok::<_, std::io::Error>(migrate_legacy_in(&store_root(), legacy_out, src).0)
+    })
+    .unwrap_or(false)
 }
 
 /// Gallery-wide variant of [`migrate_legacy_from`]: the legacy folder is
@@ -1679,7 +2277,10 @@ pub fn migrate_legacy_from_many(legacy_out: &Path, photos: &[PathBuf]) -> usize 
                 .get(crate::pipeline::stem(p))
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
-            migrate_legacy_jobs(&root, legacy_out, p, vjobs).0
+            with_develop_lock_in(&root, p, DevelopLockMode::Wait, || {
+                Ok::<_, std::io::Error>(migrate_legacy_jobs(&root, legacy_out, p, vjobs).0)
+            })
+            .unwrap_or(false)
         })
         .count()
 }
@@ -1762,7 +2363,7 @@ fn migrate_legacy_jobs(
     let abs_src = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
     let marker = dev.join("source.txt");
     if !marker.exists() {
-        let _ = std::fs::write(&marker, format!("{}\n", abs_src.display()));
+        let _ = durable_write(&marker, format!("{}\n", abs_src.display()).as_bytes());
     }
 
     let mut moved = false;
@@ -1821,7 +2422,7 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
     // published recipe — rolling it back deleted the winner's bitmap.
     // Unreferenced survivors fall under the accepted superseded-raster
     // boundary.
-    let mut legacy_rasters: Vec<PathBuf> = Vec::new();
+
     for m in &mut r.masks {
         for path in m.bitmap_paths_mut() {
             let mut p = PathBuf::from(path.as_str());
@@ -1871,13 +2472,7 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
                     // name a bystander file from an UNRELATED context
                     // (same stem, different photo) — that one is copied,
                     // never deleted.
-                    let ours = std::path::absolute(&p)
-                        .ok()
-                        .zip(std::path::absolute(legacy_out).ok())
-                        .is_some_and(|(ap, al)| ap.starts_with(al));
-                    if ours {
-                        legacy_rasters.push(p.clone());
-                    }
+
                 }
                 // Published OR adopted (an identical-content copy landed
                 // meanwhile): the central raster is in place either way.
@@ -1894,7 +2489,7 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
     let published = (|| -> Option<()> {
         let json = serde_json::to_string_pretty(&r).ok()?;
         let tmp = sibling_tmp(to);
-        if std::fs::write(&tmp, &json).is_err() {
+        if write_staged(&tmp, json.as_bytes()).is_err() {
             let _ = std::fs::remove_file(&tmp);
             return None;
         }
@@ -1908,10 +2503,9 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
         // reference.
         return false;
     }
-    let _ = std::fs::remove_file(from);
-    for legacy in &legacy_rasters {
-        let _ = std::fs::remove_file(legacy);
-    }
+    // The central copies are now authoritative for this photo, but neither the
+    // stem-keyed recipe nor its rasters can be proven to belong to this path.
+    // Retain all legacy bytes for older builds and same-stem photos.
     true
 }
 
@@ -2486,7 +3080,10 @@ mod tests {
         assert!(dev.join("v2.recipe.json").exists());
         assert!(dev.join("mask-sky.png").exists(), "raster moved along");
         assert!(dev.join("source.txt").exists(), "breadcrumb written");
-        assert!(!rj.exists() && !xmp.exists() && !v2.exists() && !raster.exists(), "legacy consumed");
+        assert!(
+            rj.exists() && xmp.exists() && v2.exists() && raster.exists(),
+            "ambiguous stem-keyed legacy bytes are copied, never consumed"
+        );
 
         // The migrated recipe references the raster by bare name.
         let back: EditRecipe =
@@ -2544,4 +3141,219 @@ mod tests {
         assert!(!dev.join("v1.mask-zone-sky.png").exists());
         let _ = std::fs::remove_dir_all(&dev);
     }
+
+
+        #[test]
+        fn the_no_hard_link_publish_fallback_never_replaces_an_owner() {
+            let dir = std::env::temp_dir().join("autoshop-store-test-pnc-fallback");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let refuse_links = |_: &Path, _: &Path| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "forced fallback",
+                ))
+            };
+
+            let owned = dir.join("owned.json");
+            std::fs::write(&owned, b"newer").unwrap();
+            let old_tmp = sibling_tmp(&owned);
+            std::fs::write(&old_tmp, b"older").unwrap();
+            assert!(!publish_no_clobber_with(&old_tmp, &owned, &refuse_links).unwrap());
+            assert_eq!(std::fs::read(&owned).unwrap(), b"newer");
+            assert!(!old_tmp.exists(), "the rejected stage is consumed");
+
+            let fresh = dir.join("fresh.json");
+            let fresh_tmp = sibling_tmp(&fresh);
+            std::fs::write(&fresh_tmp, b"payload").unwrap();
+            assert!(publish_no_clobber_with(&fresh_tmp, &fresh, &refuse_links).unwrap());
+            assert_eq!(std::fs::read(&fresh).unwrap(), b"payload");
+            assert!(!fresh_tmp.exists(), "the published stage is consumed");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_nonblocking_develop_lock_reports_contention_and_recovers_after_drop() {
+            let root = std::env::temp_dir().join("autoshop-store-test-lock");
+            let _ = std::fs::remove_dir_all(&root);
+            let photo = Path::new("D:/photos/LOCK.ARW");
+
+            with_develop_lock_in(&root, photo, DevelopLockMode::Wait, || {
+                let root = root.clone();
+                let busy = std::thread::spawn(move || {
+                    with_develop_lock_in(
+                        &root,
+                        Path::new("D:/photos/LOCK.ARW"),
+                        DevelopLockMode::NoWait,
+                        || Ok::<_, std::io::Error>(()),
+                    )
+                })
+                .join()
+                .unwrap();
+                assert_eq!(busy.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+                Ok::<_, std::io::Error>(())
+            })
+            .unwrap();
+
+            with_develop_lock_in(&root, photo, DevelopLockMode::NoWait, || {
+                Ok::<_, std::io::Error>(())
+            })
+            .expect("dropping the owner releases the kernel lock");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+
+        #[test]
+        fn durable_write_replaces_complete_bytes_and_consumes_its_stage() {
+            let dir = std::env::temp_dir().join("autoshop-store-test-durable-write");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let target = dir.join("recipe.json");
+            std::fs::write(&target, b"old").unwrap();
+
+            durable_write(&target, b"complete replacement").unwrap();
+
+            assert_eq!(std::fs::read(&target).unwrap(), b"complete replacement");
+            let stages = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+                .count();
+            assert_eq!(stages, 0, "a completed durable publish consumes its stage");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+
+        #[test]
+        fn clearing_one_same_stem_photo_suppresses_but_never_unlinks_legacy_bytes() {
+            let base = std::env::temp_dir().join("autoshop-store-test-legacy-tombstone");
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+
+            let a = base.join("trip-a").join("DSC001.ARW");
+            let b = base.join("trip-b").join("DSC001.ARW");
+            let legacy = legacy_file("DSC001.recipe.json");
+            if let Some(parent) = legacy.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&legacy, b"{\"contrast\":22.0}").unwrap();
+
+            assert_eq!(legacy_recipe(&a), legacy);
+            assert_eq!(legacy_recipe(&b), legacy);
+            let outcome = clear_develop(&a).unwrap();
+            assert!(outcome.removed, "suppressing a visible legacy develop is a clear");
+            assert!(legacy.exists(), "the ambiguous shared file is never unlinked");
+            assert!(!legacy_recipe(&a).exists(), "photo A's tombstone suppresses fallback");
+            assert_eq!(legacy_recipe(&b), legacy, "photo B still sees the old store");
+            assert_eq!(
+                std::fs::read(&legacy).unwrap(),
+                b"{\"contrast\":22.0}",
+                "the legacy bytes are preserved verbatim"
+            );
+
+            let _ = std::fs::remove_file(&legacy);
+            let _ = std::fs::remove_dir_all(develop_dir(&a));
+            let _ = std::fs::remove_dir_all(develop_dir(&b));
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+
+        #[test]
+        fn unknown_store_kinds_are_refused_without_rewriting_the_newer_record() {
+            let base = std::env::temp_dir().join("autoshop-store-test-unknown-kind");
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let photo = base.join("UNKNOWN.ARW");
+            let dev = develop_dir(&photo);
+            let _ = std::fs::remove_dir_all(&dev);
+            std::fs::create_dir_all(&dev).unwrap();
+
+            let master = dev.join("future-master.png");
+            std::fs::write(&master, b"png").unwrap();
+            let pixel_bytes = format!(
+                "{{\"origin\":{},\"kind\":\"layered\"}}",
+                serde_json::to_string("future-master.png").unwrap()
+            );
+            std::fs::write(pixel_source_path(&photo), &pixel_bytes).unwrap();
+            assert!(read_pixel_source(&photo).is_none());
+            assert_eq!(
+                std::fs::read_to_string(pixel_source_path(&photo)).unwrap(),
+                pixel_bytes
+            );
+
+            let variants = serde_json::json!({
+                "v": 1,
+                "active_kind": "stacked",
+                "active_pos": 0,
+                "others": [{
+                    "kind": "original",
+                    "recipe": EditRecipe::default(),
+                    "origin": null
+                }]
+            });
+            let variant_bytes = serde_json::to_vec_pretty(&variants).unwrap();
+            std::fs::write(variants_path(&photo), &variant_bytes).unwrap();
+            assert!(read_variants(&photo).is_none());
+            assert_eq!(std::fs::read(variants_path(&photo)).unwrap(), variant_bytes);
+
+            let _ = std::fs::remove_dir_all(&dev);
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+
+        #[test]
+        fn very_long_source_names_produce_portable_but_distinct_develop_keys() {
+            let shared = "相片".repeat(180);
+            let a = PathBuf::from(format!("D:/roll/{shared}a.ARW"));
+            let b = PathBuf::from(format!("D:/roll/{shared}b.ARW"));
+            let ka = photo_key(&a);
+            let kb = photo_key(&b);
+
+            assert!(ka.len() <= 240, "UTF-8 component is bounded: {}", ka.len());
+            assert!(
+                ka.encode_utf16().count() <= 240,
+                "UTF-16 component is bounded"
+            );
+            assert_ne!(ka, kb, "the full absolute path still feeds the hash");
+            assert_eq!(
+                ka.rsplit_once('-').unwrap().1.len(),
+                16,
+                "the stable identity suffix is retained"
+            );
+        }
+
+
+        #[test]
+        fn parsed_relative_store_paths_cannot_escape_the_develop_directory() {
+            let base = std::env::temp_dir().join("autoshop-store-test-contained-paths");
+            let _ = std::fs::remove_dir_all(&base);
+            let dev = base.join("develop");
+            std::fs::create_dir_all(&dev).unwrap();
+            let outside = base.join("outside.png");
+            std::fs::write(&outside, b"outside").unwrap();
+
+            assert!(contained_join(&dev, Path::new("../outside.png")).is_none());
+            assert_eq!(
+                contained_join(&dev, Path::new("inside.png")),
+                Some(dev.join("inside.png"))
+            );
+
+            let mut recipe = EditRecipe::default();
+            recipe.masks.push(LocalAdjustment {
+                mask: MaskGeometry::Bitmap {
+                    path: "../outside.png".into(),
+                },
+                ..Default::default()
+            });
+            resolve_mask_paths(&mut recipe, &dev);
+            let MaskGeometry::Bitmap { path } = &recipe.masks[0].mask else {
+                panic!()
+            };
+            assert_eq!(Path::new(path), dev.join(".invalid-mask-reference"));
+            assert_ne!(Path::new(path), outside);
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
 }
