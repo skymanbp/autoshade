@@ -117,6 +117,13 @@ fn apply_icc_profile(img: &mut DynamicImage, profile: &[u8], path: &Path) -> Res
         DynamicImage::ImageRgba8(rgba) => {
             (rgba.as_flat_samples_mut().samples, qcms::DataType::RGBA8)
         }
+        // 16-bit is the MAIN customer: LR "Edit in…" hands over ProPhoto
+        // 16-bit TIFFs, and refusing them here reintroduced the exact
+        // workflow this function exists to serve (they opened fine — with
+        // wrong colours — before the ICC pass landed).
+        DynamicImage::ImageRgb16(_) | DynamicImage::ImageRgba16(_) => {
+            return apply_icc_profile_16(img, &input, &output, path);
+        }
         _ => anyhow::bail!(
             "ICC profile in {} accompanies {color_type:?} pixels, but qcms has no matching \
              transform that preserves this image's channel layout and bit depth",
@@ -136,6 +143,94 @@ fn apply_icc_profile(img: &mut DynamicImage, profile: &[u8], path: &Path) -> Res
         )
     })?;
     transform.apply(pixels);
+    Ok(())
+}
+
+/// The 16-bit arm of [`apply_icc_profile`]. qcms transforms 8-bit samples
+/// only (DataType is RGB8/RGBA8/BGRA8/Gray8/GrayA8 — checked against qcms
+/// 0.3's source), and rounding the IMAGE to 8 bits would trade the
+/// colour-space error for permanent banding in every later tone move. So:
+/// run the profile pair ONCE over a 33³ RGB lattice at qcms's native 8-bit
+/// precision, then map the 16-bit samples through that lattice by trilinear
+/// interpolation in f32. The colour mapping is 8-bit-accurate (≤1/255 per
+/// lattice value — the transform's own output precision) while the DATA
+/// keeps its 16-bit smoothness, because interpolation is continuous between
+/// lattice points. ICC display-class transforms are smooth by construction,
+/// so 33 points per axis track them closely.
+fn apply_icc_profile_16(
+    img: &mut DynamicImage,
+    input: &qcms::Profile,
+    output: &qcms::Profile,
+    path: &Path,
+) -> Result<()> {
+    const N: usize = 33;
+    let mut lattice = vec![0u8; N * N * N * 3];
+    for r in 0..N {
+        for g in 0..N {
+            for b in 0..N {
+                let i = ((r * N + g) * N + b) * 3;
+                lattice[i] = (r * 255 / (N - 1)) as u8;
+                lattice[i + 1] = (g * 255 / (N - 1)) as u8;
+                lattice[i + 2] = (b * 255 / (N - 1)) as u8;
+            }
+        }
+    }
+    let transform = qcms::Transform::new(
+        input,
+        output,
+        qcms::DataType::RGB8,
+        qcms::Intent::Perceptual,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "ICC profile in {} cannot transform RGB pixels into sRGB",
+            path.display()
+        )
+    })?;
+    transform.apply(&mut lattice);
+    let sample = |rgb: [u16; 3]| -> [u16; 3] {
+        let mut idx = [0usize; 3];
+        let mut frac = [0f32; 3];
+        for (c, v) in rgb.iter().enumerate() {
+            let t = f32::from(*v) / 65535.0 * (N - 1) as f32;
+            let i = (t as usize).min(N - 2);
+            idx[c] = i;
+            frac[c] = t - i as f32;
+        }
+        let at = |dr: usize, dg: usize, db: usize, ch: usize| -> f32 {
+            let i = (((idx[0] + dr) * N + idx[1] + dg) * N + idx[2] + db) * 3 + ch;
+            f32::from(lattice[i])
+        };
+        let mut out = [0u16; 3];
+        for (ch, o) in out.iter_mut().enumerate() {
+            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+            let c00 = lerp(at(0, 0, 0, ch), at(1, 0, 0, ch), frac[0]);
+            let c10 = lerp(at(0, 1, 0, ch), at(1, 1, 0, ch), frac[0]);
+            let c01 = lerp(at(0, 0, 1, ch), at(1, 0, 1, ch), frac[0]);
+            let c11 = lerp(at(0, 1, 1, ch), at(1, 1, 1, ch), frac[0]);
+            let c0 = lerp(c00, c10, frac[1]);
+            let c1 = lerp(c01, c11, frac[1]);
+            let v = lerp(c0, c1, frac[2]) / 255.0;
+            *o = (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
+        }
+        out
+    };
+    match img {
+        DynamicImage::ImageRgb16(rgb) => {
+            for px in rgb.as_flat_samples_mut().samples.chunks_exact_mut(3) {
+                let [r, g, b] = sample([px[0], px[1], px[2]]);
+                px.copy_from_slice(&[r, g, b]);
+            }
+        }
+        DynamicImage::ImageRgba16(rgba) => {
+            // Alpha is coverage, not colour — it rides through untouched.
+            for px in rgba.as_flat_samples_mut().samples.chunks_exact_mut(4) {
+                let [r, g, b] = sample([px[0], px[1], px[2]]);
+                px[..3].copy_from_slice(&[r, g, b]);
+            }
+        }
+        _ => unreachable!("routed here only for Rgb16/Rgba16"),
+    }
     Ok(())
 }
 
@@ -699,6 +794,46 @@ mod tests {
         assert!(
             load_image(&invalid).is_err(),
             "a TIFF profile must reach the parser, not vanish into the limits bug"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The LR "Edit in…" shape itself: a PROFILED 16-BIT TIFF must open,
+    /// stay 16-bit, and come back transformed (the fixture's linear TRC is
+    /// far from sRGB's curve, so mid-tones must move visibly). Refusing the
+    /// layout — the first ICC pass did — failed the exact workflow the
+    /// module docs promise.
+    #[test]
+    fn a_profiled_16bit_image_transforms_and_keeps_its_depth() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-decode-icc16-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // PNG carrier: its encoder round-trips both 16-bit samples and the
+        // ICC blob (the tiff encoder writes a corrupt file for RGB16 plus an
+        // extra tag — probed: the result fails to decode at all). The
+        // format-specific TIFF limits fallback has its own test above; the
+        // code under test HERE (the 16-bit LUT transform) is format-blind.
+        use image::ImageEncoder as _;
+        let p = dir.join("profiled-16bit.png");
+        let f = std::fs::File::create(&p).unwrap();
+        let mut enc = image::codecs::png::PngEncoder::new(f);
+        enc.set_icc_profile(build_test_icc()).unwrap();
+        let mid: [u16; 3] = [8224, 32896, 61680]; // 32/128/240 at 16-bit
+        let bytes: Vec<u8> = mid.iter().flat_map(|v| v.to_be_bytes()).collect();
+        enc.write_image(&bytes, 1, 1, image::ExtendedColorType::Rgb16)
+            .unwrap();
+
+        let loaded = load_image(&p).expect("a profiled 16-bit TIFF must open");
+        let DynamicImage::ImageRgb16(rgb) = &loaded else {
+            panic!("bit depth must survive the transform, got {:?}", loaded.color());
+        };
+        let got = rgb.get_pixel(0, 0).0;
+        assert_ne!(
+            got, mid,
+            "linear-TRC input through the sRGB transform must move the values"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
