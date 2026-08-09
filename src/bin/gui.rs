@@ -12907,17 +12907,25 @@ impl eframe::App for AutoshopApp {
     }
 }
 
-/// Embedded symbol-font subsets (see assets/fonts/README.md): egui's bundled
-/// fonts lack most of the toolbar/panel symbols (⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 …), and
-/// leaning on system fonts made rendering machine-dependent — a stock Windows
-/// install shows tofu boxes because DengXian lacks them too. ~450 KB total buys
-/// identical symbol rendering on every OS. Order = lookup priority; the
+/// Embedded font subsets (see assets/fonts/README.md): egui's bundled fonts
+/// lack most of the toolbar/panel symbols (⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 …), and leaning
+/// on system fonts made rendering machine-dependent — a stock Windows install
+/// shows tofu boxes because DengXian lacks them too. ~623 KB total buys
+/// identical rendering on every OS. Order = lookup priority; the
 /// `embedded_fonts_cover_every_ui_symbol` test pins full-chain coverage.
+///
+/// The `cjk-ui` subset carries the hanzi the CHINESE UI ITSELF renders, so
+/// picking 中文 no longer depends on the machine owning a system CJK font —
+/// without one the whole window used to be tofu. It is last in priority so
+/// the symbol donors keep the shared punctuation, and it is deliberately not
+/// a full CJK face (~16 MB): the runtime fallback below still handles text
+/// this static extraction cannot know, like a user's own file names.
 const EMBEDDED_SYMBOL_FONTS: &[(&str, &[u8])] = &[
     ("symbols2", include_bytes!("../../assets/fonts/NotoSansSymbols2-autoshop.ttf")),
     ("symbols", include_bytes!("../../assets/fonts/NotoSansSymbols-autoshop.ttf")),
     ("math", include_bytes!("../../assets/fonts/NotoSansMath-autoshop.ttf")),
     ("emoji-extra", include_bytes!("../../assets/fonts/NotoEmoji-autoshop.ttf")),
+    ("cjk-ui", include_bytes!("../../assets/fonts/NotoSansSC-autoshop.ttf")),
 ];
 
 /// Build the GUI font chain: egui defaults → embedded symbol subsets → system
@@ -13213,6 +13221,30 @@ mod tests {
                         i += 1;
                         while i < n {
                             if b[i] == '\\' {
+                                // `\u{...}` renders exactly like the literal
+                                // char, so it needs the same glyph. STRING
+                                // literals only: the one char-literal escape
+                                // in this tree is the notdef sentinel below,
+                                // which must stay out of the needed set.
+                                if i + 2 < n && b[i + 1] == 'u' && b[i + 2] == '{' {
+                                    let mut j = i + 3;
+                                    let mut hex = String::new();
+                                    while j < n && b[j] != '}' {
+                                        hex.push(b[j]);
+                                        j += 1;
+                                    }
+                                    if j < n {
+                                        if let Some(c) = u32::from_str_radix(&hex, 16)
+                                            .ok()
+                                            .and_then(char::from_u32)
+                                            && !c.is_ascii()
+                                        {
+                                            out.insert(c);
+                                        }
+                                        i = j + 1;
+                                        continue;
+                                    }
+                                }
                                 i += 2;
                             } else if b[i] == '"' {
                                 i += 1;
@@ -13288,6 +13320,30 @@ mod tests {
             missing.is_empty(),
             "UI symbols with no glyph in the guaranteed font chain \
              (re-run scripts/subset_gui_fonts.py): {missing:?}"
+        );
+
+        // CJK is embedded too (W18): choosing 中文 must not depend on the
+        // machine owning a system CJK font — without one the whole window
+        // rendered as tofu. Asserted separately so a regression names the
+        // hanzi, and premise-checked so a broken extractor cannot pass here
+        // by finding nothing.
+        let cjk: Vec<char> = syms.iter().copied().filter(|&c| is_cjk(c)).collect();
+        assert!(
+            cjk.len() >= 300,
+            "only {} CJK codepoints extracted — the translations or the \
+             extractor are broken",
+            cjk.len()
+        );
+        let missing_cjk: Vec<String> = cjk
+            .iter()
+            .filter(|&&c| !covered(c))
+            .map(|&c| format!("U+{:04X} {c}", c as u32))
+            .collect();
+        assert!(
+            missing_cjk.is_empty(),
+            "translated text with no embedded glyph — the Chinese UI would \
+             show tofu on a machine with no system CJK font \
+             (re-run scripts/subset_gui_fonts.py): {missing_cjk:?}"
         );
     }
 

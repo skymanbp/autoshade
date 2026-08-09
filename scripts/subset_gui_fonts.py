@@ -13,14 +13,22 @@ Donor fonts (download from https://github.com/google/fonts, ofl/ tree):
     NotoSansSymbols[wght].ttf      enclosed alphanumerics ② and ⎘
     NotoSansMath-Regular.ttf       math operators ⊕ ⊖ ∩ ≡ + arrows ↶ ↷ ⇄ ⇒ ⇱
     NotoEmoji[wght].ttf            monochrome emoji missing from egui's subset
+    NotoSansSC[wght].ttf           the Chinese UI's own hanzi (see below)
 
 Usage:
-    python scripts/subset_gui_fonts.py --fonts-dir <dir with the four donors>
+    python scripts/subset_gui_fonts.py --fonts-dir <dir with the five donors>
 
 The needed-glyph list is NOT hand-maintained: it is extracted from the string
 literals of src/bin/gui.rs + src/bin/i18n.rs (the same extraction the GUI's
-`embedded_fonts_cover_every_ui_symbol` test performs in Rust). CJK ranges are
-excluded — those come from the runtime system-font fallback by design.
+`embedded_fonts_cover_every_ui_symbol` test performs in Rust).
+
+CJK is subsetted the same way, and deliberately WITHOUT margin blocks: only
+the hanzi the Chinese UI actually renders are embedded. A full CJK face is
+~16 MB, but the exact set the translations use is a few hundred glyphs, so
+the Chinese UI stops depending on the machine having a system CJK font — it
+used to render as an entire window of tofu boxes on a system without one.
+The runtime system-CJK fallback stays in the chain for user-supplied text
+(file names, folder paths), which this static extraction cannot know.
 Margin blocks (full symbol ranges the donors carry) are included so most
 future symbol picks won't need a re-run; if the Rust coverage test ever fails,
 re-run this script and commit the refreshed assets/fonts/.
@@ -43,7 +51,9 @@ REPO = Path(__file__).resolve().parent.parent
 SOURCES = [REPO / "src" / "bin" / "gui.rs", REPO / "src" / "bin" / "i18n.rs"]
 OUT_DIR = REPO / "assets" / "fonts"
 
-# CJK + fullwidth ranges are the runtime system-CJK fallback's job.
+# CJK + fullwidth ranges. Embedded from the exact translated strings (no
+# margin blocks — a whole block here would be megabytes), so the Chinese UI
+# renders without a system CJK font.
 CJK_RANGES = [(0x2E80, 0x9FFF), (0xF900, 0xFAFF), (0xFF00, 0xFFEF)]
 
 # (output name, donor file, variable?, margin blocks)
@@ -56,6 +66,9 @@ DONORS = [
     ("NotoSansMath-autoshop.ttf", "NotoSansMath-Regular.ttf", False,
      [(0x2190, 0x21FF), (0x2200, 0x22FF), (0x2980, 0x29FF), (0x2A00, 0x2AFF)]),
     ("NotoEmoji-autoshop.ttf", "NotoEmoji[wght].ttf", True, []),
+    # Last: the symbol donors above claim the shared punctuation first, so a
+    # glyph the UI already renders identically everywhere keeps doing so.
+    ("NotoSansSC-autoshop.ttf", "NotoSansSC[wght].ttf", True, []),
 ]
 
 
@@ -102,6 +115,22 @@ def string_literal_chars(src: str) -> set[str]:
             i += 1
             while i < n:
                 if src[i] == "\\":
+                    # A `\u{...}` escape renders exactly like the literal
+                    # char, so it needs the same glyph. Decoded in STRING
+                    # literals only: the sole char-literal escape in the tree
+                    # is the coverage test's deliberately-unassigned notdef
+                    # sentinel, which must stay out of the needed set.
+                    if src[i + 1 : i + 3] == "u{":
+                        close = src.find("}", i + 3)
+                        if close != -1:
+                            try:
+                                cp = int(src[i + 3 : close], 16)
+                            except ValueError:
+                                cp = -1
+                            if cp > 127:
+                                out.add(chr(cp))
+                            i = close + 1
+                            continue
                     i += 2
                 elif src[i] == '"':
                     i += 1
@@ -134,8 +163,11 @@ def main() -> int:
     needed = set()
     for p in SOURCES:
         needed |= string_literal_chars(p.read_text(encoding="utf-8"))
-    needed = {ch for ch in needed if not is_cjk(ord(ch))}
-    print(f"{len(needed)} non-CJK symbols referenced by GUI string literals")
+    n_cjk = sum(1 for ch in needed if is_cjk(ord(ch)))
+    print(
+        f"{len(needed) - n_cjk} symbols + {n_cjk} CJK codepoints "
+        "referenced by GUI string literals"
+    )
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     remaining = {ord(ch) for ch in needed}
@@ -147,7 +179,12 @@ def main() -> int:
             return 1
         font = TTFont(donor_path)
         if variable:
-            font = instancer.instantiateVariableFont(font, {"wght": 400})
+            # updateFontNames, or the shipped face keeps the DEFAULT instance's
+            # name while carrying wght=400 outlines. NotoSansSC defaults to
+            # wght=100, so without this the subset ships labelled "Thin".
+            font = instancer.instantiateVariableFont(
+                font, {"wght": 400}, updateFontNames=True
+            )
         cmap = font.getBestCmap()
         take = {cp for cp in remaining if cp in cmap}
         for lo, hi in blocks:
