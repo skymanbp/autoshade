@@ -524,8 +524,10 @@ fn api_list(request: &Request, state: &AppState) -> Result<ResponseBox> {
         .take(limit)
         .map(|(id, raw)| {
             // Central store OR legacy ./out, recipe OR XMP — pre-migration
-            // libraries keep their "analyzed" badges.
-            let analyzed = crate::store::has_develop(raw);
+            // libraries keep their "analyzed" badges — OR Lightroom's own
+            // sidecar (L13#2: the web restore already prefers it, so the
+            // badge must agree with what a click restores).
+            let analyzed = crate::store::has_develop_or_sidecar(raw);
             json!({
                 "id": id,
                 "stem": pipeline::stem(raw),

@@ -1671,6 +1671,18 @@ pub struct DevelopSnapshot {
     /// an existing save the caller must refuse to render over — falling
     /// back to legacy would resurrect stale edits, so the walk stops.
     pub recipe_err: Option<String>,
+    /// Lightroom's OWN sidecar when it out-ranks the store (newest intent,
+    /// [`lightroom_sidecar`]) — text + the same kind string the GUI open
+    /// path shows, so the two surfaces cannot drift (L13#1: the batch
+    /// renderer read recipe.json only, exporting neutral for LR-only
+    /// photos and preferring an older recipe over a newer LR edit).
+    pub lr_xmp: Option<(String, &'static str)>,
+    /// The store's XMP projection (central, else legacy ./out) — the
+    /// recipe-absent and neutral-recipe fallthroughs the open path takes.
+    pub store_xmp: Option<(String, &'static str)>,
+    /// [`LrSidecar::Unreadable`] — a sidecar that EXISTS but cannot answer,
+    /// never folded into absence (the caller discloses it).
+    pub lr_unreadable: Option<&'static str>,
     /// [`read_pixel_source`]'s answer, taken under the same lock.
     pub pixel_source: Option<(PathBuf, bool)>,
     /// [`has_pixel_source`]'s answer — a recorded-but-unloadable master
@@ -1693,6 +1705,24 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
         // read_pixel_source contract) — the reads below then degrade
         // exactly as they do for any unreadable sidecar.
         let _ = recover_orphan_baks_unlocked(src);
+        // The Lightroom sidecar, ranked under the SAME lock (L13#1). The
+        // kind strings are byte-identical to the GUI open path's
+        // (persist.rs), so the surfaces cannot drift apart in wording.
+        let mut lr_xmp = None;
+        let mut lr_unreadable = None;
+        match lightroom_sidecar(src) {
+            LrSidecar::NewerThanStore(t) => {
+                lr_xmp = Some((
+                    t,
+                    "XMP (Lightroom sidecar — newer than the saved develop; Ctrl+S adopts it)",
+                ));
+            }
+            LrSidecar::Only(t) => {
+                lr_xmp = Some((t, "XMP (Lightroom sidecar beside the RAW)"));
+            }
+            LrSidecar::Unreadable(why) => lr_unreadable = Some(why),
+            _ => {}
+        }
         let mut recipe = None;
         let mut recipe_err = None;
         for rj in [recipe_target(src), legacy_recipe(src)] {
@@ -1710,9 +1740,33 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
                 }
             }
         }
+        // The store's XMP projection — what the open path restores when the
+        // recipe is absent or parses neutral. Same one-file precedence walk
+        // as the recipe: only NotFound falls through, and an unreadable
+        // projection with NO recipe to shadow it is an existing save the
+        // caller must refuse over (folded into recipe_err).
+        let mut store_xmp = None;
+        for (xp, kind) in [(xmp_target(src), "XMP"), (legacy_xmp(src), "XMP (legacy ./out)")] {
+            match read_text_capped(&xp, MAX_STORE_JSON) {
+                Ok(t) => {
+                    store_xmp = Some((t, kind));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    if recipe.is_none() && recipe_err.is_none() {
+                        recipe_err = Some(format!("cannot read {}: {e}", xp.display()));
+                    }
+                    break;
+                }
+            }
+        }
         Ok(DevelopSnapshot {
             recipe,
             recipe_err,
+            lr_xmp,
+            store_xmp,
+            lr_unreadable,
             pixel_source: read_pixel_source(src),
             pixel_recorded: has_pixel_source(src),
         })
@@ -2076,6 +2130,31 @@ pub fn has_develop(src: &Path) -> bool {
         || xmp_target(src).exists()
         || legacy_recipe(src).exists()
         || legacy_xmp(src).exists()
+}
+
+/// [`has_develop`] PLUS the sidecar Lightroom itself writes beside the RAW
+/// (L13#2). The badge/resume predicate: a photo edited only in Lightroom
+/// showed no ● badge yet clicking it restored the Lightroom develop, and
+/// the CLI batch resume filter spent a PAID analyze on it and then wrote
+/// recipe.json over the user's Lightroom work. Existence-only and
+/// deliberately cheap (called per photo per refresh) — reading and RANKING
+/// the file is [`lightroom_sidecar`]'s job. Conservative by design: a
+/// foreign or neutral sidecar counts as "a develop may exist", because a
+/// false SKIP costs one manual analyze while a false ANALYZE costs money
+/// and supersedes the user's work. A SIBLING of `has_develop`, never a
+/// replacement: [`rank_lightroom_sidecar`] calls `has_develop` to mean "is
+/// there a STORE develop to rank against" — folding the sidecar in there
+/// would make `LrSidecar::Only` unreachable whenever a sidecar exists.
+pub fn has_develop_or_sidecar(src: &Path) -> bool {
+    // The pending-clear marker outranks the sidecar probe exactly as it
+    // outranks the store files (L03): while the develop is being removed, a
+    // projection the user once copied beside the RAW must not resurrect
+    // the badge.
+    if clear_pending(src).exists() {
+        return false;
+    }
+    has_develop(src)
+        || (crate::decode::is_raw(src) && src.with_extension("xmp").exists())
 }
 
 /// What the Lightroom sidecar BESIDE the RAW (`<dir>/<stem>.xmp`) means for
@@ -2670,15 +2749,54 @@ fn backup_saved_develop_unlocked(
     src: &Path,
     incoming: Option<&EditRecipe>,
 ) -> std::io::Result<Option<u32>> {
-    // Central first, then a not-yet-migrated LEGACY recipe — the read
-    // fallbacks restore either, so overwriting the central slot unversioned
-    // while a legacy develop still answered was silent destruction too.
     // A crashed publish's survivor is a save like any other — restore it
     // before deciding what to snapshot, or the write below destroys it. An
     // orphan we could NOT restore is an existing save we cannot see: refusing
     // beats overwriting it unversioned, the same stance as an unreadable
     // recipe below.
     recover_orphan_baks(src)?;
+    // L13#3: the newest intent may be LIGHTROOM'S OWN sidecar beside the
+    // RAW — the one develop every restore surface prefers when it out-ranks
+    // the store, and the one this gate never snapshotted: the programmatic
+    // write it gates is paired with an XMP write that destroys it. Read the
+    // ranking ONCE; snapshot the store develop FIRST and the sidecar SECOND,
+    // so version numbers encode intent order (higher n = newer intent).
+    let lr_intent = match lightroom_sidecar(src) {
+        LrSidecar::Only(t) | LrSidecar::NewerThanStore(t)
+            if !crate::xmp::xmp_to_recipe(&t).is_noop() =>
+        {
+            Some(t)
+        }
+        LrSidecar::Unreadable(why) => {
+            // Unreadable is not absent — but a text we cannot read cannot be
+            // snapshotted either. Disclosed; the sidecar file itself stays
+            // untouched beside the RAW (this gate never writes there).
+            eprintln!(
+                "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — it is NOT snapshotted; the file itself stays untouched beside the RAW",
+                crate::pipeline::stem(src)
+            );
+            None
+        }
+        _ => None,
+    };
+    let store_n = backup_store_half_unlocked(src, incoming)?;
+    match lr_intent {
+        // The is_noop-guarded sidecar snapshot: dedup against the latest
+        // version's xmp bytes lives inside snapshot_xmp_text, so repeated
+        // programmatic writes do not spam versions.
+        Some(t) => Ok(snapshot_xmp_text(src, t)?.or(store_n)),
+        None => Ok(store_n),
+    }
+}
+
+/// The STORE half of [`backup_saved_develop`]: central recipe.json first,
+/// then a not-yet-migrated LEGACY recipe — the read fallbacks restore
+/// either, so overwriting the central slot unversioned while a legacy
+/// develop still answered was silent destruction too.
+fn backup_store_half_unlocked(
+    src: &Path,
+    incoming: Option<&EditRecipe>,
+) -> std::io::Result<Option<u32>> {
     let mut found: Option<(PathBuf, String)> = None;
     for rj in [recipe_target(src), legacy_recipe(src)] {
         match read_text_capped(&rj, MAX_STORE_JSON) {
@@ -2848,18 +2966,37 @@ fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
         }
     }
     let Some(text) = found else { return Ok(None) };
+    snapshot_xmp_text(src, text)
+}
+
+/// The publish half shared by [`backup_xmp_only`] and the Lightroom-sidecar
+/// arm of [`backup_saved_develop`]: dedup against the latest version's xmp
+/// bytes, derive + stamp the recipe content, claim a number, publish both
+/// artifacts (lossless xmp first).
+fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
     let dev = develop_dir(src);
     let stem = crate::pipeline::stem(src);
     // Change-detection instead of an is_noop skip: a derived-noop XMP can
     // still carry edits xmp_to_recipe does not model (Texture, …) — skipping
     // it let analyze/match destroy the only copy. Identical bytes to the
-    // LATEST version's xmp snapshot mean this save is already preserved
-    // (no version spam on repeated programmatic writes).
-    if let Some(lastn) = list_versions(src).last().copied()
-        && let Ok(prev) = read_text_capped(&dev.join(format!("v{lastn}.{stem}.xmp")), MAX_STORE_JSON)
-        && prev == text
-    {
-        return Ok(None);
+    // NEWEST PRESERVED xmp snapshot mean this save is already preserved (no
+    // version spam on repeated programmatic writes). Newest-that-EXISTS,
+    // not v<max>: recipe-only snapshots interleave in the same number
+    // space (the L13#3 store-then-sidecar order), so v<max> often has no
+    // xmp beside it and a v<max>-only probe re-snapshotted an unchanged
+    // sidecar on every gated write.
+    for n in list_versions(src).into_iter().rev() {
+        match read_text_capped(&dev.join(format!("v{n}.{stem}.xmp")), MAX_STORE_JSON) {
+            Ok(prev) => {
+                if prev == text {
+                    return Ok(None);
+                }
+                break; // the newest preserved xmp differs — a snapshot is due
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // An unreadable snapshot cannot prove preservation — preserve anew.
+            Err(_) => break,
+        }
     }
     let mut derived = crate::xmp::xmp_to_recipe(&text);
     // A6 disclosure: numbers the import cannot read become silent neutrals
@@ -5296,6 +5433,199 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ld);
         let _ = std::fs::remove_dir_all(&cd);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L13#2: the badge/resume predicate counts the sidecar Lightroom
+    /// itself writes beside the RAW — a photo edited only in Lightroom
+    /// showed no ● yet opened with its LR develop, and CLI batch spent a
+    /// paid analyze on it.
+    #[test]
+    fn has_develop_or_sidecar_counts_a_lightroom_sidecar_beside_the_raw() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-lr-badge");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_lr_badge.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::write(raw.with_extension("xmp"), b"<x:xmpmeta/>").unwrap();
+
+        assert!(!has_develop(&raw), "no store develop");
+        assert!(has_develop_or_sidecar(&raw), "the LR sidecar counts");
+
+        // The is_raw guard: a baked photo's neighbouring .xmp is not ours.
+        let png = dir.join("_store_lr_badge.png");
+        std::fs::write(&png, b"png").unwrap();
+        std::fs::write(png.with_extension("xmp"), b"<x:xmpmeta/>").unwrap();
+        let png_dev = develop_dir(&png);
+        let _ = std::fs::remove_dir_all(&png_dev);
+        assert!(!has_develop_or_sidecar(&png), "a baked photo's sidecar does not count");
+
+        // A pending clear still outranks the sidecar probe (L03).
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("clear.pending"), b"develop clear in progress\n").unwrap();
+        assert!(!has_develop_or_sidecar(&raw), "a pending clear masks the badge");
+
+        // Regression guard: the SIBLING did not leak into has_develop —
+        // rank_lightroom_sidecar still classifies a sidecar-only photo as
+        // LrSidecar::Only (has_develop false), not a store contest.
+        let _ = std::fs::remove_dir_all(&dev);
+        match lightroom_sidecar(&raw) {
+            LrSidecar::Only(_) => {}
+            _ => panic!("a sidecar-only photo must rank as LrSidecar::Only"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&png_dev);
+    }
+
+    /// L13#1: the one-lock snapshot carries the Lightroom sidecar and the
+    /// store's XMP projection with the open path's precedence, so the batch
+    /// renderer can answer exactly what opening the photo would show.
+    #[test]
+    fn a_develop_snapshot_carries_the_xmp_layers_the_open_path_reads() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-snap-xmp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_snap_xmp.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        // XMP-only develop: the store projection answers, no recipe.
+        let xmp = crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 21.0, ..Default::default() });
+        std::fs::write(xmp_target(&raw), &xmp).unwrap();
+        let snap = read_develop_snapshot(&raw).unwrap();
+        assert!(snap.recipe.is_none());
+        assert!(snap.lr_xmp.is_none());
+        let (text, kind) = snap.store_xmp.expect("the projection rides the snapshot");
+        assert_eq!(text, xmp);
+        assert_eq!(kind, "XMP");
+
+        // A NEWER Lightroom sidecar beside the RAW outranks the recipe.
+        std::fs::write(recipe_target(&raw), b"{\"exposure_ev\":0.5}").unwrap();
+        let lr = raw.with_extension("xmp");
+        std::fs::write(
+            &lr,
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() }),
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        let snap = read_develop_snapshot(&raw).unwrap();
+        assert!(snap.recipe.is_some(), "the recipe still rides along");
+        let (_, kind) = snap.lr_xmp.expect("the newer Lightroom sidecar rides the snapshot");
+        assert!(kind.contains("Lightroom"), "{kind}");
+
+        // An unreadable sidecar is disclosed, never folded into absence.
+        std::fs::write(&lr, [0xFF, 0xFE, 0x00, 0xDC, 0x00]).unwrap();
+        let snap = read_develop_snapshot(&raw).unwrap();
+        assert!(snap.lr_xmp.is_none());
+        assert!(snap.lr_unreadable.is_some(), "unreadable is not absent");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L13#3: the backup gate snapshots the Lightroom sidecar when it is
+    /// the newest intent — store develop FIRST, sidecar SECOND, so version
+    /// numbers encode intent order; repeats dedup; a neutral sidecar is not
+    /// a save.
+    #[test]
+    fn a_newer_lightroom_sidecar_is_snapshotted_before_a_programmatic_write() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-lr-backup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_lr_backup.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let stored = EditRecipe { exposure_ev: 0.5, ..Default::default() };
+        std::fs::write(recipe_target(&raw), serde_json::to_string(&stored).unwrap()).unwrap();
+        let lr = raw.with_extension("xmp");
+        let lr_text = crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() });
+        std::fs::write(&lr, &lr_text).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+
+        let incoming = EditRecipe { exposure_ev: 1.5, ..Default::default() };
+        let n = backup_saved_develop(&raw, Some(&incoming)).unwrap();
+        assert_eq!(n, Some(2), "two snapshots: the store develop, then the newer sidecar");
+        assert_eq!(list_versions(&raw), vec![1, 2]);
+        let v1: EditRecipe =
+            serde_json::from_str(&std::fs::read_to_string(version_target(&raw, 1)).unwrap())
+                .unwrap();
+        assert_eq!(v1.exposure_ev, 0.5, "v1 is the store develop (older intent)");
+        let stem = crate::pipeline::stem(&raw);
+        assert_eq!(
+            std::fs::read_to_string(dev.join(format!("v2.{stem}.xmp"))).unwrap(),
+            lr_text,
+            "v2 carries the sidecar's lossless bytes (newer intent)"
+        );
+
+        // The real caller flow: the gated write lands, then a LATER gated
+        // write with the same content — the sidecar unchanged. Both halves
+        // dedup: no new version.
+        std::fs::write(recipe_target(&raw), serde_json::to_string(&incoming).unwrap()).unwrap();
+        let versions_before = list_versions(&raw);
+        let again = backup_saved_develop(&raw, Some(&incoming)).unwrap();
+        assert_eq!(again, None, "nothing new to snapshot");
+        assert_eq!(list_versions(&raw), versions_before);
+
+        // The sidecar file itself is never touched.
+        assert_eq!(std::fs::read_to_string(&lr).unwrap(), lr_text);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L13#3: a sidecar-ONLY develop (no store files at all) is snapshotted
+    /// instead of reported as "nothing to snapshot" — and a NEUTRAL sidecar
+    /// still is not a save.
+    #[test]
+    fn a_sidecar_only_develop_is_snapshotted_instead_of_reported_as_nothing() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-lr-only-backup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_lr_only.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        let lr = raw.with_extension("xmp");
+        let lr_text = crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 12.0, ..Default::default() });
+        std::fs::write(&lr, &lr_text).unwrap();
+
+        let n = backup_saved_develop(&raw, None).unwrap();
+        assert_eq!(n, Some(1), "the sidecar IS the develop and is preserved");
+        let stem = crate::pipeline::stem(&raw);
+        assert_eq!(
+            std::fs::read_to_string(dev.join(format!("v1.{stem}.xmp"))).unwrap(),
+            lr_text
+        );
+
+        // Neutral sidecar: not a save, nothing snapshotted.
+        let raw2 = dir.join("_store_lr_neutral.arw");
+        std::fs::write(&raw2, b"raw").unwrap();
+        let dev2 = develop_dir(&raw2);
+        let _ = std::fs::remove_dir_all(&dev2);
+        std::fs::write(raw2.with_extension("xmp"), b"<x:xmpmeta/>").unwrap();
+        assert_eq!(backup_saved_develop(&raw2, None).unwrap(), None);
+        assert!(list_versions(&raw2).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&dev2);
     }
 
     #[test]

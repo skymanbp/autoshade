@@ -923,9 +923,12 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     println!("found {} RAW(s) under {}", raws.len(), dir.display());
 
     // "Pending" = no saved develop anywhere — central store OR legacy ./out,
-    // recipe OR XMP — so a library analyzed before the store existed is not
-    // silently re-analyzed (and re-billed) after the layout change.
-    let pending: Vec<&PathBuf> = raws.iter().filter(|r| !autoshop::store::has_develop(r)).collect();
+    // recipe OR XMP, OR the sidecar Lightroom itself writes beside the RAW
+    // (L13#2: an LR-only photo was "pending", so batch spent a paid analyze
+    // on it and then wrote recipe.json over the user's Lightroom work) — so
+    // an analyzed library is not silently re-analyzed (and re-billed).
+    let pending: Vec<&PathBuf> =
+        raws.iter().filter(|r| !autoshop::store::has_develop_or_sidecar(r)).collect();
     let todo = pending.len();
     let n = todo.min(limit);
     println!("{todo} pending; processing {n} this run (--limit {limit}).");
@@ -1022,8 +1025,10 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     // user to re-run for photos a re-run would skip. Ask the store instead of
     // inferring, and keep the re-bill promise scoped to what still holds:
     // a non-Accept photo really did leave no sidecar.
+    // The SAME predicate as the up-front filter, or the summary contradicts
+    // the selection it reports on.
     let still_pending =
-        pending.iter().filter(|p| !autoshop::store::has_develop(p.as_path())).count();
+        pending.iter().filter(|p| !autoshop::store::has_develop_or_sidecar(p.as_path())).count();
     // The remedy note keys on the photos that NEED it, counted directly: a
     // FAILED photo whose develop persisted is exactly what `apply` finishes.
     // The old proxy (`still_pending < fail`) compared the library-wide

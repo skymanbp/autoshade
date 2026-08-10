@@ -2,6 +2,71 @@
 
 use super::*;
 
+/// The batch renderer's develop resolution — the OPEN path's precedence
+/// (`persist::read_saved_develop_locked`), mirrored onto a
+/// [`autoshop::store::DevelopSnapshot`] so the two surfaces answer alike
+/// (L13#1: the batch read recipe.json only — an LR-only or XMP-only photo
+/// exported neutral, and an older recipe out-ranked a newer Lightroom
+/// edit). Order: Lightroom's own sidecar when newest → recipe.json (a
+/// NEUTRAL recipe falls through, the open rule) → the store's XMP
+/// projection. XMP-restored recipes get the same fresh-calibration stamp
+/// the open path applies (`persist::stamp_calibration` shape: knots when
+/// non-empty, lens, as-shot pinned only if None). `Ok(None)` = no saved
+/// develop (the caller's neutral + base-look fallback).
+pub(crate) fn resolve_snapshot_develop(
+    p: &std::path::Path,
+    snap: &autoshop::store::DevelopSnapshot,
+) -> anyhow::Result<Option<(EditRecipe, &'static str)>> {
+    let stamp_fresh = |mut r: EditRecipe| {
+        r.clamp();
+        let knots = autoshop::pipeline::photo_base_knots(p);
+        if !knots.is_empty() {
+            r.base_curve = knots;
+        }
+        r.lens_profile = autoshop::pipeline::fresh_lens_profile(p);
+        if r.as_shot_k.is_none() {
+            let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(p);
+            r.as_shot_k = ask;
+            r.as_shot_tint = ast;
+        }
+        r
+    };
+    let from_xmp = |(text, kind): &(String, &'static str)| {
+        let r = autoshop::xmp::xmp_to_recipe(text);
+        (!r.is_noop()).then(|| (stamp_fresh(r), *kind))
+    };
+    if let Some(hit) = snap.lr_xmp.as_ref().and_then(&from_xmp) {
+        return Ok(Some(hit));
+    }
+    if let Some((text, from)) = &snap.recipe {
+        let mut r = serde_json::from_str::<EditRecipe>(text)?;
+        if r.is_noop() {
+            // Neutral recipe.json restores NOTHING on the open path — an
+            // XMP with real edits may still exist beside it, else the photo
+            // renders the fresh baseline (not the neutral recipe's stale
+            // calibration).
+            return Ok(snap.store_xmp.as_ref().and_then(&from_xmp));
+        }
+        // The one restore path that never went through clamp: a stored
+        // recipe with extreme-but-finite geometry rendered NaN weights into
+        // a published export. render_to_file now clamps too — this keeps
+        // the batch recipe equal to what OPENING the photo would show.
+        r.clamp();
+        // Rasters re-anchor to whichever dir the recipe was read from
+        // (central store first, else a legacy ./out sidecar).
+        if let Some(base) = from.parent() {
+            autoshop::store::resolve_mask_paths(&mut r, base);
+        }
+        return Ok(Some((r, "recipe.json")));
+    }
+    if let Some(err) = &snap.recipe_err {
+        // An EXISTING save that cannot be read is not absence — exporting
+        // neutral over it would silently shed the user's edits.
+        anyhow::bail!("{err}");
+    }
+    Ok(snap.store_xmp.as_ref().and_then(&from_xmp))
+}
+
 impl AutoshopApp {
     /// One-line echo of the current delivery settings for the Export /
     /// Download hover — e.g. "JPEG · 2560 px · q95 · sRGB (universal)" — so
@@ -251,29 +316,17 @@ impl AutoshopApp {
                                 (lr.clone(), pix.clone())
                             } else {
                                 let snap = autoshop::store::read_develop_snapshot(p)?;
-                                let recipe = if let Some((text, from)) = &snap.recipe {
-                                    let mut r = serde_json::from_str::<EditRecipe>(text)?;
-                                    // The one restore path that never went
-                                    // through clamp: a stored recipe with
-                                    // extreme-but-finite geometry rendered
-                                    // NaN weights into a published export.
-                                    // render_to_file now clamps too — this
-                                    // keeps the batch recipe equal to what
-                                    // OPENING the photo would show.
-                                    r.clamp();
-                                    // Rasters re-anchor to whichever dir the
-                                    // recipe was read from (central store
-                                    // first, else a legacy ./out sidecar).
-                                    if let Some(base) = from.parent() {
-                                        autoshop::store::resolve_mask_paths(&mut r, base);
-                                    }
-                                    r
-                                } else if let Some(err) = &snap.recipe_err {
-                                    // An EXISTING save that cannot be read is
-                                    // not absence — exporting neutral over it
-                                    // would silently shed the user's edits.
-                                    anyhow::bail!("{err}");
-                                } else {
+                                if let Some(why) = snap.lr_unreadable {
+                                    // Unreadable is not absent (L08): the
+                                    // batch summary line for this photo says
+                                    // what the stored develop decided over.
+                                    eprintln!(
+                                        "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — the stored develop decides",
+                                        autoshop::pipeline::stem(p)
+                                    );
+                                }
+                                let recipe = match resolve_snapshot_develop(p, &snap)? {
+                                    Some((r, _kind)) => r,
                                     // No saved develop → export what the canvas
                                     // WOULD show: neutral + the photo's camera-
                                     // matched base look (one extra develop per
@@ -281,11 +334,11 @@ impl AutoshopApp {
                                     // unedited RAW comes out on the dark base
                                     // while its open canvas shows the bright
                                     // one).
-                                    EditRecipe {
+                                    None => EditRecipe {
                                         base_curve: autoshop::pipeline::photo_base_knots(p),
                                         lens_profile: autoshop::pipeline::fresh_lens_profile(p),
                                         ..Default::default()
-                                    }
+                                    },
                                 };
                                 // A recorded-but-unhonourable master:
                                 // exporting would silently drop the retouch —

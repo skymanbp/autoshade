@@ -1069,6 +1069,85 @@
         assert_eq!(kept.exposure_ev, 0.5);
     }
 
+    /// L13#1 anti-drift gate: the batch renderer's snapshot resolution must
+    /// answer EXACTLY what opening the photo restores — XMP-only develops
+    /// included, and a newer Lightroom sidecar out-ranking the recipe
+    /// included. The open result is stamped the way the open caller stamps
+    /// it (stamp_calibration) before comparing.
+    #[test]
+    fn batch_export_resolves_the_same_develop_the_open_path_restores() {
+        let dir = std::env::temp_dir().join("autoshop-gui-batch-antidrift");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("_gui_batch_drift.ARW");
+        std::fs::write(&src, b"raw").unwrap();
+        let dev = autoshop::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
+        let stamp_like_open = |mut r: EditRecipe| {
+            let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(&src);
+            stamp_calibration(
+                &mut r,
+                &autoshop::pipeline::photo_base_knots(&src),
+                &autoshop::pipeline::fresh_lens_profile(&src),
+                ask.zip(ast),
+            );
+            r
+        };
+
+        // Phase 1: an XMP-ONLY develop (the store projection).
+        std::fs::write(
+            autoshop::store::xmp_target(&src),
+            autoshop::xmp::recipe_to_xmp(&EditRecipe { contrast: 21.0, ..Default::default() }),
+        )
+        .unwrap();
+        let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
+        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap)
+            .unwrap()
+            .expect("an XMP-only develop must resolve for the batch");
+        let SavedDevelop::Restored(open, open_kind) = read_saved_develop(&src).saved else {
+            panic!("the open path restores the XMP-only develop");
+        };
+        assert_eq!(batch_kind, open_kind);
+        let mut open = stamp_like_open(open);
+        open.clamp();
+        assert_eq!(batch, open, "batch and open answer the same develop (XMP-only)");
+
+        // Phase 2: recipe.json exists but a NEWER Lightroom sidecar wins.
+        std::fs::write(
+            autoshop::store::recipe_target(&src),
+            serde_json::to_string(&EditRecipe { exposure_ev: 0.5, ..Default::default() })
+                .unwrap(),
+        )
+        .unwrap();
+        let lr = src.with_extension("xmp");
+        std::fs::write(
+            &lr,
+            autoshop::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() }),
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
+        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap)
+            .unwrap()
+            .expect("the Lightroom develop must resolve for the batch");
+        assert!(batch_kind.contains("Lightroom"), "{batch_kind}");
+        let SavedDevelop::Restored(open, open_kind) = read_saved_develop(&src).saved else {
+            panic!("the open path restores the Lightroom develop");
+        };
+        assert_eq!(batch_kind, open_kind);
+        let mut open = stamp_like_open(open);
+        open.clamp();
+        assert_eq!(batch, open, "batch and open answer the same develop (LR newer)");
+        assert_eq!(batch.contrast, 33.0, "and it is the Lightroom edit");
+    }
+
     #[test]
     fn a_stale_keep_request_is_refused_without_the_same_path_fact() {
         // The KEEP arm honours the request only when open_path's recorded

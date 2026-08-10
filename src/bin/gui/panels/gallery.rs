@@ -164,8 +164,11 @@ impl AutoshopApp {
                                     // writes a sidecar or the folder changes.
                                     let edited = *edited_badge.entry(i).or_insert_with(|| {
                                         // Central store OR legacy ./out — a
-                                        // pre-migration library keeps its ●.
-                                        autoshop::store::has_develop(path)
+                                        // pre-migration library keeps its ● —
+                                        // OR Lightroom's own sidecar (L13#2:
+                                        // an LR-edited photo showed no badge
+                                        // yet opened with its LR develop).
+                                        autoshop::store::has_develop_or_sidecar(path)
                                     });
                                     let baked = !autoshop::decode::is_raw(path);
                                     ui.horizontal(|ui| {

@@ -628,6 +628,31 @@ fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
     // touch-time rule migrate_legacy follows; a failed recovery is re-decided
     // by the backup gate downstream).
     let _ = crate::store::recover_orphan_baks(raw);
+    // Newest intent decides WHICH develop's calibration carries forward
+    // (L13#4). When Lightroom's own sidecar out-ranks the store, recipe.json
+    // is a superseded generation: both restore surfaces already re-stamp
+    // FRESH calibration for that photo (serve.rs api_recipe, the GUI's
+    // stamp_calibration on an XMP restore), and stamping the superseded
+    // recipe's curve/profile/anchor onto a brand-new AI recipe made Analyze
+    // hand back a canvas that renders unlike the one it replaced. `None` is
+    // the right answer: the fresh arm in every consumer stamps exactly what
+    // the restore surfaces stamp.
+    match crate::store::lightroom_sidecar(raw) {
+        crate::store::LrSidecar::Only(t) | crate::store::LrSidecar::NewerThanStore(t)
+            if !crate::xmp::xmp_to_recipe(&t).is_noop() =>
+        {
+            return None;
+        }
+        crate::store::LrSidecar::Unreadable(why) => {
+            // Unreadable is not absent — but it cannot outrank either.
+            // Disclosed, then the stored develop stands.
+            eprintln!(
+                "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — calibration falls back to the stored develop",
+                stem(raw)
+            );
+        }
+        _ => {}
+    }
     for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
         if let Ok(text) = crate::store::read_text_capped(&p, crate::store::MAX_STORE_JSON)
             && let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
@@ -1787,6 +1812,69 @@ pub fn find_sources_counted(dir: &Path) -> Result<(Vec<PathBuf>, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L13#4: calibration comes from the NEWEST intent. A Lightroom sidecar
+    /// that out-ranks the store vetoes the stored recipe's calibration
+    /// (fresh stamp, like both restore surfaces); an older or neutral one
+    /// leaves the stored develop in charge.
+    #[test]
+    fn saved_calibration_resolves_by_newest_intent() {
+        let dir = std::env::temp_dir().join("autoshop-pipeline-test-lr-calib");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_lr_calib.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let stored = EditRecipe { exposure_ev: 0.5, ..Default::default() };
+        std::fs::write(crate::store::recipe_target(&raw), serde_json::to_string(&stored).unwrap())
+            .unwrap();
+
+        // No sidecar: the stored develop answers (the common case).
+        assert!(saved_recipe_snapshot(&raw).is_some());
+
+        // A NEWER Lightroom sidecar with a real edit vetoes it.
+        let lr = raw.with_extension("xmp");
+        std::fs::write(
+            &lr,
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 33.0, ..Default::default() }),
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert!(
+            saved_recipe_snapshot(&raw).is_none(),
+            "a newer Lightroom edit supersedes the stored calibration"
+        );
+
+        // An OLDER sidecar leaves the store in charge.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        let kept = saved_recipe_snapshot(&raw).expect("the older sidecar does not veto");
+        assert_eq!(kept.exposure_ev, 0.5);
+
+        // A NEUTRAL newer sidecar is not a save and does not veto either.
+        std::fs::write(&lr, b"<x:xmpmeta/>").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert!(saved_recipe_snapshot(&raw).is_some(), "a neutral sidecar is not intent");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
 
     #[test]
     fn guard_refuses_writes_into_the_source_library() {
