@@ -779,27 +779,7 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
         );
     }
     ensure_parent(&out)?;
-    // Rasters living beside the recipe are stored by bare file name so the
-    // develop dir stays relocatable (store::resolve_mask_paths re-anchors them
-    // at load). Serialize a relativized COPY — the caller's in-memory recipe
-    // keeps its absolute paths for rendering.
-    let mut on_disk = recipe.clone();
-    // The size caps belong to the WRITE, not to each caller's memory. Every
-    // render route clamped its untrusted input and `api_xmp` — the one that
-    // persists — did not, so a hostile body landed on disk as the photo's
-    // authoritative recipe.json and was re-parsed by every later reader. The
-    // caller's in-memory recipe is untouched (this is the on-disk clone), and
-    // the routes that already clamp see a no-op, so this is a floor no future
-    // route can forget to stand on.
-    let dropped = on_disk.clamp();
-    if !dropped.is_empty() {
-        // describe(): only the non-zero losses — curve/string truncation was
-        // invisible behind a "0 mask(s)" line (16-lane scan L16).
-        eprintln!("warning: recipe limits discarded {}", dropped.describe());
-    }
-    if let Some(parent) = out.parent() {
-        crate::store::relativize_mask_paths(&mut on_disk, parent);
-    }
+    let bytes = recipe_bytes_for(recipe, out.parent())?;
     // Publish via tmp+rename rather than truncating the AUTHORITATIVE file in
     // place: a crash mid-write used to leave a half-written recipe.json (loud
     // Unreadable, but the develop was gone). The old file is retired to .bak
@@ -814,7 +794,6 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // (.bak stays shared — the retire/restore pair below is
     // last-writer-wins by design; one photo has one interactive writer in
     // practice.)
-    let bytes = serde_json::to_vec_pretty(&on_disk)?;
     if out == crate::store::recipe_target(raw) {
         crate::store::durable_retire_and_write(
             &out,
@@ -834,6 +813,38 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
             .with_context(|| format!("publish recipe {}", out.display()))?;
     }
     Ok(out)
+}
+
+/// The exact on-disk recipe bytes for `anchor`: a relativized, clamped COPY —
+/// the caller's in-memory recipe keeps its absolute paths for rendering.
+/// Rasters living beside the recipe are stored by bare file name so the
+/// develop dir stays relocatable (store::resolve_mask_paths re-anchors them
+/// at load). The size caps belong to the WRITE, not to each caller's memory:
+/// every render route clamped its untrusted input and `api_xmp` — the one
+/// that persists — did not, so a hostile body landed on disk as the photo's
+/// authoritative recipe.json and was re-parsed by every later reader. The
+/// routes that already clamp see a no-op — a floor no future route can
+/// forget to stand on.
+fn recipe_bytes_for(recipe: &EditRecipe, anchor: Option<&std::path::Path>) -> Result<Vec<u8>> {
+    let mut on_disk = recipe.clone();
+    let dropped = on_disk.clamp();
+    if !dropped.is_empty() {
+        // describe(): only the non-zero losses — curve/string truncation was
+        // invisible behind a "0 mask(s)" line (16-lane scan L16).
+        eprintln!("warning: recipe limits discarded {}", dropped.describe());
+    }
+    if let Some(parent) = anchor {
+        crate::store::relativize_mask_paths(&mut on_disk, parent);
+    }
+    Ok(serde_json::to_vec_pretty(&on_disk)?)
+}
+
+/// The CENTRAL-STORE recipe bytes for `raw` — identical to what a plain
+/// [`write_recipe`] publishes — for staging into a
+/// [`crate::store::commit_develop`] single-generation save.
+pub fn recipe_store_bytes(raw: &Path, recipe: &EditRecipe) -> Result<Vec<u8>> {
+    let target = crate::store::recipe_target(raw);
+    recipe_bytes_for(recipe, target.parent())
 }
 
 /// First FREE ./out artifact path for `tag` (`tag`, `tag-2`, … `tag-999`),

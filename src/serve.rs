@@ -2242,12 +2242,34 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // FIRST (same order as the GUI): it is the authoritative projection, and
     // writing the XMP first meant a failed recipe write left a NEW XMP shadowed
     // by the STALE recipe both surfaces prefer.
-    pipeline::write_recipe(&raw, &req.recipe, None)?;
-    // A browser-session master (fill/heal chained this session) becomes the
-    // develop's persisted pixel source on save — the GUI rule: saving
+    //
+    // ONE single-generation commit (the Ctrl+S rule, L03): the recipe and the
+    // browser-session master's pixels.json land whole or the save fails whole
+    // — the client then never baselines (markSaved) on a 200 whose pixels
+    // never landed. A session master (fill/heal chained this session) becomes
+    // the develop's persisted pixel source on save — the GUI rule: saving
     // records pixel identity, else the healed pixels evaporate on the very
     // reopen that follows "saved". Only ever WRITTEN here: an absent claim
-    // must not clear a GUI-persisted master.
+    // must not clear a GUI-persisted master (`Keep`). `variants: Keep` too —
+    // the web writes no strip; a GUI-authored strip going stale under a web
+    // save is the registered cross-surface residual, unchanged here.
+    let pixels = match &master {
+        // GENERATED provenance rides from the issuance registry: hardcoding
+        // inplace here made every later open render the base curve / lens
+        // profile / anchor on top of pixels that already carry them.
+        Some((p, generated)) => crate::store::CommitMember::Write(
+            crate::store::pixel_source_record_bytes(&raw, p, *generated)?,
+        ),
+        None => crate::store::CommitMember::Keep,
+    };
+    crate::store::commit_develop(
+        &raw,
+        crate::store::DevelopCommit {
+            recipe: Some(pipeline::recipe_store_bytes(&raw, &req.recipe)?),
+            pixels,
+            variants: crate::store::CommitMember::Keep,
+        },
+    )?;
     let mut master_note = String::new();
     // The SAME question the clear branch asked, so it must read the SAME
     // recipe — the one the client sent. Testing the clamped copy here made the
@@ -2271,19 +2293,6 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         master_note = " — the saved retouch master was kept: a neutral save never deletes \
                        baked pixels"
             .to_string();
-    }
-    if let Some((p, generated)) = &master {
-        // Recipe already committed (the cross-surface rule); an I/O failure
-        // recording the pixels degrades to a disclosed warning, same as the
-        // GUI's pixels_ok path. Claim REJECTION was a 400 before any write.
-        // GENERATED provenance rides from the issuance registry: hardcoding
-        // inplace here made every later open render the base curve / lens
-        // profile / anchor on top of pixels that already carry them.
-        if let Err(e) = crate::store::write_pixel_source(&raw, p, *generated) {
-            master_note = format!(
-                " — but recording the retouched master failed ({e}); reopening shows the un-retouched source"
-            );
-        }
     }
     // Recipe committed = saved (the cross-surface rule): a failed XMP
     // projection reports success WITH the warning instead of a 500 that

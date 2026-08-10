@@ -502,8 +502,12 @@ impl AutoshopApp {
 
     /// Persist the open photo's strip beside recipe.json/pixels.json and
     /// advance the mirror. Trivial strip ⇒ clear (no noise file). An error
-    /// leaves the mirror untouched, so the unsaved protection stays armed —
-    /// callers surface the error, never swallow it.
+    /// leaves the mirror untouched, so the unsaved protection stays armed.
+    /// Test-only since the single-generation commit (L03): production saves
+    /// stage the strip INTO [`autoshop::store::commit_develop`] and advance
+    /// the mirror on the commit's success — this remains the strip-half
+    /// primitive the guard tests drive in isolation.
+    #[cfg(test)]
     pub(crate) fn persist_strip(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         match self.current_strip_record() {
             Some(rec) => {
@@ -1596,36 +1600,42 @@ impl AutoshopApp {
                 // disclosure travels with the mutation).
                 let relook_note = autoshop::pipeline::repair_pre_era_base_curve(p, &mut disk);
                 let generated = pix.as_ref().is_some_and(|(_, g)| *g);
-                let recipe_written = autoshop::pipeline::write_recipe(p, &disk, None);
-                let recipe_ok = recipe_written.is_ok();
-                let res = recipe_written.and_then(|_| {
-                    // The baked-pixels link saves/clears with the recipe —
-                    // the same pairing Ctrl+S writes.
-                    match pix {
-                        Some((o, g)) => autoshop::store::write_pixel_source(p, o, *g),
-                        None => autoshop::store::clear_pixel_source(p),
-                    }
-                    .map_err(anyhow::Error::from)
-                });
-                if recipe_ok
-                    && let Some(note) = relook_note.as_deref()
-                {
-                    eprintln!("⚠ {}: {note}", autoshop::pipeline::stem(p));
-                }
-                if let Err(e) = res {
-                    failed = Some(format!("{}: {e}", autoshop::pipeline::stem(p)));
-                    return Ok(());
-                }
-                // The strip record saves/clears with the recipe (the Ctrl+S
-                // pairing): without it the background variants this dialog
-                // just listed die with the quit anyway — a fatal result, not
-                // a warning.
-                let strip_res = match strip {
-                    Some(rec) => autoshop::store::write_variants(p, rec),
-                    None => autoshop::store::clear_variants(p),
-                };
-                match strip_res {
+                // ONE single-generation commit per photo (the Ctrl+S rule,
+                // L03): recipe + baked-pixels link + strip record land whole
+                // or not at all — the background variants this dialog just
+                // listed cannot outlive a save that tore between members.
+                let res: anyhow::Result<()> = (|| {
+                    let recipe_bytes = autoshop::pipeline::recipe_store_bytes(p, &disk)?;
+                    let pixels = match pix {
+                        Some((o, g)) => autoshop::store::CommitMember::Write(
+                            autoshop::store::pixel_source_record_bytes(p, o, *g)?,
+                        ),
+                        None => autoshop::store::CommitMember::Clear,
+                    };
+                    let variants = match strip {
+                        Some(rec) => autoshop::store::CommitMember::Write(
+                            autoshop::store::variants_record_bytes(p, rec)?,
+                        ),
+                        None => autoshop::store::CommitMember::Clear,
+                    };
+                    autoshop::store::commit_develop(
+                        p,
+                        autoshop::store::DevelopCommit {
+                            recipe: Some(recipe_bytes),
+                            pixels,
+                            variants,
+                        },
+                    )?;
+                    Ok(())
+                })();
+                match res {
                     Ok(()) => {
+                        // The disclosure travels with the mutation (the
+                        // Ctrl+S rule): the commit landed whole, so the
+                        // re-estimated curve IS on disk.
+                        if let Some(note) = relook_note.as_deref() {
+                            eprintln!("⚠ {}: {note}", autoshop::pipeline::stem(p));
+                        }
                         if self.src_path.as_deref() == Some(p.as_path()) {
                             self.saved_strip = strip.clone();
                         }
@@ -1970,7 +1980,30 @@ impl AutoshopApp {
                         // persist entirely (the fit stays on the canvas with
                         // ● unsaved; Ctrl+S overwrites explicitly).
                         match &backed {
-                            Ok(backed) => match autoshop::pipeline::write_recipe(p, &rep.recipe, None) {
+                            Ok(backed) => {
+                              // ONE single-generation commit (the Ctrl+S
+                              // rule, L03): the fit's recipe and the
+                              // pixel-link CLEAR land together. The fit is a
+                              // SOURCE-based develop by construction (it maps
+                              // the source neutral onto the rendition), and a
+                              // stale pixels.json link surviving the recipe
+                              // write made a reopen render the fit on baked
+                              // pixels it was never computed against.
+                              let commit_res: anyhow::Result<()> = (|| {
+                                  autoshop::store::commit_develop(
+                                      p,
+                                      autoshop::store::DevelopCommit {
+                                          recipe: Some(autoshop::pipeline::recipe_store_bytes(
+                                              p,
+                                              &rep.recipe,
+                                          )?),
+                                          pixels: autoshop::store::CommitMember::Clear,
+                                          variants: autoshop::store::CommitMember::Keep,
+                                      },
+                                  )?;
+                                  Ok(())
+                              })();
+                              match commit_res {
                               Err(e) => {
                                 // A failed store write must NOT discard the
                                 // minutes of segmentation + fitting that
@@ -1979,33 +2012,12 @@ impl AutoshopApp {
                                 // on the canvas unsaved.
                                 note.push_str(&trf(
                                     lang,
-                                    " · NOT persisted: writing recipe.json failed ({err}) — Ctrl+S to save explicitly",
+                                    " · NOT persisted: saving the develop failed ({err}) — Ctrl+S to save explicitly",
                                     &[("err", &e.to_string())],
                                 ));
                               }
-                              Ok(_) => {
+                              Ok(()) => {
                                 persisted = true;
-                                // The persisted fit is a SOURCE-based develop
-                                // by construction (it maps the source neutral
-                                // onto the rendition) — a stale pixels.json
-                                // master link would make a reopen render the
-                                // fit on baked pixels it was never computed
-                                // against. Pair the write like Ctrl+S does.
-                                if let Err(e) = autoshop::store::clear_pixel_source(p) {
-                                    // NOT fully persisted: the pair is what a
-                                    // reopen reads. Claiming success here
-                                    // advanced the baseline and dropped the
-                                    // stash, so the ● vanished while disk
-                                    // still linked the stale master — the user
-                                    // was told the work was safe when a cold
-                                    // reopen would render the wrong pixels.
-                                    persisted = false;
-                                    note.push_str(&trf(
-                                        lang,
-                                        " · could not clear the old retouch-master link ({err}) — reopening may show the fit on retouched pixels; Ctrl+S repairs it",
-                                        &[("err", &e.to_string())],
-                                    ));
-                                }
                                 if autoshop::decode::is_raw(p) {
                                     // The recipe write ALONE decides the saved
                                     // state (same rule as Ctrl+S / Analyze):
@@ -2040,7 +2052,8 @@ impl AutoshopApp {
                                     ));
                                 }
                               }
-                            },
+                              }
+                            }
                             Err(e) => {
                                 note.push_str(&trf(
                                     lang,

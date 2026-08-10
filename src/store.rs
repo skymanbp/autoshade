@@ -565,8 +565,18 @@ fn write_pixel_source_unlocked(
     origin: &Path,
     generated: bool,
 ) -> std::io::Result<()> {
+    publish_json_sidecar(src, "pixels.json", pixel_source_record_bytes(src, origin, generated)?)
+}
+
+/// The exact pixels.json bytes [`write_pixel_source`] publishes for `origin`
+/// — exposed so [`commit_develop`] callers can stage the identical record
+/// into a single-generation save.
+pub fn pixel_source_record_bytes(
+    src: &Path,
+    origin: &Path,
+    generated: bool,
+) -> std::io::Result<Vec<u8>> {
     let dir = develop_dir(src);
-    std::fs::create_dir_all(&dir)?;
     let stored: PathBuf = if origin.parent() == Some(dir.as_path()) {
         origin.file_name().map(PathBuf::from).unwrap_or_else(|| origin.to_path_buf())
     } else {
@@ -576,11 +586,7 @@ fn write_pixel_source_unlocked(
         "origin": stored.to_string_lossy(),
         "kind": if generated { "generated" } else { "inplace" },
     });
-    publish_json_sidecar(
-        src,
-        "pixels.json",
-        serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)?,
-    )
+    serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)
 }
 
 /// The ONE retire-and-publish primitive for the small per-photo JSON sidecars
@@ -681,6 +687,14 @@ pub fn write_variants(src: &Path, rec: &VariantsRecord) -> std::io::Result<()> {
 
 fn write_variants_unlocked(src: &Path, rec: &VariantsRecord) -> std::io::Result<()> {
     refuse_unresolved_strip(src)?;
+    publish_json_sidecar(src, "variants.json", variants_record_bytes(src, rec)?)
+}
+
+/// The exact variants.json bytes [`write_variants`] publishes for `rec` —
+/// exposed so [`commit_develop`] callers can stage the identical record into
+/// a single-generation save. The [`refuse_unresolved_strip`] gate does NOT
+/// run here: it belongs to the moment of publication, under the lock.
+pub fn variants_record_bytes(src: &Path, rec: &VariantsRecord) -> std::io::Result<Vec<u8>> {
     let dir = develop_dir(src);
     let mut stored = VariantsRecord {
         v: rec.v,
@@ -700,11 +714,7 @@ fn write_variants_unlocked(src: &Path, rec: &VariantsRecord) -> std::io::Result<
         relativize_mask_paths(&mut recipe, &dir);
         stored.others.push(VariantEntry { kind: e.kind.clone(), recipe, origin });
     }
-    publish_json_sidecar(
-        src,
-        "variants.json",
-        serde_json::to_vec_pretty(&stored).map_err(std::io::Error::other)?,
-    )
+    serde_json::to_vec_pretty(&stored).map_err(std::io::Error::other)
 }
 
 /// What a strip read actually found — the three states are NOT collapsible:
@@ -840,6 +850,294 @@ fn clear_variants_unlocked(src: &Path) -> std::io::Result<()> {
     };
     rm(develop_dir(src).join("variants.json.bak"))?;
     rm(variants_path(src))
+}
+
+/// One member of a [`DevelopCommit`]: publish these bytes, remove the
+/// sidecar (live + retired `.bak`, the detach rule), or leave it exactly as
+/// it stands.
+pub enum CommitMember {
+    Write(Vec<u8>),
+    Clear,
+    Keep,
+}
+
+impl CommitMember {
+    fn word(&self) -> &'static str {
+        match self {
+            CommitMember::Write(_) => "write",
+            CommitMember::Clear => "clear",
+            CommitMember::Keep => "keep",
+        }
+    }
+}
+
+/// A single-generation write of the develop triple. `recipe` bytes come from
+/// [`crate::pipeline::recipe_store_bytes`] (clamped + mask-relativized
+/// there), `pixels` from [`pixel_source_record_bytes`], `variants` from
+/// [`variants_record_bytes`] — the commit publishes, it does not interpret.
+pub struct DevelopCommit {
+    pub recipe: Option<Vec<u8>>,
+    pub pixels: CommitMember,
+    pub variants: CommitMember,
+}
+
+fn commit_dir(src: &Path) -> PathBuf {
+    develop_dir(src).join(".commit")
+}
+
+/// The staged-generation manifest (`.commit/COMMIT`), whose single durable
+/// rename is the transaction's linearization point. Sums are hex FNV-1a of
+/// each staged member's bytes — strings, because a u64 does not survive a
+/// JSON round trip intact.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CommitManifest {
+    v: u32,
+    recipe: String,
+    pixels: String,
+    variants: String,
+    sums: std::collections::BTreeMap<String, String>,
+}
+
+/// Publish recipe.json / pixels.json / variants.json as ONE generation (L03).
+///
+/// Ctrl+S used to run three sequential durable writes under the develop
+/// lock; the lock excludes concurrent writers, but every kill point between
+/// the renames left a torn generation — a new recipe over an old (or
+/// half-cleared) master link, or a new pair under a stale strip — and the
+/// per-file `.bak` recovery is generation-blind, so it would republish the
+/// OLD pixels link under the NEW recipe. No platform primitive swaps
+/// multiple directory entries at once (renameat2 is Linux-only; MoveFileExW
+/// cannot replace a directory), so the gap is closed by a MARKER: members
+/// stage into `develop_dir/.commit/`, ONE durable rename of `.commit/COMMIT`
+/// is the commit point, and recovery rolls FORWARD past it (an unmarked
+/// stage is discarded). A crash after COMMIT therefore COMPLETES this save
+/// on the photo's next locked touch instead of reverting it.
+pub fn commit_develop(src: &Path, commit: DevelopCommit) -> std::io::Result<()> {
+    with_develop_lock(src, DevelopLockMode::Wait, || commit_develop_unlocked(src, commit))
+}
+
+fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result<()> {
+    // The batch-S trap, same shape: a PENDING explicit clear must complete
+    // before a new generation stages — its recovery would otherwise eat the
+    // very save it predates. A pending commit resolves too: gen(n+1) cannot
+    // stage over an unresolved gen(n).
+    resolve_pending_clear_unlocked(src)?;
+    resolve_pending_commit_unlocked(src)?;
+    // The save-path floor, at the moment of publication: an unresolved strip
+    // refuses BOTH the write and the clear, exactly as the member writers do.
+    if !matches!(commit.variants, CommitMember::Keep) {
+        refuse_unresolved_strip(src)?;
+    }
+    if commit.recipe.is_none()
+        && matches!(commit.pixels, CommitMember::Keep)
+        && matches!(commit.variants, CommitMember::Keep)
+    {
+        return Ok(());
+    }
+    let dev = develop_dir(src);
+    std::fs::create_dir_all(&dev)?;
+    let cdir = commit_dir(src);
+    let staged = (|| -> std::io::Result<()> {
+        // create_dir, not create_dir_all: a leftover `.commit` was resolved
+        // above, so an existing directory here is a real error, not residue.
+        std::fs::create_dir(&cdir)?;
+        let mut sums = std::collections::BTreeMap::new();
+        let mut stage = |name: &str, bytes: &[u8]| -> std::io::Result<()> {
+            write_staged(&cdir.join(name), bytes)?;
+            sums.insert(name.to_string(), format!("{:016x}", fnv1a64(bytes)));
+            Ok(())
+        };
+        if let Some(b) = &commit.recipe {
+            stage("recipe.json", b)?;
+        }
+        if let CommitMember::Write(b) = &commit.pixels {
+            stage("pixels.json", b)?;
+        }
+        if let CommitMember::Write(b) = &commit.variants {
+            stage("variants.json", b)?;
+        }
+        // The staged entries' directory records go down BEFORE the marker
+        // can exist (unix: dir fsync; Windows: finish_parent is a no-op and
+        // durability rests on the write-through rename below plus journaled
+        // metadata, with the sums as the belt).
+        durable_os::finish_parent(&cdir.join("COMMIT"))?;
+        let manifest = CommitManifest {
+            v: 1,
+            recipe: if commit.recipe.is_some() { "write" } else { "keep" }.to_string(),
+            pixels: commit.pixels.word().to_string(),
+            variants: commit.variants.word().to_string(),
+            sums,
+        };
+        // THE commit point: one durable rename. Before it, no live file has
+        // been touched; after it, the generation is promised.
+        durable_write(
+            &cdir.join("COMMIT"),
+            &serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?,
+        )
+    })();
+    if let Err(e) = staged {
+        // Unmarked stage: nothing was promised and nothing was applied — the
+        // save simply failed, whole.
+        let _ = std::fs::remove_dir_all(&cdir);
+        return Err(e);
+    }
+    if let Err(e) = apply_commit_members(
+        src,
+        commit.recipe.as_deref().map_or(MemberRef::Keep, MemberRef::Write),
+        (&commit.pixels).into(),
+        (&commit.variants).into(),
+    ) {
+        // BEYOND the commit point: the generation is promised and `.commit`
+        // stays — recovery completes the apply on the photo's next locked
+        // touch, so the caller must not read this Err as "nothing happened".
+        return Err(std::io::Error::new(
+            e.kind(),
+            format!("{e} — the save IS committed and completes on this photo's next open or save"),
+        ));
+    }
+    // Consumed. A failure here only means the (idempotent) replay runs once
+    // more on the next touch and consumes it then.
+    let _ = std::fs::remove_dir_all(&cdir);
+    Ok(())
+}
+
+/// A borrowed [`CommitMember`], shared by the live apply and the recovery
+/// replay (which owns its bytes read back from the stage).
+#[derive(Clone, Copy)]
+enum MemberRef<'a> {
+    Write(&'a [u8]),
+    Clear,
+    Keep,
+}
+
+impl<'a> From<&'a CommitMember> for MemberRef<'a> {
+    fn from(m: &'a CommitMember) -> Self {
+        match m {
+            CommitMember::Write(b) => MemberRef::Write(b),
+            CommitMember::Clear => MemberRef::Clear,
+            CommitMember::Keep => MemberRef::Keep,
+        }
+    }
+}
+
+/// Apply one committed generation onto the live triple. IDEMPOTENT —
+/// replay-safe: a Write member whose live bytes already equal the staged
+/// bytes is skipped, so a resumed apply neither re-retires the new
+/// generation onto its own `.bak` (destroying the previous generation's
+/// crash-recovery copy) nor repeats completed work.
+fn apply_commit_members(
+    src: &Path,
+    recipe: MemberRef<'_>,
+    pixels: MemberRef<'_>,
+    variants: MemberRef<'_>,
+) -> std::io::Result<()> {
+    let dev = develop_dir(src);
+    let apply = |live: PathBuf, bak: PathBuf, member: MemberRef<'_>| -> std::io::Result<()> {
+        let rm = |p: PathBuf| match std::fs::remove_file(p) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
+        match member {
+            MemberRef::Write(bytes) => {
+                if read_bytes_capped(&live, MAX_STORE_JSON).is_ok_and(|cur| cur == bytes) {
+                    return Ok(()); // already applied — keep the retired previous generation
+                }
+                durable_retire_and_write(&live, &bak, bytes)
+            }
+            // The clear pair, `.bak` first (the clear_pixel_source rule: a
+            // crash between the removals leaves the live record, never the
+            // resurrection bait). RAW removal, not the public clear helpers
+            // — a replay must not re-run publication gates against the
+            // half-cleared state it exists to finish.
+            MemberRef::Clear => {
+                rm(bak)?;
+                rm(live)
+            }
+            MemberRef::Keep => Ok(()),
+        }
+    };
+    apply(recipe_target(src), dev.join("recipe.json.bak"), recipe)?;
+    if matches!(recipe, MemberRef::Write(_)) {
+        note_source(src); // the write_recipe breadcrumb rides the same member
+    }
+    apply(pixel_source_path(src), dev.join("pixels.json.bak"), pixels)?;
+    apply(variants_path(src), dev.join("variants.json.bak"), variants)
+}
+
+/// Resolve a `.commit` stage left by a killed [`commit_develop`]. COMMIT
+/// present with intact sums ⇒ replay the (idempotent) apply and consume the
+/// stage; COMMIT absent ⇒ nothing was promised — discard the stage. COMMIT
+/// present but unreadable, unknown, or sum-mismatched is `Err` and the
+/// evidence STAYS: the marker was durably renamed in only after every staged
+/// member was fsynced, so a mismatch means a spec-broken disk or tampering —
+/// rolling back could freeze a half-applied generation as final, and rolling
+/// forward would publish bytes nobody wrote. The error names the remedy.
+fn resolve_pending_commit_unlocked(src: &Path) -> std::io::Result<()> {
+    let cdir = commit_dir(src);
+    if !cdir.exists() {
+        return Ok(());
+    }
+    let refuse = |why: String| {
+        std::io::Error::other(format!(
+            "{} holds a crashed develop save that cannot be resolved ({why}) — delete that \
+             directory to discard the crashed save and keep the photo's current develop",
+            cdir.display()
+        ))
+    };
+    let marker = cdir.join("COMMIT");
+    let manifest_bytes = match read_bytes_capped(&marker, MAX_STORE_JSON) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Unmarked stage: the commit point was never reached, nothing
+            // was applied — discarding is a true rollback.
+            std::fs::remove_dir_all(&cdir)?;
+            return Ok(());
+        }
+        Err(e) => return Err(refuse(format!("unreadable COMMIT marker: {e}"))),
+    };
+    let m: CommitManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| refuse(format!("corrupt COMMIT marker: {e}")))?;
+    if m.v != 1 {
+        return Err(refuse(format!("future commit format v{}", m.v)));
+    }
+    // The recipe member never clears through a commit — only `clear_develop`
+    // removes recipe.json, through its own marker.
+    if m.recipe == "clear" {
+        return Err(refuse("a commit cannot clear the recipe".into()));
+    }
+    let member = |name: &str, action: &str| -> std::io::Result<Option<Vec<u8>>> {
+        match action {
+            "keep" | "clear" => Ok(None),
+            "write" => {
+                let staged = read_bytes_capped(&cdir.join(name), MAX_STORE_JSON)
+                    .map_err(|e| refuse(format!("staged {name} unreadable: {e}")))?;
+                match m.sums.get(name) {
+                    Some(want) if *want == format!("{:016x}", fnv1a64(&staged)) => Ok(Some(staged)),
+                    Some(_) => Err(refuse(format!("staged {name} does not match its recorded sum"))),
+                    None => Err(refuse(format!("staged {name} has no recorded sum"))),
+                }
+            }
+            other => Err(refuse(format!("unknown {name} action {other:?}"))),
+        }
+    };
+    let recipe = member("recipe.json", &m.recipe)?;
+    let pixels = member("pixels.json", &m.pixels)?;
+    let variants = member("variants.json", &m.variants)?;
+    let recipe_ref = recipe.as_deref().map_or(MemberRef::Keep, MemberRef::Write);
+    let pixels_ref = match (m.pixels.as_str(), &pixels) {
+        ("write", Some(b)) => MemberRef::Write(b),
+        ("clear", _) => MemberRef::Clear,
+        _ => MemberRef::Keep,
+    };
+    let variants_ref = match (m.variants.as_str(), &variants) {
+        ("write", Some(b)) => MemberRef::Write(b),
+        ("clear", _) => MemberRef::Clear,
+        _ => MemberRef::Keep,
+    };
+    apply_commit_members(src, recipe_ref, pixels_ref, variants_ref)?;
+    std::fs::remove_dir_all(&cdir)?;
+    Ok(())
 }
 
 /// THE develop's render source, shared by every surface (CLI, GUI export and
@@ -1016,23 +1314,45 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
     })
 }
 
+/// Complete a KILLED explicit clear (the `clear.pending` marker): sweep,
+/// stamp, and consume the marker — shared by the recovery head and by
+/// [`commit_develop`], which must finish a pending clear BEFORE staging a
+/// new generation (the batch-S trap: a marker that outlives the save it
+/// predates would eat that save on the next recovery).
+fn resolve_pending_clear_unlocked(src: &Path) -> std::io::Result<()> {
+    if !clear_pending(src).exists() {
+        return Ok(());
+    }
+    let (_, err) = clear_sweep(src);
+    if let Some(e) = err {
+        // The recover contract: Err is "state we cannot resolve" — the
+        // backup gates refuse rather than overwrite it.
+        return Err(e);
+    }
+    if mark_develop_cleared(src).is_ok() {
+        let _ = std::fs::remove_file(clear_pending(src));
+    }
+    Ok(())
+}
+
 fn recover_orphan_baks_unlocked(src: &Path) -> std::io::Result<()> {
     // A PENDING explicit clear outranks every other recovery (L03): the
     // marker says the user's last intent was "remove this develop", so the
     // sweep completes FIRST — the .bak republish below would otherwise
-    // resurrect the very files a killed clear was removing.
+    // resurrect the very files a killed clear was removing. (The sweep takes
+    // any pending `.commit` with it: the clear is the newer intent by
+    // construction, since `commit_develop` completes a pending clear before
+    // it stages.)
     if clear_pending(src).exists() {
-        let (_, err) = clear_sweep(src);
-        if let Some(e) = err {
-            // The recover contract: Err is "state we cannot resolve" — the
-            // backup gates refuse rather than overwrite it.
-            return Err(e);
-        }
-        if mark_develop_cleared(src).is_ok() {
-            let _ = std::fs::remove_file(clear_pending(src));
-        }
+        resolve_pending_clear_unlocked(src)?;
         return Ok(());
     }
+    // A CRASHED single-generation commit resolves next (L03): a marked stage
+    // rolls FORWARD (the generation was promised), an unmarked stage rolls
+    // back — and it must happen before the `.bak` pair loop below, which is
+    // generation-blind and would otherwise republish members the committed
+    // generation replaces or clears.
+    resolve_pending_commit_unlocked(src)?;
     // A KILLED version delete resumes here too — best-effort and DISCLOSED,
     // never folded into this fn's Err: that contract means "a save we
     // cannot see, refuse to overwrite", and one locked raster in a dead
@@ -1711,6 +2031,18 @@ fn clear_sweep(src: &Path) -> (bool, Option<std::io::Error>) {
         return (removed, Some(e));
     }
     removed |= legacy_was_visible;
+
+    // A pending single-generation commit dies with the clear: the clear is
+    // the newer intent (commit_develop completes a pending clear before it
+    // stages), and a surviving `.commit` would REPLAY the very develop this
+    // sweep removes.
+    match std::fs::remove_dir_all(commit_dir(src)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            first_err.get_or_insert(e);
+        }
+    }
 
     for p in [
         develop_dir(src).join("recipe.json.bak"),
@@ -3156,6 +3488,330 @@ mod tests {
         assert!(!variants_path(&raw).exists());
         assert!(dev.join("cleared.txt").exists(), "the clear finished with its stamp");
         assert!(!dev.join("clear.pending").exists(), "the transaction closed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// One temp-dir photo + develop-dir fixture for the commit tests, with a
+    /// non-empty master raster and helpers to build staged generations.
+    fn commit_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("autoshop-store-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join(format!("_store_{}.arw", tag.replace('-', "_")));
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        (dir, raw, dev)
+    }
+
+    fn commit_sum(bytes: &[u8]) -> String {
+        format!("{:016x}", fnv1a64(bytes))
+    }
+
+    fn strip_record(kind: &str) -> VariantsRecord {
+        VariantsRecord {
+            v: 1,
+            active_kind: kind.to_string(),
+            active_pos: 0,
+            others: Vec::new(),
+        }
+    }
+
+    /// L03: the kill point IMMEDIATELY after the COMMIT marker's rename — all
+    /// three live files still hold the previous generation. The next locked
+    /// touch replays the whole staged generation and consumes the stage: a
+    /// marked commit is a promise, not a suggestion.
+    #[test]
+    fn a_committed_generation_replays_over_a_stale_triple() {
+        let (dir, raw, dev) = commit_fixture("commit-replay");
+        let m1 = dev.join("m1.png");
+        let m2 = dev.join("m2.png");
+        std::fs::write(&m1, b"px-one").unwrap();
+        std::fs::write(&m2, b"px-two").unwrap();
+        std::fs::write(recipe_target(&raw), b"gen1-recipe").unwrap();
+        std::fs::write(
+            pixel_source_path(&raw),
+            pixel_source_record_bytes(&raw, &m1, false).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            variants_path(&raw),
+            variants_record_bytes(&raw, &strip_record("fitted")).unwrap(),
+        )
+        .unwrap();
+
+        let cdir = dev.join(".commit");
+        std::fs::create_dir_all(&cdir).unwrap();
+        let r2 = b"gen2-recipe".to_vec();
+        let p2 = pixel_source_record_bytes(&raw, &m2, false).unwrap();
+        let v2 = variants_record_bytes(&raw, &strip_record("generated")).unwrap();
+        std::fs::write(cdir.join("recipe.json"), &r2).unwrap();
+        std::fs::write(cdir.join("pixels.json"), &p2).unwrap();
+        std::fs::write(cdir.join("variants.json"), &v2).unwrap();
+        let manifest = serde_json::json!({
+            "v": 1, "recipe": "write", "pixels": "write", "variants": "write",
+            "sums": {
+                "recipe.json": commit_sum(&r2),
+                "pixels.json": commit_sum(&p2),
+                "variants.json": commit_sum(&v2),
+            },
+        });
+        std::fs::write(cdir.join("COMMIT"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        recover_orphan_baks(&raw).unwrap();
+
+        assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), r2, "recipe rolled forward");
+        assert_eq!(
+            std::fs::read(dev.join("recipe.json.bak")).unwrap(),
+            b"gen1-recipe",
+            "the previous generation retired to its .bak"
+        );
+        let (master, generated) = read_pixel_source(&raw).expect("gen2 master restored");
+        assert_eq!(master.file_name().unwrap().to_str().unwrap(), "m2.png");
+        assert!(!generated);
+        match read_variants_checked(&raw) {
+            VariantsRead::Strip(rec) => assert_eq!(rec.active_kind, "generated"),
+            _ => panic!("gen2 strip must be readable"),
+        }
+        assert!(!cdir.exists(), "the stage is consumed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L03: the kill point MID-apply — recipe already published, pixels and
+    /// strip still stale. The replay converges the remaining members and
+    /// SKIPS the already-applied one, so the previous generation's retired
+    /// `.bak` is not destroyed by a re-retire of the new bytes.
+    #[test]
+    fn a_half_applied_commit_finishes_instead_of_tearing() {
+        let (dir, raw, dev) = commit_fixture("commit-half");
+        let m1 = dev.join("m1.png");
+        std::fs::write(&m1, b"px-one").unwrap();
+        let r2 = b"gen2-recipe".to_vec();
+        // Recipe member already applied: live = staged bytes, .bak = gen1.
+        std::fs::write(recipe_target(&raw), &r2).unwrap();
+        std::fs::write(dev.join("recipe.json.bak"), b"gen1-recipe").unwrap();
+        std::fs::write(
+            pixel_source_path(&raw),
+            pixel_source_record_bytes(&raw, &m1, false).unwrap(),
+        )
+        .unwrap();
+
+        let cdir = dev.join(".commit");
+        std::fs::create_dir_all(&cdir).unwrap();
+        std::fs::write(cdir.join("recipe.json"), &r2).unwrap();
+        let manifest = serde_json::json!({
+            "v": 1, "recipe": "write", "pixels": "clear", "variants": "keep",
+            "sums": { "recipe.json": commit_sum(&r2) },
+        });
+        std::fs::write(cdir.join("COMMIT"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        recover_orphan_baks(&raw).unwrap();
+
+        assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), r2);
+        assert_eq!(
+            std::fs::read(dev.join("recipe.json.bak")).unwrap(),
+            b"gen1-recipe",
+            "the idempotent replay must not re-retire the new bytes over gen1's .bak"
+        );
+        assert!(!pixel_source_path(&raw).exists(), "the pixels clear finished");
+        assert!(!cdir.exists(), "the stage is consumed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L03: a stage the crash caught BEFORE the marker is no commitment at
+    /// all — it rolls back wholesale and the live generation stands.
+    #[test]
+    fn an_unmarked_stage_rolls_back() {
+        let (dir, raw, dev) = commit_fixture("commit-unmarked");
+        std::fs::write(recipe_target(&raw), b"gen1-recipe").unwrap();
+        let cdir = dev.join(".commit");
+        std::fs::create_dir_all(&cdir).unwrap();
+        std::fs::write(cdir.join("recipe.json"), b"gen2-recipe").unwrap();
+
+        recover_orphan_baks(&raw).unwrap();
+
+        assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen1-recipe");
+        assert!(!cdir.exists(), "the unmarked stage is discarded");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L03: a COMMIT whose staged bytes fail their recorded sum is a state
+    /// this store cannot legally reach (members are fsynced BEFORE the marker
+    /// rename) — so it refuses loudly and KEEPS the evidence: rolling back
+    /// could freeze a half-applied generation as final, rolling forward would
+    /// publish bytes nobody wrote.
+    #[test]
+    fn a_corrupt_commit_refuses_loudly_and_keeps_the_evidence() {
+        let (dir, raw, dev) = commit_fixture("commit-corrupt");
+        std::fs::write(recipe_target(&raw), b"gen1-recipe").unwrap();
+        let cdir = dev.join(".commit");
+        std::fs::create_dir_all(&cdir).unwrap();
+        std::fs::write(cdir.join("recipe.json"), b"gen2-recipe").unwrap();
+        let manifest = serde_json::json!({
+            "v": 1, "recipe": "write", "pixels": "keep", "variants": "keep",
+            "sums": { "recipe.json": commit_sum(b"different bytes entirely") },
+        });
+        std::fs::write(cdir.join("COMMIT"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let err = recover_orphan_baks(&raw).expect_err("a sum mismatch must refuse");
+        assert!(
+            err.to_string().contains("delete that directory"),
+            "the refusal names the remedy: {err}"
+        );
+        assert_eq!(
+            std::fs::read(recipe_target(&raw)).unwrap(),
+            b"gen1-recipe",
+            "nothing was published from the suspect stage"
+        );
+        assert!(cdir.exists(), "the evidence stays for the user to inspect");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L03: a committed CLEAR removes the live member AND its retired `.bak`
+    /// — the generation-blind pair sweep must not republish (resurrect) a
+    /// member the committed generation deletes.
+    #[test]
+    fn a_committed_clear_takes_the_retired_bak_with_it() {
+        let (dir, raw, dev) = commit_fixture("commit-clear-bak");
+        let m1 = dev.join("m1.png");
+        std::fs::write(&m1, b"px-one").unwrap();
+        std::fs::write(recipe_target(&raw), b"gen1-recipe").unwrap();
+        // The resurrection bait: live pixels.json already fell, its .bak
+        // survives — exactly the state the pair sweep exists to republish.
+        std::fs::write(
+            dev.join("pixels.json.bak"),
+            pixel_source_record_bytes(&raw, &m1, false).unwrap(),
+        )
+        .unwrap();
+        let cdir = dev.join(".commit");
+        std::fs::create_dir_all(&cdir).unwrap();
+        let manifest = serde_json::json!({
+            "v": 1, "recipe": "keep", "pixels": "clear", "variants": "keep",
+            "sums": {},
+        });
+        std::fs::write(cdir.join("COMMIT"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        recover_orphan_baks(&raw).unwrap();
+
+        assert!(!pixel_source_path(&raw).exists(), "the cleared member stays cleared");
+        assert!(!dev.join("pixels.json.bak").exists(), "no resurrection bait survives");
+        assert!(!has_pixel_source(&raw));
+        assert!(!cdir.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L03: a pending explicit CLEAR is the newer intent by construction
+    /// (commit_develop completes one before it stages), so recovery lets the
+    /// clear take the crashed commit with it — never replays a develop the
+    /// user asked to remove.
+    #[test]
+    fn a_cleared_develop_takes_its_pending_commit_with_it() {
+        let (dir, raw, dev) = commit_fixture("commit-vs-clear");
+        std::fs::write(recipe_target(&raw), b"gen1-recipe").unwrap();
+        let cdir = dev.join(".commit");
+        std::fs::create_dir_all(&cdir).unwrap();
+        let r2 = b"gen2-recipe".to_vec();
+        std::fs::write(cdir.join("recipe.json"), &r2).unwrap();
+        let manifest = serde_json::json!({
+            "v": 1, "recipe": "write", "pixels": "keep", "variants": "keep",
+            "sums": { "recipe.json": commit_sum(&r2) },
+        });
+        std::fs::write(cdir.join("COMMIT"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::write(dev.join("clear.pending"), b"develop clear in progress\n").unwrap();
+
+        recover_orphan_baks(&raw).unwrap();
+
+        assert!(!recipe_target(&raw).exists(), "the clear won — no replay");
+        assert!(!cdir.exists(), "the crashed commit died with the clear");
+        assert!(dev.join("cleared.txt").exists());
+        assert!(!dev.join("clear.pending").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// The public saver end to end: a full triple lands as one generation
+    /// with no staging residue, a second generation writes + clears + keeps
+    /// per member, and an unresolved strip refuses the WHOLE save before
+    /// anything stages (the all-or-nothing face).
+    #[test]
+    fn a_develop_commit_lands_all_three_or_nothing() {
+        let (dir, raw, dev) = commit_fixture("commit-public");
+        let m1 = dev.join("m1.png");
+        std::fs::write(&m1, b"px-one").unwrap();
+
+        commit_develop(
+            &raw,
+            DevelopCommit {
+                recipe: Some(b"gen1-recipe".to_vec()),
+                pixels: CommitMember::Write(pixel_source_record_bytes(&raw, &m1, true).unwrap()),
+                variants: CommitMember::Write(
+                    variants_record_bytes(&raw, &strip_record("fitted")).unwrap(),
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen1-recipe");
+        let (master, generated) = read_pixel_source(&raw).expect("master linked");
+        assert_eq!(master.file_name().unwrap().to_str().unwrap(), "m1.png");
+        assert!(generated);
+        assert!(matches!(read_variants_checked(&raw), VariantsRead::Strip(_)));
+        assert!(!dev.join(".commit").exists(), "the stage is consumed");
+
+        commit_develop(
+            &raw,
+            DevelopCommit {
+                recipe: Some(b"gen2-recipe".to_vec()),
+                pixels: CommitMember::Clear,
+                variants: CommitMember::Keep,
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(recipe_target(&raw)).unwrap(), b"gen2-recipe");
+        assert!(!has_pixel_source(&raw), "cleared, retired .bak included");
+        assert!(matches!(read_variants_checked(&raw), VariantsRead::Strip(_)), "Keep kept it");
+
+        // No `.tmp.` staging litter anywhere in the develop dir.
+        for e in std::fs::read_dir(&dev).unwrap().flatten() {
+            let name = e.file_name();
+            assert!(
+                !name.to_string_lossy().contains(".tmp."),
+                "staging residue: {name:?}"
+            );
+        }
+
+        // The all-or-nothing face: an unresolved strip refuses the save
+        // BEFORE anything stages — the recipe member does not land either.
+        std::fs::write(variants_path(&raw), b"not json at all").unwrap();
+        let err = commit_develop(
+            &raw,
+            DevelopCommit {
+                recipe: Some(b"gen3-recipe".to_vec()),
+                pixels: CommitMember::Keep,
+                variants: CommitMember::Clear,
+            },
+        )
+        .expect_err("an unresolved strip refuses the whole save");
+        assert!(err.to_string().contains("cannot be honoured"), "{err}");
+        assert_eq!(
+            std::fs::read(recipe_target(&raw)).unwrap(),
+            b"gen2-recipe",
+            "all-or-nothing: the refused save left no member behind"
+        );
+        assert!(!dev.join(".commit").exists(), "nothing staged");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);

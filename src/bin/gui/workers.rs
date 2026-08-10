@@ -1308,41 +1308,44 @@ impl AutoshopApp {
                                     // lands, reopening restores it regardless
                                     // of the XMP — so the ● baseline follows
                                     // it even when the XMP half fails.
-                                    match autoshop::pipeline::write_recipe(&p, &stamped, None) {
-                                        Ok(_) => {
-                                            // Analyze is a SAVER (same rule as
-                                            // Ctrl+S) — and the same ORDER:
-                                            // pixel identity FIRST, then the
-                                            // badge/baseline, stash removal
-                                            // GATED on it. A failed
-                                            // pixels.json write must leave
-                                            // the stash protection armed, not
-                                            // declare everything saved.
-                                            let sync = match self
-                                                .active_variant()
-                                                .and_then(|v| v.origin.clone())
-                                            {
-                                                Some(o) => autoshop::store::write_pixel_source(
-                                                    &p,
-                                                    &o,
-                                                    self.active_is_generated(),
-                                                ),
-                                                None => autoshop::store::clear_pixel_source(&p),
-                                            };
-                                            let mut pixel_err: Option<String> = None;
-                                            let pixels_ok = match sync {
-                                                Ok(()) => true,
-                                                Err(e) => {
-                                                    let t = trf(
-                                                        lang,
-                                                        "could not record the retouched master ({err}) — reopening shows the un-retouched source; Export keeps the pixels",
-                                                        &[("err", &e.to_string())],
-                                                    );
-                                                    self.toast(ToastKind::Error, t.clone());
-                                                    pixel_err = Some(t);
-                                                    false
-                                                }
-                                            };
+                                    // Analyze is a SAVER (same rule as
+                                    // Ctrl+S) — ONE single-generation
+                                    // commit (L03): recipe + pixel link
+                                    // land whole or not at all, so the
+                                    // stash protection stays armed on any
+                                    // failure instead of half a save
+                                    // declaring everything safe. `variants:
+                                    // Keep` — Analyze writes no strip; a
+                                    // GUI strip going stale under this
+                                    // save is the registered cross-surface
+                                    // residual, unchanged here.
+                                    let origin = self
+                                        .active_variant()
+                                        .and_then(|v| v.origin.clone());
+                                    let generated = self.active_is_generated();
+                                    let commit_res: anyhow::Result<()> = (|| {
+                                        let recipe_bytes =
+                                            autoshop::pipeline::recipe_store_bytes(&p, &stamped)?;
+                                        let pixels = match &origin {
+                                            Some(o) => autoshop::store::CommitMember::Write(
+                                                autoshop::store::pixel_source_record_bytes(
+                                                    &p, o, generated,
+                                                )?,
+                                            ),
+                                            None => autoshop::store::CommitMember::Clear,
+                                        };
+                                        autoshop::store::commit_develop(
+                                            &p,
+                                            autoshop::store::DevelopCommit {
+                                                recipe: Some(recipe_bytes),
+                                                pixels,
+                                                variants: autoshop::store::CommitMember::Keep,
+                                            },
+                                        )?;
+                                        Ok(())
+                                    })();
+                                    match commit_res {
+                                        Ok(()) => {
                                             self.edited_badge.clear();
                                             // The ● baseline lives in CANVAS
                                             // coordinates: on a baked variant
@@ -1352,12 +1355,8 @@ impl AutoshopApp {
                                             // disk form) lit ● the instant a
                                             // successful analyze landed.
                                             self.saved_recipe = self.recipe.clone();
-                                            if pixels_ok {
-                                                self.nav_stash.remove(&p);
-                                                self.pixels_on_disk = self
-                                                    .active_variant()
-                                                    .and_then(|v| v.origin.clone());
-                                            }
+                                            self.nav_stash.remove(&p);
+                                            self.pixels_on_disk = origin;
                                             self.forget_open_base();
                                             if backed.is_some() {
                                                 self.refresh_versions();
@@ -1370,13 +1369,6 @@ impl AutoshopApp {
                                                 ),
                                                 None => tr(lang, "AI develop applied · saved to recipe.json").to_string(),
                                             };
-                                            // L08: the pixels.json failure was
-                                            // toast-only, and toasts EXPIRE —
-                                            // the status line then kept
-                                            // claiming a clean save.
-                                            if let Some(m) = pixel_err {
-                                                s = format!("{s} — ⚠ {m}");
-                                            }
                                             if autoshop::decode::is_raw(&p) {
                                                 match autoshop::pipeline::write_xmp(&p, &stamped) {
                                                     Ok((_, None)) => {}

@@ -792,14 +792,38 @@ fn match_cmd(
     {
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
-    let recipe_path = write_recipe(raw, &rep.recipe, Some(out))?;
+    // The canonical publish is ONE single-generation commit: recipe + the
+    // pixel-link CLEAR (the GUI reverse-fit pairing, L03). This fit was
+    // solved from the ORIGINAL source, so it describes the RAW — not a
+    // previously saved heal/generative master — and a stale link surviving a
+    // kill between the two writes made every later open apply the new look
+    // ON TOP of pixels it was never fitted to (16-lane scan L09/L13).
+    let commit_canonical = || -> Result<()> {
+        autoshop::store::commit_develop(
+            raw,
+            autoshop::store::DevelopCommit {
+                recipe: Some(pipeline::recipe_store_bytes(raw, &rep.recipe)?),
+                pixels: autoshop::store::CommitMember::Clear,
+                variants: autoshop::store::CommitMember::Keep,
+            },
+        )?;
+        Ok(())
+    };
+    let canonical = autoshop::store::recipe_target(raw);
+    let recipe_path = if same_path(&out, &canonical) {
+        // `-o` spelled AS the canonical path: the gate above already ran, and
+        // the commit below IS the canonical write.
+        commit_canonical()?;
+        canonical.clone()
+    } else {
+        write_recipe(raw, &rep.recipe, Some(out))?
+    };
     println!("recipe -> {}", recipe_path.display());
     // ALSO write the canonical sidecar. The store's recipe.json is the ONLY
     // recipe the GUI (read_saved_develop) and the web (/api/recipe) read back,
     // and the XMP below cannot carry the zoned result at all (raster masks,
     // colour gains, mask roles are recipe-only) — without this, `match --zoned`
     // produced a full fit that no surface able to render it could ever load.
-    let canonical = autoshop::store::recipe_target(raw);
     // same_path, not string equality: a case-flipped / junction-aliased -o
     // naming the canonical file already wrote it above — writing it a second
     // time (and printing "overwrites any earlier develop") was the string
@@ -812,27 +836,10 @@ fn match_cmd(
         if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(&rep.recipe)) {
             anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
         }
-        let p = write_recipe(raw, &rep.recipe, Some(canonical))?;
-        println!("sidecar-> {} (what the GUI/web restore; overwrites any earlier develop)", p.display());
-    }
-    // OUTSIDE that gate: whether -o happened to name the canonical file is
-    // about not writing it twice, and says nothing about the pixel master.
-    // This fit was solved from the ORIGINAL source, so it describes the RAW —
-    // not a previously saved heal/generative master. Leaving that link in
-    // place makes every later open apply the new look ON TOP of pixels it was
-    // never fitted to (the GUI reverse-fit clears it for exactly this
-    // reason), and an -o naming the canonical recipe used to skip the clear.
-    if let Err(e) = autoshop::store::clear_pixel_source(raw) {
-        // Hard failure, not a warning: the recipe above already committed,
-        // and a surviving master link makes every later open apply this
-        // source-fitted look ON TOP of stale healed/generated pixels — a
-        // silently different develop (16-lane scan L09/L13; the GUI
-        // reverse-fit already treats this as not-fully-persisted).
-        anyhow::bail!(
-            "the fitted recipe was SAVED, but the previous pixel-master link could not be \
-             cleared ({e}) — reopening would apply the fit onto stale retouched pixels. \
-             Delete or fix {} and re-run.",
-            autoshop::store::pixel_source_path(raw).display()
+        commit_canonical()?;
+        println!(
+            "sidecar-> {} (what the GUI/web restore; overwrites any earlier develop)",
+            canonical.display()
         );
     }
     if decode::is_raw(raw) {

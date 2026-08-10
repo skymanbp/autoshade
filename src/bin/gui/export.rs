@@ -570,81 +570,63 @@ impl AutoshopApp {
                 )));
             }
         }
-        match autoshop::pipeline::write_recipe(&path, &self.recipe, None) {
-            Ok(rp) => {
+        // ONE single-generation commit (L03): recipe.json, the pixels.json
+        // link and the strip record stage together and publish past ONE
+        // durable marker — no kill point between them can leave a new recipe
+        // over an old (or half-cleared) master link, or a new pair under a
+        // stale strip. All-or-nothing replaces the old per-member degrade
+        // notes: the save either lands whole (the notes below describe
+        // SEMANTICS — what a reopen restores — not write outcomes) or fails
+        // whole, with every unsaved protection still armed.
+        let origin = self.active_variant().and_then(|v| v.origin.clone());
+        let strip_rec = self.current_strip_record();
+        let generated = self.active_is_generated();
+        let committed: anyhow::Result<()> = (|| {
+            let recipe_bytes = autoshop::pipeline::recipe_store_bytes(&path, &self.recipe)?;
+            let pixels = match &origin {
+                // An in-place heal/clone/fill bakes pixels into the variant's
+                // origin raster; parametric recipe/XMP cannot carry them, so
+                // the store records the master's path and reopening restores
+                // the retouched canvas.
+                Some(o) => autoshop::store::CommitMember::Write(
+                    autoshop::store::pixel_source_record_bytes(&path, o, generated)?,
+                ),
+                // A parametric-only save CLEARS any stale record — a
+                // surviving one would resurrect an obsolete retouched canvas
+                // on the next open.
+                None => autoshop::store::CommitMember::Clear,
+            };
+            let variants = match &strip_rec {
+                Some(rec) => autoshop::store::CommitMember::Write(
+                    autoshop::store::variants_record_bytes(&path, rec)?,
+                ),
+                None => autoshop::store::CommitMember::Clear,
+            };
+            autoshop::store::commit_develop(
+                &path,
+                autoshop::store::DevelopCommit { recipe: Some(recipe_bytes), pixels, variants },
+            )?;
+            Ok(())
+        })();
+        match committed {
+            Ok(()) => {
                 self.open_unresolved = false;
-                // Pixel identity FIRST — before the badge/baseline/stash are
-                // advanced — so a failed pixels.json write leaves the stash
-                // protection armed instead of declaring everything saved: an
-                // in-place heal/clone/fill bakes pixels into the variant's
-                // origin raster, parametric recipe/XMP cannot carry them, and
-                // the store records the master's path so reopening restores
-                // the retouched canvas. A parametric-only save CLEARS any
-                // stale record (a silent clear failure would resurrect an
-                // obsolete retouched canvas on the next open — equally loud).
-                let mut pixel_note: Option<String> = None;
-                let pixels_ok = match self.active_variant().and_then(|v| v.origin.clone()) {
-                    Some(origin) => {
-                        let generated = self.active_is_generated();
-                        match autoshop::store::write_pixel_source(&path, &origin, generated) {
-                            Ok(()) => {
-                                pixel_note = Some(
-                                    tr(
-                                        lang,
-                                        " · retouched pixels: master linked — reopening restores them (the Lightroom XMP stays parametric-only)",
-                                    )
-                                    .to_string(),
-                                );
-                                true
-                            }
-                            Err(e) => {
-                                let t = trf(
-                                    lang,
-                                    "could not record the retouched master ({err}) — reopening shows the un-retouched source; Export keeps the pixels",
-                                    &[("err", &e.to_string())],
-                                );
-                                self.toast(ToastKind::Error, t.clone());
-                                pixel_note = Some(format!(" · {t}"));
-                                false
-                            }
-                        }
-                    }
-                    None => match autoshop::store::clear_pixel_source(&path) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            let t = trf(
-                                lang,
-                                "could not clear the recorded retouched master ({err}) — reopening may resurrect it",
-                                &[("err", &e.to_string())],
-                            );
-                            self.toast(ToastKind::Error, t.clone());
-                            pixel_note = Some(format!(" · {t}"));
-                            false
-                        }
-                    },
-                };
-                // The strip record saves/clears WITH the recipe (same pairing
-                // as the pixel link): a failed write keeps the mirror — and
-                // with it the background-variant unsaved protection — armed.
-                let strip_err = self.persist_strip(&path).err();
-                if let Some(e) = &strip_err {
-                    let t = trf(
+                let rp = autoshop::store::recipe_target(&path);
+                let pixel_note: Option<String> = origin.is_some().then(|| {
+                    tr(
                         lang,
-                        "could not save the variant strip ({err}) — background variants will not survive a reopen",
-                        &[("err", &e.to_string())],
-                    );
-                    self.toast(ToastKind::Error, t.clone());
-                    pixel_note = Some(match pixel_note {
-                        Some(n) => format!("{n} · {t}"),
-                        None => format!(" · {t}"),
-                    });
-                }
+                        " · retouched pixels: master linked — reopening restores them (the Lightroom XMP stays parametric-only)",
+                    )
+                    .to_string()
+                });
+                // The strip mirror advances WITH the commit (all-or-nothing:
+                // a failed commit leaves it untouched and the
+                // background-variant unsaved protection armed).
+                self.saved_strip = strip_rec;
                 self.edited_badge.clear(); // the open photo just gained its badge
                 self.saved_recipe = self.recipe.clone();
-                if pixels_ok {
-                    self.nav_stash.remove(&path);
-                    self.pixels_on_disk = self.active_variant().and_then(|v| v.origin.clone());
-                }
+                self.nav_stash.remove(&path);
+                self.pixels_on_disk = origin;
                 let mut s = if raw {
                     match autoshop::pipeline::write_xmp(&path, &self.recipe) {
                         Ok((p, merge_note)) => {
