@@ -941,6 +941,11 @@ impl AutoshopApp {
             autoshop::store::DevelopLockMode::NoWait,
             || -> std::io::Result<anyhow::Result<(EditRecipe, autoshop::recipe::ClampSummary)>> {
                 Ok((|| {
+                    // A stale UI row can still name a half-deleted version:
+                    // complete pending recovery (killed deletes included)
+                    // under OUR lock before reading — reentrant, so this
+                    // costs no second kernel acquisition (L03).
+                    let _ = autoshop::store::recover_orphan_baks(&src);
                     let s =
                         autoshop::store::read_text_capped(&p, autoshop::store::MAX_STORE_JSON)?;
                     let mut r = serde_json::from_str::<EditRecipe>(&s)?;

@@ -1033,6 +1033,13 @@ fn recover_orphan_baks_unlocked(src: &Path) -> std::io::Result<()> {
         }
         return Ok(());
     }
+    // A KILLED version delete resumes here too — best-effort and DISCLOSED,
+    // never folded into this fn's Err: that contract means "a save we
+    // cannot see, refuse to overwrite", and one locked raster in a dead
+    // version must not block every future save of the photo (L03).
+    if let Err(e) = recover_pending_version_deletes_unlocked(src) {
+        eprintln!("⚠ a crashed version delete could not be completed ({e}) — the version stays hidden and the sweep retries on the next touch");
+    }
     let dev = develop_dir(src);
     let mut failure: Option<std::io::Error> = None;
     for (live, bak) in [
@@ -1738,6 +1745,7 @@ fn clear_sweep(src: &Path) -> (bool, Option<std::io::Error>) {
 /// Snapshot numbers present in the photo's develop dir, sorted ascending.
 pub fn list_versions(src: &Path) -> Vec<u32> {
     let mut out = Vec::new();
+    let mut deleting = Vec::new();
     if let Ok(dir) = std::fs::read_dir(develop_dir(src)) {
         for e in dir.flatten() {
             let name = e.file_name();
@@ -1748,8 +1756,18 @@ pub fn list_versions(src: &Path) -> Vec<u32> {
             {
                 out.push(n);
             }
+            // A half-deleted version is not listed (L03): its recipe may
+            // survive the kill, but the user asked for it to go — recovery
+            // finishes the sweep at the next claim or locked touch.
+            if let Some(n) = name
+                .strip_prefix(".deleting.v")
+                .and_then(|rest| rest.parse::<u32>().ok())
+            {
+                deleting.push(n);
+            }
         }
     }
+    out.retain(|n| !deleting.contains(n));
     out.sort_unstable();
     out
 }
@@ -2019,6 +2037,12 @@ fn backup_saved_develop_unlocked(
 /// rarer and louder than the silent snapshot loss this replaces.)
 pub fn claim_version(src: &Path) -> std::io::Result<(u32, PathBuf)> {
     std::fs::create_dir_all(develop_dir(src))?;
+    // Complete any KILLED delete before claiming (L03): a half-deleted
+    // version whose recipe already fell is invisible to list_versions, so
+    // max+1 would RECYCLE its number — and the surviving marker would then
+    // have recovery delete the brand-new snapshot. Best-effort: a number
+    // whose marker cannot be cleared is skipped below, never claimed.
+    let _ = recover_pending_version_deletes_unlocked(src);
     let mut last = list_versions(src).last().copied();
     loop {
         if last == Some(u32::MAX) {
@@ -2028,6 +2052,11 @@ pub fn claim_version(src: &Path) -> std::io::Result<(u32, PathBuf)> {
         }
         let n = last.unwrap_or(0).saturating_add(1);
         let dst = version_target(src, n);
+        if deleting_marker(src, n).exists() {
+            // A marker that survived a failed resume owns this number.
+            last = Some(n);
+            continue;
+        }
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&dst) {
             Ok(_) => return Ok((n, dst)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2199,7 +2228,31 @@ pub fn delete_version(src: &Path, n: u32) -> std::io::Result<()> {
     with_develop_lock(src, DevelopLockMode::Wait, || delete_version_unlocked(src, n))
 }
 
+/// The version-delete transaction marker (L03). A leading dot keeps it
+/// outside the `v<N>.` namespace the sweep removes and `list_versions`
+/// parses; while it exists the version is "being removed" — unlisted, its
+/// number unclaimable — and recovery resumes the sweep.
+fn deleting_marker(src: &Path, n: u32) -> PathBuf {
+    develop_dir(src).join(format!(".deleting.v{n}"))
+}
+
 fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
+    // TRANSACTION MARKER FIRST (L03): a kill mid-sweep used to leave a
+    // half-version — recipe alive with rasters gone (listed, loadable,
+    // rendering dead masks the next save persists as dangling paths) or
+    // rasters alive with the recipe gone (orphan blobs forever, and the
+    // number silently recyclable). The marker records the intent durably;
+    // the sweep resumes at the next claim or locked recovery touch.
+    durable_write(&deleting_marker(src, n), format!("deleting v{n}\n").as_bytes())?;
+    sweep_version_unlocked(src, n, true)?;
+    let _ = std::fs::remove_file(deleting_marker(src, n));
+    Ok(())
+}
+
+/// The sweep half of [`delete_version_unlocked`]: rasters first, recipe
+/// last. `must_exist` keeps a fresh delete's NotFound error for a
+/// stale-list 🗑 while a RESUME tolerates the recipe already being gone.
+fn sweep_version_unlocked(src: &Path, n: u32, must_exist: bool) -> std::io::Result<()> {
     // Sweep the frozen rasters FIRST, recipe LAST: with the old order a
     // raster-removal failure was silently discarded after the recipe was
     // already gone, and a retry returned early on the missing recipe —
@@ -2247,8 +2300,49 @@ fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
     if let Some(err) = first_err {
         return Err(err);
     }
-    std::fs::remove_file(version_target(src, n))?;
-    Ok(())
+    match std::fs::remove_file(version_target(src, n)) {
+        Ok(()) => Ok(()),
+        Err(e) if !must_exist && e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Resume every KILLED version delete whose marker survives. Best-effort
+/// per version — a locked raster keeps its marker (the version stays
+/// unlisted and its number unclaimable) and the next touch retries.
+fn recover_pending_version_deletes_unlocked(src: &Path) -> std::io::Result<()> {
+    let mut pending = Vec::new();
+    match std::fs::read_dir(develop_dir(src)) {
+        Ok(dir) => {
+            for e in dir.flatten() {
+                if let Some(n) = e
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.strip_prefix(".deleting.v"))
+                    .and_then(|rest| rest.parse::<u32>().ok())
+                {
+                    pending.push(n);
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    }
+    let mut failure: Option<std::io::Error> = None;
+    for n in pending {
+        match sweep_version_unlocked(src, n, false) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(deleting_marker(src, n));
+            }
+            Err(e) => {
+                failure.get_or_insert(e);
+            }
+        }
+    }
+    match failure {
+        None => Ok(()),
+        Some(e) => Err(e),
+    }
 }
 
 /// Best-effort breadcrumb so a human browsing the hashed store can tell which
@@ -2992,6 +3086,43 @@ mod tests {
         // …and genuinely different photos must still get different keys.
         assert_ne!(plain, photo_key(Path::new(r"D:\photos\DSC002.NEF")));
         assert_ne!(plain, photo_key(Path::new(r"D:\other\DSC001.NEF")));
+    }
+
+    /// L03: a killed version delete hides the half-version from the list,
+    /// resumes at the next claim, and releases the number only once the
+    /// sweep truly finished — so a resumed sweep can never eat a fresh
+    /// snapshot that took a recycled number.
+    #[test]
+    fn a_killed_version_delete_resumes_before_its_number_is_reused() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-vdel-marker");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_vdel.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        // v1 complete; v2 half-deleted: the marker landed, the recipe and
+        // one frozen raster still on disk (killed before the sweep ran).
+        std::fs::write(version_target(&raw, 1), b"{}").unwrap();
+        std::fs::write(version_target(&raw, 2), b"{}").unwrap();
+        std::fs::write(dev.join("v2.mask-sky.png"), b"raster").unwrap();
+        std::fs::write(dev.join(".deleting.v2"), b"deleting v2\n").unwrap();
+
+        assert_eq!(list_versions(&raw), vec![1], "a half-deleted version is not listed");
+
+        let (n, claimed) = claim_version(&raw).unwrap();
+        assert!(!dev.join("v2.mask-sky.png").exists(), "the claim resumed the sweep first");
+        assert!(!dev.join(".deleting.v2").exists(), "the finished sweep consumed its marker");
+        assert_eq!(
+            n, 2,
+            "a number is recycled only AFTER its delete truly finished — with the marker gone that is safe"
+        );
+        assert!(claimed.exists(), "the claim file holds the recycled slot");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     /// L03: a killed clear completes on the next locked touch instead of
