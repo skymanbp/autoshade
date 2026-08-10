@@ -450,6 +450,26 @@ impl AutoshopApp {
                                     src_ident.clone(),
                                 ),
                             );
+                            // C1/F10 alias disclosure rides the open (once
+                            // per photo per session — the store stashes the
+                            // note at first key resolution and this consumes
+                            // it). Typed note, rendered HERE in the session
+                            // language (the worker-closure i18n rule).
+                            if !keep && let Some(note) = autoshop::store::take_alias_note(&p) {
+                                let t = match note {
+                                    autoshop::store::AliasNote::Adopted { from } => trf(
+                                        lang,
+                                        "edits saved under an older spelling of this photo's path were adopted ({path})",
+                                        &[("path", &from.display().to_string())],
+                                    ),
+                                    autoshop::store::AliasNote::SecondDevelop { at } => trf(
+                                        lang,
+                                        "a second saved develop exists at {path} (an older spelling of this photo's path) — it was NOT merged; showing the develop under the photo's true path",
+                                        &[("path", &at.display().to_string())],
+                                    ),
+                                };
+                                self.toast(ToastKind::Error, t);
+                            }
                         }
                         // Kept for Reset: "reset" = the fresh-open look, so it
                         // needs this photo's knots even when the restored

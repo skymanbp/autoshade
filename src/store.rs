@@ -352,9 +352,16 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(OFFSET, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME))
 }
 
-/// Stable per-photo key: `<stem>-<16 hex>` from the photo's absolute path.
-/// The stem prefix keeps the store browsable; the hash disambiguates
-/// same-named photos in different folders. Windows paths are case-insensitive
+/// Stable per-photo key: `<stem>-<16 hex>` from the photo's IDENTITY
+/// spelling — the canonical on-disk form for local volumes (C1/F10 rework,
+/// user-decided 2026-08-10), so a symlink/junction/8.3/case alias of one
+/// photo yields ONE key and one develop dir (and one develop LOCK — the
+/// concurrency cluster's exclusion was void across aliases). Network and
+/// device paths, and spellings that cannot be resolved, keep the LEXICAL
+/// key (see [`identity_of`]); canonical identity does not see through
+/// hardlinks or two mount points of one volume. The stem prefix keeps the
+/// store browsable; the hash disambiguates same-named photos in different
+/// folders. Windows paths are case-insensitive
 /// (NTFS), so BOTH halves fold case there — one file must never produce two
 /// keys just because it was opened as `D:\DSC001.ARW` once and
 /// `d:\dsc001.arw` once. (The hash folded from the start; the stem prefix
@@ -366,7 +373,19 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// as orphans; the store's stem-cased artifact names assume a
 /// case-insensitive root on Windows throughout.)
 pub fn photo_key(src: &Path) -> String {
-    let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    key_from_spelling(&identity_of(src))
+}
+
+/// Yesterday's key, byte-identical: the spelling handed in, made absolute
+/// LEXICALLY (no link resolution). Still real, not legacy-only: it is the
+/// fallback identity for network/device paths and unresolvable spellings,
+/// and [`resolve_key_in`] consults it to adopt develops saved by pre-C1
+/// builds.
+pub(crate) fn photo_key_lexical(src: &Path) -> String {
+    key_from_spelling(&std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf()))
+}
+
+fn key_from_spelling(abs: &Path) -> String {
     let mut s = abs.to_string_lossy().into_owned();
     // BOTH halves normalise, from the SAME string. The hash was taken from
     // `abs` while the stem was taken from the raw `src`, so a spelling that
@@ -377,7 +396,7 @@ pub fn photo_key(src: &Path) -> String {
     // then invisible under the other, and the next save built a fresh empty
     // develop beside it. For every ordinary path the two agree, so this
     // re-keys nothing that exists.
-    let mut stem = crate::pipeline::stem(&abs).to_string();
+    let mut stem = crate::pipeline::stem(abs).to_string();
     if cfg!(windows) {
         s = s.to_lowercase();
         // ASCII-only for the DIRECTORY NAME half. Rust's full Unicode
@@ -450,6 +469,390 @@ fn the_stem_fold_never_invents_a_name_ntfs_cannot_resolve() {
     }
 }
 
+/// The photo's IDENTITY spelling, memoized for the process lifetime. The
+/// memo is LOAD-BEARING for correctness, not a cache: `develop_dir` must
+/// answer the SAME directory for a given input path for the whole session
+/// (raster re-anchoring via `parent() == dir`, the commit staging base, and
+/// the develop-lock path all assume it), and canonicalize is a per-call
+/// filesystem probe whose answer can flip transiently (AV holding the file,
+/// a link retargeted mid-session). Consequence, documented: a link
+/// retargeted while Autoshop runs keeps this session on the identity it
+/// opened with.
+fn identity_of(src: &Path) -> PathBuf {
+    use std::sync::{Mutex, OnceLock};
+    let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    // LEXICAL-FIRST (the F4 rule, user-decided 2026-08-10): a network or
+    // device path's identity is its spelling. Canonicalizing one costs a
+    // network round trip per photo — a dead mapping would hang every key
+    // derivation — and the store has twice decided not to reach off this
+    // machine. Note this predicate has a second duty here, distinct from
+    // the F4 refusals ("a develop pack may not reach off this machine"):
+    // it also means "do not spend a network round trip on identity".
+    if remote_identity(&abs) {
+        return abs;
+    }
+    static MEMO: OnceLock<Mutex<std::collections::HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    let memo = MEMO.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some(hit) = memo.lock().unwrap().get(&abs) {
+        return hit.clone();
+    }
+    let (id, hard_fallback) = identity_spelling(&abs);
+    if hard_fallback {
+        // HARD fallback only (no ancestor resolved — e.g. a disconnected
+        // drive): a merely-absent leaf still resolves through its parent
+        // and is not disclosed. Once per photo per process via the memo.
+        eprintln!(
+            "⚠ {} could not be resolved to its on-disk form — its develop is keyed by the \
+             path spelling, so a link or short-name alias of this photo would get a \
+             separate develop",
+            abs.display()
+        );
+    }
+    let mut m = memo.lock().unwrap();
+    // Bounded (the memory-boundary idiom). NOT cleared on overflow: existing
+    // entries are the stability promise, so they stay; entries past the cap
+    // are simply recomputed per call (deterministic for a given disk state).
+    const MEMO_CAP: usize = 50_000;
+    if m.len() < MEMO_CAP {
+        m.entry(abs).or_insert_with(|| id.clone());
+    }
+    id
+}
+
+/// Resolve `abs` to its canonical on-disk spelling: canonicalize the deepest
+/// EXISTING ancestor and re-attach the not-yet-created tail (the
+/// `pipeline::resolve_existing_pub` shape — an absent photo still keys by
+/// the folder that holds it). Returns `(spelling, hard_fallback)`; a hard
+/// fallback means NOTHING resolved and the lexical spelling stands.
+fn identity_spelling(abs: &Path) -> (PathBuf, bool) {
+    let mut cur = abs;
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(mut c) = std::fs::canonicalize(cur) {
+            for t in tail.iter().rev() {
+                c.push(t);
+            }
+            return (strip_verbatim(&c), false);
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(par), Some(name)) if !par.as_os_str().is_empty() => {
+                tail.push(name);
+                cur = par;
+            }
+            _ => return (abs.to_path_buf(), true),
+        }
+    }
+}
+
+/// Undo the `\\?\` verbatim prefix `fs::canonicalize` returns on Windows,
+/// so the canonical key of a photo already spelled with its true casing on
+/// a plain local drive is BYTE-IDENTICAL to its lexical key — the property
+/// that keeps the overwhelming majority of existing develop dirs un-rekeyed.
+/// Only explicitly-understood prefixes are rewritten; everything else is
+/// left UNCHANGED — inventing a DOS spelling for e.g. `\\?\Volume{GUID}\`
+/// could collide with a different photo's key, the exact cross-photo
+/// clobber this module exists to prevent.
+fn strip_verbatim(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut comps = p.components();
+        let Some(Component::Prefix(pre)) = comps.next() else { return p.to_path_buf() };
+        let root: PathBuf = match pre.kind() {
+            Prefix::VerbatimDisk(letter) => PathBuf::from(format!("{}:\\", letter as char)),
+            Prefix::VerbatimUNC(server, share) => {
+                let mut s = std::ffi::OsString::from(r"\\");
+                s.push(server);
+                s.push(r"\");
+                s.push(share);
+                s.push(r"\");
+                PathBuf::from(s)
+            }
+            _ => return p.to_path_buf(),
+        };
+        let mut out = root;
+        for c in comps {
+            match c {
+                Component::RootDir => {}
+                other => out.push(other),
+            }
+        }
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_path_buf()
+    }
+}
+
+/// Network/device identity gate for [`identity_of`]: the F4 lexical
+/// prefixes PLUS mapped network drive letters — `GetDriveTypeW` is a local
+/// mount-table lookup, so a `Z:` pointing at a NAS is caught without any
+/// network I/O.
+fn remote_identity(p: &Path) -> bool {
+    remote_or_device_path(p) || remote_drive_letter(p)
+}
+
+#[cfg(windows)]
+fn remote_drive_letter(p: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    let letter = match p.components().next() {
+        Some(Component::Prefix(pre)) => match pre.kind() {
+            Prefix::Disk(l) | Prefix::VerbatimDisk(l) => l,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    const DRIVE_REMOTE: u32 = 4;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "GetDriveTypeW"]
+        fn get_drive_type_w(root: *const u16) -> u32;
+    }
+    let root: [u16; 4] = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: NUL-terminated buffer, live across the synchronous call.
+    (unsafe { get_drive_type_w(root.as_ptr()) }) == DRIVE_REMOTE
+}
+
+#[cfg(not(windows))]
+fn remote_drive_letter(_: &Path) -> bool {
+    false
+}
+
+/// What one resolved photo told the user about its aliased past — typed, so
+/// the GUI renders it in the session language at consumption time (the
+/// worker-closure i18n lesson), never a pre-formatted string.
+pub enum AliasNote {
+    /// Edits saved under an older (lexical) spelling were adopted into the
+    /// canonical develop dir.
+    Adopted { from: PathBuf },
+    /// BOTH spellings hold a real develop: the canonical one is in use, the
+    /// other was left untouched at this path (user-decided 2026-08-10:
+    /// disclose, never merge — a wrong guess silently destroys a develop).
+    SecondDevelop { at: PathBuf },
+}
+
+fn alias_notes() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, AliasNote>> {
+    static NOTES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, AliasNote>>> =
+        std::sync::OnceLock::new();
+    NOTES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Pop the alias disclosure for this photo, if its first key resolution this
+/// session produced one. The GUI's open path consumes it into a toast.
+pub fn take_alias_note(src: &Path) -> Option<AliasNote> {
+    let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    alias_notes().lock().unwrap().remove(&abs)
+}
+
+fn stash_alias_note(src_abs: &Path, note: AliasNote) {
+    alias_notes().lock().unwrap().insert(src_abs.to_path_buf(), note);
+}
+
+/// Which key this photo's develop lives under IN THIS ROOT — the canonical
+/// key, after a one-time adoption of anything a pre-canonical build saved
+/// under the lexical key. Memoized per (root, photo) for the process
+/// lifetime (the same stability contract as [`identity_of`]).
+fn resolve_key_in(root: &Path, src: &Path) -> String {
+    use std::sync::{Mutex, OnceLock};
+    let ck = photo_key(src);
+    let lk = photo_key_lexical(src);
+    if ck == lk {
+        // The common case (plain local path, true casing): zero probes,
+        // zero behaviour change.
+        return ck;
+    }
+    let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    static MEMO: OnceLock<Mutex<std::collections::HashMap<(PathBuf, PathBuf), String>>> =
+        OnceLock::new();
+    let memo = MEMO.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some(hit) = memo.lock().unwrap().get(&(root.to_path_buf(), abs.clone())) {
+        return hit.clone();
+    }
+    match adopt_or_choose(root, &abs, &ck, &lk) {
+        Some(key) => {
+            let mut m = memo.lock().unwrap();
+            const MEMO_CAP: usize = 50_000;
+            if m.len() < MEMO_CAP {
+                m.entry((root.to_path_buf(), abs)).or_insert_with(|| key.clone());
+            }
+            key
+        }
+        // Undecidable RIGHT NOW (another process holds a lock): fall back
+        // to the lexical key for THIS call, unmemoized, so the next touch
+        // retries the resolution instead of freezing the fallback.
+        None => lk,
+    }
+}
+
+/// Names that are per-dir machinery, never a develop's content — excluded
+/// from adoption copies and from the "is there anything here" probes.
+fn adoption_skips(name: &str) -> bool {
+    name == ".develop.lock"
+        || name == "superseded-by.txt"
+        || name == "adopting-from.txt"
+        || name == "adopted-from.txt"
+        || name.contains(".tmp.")
+}
+
+/// The one-time adoption decision for a photo whose canonical and lexical
+/// keys differ. Returns the key to use, or `None` when a lock could not be
+/// taken without waiting (retry next call). All-or-nothing: two dirs that
+/// BOTH hold a real develop are never merged file-by-file — a no-clobber
+/// union of two generations is a franken-develop.
+fn adopt_or_choose(root: &Path, abs: &Path, ck: &str, lk: &str) -> Option<String> {
+    let cd = root.join("develops").join(ck);
+    let ld = root.join("develops").join(lk);
+    let contentful = |d: &Path| -> bool {
+        std::fs::read_dir(d).ok().is_some_and(|it| {
+            it.flatten().any(|e| !adoption_skips(&e.file_name().to_string_lossy()))
+        })
+    };
+    // Already superseded by an earlier session's adoption — nothing to redo.
+    if ld.join("superseded-by.txt").exists() {
+        return Some(ck.to_string());
+    }
+    let resume = cd.join("adopting-from.txt").exists();
+    if !resume {
+        if !contentful(&ld) {
+            // Fresh photo (or only lock litter): the canonical key, no copy.
+            return Some(ck.to_string());
+        }
+        if contentful(&cd) {
+            // GENUINE collision: both spellings hold a develop and no
+            // adoption was in flight. Canonical wins, the alias stays on
+            // disk untouched, and the fact is durable + surfaced (once).
+            let marker = cd.join("aliased-develops.txt");
+            if !marker.exists() {
+                let _ = durable_write(
+                    &marker,
+                    format!("a second develop for this photo exists at:\n{}\n", ld.display())
+                        .as_bytes(),
+                );
+                eprintln!(
+                    "⚠ {} has a second saved develop at {} from an older path spelling — it was NOT merged",
+                    abs.display(),
+                    ld.display()
+                );
+                stash_alias_note(abs, AliasNote::SecondDevelop { at: ld.clone() });
+            }
+            return Some(ck.to_string());
+        }
+        // A pending transaction in the alias dir means its true content is
+        // not settled — and the recovery helpers all derive their paths from
+        // the PHOTO, which now resolves canonically, so they cannot be
+        // pointed at the alias dir. Defer: this session keys lexically (the
+        // pre-upgrade behaviour), the residue settles in place through
+        // normal use, and the NEXT session adopts. Self-healing across two
+        // sessions instead of a half-adopted transaction.
+        let residue = ld.join("clear.pending").exists()
+            || ld.join(".commit").exists()
+            || std::fs::read_dir(&ld).ok().is_some_and(|it| {
+                it.flatten().any(|e| {
+                    e.file_name().to_string_lossy().starts_with(".deleting.v")
+                })
+            })
+            || ["recipe.json", "pixels.json", "variants.json"].iter().any(|n| {
+                !ld.join(n).exists() && ld.join(format!("{n}.bak")).exists()
+            });
+        if residue {
+            eprintln!(
+                "⚠ {} has unsettled develop state under its older path spelling ({}) — adoption \
+                 into the canonical develop is postponed until it settles",
+                abs.display(),
+                ld.display()
+            );
+            return Some(lk.to_string());
+        }
+    }
+    // Adopt (or resume a crashed adoption), under BOTH dir locks in a fixed
+    // lexical→canonical order (total and process-independent, so two
+    // processes cannot deadlock; two processes adopting concurrently copy
+    // the same source bytes no-clobber and converge). with_path_lock
+    // directly — with_develop_lock would re-derive the key and recurse into
+    // this very function. NoWait on both: this can run on the UI thread
+    // (badge fill), and a held lock postpones, never hangs.
+    let adopted: std::io::Result<()> = (|| {
+        std::fs::create_dir_all(&cd)?; // the lock file needs its dir
+        with_path_lock(ld.join(".develop.lock"), DevelopLockMode::NoWait, || {
+            with_path_lock(cd.join(".develop.lock"), DevelopLockMode::NoWait, || {
+                adopt_files(&cd, &ld)
+            })
+        })
+    })();
+    match adopted {
+        Ok(()) => {
+            stash_alias_note(abs, AliasNote::Adopted { from: ld.clone() });
+            eprintln!(
+                "⚠ adopted the develop saved under {} into {} (the photo resolves there)",
+                ld.display(),
+                cd.display()
+            );
+            Some(ck.to_string())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+        Err(e) => {
+            eprintln!(
+                "⚠ adopting the develop at {} into {} failed ({e}) — this session keys the \
+                 photo by its path spelling and the adoption retries later",
+                ld.display(),
+                cd.display()
+            );
+            Some(lk.to_string())
+        }
+    }
+}
+
+/// The copy half of adoption, marker-fenced like every other multi-file
+/// mutation in this store: `adopting-from.txt` lands durably FIRST, the
+/// files copy no-clobber (idempotent — a crashed adoption resumes, and
+/// resumed copies come from the same source bytes), the completion
+/// breadcrumbs land, and only then is the in-flight marker consumed. The
+/// alias dir is left INTACT as a frozen backup with a `superseded-by.txt`
+/// pointer — adoption copies, it never deletes.
+fn adopt_files(cd: &Path, ld: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(cd)?;
+    durable_write(
+        &cd.join("adopting-from.txt"),
+        format!("{}\n", ld.display()).as_bytes(),
+    )?;
+    let copy_dir = |from: &Path, to: &Path| -> std::io::Result<()> {
+        for e in std::fs::read_dir(from)?.flatten() {
+            let name = e.file_name();
+            let name_s = name.to_string_lossy();
+            if adoption_skips(&name_s) {
+                continue;
+            }
+            let src = from.join(&name);
+            if src.is_dir() {
+                if name_s == ".legacy-suppressed" {
+                    std::fs::create_dir_all(to.join(&name))?;
+                    for c in std::fs::read_dir(&src)?.flatten() {
+                        let _ = move_file_no_clobber(&c.path(), &to.join(&name).join(c.file_name()))?;
+                    }
+                } else {
+                    eprintln!(
+                        "⚠ adoption skipped unknown directory {} — it stays under the old spelling",
+                        src.display()
+                    );
+                }
+                continue;
+            }
+            let _ = move_file_no_clobber(&src, &to.join(&name))?;
+        }
+        Ok(())
+    };
+    copy_dir(ld, cd)?;
+    durable_write(&cd.join("adopted-from.txt"), format!("{}\n", ld.display()).as_bytes())?;
+    durable_write(
+        &ld.join("superseded-by.txt"),
+        format!("{}\n", cd.display()).as_bytes(),
+    )?;
+    let _ = std::fs::remove_file(cd.join("adopting-from.txt"));
+    settle_consumed_marker(&cd.join("adopting-from.txt"));
+    Ok(())
+}
+
 /// This photo's develop directory (not created here).
 pub fn develop_dir(src: &Path) -> PathBuf {
     develop_dir_in(&store_root(), src)
@@ -458,7 +861,7 @@ pub fn develop_dir(src: &Path) -> PathBuf {
 /// Root-parameterized core of [`develop_dir`] so tests can use a temp root
 /// without mutating process-global env (set_var is unsafe + racy in 2024).
 fn develop_dir_in(root: &Path, src: &Path) -> PathBuf {
-    root.join("develops").join(photo_key(src))
+    root.join("develops").join(resolve_key_in(root, src))
 }
 
 /// The working recipe — the single source of truth for a photo's develop.
@@ -4689,6 +5092,210 @@ mod tests {
         // (nothing moved, nothing failed).
         assert_eq!(migrate_legacy_in(&root, Path::new("out"), &src), (false, false));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A temp-dir fixture base spelled CANONICALLY (env vars can carry an
+    /// off-case or 8.3 spelling of the temp dir, which would make lexical
+    /// and canonical keys differ for reasons unrelated to the test).
+    fn canonical_temp(tag: &str) -> PathBuf {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let base = strip_verbatim(&base).join(format!("autoshop-store-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// A directory junction (no privilege needed, unlike symlinks). The
+    /// fixture must build LOUDLY or the test is vacuous (the L14#5 lesson:
+    /// a fixture that cannot build must never silently pass green).
+    #[cfg(windows)]
+    fn make_junction(link: &Path, target: &Path) {
+        let ok = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        assert!(ok, "junction fixture could not be built: {} -> {}", link.display(), target.display());
+    }
+
+    /// C1/F10: for a photo already spelled canonically on a plain local
+    /// drive, the canonical key is BYTE-IDENTICAL to the lexical key — the
+    /// property that keeps existing develop dirs un-rekeyed.
+    #[test]
+    fn a_plain_local_path_keeps_the_key_it_had_before_canonical_identity() {
+        let dir = canonical_temp("c1-plain");
+        let photo = dir.join("_c1_plain.arw");
+        std::fs::write(&photo, b"raw").unwrap();
+        assert_eq!(photo_key(&photo), photo_key_lexical(&photo));
+        // An ABSENT photo under a real folder resolves through its parent
+        // and keeps the same key too (no disclosure, no divergence).
+        let absent = dir.join("_c1_never_existed.arw");
+        assert_eq!(photo_key(&absent), photo_key_lexical(&absent));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C1/F10 (user-decided 2026-08-10): network paths keep the lexical key
+    /// — identity never spends a network round trip.
+    #[test]
+    fn a_network_path_is_keyed_lexically_without_probing() {
+        let unc = Path::new(r"\\nas-that-does-not-exist\share\photos\DSC001.ARW");
+        assert_eq!(photo_key(unc), photo_key_lexical(unc));
+    }
+
+    /// C1/F10: a junction alias and its target are ONE photo — one key, one
+    /// develop dir, one develop lock.
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_junction_and_its_target_share_one_develop() {
+        let dir = canonical_temp("c1-junction");
+        let target = dir.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.join("alias");
+        make_junction(&link, &target);
+        let photo = target.join("_c1_junction.arw");
+        std::fs::write(&photo, b"raw").unwrap();
+        let via_alias = link.join("_c1_junction.arw");
+        assert_ne!(
+            photo_key_lexical(&via_alias),
+            photo_key_lexical(&photo),
+            "premise: the two spellings differ lexically"
+        );
+        assert_eq!(photo_key(&via_alias), photo_key(&photo), "one photo, one key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C1/F10: a develop saved by a pre-canonical build under the alias
+    /// spelling is ADOPTED into the canonical dir — copied no-clobber, the
+    /// alias dir left intact with a superseded pointer, the note surfaced.
+    #[cfg(windows)]
+    #[test]
+    fn an_alias_develop_dir_is_adopted_without_clobbering() {
+        let dir = canonical_temp("c1-adopt");
+        let target = dir.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.join("alias");
+        make_junction(&link, &target);
+        let photo = target.join("_c1_adopt.arw");
+        std::fs::write(&photo, b"raw").unwrap();
+        let via_alias = link.join("_c1_adopt.arw");
+
+        let root = store_root();
+        let ld = root.join("develops").join(photo_key_lexical(&via_alias));
+        let cd_expect = root.join("develops").join(photo_key(&via_alias));
+        let _ = std::fs::remove_dir_all(&ld);
+        let _ = std::fs::remove_dir_all(&cd_expect);
+        std::fs::create_dir_all(&ld).unwrap();
+        std::fs::write(ld.join("recipe.json"), b"{\"exposure_ev\":0.5}").unwrap();
+        std::fs::write(ld.join("mask-sky.png"), b"raster").unwrap();
+        std::fs::write(ld.join("source.txt"), b"breadcrumb").unwrap();
+
+        let dev = develop_dir(&via_alias);
+        assert_eq!(dev, cd_expect, "the photo now lives under its canonical key");
+        assert_eq!(std::fs::read(dev.join("recipe.json")).unwrap(), b"{\"exposure_ev\":0.5}");
+        assert_eq!(std::fs::read(dev.join("mask-sky.png")).unwrap(), b"raster");
+        assert!(dev.join("adopted-from.txt").exists(), "the adoption breadcrumb landed");
+        assert!(!dev.join("adopting-from.txt").exists(), "the in-flight marker was consumed");
+        assert!(
+            ld.join("superseded-by.txt").exists(),
+            "the alias dir points at its successor"
+        );
+        assert_eq!(
+            std::fs::read(ld.join("recipe.json")).unwrap(),
+            b"{\"exposure_ev\":0.5}",
+            "adoption copies — the alias dir stays intact as a frozen backup"
+        );
+        assert!(
+            matches!(take_alias_note(&via_alias), Some(AliasNote::Adopted { .. })),
+            "the adoption is surfaced to the GUI once"
+        );
+
+        let _ = std::fs::remove_dir_all(&ld);
+        let _ = std::fs::remove_dir_all(&cd_expect);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C1/F10 (user-decided 2026-08-10): when BOTH spellings hold a real
+    /// develop, the canonical one wins, the alias is left untouched, and
+    /// the fact is disclosed durably + to the GUI — never merged, never
+    /// guessed by mtime.
+    #[cfg(windows)]
+    #[test]
+    fn two_spellings_with_two_develops_keep_both_and_disclose() {
+        let dir = canonical_temp("c1-collide");
+        let target = dir.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.join("alias");
+        make_junction(&link, &target);
+        let photo = target.join("_c1_collide.arw");
+        std::fs::write(&photo, b"raw").unwrap();
+        let via_alias = link.join("_c1_collide.arw");
+
+        let root = store_root();
+        let ld = root.join("develops").join(photo_key_lexical(&via_alias));
+        let cd = root.join("develops").join(photo_key(&via_alias));
+        let _ = std::fs::remove_dir_all(&ld);
+        let _ = std::fs::remove_dir_all(&cd);
+        std::fs::create_dir_all(&ld).unwrap();
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::write(ld.join("recipe.json"), b"alias-develop").unwrap();
+        std::fs::write(cd.join("recipe.json"), b"canonical-develop").unwrap();
+
+        let dev = develop_dir(&via_alias);
+        assert_eq!(dev, cd);
+        assert_eq!(
+            std::fs::read(cd.join("recipe.json")).unwrap(),
+            b"canonical-develop",
+            "the canonical develop is untouched"
+        );
+        assert_eq!(
+            std::fs::read(ld.join("recipe.json")).unwrap(),
+            b"alias-develop",
+            "the alias develop is untouched — no merge, no delete"
+        );
+        assert!(!ld.join("superseded-by.txt").exists(), "a collision never supersedes");
+        assert!(cd.join("aliased-develops.txt").exists(), "the fact is durable");
+        assert!(
+            matches!(take_alias_note(&via_alias), Some(AliasNote::SecondDevelop { .. })),
+            "the collision is surfaced to the GUI once"
+        );
+
+        let _ = std::fs::remove_dir_all(&ld);
+        let _ = std::fs::remove_dir_all(&cd);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C1/F10: unsettled transaction state under the alias spelling defers
+    /// adoption — this session keys lexically (the pre-upgrade behaviour),
+    /// the residue settles in place, the NEXT session adopts.
+    #[cfg(windows)]
+    #[test]
+    fn a_pending_transaction_defers_adoption() {
+        let dir = canonical_temp("c1-defer");
+        let target = dir.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.join("alias");
+        make_junction(&link, &target);
+        let photo = target.join("_c1_defer.arw");
+        std::fs::write(&photo, b"raw").unwrap();
+        let via_alias = link.join("_c1_defer.arw");
+
+        let root = store_root();
+        let ld = root.join("develops").join(photo_key_lexical(&via_alias));
+        let cd = root.join("develops").join(photo_key(&via_alias));
+        let _ = std::fs::remove_dir_all(&ld);
+        let _ = std::fs::remove_dir_all(&cd);
+        std::fs::create_dir_all(&ld).unwrap();
+        std::fs::write(ld.join("recipe.json"), b"{}").unwrap();
+        std::fs::write(ld.join("clear.pending"), b"develop clear in progress\n").unwrap();
+
+        let dev = develop_dir(&via_alias);
+        assert_eq!(dev, ld, "unsettled state keeps the pre-upgrade lexical key");
+        assert!(!ld.join("superseded-by.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&ld);
+        let _ = std::fs::remove_dir_all(&cd);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

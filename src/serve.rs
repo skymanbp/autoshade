@@ -1823,10 +1823,18 @@ fn registered_export_out(
     std::fs::create_dir_all(&group)
         .with_context(|| format!("create export registry {}", group.display()))?;
 
-    // Use the store's standing lexical identity exactly as decided. The
-    // absolute source line is only a human-readable breadcrumb analogous to
-    // the develop store's source.txt; it is never canonicalized or compared.
+    // The store's identity key (canonical since the C1/F10 rework), with
+    // the pre-rework LEXICAL key accepted on READ: slots claimed by an
+    // older build must keep matching their photo, or a re-key would
+    // silently change deliverable filenames. The wider match means "the
+    // same photo under two spellings", never "any matching key" — and the
+    // owner file is NOT rewritten on a legacy match (rewriting is a
+    // clobbering write into a create_new-claimed namespace; accepting both
+    // spellings IS identity). The absolute source line is only a
+    // human-readable breadcrumb analogous to the develop store's
+    // source.txt; it is never canonicalized or compared.
     let photo_key = crate::store::photo_key(raw);
+    let legacy_key = crate::store::photo_key_lexical(raw);
     let source = std::path::absolute(raw).unwrap_or_else(|_| raw.to_path_buf());
     let owner_record = format!("{photo_key}\n{}\n", source.display());
 
@@ -1835,7 +1843,8 @@ fn registered_export_out(
         loop {
             match crate::store::read_text_capped(&entry, crate::store::MAX_STORE_JSON) {
                 Ok(text) => {
-                    if text.lines().next() == Some(photo_key.as_str()) {
+                    if matches!(text.lines().next(), Some(k) if k == photo_key || k == legacy_key)
+                    {
                         return Ok(export_slot_path(out_dir, stem, suffix, kind, ext));
                     }
                     // Another photo, an unregistered legacy artifact, or a
@@ -2951,6 +2960,59 @@ fn precondition_failed(if_match: Option<&str>, current: Option<&str>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C1/F10: an export slot claimed by a pre-canonical build under the
+    /// LEXICAL key must keep matching its photo after the re-key — else a
+    /// re-key silently changes deliverable filenames. Junction fixture so
+    /// the two keys genuinely differ; it must build LOUDLY (the L14#5
+    /// lesson: a fixture that cannot build must never silently pass green).
+    #[cfg(windows)]
+    #[test]
+    fn an_export_slot_claimed_under_the_lexical_key_still_matches_its_photo() {
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join("autoshop-serve-test-c1-registry");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = base.join("alias");
+        let ok = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        assert!(ok, "junction fixture could not be built");
+        let photo = target.join("_c1_registry.arw");
+        std::fs::write(&photo, b"raw").unwrap();
+        let via_alias = link.join("_c1_registry.arw");
+        let (ck, lk) =
+            (crate::store::photo_key(&via_alias), crate::store::photo_key_lexical(&via_alias));
+        assert_ne!(ck, lk, "premise: the two keys differ through the junction");
+
+        let out_dir = base.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let stem = pipeline::stem(&via_alias);
+        let registry_stem =
+            if cfg!(windows) { stem.to_ascii_lowercase() } else { stem.to_string() };
+        let group = out_dir
+            .join(".autoshop-export-registry")
+            .join(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(registry_stem.as_bytes()));
+        std::fs::create_dir_all(&group).unwrap();
+        // An older build claimed slot 1 under the lexical key.
+        std::fs::write(group.join("1.owner"), format!("{lk}\nbreadcrumb\n")).unwrap();
+
+        let slot = registered_export_out(&via_alias, "developed", "jpg", &out_dir).unwrap();
+        assert_eq!(
+            slot,
+            export_slot_path(&out_dir, stem, 1, "developed", "jpg"),
+            "the legacy-keyed slot is this photo's slot — no second slot is claimed"
+        );
+        assert!(!group.join("2.owner").exists(), "no fresh claim was minted");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// L02: the aggregate body budget — a small charge fits, and a charge
     /// that would pass the ceiling refuses (CAS, so concurrent holders can
