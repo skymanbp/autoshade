@@ -229,78 +229,79 @@ impl AutoshopApp {
                     let mut relooked = 0usize;
                     for p in &targets {
                         let one = (|| -> anyhow::Result<()> {
-                            let over = overrides.get(p);
-                            let recipe = if let Some((lr, _)) = over {
-                                lr.clone()
+                            // ONE locked snapshot per photo when DISK decides
+                            // (L01): recipe text, pixel source and the .bak
+                            // recovery that must PRECEDE recipe selection all
+                            // come from a single develop-lock acquisition —
+                            // four independent unlocked reads let a
+                            // mid-compound save interleave (recipe.json is
+                            // retired to .bak for its whole staged publish,
+                            // so exists() read "no develop" mid-save) and
+                            // shipped a neutral render of an edited photo, or
+                            // an old recipe over new baked pixels. The render
+                            // below runs OUTSIDE the lock, on the snapshot —
+                            // the CLI's documented contract. A develop whose
+                            // pixels are a baked retouch master renders FROM
+                            // that master (the recipe composes on top, the
+                            // same InPlace contract the canvas uses); the
+                            // override's pixel identity wins over disk — an
+                            // unsaved retouch/denoise must export exactly
+                            // like its canvas.
+                            let (recipe, pix) = if let Some((lr, pix)) = overrides.get(p) {
+                                (lr.clone(), pix.clone())
                             } else {
-                                // Central store first, then a not-yet-migrated
-                                // legacy ./out sidecar; rasters re-anchor to
-                                // whichever dir the recipe was read from.
-                                let mut found = None;
-                                for rj in [
-                                    autoshop::store::recipe_target(p),
-                                    autoshop::store::legacy_recipe(p),
-                                ] {
-                                    if rj.exists() {
-                                        let mut r = serde_json::from_str::<EditRecipe>(
-                                            &autoshop::store::read_text_capped(
-                                                &rj,
-                                                autoshop::store::MAX_STORE_JSON,
-                                            )?,
-                                        )?;
-                                        // The one restore path that never went
-                                        // through clamp: a stored recipe with
-                                        // extreme-but-finite geometry rendered
-                                        // NaN weights into a published export.
-                                        // render_to_file now clamps too — this
-                                        // keeps the batch recipe equal to what
-                                        // OPENING the photo would show.
-                                        r.clamp();
-                                        if let Some(base) = rj.parent() {
-                                            autoshop::store::resolve_mask_paths(&mut r, base);
-                                        }
-                                        found = Some(r);
-                                        break;
+                                let snap = autoshop::store::read_develop_snapshot(p)?;
+                                let recipe = if let Some((text, from)) = &snap.recipe {
+                                    let mut r = serde_json::from_str::<EditRecipe>(text)?;
+                                    // The one restore path that never went
+                                    // through clamp: a stored recipe with
+                                    // extreme-but-finite geometry rendered
+                                    // NaN weights into a published export.
+                                    // render_to_file now clamps too — this
+                                    // keeps the batch recipe equal to what
+                                    // OPENING the photo would show.
+                                    r.clamp();
+                                    // Rasters re-anchor to whichever dir the
+                                    // recipe was read from (central store
+                                    // first, else a legacy ./out sidecar).
+                                    if let Some(base) = from.parent() {
+                                        autoshop::store::resolve_mask_paths(&mut r, base);
                                     }
+                                    r
+                                } else if let Some(err) = &snap.recipe_err {
+                                    // An EXISTING save that cannot be read is
+                                    // not absence — exporting neutral over it
+                                    // would silently shed the user's edits.
+                                    anyhow::bail!("{err}");
+                                } else {
+                                    // No saved develop → export what the canvas
+                                    // WOULD show: neutral + the photo's camera-
+                                    // matched base look (one extra develop per
+                                    // photo; without it the batch export of an
+                                    // unedited RAW comes out on the dark base
+                                    // while its open canvas shows the bright
+                                    // one).
+                                    EditRecipe {
+                                        base_curve: autoshop::pipeline::photo_base_knots(p),
+                                        lens_profile: autoshop::pipeline::fresh_lens_profile(p),
+                                        ..Default::default()
+                                    }
+                                };
+                                // A recorded-but-unhonourable master:
+                                // exporting would silently drop the retouch —
+                                // fail THIS photo with the cause instead (the
+                                // summary lists it). Checked BEFORE the name
+                                // claim now, so a refused photo no longer
+                                // consumes a same-stem "(2)" slot.
+                                if snap.pixel_source.is_none() && snap.pixel_recorded {
+                                    anyhow::bail!(
+                                        "the saved retouch master could not be loaded — the export would silently drop the retouch (open the photo for the cause, then re-save or clear it)"
+                                    );
                                 }
-                                // No saved develop → export what the canvas
-                                // WOULD show: neutral + the photo's camera-
-                                // matched base look (one extra develop per
-                                // photo; without it the batch export of an
-                                // unedited RAW comes out on the dark base
-                                // while its open canvas shows the bright one).
-                                found.unwrap_or_else(|| EditRecipe {
-                                    base_curve: autoshop::pipeline::photo_base_knots(p),
-                                    lens_profile: autoshop::pipeline::fresh_lens_profile(p),
-                                    ..Default::default()
-                                })
+                                (recipe, snap.pixel_source)
                             };
                             let out = names.claim(p, "developed", &ext);
                             autoshop::pipeline::ensure_parent(&out)?;
-                            // A develop whose pixels are a baked retouch
-                            // master renders FROM that master (the recipe
-                            // composes on top — the same InPlace contract the
-                            // canvas uses); exporting the un-healed source
-                            // would silently drop the retouch from the batch.
-                            // The override's pixel identity wins over disk —
-                            // an unsaved retouch/denoise must export exactly
-                            // like its canvas.
-                            let pix = match over {
-                                Some((_, pix)) => pix.clone(),
-                                None => {
-                                    let pix = autoshop::store::read_pixel_source(p);
-                                    // A recorded-but-unhonourable master:
-                                    // exporting would silently drop the
-                                    // retouch — fail THIS photo with the
-                                    // cause instead (the summary lists it).
-                                    if pix.is_none() && autoshop::store::has_pixel_source(p) {
-                                        anyhow::bail!(
-                                            "the saved retouch master could not be loaded — the export would silently drop the retouch (open the photo for the cause, then re-save or clear it)"
-                                        );
-                                    }
-                                    pix
-                                }
-                            };
                             let mut recipe = recipe;
                             if pix.as_ref().is_some_and(|(_, generated)| *generated) {
                                 // A GENERATED master's look (camera curve AND

@@ -940,6 +940,64 @@ pub fn recover_orphan_baks(src: &Path) -> std::io::Result<()> {
     with_develop_lock(src, DevelopLockMode::Wait, || recover_orphan_baks_unlocked(src))
 }
 
+/// One coherent view of a photo's saved develop, for a renderer that must
+/// not see a mid-save interleave.
+pub struct DevelopSnapshot {
+    /// Saved recipe text + the file it came from (rasters re-anchor to its
+    /// dir) — central store first, else a legacy ./out sidecar.
+    pub recipe: Option<(String, PathBuf)>,
+    /// A CENTRAL read failure that is not absence (permissions, over-cap):
+    /// an existing save the caller must refuse to render over — falling
+    /// back to legacy would resurrect stale edits, so the walk stops.
+    pub recipe_err: Option<String>,
+    /// [`read_pixel_source`]'s answer, taken under the same lock.
+    pub pixel_source: Option<(PathBuf, bool)>,
+    /// [`has_pixel_source`]'s answer — a recorded-but-unloadable master
+    /// shows up as `pixel_source: None, pixel_recorded: true`.
+    pub pixel_recorded: bool,
+}
+
+/// Snapshot a photo's saved develop under ONE develop-lock acquisition
+/// (Wait — the worker-thread rule), with the `.bak` recovery FIRST. The GUI
+/// batch renderer used to take four independent unlocked store touches per
+/// photo: a writer retires recipe.json to .bak for its whole staged publish,
+/// so an unlocked exists() read "no develop" mid-save and the batch shipped
+/// a neutral render of an edited photo — and the only .bak recovery on that
+/// path was buried inside the pixel read, AFTER the recipe had been
+/// selected. Render OUTSIDE the lock, on the snapshot (the CLI's documented
+/// contract).
+pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
+    with_develop_lock(src, DevelopLockMode::Wait, || {
+        // A FAILED recovery is already reported by the helper (the
+        // read_pixel_source contract) — the reads below then degrade
+        // exactly as they do for any unreadable sidecar.
+        let _ = recover_orphan_baks_unlocked(src);
+        let mut recipe = None;
+        let mut recipe_err = None;
+        for rj in [recipe_target(src), legacy_recipe(src)] {
+            // Read directly — no exists() probe: absence is the read's own
+            // NotFound, decided at the same instant as the content.
+            match read_text_capped(&rj, MAX_STORE_JSON) {
+                Ok(t) => {
+                    recipe = Some((t, rj));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    recipe_err = Some(format!("cannot read {}: {e}", rj.display()));
+                    break;
+                }
+            }
+        }
+        Ok(DevelopSnapshot {
+            recipe,
+            recipe_err,
+            pixel_source: read_pixel_source(src),
+            pixel_recorded: has_pixel_source(src),
+        })
+    })
+}
+
 fn recover_orphan_baks_unlocked(src: &Path) -> std::io::Result<()> {
     let dev = develop_dir(src);
     let mut failure: Option<std::io::Error> = None;
@@ -2805,6 +2863,41 @@ mod tests {
         // …and genuinely different photos must still get different keys.
         assert_ne!(plain, photo_key(Path::new(r"D:\photos\DSC002.NEF")));
         assert_ne!(plain, photo_key(Path::new(r"D:\other\DSC001.NEF")));
+    }
+
+    /// L01: the snapshot's .bak recovery PRECEDES recipe selection, and
+    /// recipe + pixel source come from one lock acquisition. A crashed
+    /// publish leaves the recipe only in recipe.json.bak — the old batch
+    /// order (exists → read, recovery buried in the later pixel read)
+    /// exported a neutral develop while opening the same photo showed the
+    /// recovered one.
+    #[test]
+    fn a_develop_snapshot_recovers_the_bak_before_choosing_a_recipe() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-snapshot-bak");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_snapshot_probe.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        // A crashed publish: the recipe lives ONLY in the .bak.
+        let saved =
+            serde_json::to_string(&EditRecipe { contrast: 17.0, ..Default::default() })
+                .unwrap();
+        std::fs::write(dev.join("recipe.json.bak"), &saved).unwrap();
+
+        let snap = read_develop_snapshot(&raw).unwrap();
+        let (text, from) = snap.recipe.expect("the .bak must be recovered, not skipped");
+        assert_eq!(text, saved, "the recovered recipe is the crashed publish's bytes");
+        assert_eq!(from, recipe_target(&raw), "recovered into the central slot");
+        assert!(snap.recipe_err.is_none(), "a recovered read is not an error");
+        assert!(!snap.pixel_recorded, "no pixel link exists in this fixture");
+        assert!(snap.pixel_source.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]
