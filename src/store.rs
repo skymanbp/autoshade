@@ -998,6 +998,7 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
     // Consumed. A failure here only means the (idempotent) replay runs once
     // more on the next touch and consumes it then.
     let _ = std::fs::remove_dir_all(&cdir);
+    settle_consumed_marker(&cdir);
     Ok(())
 }
 
@@ -1137,6 +1138,7 @@ fn resolve_pending_commit_unlocked(src: &Path) -> std::io::Result<()> {
     };
     apply_commit_members(src, recipe_ref, pixels_ref, variants_ref)?;
     std::fs::remove_dir_all(&cdir)?;
+    settle_consumed_marker(&cdir);
     Ok(())
 }
 
@@ -1319,6 +1321,20 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
 /// [`commit_develop`], which must finish a pending clear BEFORE staging a
 /// new generation (the batch-S trap: a marker that outlives the save it
 /// predates would eat that save on the next recovery).
+/// Best-effort durability for a CONSUMED transaction marker (Codex round-12
+/// durability review, finding 2): fsync the directory that held it. Without
+/// this (unix), the plain unlink can fail to reach the disk and the
+/// resurrected marker would replay its transaction over work that POSTDATES
+/// it; with it, the exposure collapses to "a not-yet-durable save may be
+/// lost" — the store's existing crash contract (any later durable publish
+/// in the same directory persists this unlink alongside its own entry).
+/// Windows: finish_parent is a documented no-op and the ordering rests on
+/// NTFS's sequential metadata journal — a later write-through rename forces
+/// every earlier metadata record down with it.
+fn settle_consumed_marker(path: &Path) {
+    let _ = durable_os::finish_parent(path);
+}
+
 fn resolve_pending_clear_unlocked(src: &Path) -> std::io::Result<()> {
     if !clear_pending(src).exists() {
         return Ok(());
@@ -1331,6 +1347,7 @@ fn resolve_pending_clear_unlocked(src: &Path) -> std::io::Result<()> {
     }
     if mark_develop_cleared(src).is_ok() {
         let _ = std::fs::remove_file(clear_pending(src));
+        settle_consumed_marker(&clear_pending(src));
     }
     Ok(())
 }
@@ -1978,6 +1995,7 @@ fn clear_develop_unlocked(src: &Path) -> std::io::Result<ClearOutcome> {
         // retries it, and the ranking treats the marker itself as newest
         // intent meanwhile.
         let _ = std::fs::remove_file(clear_pending(src));
+        settle_consumed_marker(&clear_pending(src));
     }
     Ok(ClearOutcome { removed, marker_warning })
 }
@@ -2578,6 +2596,7 @@ fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
     durable_write(&deleting_marker(src, n), format!("deleting v{n}\n").as_bytes())?;
     sweep_version_unlocked(src, n, true)?;
     let _ = std::fs::remove_file(deleting_marker(src, n));
+    settle_consumed_marker(&deleting_marker(src, n));
     Ok(())
 }
 
@@ -2665,6 +2684,7 @@ fn recover_pending_version_deletes_unlocked(src: &Path) -> std::io::Result<()> {
         match sweep_version_unlocked(src, n, false) {
             Ok(()) => {
                 let _ = std::fs::remove_file(deleting_marker(src, n));
+                settle_consumed_marker(&deleting_marker(src, n));
             }
             Err(e) => {
                 failure.get_or_insert(e);

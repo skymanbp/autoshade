@@ -2157,6 +2157,22 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         &raw,
         crate::store::DevelopLockMode::Wait,
         || {
+    // Recovery FIRST (Codex round-12 durability review, finding 1): the
+    // If-Match gate below must compare against the CURRENT generation. A
+    // crashed save that reached its COMMIT marker but not the live files
+    // leaves recipe.json one generation behind — a stale tab's revision
+    // would PASS the gate, and the writer's own commit head would roll the
+    // newer committed generation forward only for this stale body to
+    // overwrite it. `recipe_revision` deliberately reads without recovering,
+    // so the resolution happens here, once, under the request's lock; an
+    // unresolvable state refuses the request instead of guessing what
+    // "current" means.
+    if let Err(e) = crate::store::recover_orphan_baks(&raw) {
+        return Ok(status_response(
+            500,
+            &format!("the saved develop needs a recovery that failed ({e}) - retry, or repair the store as the error describes"),
+        ));
+    }
     // The If-Match gate covers BOTH branches — the clear below deletes the
     // develop, which destroys a lost update just as surely as a write.
     if let Some(resp) = precondition_failed(
