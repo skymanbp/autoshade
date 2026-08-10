@@ -243,7 +243,82 @@ impl AutoshopApp {
         for _ in 0..64 {
             let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else { break };
             match msg {
-                Msg::Opened(boxed) => {
+                Msg::Opened(boxed) => self.on_opened(ctx, lang, boxed),
+                Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
+                Msg::Analyzed(epoch, boxed) => self.on_analyzed(lang, epoch, boxed),
+                Msg::Exported(Ok(p)) => {
+                    self.batch_progress = None; // the bar belongs to ONE batch run
+                    self.done(trf(lang, "exported → {path}", &[("path", p.as_str())]));
+                }
+                Msg::Exported(Err(e)) => {
+                    self.batch_progress = None;
+                    self.fail(tr(lang, "export failed"), e);
+                }
+                Msg::BatchProgress { done, total } => {
+                    self.batch_progress = Some((done, total));
+                    self.status = trf(
+                        lang,
+                        "Batch-rendering {done}/{total} → ./out …",
+                        &[("done", &done.to_string()), ("total", &total.to_string())],
+                    );
+                }
+                Msg::Segmented(res) => self.on_segmented(lang, res),
+                Msg::MaskRefined(res) => self.on_mask_refined(lang, res),
+                Msg::Folder(boxed) => self.on_folder(lang, *boxed),
+                Msg::Thumb { generation, idx, img } => self.on_thumb(ctx, generation, idx, *img),
+                Msg::MasterLoaded { photo, origin, img } => self.on_master_loaded(ctx, lang, photo, origin, *img),
+                Msg::Progress(epoch, m) => {
+                    // Liveness lines from a running generative worker. Epoch-
+                    // gated: after Cancel + an immediate re-run, the abandoned
+                    // worker's heartbeats must not overwrite the new task's
+                    // status line.
+                    if self.busy && self.gen_cancel.is_some() && epoch == self.gen_epoch {
+                        self.status = m;
+                    }
+                }
+                Msg::Retouched(epoch, boxed) => self.on_retouched(ctx, lang, epoch, *boxed),
+                Msg::Fitted(boxed) => self.on_fitted(ctx, lang, boxed),
+                Msg::Styled(boxed) => match *boxed {
+                    Ok((prompt, note)) => {
+                        // Into the Reimagine prompt: ready to restyle OTHER photos.
+                        self.reimagine_prompt = prompt;
+                        self.done(note);
+                    }
+                    Err(e) => {
+                        self.fail(tr(lang, "Style extraction failed"), e);
+                    }
+                },
+                Msg::Pasted(res) => self.on_pasted(lang, res),
+                Msg::LegacyImported(res) => {
+                    self.edited_badge.clear(); // imported sidecars light ● badges
+                    match res {
+                        Ok(s) => self.done(s),
+                        Err(e) => self.fail(tr(lang, "import failed"), e),
+                    }
+                }
+                Msg::Models(res) => self.on_models(lang, res),
+            }
+        }
+        // Keep the frame loop alive while any worker (analyze/export/thumbs/models/
+        // master decodes) runs — but at a 100 ms poll, not frame rate: worker
+        // completion only surfaces through the mpsc poll above, and a full-rate
+        // repaint burned CPU for the whole life of a stalled 600 s AI call. Input
+        // still repaints immediately; 100 ms only bounds COMPLETION latency.
+        // `master_loads` is in the gate because a cold-variant master decode is
+        // NOT `busy`: without it, MasterLoaded sat unread until the next input
+        // and the canvas kept showing the disclosed stand-in (16-lane scan L06).
+        if self.busy
+            || self.thumb_inflight > 0
+            || self.settings.fetching_models
+            || !self.master_loads.is_empty()
+        {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    /// `Msg::Opened` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_opened(&mut self, ctx: &egui::Context, lang: Lang, boxed: Box<anyhow::Result<OpenedBase>>) {
                     // `keep` distinguishes a fresh open from a preview-resolution
                     // re-decode (the px combo): consumed whether the open
                     // succeeds or fails so a failure can't leak it into a later
@@ -1137,9 +1212,12 @@ impl AutoshopApp {
                             }
                         }
                     }
-                }},
-                Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
-                Msg::Analyzed(epoch, boxed) => {
+                }
+    }
+
+    /// `Msg::Analyzed` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_analyzed(&mut self, lang: Lang, epoch: u64, boxed: Box<anyhow::Result<(EditRecipe, autoshop::advisor::Verdict)>>) {
                     // Cleared whatever the epoch: the wire is free either way,
                     // and this is what re-arms the Analyze button.
                     self.analyze_inflight = false;
@@ -1149,7 +1227,7 @@ impl AutoshopApp {
                         // recipe.json + XMP) — a stale install would not just
                         // repaint the canvas, it would save over the photo's
                         // develop. Discard entirely (Err is just as silent).
-                        continue;
+                        return; // was `continue` — the match was the loop's last statement
                     }
                     self.gen_cancel = None;
                     match *boxed {
@@ -1357,24 +1435,13 @@ impl AutoshopApp {
                     Err(e) => {
                         self.fail(tr(lang, "analyze failed"), e);
                     }
-                }}
-                Msg::Exported(Ok(p)) => {
-                    self.batch_progress = None; // the bar belongs to ONE batch run
-                    self.done(trf(lang, "exported → {path}", &[("path", p.as_str())]));
                 }
-                Msg::Exported(Err(e)) => {
-                    self.batch_progress = None;
-                    self.fail(tr(lang, "export failed"), e);
-                }
-                Msg::BatchProgress { done, total } => {
-                    self.batch_progress = Some((done, total));
-                    self.status = trf(
-                        lang,
-                        "Batch-rendering {done}/{total} → ./out …",
-                        &[("done", &done.to_string()), ("total", &total.to_string())],
-                    );
-                }
-                Msg::Segmented(res) => match res {
+    }
+
+    /// `Msg::Segmented` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_segmented(&mut self, lang: Lang, res: anyhow::Result<(String, PathBuf)>) {
+                match res {
                     Ok((label, path)) => {
                         let path_s = path.to_string_lossy().into_owned();
                         // One raster per (photo, target): a re-run refreshed the
@@ -1467,8 +1534,13 @@ impl AutoshopApp {
                     Err(e) => {
                         self.fail(tr(lang, "AI segmentation failed"), e);
                     }
-                },
-                Msg::MaskRefined(res) => match res {
+                }
+    }
+
+    /// `Msg::MaskRefined` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_mask_refined(&mut self, lang: Lang, res: anyhow::Result<(usize, String, PathBuf)>) {
+                match res {
                     Ok((idx, stored_ref, out)) => {
                         // Index + stored reference validated TOGETHER: the
                         // strip may have been edited while the worker decoded
@@ -1523,8 +1595,13 @@ impl AutoshopApp {
                     Err(e) => {
                         self.fail(tr(lang, "mask refine failed"), e);
                     }
-                },
-                Msg::Folder(boxed) => match *boxed {
+                }
+    }
+
+    /// `Msg::Folder` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_folder(&mut self, lang: Lang, res: anyhow::Result<(PathBuf, Vec<PathBuf>)>) {
+                match res {
                     Ok((dir, list)) => {
                         let n = list.len();
                         self.gallery = list;
@@ -1555,13 +1632,17 @@ impl AutoshopApp {
                     Err(e) => {
                         self.fail(tr(lang, "scan failed"), e);
                     }
-                },
-                Msg::Thumb { generation, idx, img } => {
+                }
+    }
+
+    /// `Msg::Thumb` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_thumb(&mut self, ctx: &egui::Context, generation: u64, idx: usize, img: anyhow::Result<image::DynamicImage>) {
                     // Ignore thumbnails from a previous folder generation (their
                     // inflight count was already discarded when the folder changed).
                     if generation == self.gallery_gen {
                         self.thumb_inflight = self.thumb_inflight.saturating_sub(1);
-                        match *img {
+                        match img {
                             Ok(im) => {
                                 let tex = ctx.load_texture(
                                     format!("thumb{idx}"),
@@ -1582,8 +1663,11 @@ impl AutoshopApp {
                             }
                         }
                     }
-                }
-                Msg::MasterLoaded { photo, origin, img } => {
+    }
+
+    /// `Msg::MasterLoaded` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_master_loaded(&mut self, ctx: &egui::Context, lang: Lang, photo: PathBuf, origin: PathBuf, img: anyhow::Result<image::DynamicImage>) {
                     // The in-flight marker clears on EVERY outcome — photo
                     // mismatch included — or one failed decode would block
                     // all retries for the rest of the session.
@@ -1592,7 +1676,7 @@ impl AutoshopApp {
                     // photo is open, and only into strip entries that still
                     // reference this exact master and still await pixels.
                     if self.src_path.as_ref() == Some(&photo) {
-                        match *img {
+                        match img {
                             Ok(im) => {
                                 let arc = Arc::new(im);
                                 let mut hit_active = false;
@@ -1620,26 +1704,20 @@ impl AutoshopApp {
                             }
                         }
                     }
-                }
-                Msg::Progress(epoch, m) => {
-                    // Liveness lines from a running generative worker. Epoch-
-                    // gated: after Cancel + an immediate re-run, the abandoned
-                    // worker's heartbeats must not overwrite the new task's
-                    // status line.
-                    if self.busy && self.gen_cancel.is_some() && epoch == self.gen_epoch {
-                        self.status = m;
-                    }
-                }
-                Msg::Retouched(epoch, boxed) => {
+    }
+
+    /// `Msg::Retouched` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_retouched(&mut self, ctx: &egui::Context, lang: Lang, epoch: u64, done: RetouchDone) {
                     if epoch != self.gen_epoch {
                         // A cancelled task's late result: the user already
                         // moved on — never let it mutate the canvas. Its ./out
                         // artifact stays on disk (harmless, and Err is just as
                         // silent).
-                        continue;
+                        return; // was `continue` — the match was the loop's last statement
                     }
                     self.gen_cancel = None;
-                    match *boxed {
+                    match done {
                     Ok((img, msg, saved, kind)) => {
                         self.clear_mask();
                         match kind {
@@ -1709,8 +1787,12 @@ impl AutoshopApp {
                         self.fail(tr(lang, "retouch failed"), e);
                     }
                     }
-                }
-                Msg::Fitted(boxed) => match *boxed {
+    }
+
+    /// `Msg::Fitted` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_fitted(&mut self, ctx: &egui::Context, lang: Lang, boxed: Box<anyhow::Result<(EditRecipe, String, bool)>>) {
+                match *boxed {
                     // Either way the worker may have persisted a recipe.json
                     // (an Err can land after that write) — recompute badges.
                     Ok((recipe, note, persisted)) => {
@@ -1756,18 +1838,12 @@ impl AutoshopApp {
                         self.refresh_versions();
                         self.fail(tr(lang, "Reverse-fit failed"), e);
                     }
-                },
-                Msg::Styled(boxed) => match *boxed {
-                    Ok((prompt, note)) => {
-                        // Into the Reimagine prompt: ready to restyle OTHER photos.
-                        self.reimagine_prompt = prompt;
-                        self.done(note);
-                    }
-                    Err(e) => {
-                        self.fail(tr(lang, "Style extraction failed"), e);
-                    }
-                },
-                Msg::Pasted(res) => {
+                }
+    }
+
+    /// `Msg::Pasted` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_pasted(&mut self, lang: Lang, res: anyhow::Result<String>) {
                     // Sidecars were written (possibly partially on error) —
                     // recompute the gallery badges either way.
                     self.edited_badge.clear();
@@ -1793,15 +1869,12 @@ impl AutoshopApp {
                             self.fail(tr(lang, "batch paste"), e);
                         }
                     }
-                }
-                Msg::LegacyImported(res) => {
-                    self.edited_badge.clear(); // imported sidecars light ● badges
-                    match res {
-                        Ok(s) => self.done(s),
-                        Err(e) => self.fail(tr(lang, "import failed"), e),
-                    }
-                }
-                Msg::Models(res) => match res {
+    }
+
+    /// `Msg::Models` landing — body extracted verbatim from the
+    /// poll_workers pump (round-12 decomposition; indentation kept).
+    fn on_models(&mut self, lang: Lang, res: anyhow::Result<Vec<String>>) {
+                match res {
                     Ok(ids) => {
                         let chat: Vec<String> = ids
                             .iter()
@@ -1831,23 +1904,7 @@ impl AutoshopApp {
                         self.settings.status =
                             trf(lang, "fetch failed: {err}", &[("err", &e.to_string())]);
                     }
-                },
-            }
-        }
-        // Keep the frame loop alive while any worker (analyze/export/thumbs/models/
-        // master decodes) runs — but at a 100 ms poll, not frame rate: worker
-        // completion only surfaces through the mpsc poll above, and a full-rate
-        // repaint burned CPU for the whole life of a stalled 600 s AI call. Input
-        // still repaints immediately; 100 ms only bounds COMPLETION latency.
-        // `master_loads` is in the gate because a cold-variant master decode is
-        // NOT `busy`: without it, MasterLoaded sat unread until the next input
-        // and the canvas kept showing the disclosed stand-in (16-lane scan L06).
-        if self.busy
-            || self.thumb_inflight > 0
-            || self.settings.fetching_models
-            || !self.master_loads.is_empty()
-        {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        }
+                }
     }
+
 }
