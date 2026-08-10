@@ -169,6 +169,35 @@ pub(crate) fn discard_failed_output(
     }
 }
 
+/// The unique staged sibling a denoise run writes before publishing: the
+/// promised deliverable name is shared and deterministic
+/// (`out/<stem>.denoised.tif`, keyed by stem alone), so the sidecar must
+/// never write it directly. The REAL extension stays LAST — the python
+/// sidecar picks cv2's encoder from it. Litter, disclosed: a hard kill can
+/// orphan one of these beside the deliverable — the same exposure class as
+/// the pre-existing `.part` siblings, and no sweeper exists for either.
+fn staged_sibling(out: &Path) -> PathBuf {
+    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("denoise");
+    out.with_file_name(format!(
+        "{stem}.dnstage.{}-{}.{ext}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ))
+}
+
+/// Release the caller's 0-byte claim at the promised name — and ONLY a
+/// 0-byte claim (the GUI's `unique_out` pre-creates one; failed runs used to
+/// eat the 999-name cap). A NONEMPTY file there is a concurrent run's
+/// published deliverable and must survive this run's failure — exactly the
+/// loss `discard_failed_output` inflicted at the shared name whenever its
+/// pre-spawn snapshot predated that publish. The GUI helper's lib-side twin.
+fn release_empty_claim(p: &Path) {
+    if std::fs::metadata(p).is_ok_and(|m| m.len() == 0) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Everything the sidecar needs for one run. Built from [`Config`] so the render
 /// engine stays decoupled from config/env.
 pub struct DenoiseOpts {
@@ -348,9 +377,15 @@ fn run_sidecar_with_budget(
             opts.script.display()
         );
     }
-    // BEFORE the spawn: what already sits at the promised path (a stale
-    // deliverable, or the 0-byte claim file the GUI's unique_out creates).
-    let before = crate::artifact_state(output);
+    // The sidecar writes a STAGED sibling, never the promised name: that
+    // name is shared and deterministic, so two concurrent runs used to
+    // interleave into ONE file — and a failing run's cleanup deleted the
+    // deliverable a concurrent run had JUST published (the failer's
+    // pre-spawn snapshot predated the publish, so it read as removable).
+    // The snapshot now guards the staged path — fresh by construction, so
+    // the exit-0-no-write refusal keeps its full strength.
+    let staged = staged_sibling(output);
+    let before = crate::artifact_state(&staged);
     let mut cmd = Command::new(&opts.python_bin);
     // `-E`: ignore PYTHON* environment variables — a cwd .env's
     // `PYTHONPATH=.` beside a hostile `numpy.py` is code execution at
@@ -360,7 +395,7 @@ fn run_sidecar_with_budget(
         .arg("--input")
         .arg(input)
         .arg("--output")
-        .arg(output)
+        .arg(&staged)
         .arg("--model")
         .arg(&opts.model)
         .arg("--strength")
@@ -389,14 +424,18 @@ fn run_sidecar_with_budget(
     let out = match run {
         Ok(out) => out,
         Err(error) => {
-            // A killed/failed run must not leave the store holding a claim no
-            // recipe references (nor a partial write at the promised name).
-            discard_failed_output(output, before);
+            // A killed/failed run cleans its OWN staging and releases the
+            // caller's 0-byte claim at the promised name — never a nonempty
+            // file there, which is a concurrent run's published deliverable
+            // now that the sidecar cannot write the shared name.
+            discard_failed_output(&staged, before);
+            release_empty_claim(output);
             return Err(error);
         }
     };
     if !out.status.success() {
-        discard_failed_output(output, before);
+        discard_failed_output(&staged, before);
+        release_empty_claim(output);
         bail!(
             "denoise sidecar exited with {}: {}",
             out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
@@ -408,11 +447,22 @@ fn run_sidecar_with_budget(
     // that wrote nothing still "succeeded" whenever the deterministic
     // deliverable name already held an EARLIER export — the check passed on
     // the stale file and the CLI presented last week's pixels as this run's.
-    let wrote = crate::sidecar_wrote("denoise sidecar", output, before);
-    if wrote.is_err() {
-        discard_failed_output(output, before);
+    let wrote = crate::sidecar_wrote("denoise sidecar", &staged, before);
+    if let Err(e) = wrote {
+        discard_failed_output(&staged, before);
+        release_empty_claim(output);
+        return Err(e);
     }
-    wrote
+    // Publish: ONE rename moves the finished bytes onto the promised name,
+    // replacing the caller's 0-byte claim (or an older deliverable) in a
+    // single step — concurrent runs can no longer interleave into the
+    // shared name, and this run's failure paths never touch it.
+    if let Err(e) = std::fs::rename(&staged, output) {
+        let _ = std::fs::remove_file(&staged);
+        release_empty_claim(output);
+        return Err(e).with_context(|| format!("publish denoise output {}", output.display()));
+    }
+    Ok(())
 }
 
 fn temp_path(tag: &str) -> Result<PathBuf> {
@@ -528,6 +578,34 @@ mod tests {
         }
     }
 
+    /// A stand-in that models a CONCURRENT publisher: it writes fixed
+    /// bytes to the FINAL deliverable name (ignoring the staged `--output`
+    /// it was handed) and exits with `code`.
+    fn stand_in_publishing(dir: &Path, target: &Path, code: i32) -> String {
+        #[cfg(windows)]
+        {
+            let p = dir.join(format!("publish{code}.bat"));
+            let body = format!(
+                "@echo another runs pixels>\"{}\"\r\n@exit /b {code}\r\n",
+                target.display()
+            );
+            std::fs::write(&p, body).unwrap();
+            p.to_string_lossy().into_owned()
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join(format!("publish{code}.sh"));
+            let body = format!(
+                "#!/bin/sh\nprintf 'another runs pixels' > \"{}\"\nexit {code}\n",
+                target.display()
+            );
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_string_lossy().into_owned()
+        }
+    }
+
     fn opts_for(dir: &Path, writes: bool) -> DenoiseOpts {
         // The script must merely exist — run_sidecar refuses a missing one
         // before it ever spawns.
@@ -589,7 +667,46 @@ mod tests {
         std::fs::write(&output, b"an earlier successful export").unwrap();
 
         let err = run_sidecar(&opts, &input, &output).unwrap_err().to_string();
-        assert!(err.contains("predates this run"), "{err}");
+        // Staged now: a missing write is refused as "no output" (the staged
+        // sibling is fresh by construction) — and the stale deliverable
+        // SURVIVES, where the old direct-write cleanup could delete it.
+        assert!(err.contains("exited 0 but wrote no output"), "{err}");
+        assert!(
+            std::fs::read(&output).unwrap().starts_with(b"an earlier successful export"),
+            "a failed run must not touch the promised name"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L01/L10: the promised deliverable name is shared — a concurrent run's
+    /// just-published file used to be DELETED by this run's failure cleanup
+    /// (the failer's pre-spawn snapshot predated the publish, so it read as
+    /// removable), and an exit-0-no-write sidecar had the other run's bytes
+    /// accepted as its own result. The "concurrent publisher" is modelled by
+    /// a stand-in that writes the FINAL name and fails — no threads, no
+    /// timing luck.
+    #[test]
+    fn another_runs_published_deliverable_survives_this_runs_failure() {
+        let dir = tdir("crossrun");
+        let output = dir.join("out.png");
+        let input = dir.join("in.png");
+        std::fs::write(&input, b"not-really-a-png").unwrap();
+
+        let mut opts = opts_for(&dir, false);
+        opts.python_bin = stand_in_publishing(&dir, &output, 1);
+        assert!(run_sidecar(&opts, &input, &output).is_err());
+        assert!(
+            std::fs::read(&output).unwrap().starts_with(b"another runs pixels"),
+            "a failing run deleted a concurrent run's published deliverable"
+        );
+
+        // The exit-0 variant: the other run's bytes must not be presented
+        // as THIS run's result — and they still survive the refusal.
+        opts.python_bin = stand_in_publishing(&dir, &output, 0);
+        let err = run_sidecar(&opts, &input, &output).unwrap_err().to_string();
+        assert!(err.contains("exited 0 but wrote no output"), "{err}");
+        assert!(std::fs::read(&output).unwrap().starts_with(b"another runs pixels"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -606,7 +723,11 @@ mod tests {
         std::fs::write(&output, b"").unwrap(); // the claim file
 
         let err = run_sidecar(&opts, &input, &output).unwrap_err().to_string();
-        assert!(err.contains("is empty"), "{err}");
+        // Staged now: refused as "no output" (the fresh staged sibling was
+        // never written), and the 0-byte claim is RELEASED so failed runs
+        // stop eating the 999-name cap.
+        assert!(err.contains("exited 0 but wrote no output"), "{err}");
+        assert!(!output.exists(), "the empty claim must be released on failure");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
