@@ -2521,43 +2521,42 @@ fn api_settings_get(state: &AppState) -> Result<ResponseBox> {
 /// Persist provider/model/key changes to the gitignored local file, then
 /// hot-reload the running config. Blank key fields are left unchanged (the GET
 /// side never reveals existing keys, so the UI sends a key only when it changes).
-/// Serializes the settings read-modify-write cycle: two concurrent POSTs
-/// each loading the same old file and changing different fields silently
-/// lost whichever save landed first.
-static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+/// The read-modify-write cycle runs inside `config::update_local_settings`,
+/// under the CROSS-PROCESS settings lock: the in-process Mutex that used to
+/// sit here serialized only this server's threads, while the GUI process
+/// merges onto the same file — either side's save landing between the other's
+/// load and rename was silently erased (L01).
 fn api_settings_post(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let inc: LocalSettings = read_json(request)?;
-    let _settings = SETTINGS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut cur = crate::config::load_local_settings();
-    // Non-secret fields: take whatever the UI sent (empty ⇒ falls back to default).
-    if inc.analysis_provider.is_some() {
-        cur.analysis_provider = inc.analysis_provider;
-    }
-    if inc.analysis_model.is_some() {
-        cur.analysis_model = inc.analysis_model;
-    }
-    if inc.analysis_base_url.is_some() {
-        cur.analysis_base_url = inc.analysis_base_url;
-    }
-    if inc.image_model.is_some() {
-        cur.image_model = inc.image_model;
-    }
-    if inc.image_base_url.is_some() {
-        cur.image_base_url = inc.image_base_url;
-    }
-    if inc.image_gen_model.is_some() {
-        cur.image_gen_model = inc.image_gen_model;
-    }
-    // Secrets: only overwrite when a non-empty value was actually provided.
-    if let Some(k) = inc.analysis_api_key.filter(|s| !s.trim().is_empty()) {
-        cur.analysis_api_key = Some(k);
-    }
-    if let Some(k) = inc.image_api_key.filter(|s| !s.trim().is_empty()) {
-        cur.image_api_key = Some(k);
-    }
-
-    let path = crate::config::save_local_settings(&cur).map_err(|e| anyhow!("write settings: {e}"))?;
+    let path = crate::config::update_local_settings(|cur| {
+        // Non-secret fields: take whatever the UI sent (empty ⇒ falls back to default).
+        if inc.analysis_provider.is_some() {
+            cur.analysis_provider = inc.analysis_provider;
+        }
+        if inc.analysis_model.is_some() {
+            cur.analysis_model = inc.analysis_model;
+        }
+        if inc.analysis_base_url.is_some() {
+            cur.analysis_base_url = inc.analysis_base_url;
+        }
+        if inc.image_model.is_some() {
+            cur.image_model = inc.image_model;
+        }
+        if inc.image_base_url.is_some() {
+            cur.image_base_url = inc.image_base_url;
+        }
+        if inc.image_gen_model.is_some() {
+            cur.image_gen_model = inc.image_gen_model;
+        }
+        // Secrets: only overwrite when a non-empty value was actually provided.
+        if let Some(k) = inc.analysis_api_key.filter(|s| !s.trim().is_empty()) {
+            cur.analysis_api_key = Some(k);
+        }
+        if let Some(k) = inc.image_api_key.filter(|s| !s.trim().is_empty()) {
+            cur.image_api_key = Some(k);
+        }
+    })
+    .map_err(|e| anyhow!("write settings: {e}"))?;
     *state.cfg.write().unwrap_or_else(|e| e.into_inner()) = Config::load();
     Ok(json_response(&json!({ "ok": true, "saved": path.display().to_string() })))
 }

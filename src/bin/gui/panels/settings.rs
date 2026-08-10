@@ -38,26 +38,32 @@ impl AutoshopApp {
     /// Persist the Settings form to autoshop.local.json (gitignored). A blank key
     /// keeps the stored one. The next Analyze/Export reloads Config, so it applies.
     pub(crate) fn save_settings_form(&mut self) {
-        let mut cur = autoshop::config::load_local_settings();
-        cur.analysis_provider =
-            Some(if self.settings.analysis_provider_api { "api" } else { "oauth" }.to_string());
-        cur.image_provider =
-            Some(if self.settings.image_provider_oauth { "oauth" } else { "api" }.to_string());
-        cur.analysis_model = Some(self.settings.analysis_model.trim().to_string());
-        cur.analysis_base_url = Some(self.settings.analysis_base_url.trim().to_string());
-        cur.image_model = Some(self.settings.image_model.trim().to_string());
-        cur.image_base_url = Some(self.settings.image_base_url.trim().to_string());
-        cur.image_gen_model = Some(self.settings.image_gen_model.trim().to_string());
-        // Secrets: only overwrite when a non-empty value was actually typed.
-        let ak = self.settings.analysis_api_key.trim().to_string();
-        let ik = self.settings.image_api_key.trim().to_string();
-        if !ak.is_empty() {
-            cur.analysis_api_key = Some(ak);
-        }
-        if !ik.is_empty() {
-            cur.image_api_key = Some(ik);
-        }
-        match autoshop::config::save_local_settings(&cur) {
+        // The whole load-merge-save runs under the cross-process settings
+        // lock (`config::update_local_settings`): this panel and the serve
+        // process merge onto the same file, and the old unlocked cycle here
+        // let a save that landed between its load and its rename be erased.
+        let form = &self.settings;
+        let saved = autoshop::config::update_local_settings(|cur| {
+            cur.analysis_provider =
+                Some(if form.analysis_provider_api { "api" } else { "oauth" }.to_string());
+            cur.image_provider =
+                Some(if form.image_provider_oauth { "oauth" } else { "api" }.to_string());
+            cur.analysis_model = Some(form.analysis_model.trim().to_string());
+            cur.analysis_base_url = Some(form.analysis_base_url.trim().to_string());
+            cur.image_model = Some(form.image_model.trim().to_string());
+            cur.image_base_url = Some(form.image_base_url.trim().to_string());
+            cur.image_gen_model = Some(form.image_gen_model.trim().to_string());
+            // Secrets: only overwrite when a non-empty value was actually typed.
+            let ak = form.analysis_api_key.trim().to_string();
+            let ik = form.image_api_key.trim().to_string();
+            if !ak.is_empty() {
+                cur.analysis_api_key = Some(ak);
+            }
+            if !ik.is_empty() {
+                cur.image_api_key = Some(ik);
+            }
+        });
+        match saved {
             Ok(p) => {
                 self.settings.analysis_api_key.clear();
                 self.settings.image_api_key.clear();

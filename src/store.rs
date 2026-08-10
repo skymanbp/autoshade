@@ -54,10 +54,12 @@ pub enum DevelopLockMode {
 
 thread_local! {
     /// OS locks are not recursively lockable through independent handles.
-    /// Compound surface saves call lower-level store writers, so same-thread
-    /// nesting reuses the outer lock while other threads and processes still
-    /// contend through the kernel.
-    static HELD_DEVELOP_LOCKS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    /// Compound surface saves call lower-level store writers (and a locked
+    /// settings writer's load can hit the corrupt-file rescue), so
+    /// same-thread nesting reuses the outer lock while other threads and
+    /// processes still contend through the kernel. Keyed by lock-file path:
+    /// develop locks and the settings lock share this set.
+    static HELD_FILE_LOCKS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
 }
 
 struct DevelopLockGuard {
@@ -68,7 +70,7 @@ struct DevelopLockGuard {
 impl Drop for DevelopLockGuard {
     fn drop(&mut self) {
         os_develop_lock::unlock(&self.file);
-        HELD_DEVELOP_LOCKS.with(|held| {
+        HELD_FILE_LOCKS.with(|held| {
             held.borrow_mut().remove(&self.path);
         });
     }
@@ -100,8 +102,22 @@ where
 {
     let dev = develop_dir_in(root, src);
     std::fs::create_dir_all(&dev).map_err(E::from)?;
-    let path = dev.join(".develop.lock");
-    if HELD_DEVELOP_LOCKS.with(|held| held.borrow().contains(&path)) {
+    with_path_lock(dev.join(".develop.lock"), mode, f)
+}
+
+/// The shared engine of [`with_develop_lock`] and [`with_settings_lock`]: run
+/// `f` under the kernel lock on `path`. Same-thread nesting on the same lock
+/// path re-enters through the thread-local held set; other threads and other
+/// processes contend through the kernel.
+fn with_path_lock<T, E>(
+    path: PathBuf,
+    mode: DevelopLockMode,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<io::Error>,
+{
+    if HELD_FILE_LOCKS.with(|held| held.borrow().contains(&path)) {
         return f();
     }
 
@@ -118,11 +134,42 @@ where
         .open(&path)
         .map_err(E::from)?;
     os_develop_lock::lock(&file, mode).map_err(E::from)?;
-    HELD_DEVELOP_LOCKS.with(|held| {
+    HELD_FILE_LOCKS.with(|held| {
         held.borrow_mut().insert(path.clone());
     });
     let _guard = DevelopLockGuard { path, file };
     f()
+}
+
+/// Run one settings-file operation — a writer's read-modify-write cycle, or
+/// the corrupt-file rescue — under a cross-process kernel lock
+/// (`.settings.lock` in the store root). serve's old in-process
+/// `SETTINGS_LOCK` Mutex serialized only its own threads: the GUI process and
+/// the serve process each load-merge-save the same `autoshop.local.json`, so
+/// one process's save landing between the other's load and rename was
+/// silently erased — and the file carries the API keys (L01). Kernel-owned
+/// like the develop lock: a crash releases it, so no stale-lock cleanup
+/// exists or is needed.
+pub fn with_settings_lock<T, E>(
+    mode: DevelopLockMode,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<io::Error>,
+{
+    with_settings_lock_in(&store_root(), mode, f)
+}
+
+fn with_settings_lock_in<T, E>(
+    root: &Path,
+    mode: DevelopLockMode,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<io::Error>,
+{
+    std::fs::create_dir_all(root).map_err(E::from)?;
+    with_path_lock(root.join(".settings.lock"), mode, f)
 }
 
 #[cfg(unix)]
@@ -3486,6 +3533,46 @@ mod tests {
                 Ok::<_, std::io::Error>(())
             })
             .expect("dropping the owner releases the kernel lock");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// L01: the settings lock is the develop lock's machinery pointed at
+        /// ONE store-root-wide file — kernel-owned (it reaches the GUI and
+        /// serve PROCESSES; threads model them here), reentrant on its own
+        /// thread (a writer's cycle contains the loader's rescue), and
+        /// NoWait-refusing while held.
+        #[test]
+        fn a_settings_lock_serializes_writers_and_reenters_on_its_thread() {
+            let root = std::env::temp_dir().join("autoshop-store-test-settings-lock");
+            let _ = std::fs::remove_dir_all(&root);
+
+            let nested = with_settings_lock_in(&root, DevelopLockMode::Wait, || {
+                // The rescue inside a locked writer's own load re-enters
+                // instead of deadlocking against its own cycle.
+                with_settings_lock_in(&root, DevelopLockMode::NoWait, || {
+                    Ok::<_, std::io::Error>(7)
+                })
+            });
+            assert_eq!(nested.unwrap(), 7);
+
+            with_settings_lock_in(&root, DevelopLockMode::Wait, || {
+                let root2 = root.clone();
+                let busy = std::thread::spawn(move || {
+                    with_settings_lock_in(&root2, DevelopLockMode::NoWait, || {
+                        Ok::<_, std::io::Error>(())
+                    })
+                })
+                .join()
+                .unwrap();
+                assert_eq!(busy.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+                Ok::<_, std::io::Error>(())
+            })
+            .unwrap();
+
+            with_settings_lock_in(&root, DevelopLockMode::NoWait, || {
+                Ok::<_, std::io::Error>(())
+            })
+            .expect("dropping the owner releases the settings lock");
             let _ = std::fs::remove_dir_all(&root);
         }
 

@@ -105,6 +105,29 @@ impl LocalSettings {
 /// permanent and unannounced. Now the bytes are preserved beside the original
 /// and the reader moves on to the next candidate.
 fn preserve_corrupt_settings(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    // Under the cross-process settings lock, NoWait: `bytes` were read some
+    // time ago, and the remove inside acts on whatever sits at `path` NOW.
+    // Unguarded, a settings writer that atomically replaced the corrupt file
+    // in between (both writers hold this same lock for their whole cycle) had
+    // its GOOD file — keys and all — deleted by this stale rescuer. A busy
+    // lock skips the rescue outright: the holder is about to overwrite the
+    // corrupt file anyway, and its own load preserved the bytes first.
+    crate::store::with_settings_lock(crate::store::DevelopLockMode::NoWait, || {
+        rescue_if_unchanged(path, bytes)
+    })
+}
+
+/// The rescue body, entered only with the settings lock held: re-verify the
+/// live file still holds exactly the corrupt bytes that were read, then claim
+/// a unique `.corrupt` copy and remove the live file. A changed or vanished
+/// live file means another process already replaced it — touch nothing.
+fn rescue_if_unchanged(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    let live = crate::store::read_bytes_capped(path, crate::store::MAX_STORE_JSON)?;
+    if live != bytes {
+        return Err(std::io::Error::other(
+            "the settings file changed while being rescued — nothing was removed",
+        ));
+    }
     use std::io::Write as _;
 
     static CORRUPT_SEQ: std::sync::atomic::AtomicU64 =
@@ -204,6 +227,15 @@ pub fn load_local_settings() -> LocalSettings {
 /// write left partial JSON that `load_local_settings` silently turned into
 /// complete defaults — losing every saved key and model choice.
 pub fn save_local_settings(s: &LocalSettings) -> std::io::Result<PathBuf> {
+    // Reentrant under `update_local_settings`' own lock; a DIRECT call is a
+    // lone publish and takes the lock here — no caller can slip an
+    // unserialized rename between another process's load and save.
+    crate::store::with_settings_lock(crate::store::DevelopLockMode::Wait, || {
+        save_local_settings_unlocked(s)
+    })
+}
+
+fn save_local_settings_unlocked(s: &LocalSettings) -> std::io::Result<PathBuf> {
     let p = local_settings_path();
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
@@ -260,6 +292,23 @@ pub fn save_local_settings(s: &LocalSettings) -> std::io::Result<PathBuf> {
         return Err(e);
     }
     Ok(p)
+}
+
+/// ONE settings read-modify-write, closed against every other writer in every
+/// process: load, hand the caller the merge, save — all under
+/// [`crate::store::with_settings_lock`]. Both writers (serve's POST route and
+/// the GUI's Settings panel) go through here; an unlocked (or in-process-only
+/// locked) cycle let the OTHER process's save land between this one's load
+/// and rename and erased it — the file carries the API keys. Wait mode: the
+/// critical section is one small file read and rewrite.
+pub fn update_local_settings(
+    mutate: impl FnOnce(&mut LocalSettings),
+) -> std::io::Result<PathBuf> {
+    crate::store::with_settings_lock(crate::store::DevelopLockMode::Wait, || {
+        let mut cur = load_local_settings();
+        mutate(&mut cur);
+        save_local_settings(&cur)
+    })
 }
 
 // Clone: the web server snapshots the config OUT of its RwLock before long AI
@@ -820,14 +869,50 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("autoshop.local.json");
 
-            let first = preserve_corrupt_settings(&path, b"{first").unwrap();
-            let second = preserve_corrupt_settings(&path, b"{second").unwrap();
+            // The live file carries the corrupt bytes each time — the
+            // rescue re-verifies before it removes (the race test below).
+            std::fs::write(&path, b"{first").unwrap();
+            let first = rescue_if_unchanged(&path, b"{first").unwrap();
+            std::fs::write(&path, b"{second").unwrap();
+            let second = rescue_if_unchanged(&path, b"{second").unwrap();
             assert_ne!(first, second, "a later incident reused the old rescue name");
             assert_eq!(std::fs::read(first).unwrap(), b"{first");
             assert_eq!(std::fs::read(second).unwrap(), b"{second");
+            assert!(!path.exists(), "a verified rescue consumes the live file");
 
             let _ = std::fs::remove_dir_all(dir);
         }
 
-    // FILE: src/generative.rs  (append inside the existing `mod tests`)
+        /// L01: the rescue acts on whatever sits at the path NOW. If another
+        /// process replaced the corrupt file between the loader's read and
+        /// this rescue — settings writers hold the same lock for their whole
+        /// cycle, so this models the stale-rescuer side — the live file must
+        /// survive untouched and no rescue copy may be minted.
+        #[test]
+        fn a_replaced_settings_file_survives_a_stale_rescuer() {
+            let dir = env::temp_dir().join(format!(
+                "autoshop-corrupt-settings-race-{}-{}",
+                std::process::id(),
+                crate::store::next_tmp_seq()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("autoshop.local.json");
+            std::fs::write(&path, b"{\"analysis_model\":\"good\"}").unwrap();
+
+            let res = rescue_if_unchanged(&path, b"{corrupt bytes read earlier");
+            assert!(res.is_err(), "a changed live file must refuse the rescue");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"{\"analysis_model\":\"good\"}",
+                "the replacement file was deleted by a stale rescuer"
+            );
+            let minted = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains("corrupt"))
+                .count();
+            assert_eq!(minted, 0, "no rescue copy may claim bytes that are no longer live");
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
 }
