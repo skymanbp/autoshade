@@ -306,17 +306,19 @@ impl AutoshopApp {
                     }
                     let rep = rep?;
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let mut s = trf(
+                        lang,
+                        "healed {n} spot(s) → {path}",
+                        &[("n", &rep.spots.to_string()), ("path", &out.display().to_string())],
+                    );
+                    // The report's rationale (AI-detect fallback, budget
+                    // skips) was dropped here — stderr is invisible in the
+                    // windowed GUI (L08 rule).
+                    if !rep.rationale.is_empty() {
+                        s = format!("{s} — ⚠ {}", rep.rationale);
+                    }
                     // InPlace: bake into the active variant's base + repoint origin.
-                    Ok((
-                        img,
-                        trf(
-                            lang,
-                            "healed {n} spot(s) → {path}",
-                            &[("n", &rep.spots.to_string()), ("path", &out.display().to_string())],
-                        ),
-                        out,
-                        RetouchKind::InPlace,
-                    ))
+                    Ok((img, s, out, RetouchKind::InPlace))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);

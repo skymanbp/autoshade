@@ -344,11 +344,29 @@ fn heal_one<T: HealDepth>(
     }
 }
 
+/// Hard budgets on what ONE painted mask may plan (L02). Three terms, because
+/// no single one bounds the others: region COUNT (each spot is a struct + two
+/// heap allocations; a 1-px-gap tiling of an 8192-edge canvas yields ~5.6 M
+/// regions ≈ 1 GB of spots and an effective hang in the serial heal loop),
+/// aggregate BBOX coverage (the retained `SpotCoverage` bitsets are bbox-sized
+/// and unrelated to painted-pixel count — thin diagonal staircases retain
+/// ~512× their painted bytes), and aggregate HEAL-DISK area (heal work scales
+/// with Σ(2r+1)², which thin full-height strokes blow up while staying tiny in
+/// bbox terms). The AI path already truncates to 30 spots; 512 is ~17× that
+/// and far above any hand-painted retouch.
+const MAX_PAINTED_SPOTS: usize = 512;
+const MAX_BBOX_COVERAGE: f64 = 4.0; // Σ bbox px ≤ 4 × mask px
+const MAX_DISK_COVERAGE: f64 = 16.0; // Σ (2r+1)² px ≤ 16 × mask px
+
 /// Turn a painted RGBA mask (alpha < 128 = painted = heal here, matching the UI's
 /// brush + the generative-mask convention) into heal spots via connected
 /// components: each painted blob becomes one circular heal target. Coordinates
 /// are normalised, so the mask can be at any resolution.
-pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
+///
+/// The second return is the budget note when regions were SKIPPED (planned
+/// ones still heal): raster-order deterministic, and the caller must surface
+/// it — the skipped regions are left untouched.
+pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<String>) {
     let (w, h) = mask.dimensions();
     let wu = w as usize;
     let n_px = wu * h as usize;
@@ -357,7 +375,7 @@ pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
     // loudly, not wrap indices into corrupt radii.
     if n_px > u32::MAX as usize {
         eprintln!("⚠ mask raster {w}x{h} exceeds the u32 index space — no heal spots planned");
-        return Vec::new();
+        return (Vec::new(), None);
     }
     // u64 bitsets, not Vec<bool>: at an 8192-edge painted canvas the two flat
     // maps were ~88 MB of bookkeeping for one bit of information per pixel.
@@ -372,6 +390,9 @@ pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
     let short = w.min(h) as f32;
     let mut spots = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
+    let mut bbox_px = 0u64;
+    let mut disk_px = 0u64;
+    let mut skipped = 0usize;
     for start in 0..n_px {
         if !get(&painted, start) || get(&seen, start) {
             continue;
@@ -403,6 +424,10 @@ pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
         if cnt < 6 {
             continue; // ignore stray dots / brush noise
         }
+        if spots.len() >= MAX_PAINTED_SPOTS {
+            skipped += 1;
+            continue; // labeling continues so the note can count every region
+        }
         let cxp = (sx / cnt as f64) as f32;
         let cyp = (sy / cnt as f64) as f32;
         let mut rad = 0f32;
@@ -425,6 +450,22 @@ pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
         let coverage_width = max_x - min_x + 1;
         let coverage_height = max_y - min_y + 1;
         let coverage_len = coverage_width as usize * coverage_height as usize;
+        // Budget check BEFORE the bbox-sized allocation. The disk term uses
+        // the radius heal_image will actually scan: the same
+        // `(rad*1.1).max(2.0)` scaling applied below, clamped to half the
+        // short side exactly as heal_image clamps it.
+        let this_bbox = coverage_len as u64;
+        let r_eff = ((rad * 1.1).max(2.0)).min(0.5 * short);
+        let d_eff = (2.0 * r_eff + 1.0) as u64;
+        let this_disk = d_eff.saturating_mul(d_eff);
+        if bbox_px.saturating_add(this_bbox) > (MAX_BBOX_COVERAGE * n_px as f64) as u64
+            || disk_px.saturating_add(this_disk) > (MAX_DISK_COVERAGE * n_px as f64) as u64
+        {
+            skipped += 1;
+            continue;
+        }
+        bbox_px += this_bbox;
+        disk_px += this_disk;
         let mut coverage_bits = vec![0u64; coverage_len.div_ceil(64)];
         for i in &pts {
             let x = (*i as usize % wu) as u32;
@@ -453,7 +494,19 @@ pub fn plan_from_mask(mask: &RgbaImage) -> Vec<HealSpot> {
             label: "painted".into(),
         });
     }
-    spots
+    let note = (skipped > 0).then(|| {
+        format!(
+            "healed {} of {} painted region(s) — the rest exceeded the retouch budget \
+             ({MAX_PAINTED_SPOTS} regions / {MAX_BBOX_COVERAGE}x bbox / {MAX_DISK_COVERAGE}x \
+             heal coverage) and were left UNTOUCHED; paint fewer or smaller regions",
+            spots.len(),
+            spots.len() + skipped
+        )
+    });
+    if let Some(n) = &note {
+        eprintln!("⚠ {n}");
+    }
+    (spots, note)
 }
 
 // --- AI auto-detection (vision) --------------------------------------------
@@ -652,7 +705,14 @@ pub fn heal(
         let m = crate::render::open_mask_bounded(mp)
             .with_context(|| format!("open mask {}", mp.display()))?
             .to_rgba8();
-        spots.extend(plan_from_mask(&m));
+        let (planned, note) = plan_from_mask(&m);
+        spots.extend(planned);
+        if let Some(n) = note {
+            if !rationale.is_empty() {
+                rationale.push_str("; ");
+            }
+            rationale.push_str(&n);
+        }
     }
     if spots.is_empty() {
         // Writing (and linking) a byte-identical zero-spot master helps
@@ -812,7 +872,7 @@ pub fn clone_stamp(
     let m = crate::render::open_mask_bounded(mask_path)
         .with_context(|| format!("open mask {}", mask_path.display()))?
         .to_rgba8();
-    let mut spots = plan_from_mask(&m);
+    let (mut spots, budget_note) = plan_from_mask(&m);
     if spots.is_empty() {
         return Err(anyhow!("nothing painted — brush over the target area first"));
     }
@@ -824,7 +884,7 @@ pub fn clone_stamp(
     }
     let n = spots.len();
     heal_and_save(base, &spots, out)?;
-    Ok(HealReport { spots: n, rationale: String::new(), dims: (w, h) })
+    Ok(HealReport { spots: n, rationale: budget_note.unwrap_or_default(), dims: (w, h) })
 }
 
 #[cfg(test)]
@@ -979,7 +1039,7 @@ mod tests {
                 m.put_pixel(x, y, Rgba([255, 0, 0, 0])); // painted
             }
         }
-        let spots = plan_from_mask(&m);
+        let (spots, _) = plan_from_mask(&m);
         assert_eq!(spots.len(), 1, "one blob → one spot");
         assert!((spots[0].cx - 0.495).abs() < 0.05 && (spots[0].cy - 0.495).abs() < 0.05);
     }
@@ -991,7 +1051,29 @@ mod tests {
         heal_image(&mut img, &[]);
         assert_eq!(img, before, "no spots → image unchanged");
         let clean = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255])); // nothing painted
-        assert!(plan_from_mask(&clean).is_empty());
+        assert!(plan_from_mask(&clean).0.is_empty());
+    }
+
+    /// L02: the painted-mask budget — a mask tiled with more regions than
+    /// the cap plans exactly the cap, and the note names the split.
+    #[test]
+    fn plan_from_mask_budget_caps_regions_and_discloses() {
+        // 24×24 painted blocks of 3×2 px on a 4-px grid (each ≥ the cnt<6
+        // floor, 1-px gaps keep them 4-disconnected): 576 regions > 512.
+        let mut mask = RgbaImage::from_pixel(96, 96, Rgba([0, 0, 0, 255]));
+        for by in 0..24u32 {
+            for bx in 0..24u32 {
+                for dy in 0..2 {
+                    for dx in 0..3 {
+                        mask.put_pixel(bx * 4 + dx, by * 4 + dy, Rgba([255, 0, 0, 0]));
+                    }
+                }
+            }
+        }
+        let (spots, note) = plan_from_mask(&mask);
+        assert_eq!(spots.len(), 512, "the cap plans exactly the budget");
+        let note = note.expect("over-budget must disclose");
+        assert!(note.contains("512 of 576"), "{note}");
     }
 
     #[test]
@@ -1002,7 +1084,7 @@ mod tests {
                 mask.put_pixel(x, y, Rgba([255, 0, 0, 0]));
             }
         }
-        let mut spots = plan_from_mask(&mask);
+        let (mut spots, _) = plan_from_mask(&mask);
         assert_eq!(spots.len(), 1);
         spots[0].source = Some([0.0, 0.3]);
         spots[0].clone_raw = true;
