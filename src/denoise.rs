@@ -464,7 +464,10 @@ fn run_sidecar_with_budget(
     // replacing the caller's 0-byte claim (or an older deliverable) in a
     // single step — concurrent runs can no longer interleave into the
     // shared name, and this run's failure paths never touch it.
-    if let Err(e) = std::fs::rename(&staged, output) {
+    // durable_replace (L03): the staged result is fsynced before the
+    // rename and the dir entry after — a denoise master referenced by a
+    // durably-saved develop must survive the same power cut the JSON does.
+    if let Err(e) = crate::store::durable_replace(&staged, output) {
         // The staged result SURVIVES a failed publish and the error names
         // it (Codex R12 #5): on Windows a viewer holding the destination
         // open without delete sharing fails this rename, and deleting the

@@ -105,8 +105,13 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
     let wrote = crate::sidecar_wrote("segmentation sidecar", output, before);
     if wrote.is_err() {
         crate::denoise::discard_failed_output(output, before);
+        return wrote;
     }
-    wrote
+    // The mask must be durable BEFORE any recipe references it (L03). The
+    // sidecar fsyncs before its os.replace now — this adopt is the belt for
+    // an older script on disk, at the cost of one flush.
+    crate::store::durable_adopt(output)
+        .with_context(|| format!("sync segmentation output {}", output.display()))
 }
 
 #[cfg(test)]

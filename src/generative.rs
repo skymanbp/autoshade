@@ -182,7 +182,9 @@ pub fn reimagine(
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("write {}", tmp.display()));
     }
-    if let Err(e) = std::fs::rename(&tmp, out) {
+    // durable_replace, not bare rename (L03): the pixel-source JSON that
+    // will reference this master commits durably — the payload first.
+    if let Err(e) = crate::store::durable_replace(&tmp, out) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("publish {}", out.display()));
     }
@@ -323,7 +325,9 @@ pub fn retouch(
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("write {}", tmp.display()));
     }
-    if let Err(e) = std::fs::rename(&tmp, out) {
+    // durable_replace, not bare rename (L03): the pixel-source JSON that
+    // will reference this master commits durably — the payload first.
+    if let Err(e) = crate::store::durable_replace(&tmp, out) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("publish {}", out.display()));
     }

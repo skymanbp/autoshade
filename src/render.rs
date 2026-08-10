@@ -695,7 +695,10 @@ fn publish_staged(out: &Path, staged: &Path, written: Result<()>) -> Result<()> 
         let _ = std::fs::remove_file(staged);
         return Err(error);
     }
-    if let Err(error) = std::fs::rename(staged, out) {
+    // durable_replace, not bare rename (L03): staged bytes + dir entry are
+    // fsynced around the rename — pixels.json commits durably, so the
+    // master it names must not be able to vanish with the page cache.
+    if let Err(error) = crate::store::durable_replace(staged, out) {
         let _ = std::fs::remove_file(staged);
         return Err(error).with_context(|| format!("publish {}", out.display()));
     }

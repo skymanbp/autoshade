@@ -1178,6 +1178,17 @@ pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
         );
         return None;
     }
+    // A 0-byte file at the recorded path is the CLAIM, not the master — the
+    // same "the claim file is not an artifact" rule sidecar_wrote states. A
+    // crash between claim and publish must not hand an empty frame to the
+    // renderer as the user's retouch (L03).
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
+        eprintln!(
+            "⚠ baked master {} is empty (an unfinished write) — the retouched canvas cannot be restored (the develop falls back to the source)",
+            path.display()
+        );
+        return None;
+    }
     Some((path, generated))
 }
 
@@ -2264,6 +2275,17 @@ pub(crate) fn durable_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     durable_os::finish_parent(to)
 }
 
+/// Make an already-written payload durable where it stands: fsync its
+/// bytes and its parent directory. For binary payloads (mask rasters,
+/// sidecar masks) written straight onto their claimed name and about to be
+/// REFERENCED by a durably-committed JSON — the JSON's own fsync is
+/// meaningless if the payload it names can still vanish with the page
+/// cache (L03). `pub`: the GUI binary's mask writers consume it.
+pub fn durable_adopt(path: &Path) -> std::io::Result<()> {
+    sync_staged(path)?;
+    durable_os::finish_parent(path)
+}
+
 /// Publish complete bytes through the one durable write protocol.
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
@@ -2903,6 +2925,34 @@ mod tests {
         // …and genuinely different photos must still get different keys.
         assert_ne!(plain, photo_key(Path::new(r"D:\photos\DSC002.NEF")));
         assert_ne!(plain, photo_key(Path::new(r"D:\other\DSC001.NEF")));
+    }
+
+    /// L03: a 0-byte file at the recorded master path is the crash-
+    /// between-claim-and-publish state — the reader refuses it with the
+    /// cause while the record itself still counts (callers refuse
+    /// deliverables instead of silently rendering the un-retouched source).
+    #[test]
+    fn an_empty_master_claim_is_refused_not_restored() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-empty-master");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_empty_master.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let master = dev.join("retouch-master.png");
+        std::fs::write(&master, b"").unwrap();
+        write_pixel_source(&raw, &master, false).unwrap();
+
+        assert!(read_pixel_source(&raw).is_none(), "an empty claim is not a master");
+        assert!(
+            has_pixel_source(&raw),
+            "the record still exists — deliverable callers refuse, not degrade"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     /// L01: the revision tag names the BYTES. Absence is a real tag; a

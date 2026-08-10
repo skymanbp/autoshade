@@ -836,7 +836,9 @@ fn save_master(out: &Path, img: DynamicImage) -> Result<()> {
         let _ = std::fs::remove_file(&staged);
         return Err(e).with_context(|| format!("write {}", staged.display()));
     }
-    if let Err(e) = std::fs::rename(&staged, out) {
+    // durable_replace, not bare rename (L03): pixels.json will reference
+    // this master durably — its bytes must be on disk first.
+    if let Err(e) = crate::store::durable_replace(&staged, out) {
         let _ = std::fs::remove_file(&staged);
         return Err(e).with_context(|| format!("publish {}", out.display()));
     }

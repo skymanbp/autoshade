@@ -338,6 +338,11 @@ def main():
         ok = cv2.imwrite(tmp, out)
         if not ok:
             raise SystemExit(f"cannot write image: {tmp}")
+        # fsync before the replace lands it (L03): the caller stages this
+        # output and republishes it durably, but an older caller adopted it
+        # as-is — the payload must not be able to vanish with the page cache.
+        with open(tmp, "rb+") as f:
+            os.fsync(f.fileno())
         os.replace(tmp, args.output)
     finally:
         if os.path.exists(tmp):

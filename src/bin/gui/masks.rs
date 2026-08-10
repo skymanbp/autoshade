@@ -174,7 +174,15 @@ impl AutoshopApp {
         }
         let written = autoshop::store::claim_raster(&src, "mask-brush")
             .map_err(anyhow::Error::from)
-            .and_then(|p| gray.save(&p).map(|()| p).map_err(anyhow::Error::from));
+            .and_then(|p| {
+                gray.save(&p)?;
+                // Durable BEFORE the recipe references it (L03): the JSON
+                // commits through fsync, and a raster still in the page
+                // cache leaves a saved develop pointing at pixels a power
+                // cut never wrote.
+                autoshop::store::durable_adopt(&p)?;
+                Ok(p)
+            });
         match written {
             Ok(path) => {
                 let path_s = path.to_string_lossy().into_owned();
@@ -232,6 +240,8 @@ impl AutoshopApp {
             .and_then(|g| {
                 let p = autoshop::store::claim_raster(&src, tag).map_err(anyhow::Error::from)?;
                 g.save(&p).map_err(anyhow::Error::from)?;
+                // Same L03 rule as the brush writer: payload durable first.
+                autoshop::store::durable_adopt(&p)?;
                 Ok(p)
             });
         match done {
@@ -290,6 +300,8 @@ impl AutoshopApp {
                     );
                     let out = autoshop::store::claim_raster(&src, "mask-refined")?;
                     refined.save(&out)?;
+                    // Same L03 rule as the brush writer: durable first.
+                    autoshop::store::durable_adopt(&out)?;
                     Ok((i, stored_ref, out))
                 })();
                 Msg::MaskRefined(res)

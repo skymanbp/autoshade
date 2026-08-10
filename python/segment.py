@@ -110,6 +110,11 @@ def main() -> None:
     tmp = f"{a.output}.{os.getpid()}.tmp.png"
     try:
         mask.save(tmp)
+        # fsync before the replace lands it (L03): the caller's recipe JSON
+        # commits durably, so a mask still in the page cache must not vanish
+        # out from under a reference a power cut preserved.
+        with open(tmp, "rb+") as f:
+            os.fsync(f.fileno())
         os.replace(tmp, a.output)
     finally:
         if os.path.exists(tmp):
