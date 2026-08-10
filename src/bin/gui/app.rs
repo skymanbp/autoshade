@@ -276,209 +276,10 @@ pub(crate) struct AutoshopApp {
     pub(crate) versions: Vec<u32>,                    // snapshot numbers found for the open photo (sorted)
 }
 
-impl Default for AutoshopApp {
-    fn default() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        Self {
-            src_path: None,
-            base_preview: None,
-            source_preview: None,
-            before_tex: None,
-            after_tex: None,
-            recipe: EditRecipe::default(),
-            dirty: false,
-            develop_inflight: false,
-            develop_count: 0,
-            status: "Open a photo, or open a folder to browse your library.".into(),
-            busy: false,
-            rx: Some(rx),
-            tx,
-            verdict: None,
-            rationale: String::new(),
-            style_strength: 0.30,
-            hsl_tab: 0,
-            grade_region: 0,
-            guidance: String::new(),
-            save_jpeg: false,
-            committed: UndoStep::default(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            save_denoise: false,
-            zoned_fit: true,
-            show_settings: false,
-            show_shortcuts: false,
-            panels_hidden: false,
-            defocus_next: false,
-            settings: SettingsForm::default(),
-            // English is the default / skeleton language; a persisted pref
-            // (restored in `new`) overrides this on launch.
-            lang: Lang::En,
-            theme: ThemePref::Dark,
-            gallery: Vec::new(),
-            gallery_dir: None,
-            gallery_gen: 0,
-            selected: None,
-            thumbs: HashMap::new(),
-            thumb_requested: HashSet::new(),
-            thumb_fail: std::collections::HashMap::new(),
-            thumb_inflight: 0,
-            edited_badge: HashMap::new(),
-            base_cache: Vec::new(),
-            saved_recipe: EditRecipe::default(),
-            pixels_on_disk: None,
-            saved_strip: None,
-            nav_stash: HashMap::new(),
-            master_loads: std::collections::HashSet::new(),
-            open_unresolved: false,
-            pasted_open: None,
-            photo_knots: Vec::new(),
-            photo_lens: Default::default(),
-            photo_as_shot: None,
-            before_curve: Vec::new(),
-            confirm_quit: false,
-            mask_name_buf: None,
-            gallery_scroll_to: None,
-            region: None,
-            region_drag: None,
-            region_restore: None,
-            paint_mode: false,
-            brush: 30.0,
-            mask_paint: None,
-            mask_tex: None,
-            mask_dirty_rect: None,
-            mask_tex_built: Instant::now(),
-            mask_dirty: false,
-            mask_tex_xform: (0.0, 0.0, false),
-            paint_last: None,
-            fill_prompt: String::new(),
-            fill_quality: 0,
-            fill_fullres: false,
-            heal_fullres: false,
-            denoise_fullres: false,
-            reimagine_prompt: String::new(),
-            view_mode: ViewMode::SideBySide,
-            toasts: Vec::new(),
-            histogram: None,
-            last_title: String::new(),
-            zoom: 1.0,
-            pan: egui::vec2(0.5, 0.5),
-            crop_mode: false,
-            crop_aspect: 0,
-            crop_aspect_pending: false,
-            crop_grid: 0,
-            before_latch: false,
-            crop_drag: None,
-            mask_drag: None,
-            sel_mask: None,
-            placing_mask: None,
-            sel_component: None,
-            component_mode: autoshop::recipe::MaskCombine::Add,
-            mask_brush: None,
-            mask_brush_gray: None,
-            place_start: None,
-            curve_channel: 0,
-            curve_drag: None,
-            #[cfg(test)]
-            curve_rect: None,
-            multi_sel: HashSet::new(),
-            copied: None,
-            copied_from: None,
-            paste_geometry: false,
-            wb_picking: false,
-            range_picking: None,
-            clone_mode: false,
-            clone_src: None,
-            clone_fullres: false,
-            gen_epoch: 0,
-            gen_cancel: None,
-            analyze_inflight: false,
-            variants: Vec::new(),
-            discard_requested: false,
-            active: 0,
-            keep_recipe: false,
-            open_in_flight: false,
-            open_same_path: false,
-            edge_before_flight: None,
-            exp_long_edge: 0,
-            exp_sharpen: 0.0,
-            exp_quality: 95.0,
-            exp_space: 0,
-            preview_edge: PREVIEW_EDGE,
-            versions: Vec::new(),
-            show_mask_overlay: true,
-            mask_overlay_tex: None,
-            overlay_stale: false,
-            overlay_key: None,
-            overlay_ref: None,
-            overlay_build_count: 0,
-            hover_mask: None,
-            batch_progress: None,
-            show_clipping: false,
-            last_rgb: None,
-            clip_tex: None,
-        }
-    }
-}
-
-impl eframe::App for AutoshopApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_workers(ctx);
-        // Window-close guard: the unsaved-edit protection (● + nav_stash)
-        // used to stop at photo switching — the title-bar ✕ dropped the open
-        // photo's uncommitted develop AND every stashed one with no prompt.
-        // An in-app confirm layer (egui Window, never an OS dialog) offers
-        // save-all / discard / cancel; the guard re-checks on the way out, so
-        // both quit buttons work by making the state genuinely clean.
-        if ctx.input(|i| i.viewport().close_requested()) {
-            // A typed-but-uncommitted mask rename must COUNT as unsaved
-            // work: commit it before the dirty check below — an otherwise
-            // clean recipe used to close without a prompt and the rename
-            // died with the window (U10).
-            self.commit_mask_name_buf();
-            // Unsaved covers PIXELS too: a baked retouch whose master isn't
-            // recorded in the store yet dies with the window exactly like an
-            // unsaved slider move (the master PNG survives, its linkage not).
-            let pixels_unsaved = self.src_path.as_deref().is_some_and(|p| {
-                let origin = self.active_variant().and_then(|v| v.origin.clone());
-                // Both directions count (gained OR dropped master).
-                let recorded = autoshop::store::read_pixel_source(p).map(|(q, _)| q);
-                !same_master_opt(recorded.as_deref(), origin.as_deref())
-            });
-            let unsaved_open = self.src_path.is_some()
-                && (dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved);
-            if self.busy {
-                // A running export / retouch / paid AI generation dies with
-                // the process — the ✕ used to bypass every guard mid-flight.
-                // Block and say why; close again once the worker lands.
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                let t = tr(self.lang, "An operation is still running — wait for it to finish, then close").to_string();
-                self.toast(ToastKind::Error, t);
-            } else if !self.discard_requested
-                && (unsaved_open
-                    || !self.nav_stash.is_empty()
-                    || self.inactive_dirty_variants() > 0)
-            {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.confirm_quit = true;
-                // Surrender any widget focus NOW: the layer's Enter-saves
-                // default is gated on "no widget focused", and a text field
-                // that kept focus from before the close request silently
-                // disabled the promised keyboard default. (Tab inside the
-                // dialog can still focus its buttons — the gate then
-                // correctly routes Enter to the focused control.)
-                if let Some(id) = ctx.memory(|m| m.focused()) {
-                    ctx.memory_mut(|m| m.surrender_focus(id));
-                }
-            }
-        }
-        if self.confirm_quit {
-            self.confirm_quit_layer(ctx);
-        }
-        // Hover-to-preview is frame-scoped: take last frame's target; the mask
-        // list re-sets it below if the cursor is still on a row. The diff is
-        // checked right before the overlay refresh at the end of update().
-        let hover_prev = self.hover_mask.take();
-
+impl AutoshopApp {
+    /// One update() phase — body extracted verbatim from the eframe
+    /// update loop (round-12 decomposition).
+    fn upd_shortcuts(&mut self, ctx: &egui::Context) {
         // Tab's egui focus traversal fired last frame despite the consume (see
         // `defocus_next`): drop that focus now so the panel toggle doesn't
         // leave a surprise-focused widget eating every later shortcut.
@@ -788,6 +589,11 @@ impl eframe::App for AutoshopApp {
         // Ignored entirely while the quit-confirm layer is up — a drop must
         // not mutate the very state the user is deciding whether to save
         // (the shortcut block is gated on the same condition).
+    }
+
+    /// One update() phase — body extracted verbatim from the eframe
+    /// update loop (round-12 decomposition).
+    fn upd_dropped_and_title(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = if self.confirm_quit {
             Vec::new()
         } else {
@@ -858,7 +664,11 @@ impl eframe::App for AutoshopApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+    }
 
+    /// One update() phase — body extracted verbatim from the eframe
+    /// update loop (round-12 decomposition).
+    fn upd_top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             let lang = self.lang;
             // ONE wrapped row of ACTIONS only (UX batch): settings that used
@@ -1016,7 +826,11 @@ impl eframe::App for AutoshopApp {
                 }
             });
         });
+    }
 
+    /// One update() phase — body extracted verbatim from the eframe
+    /// update loop (round-12 decomposition).
+    fn upd_status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.busy {
@@ -1079,7 +893,11 @@ impl eframe::App for AutoshopApp {
                     .on_hover_text(&self.status);
             });
         });
+    }
 
+    /// One update() phase — body extracted verbatim from the eframe
+    /// update loop (round-12 decomposition).
+    fn upd_strips_and_side_panels(&mut self, ctx: &egui::Context) {
         // Variant strip — sits directly above the status bar (registered after
         // it so it stacks on top), only when a photo is open. The selector for
         // 原片 / AI 生成 / 反推 renditions.
@@ -1124,38 +942,11 @@ impl eframe::App for AutoshopApp {
         // fast drags coalesce to the worker's throughput without a render storm.
         // The Before pane mirrors the canvas recipe's base_curve (calibration,
         // not an edit — the ● logic ignores it, but the compare must not):
-        // Reset re-stamping a legacy photo, a paste, or a restore would
-        // otherwise leave the compare against a stale starting point. One
-        // cheap LUT-only develop, and only when the curve actually changed.
-        if self.src_path.is_some()
-            // NOT base-present: an InPlace master legitimately renders Before
-            // under the canvas curve, and gating on v.base froze its Before
-            // against Reset / undo / paste forever. A Generated canvas
-            // recipe's curve is empty by construction, so this compare is
-            // simply quiet there.
-            && !self.active_is_generated()
-            && self.recipe.base_curve != self.before_curve
-            && let Some(b) = self.base_preview.clone()
-        {
-            let curve = self.recipe.base_curve.clone();
-            self.set_before(ctx, &b, &curve);
-        }
-        // A held-still pointer still needs a repaint to receive the result.
-        if self.dirty && !self.develop_inflight {
-            self.start_redevelop();
-        }
-        if self.develop_inflight {
-            ctx.request_repaint();
-        }
-        // The mask coverage overlay follows develop / selection / toggle /
-        // hover (a changed hover target includes "left the list entirely").
-        if self.hover_mask != hover_prev {
-            self.overlay_stale = true;
-        }
-        if std::mem::take(&mut self.overlay_stale) {
-            self.refresh_mask_overlay(ctx);
-        }
+    }
 
+    /// One update() phase — body extracted verbatim from the eframe
+    /// update loop (round-12 decomposition).
+    fn upd_central(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Empty state: a real landing surface instead of a blank canvas.
             if self.src_path.is_none() {
@@ -1230,7 +1021,11 @@ impl eframe::App for AutoshopApp {
                 }
             }
         });
+    }
 
+    /// One update() phase — body extracted verbatim from the eframe
+    /// update loop (round-12 decomposition).
+    fn upd_sheets(&mut self, ctx: &egui::Context) {
         // Settings window (provider / model / API keys). A local `open` avoids a
         // double &mut self borrow (Window::open vs the closure that reads self).
         if self.show_settings {
@@ -1327,6 +1122,255 @@ impl eframe::App for AutoshopApp {
         }
 
         // Drag & drop affordance: show a full-window overlay while files hover.
+    }
+}
+
+impl Default for AutoshopApp {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            src_path: None,
+            base_preview: None,
+            source_preview: None,
+            before_tex: None,
+            after_tex: None,
+            recipe: EditRecipe::default(),
+            dirty: false,
+            develop_inflight: false,
+            develop_count: 0,
+            status: "Open a photo, or open a folder to browse your library.".into(),
+            busy: false,
+            rx: Some(rx),
+            tx,
+            verdict: None,
+            rationale: String::new(),
+            style_strength: 0.30,
+            hsl_tab: 0,
+            grade_region: 0,
+            guidance: String::new(),
+            save_jpeg: false,
+            committed: UndoStep::default(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            save_denoise: false,
+            zoned_fit: true,
+            show_settings: false,
+            show_shortcuts: false,
+            panels_hidden: false,
+            defocus_next: false,
+            settings: SettingsForm::default(),
+            // English is the default / skeleton language; a persisted pref
+            // (restored in `new`) overrides this on launch.
+            lang: Lang::En,
+            theme: ThemePref::Dark,
+            gallery: Vec::new(),
+            gallery_dir: None,
+            gallery_gen: 0,
+            selected: None,
+            thumbs: HashMap::new(),
+            thumb_requested: HashSet::new(),
+            thumb_fail: std::collections::HashMap::new(),
+            thumb_inflight: 0,
+            edited_badge: HashMap::new(),
+            base_cache: Vec::new(),
+            saved_recipe: EditRecipe::default(),
+            pixels_on_disk: None,
+            saved_strip: None,
+            nav_stash: HashMap::new(),
+            master_loads: std::collections::HashSet::new(),
+            open_unresolved: false,
+            pasted_open: None,
+            photo_knots: Vec::new(),
+            photo_lens: Default::default(),
+            photo_as_shot: None,
+            before_curve: Vec::new(),
+            confirm_quit: false,
+            mask_name_buf: None,
+            gallery_scroll_to: None,
+            region: None,
+            region_drag: None,
+            region_restore: None,
+            paint_mode: false,
+            brush: 30.0,
+            mask_paint: None,
+            mask_tex: None,
+            mask_dirty_rect: None,
+            mask_tex_built: Instant::now(),
+            mask_dirty: false,
+            mask_tex_xform: (0.0, 0.0, false),
+            paint_last: None,
+            fill_prompt: String::new(),
+            fill_quality: 0,
+            fill_fullres: false,
+            heal_fullres: false,
+            denoise_fullres: false,
+            reimagine_prompt: String::new(),
+            view_mode: ViewMode::SideBySide,
+            toasts: Vec::new(),
+            histogram: None,
+            last_title: String::new(),
+            zoom: 1.0,
+            pan: egui::vec2(0.5, 0.5),
+            crop_mode: false,
+            crop_aspect: 0,
+            crop_aspect_pending: false,
+            crop_grid: 0,
+            before_latch: false,
+            crop_drag: None,
+            mask_drag: None,
+            sel_mask: None,
+            placing_mask: None,
+            sel_component: None,
+            component_mode: autoshop::recipe::MaskCombine::Add,
+            mask_brush: None,
+            mask_brush_gray: None,
+            place_start: None,
+            curve_channel: 0,
+            curve_drag: None,
+            #[cfg(test)]
+            curve_rect: None,
+            multi_sel: HashSet::new(),
+            copied: None,
+            copied_from: None,
+            paste_geometry: false,
+            wb_picking: false,
+            range_picking: None,
+            clone_mode: false,
+            clone_src: None,
+            clone_fullres: false,
+            gen_epoch: 0,
+            gen_cancel: None,
+            analyze_inflight: false,
+            variants: Vec::new(),
+            discard_requested: false,
+            active: 0,
+            keep_recipe: false,
+            open_in_flight: false,
+            open_same_path: false,
+            edge_before_flight: None,
+            exp_long_edge: 0,
+            exp_sharpen: 0.0,
+            exp_quality: 95.0,
+            exp_space: 0,
+            preview_edge: PREVIEW_EDGE,
+            versions: Vec::new(),
+            show_mask_overlay: true,
+            mask_overlay_tex: None,
+            overlay_stale: false,
+            overlay_key: None,
+            overlay_ref: None,
+            overlay_build_count: 0,
+            hover_mask: None,
+            batch_progress: None,
+            show_clipping: false,
+            last_rgb: None,
+            clip_tex: None,
+        }
+    }
+}
+
+impl eframe::App for AutoshopApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_workers(ctx);
+        // Window-close guard: the unsaved-edit protection (● + nav_stash)
+        // used to stop at photo switching — the title-bar ✕ dropped the open
+        // photo's uncommitted develop AND every stashed one with no prompt.
+        // An in-app confirm layer (egui Window, never an OS dialog) offers
+        // save-all / discard / cancel; the guard re-checks on the way out, so
+        // both quit buttons work by making the state genuinely clean.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            // A typed-but-uncommitted mask rename must COUNT as unsaved
+            // work: commit it before the dirty check below — an otherwise
+            // clean recipe used to close without a prompt and the rename
+            // died with the window (U10).
+            self.commit_mask_name_buf();
+            // Unsaved covers PIXELS too: a baked retouch whose master isn't
+            // recorded in the store yet dies with the window exactly like an
+            // unsaved slider move (the master PNG survives, its linkage not).
+            let pixels_unsaved = self.src_path.as_deref().is_some_and(|p| {
+                let origin = self.active_variant().and_then(|v| v.origin.clone());
+                // Both directions count (gained OR dropped master).
+                let recorded = autoshop::store::read_pixel_source(p).map(|(q, _)| q);
+                !same_master_opt(recorded.as_deref(), origin.as_deref())
+            });
+            let unsaved_open = self.src_path.is_some()
+                && (dirty_vs(&self.recipe, &self.saved_recipe) || pixels_unsaved);
+            if self.busy {
+                // A running export / retouch / paid AI generation dies with
+                // the process — the ✕ used to bypass every guard mid-flight.
+                // Block and say why; close again once the worker lands.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                let t = tr(self.lang, "An operation is still running — wait for it to finish, then close").to_string();
+                self.toast(ToastKind::Error, t);
+            } else if !self.discard_requested
+                && (unsaved_open
+                    || !self.nav_stash.is_empty()
+                    || self.inactive_dirty_variants() > 0)
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.confirm_quit = true;
+                // Surrender any widget focus NOW: the layer's Enter-saves
+                // default is gated on "no widget focused", and a text field
+                // that kept focus from before the close request silently
+                // disabled the promised keyboard default. (Tab inside the
+                // dialog can still focus its buttons — the gate then
+                // correctly routes Enter to the focused control.)
+                if let Some(id) = ctx.memory(|m| m.focused()) {
+                    ctx.memory_mut(|m| m.surrender_focus(id));
+                }
+            }
+        }
+        if self.confirm_quit {
+            self.confirm_quit_layer(ctx);
+        }
+        // Hover-to-preview is frame-scoped: take last frame's target; the mask
+        // list re-sets it below if the cursor is still on a row. The diff is
+        // checked right before the overlay refresh at the end of update().
+        let hover_prev = self.hover_mask.take();
+
+        self.upd_shortcuts(ctx);
+        self.upd_dropped_and_title(ctx);
+
+        self.upd_top_bar(ctx);
+
+        self.upd_status_bar(ctx);
+
+        self.upd_strips_and_side_panels(ctx);
+        // Reset re-stamping a legacy photo, a paste, or a restore would
+        // otherwise leave the compare against a stale starting point. One
+        // cheap LUT-only develop, and only when the curve actually changed.
+        if self.src_path.is_some()
+            // NOT base-present: an InPlace master legitimately renders Before
+            // under the canvas curve, and gating on v.base froze its Before
+            // against Reset / undo / paste forever. A Generated canvas
+            // recipe's curve is empty by construction, so this compare is
+            // simply quiet there.
+            && !self.active_is_generated()
+            && self.recipe.base_curve != self.before_curve
+            && let Some(b) = self.base_preview.clone()
+        {
+            let curve = self.recipe.base_curve.clone();
+            self.set_before(ctx, &b, &curve);
+        }
+        // A held-still pointer still needs a repaint to receive the result.
+        if self.dirty && !self.develop_inflight {
+            self.start_redevelop();
+        }
+        if self.develop_inflight {
+            ctx.request_repaint();
+        }
+        // The mask coverage overlay follows develop / selection / toggle /
+        // hover (a changed hover target includes "left the list entirely").
+        if self.hover_mask != hover_prev {
+            self.overlay_stale = true;
+        }
+        if std::mem::take(&mut self.overlay_stale) {
+            self.refresh_mask_overlay(ctx);
+        }
+
+        self.upd_central(ctx);
+
+        self.upd_sheets(ctx);
         // Gated like drop PROCESSING is: while the quit-confirm layer is up,
         // drops are deliberately discarded — promising "Drop to open" there
         // was a lie.
