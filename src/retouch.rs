@@ -649,7 +649,7 @@ pub fn heal(
         }
     }
     if let Some(mp) = manual_mask {
-        let m = image::open(mp)
+        let m = crate::render::open_mask_bounded(mp)
             .with_context(|| format!("open mask {}", mp.display()))?
             .to_rgba8();
         spots.extend(plan_from_mask(&m));
@@ -809,7 +809,7 @@ pub fn clone_stamp(
     };
     let (w, h) = (base.width(), base.height());
 
-    let m = image::open(mask_path)
+    let m = crate::render::open_mask_bounded(mask_path)
         .with_context(|| format!("open mask {}", mask_path.display()))?
         .to_rgba8();
     let mut spots = plan_from_mask(&m);

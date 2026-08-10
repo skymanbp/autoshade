@@ -302,8 +302,12 @@ fn segment_both(
         target.to_rgb8().save(&tmp_tgt).context("write segmentation input (target)")?;
         segment_file(seg, &tmp_src, mask_path).context("segment source sky")?;
         segment_file(seg, &tmp_tgt, &tmp_tgt_mask).context("segment target sky")?;
-        let sm = image::open(mask_path).context("read source sky mask")?.to_luma8();
-        let tm = image::open(&tmp_tgt_mask).context("read target sky mask")?.to_luma8();
+        let sm = crate::render::open_mask_bounded(mask_path)
+            .context("read source sky mask")?
+            .to_luma8();
+        let tm = crate::render::open_mask_bounded(&tmp_tgt_mask)
+            .context("read target sky mask")?
+            .to_luma8();
         Ok((sm, tm))
     };
     let out = run();

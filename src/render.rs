@@ -1668,6 +1668,39 @@ pub fn dead_bitmap_rasters(m: &crate::recipe::LocalAdjustment) -> Vec<String> {
         .collect()
 }
 
+/// The ONE bounded gate for decoding a standalone mask/overlay raster (L02):
+/// a header-only dimension probe refuses anything whose worst-case decoded
+/// footprint (w×h×4, the decoder's native intermediate) exceeds the mask
+/// budget BEFORE the decoder allocates. Every mask decode outside the
+/// snapshot loader routes through here — GUI brush/edit/refine bases,
+/// heal/clone plan masks, generative fill masks, reverse-fit sky masks.
+/// (The probe and the decode are two opens; a file swapped between them is
+/// the develop-store TOCTOU boundary, not this size gate's.)
+pub fn open_mask_bounded(path: &std::path::Path) -> anyhow::Result<image::DynamicImage> {
+    let (w, h) = image::ImageReader::open(path)?.into_dimensions()?;
+    check_mask_dims(w, h, &path.display().to_string())?;
+    Ok(image::open(path)?)
+}
+
+/// [`open_mask_bounded`] for in-memory bytes (the web UI's uploaded masks).
+pub fn mask_from_memory_bounded(bytes: &[u8]) -> anyhow::Result<image::DynamicImage> {
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()?
+        .into_dimensions()?;
+    check_mask_dims(w, h, "uploaded mask")?;
+    Ok(image::load_from_memory(bytes)?)
+}
+
+fn check_mask_dims(w: u32, h: u32, what: &str) -> anyhow::Result<()> {
+    if (w as usize).saturating_mul(h as usize).saturating_mul(4) > MASK_RASTER_BUDGET_BYTES {
+        anyhow::bail!(
+            "{what} is {w}x{h} — its decoded footprint exceeds the \
+             {MASK_RASTER_BUDGET_BYTES}-byte mask budget"
+        );
+    }
+    Ok(())
+}
+
 fn load_mask_raster_snapshot_with_budget(
     recipe: &EditRecipe,
     budget_bytes: usize,
@@ -1823,11 +1856,30 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
             return img.clone();
         }
     }
-    let decoded = match image::open(path) {
-        Ok(img) => Some(Arc::new(img.to_luma8())),
-        Err(e) => {
-            eprintln!("⚠ bitmap mask '{path}' could not be loaded ({e}) — mask is inert");
-            None
+    // Header-only dimension precheck BEFORE the decode (L02): the snapshot
+    // loader guards its own calls, but every OTHER path through here (the
+    // mask list's ⚠-badge probe, a future direct call) hit image::open
+    // unbounded — the decoder allocates the full raster plus its native
+    // intermediate before any byte count exists. The refusal is cached under
+    // the file's identity below, exactly like a failed decode.
+    let over_budget = image::ImageReader::open(path.as_str())
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .is_some_and(|(w, h)| {
+            (w as usize).saturating_mul(h as usize).saturating_mul(4) > MASK_RASTER_BUDGET_BYTES
+        });
+    let decoded = if over_budget {
+        eprintln!(
+            "⚠ bitmap mask '{path}' exceeds the {MASK_RASTER_BUDGET_BYTES}-byte mask budget — mask is inert"
+        );
+        None
+    } else {
+        match image::open(path) {
+            Ok(img) => Some(Arc::new(img.to_luma8())),
+            Err(e) => {
+                eprintln!("⚠ bitmap mask '{path}' could not be loaded ({e}) — mask is inert");
+                None
+            }
         }
     };
     {
@@ -6155,6 +6207,57 @@ mod tests {
             ..Default::default()
         };
         assert!(dead_bitmap_rasters(&all_good).is_empty());
+    }
+
+    /// L02: the bounded mask-decode gate — a header claiming absurd
+    /// dimensions is refused BEFORE the decoder allocates (the fixture is a
+    /// header-only PNG with no pixel data: if the gate did not fire first,
+    /// the decode would fail with a non-budget error and the assert catches
+    /// the difference). A real small raster passes.
+    #[test]
+    fn open_mask_bounded_refuses_oversized_headers() {
+        let dir = std::env::temp_dir().join("autoshop-mask-bounded-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("small.png");
+        image::GrayImage::from_pixel(4, 4, image::Luma([1])).save(&good).unwrap();
+        assert!(open_mask_bounded(&good).is_ok());
+        // A PNG signature + one IHDR chunk claiming 100000×100000 (a 40 GB
+        // decode) and nothing else. The IHDR CRC must be real — the png
+        // reader verifies it before yielding dimensions.
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { 0xEDB8_8320 ^ (crc >> 1) } else { crc >> 1 };
+                }
+            }
+            crc ^ 0xFFFF_FFFF
+        }
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(b"IHDR");
+        ihdr.extend_from_slice(&100_000u32.to_be_bytes()); // width
+        ihdr.extend_from_slice(&100_000u32.to_be_bytes()); // height
+        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]); // 8-bit greyscale, no interlace
+        let mut png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(&ihdr);
+        png.extend_from_slice(&crc32(&ihdr).to_be_bytes());
+        // The dimension probe reads chunks up to the first IDAT header —
+        // give it an empty IDAT (and IEND) so it succeeds with zero pixel
+        // data on disk.
+        png.extend_from_slice(&0u32.to_be_bytes());
+        png.extend_from_slice(b"IDAT");
+        png.extend_from_slice(&crc32(b"IDAT").to_be_bytes());
+        png.extend_from_slice(&0u32.to_be_bytes());
+        png.extend_from_slice(b"IEND");
+        png.extend_from_slice(&crc32(b"IEND").to_be_bytes());
+        let huge = dir.join("huge.png");
+        std::fs::write(&huge, &png).unwrap();
+        let err = open_mask_bounded(&huge).unwrap_err();
+        assert!(err.to_string().contains("budget"), "{err}");
+        let err = mask_from_memory_bounded(&png).unwrap_err();
+        assert!(err.to_string().contains("budget"), "{err}");
     }
 
     #[test]

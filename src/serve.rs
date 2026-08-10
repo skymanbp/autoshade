@@ -1452,7 +1452,7 @@ fn unwarp_mask(bytes: &[u8], view: Option<&EditRecipe>, raw: &Path) -> Option<Ve
         return None;
     }
     let dims = source_dims(raw)?;
-    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let img = render::mask_from_memory_bounded(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
         return None;

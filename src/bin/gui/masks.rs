@@ -112,7 +112,7 @@ impl AutoshopApp {
         if let Some(i) = target
             && let Some(MaskGeometry::Bitmap { path }) = self.recipe.masks.get(i).map(|m| &m.mask)
         {
-            match image::open(path) {
+            match autoshop::render::open_mask_bounded(std::path::Path::new(path)) {
                 Ok(img) => {
                     let g = image::imageops::resize(
                         &img.to_luma8(),
@@ -227,8 +227,7 @@ impl AutoshopApp {
             return;
         };
         let lang = self.lang;
-        let done = image::open(&path)
-            .map_err(anyhow::Error::from)
+        let done = autoshop::render::open_mask_bounded(std::path::Path::new(&path))
             .map(|img| op(&img.to_luma8()))
             .and_then(|g| {
                 let p = autoshop::store::claim_raster(&src, tag).map_err(anyhow::Error::from)?;
@@ -278,7 +277,7 @@ impl AutoshopApp {
         self.spawn_worker(
             move || {
                 let res = (|| {
-                    let mask = image::open(&path)
+                    let mask = autoshop::render::open_mask_bounded(std::path::Path::new(&path))
                         .map_err(|e| anyhow::anyhow!("load mask raster {path}: {e}"))?
                         .to_luma8();
                     let full = autoshop::decode::load_image(&src)?;

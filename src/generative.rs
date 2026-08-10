@@ -231,7 +231,7 @@ pub fn retouch(
     // image from THIS base so the generated pixels match its look (no seam shift).
     let small = DynamicImage::ImageRgb8(base.resize_exact(sw, sh, FilterType::Lanczos3).to_rgb8());
     let png = encode_png(&small)?;
-    let mask_img = image::open(mask_path)
+    let mask_img = crate::render::open_mask_bounded(mask_path)
         .with_context(|| format!("open mask {}", mask_path.display()))?;
     let mask_png = encode_png(&mask_img.resize_exact(sw, sh, FilterType::Nearest))?;
 
