@@ -629,7 +629,7 @@ fn saved_recipe_snapshot(raw: &Path) -> Option<EditRecipe> {
     // by the backup gate downstream).
     let _ = crate::store::recover_orphan_baks(raw);
     for p in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
-        if let Ok(text) = std::fs::read_to_string(&p)
+        if let Ok(text) = crate::store::read_text_capped(&p, crate::store::MAX_STORE_JSON)
             && let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
         {
             if let Some(note) = repair_pre_era_base_curve(raw, &mut r) {

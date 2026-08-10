@@ -695,7 +695,7 @@ pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
 pub fn read_variants_checked(src: &Path) -> VariantsRead {
     let _ = recover_orphan_baks(src);
     let sidecar = variants_path(src);
-    let bytes = match std::fs::read(&sidecar) {
+    let bytes = match read_bytes_capped(&sidecar, MAX_STORE_JSON) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return VariantsRead::Absent,
         Err(e) => {
@@ -973,7 +973,7 @@ pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
     // to "no master" exactly as it does for any unreadable sidecar.
     let _ = recover_orphan_baks(src);
     let sidecar = pixel_source_path(src);
-    let bytes = match std::fs::read(&sidecar) {
+    let bytes = match read_bytes_capped(&sidecar, MAX_STORE_JSON) {
         Ok(b) => b,
         // Missing IS the normal parametric-only case — stay silent.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -987,21 +987,29 @@ pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
             return None;
         }
     };
-    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+    // A narrow struct, not `serde_json::Value`: a hostile pixels.json
+    // amplified ~10× into a throwaway tree (L02/L16). Unknown fields still
+    // pass — forward compatibility is unchanged.
+    #[derive(serde::Deserialize)]
+    struct PixelSourceDoc {
+        origin: Option<String>,
+        kind: Option<String>,
+    }
+    let Ok(doc) = serde_json::from_slice::<PixelSourceDoc>(&bytes) else {
         eprintln!(
             "⚠ {} is unreadable — the baked retouch master is not restored",
             sidecar.display()
         );
         return None;
     };
-    let Some(origin) = doc.get("origin").and_then(|o| o.as_str()) else {
+    let Some(origin) = doc.origin else {
         eprintln!(
             "⚠ {} has no origin field — the baked retouch master is not restored",
             sidecar.display()
         );
         return None;
     };
-    let generated = match doc.get("kind").and_then(|k| k.as_str()) {
+    let generated = match doc.kind.as_deref() {
         Some("generated") => true,
         Some("inplace") => false,
         Some(kind) => {
@@ -1202,6 +1210,46 @@ pub enum SidecarRead {
     /// A file IS there but cannot be used, and this is why (used verbatim in
     /// user-facing notes).
     Unreadable(&'static str),
+}
+
+/// The bounded ceiling for the app's own JSON/text sidecars (recipe.json,
+/// variants.json, pixels.json, version snapshots, settings). Far above any
+/// legitimate file this app writes (recipe strings are clamp-capped; a real
+/// variants.json is kilobytes), yet it stops a photo pack's 2 GB
+/// "recipe.json" from materialising in RAM on open (L02).
+pub const MAX_STORE_JSON: u64 = 16 * 1024 * 1024;
+
+/// Bounded replacement for `std::fs::read_to_string` on files the app itself
+/// persists but an untrusted photo pack can replace wholesale. Over the cap →
+/// `InvalidData` naming the limit; `NotFound` passes through untouched, so
+/// every caller's existing "unreadable ≠ absent" branching keeps its shape.
+/// Bytes first, text second — same rationale as [`read_sidecar_checked`]:
+/// `read_to_string` on a `Take` that cuts through a multi-byte character
+/// reports the wrong reason.
+pub fn read_text_capped(path: &Path, cap: u64) -> std::io::Result<String> {
+    let buf = read_bytes_capped(path, cap)?;
+    String::from_utf8(buf).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not readable UTF-8 text", path.display()),
+        )
+    })
+}
+
+/// [`read_text_capped`] for binary payloads (`variants.json`/`pixels.json`
+/// parse from slices).
+pub fn read_bytes_capped(path: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let f = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    let n = f.take(cap + 1).read_to_end(&mut buf)?;
+    if n as u64 > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is larger than the {cap}-byte limit", path.display()),
+        ));
+    }
+    Ok(buf)
 }
 
 /// Every read of an XMP sidecar, bounded. A sidecar is metadata a user
@@ -1598,7 +1646,7 @@ fn backup_saved_develop_unlocked(
     recover_orphan_baks(src)?;
     let mut found: Option<(PathBuf, String)> = None;
     for rj in [recipe_target(src), legacy_recipe(src)] {
-        match std::fs::read_to_string(&rj) {
+        match read_text_capped(&rj, MAX_STORE_JSON) {
             Ok(t) => {
                 found = Some((rj, t));
                 break;
@@ -1743,7 +1791,7 @@ pub fn claim_version(src: &Path) -> std::io::Result<(u32, PathBuf)> {
 fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
     let mut found: Option<String> = None;
     for xp in [xmp_target(src), legacy_xmp(src)] {
-        match std::fs::read_to_string(&xp) {
+        match read_text_capped(&xp, MAX_STORE_JSON) {
             Ok(t) => {
                 found = Some(t);
                 break;
@@ -1762,7 +1810,7 @@ fn backup_xmp_only(src: &Path) -> std::io::Result<Option<u32>> {
     // LATEST version's xmp snapshot mean this save is already preserved
     // (no version spam on repeated programmatic writes).
     if let Some(lastn) = list_versions(src).last().copied()
-        && let Ok(prev) = std::fs::read_to_string(dev.join(format!("v{lastn}.{stem}.xmp")))
+        && let Ok(prev) = read_text_capped(&dev.join(format!("v{lastn}.{stem}.xmp")), MAX_STORE_JSON)
         && prev == text
     {
         return Ok(None);
@@ -2510,7 +2558,7 @@ fn migrate_legacy_jobs(
 /// they are identical-content derivations a concurrent migration may already
 /// reference (rolling them back deleted the winner's bitmap).
 fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(from) else { return false };
+    let Ok(text) = read_text_capped(from, MAX_STORE_JSON) else { return false };
     let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text) else {
         // Unparsable (interrupted write / newer schema): move byte-for-byte so
         // the read path can keep reporting it loudly as Unreadable. Ok(false)
@@ -2719,6 +2767,27 @@ mod tests {
             panic!("an unreadable sidecar must be disclosed, not treated as absent");
         };
         assert!(why.contains("UTF-8"), "the reason names the cause: {why}");
+    }
+
+    /// L02: the bounded reader — over the cap is InvalidData naming the
+    /// limit, at the cap passes, NotFound passes through untouched.
+    #[test]
+    fn read_text_capped_enforces_its_limit() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-capped");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("capped.json");
+        std::fs::write(&p, b"12345678").unwrap();
+        assert_eq!(read_text_capped(&p, 8).unwrap(), "12345678");
+        let err = read_text_capped(&p, 7).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("limit"), "{err}");
+        let missing = read_text_capped(&dir.join("absent.json"), 8).unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        std::fs::write(&p, [0xFFu8, 0xFE]).unwrap();
+        assert_eq!(
+            read_text_capped(&p, 8).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

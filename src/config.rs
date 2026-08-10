@@ -148,7 +148,17 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
         (local_settings_path(), SettingsOrigin::Central),
         (PathBuf::from("autoshop.local.json"), SettingsOrigin::WorkingDir),
     ] {
-        let Ok(s) = std::fs::read_to_string(&p) else { continue };
+        let s = match crate::store::read_text_capped(&p, crate::store::MAX_STORE_JSON) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // Unreadable ≠ absent (over-cap, permissions): the old silent
+            // skip fell through to defaults with nothing to say why the
+            // user's keys stopped applying.
+            Err(e) => {
+                eprintln!("warning: {} cannot be read ({e}) — ignoring it", p.display());
+                continue;
+            }
+        };
         match serde_json::from_str::<LocalSettings>(&s) {
             Ok(v) => return (v, origin),
             Err(e) => {

@@ -243,7 +243,10 @@ impl AutoshopApp {
                                 ] {
                                     if rj.exists() {
                                         let mut r = serde_json::from_str::<EditRecipe>(
-                                            &std::fs::read_to_string(&rj)?,
+                                            &autoshop::store::read_text_capped(
+                                                &rj,
+                                                autoshop::store::MAX_STORE_JSON,
+                                            )?,
                                         )?;
                                         // The one restore path that never went
                                         // through clamp: a stored recipe with

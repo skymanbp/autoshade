@@ -938,7 +938,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // Central first; then any legacy file a failed migration left behind.
     let mut parse_err: Option<String> = None;
     for path in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
-        let text = match std::fs::read_to_string(&path) {
+        let text = match crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
             Ok(t) => t,
             // Missing IS absence; any OTHER read failure (permissions, I/O)
             // is an EXISTING save we could not honour — treating it as
@@ -955,15 +955,19 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         // throw in the middle of `selectPhoto`, leaving an empty control panel
         // and no error anywhere. The check is schema-AGNOSTIC (`Value`, not
         // `EditRecipe`) so a newer-schema file still goes out byte-for-byte.
-        match serde_json::from_str::<serde_json::Value>(&text) {
+        // Syntax-validated WITHOUT building a tree: `IgnoredAny` walks the
+        // whole document in O(depth) memory, where `Value` materialised a
+        // ~10× tree of a hostile recipe.json just to throw it away
+        // (L02/L16). The object test is syntactic: a JSON document whose
+        // first token is not `{` — `null`, an array, a bare scalar — can
+        // never be a recipe of ANY schema generation; that is corruption,
+        // not a newer schema (which is still an object, served verbatim).
+        match serde_json::from_str::<serde::de::IgnoredAny>(&text) {
             Err(e) => {
                 parse_err = Some(e.to_string());
                 continue;
             }
-            // `null`, an array or a bare scalar parses as Value yet can never
-            // be a recipe of ANY schema generation — that is corruption, not
-            // a newer schema (which is still an object and goes out verbatim).
-            Ok(v) if !v.is_object() => {
+            Ok(_) if !text.trim_start().starts_with('{') => {
                 parse_err = Some("recipe JSON is not an object".into());
                 continue;
             }
@@ -1007,7 +1011,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // was tuned in Lightroom over ITS camera-profile base, so it gets the
     // photo's fresh base look — the same rule the GUI applies on open.
     for path in [pipeline::xmp_target(raw), crate::store::legacy_xmp(raw)] {
-        if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(text) = crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
             let mut r = crate::xmp::xmp_to_recipe(&text);
             // First consulted file wins the disclosure slot (GUI accumulates
             // the same way) — set regardless of noop-ness.
@@ -1791,7 +1795,7 @@ fn registered_export_out(
     for suffix in 1..=999u32 {
         let entry = group.join(format!("{suffix}.owner"));
         loop {
-            match std::fs::read_to_string(&entry) {
+            match crate::store::read_text_capped(&entry, crate::store::MAX_STORE_JSON) {
                 Ok(text) => {
                     if text.lines().next() == Some(photo_key.as_str()) {
                         return Ok(export_slot_path(out_dir, stem, suffix, kind, ext));

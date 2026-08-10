@@ -508,7 +508,7 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
 }
 
 fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
-    let text = std::fs::read_to_string(recipe_path)
+    let text = autoshop::store::read_text_capped(recipe_path, autoshop::store::MAX_STORE_JSON)
         .with_context(|| format!("read recipe {}", recipe_path.display()))?;
     let mut recipe: EditRecipe =
         serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))?;

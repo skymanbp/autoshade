@@ -150,7 +150,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         // EXISTS but can't answer — reporting it as Unreadable keeps the
         // stated precedence: a stale legacy recipe (or the lossy XMP) must
         // never silently replace an unreadable central one.
-        let text = match std::fs::read_to_string(&rj) {
+        let text = match autoshop::store::read_text_capped(&rj, autoshop::store::MAX_STORE_JSON) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
@@ -199,7 +199,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
     ] {
         // Same rule as the recipe loop: only NotFound falls through — an
         // unreadable central XMP must not let a stale legacy one answer.
-        let text = match std::fs::read_to_string(&xp) {
+        let text = match autoshop::store::read_text_capped(&xp, autoshop::store::MAX_STORE_JSON) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => {
@@ -294,7 +294,7 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
         autoshop::store::recipe_target(target),
         autoshop::store::legacy_recipe(target),
     ] {
-        match std::fs::read_to_string(&p) {
+        match autoshop::store::read_text_capped(&p, autoshop::store::MAX_STORE_JSON) {
             Ok(text) => {
                 if let Ok(mut saved) = serde_json::from_str::<EditRecipe>(&text) {
                     // Repair BEFORE adopting, and carry the era stamp WITH the

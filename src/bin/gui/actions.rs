@@ -926,7 +926,7 @@ impl AutoshopApp {
         let lang = self.lang;
         let Some(src) = self.src_path.clone() else { return };
         let p = Self::version_path(&src, n);
-        match std::fs::read_to_string(&p)
+        match autoshop::store::read_text_capped(&p, autoshop::store::MAX_STORE_JSON)
             .map_err(anyhow::Error::from)
             .and_then(|s| Ok(serde_json::from_str::<EditRecipe>(&s)?))
         {
