@@ -946,14 +946,14 @@
         let _scrub = Scrub(vec![dev.clone(), xp.clone(), legacy_rj.clone()]);
 
         assert!(
-            matches!(read_saved_develop(src).0, SavedDevelop::Nothing),
+            matches!(read_saved_develop(src).saved, SavedDevelop::Nothing),
             "no sidecar → Nothing"
         );
 
         // A NEUTRAL XMP (foreign file, or ours with nothing set) restores nothing.
         std::fs::write(&xp, autoshop::xmp::recipe_to_xmp(&EditRecipe::default())).unwrap();
         assert!(
-            matches!(read_saved_develop(src).0, SavedDevelop::NoopOnly),
+            matches!(read_saved_develop(src).saved, SavedDevelop::NoopOnly),
             "a no-op XMP must not claim a restore"
         );
 
@@ -964,14 +964,14 @@
             .replace("crs:Exposure2012=\"0.00\"", "crs:Exposure2012=\"broken\"");
         assert!(doc.contains("broken"), "fixture: the corrupt attribute must exist");
         std::fs::write(&xp, &doc).unwrap();
-        let (saved, warn, _, _) = read_saved_develop(src);
+        let RestoredDevelop { saved, xmp_bad: warn, .. } = read_saved_develop(src);
         assert!(matches!(saved, SavedDevelop::NoopOnly), "corrupt-only still restores nothing");
         assert!(warn.contains(&"Exposure2012".to_string()), "{warn:?}");
 
         // XMP with real edits → imported through the reverse crs mapping.
         let edited = EditRecipe { contrast: 22.0, ..Default::default() };
         std::fs::write(&xp, autoshop::xmp::recipe_to_xmp(&edited)).unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(src).0 else {
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src).saved else {
             panic!("an edited XMP restores");
         };
         assert_eq!((r.contrast, kind), (22.0, "XMP"));
@@ -979,14 +979,14 @@
         // recipe.json appears → preferred over the XMP.
         let full = EditRecipe { exposure_ev: 0.5, ..Default::default() };
         std::fs::write(&rj, serde_json::to_string(&full).unwrap()).unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(src).0 else {
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src).saved else {
             panic!("recipe.json restores");
         };
         assert_eq!((r.exposure_ev, kind), (0.5, "recipe.json"));
 
         // A damaged recipe.json degrades LOUDLY, XMP fallback attached.
         std::fs::write(&rj, "{ not json").unwrap();
-        let SavedDevelop::Unreadable { fallback, .. } = read_saved_develop(src).0 else {
+        let SavedDevelop::Unreadable { fallback, .. } = read_saved_develop(src).saved else {
             panic!("a damaged recipe.json must be reported, not skipped");
         };
         assert_eq!(fallback.expect("XMP fallback rides along").1, "XMP");
@@ -1008,7 +1008,7 @@
         let _scrub2 = Scrub(vec![dev2.clone(), legacy_rj2.clone()]);
         let legacy = EditRecipe { contrast: -11.0, ..Default::default() };
         std::fs::write(&legacy_rj2, serde_json::to_string(&legacy).unwrap()).unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(src2).0 else {
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(src2).saved else {
             panic!("a legacy ./out recipe restores");
         };
         assert_eq!((r.contrast, kind), (-11.0, "recipe.json"));
@@ -1055,7 +1055,7 @@
             .unwrap()
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
             .unwrap();
-        let SavedDevelop::Restored(r, kind) = read_saved_develop(&src).0 else {
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(&src).saved else {
             panic!("a newer Lightroom sidecar must restore");
         };
         assert_eq!(r.contrast, 33.0, "the newer Lightroom edit wins over the stored develop");

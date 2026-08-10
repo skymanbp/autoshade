@@ -30,19 +30,37 @@ pub(crate) enum SavedDevelop {
 /// migration could not move keeps being read in place, and the `kind` string
 /// says which file actually answered.
 ///
-/// The third return is the count of mask corrections the restoring XMP
-/// carried that the import CANNOT represent (LR brush / AI / depth masks) —
-/// its own channel, NOT `xmp_bad`: appended there it rendered as "unreadable
-/// numeric setting(s)", a warning about something else entirely. 0 whenever
-/// the restore came from recipe.json (which carries no LR-only masks).
-// The fourth element is what the restore-time clamps DISCARDED (mask and
-// component counts past the recipe limits): W20's contract — sanitisation
-// must not be silent loss — applies to restores exactly as it does to the
-// CLI import and the render entry points, and this is the channel the
-// Opened handler surfaces it through.
-pub(crate) fn read_saved_develop(
-    src: &std::path::Path,
-) -> (SavedDevelop, Vec<String>, usize, autoshop::recipe::ClampSummary) {
+/// The disclosure channels ride along in [`RestoredDevelop`].
+/// Everything a saved-develop restore hands back: the develop itself plus
+/// the three restore-time disclosure channels (W20 — restore loss must never
+/// be silent). Was a positional 4-tuple; the channels kept being threaded
+/// by position through the fresh-open path (round-12 结构 cluster).
+pub(crate) struct RestoredDevelop {
+    pub(crate) saved: SavedDevelop,
+    /// Unreadable numeric XMP settings, phrased for the open-note channel.
+    pub(crate) xmp_bad: Vec<String>,
+    /// LR mask corrections (brush/AI/depth) the import cannot represent —
+    /// its own channel, NOT `xmp_bad`: appended there it rendered as
+    /// "unreadable numeric setting(s)", a warning about something else.
+    /// 0 whenever the restore came from recipe.json (no LR-only masks).
+    pub(crate) dropped_masks: usize,
+    /// What the restore-time clamps DISCARDED (W20: sanitisation must not
+    /// be silent loss) — the Opened handler's disclosure channel.
+    pub(crate) clamp: autoshop::recipe::ClampSummary,
+}
+
+impl Default for RestoredDevelop {
+    fn default() -> Self {
+        RestoredDevelop {
+            saved: SavedDevelop::Nothing,
+            xmp_bad: Vec::new(),
+            dropped_masks: 0,
+            clamp: Default::default(),
+        }
+    }
+}
+
+pub(crate) fn read_saved_develop(src: &std::path::Path) -> RestoredDevelop {
     // The whole restore — legacy migration plus the multi-file precedence
     // walk — runs under ONE develop lock, so another process's mid-compound
     // save cannot hand back half-old, half-new answers. NoWait: this runs on
@@ -54,23 +72,19 @@ pub(crate) fn read_saved_develop(
         || Ok::<_, std::io::Error>(read_saved_develop_locked(src)),
     ) {
         Ok(answer) => answer,
-        Err(e) => (
-            SavedDevelop::Unreadable {
+        Err(e) => RestoredDevelop {
+            saved: SavedDevelop::Unreadable {
                 err: format!(
                     "the develop is busy in another Autoshop process ({e}); retry opening the photo"
                 ),
                 fallback: None,
             },
-            Vec::new(),
-            0,
-            Default::default(),
-        ),
+            ..Default::default()
+        },
     }
 }
 
-pub(crate) fn read_saved_develop_locked(
-    src: &std::path::Path,
-) -> (SavedDevelop, Vec<String>, usize, autoshop::recipe::ClampSummary) {
+pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelop {
     let mut clamp_dropped = autoshop::recipe::ClampSummary::default();
     autoshop::store::migrate_legacy(src);
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes.
@@ -102,7 +116,12 @@ pub(crate) fn read_saved_develop_locked(
         if !r.is_noop() {
             clamp_dropped.absorb(r.clamp());
             let dropped = autoshop::xmp::unsupported_corrections(&text);
-            return (SavedDevelop::Restored(r, kind), xmp_bad, dropped, clamp_dropped);
+            return RestoredDevelop {
+                saved: SavedDevelop::Restored(r, kind),
+                xmp_bad,
+                dropped_masks: dropped,
+                clamp: clamp_dropped,
+            };
         }
     }
     let mut any = false;
@@ -151,7 +170,11 @@ pub(crate) fn read_saved_develop_locked(
         // recipe.json restored: lossless truth — a corrupt number in the
         // subordinate XMP is REPLACED by the next save's owned-attr merge,
         // so there is nothing to disclose on this path.
-        return (SavedDevelop::Restored(r, kind), Vec::new(), 0, clamp_dropped);
+        return RestoredDevelop {
+            saved: SavedDevelop::Restored(r, kind),
+            clamp: clamp_dropped,
+            ..Default::default()
+        };
     }
     let mut fallback = None;
     let mut dropped_masks = 0usize;
@@ -188,12 +211,32 @@ pub(crate) fn read_saved_develop_locked(
         break; // same rule: the file that answered decides
     }
     if let Some(err) = parse_err {
-        return (SavedDevelop::Unreadable { err, fallback }, xmp_bad, dropped_masks, clamp_dropped);
+        return RestoredDevelop {
+            saved: SavedDevelop::Unreadable { err, fallback },
+            xmp_bad,
+            dropped_masks,
+            clamp: clamp_dropped,
+        };
     }
     match (fallback, any) {
-        (Some((r, k)), _) => (SavedDevelop::Restored(r, k), xmp_bad, dropped_masks, clamp_dropped),
-        (None, true) => (SavedDevelop::NoopOnly, xmp_bad, 0, clamp_dropped),
-        (None, false) => (SavedDevelop::Nothing, xmp_bad, 0, clamp_dropped),
+        (Some((r, k)), _) => RestoredDevelop {
+            saved: SavedDevelop::Restored(r, k),
+            xmp_bad,
+            dropped_masks,
+            clamp: clamp_dropped,
+        },
+        (None, true) => RestoredDevelop {
+            saved: SavedDevelop::NoopOnly,
+            xmp_bad,
+            clamp: clamp_dropped,
+            ..Default::default()
+        },
+        (None, false) => RestoredDevelop {
+            saved: SavedDevelop::Nothing,
+            xmp_bad,
+            clamp: clamp_dropped,
+            ..Default::default()
+        },
     }
 }
 

@@ -550,11 +550,16 @@ impl AutoshopApp {
                             // recipe's own base_curve.
                             self.source_preview = Some(base.clone());
                             self.base_preview = Some(base);
-                            let (saved, xmp_bad, dropped_masks, clamp_dropped) = self
+                            let RestoredDevelop {
+                                saved,
+                                xmp_bad,
+                                dropped_masks,
+                                clamp: clamp_dropped,
+                            } = self
                                 .src_path
                                 .as_deref()
                                 .map(read_saved_develop)
-                                .unwrap_or((SavedDevelop::Nothing, Vec::new(), 0, Default::default()));
+                                .unwrap_or_default();
                             // W20: restore-time sanitisation is not allowed to
                             // be silent loss — a stored recipe past the caps
                             // opens minus edits, and the user must hear it.
