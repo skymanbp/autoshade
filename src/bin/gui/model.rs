@@ -363,12 +363,19 @@ impl UndoStep {
     }
 }
 
-/// One photo the quit dialog would save: path + canvas recipe + its baked
-/// pixel identity (`origin`, is_generated) when one exists + the photo's
-/// strip record (background variants + active kind/position) when the strip
-/// is non-trivial — Save-all persists the WHOLE strip, exactly like Ctrl+S.
-pub(crate) type PendingSave =
-    (PathBuf, EditRecipe, Option<(PathBuf, bool)>, Option<autoshop::store::VariantsRecord>);
+/// One photo the quit dialog would save. Was a positional 4-tuple with a
+/// nested pair — six values threaded by position (round-12 结构 cluster).
+pub(crate) struct PendingSave {
+    pub(crate) photo: PathBuf,
+    /// The canvas recipe Save-all writes, exactly like Ctrl+S.
+    pub(crate) recipe: EditRecipe,
+    /// The canvas's baked pixel identity when one exists:
+    /// (master origin, is_generated) — persists the master link.
+    pub(crate) pixels: Option<(PathBuf, bool)>,
+    /// The photo's strip record (background variants + active kind/position)
+    /// when the strip is non-trivial — Save-all persists the WHOLE strip.
+    pub(crate) strip: Option<autoshop::store::VariantsRecord>,
+}
 
 /// The canvas snapshot navigation stashes for a photo with unsaved work:
 /// the recipe PLUS the active variant's pixel identity. A baked in-place

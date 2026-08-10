@@ -1321,13 +1321,11 @@ impl AutoshopApp {
         let mut pending: Vec<PendingSave> = self
             .nav_stash
             .iter()
-            .map(|(p, st)| {
-                (
-                    p.clone(),
-                    st.recipe.clone(),
-                    st.origin.clone().map(|o| (o, st.kind == VariantKind::Generated)),
-                    stash_strip_record(st),
-                )
+            .map(|(p, st)| PendingSave {
+                photo: p.clone(),
+                recipe: st.recipe.clone(),
+                pixels: st.origin.clone().map(|o| (o, st.kind == VariantKind::Generated)),
+                strip: stash_strip_record(st),
             })
             .collect();
         // Live-canvas override — skipped while a photo OPEN is in flight:
@@ -1345,7 +1343,7 @@ impl AutoshopApp {
             // The live canvas outranks its own stash entry WHOLESALE: displace
             // it even when the canvas is clean (the user reverted) — the loop
             // below would otherwise write the stale stashed edits to disk.
-            pending.retain(|(q, ..)| q != &p);
+            pending.retain(|e| e.photo != p);
             // Both directions count (gained OR dropped master) — see open_path.
             let recorded = autoshop::store::read_pixel_source(&p);
             let live_generated = self.active_is_generated();
@@ -1363,7 +1361,12 @@ impl AutoshopApp {
                 || self.open_dirty_variants() > 0
             {
                 let pix = origin.map(|o| (o, self.active_is_generated()));
-                pending.push((p, self.recipe.clone(), pix, self.current_strip_record()));
+                pending.push(PendingSave {
+                    photo: p,
+                    recipe: self.recipe.clone(),
+                    pixels: pix,
+                    strip: self.current_strip_record(),
+                });
             }
         }
         // Background variants ride IN `pending` since v0.22: each entry
@@ -1426,7 +1429,7 @@ impl AutoshopApp {
                 // Parent folder + stem: two DSC_0431 from two shoots must be
                 // distinguishable in the one dialog where the stakes are real.
                 egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                    for (p, ..) in &pending {
+                    for PendingSave { photo: p, .. } in &pending {
                         let folder = p
                             .parent()
                             .and_then(|d| d.file_name())
@@ -1482,7 +1485,7 @@ impl AutoshopApp {
             // Collected, not fatal — reported on the way out (see below).
             let mut xmp_warns: Vec<String> = Vec::new();
             let mut clear_warns: Vec<String> = Vec::new();
-            for (p, r, pix, strip) in &pending {
+            for PendingSave { photo: p, recipe: r, pixels: pix, strip } in &pending {
                 // ONE NoWait lock per photo across its whole persist compound
                 // (the Ctrl+S pairing). A develop busy in another process
                 // fails THIS photo — the quit bounces and reports below —
