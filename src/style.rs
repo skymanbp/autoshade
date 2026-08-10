@@ -206,16 +206,19 @@ impl StyleIndex {
         println!("building style index from {} RAW+.xmp pairs ...", pairs.len());
         // Decode in parallel: each pair pays ~1s of full-res embedded-JPEG decode
         // and the old serial scan left every other core idle (a 2000-pair library
-        // took the better part of an hour). A FIXED pool of at most 4 workers
-        // bounds peak memory (each in-flight decode can hold ~180 MB); an atomic
-        // counter hands out indices, and each result lands in its own slot so the
-        // exemplar ORDER stays identical to the serial version.
+        // took the better part of an hour). The worker count IS the process-wide
+        // decode cap (decode::MAX_CONCURRENT_DECODES; each in-flight decode can
+        // hold ~180 MB), and each decode also takes a DecodePermit — so two
+        // concurrent builds (the web server's request threads) share one budget
+        // instead of stacking to ~1.4 GB, while a single build never blocks. An
+        // atomic counter hands out indices, and each result lands in its own
+        // slot so the exemplar ORDER stays identical to the serial version.
         use std::sync::atomic::{AtomicUsize, Ordering};
         let mut slots: Vec<Option<StyleExemplar>> = Vec::new();
         slots.resize_with(pairs.len(), || None);
         let next = AtomicUsize::new(0);
         let done = AtomicUsize::new(0);
-        let workers = pairs.len().clamp(1, 4);
+        let workers = pairs.len().clamp(1, decode::MAX_CONCURRENT_DECODES);
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
             for _ in 0..workers {
@@ -224,9 +227,13 @@ impl StyleIndex {
                 s.spawn(move || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&raw) = pairs.get(i) else { break };
+                    let permit = decode::DecodePermit::acquire();
+                    // Destructured, not bound whole: `preview` (~181 MB at
+                    // 61 MP) is never read here, yet bound as `d` it stayed
+                    // alive across the sidecar read below.
                     let ex = match decode::decode_raw(raw) {
-                        Ok(d) => {
-                            let feat = feature_vector(&d.meta, &d.histogram);
+                        Ok(decode::Decoded { meta, histogram, .. }) => {
+                            let feat = feature_vector(&meta, &histogram);
                             // An unreadable sidecar must SKIP the photo, not
                             // produce a settings-free exemplar that dilutes
                             // retrieval (the pair scan guaranteed the .xmp
@@ -271,6 +278,7 @@ impl StyleIndex {
                             None
                         }
                     };
+                    drop(permit); // free the decode slot before the prints/send
                     // Progress counts COMPLETED photos (completion order differs
                     // from index order under parallelism) so it stays monotonic.
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;

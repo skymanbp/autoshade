@@ -767,7 +767,7 @@ pub fn render_to_file(
         let working = if native_wide { space } else { ExportColorSpace::Srgb };
         render_to_image_in(src_path, recipe, denoise, None, working)?
     } else {
-        let src = crate::decode::load_image(src_path)?;
+        let src = crate::decode::load_image_for_develop(src_path)?;
         render_baked_to_image(&src, recipe, denoise)?
     };
     if let Some(le) = opts.long_edge

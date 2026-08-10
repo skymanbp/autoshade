@@ -261,6 +261,27 @@ fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u6
     }
 }
 
+/// Bytes per SOURCE pixel the baked develop chain holds ON TOP of the decoded
+/// buffer at its peak (`render_baked_to_image`): the f32 planes
+/// (`Vec<[f32; 3]>`, 12 B/px, alive to the end of the fn), the packed 16-bit
+/// frame (6 B/px) and the fresh full-size output the geometric resamplers
+/// allocate (6 B/px) — all while the decoded source is still borrowed
+/// underneath. 12 + 6 + 6 = 24. If a further full-frame stage joins that
+/// chain, this constant must grow with it.
+const PIPELINE_BYTES_PER_PIXEL: u64 = 24;
+
+/// [`decode_peak_bytes`] plus the develop chain's own full-frame buffers —
+/// what the baked develop entry point really allocates for a source of
+/// `pixels` px. Pure, so the boundary test can pin the accounting.
+fn develop_peak_bytes(
+    decoded_bytes: u64,
+    orientation: image::metadata::Orientation,
+    pixels: u64,
+) -> u64 {
+    decode_peak_bytes(decoded_bytes, orientation)
+        .saturating_add(pixels.saturating_mul(PIPELINE_BYTES_PER_PIXEL))
+}
+
 /// Load a baked raster (PNG/TIFF/JPEG) with a RAISED (not lifted) decoder
 /// memory limit — a 60 MP export trips the image crate's default cap, but
 /// `no_limits()` let a corrupt header with absurd declared dimensions drive an
@@ -272,6 +293,22 @@ fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u6
 /// metadata the decoder does NOT apply — imported photos rendered sideways
 /// (the RAW path already orients via the sensor metadata).
 pub fn load_image(path: &Path) -> Result<DynamicImage> {
+    load_image_gated(path, false)
+}
+
+/// [`load_image`] for the full-frame baked DEVELOP path
+/// (`render_baked_to_image`): charges each source pixel the develop chain's
+/// downstream footprint ([`PIPELINE_BYTES_PER_PIXEL`]) on top of the decode
+/// buffer, so the ceiling bounds the true pipeline peak — the plain gate
+/// admitted an L8 source whose develop then peaked at ~25× the ceiling (L02).
+/// Thumbnail consumers (GUI open, denoise/retouch/fit pre-shrink) stay on
+/// [`load_image`]: they never build those planes, and charging them would
+/// refuse sources they legitimately shrink.
+pub fn load_image_for_develop(path: &Path) -> Result<DynamicImage> {
+    load_image_gated(path, true)
+}
+
+fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     use image::ImageDecoder as _;
     let mut reader = image::ImageReader::open(path)
         .with_context(|| format!("open image {}", path.display()))?;
@@ -295,12 +332,22 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
     let decoded_bytes = decoder.total_bytes();
-    let need = decode_peak_bytes(decoded_bytes, orientation);
+    let (dw, dh) = decoder.dimensions();
+    let need = if develop {
+        develop_peak_bytes(
+            decoded_bytes,
+            orientation,
+            u64::from(dw).saturating_mul(u64::from(dh)),
+        )
+    } else {
+        decode_peak_bytes(decoded_bytes, orientation)
+    };
     if allocation_over_ceiling(need) {
         anyhow::bail!(
-            "image {} needs {need} bytes at peak (decode {decoded_bytes}, then orientation) \
+            "image {} needs {need} bytes at peak (decode {decoded_bytes}, then orientation{}) \
              — at or over the {MAX_ALLOC}-byte ceiling",
-            path.display()
+            path.display(),
+            if develop { ", then the develop chain's full-frame buffers" } else { "" }
         );
     }
     let icc_profile = decoder
@@ -388,6 +435,53 @@ fn hist_copy(img: &DynamicImage) -> DynamicImage {
         img.resize(1024, 1024, image::imageops::FilterType::Triangle)
     } else {
         img.clone()
+    }
+}
+
+/// Process-wide cap on CONCURRENT full-res embedded-preview decodes. A 61 MP
+/// ARW preview lands as a 9504×6336 Rgb8 frame (~181 MB), and a portrait
+/// rotation holds a second copy while it turns. `StyleIndex::build`'s worker
+/// pool bounds ONE build; two builds in the same process (the web server's
+/// request threads — see `StyleIndex::save`'s tmp-name comment) used to
+/// stack 8 decodes ≈ 1.4 GB. This bounds them together. Taken at the BUILD
+/// call site only: gating inside `decode_raw` would silently throttle the
+/// GUI thumbnail path, whose own cap deliberately keeps RAW thumbs
+/// concurrent.
+pub const MAX_CONCURRENT_DECODES: usize = 4;
+const _: () = assert!(MAX_CONCURRENT_DECODES > 0);
+
+fn decode_gate() -> &'static (std::sync::Mutex<usize>, std::sync::Condvar) {
+    static GATE: std::sync::OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(Default::default)
+}
+
+/// One decode slot, released on DROP — mandatory, not tidiness: rawler runs
+/// third-party parsers over untrusted files, and a permit leaked by an
+/// unwind inside `thread::scope` would park every other worker forever
+/// instead of letting the scope join and re-panic. Poison is recovered,
+/// never re-panicked — a panic inside Drop during an unwind aborts the
+/// process.
+pub struct DecodePermit(());
+
+impl DecodePermit {
+    pub fn acquire() -> Self {
+        let (lock, cv) = decode_gate();
+        let mut n = lock.lock().unwrap_or_else(|p| p.into_inner());
+        while *n >= MAX_CONCURRENT_DECODES {
+            n = cv.wait(n).unwrap_or_else(|p| p.into_inner());
+        }
+        *n += 1;
+        DecodePermit(())
+    }
+}
+
+impl Drop for DecodePermit {
+    fn drop(&mut self) {
+        let (lock, cv) = decode_gate();
+        let mut n = lock.lock().unwrap_or_else(|p| p.into_inner());
+        *n = n.saturating_sub(1);
+        cv.notify_one();
     }
 }
 
@@ -885,5 +979,26 @@ mod tests {
     fn the_allocation_ceiling_refuses_equality_and_admits_one_byte_below() {
         assert!(allocation_over_ceiling(MAX_ALLOC));
         assert!(!allocation_over_ceiling(MAX_ALLOC - 1));
+    }
+
+    /// L02: the develop entry charges downstream bytes-per-pixel — the same
+    /// source clears the plain decode gate yet refuses the develop gate, and
+    /// the documented 61 MP RGBA16 target still clears it with headroom.
+    #[test]
+    fn develop_peak_accounting_charges_downstream_bpp() {
+        use image::metadata::Orientation;
+        let px: u64 = 200_000_000; // 200 MP L8: decode 200 MB, develop peak 5 GB
+        assert!(!allocation_over_ceiling(decode_peak_bytes(px, Orientation::NoTransforms)));
+        assert!(allocation_over_ceiling(develop_peak_bytes(
+            px,
+            Orientation::NoTransforms,
+            px
+        )));
+        let target: u64 = 61_000_000; // 61 MP RGBA16, even rotated
+        assert!(!allocation_over_ceiling(develop_peak_bytes(
+            target * 8,
+            Orientation::Rotate90,
+            target
+        )));
     }
 }
