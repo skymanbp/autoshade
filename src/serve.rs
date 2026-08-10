@@ -440,7 +440,18 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
         eprintln!("request error ({path}): {e:#}");
         // A CLIENT-caused failure (malformed JSON, bad id) answers 400 — the
         // blanket 500 told the web UI the SERVER broke.
-        let status = if e.downcast_ref::<ClientErr>().is_some() { 400 } else { 500 };
+        let status = if e.downcast_ref::<ClientErr>().is_some() {
+            400
+        } else {
+            // GuardedBody's two invented kinds (anyhow downcast passes
+            // through .context layers): a pacing timeout is the client's
+            // 408; an exhausted aggregate budget is a 503, not our 500.
+            match e.downcast_ref::<std::io::Error>().map(|io| io.kind()) {
+                Some(std::io::ErrorKind::TimedOut) => 408,
+                Some(std::io::ErrorKind::OutOfMemory) => 503,
+                _ => 500,
+            }
+        };
         status_response(status, &format!("{e:#}"))
     });
     request.respond(reply).map_err(Into::into)
@@ -654,13 +665,23 @@ fn api_upload(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // upload exhaust process memory. 500 MB comfortably covers any current
     // RAW/TIFF; past the cap the request is refused, not truncated.
     const MAX_UPLOAD: usize = 500 * 1024 * 1024;
+    // Declared-size pre-reject: a 4 GB declared upload used to read 500 MB
+    // before refusing (chunked bodies fall through to the loop cap).
+    if let Some(len) = request.body_length()
+        && len > MAX_UPLOAD
+    {
+        return Ok(status_response(413, "upload exceeds the 500 MB limit"));
+    }
     let mut bytes = Vec::new();
     // Bounded manual read loop (Take<T> on a trait object fights the method
-    // resolver): refuse — never truncate — anything past the cap.
-    let reader = request.as_reader();
+    // resolver): refuse — never truncate — anything past the cap. The reads
+    // go through GuardedBody, so this body also charges the aggregate
+    // budget and obeys the pacing deadline.
+    let mut budget = BodyBudget(0);
+    let mut gb = GuardedBody::new(request.as_reader(), &mut budget);
     let mut chunk = [0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut chunk).context("read upload body")?;
+        let n = std::io::Read::read(&mut gb, &mut chunk).context("read upload body")?;
         if n == 0 {
             break;
         }
@@ -2639,6 +2660,87 @@ fn query_param(url: &str, key: &str) -> Option<String> {
     })
 }
 
+/// Aggregate cap on request-body bytes buffered across ALL in-flight
+/// requests (L02): the per-request caps alone let 8 concurrent bodies stack
+/// 8 × 500 MiB ≈ 4 GiB. 1 GiB keeps every single-tab flow byte-identical
+/// (the bundled UI uploads sequentially, and one 500 MiB upload fits); two
+/// tabs racing 500 MiB drops see one refused instead of the stack.
+const BODY_BUDGET: u64 = 1024 * 1024 * 1024;
+static BODY_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// The bytes THIS request charged against [`BODY_BUDGET`] — refunded on
+/// Drop, unconditionally: a panicking handler must give the budget back
+/// (the exact leak `Permit`'s docs record).
+struct BodyBudget(u64);
+
+impl BodyBudget {
+    fn charge(&mut self, n: u64) -> bool {
+        // fetch_update (CAS), not add-then-check: two threads must never
+        // both pass the check and overshoot the ceiling together.
+        if BODY_BYTES
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                cur.checked_add(n).filter(|&t| t <= BODY_BUDGET)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.0 += n;
+        true
+    }
+}
+
+impl Drop for BodyBudget {
+    fn drop(&mut self) {
+        BODY_BYTES.fetch_sub(self.0, Ordering::Relaxed);
+    }
+}
+
+/// A request-body reader that charges the aggregate budget and enforces a
+/// pacing deadline (idle 30 s between reads, 10 min for the whole body —
+/// nothing had ANY deadline before). HONEST LIMIT: the deadline fires
+/// BETWEEN reads, so it kills byte-trickle clients but cannot interrupt a
+/// peer that went silent mid-read — tiny_http 0.12 exposes no socket handle
+/// and sets no read timeout, so a fully wedged `read` parks until TCP
+/// keepalive. Bounding THAT needs a listener-level SO_RCVTIMEO experiment,
+/// not this adapter.
+struct GuardedBody<'a> {
+    inner: &'a mut dyn std::io::Read,
+    budget: &'a mut BodyBudget,
+    hard: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl<'a> GuardedBody<'a> {
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+    const HARD: std::time::Duration = std::time::Duration::from_secs(600);
+    fn new(inner: &'a mut dyn std::io::Read, budget: &'a mut BodyBudget) -> Self {
+        let now = std::time::Instant::now();
+        GuardedBody { inner, budget, hard: now + Self::HARD, last: now }
+    }
+}
+
+impl std::io::Read for GuardedBody<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let now = std::time::Instant::now();
+        if now > self.hard || now.duration_since(self.last) > Self::IDLE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "request body read timed out",
+            ));
+        }
+        let n = std::io::Read::read(self.inner, buf)?;
+        self.last = std::time::Instant::now();
+        if n > 0 && !self.budget.charge(n as u64) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "server busy: aggregate request-body budget exhausted — retry shortly",
+            ));
+        }
+        Ok(n)
+    }
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T> {
     // Bounded: an unbounded read_to_string materialized an arbitrarily large
     // (or hostile) body in memory before parsing ever ran. 256 MiB clears any
@@ -2647,10 +2749,22 @@ fn read_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T>
     use std::io::Read as _;
     const BODY_CAP: u64 = 256 * 1024 * 1024;
     let mut body = String::new();
-    // UFCS: `as_reader` hands out `&mut dyn Read`; autoref would try `take`
-    // on the UNSIZED trait object, but the sized `&mut dyn Read` itself
-    // implements Read.
-    std::io::Read::take(request.as_reader(), BODY_CAP + 1)
+    // Declared-size pre-reject: a Content-Length past the cap refuses before
+    // the first byte is read (chunked bodies carry no length and fall
+    // through to the read cap below).
+    if let Some(len) = request.body_length()
+        && len as u64 > BODY_CAP
+    {
+        anyhow::bail!(ClientErr(format!(
+            "request body exceeds {} MiB",
+            BODY_CAP / (1024 * 1024)
+        )));
+    }
+    let mut budget = BodyBudget(0);
+    let mut gb = GuardedBody::new(request.as_reader(), &mut budget);
+    // UFCS: `take` on the sized adapter (autoref on the UNSIZED trait object
+    // fights the method resolver).
+    std::io::Read::take(&mut gb, BODY_CAP + 1)
         .read_to_string(&mut body)
         .context("read body")?;
     if body.len() as u64 > BODY_CAP {
@@ -2723,6 +2837,18 @@ fn status_response(code: u16, msg: &str) -> ResponseBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L02: the aggregate body budget — a small charge fits, and a charge
+    /// that would pass the ceiling refuses (CAS, so concurrent holders can
+    /// never overshoot together). Only concurrency-independent assertions:
+    /// other tests drive real requests through read_json in parallel.
+    /// Drop-refund is exercised by every one of those requests.
+    #[test]
+    fn body_budget_refuses_past_the_ceiling() {
+        let mut a = BodyBudget(0);
+        assert!(a.charge(1), "a 1-byte charge must fit");
+        assert!(!a.charge(BODY_BUDGET), "own hold + the full ceiling must refuse");
+    }
 
     #[test]
     fn at_checked_binds_id_resolution_to_the_installed_generation() {
