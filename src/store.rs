@@ -1180,12 +1180,17 @@ pub enum LrSidecar {
     Only(String),
     NewerThanStore(String),
     OlderThanStore,
+    /// A sidecar file IS beside the RAW but cannot be read, and this is why
+    /// (see [`SidecarRead::Unreadable`]). Folding this into `None` opened the
+    /// photo neutral in silence while the user's Lightroom work might sit
+    /// right there (L08) — callers disclose it and fall back to the store.
+    Unreadable(&'static str),
 }
 
 /// What a bounded sidecar read found. `Missing` and `Unreadable` are NOT the
 /// same thing to a caller choosing a merge base: a missing file carries
 /// nothing, while an unreadable one may carry the user's Lightroom work — and
-/// collapsing both into one "absent" let `write_xmp_disclosed` fall back to
+/// collapsing both into one "absent" let the XMP writer fall back to
 /// our own previous projection with no note, so an over-the-cap Lightroom
 /// sidecar lost its properties in exactly the silence the merge note was
 /// built to end.
@@ -1206,7 +1211,7 @@ pub enum SidecarRead {
 /// to a scanner. Real ones are kilobytes; the biggest Lightroom masks documents
 /// are single-digit megabytes. Over the cap the content is refused — restore
 /// callers treat that as "no develop", and the XMP-writing path DISCLOSES it
-/// (see [`crate::pipeline::write_xmp_disclosed`]) instead of silently merging
+/// (see [`crate::pipeline::write_xmp`]) instead of silently merging
 /// against a different base.
 ///
 /// `Read::take` rather than a `metadata()` size check: the length is bounded by
@@ -1254,8 +1259,11 @@ pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
         return LrSidecar::None;
     }
     let lr = src.with_extension("xmp");
-    let Some(text) = read_sidecar(&lr) else {
-        return LrSidecar::None;
+    let text = match read_sidecar_checked(&lr) {
+        SidecarRead::Ok(t) => t,
+        SidecarRead::Missing => return LrSidecar::None,
+        // A file IS there but cannot answer — never fold that into "absent".
+        SidecarRead::Unreadable(why) => return LrSidecar::Unreadable(why),
     };
     for ours in [xmp_target(src), legacy_xmp(src)] {
         if read_sidecar(&ours).is_some_and(|t| t == text) {
@@ -2696,6 +2704,21 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L08: an unreadable sidecar beside the RAW is DISCLOSED, not folded
+    /// into "no sidecar" — the old fold opened the photo neutral in silence.
+    #[test]
+    fn lightroom_sidecar_unreadable_is_disclosed_not_absent() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-lr-unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_probe.arw"); // never read — only its neighbour is
+        std::fs::write(dir.join("_probe.xmp"), [0xFFu8, 0xFE, 0xC0, 0x00]).unwrap();
+        let LrSidecar::Unreadable(why) = lightroom_sidecar(&raw) else {
+            panic!("an unreadable sidecar must be disclosed, not treated as absent");
+        };
+        assert!(why.contains("UTF-8"), "the reason names the cause: {why}");
     }
 
     #[test]

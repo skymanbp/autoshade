@@ -919,6 +919,20 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 return Ok(resp);
             }
         }
+        crate::store::LrSidecar::Unreadable(why) => {
+            // The file EXISTS but cannot answer — the old fold into "absent"
+            // answered from the store in silence (L08). The store still
+            // answers below; the warning rides every answer.
+            xmp_warn = Header::from_bytes(
+                &b"X-Recipe-Warning"[..],
+                format!(
+                    "a Lightroom sidecar sits beside this photo but could not be read ({why}) - \
+                     any Lightroom edits in it are NOT reflected"
+                )
+                .as_bytes(),
+            )
+            .ok();
+        }
         _ => {}
     }
     // Central first; then any legacy file a failed migration left behind.

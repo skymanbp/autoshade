@@ -1039,7 +1039,8 @@ impl AutoshopApp {
         self.status = trf(lang, "scanning {path} …", &[("path", &dir.display().to_string())]);
         self.spawn_worker(
             move || {
-                let res = autoshop::pipeline::find_sources(&dir).map(|list| (dir, list));
+                let res = autoshop::pipeline::find_sources_counted(&dir)
+                    .map(|(list, skipped)| (dir, list, skipped));
                 Msg::Folder(Box::new(res))
             },
             |e| Msg::Folder(Box::new(Err(e))),

@@ -181,6 +181,13 @@ follow it closely): ");
         let dropped = recipe.clamp();
         if !dropped.is_empty() {
             eprintln!("warning: the model's proposal exceeded recipe limits — discarded {}", dropped.describe());
+            // The stderr line is invisible in the windowed GUI (L08) — the
+            // rationale rides the recipe to every surface, so the discard is
+            // disclosed exactly where the proposal is read.
+            recipe.rationale.push_str(&format!(
+                " [the proposal exceeded recipe limits — discarded {}]",
+                dropped.describe()
+            ));
         }
         recipe.temper(); // taste guardrail: couple highlight-recovery to the white point, soft-cap extremes
         Ok(recipe)

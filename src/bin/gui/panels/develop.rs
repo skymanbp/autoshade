@@ -977,9 +977,19 @@ impl AutoshopApp {
                         // were indistinguishable was a real navigation cost.
                         let active = m.enabled && autoshop::render::engine_active(m);
                         let enabled = m.enabled;
+                        // L08: a dead raster renders INERT (the engine skips
+                        // it with a stderr-only warning) while this row still
+                        // read "enabled" — the ⚠ puts the fact on the row.
+                        // Muted/parked masks skip the probe: nothing renders.
+                        let dead = if active {
+                            autoshop::render::dead_bitmap_rasters(m)
+                        } else {
+                            Vec::new()
+                        };
                         let label = format!(
-                            "{base} · {kind}{}",
-                            if active { "  ●" } else { "" }
+                            "{base} · {kind}{}{}",
+                            if active { "  ●" } else { "" },
+                            if dead.is_empty() { "" } else { "  ⚠" }
                         );
                         let label = if enabled {
                             egui::RichText::new(label)
@@ -1003,7 +1013,14 @@ impl AutoshopApp {
                         {
                             toggle_eye = Some(i);
                         }
-                        let row = ui.selectable_label(self.sel_mask == Some(i), label);
+                        let mut row = ui.selectable_label(self.sel_mask == Some(i), label);
+                        if !dead.is_empty() {
+                            row = row.on_hover_text(trf(
+                                self.lang,
+                                "bitmap raster unreadable ({list}) — this mask currently has NO effect",
+                                &[("list", &dead.join(", "))],
+                            ));
+                        }
                         if row.hovered() {
                             self.hover_mask = Some(i);
                         }

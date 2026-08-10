@@ -197,7 +197,7 @@ pub(crate) enum Msg {
     Analyzed(u64, Box<anyhow::Result<(EditRecipe, autoshop::advisor::Verdict)>>),
     Exported(anyhow::Result<String>),
     /// A folder scan finished: (folder, sorted source paths).
-    Folder(Box<anyhow::Result<(PathBuf, Vec<PathBuf>)>>),
+    Folder(Box<anyhow::Result<(PathBuf, Vec<PathBuf>, usize)>>),
     /// A gallery thumbnail decoded. `generation` tags the folder generation so a
     /// folder switch can't insert a stale thumbnail under a reused index.
     Thumb { generation: u64, idx: usize, img: Box<anyhow::Result<image::DynamicImage>> },

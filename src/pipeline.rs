@@ -76,40 +76,44 @@ pub fn produce_recipe(
     // pull the FINAL recipe toward those historical means (the blend below).
     // Central store first; the legacy cwd-relative file keeps an index built
     // before the store existed working unchanged.
-    let style = (style_strength > 0.0)
-        .then(|| {
-            let central = crate::store::style_index_path();
-            match crate::style::StyleIndex::load(&central).or_else(|e| {
-                crate::style::StyleIndex::load(std::path::Path::new("out/style-index.json"))
-                    // Keep the CENTRAL error — it carries the version-gate
-                    // message naming the rebuild command.
-                    .map_err(|_| e)
-            }) {
-                Ok(ix) => Some(ix),
-                Err(e) => {
-                    // Surfaced ONCE, and only when an index file exists: the
-                    // old `.ok()` swallowed the version-gate message, so a
-                    // stale index silently disabled the style reference with
-                    // nothing to say why. (No file at all is the normal
-                    // fresh-install case — no noise there.)
-                    if central.exists() {
-                        static ONCE: std::sync::Once = std::sync::Once::new();
-                        ONCE.call_once(|| {
-                            eprintln!(
-                                "⚠ style reference unavailable ({e:#}) — the Style slider has \
-                                 no effect until the index is rebuilt"
-                            );
-                        });
-                    }
-                    None
+    let mut style_err: Option<String> = None;
+    let style_ix = if style_strength > 0.0 {
+        let central = crate::store::style_index_path();
+        match crate::style::StyleIndex::load(&central).or_else(|e| {
+            crate::style::StyleIndex::load(std::path::Path::new("out/style-index.json"))
+                // Keep the CENTRAL error — it carries the version-gate
+                // message naming the rebuild command.
+                .map_err(|_| e)
+        }) {
+            Ok(ix) => Some(ix),
+            Err(e) => {
+                // Surfaced ONCE on stderr, and only when an index file
+                // exists: the old `.ok()` swallowed the version-gate message,
+                // so a stale index silently disabled the style reference with
+                // nothing to say why. (No file at all is the normal
+                // fresh-install case — no noise there.) The windowed GUI has
+                // no console, so the same fact also rides the rationale
+                // below (L08 disclosure threading).
+                if central.exists() {
+                    static ONCE: std::sync::Once = std::sync::Once::new();
+                    ONCE.call_once(|| {
+                        eprintln!(
+                            "⚠ style reference unavailable ({e:#}) — the Style slider has \
+                             no effect until the index is rebuilt"
+                        );
+                    });
+                    style_err = Some(format!("{e:#}"));
                 }
+                None
             }
-        })
-        .flatten()
-        .map(|ix| {
-            let ex = ix.retrieve(&meta, &histogram, 4, raw);
-            (ix.render_reference(&ex), crate::style::style_targets(&ex))
-        });
+        }
+    } else {
+        None
+    };
+    let style = style_ix.map(|ix| {
+        let ex = ix.retrieve(&meta, &histogram, 4, raw);
+        (ix.render_reference(&ex), crate::style::style_targets(&ex))
+    });
     let reference: Option<String> = style.as_ref().and_then(|(r, _)| r.clone());
     let ref_str = reference.as_deref();
     if verbose && ref_str.is_some() {
@@ -266,6 +270,15 @@ pub fn produce_recipe(
                 }
             }
         }
+    }
+    // L08: the stderr warning above is invisible in the windowed GUI — the
+    // rationale is the one channel all three surfaces show. Every develop
+    // that ASKED for style influence and silently got none says so here.
+    if let Some(e) = &style_err {
+        recipe.rationale.push_str(&format!(
+            " [style reference unavailable ({e}) — the Style slider had no effect on this \
+             develop; rebuild it with: autoshop style-index <folder>]"
+        ));
     }
     // Base look, stamped in ONE place for every surface: the proposal and the
     // verification above both ran over the camera's embedded preview — the
@@ -1663,6 +1676,16 @@ pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
 /// aborting the whole scan — only an unreadable ROOT is a real failure. The
 /// depth cap stays as a backstop for canonicalize-failing paths.
 fn walk_photos(root: &Path, pred: fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
+    walk_photos_counted(root, pred).map(|(v, _)| v)
+}
+
+/// [`walk_photos`], plus how many entries the scan could not read and skipped.
+/// Each skip already warns on stderr AS IT HAPPENS; the count exists so a
+/// windowed caller can say so too (L08 — the GUI has no console).
+fn walk_photos_counted(
+    root: &Path,
+    pred: fn(&Path) -> bool,
+) -> Result<(Vec<PathBuf>, usize)> {
     fn walk(
         dir: &Path,
         pred: fn(&Path) -> bool,
@@ -1670,6 +1693,7 @@ fn walk_photos(root: &Path, pred: fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
         visited: &mut std::collections::HashSet<PathBuf>,
         depth: u32,
         is_root: bool,
+        skipped: &mut usize,
     ) -> std::io::Result<()> {
         if let Ok(c) = std::fs::canonicalize(dir)
             && !visited.insert(c)
@@ -1683,6 +1707,7 @@ fn walk_photos(root: &Path, pred: fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
             Ok(rd) => rd,
             Err(e) if !is_root => {
                 eprintln!("⚠ skipping unreadable folder {} ({e})", dir.display());
+                *skipped += 1;
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -1692,25 +1717,30 @@ fn walk_photos(root: &Path, pred: fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("⚠ skipping unreadable entry under {} ({e})", dir.display());
+                    *skipped += 1;
                     continue;
                 }
             };
             let p = entry.path();
             match entry_is_dir(&entry) {
-                Ok(true) => walk(&p, pred, out, visited, depth + 1, false)?,
+                Ok(true) => walk(&p, pred, out, visited, depth + 1, false, skipped)?,
                 Ok(false) => {
                     if pred(&p) {
                         out.push(p);
                     }
                 }
-                Err(e) => eprintln!("⚠ skipping unreadable entry {} ({e})", p.display()),
+                Err(e) => {
+                    eprintln!("⚠ skipping unreadable entry {} ({e})", p.display());
+                    *skipped += 1;
+                }
             }
         }
         Ok(())
     }
     let mut out = Vec::new();
     let mut visited = std::collections::HashSet::new();
-    walk(root, pred, &mut out, &mut visited, 0, true)
+    let mut skipped = 0usize;
+    walk(root, pred, &mut out, &mut visited, 0, true, &mut skipped)
         .with_context(|| format!("scan {}", root.display()))?;
     out.sort();
     // Canonical-identity dedupe (first occurrence in sorted order wins): two
@@ -1719,7 +1749,7 @@ fn walk_photos(root: &Path, pred: fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
     // bill its own analysis in batch.
     let mut seen = std::collections::HashSet::new();
     out.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
-    Ok(out)
+    Ok((out, skipped))
 }
 
 /// Does this path name a photo — a camera RAW or an already-baked raster?
@@ -1735,6 +1765,12 @@ pub fn is_source(p: &Path) -> bool {
 /// the web UI can browse and edit LR/PS-denoised exports alongside RAWs. Sorted.
 pub fn find_sources(dir: &Path) -> Result<Vec<PathBuf>> {
     walk_photos(dir, is_source)
+}
+
+/// [`find_sources`], plus the number of unreadable entries the scan skipped —
+/// the GUI folder scan consumes the count (stderr already names each one).
+pub fn find_sources_counted(dir: &Path) -> Result<(Vec<PathBuf>, usize)> {
+    walk_photos_counted(dir, is_source)
 }
 
 #[cfg(test)]

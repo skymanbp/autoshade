@@ -555,6 +555,7 @@ impl AutoshopApp {
                                 xmp_bad,
                                 dropped_masks,
                                 clamp: clamp_dropped,
+                                lr_unreadable,
                             } = self
                                 .src_path
                                 .as_deref()
@@ -632,6 +633,14 @@ impl AutoshopApp {
                                         ("n", &xmp_bad.len().to_string()),
                                         ("list", &xmp_bad.join(", ")),
                                     ],
+                                );
+                                open_note = merge_note(open_note, w);
+                            }
+                            if let Some(why) = lr_unreadable {
+                                let w = trf(
+                                    lang,
+                                    "a Lightroom sidecar sits beside this photo but could not be read ({why}) — any Lightroom edits in it are NOT reflected",
+                                    &[("why", why)],
                                 );
                                 open_note = merge_note(open_note, w);
                             }
@@ -1215,6 +1224,7 @@ impl AutoshopApp {
                                                 ),
                                                 None => autoshop::store::clear_pixel_source(&p),
                                             };
+                                            let mut pixel_err: Option<String> = None;
                                             let pixels_ok = match sync {
                                                 Ok(()) => true,
                                                 Err(e) => {
@@ -1223,7 +1233,8 @@ impl AutoshopApp {
                                                         "could not record the retouched master ({err}) — reopening shows the un-retouched source; Export keeps the pixels",
                                                         &[("err", &e.to_string())],
                                                     );
-                                                    self.toast(ToastKind::Error, t);
+                                                    self.toast(ToastKind::Error, t.clone());
+                                                    pixel_err = Some(t);
                                                     false
                                                 }
                                             };
@@ -1254,6 +1265,13 @@ impl AutoshopApp {
                                                 ),
                                                 None => tr(lang, "AI develop applied · saved to recipe.json").to_string(),
                                             };
+                                            // L08: the pixels.json failure was
+                                            // toast-only, and toasts EXPIRE —
+                                            // the status line then kept
+                                            // claiming a clean save.
+                                            if let Some(m) = pixel_err {
+                                                s = format!("{s} — ⚠ {m}");
+                                            }
                                             if autoshop::decode::is_raw(&p) {
                                                 match autoshop::pipeline::write_xmp(&p, &stamped) {
                                                     Ok((_, None)) => {}
@@ -1478,9 +1496,9 @@ impl AutoshopApp {
 
     /// `Msg::Folder` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_folder(&mut self, lang: Lang, res: anyhow::Result<(PathBuf, Vec<PathBuf>)>) {
+    fn on_folder(&mut self, lang: Lang, res: anyhow::Result<(PathBuf, Vec<PathBuf>, usize)>) {
                 match res {
-                    Ok((dir, list)) => {
+                    Ok((dir, list, skipped)) => {
                         let n = list.len();
                         self.gallery = list;
                         self.gallery_dir = Some(dir);
@@ -1506,6 +1524,17 @@ impl AutoshopApp {
                         } else {
                             trf(lang, "{n} photos — click a thumbnail to open", &[("n", &n.to_string())])
                         };
+                        // L08: each unreadable entry went to stderr as the
+                        // scan hit it — invisible in the windowed GUI, so
+                        // the count rides the scan's own status answer.
+                        if skipped > 0 {
+                            let w = trf(
+                                lang,
+                                "{n} unreadable item(s) skipped during the folder scan",
+                                &[("n", &skipped.to_string())],
+                            );
+                            self.status = format!("{} — ⚠ {}", self.status, w);
+                        }
                     }
                     Err(e) => {
                         self.fail(tr(lang, "scan failed"), e);

@@ -1651,6 +1651,23 @@ fn best_effort_mask_raster_snapshot(recipe: &EditRecipe) -> MaskRasterSnapshot {
         .unwrap_or_default()
 }
 
+/// Which of this adjustment's bitmap geometries (base or component) currently
+/// have NO loadable raster. The preview path renders such a geometry inert
+/// with only a stderr warning ([`load_mask_bitmap`]) — the GUI mask list uses
+/// this to put the fact ON THE ROW (L08: the list said "enabled" while the
+/// engine skipped the mask). Cache-hot: the answer comes from
+/// `load_mask_bitmap`'s (mtime, size)-keyed cache, so a per-frame call costs
+/// one metadata stat per path, not a decode.
+pub fn dead_bitmap_rasters(m: &crate::recipe::LocalAdjustment) -> Vec<String> {
+    std::iter::once(&m.mask)
+        .chain(m.components.iter().map(|c| &c.geometry))
+        .filter_map(|g| {
+            let MaskGeometry::Bitmap { path } = g else { return None };
+            load_mask_bitmap(g).is_none().then(|| path.clone())
+        })
+        .collect()
+}
+
 fn load_mask_raster_snapshot_with_budget(
     recipe: &EditRecipe,
     budget_bytes: usize,
@@ -6108,6 +6125,36 @@ mod tests {
             cov.pixels().all(|p| p[0] == 0),
             "the overlay must not advertise coverage the render will not apply"
         );
+    }
+
+    /// L08: the mask list's ⚠ badge — only geometries whose raster cannot
+    /// load are reported; a readable one is not.
+    #[test]
+    fn dead_bitmap_rasters_reports_only_unloadable_geometries() {
+        use crate::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
+        let dir = std::env::temp_dir().join("autoshop-dead-raster-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good-raster.png");
+        image::GrayImage::from_pixel(4, 4, image::Luma([200])).save(&good).unwrap();
+        let missing = "Z:/__autoshop_definitely_missing__/raster.png";
+        let m = LocalAdjustment {
+            exposure_ev: 1.0,
+            mask: MaskGeometry::Bitmap { path: good.to_string_lossy().into_owned() },
+            components: vec![MaskComponent {
+                geometry: MaskGeometry::Bitmap { path: missing.into() },
+                mode: MaskCombine::Subtract,
+            }],
+            name: "badge".into(),
+            ..Default::default()
+        };
+        assert_eq!(dead_bitmap_rasters(&m), vec![missing.to_string()]);
+        let all_good = LocalAdjustment {
+            exposure_ev: 1.0,
+            mask: MaskGeometry::Bitmap { path: good.to_string_lossy().into_owned() },
+            name: "clean".into(),
+            ..Default::default()
+        };
+        assert!(dead_bitmap_rasters(&all_good).is_empty());
     }
 
     #[test]

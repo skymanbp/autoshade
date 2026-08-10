@@ -47,6 +47,10 @@ pub(crate) struct RestoredDevelop {
     /// What the restore-time clamps DISCARDED (W20: sanitisation must not
     /// be silent loss) — the Opened handler's disclosure channel.
     pub(crate) clamp: autoshop::recipe::ClampSummary,
+    /// A Lightroom sidecar sits beside the RAW but could not be read (the
+    /// reason, verbatim from [`autoshop::store::SidecarRead`]) — whatever it
+    /// holds is NOT in `saved`, and the user must hear that (L08).
+    pub(crate) lr_unreadable: Option<&'static str>,
 }
 
 impl Default for RestoredDevelop {
@@ -56,6 +60,7 @@ impl Default for RestoredDevelop {
             xmp_bad: Vec::new(),
             dropped_masks: 0,
             clamp: Default::default(),
+            lr_unreadable: None,
         }
     }
 }
@@ -93,12 +98,20 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
     // be ignored entirely, so Lightroom edits silently lost to older
     // Autoshop saves. Our own copied projection is recognised and skipped;
     // the store copy stays untouched until the user actually saves.
+    let mut lr_unreadable: Option<&'static str> = None;
     let lr = match autoshop::store::lightroom_sidecar(src) {
         autoshop::store::LrSidecar::NewerThanStore(t) => {
             Some((t, "XMP (Lightroom sidecar — newer than the saved develop; Ctrl+S adopts it)"))
         }
         autoshop::store::LrSidecar::Only(t) => {
             Some((t, "XMP (Lightroom sidecar beside the RAW)"))
+        }
+        // The file EXISTS but cannot answer — the old fold into "absent"
+        // opened neutral in silence while Lightroom work might sit right
+        // there (L08). The store still answers below; the note rides along.
+        autoshop::store::LrSidecar::Unreadable(why) => {
+            lr_unreadable = Some(why);
+            None
         }
         _ => None,
     };
@@ -121,6 +134,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
                 xmp_bad,
                 dropped_masks: dropped,
                 clamp: clamp_dropped,
+                lr_unreadable,
             };
         }
     }
@@ -173,6 +187,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         return RestoredDevelop {
             saved: SavedDevelop::Restored(r, kind),
             clamp: clamp_dropped,
+            lr_unreadable,
             ..Default::default()
         };
     }
@@ -216,6 +231,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             xmp_bad,
             dropped_masks,
             clamp: clamp_dropped,
+            lr_unreadable,
         };
     }
     match (fallback, any) {
@@ -224,17 +240,20 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             xmp_bad,
             dropped_masks,
             clamp: clamp_dropped,
+            lr_unreadable,
         },
         (None, true) => RestoredDevelop {
             saved: SavedDevelop::NoopOnly,
             xmp_bad,
             clamp: clamp_dropped,
+            lr_unreadable,
             ..Default::default()
         },
         (None, false) => RestoredDevelop {
             saved: SavedDevelop::Nothing,
             xmp_bad,
             clamp: clamp_dropped,
+            lr_unreadable,
             ..Default::default()
         },
     }
