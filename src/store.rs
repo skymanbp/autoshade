@@ -1017,6 +1017,22 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
 }
 
 fn recover_orphan_baks_unlocked(src: &Path) -> std::io::Result<()> {
+    // A PENDING explicit clear outranks every other recovery (L03): the
+    // marker says the user's last intent was "remove this develop", so the
+    // sweep completes FIRST — the .bak republish below would otherwise
+    // resurrect the very files a killed clear was removing.
+    if clear_pending(src).exists() {
+        let (_, err) = clear_sweep(src);
+        if let Some(e) = err {
+            // The recover contract: Err is "state we cannot resolve" — the
+            // backup gates refuse rather than overwrite it.
+            return Err(e);
+        }
+        if mark_develop_cleared(src).is_ok() {
+            let _ = std::fs::remove_file(clear_pending(src));
+        }
+        return Ok(());
+    }
     let dev = develop_dir(src);
     let mut failure: Option<std::io::Error> = None;
     for (live, bak) in [
@@ -1287,7 +1303,21 @@ fn suppressed_legacy_path(src: &Path, name: &str) -> PathBuf {
 /// Does this photo have ANY saved develop — central or legacy, recipe or XMP?
 /// Existence-only (no parse): the gallery badge and the web list call this per
 /// photo per refresh.
+/// The explicit-clear transaction marker (L03): written durably BEFORE
+/// the sweep begins, consumed only after the cleared stamp lands. While it
+/// exists the develop is "being removed": [`has_develop`] answers false,
+/// the newest-intent ranking treats it like the cleared stamp, and
+/// recovery completes the sweep on the next locked touch.
+fn clear_pending(src: &Path) -> PathBuf {
+    develop_dir(src).join("clear.pending")
+}
+
 pub fn has_develop(src: &Path) -> bool {
+    // A PENDING explicit clear means "this develop is being removed" — the
+    // surviving files are sweep leftovers, not a save (L03).
+    if clear_pending(src).exists() {
+        return false;
+    }
     // recipe.json.bak covers the retire window: a crash between retire and
     // publish leaves ONLY the .bak — recover_orphan_baks republishes it on
     // the next real read — so answering "nothing saved" here was a lie that
@@ -1510,9 +1540,13 @@ fn rank_lightroom_sidecar(
     // develop on the very next open. The LIBRARY stays untouched (deleting
     // or rewriting the user's own sidecar would break the read-only
     // contract), and a Lightroom edit made AFTER the clear still wins.
-    let cleared_t = std::fs::metadata(develop_dir(src).join("cleared.txt"))
-        .and_then(|m| m.modified())
-        .ok();
+    // A PENDING clear is newest intent too (L03): between the marker and
+    // the completed sweep, a projection beside the RAW must not out-rank
+    // the clear and resurrect what is being removed.
+    let cleared_t = [develop_dir(src).join("cleared.txt"), clear_pending(src)]
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max();
     let lr_t = match stamp {
         Some(s) => {
             // ONE re-verification after the read: the path must still
@@ -1597,6 +1631,36 @@ pub fn clear_develop(src: &Path) -> std::io::Result<ClearOutcome> {
 }
 
 fn clear_develop_unlocked(src: &Path) -> std::io::Result<ClearOutcome> {
+    // TRANSACTION MARKER FIRST (L03): a kill mid-sweep used to leave a
+    // half-cleared develop — recipe gone, XMP or variants alive — that
+    // every reader took for a real partial develop, resurrecting edits the
+    // user explicitly cleared (and recover_orphan_baks republished the very
+    // .baks the clear was deleting). The marker records the intent durably;
+    // recovery completes the sweep on the next locked touch.
+    durable_write(&clear_pending(src), b"develop clear in progress\n")?;
+    let (removed, first_err) = clear_sweep(src);
+    if let Some(e) = first_err {
+        // The marker STAYS — recovery retries the sweep.
+        return Err(e);
+    }
+    let marker_warning = mark_develop_cleared(src).err().map(|e| e.to_string());
+    if marker_warning.is_none() {
+        // Only after the durable cleared stamp exists — between the two
+        // writes BOTH markers exist, so the clear's intent is never
+        // invisible. A failed stamp keeps the pending marker: recovery
+        // retries it, and the ranking treats the marker itself as newest
+        // intent meanwhile.
+        let _ = std::fs::remove_file(clear_pending(src));
+    }
+    Ok(ClearOutcome { removed, marker_warning })
+}
+
+/// The sweep half of [`clear_develop_unlocked`], IDEMPOTENT so recovery may
+/// repeat it: legacy tombstone, the central files (retired `.bak`s
+/// included) and the pixel-source pair. Returns what it removed and the
+/// first failure (later removals still run — retrying costs nothing and a
+/// partial sweep is smaller than the one it retries).
+fn clear_sweep(src: &Path) -> (bool, Option<std::io::Error>) {
     let del = |p: &Path| match std::fs::remove_file(p) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -1632,10 +1696,13 @@ fn clear_develop_unlocked(src: &Path) -> std::io::Result<ClearOutcome> {
             root.join(format!("{stem}.recipe.json")).exists()
                 || root.join(format!("{stem}.xmp")).exists()
         });
-    // The marker lands BEFORE central files are removed. A crash can therefore
-    // leave the old central develop visible, or leave it cleared with legacy
-    // already suppressed, but cannot expose the ambiguous fallback in between.
-    suppress_legacy(src)?;
+    // The tombstone lands BEFORE central files are removed. A crash can
+    // therefore leave the old central develop visible, or leave it cleared
+    // with legacy already suppressed, but cannot expose the ambiguous
+    // fallback in between.
+    if let Err(e) = suppress_legacy(src) {
+        return (removed, Some(e));
+    }
     removed |= legacy_was_visible;
 
     for p in [
@@ -1665,11 +1732,7 @@ fn clear_develop_unlocked(src: &Path) -> std::io::Result<ClearOutcome> {
             first_err.get_or_insert(e);
         }
     }
-    if let Some(e) = first_err {
-        return Err(e);
-    }
-    let marker_warning = mark_develop_cleared(src).err().map(|e| e.to_string());
-    Ok(ClearOutcome { removed, marker_warning })
+    (removed, first_err)
 }
 
 /// Snapshot numbers present in the photo's develop dir, sorted ascending.
@@ -2555,9 +2618,6 @@ fn move_file_no_clobber(from: &Path, to: &Path) -> std::io::Result<bool> {
 /// resumability finish any remainder on the next touch. No lock: the store is
 /// single-user by construction, and identical-content races cannot corrupt.
 pub fn migrate_legacy(src: &Path) -> bool {
-    if legacy_suppressed(src) {
-        return false;
-    }
     match with_develop_lock(src, DevelopLockMode::Wait, || {
         Ok::<_, std::io::Error>(migrate_legacy_unlocked(src))
     }) {
@@ -2579,6 +2639,13 @@ fn migrate_legacy_unlocked(src: &Path) -> bool {
     // recovery is reported by the helper and re-decided by the backup gate,
     // which refuses to overwrite what it could not snapshot.
     let _ = recover_orphan_baks(src);
+    // AFTER the recovery, never before the lock (L03): every explicit clear
+    // writes the tombstone, so the suppressed early-return used to skip the
+    // recovery hook for exactly the photos a killed clear leaves behind —
+    // and the web's api_recipe reaches recovery only through this call.
+    if legacy_suppressed(src) {
+        return false;
+    }
     // Process-wide memo: a photo can only need migrating once per process, and
     // this runs on every photo open (UI thread) — without the memo a library
     // whose ./out holds thousands of exports pays a full directory enumeration
@@ -2925,6 +2992,78 @@ mod tests {
         // …and genuinely different photos must still get different keys.
         assert_ne!(plain, photo_key(Path::new(r"D:\photos\DSC002.NEF")));
         assert_ne!(plain, photo_key(Path::new(r"D:\other\DSC001.NEF")));
+    }
+
+    /// L03: a killed clear completes on the next locked touch instead of
+    /// leaving a half-cleared develop whose surviving XMP/variants would
+    /// resurrect the cleared edits — and the .bak republish never undoes
+    /// the sweep (the pending marker is checked first).
+    #[test]
+    fn a_pending_clear_completes_on_the_next_touch() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-pending-clear");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_pending_clear.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        // The kill point: the marker landed, the recipe fell, everything
+        // else survived — including a .bak recovery would republish.
+        std::fs::write(dev.join("recipe.json.bak"), b"{}").unwrap();
+        std::fs::write(xmp_target(&raw), b"<x:xmpmeta/>").unwrap();
+        std::fs::write(variants_path(&raw), b"{}").unwrap();
+        std::fs::write(dev.join("clear.pending"), b"develop clear in progress\n").unwrap();
+        assert!(!has_develop(&raw), "a pending clear is not a develop");
+
+        recover_orphan_baks(&raw).unwrap();
+
+        assert!(!recipe_target(&raw).exists());
+        assert!(!dev.join("recipe.json.bak").exists(), "the .bak fell with the sweep");
+        assert!(!xmp_target(&raw).exists());
+        assert!(!variants_path(&raw).exists());
+        assert!(dev.join("cleared.txt").exists(), "the clear finished with its stamp");
+        assert!(!dev.join("clear.pending").exists(), "the transaction closed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L03: between the marker and the completed sweep, a projection copied
+    /// beside the RAW must not out-rank the clear and resurrect what is
+    /// being removed — the pending marker ranks like the cleared stamp.
+    #[test]
+    fn a_pending_clear_outranks_the_sidecar_beside_the_photo() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join("autoshop-store-test-pending-rank");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_pending_rank.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let lr = raw.with_extension("xmp");
+        std::fs::write(
+            &lr,
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() }),
+        )
+        .unwrap();
+        std::fs::write(dev.join("clear.pending"), b"develop clear in progress\n").unwrap();
+        // The sidecar is OLDER than the pending clear → the clear wins.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(7200))
+            .unwrap();
+        assert!(
+            matches!(lightroom_sidecar(&raw), LrSidecar::None),
+            "a pending clear must outrank the older sidecar"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     /// L03: a 0-byte file at the recorded master path is the crash-
