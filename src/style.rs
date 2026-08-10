@@ -336,7 +336,12 @@ impl StyleIndex {
         // NO pre-remove: rename replaces the destination on Windows too, and
         // deleting first meant a failed rename (or a crash between the two)
         // had already destroyed the last good index.
-        if let Err(e) = std::fs::rename(&tmp, path) {
+        // DURABLE replace (L03): staged-bytes fsync + parent-dir fsync
+        // around the rename — tmp+rename alone leaves a post-crash window
+        // where the live name points at bytes the disk never received,
+        // which is exactly the corrupt-index state this staging exists to
+        // prevent.
+        if let Err(e) = crate::store::durable_replace(&tmp, path) {
             let _ = std::fs::remove_file(&tmp); // don't leak the staging file
             return Err(e)
                 .with_context(|| format!("publish style index {}", path.display()));

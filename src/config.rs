@@ -156,7 +156,11 @@ fn rescue_if_unchanged(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
-        if let Err(e) = std::fs::rename(path, &kept) {
+        // durable_replace, not bare rename (L03): the rescue copy holds
+        // the user's keys, and without the parent-dir fsync the moved
+        // entry can vanish with a crash — "preserved at <kept>" must stay
+        // true after a power cut.
+        if let Err(e) = crate::store::durable_replace(path, &kept) {
             let _ = std::fs::remove_file(&kept); // release the claim
             return Err(e);
         }
@@ -296,7 +300,11 @@ fn save_local_settings_unlocked(s: &LocalSettings) -> std::io::Result<PathBuf> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    if let Err(e) = std::fs::rename(&tmp, &p) {
+    // DURABLE replace (L03): fsync the staged bytes and the parent dir
+    // around the rename. tmp+rename alone left a post-crash window where
+    // the live name pointed at bytes the disk never received — and this
+    // file holds the API keys. The 0600 claim's mode rides the rename.
+    if let Err(e) = crate::store::durable_replace(&tmp, &p) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }

@@ -2242,6 +2242,18 @@ fn sync_staged(path: &Path) -> std::io::Result<()> {
     OpenOptions::new().write(true).open(path)?.sync_all()
 }
 
+/// Durability tail for a staged publish performed OUTSIDE this module (the
+/// settings file, the style index): fsync the staged bytes, rename them over
+/// the live name, fsync the parent directory. tmp+rename ALONE leaves a
+/// post-crash window where the live name points at bytes the disk never
+/// received (L03) — and modes are untouched, so a 0600-claimed staging
+/// carries its mode to the live name.
+pub(crate) fn durable_replace(staged: &Path, live: &Path) -> std::io::Result<()> {
+    sync_staged(staged)?;
+    durable_os::replace(staged, live)?;
+    durable_os::finish_parent(live)
+}
+
 /// Publish complete bytes through the one durable write protocol.
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
@@ -3820,6 +3832,26 @@ mod tests {
             let _ = std::fs::remove_dir_all(&root);
         }
 
+
+        /// L03: the out-of-module publish tail — staged bytes land intact
+        /// under the live name, the stage is consumed, and the staged
+        /// file's mode travels with the rename (the 0600 settings claim).
+        #[test]
+        fn durable_replace_lands_complete_bytes_and_consumes_its_stage() {
+            let dir = std::env::temp_dir().join("autoshop-store-test-durable-replace");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let live = dir.join("settings.json");
+            std::fs::write(&live, b"old").unwrap();
+            let staged = dir.join("settings.json.stage");
+            std::fs::write(&staged, b"complete new bytes").unwrap();
+
+            durable_replace(&staged, &live).unwrap();
+
+            assert_eq!(std::fs::read(&live).unwrap(), b"complete new bytes");
+            assert!(!staged.exists(), "a completed publish consumes its stage");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
 
         #[test]
         fn durable_write_replaces_complete_bytes_and_consumes_its_stage() {
