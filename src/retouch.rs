@@ -478,6 +478,9 @@ If the photo is clean, return an empty list.";
 
     let body = json!({
         "model": cfg.openai_model,
+        // Stored responses land in the KEY OWNER's account — never persist
+        // the user's photos there (see the proposer's rule in openai.rs).
+        "store": false,
         "input": [{
             "role": "user",
             "content": [

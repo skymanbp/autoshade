@@ -471,7 +471,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Tone curve caption (curve_editor) ────────────────────────────────────
     ("Click to add a point · drag to move · drag outside the box to delete — preview and export match (XMP carries the closest Lightroom form)",
-        "点击加点 · 拖动移点 · 拖出框外删点 — 预览/导出/XMP 同源生效"),
+        "点击加点 · 拖动移点 · 拖出框外删点 — 预览与导出一致（XMP 只携带最接近的 Lightroom 形式，Lightroom 中可能有细微差异）"),
 
     // ── AI segmentation · subject / sky (labels + status) ────────────────────
     ("Subject", "主体"),
@@ -571,10 +571,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "编辑与已保存的显影不同 — Ctrl+S 保存；切换照片仅在本会话内暂存"),
     ("ready — restored this session's unsaved edits (● not saved yet; Ctrl+S)",
         "就绪 — 已恢复本会话未保存的编辑（● 尚未保存；Ctrl+S）"),
-    ("recipe limits discarded {n} mask(s) and {m} component(s) on restore — the saved file exceeds the app's caps",
-        "恢复时因配方上限丢弃了 {n} 个蒙版、{m} 个组合项 — 存档文件超出应用上限"),
+    ("recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) on restore — the saved file exceeds the app's caps",
+        "恢复时因配方上限丢弃了 {n} 个蒙版、{m} 个组合项、{c} 个曲线点、{s} 个字符字节 — 存档文件超出应用上限"),
     ("not saved — a develop-store write failed: {err}",
         "未保存 — 显影库写入失败：{err}"),
+    ("this photo's variant strip (variants.json) cannot be read — background variants stay hidden and saving refuses until the file is fixed or deleted",
+        "此照片的变体条（variants.json）无法读取 — 后台变体保持隐藏，保存将被拒绝，直到该文件被修复或删除"),
     ("recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it (the unread save is backed up as a version first)",
         "recipe.json 无法解析（{err}）— 编辑未完整恢复；Ctrl+S 会覆盖它（未能读取的保存会先备份为版本）"),
     ("a saved develop exists but holds no effective edits", "已保存的显影存在但不含有效编辑"),
@@ -607,7 +609,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "AI 分割{what}中…（首次运行自动下载模型；失败会在此报告）"),
     ("Reset to its default", "重置为默认值"),
     ("Language & Reverse-fit apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
-        "「语言」与「反推」立即生效。下方的提供商设置经「保存设置」写入你 Autoshop 个人目录下的 autoshop.local.json（不在仓库里），对下一次分析生效。"),
+        "「语言」与「反推」立即生效。下方的提供商设置经「保存设置」写入你 Autoshop 个人目录下的 autoshop.local.json（不在仓库里），对下一次 AI 调用生效（分析 / 填充 / 重绘）。"),
 
     // ── Status bar · WB / range pick + manual mask placement ─────────────────
     ("WB eyedropper: {k} K · tint {tint} — fine-tune in the Tone section",

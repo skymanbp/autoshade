@@ -780,10 +780,9 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
     // route can forget to stand on.
     let dropped = on_disk.clamp();
     if !dropped.is_empty() {
-        eprintln!(
-            "warning: recipe limits discarded {} mask(s) and {} mask component(s)",
-            dropped.dropped_masks, dropped.dropped_components
-        );
+        // describe(): only the non-zero losses — curve/string truncation was
+        // invisible behind a "0 mask(s)" line (16-lane scan L16).
+        eprintln!("warning: recipe limits discarded {}", dropped.describe());
     }
     if let Some(parent) = out.parent() {
         crate::store::relativize_mask_paths(&mut on_disk, parent);

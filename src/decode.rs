@@ -236,6 +236,13 @@ fn apply_icc_profile_16(
 
 const MAX_ALLOC: u64 = 4 * 1024 * 1024 * 1024;
 
+/// The accept/reject decision for a decode's peak allocation, extracted so a
+/// test can pin the BOUNDARY: equality refuses (`>` instead of `>=` would
+/// admit an exact-ceiling allocation and abort the process).
+fn allocation_over_ceiling(need: u64) -> bool {
+    need >= MAX_ALLOC
+}
+
 /// Peak output-buffer bytes for a decode followed by `apply_orientation`: the
 /// four rotating variants allocate a SECOND full buffer (`rotate90()` /
 /// `rotate270()` return new images; 180°/flips are in-place), so the old
@@ -289,7 +296,7 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
         .unwrap_or(image::metadata::Orientation::NoTransforms);
     let decoded_bytes = decoder.total_bytes();
     let need = decode_peak_bytes(decoded_bytes, orientation);
-    if need >= MAX_ALLOC {
+    if allocation_over_ceiling(need) {
         anyhow::bail!(
             "image {} needs {need} bytes at peak (decode {decoded_bytes}, then orientation) \
              — at or over the {MAX_ALLOC}-byte ceiling",
@@ -747,7 +754,17 @@ mod tests {
 
         let valid = dir.join("valid-profile.png");
         write(&valid, &build_test_icc());
-        load_image(&valid).expect("a supported embedded profile is transformed");
+        let img = load_image(&valid).expect("a supported embedded profile is transformed");
+        // The transform must ACTUALLY run, not merely parse: this profile's
+        // TRCs are linear, so encoding (32,128,240) back to sRGB visibly
+        // brightens it — a no-op `transform.apply` loaded the raw samples as
+        // sRGB with silently wrong colour (16-lane scan L14).
+        let px = img.to_rgb8().get_pixel(0, 0).0;
+        assert_ne!(
+            px,
+            [32, 128, 240],
+            "the RGB8 ICC pass left the pixels untransformed"
+        );
 
         let invalid = dir.join("invalid-profile.png");
         write(&invalid, b"not an ICC profile");
@@ -860,5 +877,13 @@ mod tests {
             decode_peak_bytes(MAX_ALLOC, Orientation::NoTransforms),
             MAX_ALLOC
         );
+    }
+
+    /// The PREDICATE, not just the arithmetic: `>` instead of `>=` admits an
+    /// exact-4-GiB allocation the ceiling exists to refuse (16-lane scan L14).
+    #[test]
+    fn the_allocation_ceiling_refuses_equality_and_admits_one_byte_below() {
+        assert!(allocation_over_ceiling(MAX_ALLOC));
+        assert!(!allocation_over_ceiling(MAX_ALLOC - 1));
     }
 }

@@ -52,7 +52,10 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
     // `exists()` guard here never fired for them.
     let before = crate::artifact_state(output);
     let mut cmd = Command::new(&opts.python_bin);
-    cmd.arg(&opts.script)
+    // `-E`: ignore PYTHON* environment variables — same import-hijack
+    // guard as the denoise sidecar (config.rs protects them too).
+    cmd.arg("-E")
+        .arg(&opts.script)
         .arg("--input")
         .arg(input)
         .arg("--output")

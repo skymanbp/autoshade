@@ -135,6 +135,10 @@ follow it closely): ");
 
         let body = json!({
             "model": self.model,
+            // The Responses API STORES responses (input images included) in
+            // the key owner's account by default — under a key planted by a
+            // photo pack's .env, that is a photo-exfiltration channel.
+            "store": false,
             "input": [{
                 "role": "user",
                 "content": [
@@ -171,7 +175,13 @@ follow it closely): ");
         ))?;
         let mut recipe: EditRecipe = serde_json::from_str(strip_code_fence(&recipe_json))?;
         super::project_remote_recipe_text(&mut recipe, &[key]);
-        recipe.clamp(); // never trust the model's ranges
+        // Never trust the model's ranges — and never eat the loss silently:
+        // this is the FIRST clamp, so the render-time ValidatedRecipe sees an
+        // already-clean recipe and discloses nothing (16-lane scan L15).
+        let dropped = recipe.clamp();
+        if !dropped.is_empty() {
+            eprintln!("warning: the model's proposal exceeded recipe limits — discarded {}", dropped.describe());
+        }
         recipe.temper(); // taste guardrail: couple highlight-recovery to the white point, soft-cap extremes
         Ok(recipe)
     }
@@ -205,6 +215,9 @@ so the same prompt can restyle ANY other photograph. Output ONLY the prompt text
 
     let body = json!({
         "model": cfg.openai_model,
+        // Same rule as the proposer: stored responses land in the KEY OWNER's
+        // account — never persist the user's photos there.
+        "store": false,
         "input": [{
             "role": "user",
             "content": [

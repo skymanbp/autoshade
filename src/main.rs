@@ -59,7 +59,7 @@ enum Command {
         guidance: Option<String>,
         /// How strongly to follow your historical edit style, 0..1 (needs a built
         /// `style-index`). Omit to use AUTOSHOP_STYLE_STRENGTH (default 0.3).
-        #[arg(long)]
+        #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
@@ -84,13 +84,13 @@ enum Command {
         guidance: Option<String>,
         /// How strongly to follow your historical edit style, 0..1 (needs a built
         /// `style-index`). Omit for AUTOSHOP_STYLE_STRENGTH (default 0.3).
-        #[arg(long)]
+        #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// Run AI denoise (SCUNet, GPU) before developing — for high-ISO/astro.
         #[arg(long)]
         denoise: bool,
         /// Denoise strength 0..1 (blend with original); default 1.0.
-        #[arg(long, requires = "denoise")]
+        #[arg(long, requires = "denoise", value_parser = unit_interval)]
         denoise_strength: Option<f32>,
         /// SCUNet model: color_real_psnr (default) / color_real_gan / color_15|25|50.
         #[arg(long, requires = "denoise")]
@@ -106,7 +106,7 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
         /// Strength 0..1 (blend with original); default 1.0.
-        #[arg(long)]
+        #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
         /// SCUNet model tier (see `auto --denoise-model`).
         #[arg(long)]
@@ -356,6 +356,17 @@ fn decode_cmd(raw: &Path, out: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Clap parser for the 0..=1 strength flags: finite AND in-domain. "NaN"
+/// parsed as a valid f32 and silently disabled style; `--style 2` reported
+/// 200% while clamping to the same result as 1 (16-lane scan L09).
+fn unit_interval(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        return Err(format!("`{s}` is outside 0..=1 (a finite fraction)"));
+    }
+    Ok(v)
+}
+
 /// Same file? canonicalize when it exists (kills case/alias spellings — the
 /// dangerous overwrite case implies existence), else lexical absolute. The
 /// canonical-vs-`-o` decision must not depend on how the path was spelled.
@@ -509,11 +520,12 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     // exposure (hand-edited JSON) otherwise reaches powf unbounded.
     let dropped = recipe.clamp();
     if !dropped.is_empty() {
+        // describe(): only the non-zero losses — a curve-only truncation used
+        // to print "0 mask(s) and 0 mask component(s)" (16-lane scan L16).
         eprintln!(
-            "warning: importing {} discarded {} mask(s) and {} mask component(s)",
+            "warning: importing {} discarded {}",
             recipe_path.display(),
-            dropped.dropped_masks,
-            dropped.dropped_components
+            dropped.describe()
         );
     }
     // The guard FIRST: a refused -o must not pay a RAW decode for the repair
@@ -699,6 +711,21 @@ fn match_cmd(
     style_prompt: bool,
     out: Option<PathBuf>,
 ) -> Result<()> {
+    // BEFORE any fitting/segmentation is paid for: `-o` naming the photo's
+    // XMP sidecar wrote the promised recipe JSON there, then the projection
+    // below overwrote it — both lines printed success while the named
+    // artifact no longer existed (16-lane scan L09). Analyze has the
+    // equivalent collision check; the RAW gate matches write_xmp's own.
+    if decode::is_raw(raw)
+        && let Some(o) = out.as_deref()
+        && same_path(o, &pipeline::xmp_target(raw))
+    {
+        anyhow::bail!(
+            "-o names this photo's XMP sidecar ({}) — the XMP projection would overwrite the \
+             recipe JSON written there; choose a different output path",
+            o.display()
+        );
+    }
     let src = decode::preview_only(raw)?;
     let tgt = decode::load_image(target)?;
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
@@ -795,7 +822,17 @@ fn match_cmd(
     // never fitted to (the GUI reverse-fit clears it for exactly this
     // reason), and an -o naming the canonical recipe used to skip the clear.
     if let Err(e) = autoshop::store::clear_pixel_source(raw) {
-        eprintln!("  ⚠ the saved pixel-master link could not be cleared: {e}");
+        // Hard failure, not a warning: the recipe above already committed,
+        // and a surviving master link makes every later open apply this
+        // source-fitted look ON TOP of stale healed/generated pixels — a
+        // silently different develop (16-lane scan L09/L13; the GUI
+        // reverse-fit already treats this as not-fully-persisted).
+        anyhow::bail!(
+            "the fitted recipe was SAVED, but the previous pixel-master link could not be \
+             cleared ({e}) — reopening would apply the fit onto stale retouched pixels. \
+             Delete or fix {} and re-run.",
+            autoshop::store::pixel_source_path(raw).display()
+        );
     }
     if decode::is_raw(raw) {
         // Warning, not failure: the recipe above already committed.
@@ -997,6 +1034,12 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
              no longer pending — re-run `autoshop apply` for its deliverable."
         );
     }
+    // The summary printed FIRST (it names every photo); the exit code then
+    // tells scripts/CI the truth — an all-FAILED run used to exit 0
+    // (16-lane scan L09).
+    if fail > 0 {
+        anyhow::bail!("{fail} photo(s) failed — see the FAILED lines above");
+    }
     Ok(())
 }
 
@@ -1115,5 +1158,29 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("--denoise"), "{message}");
         }
+    }
+
+    /// 16-lane scan L09: "--style NaN" parsed as a valid f32 and silently
+    /// disabled style; "--style 2" reported 200% while clamping to 1's
+    /// effect. The 0..=1 flags refuse out-of-domain input at the parser.
+    #[test]
+    fn strength_flags_refuse_non_finite_and_out_of_domain_values() {
+        for bad in ["NaN", "inf", "2", "-0.1"] {
+            assert!(
+                Cli::try_parse_from(["autoshop", "analyze", "p.arw", "--style", bad]).is_err(),
+                "--style {bad} must be refused"
+            );
+            assert!(
+                Cli::try_parse_from(["autoshop", "denoise", "p.png", "--strength", bad]).is_err(),
+                "--strength {bad} must be refused"
+            );
+        }
+        assert!(Cli::try_parse_from(["autoshop", "analyze", "p.arw", "--style", "0.7"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "autoshop", "auto", "p.arw", "--denoise", "--denoise-strength", "1"
+            ])
+            .is_ok()
+        );
     }
 }

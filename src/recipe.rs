@@ -753,6 +753,36 @@ impl ClampSummary {
     pub fn is_empty(self) -> bool {
         self == ClampSummary::default()
     }
+
+    /// Fold another summary in — the accumulator restore paths use. Field-by-
+    /// field copies at call sites silently dropped the curve/string counts the
+    /// moment those fields were added (16-lane scan, L14/L15/L16).
+    pub fn absorb(&mut self, other: ClampSummary) {
+        self.dropped_masks += other.dropped_masks;
+        self.dropped_components += other.dropped_components;
+        self.truncated_curve_points += other.truncated_curve_points;
+        self.truncated_string_bytes += other.truncated_string_bytes;
+    }
+
+    /// English stderr rendering listing only the non-zero losses — "0 mask(s)
+    /// and 0 component(s)" for a curve-only truncation was a false all-clear.
+    /// GUI surfaces use their own localized 4-placeholder message instead.
+    pub fn describe(self) -> String {
+        let mut parts = Vec::new();
+        if self.dropped_masks > 0 {
+            parts.push(format!("{} mask(s)", self.dropped_masks));
+        }
+        if self.dropped_components > 0 {
+            parts.push(format!("{} mask component(s)", self.dropped_components));
+        }
+        if self.truncated_curve_points > 0 {
+            parts.push(format!("{} curve point(s)", self.truncated_curve_points));
+        }
+        if self.truncated_string_bytes > 0 {
+            parts.push(format!("{} string byte(s)", self.truncated_string_bytes));
+        }
+        parts.join(", ")
+    }
 }
 
 /// Proof-of-sanitisation token (arch item c): constructing it is the ONE
@@ -1538,6 +1568,45 @@ mod tests {
         assert_eq!(d.truncated_curve_points, 44, "300 points over the 256 cap");
         assert_eq!(d.truncated_string_bytes, 5000 - 4096, "rationale past its cap");
         assert!(!d.is_empty(), "curve/string loss alone must flip is_empty");
+    }
+
+    /// 16-lane scan L14/L15/L16: field-by-field accumulator copies silently
+    /// dropped the two new counts, and the shared formatter printed
+    /// "0 mask(s) and 0 component(s)" for a curve-only loss.
+    #[test]
+    fn absorb_folds_all_four_fields_and_describe_names_only_real_losses() {
+        let mut acc = ClampSummary::default();
+        acc.absorb(ClampSummary {
+            dropped_masks: 1,
+            dropped_components: 0,
+            truncated_curve_points: 44,
+            truncated_string_bytes: 0,
+        });
+        acc.absorb(ClampSummary {
+            dropped_masks: 0,
+            dropped_components: 2,
+            truncated_curve_points: 1,
+            truncated_string_bytes: 7,
+        });
+        assert_eq!(
+            acc,
+            ClampSummary {
+                dropped_masks: 1,
+                dropped_components: 2,
+                truncated_curve_points: 45,
+                truncated_string_bytes: 7,
+            }
+        );
+        assert_eq!(
+            acc.describe(),
+            "1 mask(s), 2 mask component(s), 45 curve point(s), 7 string byte(s)"
+        );
+        let curve_only = ClampSummary { truncated_curve_points: 44, ..Default::default() };
+        assert_eq!(
+            curve_only.describe(),
+            "44 curve point(s)",
+            "zero categories stay OUT of the line — '0 mask(s)' was a false all-clear"
+        );
     }
 
     #[test]

@@ -2155,9 +2155,7 @@ fn read_saved_develop_locked(
         // Neutral / foreign content restores nothing — the store answers
         // exactly as before.
         if !r.is_noop() {
-            let d = r.clamp();
-            clamp_dropped.dropped_masks += d.dropped_masks;
-            clamp_dropped.dropped_components += d.dropped_components;
+            clamp_dropped.absorb(r.clamp());
             let dropped = autoshop::xmp::unsupported_corrections(&text);
             return (SavedDevelop::Restored(r, kind), xmp_bad, dropped, clamp_dropped);
         }
@@ -2187,9 +2185,7 @@ fn read_saved_develop_locked(
         match serde_json::from_str::<EditRecipe>(&text) {
             Ok(mut r) => {
                 if !r.is_noop() {
-                    let d = r.clamp();
-                    clamp_dropped.dropped_masks += d.dropped_masks;
-                    clamp_dropped.dropped_components += d.dropped_components;
+                    clamp_dropped.absorb(r.clamp());
                     // Store recipes reference rasters by bare file name —
                     // anchor them to the file they were loaded beside.
                     if let Some(base) = rj.parent() {
@@ -2240,9 +2236,7 @@ fn read_saved_develop_locked(
         // A foreign / neutral sidecar parses to a no-op recipe — "restoring"
         // it would only produce a misleading status line.
         if !r.is_noop() {
-            let d = r.clamp();
-            clamp_dropped.dropped_masks += d.dropped_masks;
-            clamp_dropped.dropped_components += d.dropped_components;
+            clamp_dropped.absorb(r.clamp());
             dropped_masks = autoshop::xmp::unsupported_corrections(&text);
             fallback = Some((r, kind));
         }
@@ -3355,13 +3349,16 @@ impl AutoshopApp {
                 let dropped = r.clamp();
                 if !dropped.is_empty() {
                     // Same W20 disclosure as the open restore: a snapshot
-                    // past the caps loads minus edits, never silently.
+                    // past the caps loads minus edits, never silently —
+                    // and all four loss kinds, like the open toast.
                     let t = trf(
                         lang,
-                        "recipe limits discarded {n} mask(s) and {m} component(s) on restore — the saved file exceeds the app's caps",
+                        "recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) on restore — the saved file exceeds the app's caps",
                         &[
                             ("n", &dropped.dropped_masks.to_string()),
                             ("m", &dropped.dropped_components.to_string()),
+                            ("c", &dropped.truncated_curve_points.to_string()),
+                            ("s", &dropped.truncated_string_bytes.to_string()),
                         ],
                     );
                     self.toast(ToastKind::Error, t);
@@ -6505,12 +6502,18 @@ impl AutoshopApp {
                             // be silent loss — a stored recipe past the caps
                             // opens minus edits, and the user must hear it.
                             if !clamp_dropped.is_empty() {
+                                // All four loss kinds — a curve-only or
+                                // string-only truncation used to toast
+                                // "0 mask(s) and 0 component(s)" (16-lane
+                                // scan L14/L16).
                                 let t = trf(
                                     lang,
-                                    "recipe limits discarded {n} mask(s) and {m} component(s) on restore — the saved file exceeds the app's caps",
+                                    "recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) on restore — the saved file exceeds the app's caps",
                                     &[
                                         ("n", &clamp_dropped.dropped_masks.to_string()),
                                         ("m", &clamp_dropped.dropped_components.to_string()),
+                                        ("c", &clamp_dropped.truncated_curve_points.to_string()),
+                                        ("s", &clamp_dropped.truncated_string_bytes.to_string()),
                                     ],
                                 );
                                 self.toast(ToastKind::Error, t);
@@ -6834,10 +6837,26 @@ impl AutoshopApp {
                             // outranks it wholesale: it is also the mirror
                             // the background-variant dirty test compares
                             // against (see `open_dirty_variants`).
-                            let disk_strip = self
+                            let disk_strip = match self
                                 .src_path
                                 .as_deref()
-                                .and_then(autoshop::store::read_variants);
+                                .map(autoshop::store::read_variants_checked)
+                            {
+                                Some(autoshop::store::VariantsRead::Strip(rec)) => Some(rec),
+                                Some(autoshop::store::VariantsRead::Unresolved) => {
+                                    // The store's save floor refuses to touch
+                                    // an unresolved strip — say so at OPEN,
+                                    // not first at the failing save.
+                                    let t = tr(
+                                        lang,
+                                        "this photo's variant strip (variants.json) cannot be read — background variants stay hidden and saving refuses until the file is fixed or deleted",
+                                    )
+                                    .to_string();
+                                    self.toast(ToastKind::Error, t);
+                                    None
+                                }
+                                _ => None,
+                            };
                             if !from_stash
                                 && let Some(rec) = &disk_strip
                                 && rec.active_kind == "fitted"
@@ -7833,12 +7852,19 @@ impl AutoshopApp {
                 },
             }
         }
-        // Keep the frame loop alive while any worker (analyze/export/thumbs/models)
-        // runs — but at a 100 ms poll, not frame rate: worker completion only
-        // surfaces through the mpsc poll above, and a full-rate repaint burned
-        // CPU for the whole life of a stalled 600 s AI call. Input still
-        // repaints immediately; 100 ms only bounds COMPLETION latency.
-        if self.busy || self.thumb_inflight > 0 || self.settings.fetching_models {
+        // Keep the frame loop alive while any worker (analyze/export/thumbs/models/
+        // master decodes) runs — but at a 100 ms poll, not frame rate: worker
+        // completion only surfaces through the mpsc poll above, and a full-rate
+        // repaint burned CPU for the whole life of a stalled 600 s AI call. Input
+        // still repaints immediately; 100 ms only bounds COMPLETION latency.
+        // `master_loads` is in the gate because a cold-variant master decode is
+        // NOT `busy`: without it, MasterLoaded sat unread until the next input
+        // and the canvas kept showing the disclosed stand-in (16-lane scan L06).
+        if self.busy
+            || self.thumb_inflight > 0
+            || self.settings.fetching_models
+            || !self.master_loads.is_empty()
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }

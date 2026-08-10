@@ -1562,10 +1562,15 @@ fn parse_curve_checked(xmp: &str, tag: &str) -> Result<Vec<CurvePoint>, ()> {
         if it.next().is_some() || !x.is_finite() || !y.is_finite() {
             return Err(());
         }
-        pts.push(CurvePoint {
-            input: x.clamp(0.0, 255.0).round() as u8,
-            output: y.clamp(0.0, 255.0).round() as u8,
-        });
+        // Out-of-domain coordinates are as unparsable as non-finite ones:
+        // silently saturating "999, -5" to (255, 0) imported a curve that
+        // renders nearly black AND persisted it on the next save (16-lane
+        // scan L05). Err flows into the same disclosure + drop path.
+        let (x, y) = (x.round(), y.round());
+        if !(0.0..=255.0).contains(&x) || !(0.0..=255.0).contains(&y) {
+            return Err(());
+        }
+        pts.push(CurvePoint { input: x as u8, output: y as u8 });
     }
 
     let identity = [CurvePoint { input: 0, output: 0 }, CurvePoint { input: 255, output: 255 }];
@@ -2108,18 +2113,31 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         hsl.saturation[i] = f(&format!("SaturationAdjustment{band}"));
         hsl.luminance[i] = f(&format!("LuminanceAdjustment{band}"));
     }
+    // A wheel whose HUE is present but unreadable must not keep its paired
+    // saturation: the generic zero fallback turned a corrupt hue into finite
+    // 0 (= red), so `ShadowHue="bogus"` + a valid Saturation of 50 imported
+    // as a STRONG RED grade while the disclosure said "restored as neutral"
+    // (16-lane scan L05). The hue itself is already named by
+    // `unparsable_crs_numbers`; zeroing the sat makes the wheel colourless.
+    let wheel_sat = |hue_key: &str, sat_key: &str| -> f32 {
+        if crs_str(scope, hue_key).is_some() && crs_f32(scope, hue_key).is_none() {
+            0.0
+        } else {
+            f(sat_key)
+        }
+    };
     let color_grade = ColorGrade {
         shadow_hue: f("SplitToningShadowHue"),
-        shadow_sat: f("SplitToningShadowSaturation"),
+        shadow_sat: wheel_sat("SplitToningShadowHue", "SplitToningShadowSaturation"),
         shadow_lum: f("ColorGradeShadowLum"),
         midtone_hue: f("ColorGradeMidtoneHue"),
-        midtone_sat: f("ColorGradeMidtoneSat"),
+        midtone_sat: wheel_sat("ColorGradeMidtoneHue", "ColorGradeMidtoneSat"),
         midtone_lum: f("ColorGradeMidtoneLum"),
         highlight_hue: f("SplitToningHighlightHue"),
-        highlight_sat: f("SplitToningHighlightSaturation"),
+        highlight_sat: wheel_sat("SplitToningHighlightHue", "SplitToningHighlightSaturation"),
         highlight_lum: f("ColorGradeHighlightLum"),
         global_hue: f("ColorGradeGlobalHue"),
-        global_sat: f("ColorGradeGlobalSat"),
+        global_sat: wheel_sat("ColorGradeGlobalHue", "ColorGradeGlobalSat"),
         global_lum: f("ColorGradeGlobalLum"),
         blending: crs_f32(scope, "ColorGradeBlending").unwrap_or(ColorGrade::default().blending),
         balance: f("SplitToningBalance"),
@@ -2766,6 +2784,73 @@ mod tests {
         assert!(!bad.contains(&"Exposure2012".to_string()), "{bad:?}");
     }
 
+    /// 16-lane scan L05: "999, -5" used to saturate to (255, 0) — a one-point
+    /// master curve that renders nearly black, imported silently and
+    /// PERSISTED by the next save. Out-of-domain now takes the same
+    /// reject-and-disclose path as a malformed point.
+    #[test]
+    fn out_of_domain_curve_points_drop_the_curve_and_are_disclosed() {
+        let lr = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 7.0-c000">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:Exposure2012="+0.30"
+    crs:HasSettings="True">
+   <crs:ToneCurvePV2012>
+    <rdf:Seq>
+     <rdf:li>999, -5</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+        let r = xmp_to_recipe(lr);
+        assert!(r.tone_curve.is_empty(), "the out-of-domain curve must not import");
+        assert_eq!(r.exposure_ev, 0.30, "finite neighbours still import");
+        let bad = unparsable_crs_numbers(lr);
+        assert!(bad.contains(&"ToneCurvePV2012".to_string()), "{bad:?}");
+        // In-domain float spellings keep rounding like before (a non-identity
+        // pair — the 0,0→255,255 identity deliberately collapses to empty).
+        assert_eq!(
+            parse_curve_checked("<crs:T><rdf:Seq><rdf:li>0, 10</rdf:li><rdf:li>254.6, 255</rdf:li></rdf:Seq></crs:T>", "T"),
+            Ok(vec![
+                CurvePoint { input: 0, output: 10 },
+                CurvePoint { input: 255, output: 255 }
+            ])
+        );
+    }
+
+    /// 16-lane scan L05: a wheel whose HUE is unreadable must not keep its
+    /// paired saturation — the zero fallback made "bogus" hue 0 (= RED) and
+    /// a valid Saturation of 50 imported as a strong red grade while the
+    /// disclosure claimed neutral restoration.
+    #[test]
+    fn an_unreadable_wheel_hue_zeroes_its_paired_saturation() {
+        let lr = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 7.0-c000">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:SplitToningShadowHue="bogus"
+    crs:SplitToningShadowSaturation="50"
+    crs:SplitToningHighlightHue="45"
+    crs:SplitToningHighlightSaturation="20"
+    crs:HasSettings="True">
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+        let r = xmp_to_recipe(lr);
+        assert_eq!(
+            r.color_grade.shadow_sat, 0.0,
+            "an unreadable shadow hue must take its saturation with it"
+        );
+        assert_eq!(r.color_grade.highlight_hue, 45.0, "the healthy wheel is untouched");
+        assert_eq!(r.color_grade.highlight_sat, 20.0);
+        assert!(
+            unparsable_crs_numbers(lr).contains(&"SplitToningShadowHue".to_string()),
+            "and the unreadable hue is named"
+        );
+    }
+
     #[test]
     fn renders_hsl_bands_only_when_set() {
         let r = EditRecipe {
@@ -3389,10 +3474,10 @@ mod tests {
         assert_eq!(r.contrast, -100.0);
         assert_eq!(r.sharpening, 150.0);
         assert_eq!(r.crop, None, "invalid compound crop geometry is rejected");
-        assert_eq!(
-            r.tone_curve,
-            vec![CurvePoint { input: 255, output: 0 }],
-            "finite curve coordinates retain the existing u8 saturation policy"
+        assert!(
+            r.tone_curve.is_empty(),
+            "out-of-domain curve coordinates are rejected as a group — the old \
+             saturation policy imported '999, -5' as a near-black one-point curve"
         );
         assert!(r.red_curve.is_empty(), "a malformed curve is rejected as a group");
         assert!(r.masks.is_empty(), "an out-of-range local correction is rejected as partial");

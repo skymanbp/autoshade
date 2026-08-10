@@ -352,7 +352,11 @@ fn run_sidecar_with_budget(
     // deliverable, or the 0-byte claim file the GUI's unique_out creates).
     let before = crate::artifact_state(output);
     let mut cmd = Command::new(&opts.python_bin);
-    cmd.arg(&opts.script)
+    // `-E`: ignore PYTHON* environment variables — a cwd .env's
+    // `PYTHONPATH=.` beside a hostile `numpy.py` is code execution at
+    // import time (config.rs also protects those vars; two layers).
+    cmd.arg("-E")
+        .arg(&opts.script)
         .arg("--input")
         .arg(input)
         .arg("--output")
@@ -495,13 +499,14 @@ mod tests {
     }
 
     /// A stand-in "python" that exits 0 and, if `writes`, writes the sidecar's
-    /// `--output` argument (argv position 5). Windows: .bat; elsewhere: sh.
+    /// `--output` argument (argv position 6 — position 1 is the `-E`
+    /// isolation flag the real spawn passes). Windows: .bat; elsewhere: sh.
     fn stand_in(dir: &Path, writes: bool) -> String {
         #[cfg(windows)]
         {
             let p = dir.join(if writes { "writing.bat" } else { "noop.bat" });
             let body = if writes {
-                "@echo denoised-bytes>\"%~5\"\r\n@exit /b 0\r\n"
+                "@echo denoised-bytes>\"%~6\"\r\n@exit /b 0\r\n"
             } else {
                 "@exit /b 0\r\n"
             };
@@ -513,7 +518,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let p = dir.join(if writes { "writing.sh" } else { "noop.sh" });
             let body = if writes {
-                "#!/bin/sh\nprintf denoised-bytes > \"$5\"\nexit 0\n"
+                "#!/bin/sh\nprintf denoised-bytes > \"$6\"\nexit 0\n"
             } else {
                 "#!/bin/sh\nexit 0\n"
             };

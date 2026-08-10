@@ -147,9 +147,11 @@ Configure keys + models from the **Settings** panel — written to
 `autoshop.local.json` in your per-user Autoshop folder (never in a repo), which
 overrides the environment. Keys never leave your machine: the server binds
 `127.0.0.1`, refuses any request whose `Host`/`Origin` is not that exact
-loopback authority *on its own port*, never returns a key (settings answer
-`key_present: true/false`), and sends `X-Frame-Options: DENY` so a page you
-visit cannot frame the UI. You can also use `.env`:
+loopback authority *on its own port*, requires the page's per-run session
+token on every state-changing request, marks all `/api/*` responses
+`no-store`, never returns a key (settings answer `key_present: true/false`),
+and sends `X-Frame-Options: DENY` so a page you visit cannot frame the UI.
+You can also use `.env`:
 
 ```
 OPENAI_API_KEY=sk-...
@@ -212,7 +214,10 @@ pip install opencv-python numpy einops requests
 ```
 
 On first use it downloads the model weights (~69 MB/model) into `python/weights/`
-(gitignored). Trigger it via `autoshop auto --denoise`, `autoshop denoise <src>`,
+(gitignored). The sidecar script and its weight cache are resolved against the
+*program's own directory tree*, never the folder you run from — a downloaded
+photo pack cannot substitute its own script or weights. Trigger it via
+`autoshop auto --denoise`, `autoshop denoise <src>`,
 or the **AI Denoise** checkbox in the web UI. Models: `color_real_psnr` (default,
 blind, best for real high-ISO/astro), `color_real_gan`, `color_15/25/50`.
 

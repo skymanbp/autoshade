@@ -497,9 +497,28 @@ fn canonical_generated_png(bytes: &[u8], expected_size: &str) -> Result<Vec<u8>>
             "image API returned {format:?}; the generated-image contract requires PNG"
         ));
     }
+    let expected = parse_size(expected_size);
+    // Dimensions from the HEADER, before any pixel decode: a tiny hostile
+    // PNG can declare a ~480-megapixel frame, and fully decoding it just to
+    // reject the mismatch cost hundreds of MiB per response (16-lane scan
+    // L02/L16). The full decode below then runs only at the agreed size.
+    let declared = image::ImageReader::with_format(
+        std::io::Cursor::new(bytes),
+        image::ImageFormat::Png,
+    )
+    .into_dimensions()
+    .context("read generated PNG header")?;
+    if declared != expected {
+        return Err(anyhow!(
+            "image API returned {}x{} for requested {}x{}",
+            declared.0,
+            declared.1,
+            expected.0,
+            expected.1
+        ));
+    }
     let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
         .context("fully decode generated PNG")?;
-    let expected = parse_size(expected_size);
     if image.dimensions() != expected {
         return Err(anyhow!(
             "image API returned {}x{} for requested {}x{}",

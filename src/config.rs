@@ -16,7 +16,7 @@
 //! calibration baked in here.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -348,8 +348,17 @@ impl Config {
         //
         // Everything else — keys, model names, providers, tuning numbers — is
         // still honoured from `.env`, which is where this project's own key
-        // lives.
-        const AMBIENT_UNSAFE_VARS: [&str; 14] = [
+        // lives. (A planted key can no longer read the user's photos back:
+        // every Responses call sends `store: false`, so nothing persists in
+        // the key owner's account — see advisor/openai.rs.)
+        //
+        // PYTHONPATH / PYTHONHOME join the protected set for the same reason
+        // as the script variables: both Python sidecars inherit the process
+        // environment, and a .env's `PYTHONPATH=.` beside a hostile
+        // `numpy.py` is code execution at import time (the sidecars also
+        // pass `-E` — defence in both layers). The weight cache joins
+        // because a redirected cache is a poisoned-model path.
+        const AMBIENT_UNSAFE_VARS: [&str; 17] = [
             "AUTOSHOP_OPENAI_BASE_URL",
             "AUTOSHOP_ANALYSIS_BASE_URL",
             "AUTOSHOP_CLAUDE_BIN",
@@ -364,8 +373,11 @@ impl Config {
             "AUTOSHOP_OPENAI_MODEL",
             "AUTOSHOP_OPENAI_IMAGE_MODEL",
             "AUTOSHOP_IMAGE_PROVIDER",
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "AUTOSHOP_DENOISE_CACHE",
         ];
-        static PRE_DOTENV: std::sync::OnceLock<[Option<String>; 14]> = std::sync::OnceLock::new();
+        static PRE_DOTENV: std::sync::OnceLock<[Option<String>; 17]> = std::sync::OnceLock::new();
         let pre_dotenv = PRE_DOTENV.get_or_init(|| {
             let before = AMBIENT_UNSAFE_VARS.map(|k| env::var(k).ok());
             let _ = dotenvy::dotenv_override();
@@ -431,6 +443,23 @@ impl Config {
         };
 
         let default_base = "https://api.openai.com/v1";
+        // Bundled sidecar helpers resolve against the PROGRAM's own tree,
+        // never the cwd (see `bundled_helper`): a photo pack carrying
+        // `python/denoise.py` used to have that file executed as the user
+        // the next time denoise ran from inside it. The weight cache
+        // defaults to `weights/` beside whichever script answered, so dev
+        // builds keep the repo cache and a packaged install stays beside
+        // the exe.
+        let denoise_script =
+            pre(4).unwrap_or_else(|| bundled_helper("python/denoise.py"));
+        let denoise_cache = pre(16).unwrap_or_else(|| {
+            Path::new(&denoise_script)
+                .parent()
+                .map(|d| d.join("weights").to_string_lossy().into_owned())
+                .unwrap_or_else(|| bundled_helper("python/weights"))
+        });
+        let segment_script =
+            pre(5).unwrap_or_else(|| bundled_helper("python/segment.py"));
         Config {
             openai_api_key: pick_opt(&local.image_api_key, nonempty("OPENAI_API_KEY")),
             openai_model: pick(&local.image_model, pre(11), "gpt-5.5"),
@@ -467,12 +496,9 @@ impl Config {
             python_bin: pre(3).unwrap_or_else(|| "python".to_string()),
             denoise_model: nonempty("AUTOSHOP_DENOISE_MODEL")
                 .unwrap_or_else(|| "color_real_psnr".to_string()),
-            denoise_script: pre(4)
-                .unwrap_or_else(|| "python/denoise.py".to_string()),
-            denoise_cache: nonempty("AUTOSHOP_DENOISE_CACHE")
-                .unwrap_or_else(|| "python/weights".to_string()),
-            segment_script: pre(5)
-                .unwrap_or_else(|| "python/segment.py".to_string()),
+            denoise_script,
+            denoise_cache,
+            segment_script,
             style_strength: nonempty("AUTOSHOP_STYLE_STRENGTH")
                 .and_then(|s| s.parse::<f32>().ok())
                 // "NaN" parses as a valid f32 and SURVIVES clamp (clamp keeps
@@ -494,6 +520,51 @@ impl Config {
     pub fn image_is_oauth(&self) -> bool {
         self.image_provider.eq_ignore_ascii_case("oauth")
     }
+}
+
+/// Resolve a bundled helper (sidecar script / weight cache) against the
+/// PROGRAM'S OWN tree, never the working directory. The cwd is ambient input
+/// — photos arrive in unzipped packs, and a pack carrying `python/denoise.py`
+/// satisfied the old cwd-relative default's `exists()` gate, so the pack's
+/// script ran as the user. Candidates: the executable's directory (a packaged
+/// install) and its first three ancestors (`target/release` and
+/// `target/debug/deps` both reach the repo root). When nothing answers, the
+/// FIRST candidate still names the expected location, so the sidecar's
+/// "not found at <path>" error stays actionable — and never names a path an
+/// untrusted pack could satisfy.
+fn bundled_helper(rel: &str) -> String {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        roots.push(dir.to_path_buf());
+        let mut up = dir;
+        for _ in 0..3 {
+            match up.parent() {
+                Some(p) => {
+                    roots.push(p.to_path_buf());
+                    up = p;
+                }
+                None => break,
+            }
+        }
+    }
+    for root in &roots {
+        let cand = root.join(rel);
+        if cand.exists() {
+            return cand.to_string_lossy().into_owned();
+        }
+    }
+    roots.first().map(|r| r.join(rel).to_string_lossy().into_owned()).unwrap_or_else(|| {
+        // current_exe() unavailable (e.g. a chroot without /proc): FAIL
+        // CLOSED. Returning `rel` here would quietly reopen the
+        // planted-script hole as a cwd-relative lookup (Codex R11 #2). A
+        // NUL byte is unrepresentable in real paths on every platform, so
+        // this sentinel can never be satisfied by any file an untrusted
+        // pack could create — the sidecar's "not found at <path>" refusal
+        // fires instead.
+        format!("\u{0}install-dir-unavailable/{rel}")
+    })
 }
 
 #[cfg(test)]
@@ -662,6 +733,7 @@ mod tests {
             if env::var_os(CHILD).is_some() {
                 let path_before = env::var_os("PATH");
                 let data_before = env::var_os("AUTOSHOP_DATA_DIR");
+                let pythonpath_before = env::var_os("PYTHONPATH");
                 let cfg = Config::load();
 
                 assert_eq!(env::var_os("PATH"), path_before, "dotenv rewrote executable search");
@@ -670,11 +742,21 @@ mod tests {
                     data_before,
                     "dotenv redirected the trusted settings root"
                 );
+                assert_eq!(
+                    env::var_os("PYTHONPATH"),
+                    pythonpath_before,
+                    "dotenv planted a Python import path for the sidecars to inherit"
+                );
                 assert_eq!(cfg.analysis_provider, "oauth", "dotenv initiated an API verifier call");
                 assert_eq!(
                     cfg.analysis_api_key.as_deref(),
                     Some("dotenv-key"),
                     "ordinary secret keys in the user's dotenv remain supported"
+                );
+                assert!(
+                    !Path::new(&cfg.denoise_script).is_relative(),
+                    "the bundled-script default stayed cwd-relative: {}",
+                    cfg.denoise_script
                 );
                 return;
             }
@@ -689,6 +771,7 @@ mod tests {
                 dir.join(".env"),
                 "PATH=.\n\
                  AUTOSHOP_DATA_DIR=.\n\
+                 PYTHONPATH=.\n\
                  AUTOSHOP_ANALYSIS_PROVIDER=api\n\
                  AUTOSHOP_ANALYSIS_API_KEY=dotenv-key\n",
             )

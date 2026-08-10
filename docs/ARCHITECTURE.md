@@ -1,6 +1,6 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.23.0). The full decode → advise → verify → render
+> Status: **implemented** (v0.23.1). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
@@ -8,7 +8,27 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 273 library + 2 CLI + 37 GUI tests pass in both build configurations.
+> 281 library + 3 CLI + 37 GUI tests pass in both build configurations.
+> v0.23.1 (16-lane parallel scan round) landed the deferred quartet and the
+> scan's verified fixes: restore-time clamp disclosure travels ALL FOUR
+> `ClampSummary` fields (masks/components/curve points/string bytes) to every
+> consumer; `persist_postponed` types its failures (Busy vs Io); render entry
+> points construct one `ValidatedRecipe` token; the guided mask refine runs
+> tiled (1024-edge tiles + 6r halo — a 61 MP refine's ~3.4 GiB of derived
+> planes became ~42 MiB peak, seam-tested to ±1 grey level); bundled Python
+> sidecar scripts and the weight cache resolve against the PROGRAM's own tree
+> (never the cwd — an unzipped photo pack could plant `python/denoise.py`),
+> `.env` cannot supply `PYTHONPATH`/`PYTHONHOME`/the weight cache (and the
+> sidecars pass `-E`); every Responses-API body sends `store: false` so no
+> photo persists in the key owner's account; UNC/device paths in develop-store
+> sidecars are refused LEXICALLY before any filesystem probe; the local web
+> server requires the session token on every POST and marks all `/api/*`
+> responses `no-store`; an unreadable `variants.json` is a typed
+> `Unresolved` state that the strip save primitives refuse to overwrite or
+> clear (an ordinary Ctrl+S used to delete it silently); XMP import rejects
+> out-of-domain curve points as a group and zeroes a colour-grade wheel's
+> saturation when its hue is present but unreadable. The GUI also had its
+> first-ever real-window run (user-permitted), captured in the E2E harness.
 > v0.23.0 (adversarial-review round) hardened the whole crate: a per-photo
 > OS develop lock (`store::with_develop_lock`, Wait/NoWait + thread-local
 > reentrancy) now wraps every persistence compound across GUI, CLI and serve;

@@ -42,11 +42,14 @@ fn session_token() -> Result<String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Put the run's capability only on the two URLs browsers load as images.
+/// Put the run's capability on the two URLs browsers load as images, and in
+/// the page's fetch wrapper, which stamps it onto every state-changing
+/// request (`X-Autoshop-Token` — the POST guard in `handle`).
 fn tokenized_index(token: &str) -> String {
     INDEX_HTML
         .replace("/api/thumb?id=", &format!("/api/thumb?token={token}&id="))
         .replace("/api/preview?id=", &format!("/api/preview?token={token}&id="))
+        .replace("__AUTOSHOP_SESSION_TOKEN__", token)
 }
 
 /// Browsers with Fetch Metadata identify a request initiated by another site.
@@ -381,6 +384,20 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
                 403,
                 "this image link belongs to another Autoshop server session; reopen the printed \
                  Autoshop UI URL to refresh the page and its image links",
+            ))
+            .map_err(Into::into);
+    }
+    // EVERY state-changing route needs the session capability, not just the
+    // image GETs: the Origin/Sec-Fetch/Host trio blocks modern browsers, but
+    // a client that sends none of those headers used to reach
+    // /api/settings & friends unauthenticated (16-lane scan L10). The page's
+    // fetch wrapper stamps the header; anything else gets 403.
+    if is_post && req_header(&request, "X-Autoshop-Token").as_deref() != Some(image_token) {
+        return request
+            .respond(status_response(
+                403,
+                "this request carries no valid Autoshop session token; reopen the printed \
+                 Autoshop UI URL and retry from that page",
             ))
             .map_err(Into::into);
     }
@@ -1035,7 +1052,13 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let body = fresh_base_payload(raw);
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static ASCII header");
-    let mut resp = Response::from_string(body).with_status_code(404).with_header(ct);
+    // no-store like every other /api answer — a CACHED "not analyzed yet"
+    // 404 replayed after another surface saved would reopen a neutral
+    // canvas whose next save clears the newer develop (Codex R11 #1).
+    let mut resp = Response::from_string(body)
+        .with_status_code(404)
+        .with_header(ct)
+        .with_header(no_store());
     if let Some(w) = xmp_warn {
         resp = resp.with_header(w);
     }
@@ -2573,7 +2596,7 @@ fn header(field: &str, value: &str) -> Option<Header> {
 /// A JPEG body plus the `X-Output-Path` of the master that was saved, with the
 /// path percent-encoded so a non-ASCII stem can never break the header.
 fn image_with_path(buf: Vec<u8>, out: &Path) -> ResponseBox {
-    let mut resp = Response::from_data(buf);
+    let mut resp = Response::from_data(buf).with_header(no_store());
     if let Some(h) = header("Content-Type", "image/jpeg") {
         resp = resp.with_header(h);
     }
@@ -2619,10 +2642,19 @@ fn json_response(v: &serde_json::Value) -> ResponseBox {
     json_text(v.to_string())
 }
 
+/// Dynamic `/api/*` payloads must never be answered from a browser cache: a
+/// standards-permitted reuse of a cached `/api/recipe` 404 after another
+/// surface saved a develop reopens a NEUTRAL state whose next save clears
+/// the newer develop (16-lane scan L10). Ids are also reused across folder
+/// switches, so images are no-store too.
+fn no_store() -> Header {
+    Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap()
+}
+
 /// A JSON body that is already serialised (e.g. a sidecar served verbatim).
 fn json_text(text: String) -> ResponseBox {
     let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    Response::from_string(text).with_header(header).boxed()
+    Response::from_string(text).with_header(header).with_header(no_store()).boxed()
 }
 
 fn html_response(html: &str) -> ResponseBox {
@@ -2656,11 +2688,11 @@ fn jpeg_response(img: &DynamicImage) -> Result<ResponseBox> {
     img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
         .context("encode jpeg")?;
     let header = Header::from_bytes(&b"Content-Type"[..], &b"image/jpeg"[..]).unwrap();
-    Ok(Response::from_data(buf).with_header(header).boxed())
+    Ok(Response::from_data(buf).with_header(header).with_header(no_store()).boxed())
 }
 
 fn status_response(code: u16, msg: &str) -> ResponseBox {
-    Response::from_string(msg).with_status_code(code).boxed()
+    Response::from_string(msg).with_status_code(code).with_header(no_store()).boxed()
 }
 
 #[cfg(test)]

@@ -359,6 +359,11 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
     }
 
     if evaluated == 0 {
+        // Attempted pairs that ALL failed must not exit 0 — broken
+        // credentials looked like a clean run to CI (16-lane scan L09).
+        if pairs.iter().take(limit).next().is_some() {
+            anyhow::bail!("no photo evaluated — every attempted pair failed (see the FAILED lines above)");
+        }
         println!("No photos evaluated.");
         return Ok(());
     }

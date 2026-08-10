@@ -633,6 +633,7 @@ pub fn write_variants(src: &Path, rec: &VariantsRecord) -> std::io::Result<()> {
 }
 
 fn write_variants_unlocked(src: &Path, rec: &VariantsRecord) -> std::io::Result<()> {
+    refuse_unresolved_strip(src)?;
     let dir = develop_dir(src);
     let mut stored = VariantsRecord {
         v: rec.v,
@@ -659,26 +660,50 @@ fn write_variants_unlocked(src: &Path, rec: &VariantsRecord) -> std::io::Result<
     )
 }
 
+/// What a strip read actually found — the three states are NOT collapsible:
+/// an `Unresolved` file records background variants this build cannot parse,
+/// and the save primitives refuse to overwrite or clear it (an ordinary
+/// Ctrl+S over a single card used to DELETE the unreadable record plus its
+/// `.bak`, silently destroying every background variant it held — 16-lane
+/// scan L08).
+pub enum VariantsRead {
+    /// No `variants.json` — the normal single-card case.
+    Absent,
+    Strip(VariantsRecord),
+    /// The file EXISTS but cannot be honoured (unreadable bytes/JSON,
+    /// future format, unknown kind, escaping or network origin).
+    Unresolved,
+}
+
 /// The photo's persisted strip record, if one exists and parses. Origins and
 /// Bitmap mask references come back resolved against the develop dir; their
 /// EXISTENCE is deliberately not checked here — the GUI restore is the one
 /// place that can degrade per-variant honestly (toast + neutral develop)
 /// instead of silently dropping a variant's recipe with its raster.
-/// A missing file is silent (the normal single-card case); an existing file
-/// that cannot be honoured warns on stderr and degrades to None, exactly like
-/// [`read_pixel_source`].
 pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
+    match read_variants_checked(src) {
+        VariantsRead::Strip(rec) => Some(rec),
+        _ => None,
+    }
+}
+
+/// [`read_variants`] with the absent/unresolved distinction preserved. A
+/// missing file is silent (the normal single-card case); an existing file
+/// that cannot be honoured warns on stderr and comes back `Unresolved`,
+/// exactly like [`read_pixel_source`] degrades — except that save paths
+/// treat `Unresolved` as a refusal, never as "nothing to keep".
+pub fn read_variants_checked(src: &Path) -> VariantsRead {
     let _ = recover_orphan_baks(src);
     let sidecar = variants_path(src);
     let bytes = match std::fs::read(&sidecar) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return VariantsRead::Absent,
         Err(e) => {
             eprintln!(
                 "⚠ {} exists but cannot be read ({e}) — the variant strip is not restored",
                 sidecar.display()
             );
-            return None;
+            return VariantsRead::Unresolved;
         }
     };
     let mut rec = match serde_json::from_slice::<VariantsRecord>(&bytes) {
@@ -688,7 +713,7 @@ pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
                 "⚠ {} is unreadable ({e}) — the variant strip is not restored",
                 sidecar.display()
             );
-            return None;
+            return VariantsRead::Unresolved;
         }
     };
     if rec.v != 1 {
@@ -697,7 +722,7 @@ pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
             sidecar.display(),
             rec.v
         );
-        return None;
+        return VariantsRead::Unresolved;
     }
     if !known_variant_kind(&rec.active_kind)
         || rec.others.iter().any(|entry| !known_variant_kind(&entry.kind))
@@ -706,25 +731,50 @@ pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
             "⚠ {} contains a variant kind this build does not understand — the variant strip is not restored and the file is left untouched",
             sidecar.display()
         );
-        return None;
+        return VariantsRead::Unresolved;
     }
     let dir = develop_dir(src);
     for e in &mut rec.others {
-        if let Some(o) = &e.origin
-            && o.is_relative()
-        {
-            let Some(origin) = contained_join(&dir, o) else {
+        if let Some(o) = &e.origin {
+            // LEXICAL network/device refusal BEFORE any probe, like the
+            // pixel-source origin: a crafted UNC origin must not be touched.
+            if remote_or_device_path(o) {
                 eprintln!(
-                    "⚠ {} contains a variant origin outside its develop directory — the variant strip is not restored",
+                    "⚠ {} contains a network/device variant origin — the variant strip is not restored",
                     sidecar.display()
                 );
-                return None;
-            };
-            e.origin = Some(origin);
+                return VariantsRead::Unresolved;
+            }
+            if o.is_relative() {
+                let Some(origin) = contained_join(&dir, o) else {
+                    eprintln!(
+                        "⚠ {} contains a variant origin outside its develop directory — the variant strip is not restored",
+                        sidecar.display()
+                    );
+                    return VariantsRead::Unresolved;
+                };
+                e.origin = Some(origin);
+            }
         }
         resolve_mask_paths(&mut e.recipe, &dir);
     }
-    Some(rec)
+    VariantsRead::Strip(rec)
+}
+
+/// The save-path floor shared by [`write_variants`] and [`clear_variants`]:
+/// an existing strip record this build cannot honour is someone's data, not
+/// noise — refusing here protects every caller at once (Ctrl+S, save-all).
+/// The EXPLICIT user clear (`clear_develop`) removes the file directly and
+/// deliberately does not pass through this gate.
+fn refuse_unresolved_strip(src: &Path) -> std::io::Result<()> {
+    match read_variants_checked(src) {
+        VariantsRead::Unresolved => Err(std::io::Error::other(format!(
+            "{} exists but cannot be honoured — the background variants it records would be \
+             destroyed; fix or delete that file, then save again",
+            variants_path(src).display()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Forget the persisted strip (the photo went back to a single card). Same
@@ -735,6 +785,7 @@ pub fn clear_variants(src: &Path) -> std::io::Result<()> {
 }
 
 fn clear_variants_unlocked(src: &Path) -> std::io::Result<()> {
+    refuse_unresolved_strip(src)?;
     let rm = |p: PathBuf| match std::fs::remove_file(p) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -969,6 +1020,16 @@ pub fn read_pixel_source(src: &Path) -> Option<(PathBuf, bool)> {
         }
     };
     let mut path = PathBuf::from(origin);
+    // LEXICAL first: probing a `\\attacker\share\…` origin with `exists()`
+    // below would already send this machine's credentials outbound. A
+    // develop store unzipped from someone else's pack is untrusted input.
+    if remote_or_device_path(&path) {
+        eprintln!(
+            "⚠ {} names a network/device master path — the master is not restored (a develop store may not reach off this machine)",
+            sidecar.display()
+        );
+        return None;
+    }
     if path.is_relative() {
         let Some(contained) = contained_join(&develop_dir(src), &path) else {
             eprintln!(
@@ -1409,11 +1470,39 @@ fn contained_join(base: &Path, relative: &Path) -> Option<PathBuf> {
     }
     Some(candidate)
 }
+/// True for UNC / verbatim-UNC / device-namespace prefixes — the classes
+/// whose mere `exists()` probe leaves this machine (an SMB touch sends
+/// NetNTLM credentials). Checked LEXICALLY, before any filesystem call, for
+/// exactly that reason. Local drive-letter absolutes stay honoured: the
+/// pixel-source writer legitimately records them for masters outside the
+/// develop dir.
+fn remote_or_device_path(p: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    match p.components().next() {
+        Some(Component::Prefix(pre)) => matches!(
+            pre.kind(),
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(_)
+        ),
+        _ => false,
+    }
+}
+
 pub fn resolve_mask_paths(r: &mut EditRecipe, base: &Path) {
     for m in &mut r.masks {
         for path in m.bitmap_paths_mut() {
             let p = Path::new(path.as_str());
-            if p.is_relative() {
+            if remote_or_device_path(p) {
+                // A develop store is not trusted to reach OFF this machine:
+                // a crafted `\\attacker\share\mask.png` turned "open the
+                // photo" into an outbound SMB authentication.
+                eprintln!(
+                    "⚠ bitmap mask reference {path:?} names a network/device path — it is disabled"
+                );
+                *path = base
+                    .join(".invalid-mask-reference")
+                    .to_string_lossy()
+                    .into_owned();
+            } else if p.is_relative() {
                 // A BARE name is the store's own convention and can only mean
                 // "this develop dir" — anchor it even when the file is GONE.
                 // Safe multi-component legacy refs retain their old
@@ -2888,6 +2977,103 @@ mod tests {
         // A future format version is refused, not misread.
         std::fs::write(variants_path(&photo), b"{\"v\":9,\"active_kind\":\"original\",\"active_pos\":0,\"others\":[]}").unwrap();
         assert!(read_variants(&photo).is_none(), "future major refused");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 16-lane scan L08: an unreadable/foreign variants.json opened as a
+    /// single card, and the next ordinary save DELETED it (with its .bak) —
+    /// every background variant it recorded died to a Ctrl+S. The save
+    /// primitives now refuse while the record is unresolved.
+    #[test]
+    fn an_unresolved_strip_refuses_save_and_clear_but_not_reads() {
+        let base = std::env::temp_dir().join("autoshop-store-test-varunres");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let photo = base.join("DSC_VARUNRES.ARW");
+        std::fs::write(&photo, b"raw").unwrap();
+        let dev = develop_dir(&photo);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        std::fs::write(variants_path(&photo), b"not json at all").unwrap();
+        assert!(
+            matches!(read_variants_checked(&photo), VariantsRead::Unresolved),
+            "garbage bytes are Unresolved, never Absent"
+        );
+        assert!(read_variants(&photo).is_none(), "the plain reader still degrades");
+
+        clear_variants(&photo).expect_err("clearing over an unresolved strip must refuse");
+        let rec = VariantsRecord {
+            v: 1,
+            active_kind: "original".into(),
+            active_pos: 0,
+            others: Vec::new(),
+        };
+        write_variants(&photo, &rec).expect_err("overwriting an unresolved strip must refuse");
+        assert_eq!(
+            std::fs::read(variants_path(&photo)).unwrap(),
+            b"not json at all",
+            "the refused save left the record byte-identical"
+        );
+
+        // Removing the bad record ends the refusal — the normal flow resumes.
+        std::fs::remove_file(variants_path(&photo)).unwrap();
+        assert!(matches!(read_variants_checked(&photo), VariantsRead::Absent));
+        write_variants(&photo, &rec).expect("a resolved store accepts saves again");
+        clear_variants(&photo).expect("and clears");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 16-lane scan L07: a develop pack naming `\\attacker\share\…` had its
+    /// origin PROBED on open (`exists()` = an outbound SMB authentication).
+    /// The refusal is lexical — no filesystem call may touch the path.
+    #[test]
+    #[cfg(windows)]
+    fn network_and_device_paths_are_refused_lexically() {
+        assert!(remote_or_device_path(Path::new(r"\\attacker\share\master.png")));
+        assert!(remote_or_device_path(Path::new(r"\\?\UNC\attacker\share\m.png")));
+        assert!(remote_or_device_path(Path::new(r"\\.\PhysicalDrive0")));
+        assert!(!remote_or_device_path(Path::new(r"C:\photos\master.png")));
+        assert!(!remote_or_device_path(Path::new("master.png")));
+
+        let base = std::env::temp_dir().join("autoshop-store-test-uncorigin");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let photo = base.join("DSC_UNC.ARW");
+        std::fs::write(&photo, b"raw").unwrap();
+        let dev = develop_dir(&photo);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(
+            pixel_source_path(&photo),
+            br#"{"origin": "\\\\attacker\\share\\master.png", "kind": "inplace"}"#,
+        )
+        .unwrap();
+        assert!(
+            read_pixel_source(&photo).is_none(),
+            "a UNC origin must not be restored (nor probed)"
+        );
+
+        // A recipe's bitmap ref pointing at a share is disabled, not probed.
+        let mut r = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment {
+                mask: crate::recipe::MaskGeometry::Bitmap {
+                    path: r"\\attacker\share\mask.png".into(),
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        resolve_mask_paths(&mut r, &dev);
+        let crate::recipe::MaskGeometry::Bitmap { path } = &r.masks[0].mask else {
+            panic!("geometry kind must survive");
+        };
+        assert!(
+            path.ends_with(".invalid-mask-reference"),
+            "the share ref must be repointed at the never-existing sentinel: {path}"
+        );
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&base);
     }

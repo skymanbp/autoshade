@@ -27,11 +27,21 @@
 > `autoshop-roadmap.md`。
 > **（2026-08-08 起开发已重启：用户试用报三问题，第九轮 v0.22.0 见下条。）**
 >
+> **v0.23.1（2026-08-09，第十一轮 = 队列四项 + 16 路并行 xhigh 全扫收敛 +
+> GUI 历史首次真机 E2E）**：队列四项落地（W20 恢复披露 / persist_postponed
+> Busy-Io 分型 / ValidatedRecipe / W22 瓦片化引导滤波 3.4GiB→~42MiB）+ 我审
+> 抓出的 Prefs 沙箱缺口修复；16 路 Codex gpt-5.6-sol xhigh 镜头并行全 crate
+> 扫描 104 发现 → 去重亲证 → 17 项修复落地（variants.json 保存拒删门、UNC
+> 词法拒绝、.env PYTHONPATH/权重缓存护栏、Responses store:false、serve POST
+> 全令牌+no-store、XMP 曲线越界拒绝/坏色相成对清零……）+ 其余簇有据登记
+> 下轮队列；E2E 18 项真进程全过，含 GUI 首次真机启动+截图（用户本轮解禁）。
+> 详见「当前状态」首条。
+>
 > **v0.23.0（2026-08-09，第十轮 = GUI 打磨五项 + 双轨攻击式审阅收敛）**：
 > Phase 1 五项（字体嵌入/双主题/排版/按钮/i18n）+ Codex gpt-5.6-sol xhigh 三批
 > 全 crate 审计 92 发现 → 36 工作项 35 项落地（W22 余项用户拍板推迟）+ Codex
 > 只读全差异 debug 复审 11 发现全闭合。测试 266→312 总，clippy 0，i18n 审计门
-> 强制化。详见「当前状态」首条。⚠ GUI 视觉验收待用户（禁启动纪律）。
+> 强制化。详见「当前状态」次条。
 >
 > **v0.22.0 已发布（2026-08-09，tag `v0.22.0` → `84be2cf`，assets 字节验证
 > gui 35840472 / cli 27572908，Latest；E2E 18/18 用户解禁后真进程通过——见
@@ -180,20 +190,132 @@
   与攻击审阅结果交叉比对，发现全修 + 回归钉死。
 - 收口照旧：clippy/全测试/文档五份+记忆同步/发版（预定 v0.23.0）。
 
-## 下轮队列（第十一轮候选 · 未锁定，须用户确认范围）
+## 下轮队列（第十二轮候选 · 未锁定，须用户确认范围。来源=第十一轮 16 路
+## 扫描 104 发现中"逐条亲证属实但判超本轮最小变更"的登记簇，按主题合并，
+## 括号内为路号#序号）
 
-- **W22 余项**：瓦片化引导滤波（全分辨率 refine 数 GB 临时平面；含 C11/F1 的
-  8 GiB 解码+旋转峰值并入同一工作集预算）——用户 2026-08-09 拍板推迟至此。
-- **ValidatedRecipe**（debug 复审架构议题 c，双方同意）：信任边界构造一次校验
-  型配方，内部渲染函数免重复 clone+clamp；ClampSummary 扩展到曲线/字符串截断。
-- **GUI 持久化协调器**（架构议题 b，双方同意）：统一各保存复合的锁包裹、
-  Busy/Io 分型错误与忙碌文案映射（现为 save_xmp/Save-all/Analyze 三处同构闭包）。
-- **W20 GUI 恢复路径披露**：read_saved_develop/load_version/粘贴的 ClampSummary
-  计数上屏（CLI 与批量导出已披露；恢复路径判超本轮最小变更）。
-- **C1/F10 词法路径身份**：盘符/UNC/symlink 迁移库 → develop"失踪"——维持既有
-  取舍（source.txt 面包屑），改身份模型=大型设计变更，仅登记。
+- **披露穿线（架构级，最大簇）**（L08 全 10 项 + L15#2）：write_xmp 的损失
+  注记只有 2/7 调用方消费（Save-all/Analyze/粘贴/反推/api-analyze 丢弃）；
+  不可读外部 XMP 折叠成"absent"静默中性开照；目录扫描部分失败静默；蒙版栅格
+  失效仅 stderr 而画布仍显"启用"；style 索引不可用静默失效；Analyze 复合保存
+  toast 过期后状态行夸大；openai 提案 clamp 摘要只到 stderr（strict schema
+  不支持 maxItems，openai.rs:308 已验证 400）——需统一"警告聚合→UI 通道"，
+  逐点补=打补丁反模式。
+- **内存边界统一**（L02 全 13 + L07#6/#7 + L16#2/#4）：全部 store/config JSON
+  直读改有界读取器（variants/pixels/recipe/中央 XMP/autoshop.local.json）；
+  蒙版解码统一有界原语（serve Fill/Heal 掩膜、retouch、GUI 笔刷/精修烘焙路径
+  绕过 256MiB 快照）；serve 上传流式化+聚合字节预算+体读超时；generative 预览
+  全幅合成瓦片化；GUI 冷变体全幅解码上限+LRU；style 构建全局解码信号量；
+  serde_json::Value 反序列化放大（窄结构体+visitor 上限）；rawler IFD 环上游；
+  retouch plan_from_mask 组件 bbox 覆盖预算；解码上限×下游 bpp。
+- **并发/TOCTOU**（L01 全 6 + L10#2/#6）：GUI batch 配方+像素源单锁快照（读-写
+  竞态）+ .bak 恢复先于选配方；lightroom_sidecar 读后句柄身份重验；load_version
+  全程 NoWait 锁；SETTINGS_LOCK 跨进程化（GUI/serve 双进程丢更新）；serve
+  If-Match 配方修订前置条件（双标签互踩）；denoise 并发同目标输出竞态（staging
+  自有文件）；config 损坏救援 unlink 竞态。
+- **耐久性**（L03 全 6）：recipe/pixels/variants 三件套单代原子提交（当前
+  Ctrl+S 三写之间每个 kill 点都是不一致态）；显式清除 clear_develop 事务标记
+  先行；heal/蒙版二进制载荷 sync_all 后再让 JSON 引用；版本删除 .deleting
+  标记；config/style 持久化走 durable replace（保 0600）。
+- **XMP 保真**（L05#1/#4/#6/#7）：属性化开标签/带空格标签的精确字符串盲区
+  （present-but-unparseable 须计损失）；merge base 权威性（store 胜时旧
+  sidecar 蒙版不得复活）；RAW 内嵌 XMP 包导入（最低优先级源）；命名空间以
+  URI 而非 crs 前缀识别。
+- **跨面一致**（L13#1-#4）：GUI batch 用共享 resolved-develop 加载器（现只认
+  recipe.json，丢 XMP-only 显影）；has_develop 认 LR sidecar（batch 重复计费
+  隐患）；Analyze 备份把更新的 LR sidecar 一并快照；produce_recipe 标定经
+  newest-intent 解析（旧 recipe 的 base_curve/WB 锚污染新画布）。
+- **GUI 状态机**（L06#2-#6）：冷母版按画布分辨率解码（现全幅 9504px 上桌）；
+  蒙版选择切换取消武装中的 Redraw/加组件/笔刷；retouch 落地推迟到手势结束再
+  按序提交；笔刷会话随底片替换取消；变体缩略图无完成帧时失效。
+- **sidecar 加固余项**（L11#3-#7）：SCUNet 权重 SHA-256 钉死+旧 torch 拒绝
+  回退 pickle；下载字节上限+.part 回收；claude.rs 复用有界 drain（现无界
+  Vec）+ 进程组/Job 罩后代 + prompt 走 stdin（Windows 32767 argv 上限）。
+- **测试质量余项**（L14#2/#3/#5/#7）：付费 POST 恰一次的注入测试（现测试
+  grep 旧标识符名）；ClaudeProvider argv 隔离断言；Windows junction 循环
+  夹具（现 fixture 建不成时空转绿）；瓦片规划器过公共入口测试。
+- **i18n 余项**（L12#2/#3/#4/#6）：verdict/deterministic rationale 结构化后
+  渲染时本地化；非 CJK 脚本动态文本（阿拉伯/泰/韩文件名）回退字体；worker
+  闭包语言捕获改返回类型化数据；audit 校验中英占位符多重集对齐。
+- **渲染数值**（L04 全 3）：DNG ColorMatrix 奇异/AsShotNeutral 零分量守卫；
+  CA-only 时 fill scale 计入通道因子；style 索引有限溢出（f64 距离+物理界）。
+- **CLI 余项**（L09#1/#4/#7）：付费调用前输出路径预检；heal --full-res 帮助
+  文本对烘焙输入的降采样说明；subset_gui_fonts.py 捐赠数勘误+先验后写。
+- **Unix 专项**（L16#3）：GUI 线程存在后首次 Config::load 的 setenv UB——
+  .env 解析改 owned map 不动进程环境。
+- **结构（我的架构审登记）**：Opened 恢复块（历轮缺陷热点）抽纯函数；
+  gui.rs 巨石分模块（1781 处 self 引用）；read_saved_develop 4 元组、
+  save-all 6 元组结构体化。
+- **C1/F10 词法路径身份**：维持既有取舍（source.txt 面包屑），仅登记。
 
 ## 当前状态（已完成，勿重做）
+
+- **第十一轮：队列四项 + 16 路并行全扫收敛 + GUI 首次真机 E2E（2026-08-09，
+  v0.23.1）**
+
+  **队列四项（`bc2be17` + `d8a8b64`）**：①W20 恢复路径披露——
+  read_saved_develop 返回 4 元组携带恢复期 ClampSummary，开照/load_version
+  上屏 toast；②架构 b persist_postponed——统一失败映射原语接管 5 个位点，
+  且 Busy/Io 分型（此前磁盘满也谎称"另一进程占用"）；③架构 c
+  ValidatedRecipe——render 4 入口收敛为一次构造+disclose() 的校验令牌，
+  ClampSummary 扩到曲线点/字符串字节；④W22 瓦片化引导滤波——
+  refine_mask_guided_tiled 1024 边长瓦片 + 6r 晕圈（两级串行模糊×3r，Codex
+  纠正了 3r 简报），61MP 全幅 ~3.4GiB 临时平面 → 峰值 ~42MiB，接缝测试全
+  像素 ±1 灰阶等价。**Prefs 沙箱缺口（`703ac1f`，我审抓出）**：eframe
+  persistence_path 不随 AUTOSHOP_DATA_DIR——E2E 的 GUI 真读了用户图库并
+  改写真实 Prefs；现沙箱变量覆盖整个应用。
+
+  **16 路并行 debug 扫描（用户令"十六路并行，每一路完整扫"）**：16 个
+  codex exec gpt-5.6-sol xhigh 并发，各持一镜头（并发/内存/耐久/数值/XMP/
+  GUI 状态机/安全/披露/CLI/serve/子进程/i18n/跨面/测试质量/本轮差异/Rust
+  健全性）互相盲扫全 crate，产出 104 发现。去重+逐条对源码亲证 → 17 项
+  本轮修复（F 系列）+ 其余簇全部有据登记「下轮队列」（见上节，带路号）。
+
+  **17 项修复（单提交落地）**：F1 ClampSummary::absorb/describe 四字段全链
+  （gui 3 累计点+2 消息、main/pipeline/openai 消费端——curve-only 损失曾
+  toast"0 蒙版 0 组件"假全清）；F2 bundled_helper() 边车脚本/权重缓存按
+  exe 树解析永不认 cwd（照片包携带 python/denoise.py 即可被执行）；F3
+  AMBIENT_UNSAFE_VARS 14→17（PYTHONPATH/PYTHONHOME/AUTOSHOP_DENOISE_CACHE）
+  + 两边车 python -E；Responses 三体 store:false（植键包否则可在攻击者
+  OpenAI 账户日志读回用户照片——.env 供键契约不动，测试钉住）；F4
+  remote_or_device_path() UNC/Verbatim/DeviceNS 词法先拒（exists() 探测
+  本身即出站 SMB 认证）于 pixels.json origin/蒙版引用/变体 origin 三处，
+  本地盘符绝对路径保留（writer 合法写出）；F5 serve 全 POST 路由要求
+  X-Autoshop-Token（fetch 包装器注头+页面占位符替换）；F6 重绘门加
+  master_loads（冷变体母版解码完成曾滞留到下次输入）；F7 batch fail>0 /
+  eval 全败改非零退出；F8 match -o==xmp_target 先拒（曾两行 success 但
+  产物被覆盖）；F9 match 清像素链失败改硬错误（曾静默留旧 master 链）；
+  F10 unit_interval 解析器护 4 个 0..=1 旗标（--style NaN 曾静默禁用）；
+  F11 中文两处（曲线标题丢近似告警、提供商范围漏填充/重绘）；F12 XMP
+  曲线越界坐标改判 unparsable 整组拒绝+披露（"999,-5"曾饱和成近黑单点
+  曲线并随保存持久化）；F13 色轮 hue 在场不可读→成对清零 sat（bogus 曾
+  落 hue=0=红+sat 50=强红渐变）；F14 generative PNG 头部尺寸前置检查
+  （压缩炸弹曾全解码后才比尺寸）；F15 /api/* 全响应 no-store（缓存的
+  recipe 404 复用曾可让下次保存清掉新显影）；F16 VariantsRead 三态 +
+  refuse_unresolved_strip() 保存拒删门（不可读 variants.json 曾被一次
+  普通 Ctrl+S 连 .bak 一起删掉=后台变体团灭）+ 开照 toast；F18 测试补
+  MAX_ALLOC 边界谓词（提取 allocation_over_ceiling）与 RGB8 ICC 像素必
+  变断言。F17（openai schema maxItems）**据 openai.rs:308-311 已验证
+  API 限制（strict 模式 maxItems 400）驳回**，披露地板并入 F1。
+
+  **E2E 18 项（真 release 进程+沙箱 store）**：超限披露/极端几何/降噪门/
+  缺栅格点名/ICC 收+拒/serve 令牌三态/**POST 无令牌 403+带令牌 200**/
+  **no-store 头**/GUI 真机启动 10s 无恐慌+全屏截图+干净退出+**Prefs 落
+  沙箱断言**。GUI 首次真机运行（用户本轮解禁）：中文界面零豆腐块（嵌入
+  字体首次实战验证）、亮色主题、图库 122 缩略图正常，截图已交用户作
+  Phase 1 视觉验收材料。
+
+  **Codex 复审（gpt-5.6-sol xhigh 只读全 diff；子代理会话无该模型即如实
+  中止，改 16 路同款直连管道重发）**：2 发现均亲证属实并闭合——#1
+  /api/recipe 的直构 404 绕过 no_store()（缓存的"未分析"回放会重开中性
+  画布）；#2 bundled_helper 在 current_exe 不可用时回退 cwd 相对=洞重开
+  → 改 NUL 字节哨兵 fail-closed（任何平台真实路径都无法包含 NUL，攻击包
+  永远无法满足）。E2E 硬杀缺陷同修：terminate()=TerminateProcess，eframe
+  只在优雅关窗写 prefs → 改 CloseMainWindow 后隔离断言真过。
+
+  **终态**：281 lib + 3 CLI + 37 GUI 全绿（第十一轮起点 273+2+37），
+  clippy 0（--all-targets --features gui），audit_i18n.py 0，字体门 669
+  CJK 码点，E2E 18/18 全过（含 GUI 优雅关窗+沙箱 prefs 落盘实证）。
 
 - **第十轮：GUI 打磨五项 + 双轨攻击式审阅收敛（2026-08-09，v0.23.0）**
 
