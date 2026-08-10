@@ -895,7 +895,14 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     return crate::store::with_develop_lock(
         &raw,
         crate::store::DevelopLockMode::Wait,
-        || api_recipe_locked(&raw),
+        || {
+            // The tag is computed AFTER the locked read: migrate_legacy and
+            // the .bak recovery inside can themselves (re)write recipe.json,
+            // and the tag must name what this answer was built from. ONE
+            // stamping site covers all six answer shapes.
+            let resp = api_recipe_locked(&raw)?;
+            Ok(with_revision(resp, crate::store::recipe_revision(&raw).as_deref()))
+        },
     );
 
     fn api_recipe_locked(raw: &Path) -> Result<ResponseBox> {
@@ -1627,6 +1634,11 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // rule): a failed XMP projection degrades to a warning — the old
             // `?` answered 500 and hid the committed save from the browser.
             let mut body = json!({ "recipe": recipe, "verdict": verdict, "saved": true });
+            // The NEW revision rides the answer: the tab adopts it so its
+            // own next Save does not 412 against this very analyze. (The
+            // not-saved arms change nothing on disk — the tab's held tag
+            // stays valid, so they carry none.)
+            body["revision"] = json!(crate::store::recipe_revision(&raw));
             if decode::is_raw(&raw) {
                 match pipeline::write_xmp(&raw, &recipe) {
                     Ok((_, None)) => {}
@@ -2101,6 +2113,10 @@ fn sweep_stale_temp_files() {
 
 fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let stamp = request_gen(request);
+    // Read BEFORE read_json takes the body reader. The precondition itself
+    // is evaluated inside the develop lock below, where the current
+    // revision cannot move under it.
+    let if_match = req_header(request, "If-Match");
     let mut req: XmpReq = read_json(request)?;
     // "Did the client ask to clear?" is decided on what the client SENT,
     // BEFORE clamping — because clamping can manufacture a neutral recipe, and
@@ -2136,6 +2152,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         &raw,
         crate::store::DevelopLockMode::Wait,
         || {
+    // The If-Match gate covers BOTH branches — the clear below deletes the
+    // develop, which destroys a lost update just as surely as a write.
+    if let Some(resp) = precondition_failed(
+        if_match.as_deref(),
+        crate::store::recipe_revision(&raw).as_deref(),
+    ) {
+        return Ok(resp);
+    }
     // Resolve the session master FIRST: a rejected master must fail the save
     // BEFORE the recipe commits, or the client baselines (markSaved) on a
     // 200 whose pixels never landed — and a later navigation discards the
@@ -2186,7 +2210,10 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                     ),
                     None => String::new(),
                 };
-                Ok(text_response(&format!("cleared — saved edits removed{note}")))
+                Ok(with_revision(
+                    text_response(&format!("cleared — saved edits removed{note}")),
+                    crate::store::recipe_revision(&raw).as_deref(),
+                ))
             }
             Err(e) => Ok(status_response(500, &format!("could not clear the saved edits: {e}"))),
         };
@@ -2256,20 +2283,29 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // Recipe committed = saved (the cross-surface rule): a failed XMP
     // projection reports success WITH the warning instead of a 500 that
     // contradicts the on-disk state.
+    // The NEW revision rides both success replies (recipe.json committed
+    // either way), so the tab adopts it without a re-GET.
+    let rev = crate::store::recipe_revision(&raw);
     match pipeline::write_xmp(&raw, &req.recipe) {
         // A regenerated (rather than merged) sidecar is a LOSS of the user's
         // Lightroom-only properties, so it rides the same reply as the path —
         // reporting a bare success here is what made the loss silent.
         Ok((path, merge_note)) => {
             let merge_note = merge_note.map(|m| format!("\n⚠ {m}")).unwrap_or_default();
-            Ok(text_response(&format!(
-                "{}{save_note}{master_note}{merge_note}",
-                path.display()
-            )))
+            Ok(with_revision(
+                text_response(&format!(
+                    "{}{save_note}{master_note}{merge_note}",
+                    path.display()
+                )),
+                rev.as_deref(),
+            ))
         }
-        Err(e) => Ok(text_response(&format!(
-            "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{save_note}{master_note}"
-        ))),
+        Err(e) => Ok(with_revision(
+            text_response(&format!(
+                "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{save_note}{master_note}"
+            )),
+            rev.as_deref(),
+        )),
     }
         },
     )
@@ -2833,6 +2869,38 @@ fn status_response(code: u16, msg: &str) -> ResponseBox {
     Response::from_string(msg).with_status_code(code).with_header(no_store()).boxed()
 }
 
+/// Stamp the saved recipe's revision as a strong ETag. `None` (an existing
+/// file that cannot be read — untaggable) stamps nothing: a conditional
+/// writer then gets 412, an unconditional one keeps today's behaviour.
+fn with_revision(resp: ResponseBox, rev: Option<&str>) -> ResponseBox {
+    match rev.and_then(|r| header("ETag", &format!("\"{r}\""))) {
+        Some(h) => resp.with_header(h),
+        None => resp,
+    }
+}
+
+/// The `If-Match` precondition for the recipe writers, evaluated INSIDE the
+/// develop lock. No header = no precondition (curl / the CLI / older pages
+/// stay unconditional — the tag is opt-in; the bundled client always sends
+/// it). A mismatch — or an untaggable current state — answers 412 carrying
+/// the live revision and writes NOTHING: the develop lock serializes two
+/// tabs' saves but cannot order them, so without this the later tab
+/// silently destroyed the earlier tab's edit (lost update, L01).
+fn precondition_failed(if_match: Option<&str>, current: Option<&str>) -> Option<ResponseBox> {
+    let want = if_match?.trim().trim_matches('"').to_string();
+    match current {
+        Some(cur) if *cur == want => None,
+        cur => Some(with_revision(
+            status_response(
+                412,
+                "this photo's develop changed since this tab loaded it — nothing was \
+                 overwritten; reselect the photo to load the newer save, then redo the change",
+            ),
+            cur,
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2847,6 +2915,21 @@ mod tests {
         let mut a = BodyBudget(0);
         assert!(a.charge(1), "a 1-byte charge must fit");
         assert!(!a.charge(BODY_BUDGET), "own hold + the full ceiling must refuse");
+    }
+
+    /// L01: the If-Match gate. No header = unconditional (curl/CLI/E2E
+    /// keep working); a matching tag — quoted or bare — admits; a stale tag,
+    /// or an untaggable current state, refuses with 412 and writes nothing.
+    #[test]
+    fn a_write_without_the_revision_it_read_is_refused() {
+        assert!(precondition_failed(None, Some("r1")).is_none());
+        assert!(precondition_failed(Some("\"r1\""), Some("r1")).is_none());
+        assert!(precondition_failed(Some("r1"), Some("r1")).is_none());
+        let stale = precondition_failed(Some("\"r0\""), Some("r1")).expect("stale must refuse");
+        assert_eq!(stale.status_code().0, 412);
+        let untagged =
+            precondition_failed(Some("\"r1\""), None).expect("untaggable must refuse");
+        assert_eq!(untagged.status_code().0, 412);
     }
 
     #[test]

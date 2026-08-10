@@ -450,6 +450,16 @@ the user's own browser*, and the guarantees are:
   (a zero-area crop becomes `None`), so a body carrying only a degenerate crop
   clamped to exactly `EditRecipe::default()` and deleted saved work that the
   same request would have *saved* before the clamp was added.
+- **Two tabs cannot silently destroy each other's saves.** `GET /api/recipe`
+  answers with an `ETag` naming the saved recipe's bytes (`"none"` when no
+  save exists — absence is a real revision, so two tabs racing the *first*
+  save still collide), and `POST /api/xmp` honours `If-Match`: a stale tag
+  gets **412** and writes nothing — the clear branch included, since a clear
+  destroys a lost update just as surely. The bundled client always sends the
+  tag it loaded and adopts the one each save/analyze answers with; a request
+  without the header (curl, the CLI, older pages) stays unconditional. The
+  tag names `recipe.json` only — pixels.json, the XMP projection and mask
+  rasters are outside it by design.
 - **Bounded concurrency, released on unwind.** Eight request slots, each held
   by an RAII permit: a handler that panics on a malformed image still gives its
   slot back, where the earlier tail-release leaked one per panic and wedged the

@@ -434,6 +434,10 @@ let listSeq = 0;           // latest-wins: rapid Prev/Next answers race
 // recipe alone let a fill with untouched sliders vanish on a thumbnail
 // click with no warning (Codex batch-38).
 let savedRecipe = null;
+// The ETag /api/recipe answered with — sent back as If-Match on Save so the
+// server refuses (412) when another tab or the desktop app saved this photo
+// meanwhile, instead of letting this tab silently overwrite that save.
+let savedRev = null;
 const baselineSnapshot = () =>
   JSON.stringify({ recipe: state.recipe, master: state.sessionMaster ?? null });
 function markSaved() {
@@ -976,6 +980,7 @@ async function selectPhoto(id, stem, el) {
   // (every consumer already guards on state.recipe).
   state.recipe = null;
   savedRecipe = null;
+  savedRev = null;
   state.sessionMaster = null;   // the fill/heal chain restarts per photo
   const main = $("#main");
   main.innerHTML = "";
@@ -1006,10 +1011,14 @@ async function selectPhoto(id, stem, el) {
       loaded = await rr.json();
       loadedFrom = rr.headers.get("X-Recipe-Source");
       loadedWarn = rr.headers.get("X-Recipe-Warning");
+      savedRev = rr.headers.get("ETag");
     }
     else if (rr.status === 404) {
       // A corrupt-only sidecar restores nothing (404) but must still warn.
       loadedWarn = rr.headers.get("X-Recipe-Warning");
+      // A fresh photo's "none" tag is REAL: two tabs both opening it must
+      // still collide on their first save.
+      savedRev = rr.headers.get("ETag");
       // "Not analyzed yet" — but the 404 body carries the photo's camera-
       // matched base look AND its in-camera lens profile, so a fresh open
       // matches a fresh GUI open instead of changing after the first Analyze.
@@ -1433,6 +1442,9 @@ async function analyze() {
       // unsaved-retouch warning and a thumbnail click discarded the chain.
       const prevMaster = savedRecipe ? JSON.parse(savedRecipe).master : null;
       savedRecipe = JSON.stringify({ recipe: state.recipe, master: prevMaster });
+      // The analyze rewrote recipe.json — adopt its revision, or this tab's
+      // own next Save would 412 against its own analyze.
+      if (data.revision) savedRev = data.revision;
     }
     // `warning` = the proposal is on screen but was NOT persisted — an
     // existing explicit save could not be snapshotted, or the verdict was
@@ -1470,7 +1482,11 @@ async function saveXmp() {
   const reqId = state.id, reqSeq = selectSeq, sentMaster = state.sessionMaster || null;
   const sentBaseline = JSON.stringify({ recipe: state.recipe, master: sentMaster });
   try {
-    const r = await fetch("/api/xmp", {method:"POST", headers:{"Content-Type":"application/json"},
+    const hdrs = {"Content-Type":"application/json"};
+    // The revision this tab loaded (or last saved). Absent against an old
+    // server — the save is then unconditional, exactly as before.
+    if (savedRev) hdrs["If-Match"] = savedRev;
+    const r = await fetch("/api/xmp", {method:"POST", headers:hdrs,
       body: JSON.stringify({id: reqId, recipe: state.recipe,
                             master: sentMaster || undefined})});
     const body = await r.text();
@@ -1479,7 +1495,13 @@ async function saveXmp() {
     // save at all: the server deletes the sidecars instead (Reset + Save = "clear
     // my edits") and answers "cleared …".
     const stale = reqId !== state.id || reqSeq !== selectSeq;
-    if (!r.ok) { setStatus((stale ? "save for another photo failed: " : "save failed: ") + body); return; }
+    if (!r.ok) {
+      const why = r.status === 412
+        ? "another tab or the desktop app saved this photo after it was loaded here — nothing was overwritten; reselect the photo to load that save, then redo your change"
+        : body;
+      setStatus((stale ? "save for another photo failed: " : "save failed: ") + why);
+      return;
+    }
     if (stale) { setStatus("save for another photo finished — its develop is on disk"); loadList(); return; }
     // The server APPENDS why a clear could not be marked (without the marker
     // a sidecar beside the RAW can restore the edits on the next open).
@@ -1488,6 +1510,10 @@ async function saveXmp() {
     // ...but NOT the master half when the server says it could not record it:
     // the recipe landed, the pixel link did not, and baselining the master as
     // saved let the next thumbnail click discard the fill with no warning.
+    // What is on disk now carries THIS tag — adopt it (after the stale
+    // guard above: a stale answer's tag belongs to another photo's flight).
+    const newRev = r.headers.get("ETag");
+    if (newRev) savedRev = newRev;
     savedRecipe = body.includes("recording the retouched master failed")
       ? JSON.stringify({ recipe: JSON.parse(sentBaseline).recipe, master: null })
       : sentBaseline; // what is on disk = what this request CARRIED

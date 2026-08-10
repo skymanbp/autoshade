@@ -940,6 +940,24 @@ pub fn recover_orphan_baks(src: &Path) -> std::io::Result<()> {
     with_develop_lock(src, DevelopLockMode::Wait, || recover_orphan_baks_unlocked(src))
 }
 
+/// The saved recipe's revision tag: the FNV-1a of recipe.json's bytes,
+/// `"none"` when no file exists — absence is a REAL revision, two tabs
+/// racing the FIRST save of a fresh photo must still collide — and `None`
+/// when the file exists but cannot be read (untaggable; a conditional
+/// writer refuses rather than overwrite what it cannot name). Content, not
+/// mtime: stamp granularity is too coarse to gate a write.
+pub fn recipe_revision(src: &Path) -> Option<String> {
+    revision_of(&recipe_target(src))
+}
+
+fn revision_of(p: &Path) -> Option<String> {
+    match read_bytes_capped(p, MAX_STORE_JSON) {
+        Ok(b) => Some(format!("r{:016x}", fnv1a64(&b))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("none".into()),
+        Err(_) => None,
+    }
+}
+
 /// One coherent view of a photo's saved develop, for a renderer that must
 /// not see a mid-save interleave.
 pub struct DevelopSnapshot {
@@ -2863,6 +2881,30 @@ mod tests {
         // …and genuinely different photos must still get different keys.
         assert_ne!(plain, photo_key(Path::new(r"D:\photos\DSC002.NEF")));
         assert_ne!(plain, photo_key(Path::new(r"D:\other\DSC001.NEF")));
+    }
+
+    /// L01: the revision tag names the BYTES. Absence is a real tag; a
+    /// byte-identical republish keeps its tag (it must never 412); different
+    /// bytes change it. (The untaggable arm — an existing file the bounded
+    /// reader refuses — is a two-line error map covered by
+    /// read_text_capped_enforces_its_limit + the serve-side gate test.)
+    #[test]
+    fn a_recipe_revision_names_the_bytes_and_absence_is_a_real_tag() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-revision");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("recipe.json");
+
+        assert_eq!(revision_of(&p).as_deref(), Some("none"), "absence is a real tag");
+        std::fs::write(&p, b"{\"contrast\":1.0}").unwrap();
+        let a = revision_of(&p).expect("readable bytes must tag");
+        assert_ne!(a, "none");
+        std::fs::write(&p, b"{\"contrast\":1.0}").unwrap();
+        assert_eq!(revision_of(&p).as_deref(), Some(a.as_str()), "same bytes, same tag");
+        std::fs::write(&p, b"{\"contrast\":2.0}").unwrap();
+        assert_ne!(revision_of(&p).expect("readable"), a, "changed bytes change the tag");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// L01: the snapshot's .bak recovery PRECEDES recipe selection, and
