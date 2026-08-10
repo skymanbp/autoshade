@@ -37,8 +37,16 @@ from pathlib import Path
 import re
 
 REPO = Path(__file__).resolve().parent.parent
-GUI = (REPO / "src" / "bin" / "gui.rs").read_text(encoding="utf-8")
-I18N = (REPO / "src" / "bin" / "i18n.rs").read_text(encoding="utf-8")
+# The GUI crate is a module tree (round 12 split); audit every module file so
+# tr() call sites moved into new files never escape the gate. i18n.rs itself
+# is the catalogue, not a consumer — keep it out of the call-site scan.
+_GUI_DIR = REPO / "src" / "bin" / "gui"
+GUI = "\n".join(
+    p.read_text(encoding="utf-8")
+    for p in sorted(_GUI_DIR.glob("**/*.rs"))
+    if p.name != "i18n.rs"
+)
+I18N = (_GUI_DIR / "i18n.rs").read_text(encoding="utf-8")
 RECIPE = (REPO / "src" / "recipe.rs").read_text(encoding="utf-8")
 
 # ── Dynamic-key registry ────────────────────────────────────────────────────

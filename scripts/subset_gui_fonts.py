@@ -48,7 +48,9 @@ from fontTools.ttLib import TTFont
 from fontTools.varLib import instancer
 
 REPO = Path(__file__).resolve().parent.parent
-SOURCES = [REPO / "src" / "bin" / "gui.rs", REPO / "src" / "bin" / "i18n.rs"]
+# The GUI crate is a module tree (round 12 split); glob it so strings moved
+# into new module files never silently fall out of the embedded subset.
+SOURCES = sorted((REPO / "src" / "bin" / "gui").glob("**/*.rs"))
 OUT_DIR = REPO / "assets" / "fonts"
 
 # CJK + fullwidth ranges. Embedded from the exact translated strings (no

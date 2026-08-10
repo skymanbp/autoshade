@@ -7,9 +7,10 @@ license = "MIT"
 repository = "https://github.com/skymanbp/autoshop"
 readme = "README.md"
 # Both binaries are declared explicitly below, so disable auto-discovery of
-# src/main.rs + src/bin/*.rs. This lets the GUI keep a private submodule at
-# src/bin/i18n.rs (`mod i18n;` in gui.rs) WITHOUT Cargo treating that file as a
-# separate binary target (it has no `main`, so autobins would fail to build it).
+# src/main.rs + src/bin/*.rs. The GUI is a module tree rooted at
+# src/bin/gui/main.rs (round-12 split of the old single-file gui.rs); its
+# sibling module files (i18n.rs, model.rs, …) must never be picked up as
+# separate binary targets (they have no `main`, so autobins would fail).
 autobins = false
 
 # Shared engine library — linked by both front-ends.
@@ -27,7 +28,7 @@ path = "src/main.rs"
 # build it with `cargo run --features gui --bin autoshop-gui`.
 [[bin]]
 name = "autoshop-gui"
-path = "src/bin/gui.rs"
+path = "src/bin/gui/main.rs"
 required-features = ["gui"]
 
 [features]
