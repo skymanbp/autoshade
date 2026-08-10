@@ -1312,21 +1312,44 @@ pub fn read_bytes_capped(path: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
 /// `Read::take` rather than a `metadata()` size check: the length is bounded by
 /// what was actually read, so a file that grows between the two syscalls cannot
 /// widen the allocation.
+/// A sidecar's identity as its open HANDLE reports it: (mtime, length). A
+/// stage+rename publish re-points the PATH at a different file, but never the
+/// handle — so this is the identity the content actually read is bound to,
+/// and the only mtime a newest-intent ranking of that content may use.
+pub type SidecarStamp = (std::time::SystemTime, u64);
+
+fn handle_stamp(f: &std::fs::File) -> Option<SidecarStamp> {
+    f.metadata().ok().and_then(|m| m.modified().ok().map(|t| (t, m.len())))
+}
+
 pub fn read_sidecar_checked(path: &Path) -> SidecarRead {
+    read_sidecar_stamped(path).0
+}
+
+/// [`read_sidecar_checked`] plus the handle identity of what was read. The
+/// stamp is fstat'd from the SAME handle before AND after the read: a writer
+/// mutating the file in place mid-read used to hand back silently torn text —
+/// that now reports as unreadable with the true reason, and the stamp is
+/// returned only when both fstats agree. (A same-length in-place rewrite
+/// inside one mtime tick of a coarse-granularity filesystem can still slip
+/// through; the develop lock covers the app's own writers — this guard is
+/// for foreign ones, best-effort by nature.)
+pub fn read_sidecar_stamped(path: &Path) -> (SidecarRead, Option<SidecarStamp>) {
     use std::io::Read as _;
     const MAX_SIDECAR: u64 = 16 * 1024 * 1024;
     let f = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SidecarRead::Missing,
-        Err(_) => return SidecarRead::Unreadable("it could not be opened"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (SidecarRead::Missing, None),
+        Err(_) => return (SidecarRead::Unreadable("it could not be opened"), None),
     };
+    let before = handle_stamp(&f);
     // BYTES first, text second. `read_to_string` on a `Take` that cuts through
     // a multi-byte character fails with InvalidData BEFORE any size check can
     // run, so an over-cap sidecar carrying CJK captions or typographic quotes
     // was reported to the user as "not readable UTF-8 text" — a false reason,
     // in a note this round exists to make truthful.
     let mut buf = Vec::new();
-    match f.take(MAX_SIDECAR + 1).read_to_end(&mut buf) {
+    let read = match (&f).take(MAX_SIDECAR + 1).read_to_end(&mut buf) {
         Err(_) => SidecarRead::Unreadable("it could not be read"),
         Ok(n) if n as u64 > MAX_SIDECAR => {
             SidecarRead::Unreadable("it is larger than the 16 MiB sidecar limit")
@@ -1335,6 +1358,16 @@ pub fn read_sidecar_checked(path: &Path) -> SidecarRead {
             Ok(s) => SidecarRead::Ok(s),
             Err(_) => SidecarRead::Unreadable("it is not readable UTF-8 text"),
         },
+    };
+    let after = handle_stamp(&f);
+    match (before, after) {
+        (Some(b), Some(a)) if b == a => (read, Some(a)),
+        (Some(_), Some(_)) => {
+            (SidecarRead::Unreadable("it changed while it was being read"), None)
+        }
+        // No handle identity available (exotic filesystem): the text is
+        // still the text — callers just get no stamp to verify against.
+        _ => (read, None),
     }
 }
 
@@ -1354,12 +1387,29 @@ pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
         return LrSidecar::None;
     }
     let lr = src.with_extension("xmp");
-    let text = match read_sidecar_checked(&lr) {
+    let (read, stamp) = read_sidecar_stamped(&lr);
+    let text = match read {
         SidecarRead::Ok(t) => t,
         SidecarRead::Missing => return LrSidecar::None,
         // A file IS there but cannot answer — never fold that into "absent".
         SidecarRead::Unreadable(why) => return LrSidecar::Unreadable(why),
     };
+    rank_lightroom_sidecar(src, &lr, text, stamp)
+}
+
+/// The ranking half of [`lightroom_sidecar`], split so a test can hand it a
+/// deliberately mismatched identity. `stamp` is the HANDLE identity of the
+/// text actually read; the mtime the newest-intent contest uses comes from it
+/// — never from a fresh path stat, which after a swap describes a DIFFERENT
+/// file than the text in hand (generation-N text ranked under
+/// generation-N+1's mtime resurrected stale edits as "newer than the store",
+/// and the mirror swap silently discarded fresh Lightroom work as older).
+fn rank_lightroom_sidecar(
+    src: &Path,
+    lr: &Path,
+    text: String,
+    stamp: Option<SidecarStamp>,
+) -> LrSidecar {
     for ours in [xmp_target(src), legacy_xmp(src)] {
         if read_sidecar(&ours).is_some_and(|t| t == text) {
             return LrSidecar::None;
@@ -1376,7 +1426,24 @@ pub fn lightroom_sidecar(src: &Path) -> LrSidecar {
     let cleared_t = std::fs::metadata(develop_dir(src).join("cleared.txt"))
         .and_then(|m| m.modified())
         .ok();
-    let lr_t = std::fs::metadata(&lr).and_then(|m| m.modified()).ok();
+    let lr_t = match stamp {
+        Some(s) => {
+            // ONE re-verification after the read: the path must still
+            // resolve to the very file the handle read. A swap — or an
+            // unlink — after the read means the text in hand no longer
+            // describes what sits beside the photo: disclosed, never ranked.
+            let now = std::fs::metadata(lr)
+                .ok()
+                .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+            if now != Some(s) {
+                return LrSidecar::Unreadable("it was replaced while it was being read");
+            }
+            Some(s.0)
+        }
+        // No handle identity was available: the old path stat is all there
+        // is — strictly no worse than before this guard existed.
+        None => std::fs::metadata(lr).and_then(|m| m.modified()).ok(),
+    };
     if !has_develop(src) {
         return match (lr_t, cleared_t) {
             (Some(l), Some(cl)) if l <= cl => LrSidecar::None,
@@ -2803,6 +2870,48 @@ mod tests {
 
     /// L08: an unreadable sidecar beside the RAW is DISCLOSED, not folded
     /// into "no sidecar" — the old fold opened the photo neutral in silence.
+    #[test]
+    fn a_sidecar_swapped_after_the_read_is_disclosed_not_ranked() {
+        // L01: the newest-intent contest may only rank the text it actually
+        // read. An identity that cannot match what is on disk models a
+        // sidecar swapped right after the read.
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-sidecar-swap-{}-{}",
+            std::process::id(),
+            next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("SWAP.ARW");
+        std::fs::write(&raw, b"raw").unwrap();
+        let lr = raw.with_extension("xmp");
+        std::fs::write(&lr, b"<x:xmpmeta/>").unwrap();
+
+        let swapped = rank_lightroom_sidecar(
+            &raw,
+            &lr,
+            "<x:xmpmeta/>".to_string(),
+            // No real file carries the epoch mtime with a u64::MAX length.
+            Some((std::time::SystemTime::UNIX_EPOCH, u64::MAX)),
+        );
+        assert!(
+            matches!(swapped, LrSidecar::Unreadable(why) if why.contains("replaced")),
+            "an impossible identity must disclose the swap"
+        );
+
+        let real = std::fs::File::open(&lr)
+            .ok()
+            .and_then(|f| f.metadata().ok())
+            .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+        assert!(real.is_some(), "the fixture filesystem must report mtimes");
+        let ranked = rank_lightroom_sidecar(&raw, &lr, "<x:xmpmeta/>".to_string(), real);
+        assert!(
+            matches!(ranked, LrSidecar::Only(_)),
+            "the true identity must rank exactly as before this guard"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn lightroom_sidecar_unreadable_is_disclosed_not_absent() {
         let dir = std::env::temp_dir().join("autoshop-store-test-lr-unreadable");

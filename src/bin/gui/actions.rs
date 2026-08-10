@@ -926,12 +926,54 @@ impl AutoshopApp {
         let lang = self.lang;
         let Some(src) = self.src_path.clone() else { return };
         let p = Self::version_path(&src, n);
-        match autoshop::store::read_text_capped(&p, autoshop::store::MAX_STORE_JSON)
-            .map_err(anyhow::Error::from)
-            .and_then(|s| Ok(serde_json::from_str::<EditRecipe>(&s)?))
-        {
-            Ok(mut r) => {
-                let dropped = r.clamp();
+        // ONE NoWait lock across the whole snapshot read: the version file,
+        // the mask re-anchor probes and the raster detach copies are separate
+        // file touches, and delete_version sweeps v<N>.* rasters FIRST and
+        // removes the recipe LAST — an unlocked load could parse a recipe
+        // whose rasters were already swept and the next Ctrl+S then persists
+        // dangling paths. Foreground button ⇒ NoWait (the save_version rule);
+        // a busy develop reports and leaves the canvas untouched. The clamp
+        // toast and the pre-era repair (a seconds-long RAW decode) run
+        // OUTSIDE the lock — the read-under-lock / decide-outside split
+        // read_saved_develop already draws.
+        let locked = autoshop::store::with_develop_lock(
+            &src,
+            autoshop::store::DevelopLockMode::NoWait,
+            || -> std::io::Result<anyhow::Result<(EditRecipe, autoshop::recipe::ClampSummary)>> {
+                Ok((|| {
+                    let s =
+                        autoshop::store::read_text_capped(&p, autoshop::store::MAX_STORE_JSON)?;
+                    let mut r = serde_json::from_str::<EditRecipe>(&s)?;
+                    let dropped = r.clamp();
+                    // Snapshots name their rasters by bare file name, like
+                    // the working recipe — re-anchor them to the develop dir.
+                    if let Some(base) = p.parent() {
+                        autoshop::store::resolve_mask_paths(&mut r, base);
+                    }
+                    // Then DETACH from the snapshot: the frozen v<N>.*.png
+                    // files belong to that version and `delete_version`
+                    // sweeps them, so a canvas pointing at them lost its
+                    // masks the moment the user deleted the version it was
+                    // loaded from — and the next save persisted the dangling
+                    // path. The loaded state gets its own claimed copies.
+                    autoshop::store::detach_rasters(&src, &mut r, "mask-restored");
+                    Ok((r, dropped))
+                })())
+            },
+        );
+        let outcome = match locked {
+            Ok(inner) => inner,
+            Err(e) => {
+                // The uniform busy/IO mapper every foreground compound uses.
+                return self.persist_postponed(
+                    &e,
+                    "Load v{n} failed: {err}",
+                    &[("n", &n.to_string())],
+                );
+            }
+        };
+        match outcome {
+            Ok((mut r, dropped)) => {
                 if !dropped.is_empty() {
                     // Same W20 disclosure as the open restore: a snapshot
                     // past the caps loads minus edits, never silently —
@@ -948,18 +990,6 @@ impl AutoshopApp {
                     );
                     self.toast(ToastKind::Error, t);
                 }
-                // Snapshots name their rasters by bare file name, like the
-                // working recipe — re-anchor them to the develop dir.
-                if let Some(base) = p.parent() {
-                    autoshop::store::resolve_mask_paths(&mut r, base);
-                }
-                // Then DETACH from the snapshot: the frozen v<N>.*.png files
-                // belong to that version and `delete_version` sweeps them, so
-                // a canvas pointing at them lost its masks the moment the user
-                // deleted the version it was loaded from — and the next save
-                // persisted the dangling path. The loaded state gets its own
-                // claimed copies.
-                autoshop::store::detach_rasters(&src, &mut r, "mask-restored");
                 // A Generated variant's pixels already carry the camera look
                 // AND the lens corrections — a source-based snapshot's
                 // calibration would cook both twice (same strip rule as the
