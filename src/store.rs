@@ -2254,6 +2254,16 @@ pub(crate) fn durable_replace(staged: &Path, live: &Path) -> std::io::Result<()>
     durable_os::finish_parent(live)
 }
 
+/// Durably MOVE an existing file to a new name. The bytes are already
+/// whatever the disk holds — nothing was staged — so only the directory
+/// entry needs to survive. NOT [`durable_replace`]: that fsyncs its source
+/// through a WRITE handle, which a read-only or exclusively-held file
+/// refuses — turning a move that used to succeed into a failure (L03).
+pub(crate) fn durable_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    durable_os::replace(from, to)?;
+    durable_os::finish_parent(to)
+}
+
 /// Publish complete bytes through the one durable write protocol.
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent()

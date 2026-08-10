@@ -156,12 +156,20 @@ fn rescue_if_unchanged(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
-        // durable_replace, not bare rename (L03): the rescue copy holds
-        // the user's keys, and without the parent-dir fsync the moved
-        // entry can vanish with a crash — "preserved at <kept>" must stay
-        // true after a power cut.
-        if let Err(e) = crate::store::durable_replace(path, &kept) {
-            let _ = std::fs::remove_file(&kept); // release the claim
+        // durable_rename, not bare rename (L03) and not durable_replace:
+        // the parent-dir fsync keeps "preserved at <kept>" true after a
+        // power cut, while replace's source-sync would open the LIVE file
+        // for write — read-only or exclusively held, that fails a move
+        // that used to succeed. The bytes are already on disk as-is.
+        if let Err(e) = crate::store::durable_rename(path, &kept) {
+            // Release the claim ONLY when the live file demonstrably did
+            // not move (the settings lock is held, so this probe races no
+            // cooperating writer). Once the rename itself succeeded, `kept`
+            // IS the only copy of the user's keys — a finish_parent
+            // failure must not have this cleanup delete the sole survivor.
+            if path.exists() {
+                let _ = std::fs::remove_file(&kept);
+            }
             return Err(e);
         }
         // The rename carried the live file's own mode over the 0600 claim;
