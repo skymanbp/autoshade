@@ -594,111 +594,31 @@ impl AutoshopApp {
                                 );
                                 self.toast(ToastKind::Error, t);
                             }
-                            let mut restored: Option<&'static str> = None;
-                            let mut open_note: Option<String> = None;
-                            let mut recipe = EditRecipe::default();
-                            // Whether to stamp this photo's camera-matched base
-                            // look onto the recipe: yes for fresh opens and
-                            // XMP-only restores (Lightroom tuned those against
-                            // its own camera-profile base — the bright base is
-                            // the closer rendering); NO for recipe.json, which
-                            // keeps its saved curve verbatim so legacy develops
-                            // render exactly as they were tuned.
-                            let mut stamp = true;
-                            match saved {
-                                SavedDevelop::Restored(r, kind) => {
-                                    recipe = r;
-                                    restored = Some(kind);
-                                    stamp = kind.starts_with("XMP");
-                                    // Only the recipe.json path can carry a
-                                    // washed-frame base curve to the canvas: an
-                                    // XMP restore re-stamps the curve anyway
-                                    // (stamp == true). Its own sentence, in the
-                                    // open-note channel — appended to `xmp_bad`
-                                    // it was rendered as "unreadable XMP
-                                    // numeric setting(s) … restored as
-                                    // neutral", a warning about something else
-                                    // entirely.
-                                    if !stamp
-                                        // The fourth ordering site: a
-                                        // GENERATED canvas strips its
-                                        // calibration below, so repairing
-                                        // first paid a synchronous RAW
-                                        // decode + develop ON THE UI THREAD
-                                        // for a curve the strip then
-                                        // deleted — and the note disclosed
-                                        // a re-estimate that never reached
-                                        // a pixel (load_version, the render
-                                        // funnel and the batch export were
-                                        // the other three).
-                                        && !baked.as_ref().is_some_and(|(_, _, g)| *g)
-                                        // ...nor when THIS session's nav
-                                        // stash is about to override the
-                                        // canvas wholesale (below): the
-                                        // toast would disclose a repair the
-                                        // stash discards, and the decode
-                                        // would be paid for nothing. (● is
-                                        // safe in BOTH directions now —
-                                        // dirty_vs neutralises the era
-                                        // stamp with the curve.)
-                                        // Deliverables repair for
-                                        // themselves.
-                                        && !self
-                                            .src_path
-                                            .as_ref()
-                                            .is_some_and(|p| self.nav_stash.contains_key(p))
-                                        && self.src_path.clone().is_some_and(|p| {
-                                            autoshop::pipeline::repair_pre_era_base_curve(
-                                                &p, &mut recipe,
-                                            )
-                                            .is_some()
-                                        })
-                                    {
-                                        // The GUI's OWN sentence, localized —
-                                        // every other open-note here goes
-                                        // through tr/trf; the engine note is
-                                        // for the CLI/HTTP surfaces.
-                                        open_note = Some(
-                                            tr(
-                                                lang,
-                                                "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
-                                            )
-                                            .into(),
-                                        );
-                                    }
-                                }
-                                SavedDevelop::Unreadable { err, fallback } => {
-                                    // A damaged / newer-build recipe.json must
-                                    // never degrade to the lossy XMP silently:
-                                    // bitmap masks and recolour gains would be
-                                    // gone and the next Ctrl+S would overwrite
-                                    // the still-good file.
-                                    if let Some((r, kind)) = fallback {
-                                        recipe = r;
-                                        restored = Some(kind);
-                                        stamp = kind.starts_with("XMP");
-                                    }
-                                    // An explicit save over a develop we never
-                                    // successfully READ (damaged file, or busy
-                                    // in another process at open) must version
-                                    // what it overwrites — save_xmp runs the
-                                    // backup gate while this flag stands, so
-                                    // the unread save survives as v<N> instead
-                                    // of being destroyed by a blank baseline.
-                                    self.open_unresolved = true;
-                                    open_note = Some(trf(
-                                        lang,
-                                        "recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it (the unread save is backed up as a version first)",
-                                        &[("err", &err)],
-                                    ));
-                                }
-                                SavedDevelop::NoopOnly => {
-                                    open_note = Some(
-                                        tr(lang, "a saved develop exists but holds no effective edits")
-                                            .into(),
-                                    );
-                                }
-                                SavedDevelop::Nothing => {}
+                            // The decision half lives in persist::resolve_saved_develop —
+                            // this handler applies it to the canvas. Two reasons to skip
+                            // the repair decode fold here: a GENERATED canvas strips its
+                            // calibration below, and a session stash about to override the
+                            // canvas wholesale would discard the repair (dirty_vs keeps ●
+                            // safe in both directions).
+                            let skip_repair = baked.as_ref().is_some_and(|(_, _, g)| *g)
+                                || self
+                                    .src_path
+                                    .as_ref()
+                                    .is_some_and(|p| self.nav_stash.contains_key(p));
+                            let ResolvedSaved {
+                                mut recipe,
+                                restored,
+                                stamp,
+                                mut open_note,
+                                unresolved,
+                            } = resolve_saved_develop(
+                                lang,
+                                saved,
+                                skip_repair,
+                                self.src_path.as_deref(),
+                            );
+                            if unresolved {
+                                self.open_unresolved = true;
                             }
                             // A6 disclosure: numeric settings in the restored
                             // XMP that do not parse imported as SILENT
@@ -713,32 +633,10 @@ impl AutoshopApp {
                                         ("list", &xmp_bad.join(", ")),
                                     ],
                                 );
-                                open_note = Some(match open_note {
-                                    Some(o) => format!("{o} · {w}"),
-                                    None => w,
-                                });
+                                open_note = merge_note(open_note, w);
                             }
                             if stamp {
-                                if !knots.is_empty() {
-                                    recipe.base_curve = knots.clone();
-                                }
-                                // Same rule as the curve: fresh opens and
-                                // XMP-only restores get the photo's in-camera
-                                // lens profile (all-available-on); a saved
-                                // recipe.json keeps its own verbatim.
-                                recipe.lens_profile = lens.clone();
-                                // Third calibration half, same rule — plus
-                                // stamp-if-None: an old-era Autoshop XMP
-                                // restore arrives with the 5500 anchor PINNED
-                                // by xmp_to_recipe (its Kelvin was tuned
-                                // relative); overwriting the pin would
-                                // reinterpret the saved look.
-                                if recipe.as_shot_k.is_none()
-                                    && let Some((k, t)) = as_shot
-                                {
-                                    recipe.as_shot_k = Some(k);
-                                    recipe.as_shot_tint = Some(t);
-                                }
+                                stamp_calibration(&mut recipe, &knots, &lens, as_shot);
                             } else if !stamp
                                 && recipe.base_curve.is_empty()
                                 && !knots.is_empty()
@@ -887,10 +785,7 @@ impl AutoshopApp {
                                             "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
                                         )
                                         .to_string();
-                                        open_note = Some(match open_note {
-                                            Some(o) => format!("{o} · {w}"),
-                                            None => w,
-                                        });
+                                        open_note = merge_note(open_note, w);
                                     }
                                 }
                             }
@@ -1067,38 +962,7 @@ impl AutoshopApp {
                                 // version/base_curve, so healing the live
                                 // strip never lights ● against the mirror.)
                                 let active_v = self.variants.remove(0);
-                                let mut strip: Vec<Variant> = rec
-                                    .others
-                                    .iter()
-                                    .filter_map(|e| {
-                                        let Some(kind) =
-                                            VariantKind::from_store_str(&e.kind)
-                                        else {
-                                            eprintln!(
-                                                "⚠ variants.json entry with unknown kind {:?} — that variant is not restored",
-                                                e.kind
-                                            );
-                                            return None;
-                                        };
-                                        Some(Variant {
-                                            kind,
-                                            recipe: e.recipe.clone(),
-                                            base: None,
-                                            origin: e.origin.clone(),
-                                            thumb: None,
-                                        })
-                                    })
-                                    .collect();
-                                if let Some(p) = self.src_path.clone() {
-                                    for v in strip.iter_mut() {
-                                        if v.kind != VariantKind::Generated {
-                                            let _ = autoshop::pipeline::repair_pre_era_base_curve(
-                                                &p,
-                                                &mut v.recipe,
-                                            );
-                                        }
-                                    }
-                                }
+                                let mut strip = strip_from_record(rec, self.src_path.as_deref());
                                 let pos = rec.active_pos.min(strip.len());
                                 strip.insert(pos, active_v);
                                 self.variants = strip;
