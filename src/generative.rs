@@ -31,7 +31,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use image::imageops::FilterType;
-use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
+use image::{DynamicImage, GenericImageView, RgbImage, Rgba, RgbaImage};
 
 use crate::config::Config;
 use crate::{decode, pipeline};
@@ -268,11 +268,22 @@ pub fn retouch(
     // one-expression flow peaked ~1.8 GB; the staged flow halved that, and
     // dropping the 16-bit master BEFORE the model call — see above — takes
     // another full frame off this peak): the full-res mask exists only long
-    // enough to become the weight plane.
+    // enough to become the weight plane, the generative frame is never
+    // copied to RGBA, and the blur runs in place.
+    //
+    // STILL FULL-FRAME, deliberately: the generative upscale and the weight
+    // plane are each ~241 MB at 61 MP. Banding them top-to-bottom would need
+    // a hand-written replica of `image`'s Lanczos3 two-pass that is
+    // byte-identical to it (a resampler that differs in the last bit is a
+    // rendering change wearing an optimisation's clothes), which is its own
+    // piece of work with its own oracle tests — not a comment away.
+    // `to_rgb8`, not `to_rgba8`: the blend reads only RGB and writes an
+    // opaque alpha, so the RGBA copy was 241 MB of pure waste at 61 MP —
+    // and it coexisted with the 181 MB RGB frame it was copied from.
     let gen_img = image::load_from_memory(&result)
         .context("decode generative result")?
         .resize_exact(bw, bh, FilterType::Lanczos3)
-        .to_rgba8();
+        .to_rgb8();
     // Cancel checkpoints through the composite: at 61 MP the decode/weight/
     // blend stages take seconds each, and a cancel arriving during them was
     // ignored — the abandoned result then landed in ./out anyway.
@@ -283,6 +294,10 @@ pub fn retouch(
     let weight = {
         let mask_full = mask_img.resize_exact(bw, bh, FilterType::Nearest).to_rgba8();
         let w: Vec<f32> = mask_full.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
+        // The full-res mask dies HERE, not at the end of this block: it and
+        // the weight plane are ~241 MB each at 61 MP and the blur below
+        // never touches it.
+        drop(mask_full);
         if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
     };
     if cancelled() {
@@ -420,14 +435,20 @@ fn composite_region(
         weight = box_blur(weight, wu, hu, feather);
     }
     let mut out = base.clone();
-    composite_in_place(&mut out, gen_img, &weight);
+    // The blend takes RGB (alpha is never read); the test surface keeps its
+    // RGBA-facing signature.
+    let gen_rgb = RgbImage::from_fn(w, h, |x, y| {
+        let p = gen_img.get_pixel(x, y);
+        image::Rgb([p[0], p[1], p[2]])
+    });
+    composite_in_place(&mut out, &gen_rgb, &weight);
     out
 }
 
 /// The blend pass over an owned base copy. Each pixel is written at most once,
 /// so reading back from `out` is exact — no separate source plane needed (the
 /// memory-staged full-res path in [`retouch`] rides on that).
-fn composite_in_place(out: &mut RgbaImage, gen_img: &RgbaImage, weight: &[f32]) {
+fn composite_in_place(out: &mut RgbaImage, gen_img: &RgbImage, weight: &[f32]) {
     let (w, h) = out.dimensions();
     let wu = w as usize;
     for y in 0..h {
@@ -445,15 +466,19 @@ fn composite_in_place(out: &mut RgbaImage, gen_img: &RgbaImage, weight: &[f32]) 
     }
 }
 
-/// Separable box blur with prefix sums — cost is O(w·h), independent of `radius`,
-/// so a wide feather on a full-res frame stays cheap. Takes `src` by value and
-/// reuses its allocation as the output plane — one fewer 244 MB transient on a
-/// 61 MP weight field.
-fn box_blur(src: Vec<f32>, w: usize, h: usize, radius: usize) -> Vec<f32> {
+/// Separable box blur with prefix sums — cost is O(w·h), independent of
+/// `radius`, so a wide feather on a full-res frame stays cheap. Runs entirely
+/// IN PLACE on the caller's plane: the only scratch is one row prefix and one
+/// column prefix, so a 61 MP weight field no longer pays a second ~241 MB
+/// plane (L02). Both passes are safe in place, and neither changes a value:
+///   · horizontal — a row's whole prefix is read before that row is written,
+///     and no other row is touched;
+///   · vertical — a column's whole prefix is read before that column is
+///     written, in the same y=0-upward accumulation order as before.
+fn box_blur(mut src: Vec<f32>, w: usize, h: usize, radius: usize) -> Vec<f32> {
     if radius == 0 || w == 0 || h == 0 {
         return src;
     }
-    let mut tmp = vec![0.0f32; src.len()];
     let mut prefix = vec![0.0f32; w + 1];
     for y in 0..h {
         let row = y * w;
@@ -463,24 +488,21 @@ fn box_blur(src: Vec<f32>, w: usize, h: usize, radius: usize) -> Vec<f32> {
         for x in 0..w {
             let lo = x.saturating_sub(radius);
             let hi = (x + radius + 1).min(w);
-            tmp[row + x] = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
+            src[row + x] = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
         }
     }
-    // Vertical pass writes back into the caller's plane (src is fully
-    // consumed by the horizontal pass above — every read now hits `tmp`).
-    let mut out = src;
     let mut col = vec![0.0f32; h + 1];
     for x in 0..w {
         for y in 0..h {
-            col[y + 1] = col[y] + tmp[y * w + x];
+            col[y + 1] = col[y] + src[y * w + x];
         }
         for y in 0..h {
             let lo = y.saturating_sub(radius);
             let hi = (y + radius + 1).min(h);
-            out[y * w + x] = (col[hi] - col[lo]) / (hi - lo) as f32;
+            src[y * w + x] = (col[hi] - col[lo]) / (hi - lo) as f32;
         }
     }
-    out
+    src
 }
 
 fn encode_png(img: &DynamicImage) -> Result<Vec<u8>> {
@@ -1120,6 +1142,60 @@ mod tests {
         // Below the API minimum → no flexible size (enum fallback).
         assert_eq!(flex_size(6000, 4000, 100_000), None);
         assert_eq!(flex_size(0, 4000, u32::MAX), None);
+    }
+
+    /// L02: the in-place box blur must be BIT-identical to the previous
+    /// two-plane implementation, which is inlined here as the oracle — a
+    /// memory optimisation that shifts a seam by one LSB is a rendering
+    /// change, not an optimisation.
+    #[test]
+    fn in_place_box_blur_is_bit_identical_to_the_two_plane_form() {
+        fn two_plane(src: Vec<f32>, w: usize, h: usize, radius: usize) -> Vec<f32> {
+            if radius == 0 || w == 0 || h == 0 {
+                return src;
+            }
+            let mut tmp = vec![0.0f32; src.len()];
+            let mut prefix = vec![0.0f32; w + 1];
+            for y in 0..h {
+                let row = y * w;
+                for x in 0..w {
+                    prefix[x + 1] = prefix[x] + src[row + x];
+                }
+                for x in 0..w {
+                    let lo = x.saturating_sub(radius);
+                    let hi = (x + radius + 1).min(w);
+                    tmp[row + x] = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
+                }
+            }
+            let mut out = src;
+            let mut col = vec![0.0f32; h + 1];
+            for x in 0..w {
+                for y in 0..h {
+                    col[y + 1] = col[y] + tmp[y * w + x];
+                }
+                for y in 0..h {
+                    let lo = y.saturating_sub(radius);
+                    let hi = (y + radius + 1).min(h);
+                    out[y * w + x] = (col[hi] - col[lo]) / (hi - lo) as f32;
+                }
+            }
+            out
+        }
+        // Deterministic pseudo-random plane (no rand dependency): a
+        // multiplicative hash spread over [0,1), so the comparison is not
+        // over a constant field where any blur agrees trivially.
+        for (w, h) in [(1usize, 1usize), (7, 3), (13, 11), (64, 5), (5, 64)] {
+            let plane: Vec<f32> = (0..w * h)
+                .map(|i| ((i as u32).wrapping_mul(2_654_435_761) % 10_007) as f32 / 10_007.0)
+                .collect();
+            for radius in [0usize, 1, 2, 7, 64] {
+                assert_eq!(
+                    box_blur(plane.clone(), w, h, radius).iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    two_plane(plane.clone(), w, h, radius).iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "in-place blur diverged at {w}x{h} radius {radius}"
+                );
+            }
+        }
     }
 
     #[test]
