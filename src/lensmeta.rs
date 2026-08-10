@@ -40,7 +40,14 @@ pub fn read(path: &Path) -> LensProfile {
     }
     let Ok(file) = std::fs::File::open(path) else { return out };
     let mut reader = std::io::BufReader::new(file);
-    let Ok(tiff) = GenericTiffReader::new(&mut reader, 0, 0, None, &[]) else {
+    // `Some(16)`, not `None`: with no chain cap, rawler 0.7.2's walker
+    // (formats/tiff/reader.rs:164-179) keeps no visited-offset set and its
+    // only `break` sits inside `if let Some(max)` — a self-referential
+    // next_ifd loops forever, pushing an IFD per iteration. 16 is rawler's
+    // own test value and above its internal `new_root` cap of 10; real RAWs
+    // carry ≤4 top-level IFDs, and this reader only consults `root_ifd()`,
+    // so a truncated chain tail is unobservable here.
+    let Ok(tiff) = GenericTiffReader::new(&mut reader, 0, 0, Some(16), &[]) else {
         return out;
     };
     let root = tiff.root_ifd();

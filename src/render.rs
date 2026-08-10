@@ -103,6 +103,7 @@ pub fn render_to_image_in(
     // outlives the sensor read — so the file bytes drop HERE instead of
     // sitting under the whole ~720 MB-per-plane develop chain below (A7
     // buffer-lifetime queue).
+    crate::decode::guard_tiff_chain(raw_path)?;
     let rawimage = {
         let src = RawSource::new(raw_path)
             .with_context(|| format!("open RAW {}", raw_path.display()))?;
@@ -517,6 +518,9 @@ pub fn as_shot_wb(raw_path: &Path) -> Option<(f32, f32)> {
     if !crate::decode::is_raw(raw_path) {
         return None;
     }
+    // A cyclic-IFD file degrades to None here — the documented
+    // no-metadata path (callers keep the historical 5500 K anchor).
+    crate::decode::guard_tiff_chain(raw_path).ok()?;
     let src = RawSource::new(raw_path).ok()?;
     let decoder = get_decoder(&src).ok()?;
     let rawimage = decoder.raw_image(&src, &RawDecodeParams { image_index: 0 }, true).ok()?;

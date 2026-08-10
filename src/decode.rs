@@ -485,9 +485,109 @@ impl Drop for DecodePermit {
     }
 }
 
+/// Refuse a TIFF-container RAW whose top-level IFD chain CYCLES, before
+/// rawler ever walks it.
+///
+/// Upstream defect (rawler 0.7.2, `formats/tiff/reader.rs:164-179`): the
+/// chain walker keeps no visited-offset set, and its only `break` is inside
+/// `if let Some(max) = max_chained` — which never fires for `None`. Every
+/// path into `get_decoder` passes `None` (`decoders/mod.rs:909`, hard-coded
+/// and unreachable from here), so an IFD whose `next_ifd` points at itself
+/// spins forever pushing a fresh IFD per iteration: unbounded time AND
+/// memory. Nothing downstream can contain it — there is no panic for
+/// `spawn_worker`'s `catch_unwind` to catch, allocation failure aborts
+/// rather than unwinds, and Rust cannot kill a spinning thread.
+///
+/// CONTAINMENT, NOT A TERMINATION PROOF. This walk mirrors the straight
+/// `count × 12` entry stride; rawler's `IFD::new` can abandon its entry loop
+/// early on a malformed entry and then read `next_ifd` from wherever its
+/// reader stopped, so a file crafted against that divergence could follow a
+/// different chain and still hang. It stops the natural crafted cycle. The
+/// complete cure is upstream (a visited-offset set, plus a sane default cap
+/// for `None`) or decoding in a subprocess.
+///
+/// NOT COVERED, same upstream file class: `Entry::parse`
+/// (`formats/tiff/entry.rs:106-112` and its siblings) sizes
+/// `vec![0; count as usize]` from a file-supplied u32 BEFORE reading, so a
+/// SINGLE entry can demand up to 4 GiB (34 GiB for DOUBLE). No app-side
+/// interception exists short of vendoring rawler; a chain of length one
+/// reaches it, and this guard does nothing about it.
+///
+/// Called from EVERY `get_decoder` caller in the crate — `decode_raw`,
+/// `camera_rendition`, the full-res sensor render, and `as_shot_wb`. A new
+/// `get_decoder` call site needs this line too.
+///
+/// Rejects ONLY on proof; any IO error or non-TIFF magic passes through, so
+/// no file that decodes today changes behaviour (truncation is end-of-chain
+/// to rawler, not an error, and CR3/RAF/X3F never reach the TIFF probe).
+pub(crate) fn guard_tiff_chain(path: &Path) -> Result<()> {
+    use std::io::{Read as _, Seek as _};
+    /// Far above any real file (a RAW carries ≤4) and above rawler's own
+    /// internal caps of 10/16 — a chain this long is already pathological.
+    const MAX_IFDS: usize = 64;
+    fn u16at(r: &mut impl std::io::Read, le: bool) -> std::io::Result<u16> {
+        let mut b = [0u8; 2];
+        r.read_exact(&mut b)?;
+        Ok(if le { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
+    }
+    fn u32at(r: &mut impl std::io::Read, le: bool) -> std::io::Result<u32> {
+        let mut b = [0u8; 4];
+        r.read_exact(&mut b)?;
+        Ok(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+    }
+    let Ok(file) = std::fs::File::open(path) else { return Ok(()) };
+    let mut r = std::io::BufReader::new(file);
+    let mut bom = [0u8; 2];
+    if r.read_exact(&mut bom).is_err() {
+        return Ok(());
+    }
+    let le = match &bom {
+        b"II" => true,
+        b"MM" => false,
+        _ => return Ok(()), // not a TIFF container — rawler probes it elsewhere
+    };
+    // The magic word is READ but not enforced: rawler's own check is
+    // commented out (reader.rs:151-154), which is how Panasonic RW2's 0x55
+    // reaches the same walker. Enforcing 42 here would leave RW2 unguarded.
+    if u16at(&mut r, le).is_err() {
+        return Ok(());
+    }
+    // base = corr = 0 at every call site we guard (decoders/mod.rs:909), so
+    // there is no offset correction to model.
+    let Ok(mut next) = u32at(&mut r, le) else { return Ok(()) };
+    let mut seen = std::collections::HashSet::new();
+    let mut walked = 0usize;
+    while next != 0 {
+        if !seen.insert(next) {
+            anyhow::bail!(
+                "{} has a cyclic TIFF IFD chain (offset {next} repeats) — refusing to decode",
+                path.display()
+            );
+        }
+        walked += 1;
+        if walked > MAX_IFDS {
+            anyhow::bail!(
+                "{} has a TIFF IFD chain longer than {MAX_IFDS} entries — refusing to decode",
+                path.display()
+            );
+        }
+        if r.seek(std::io::SeekFrom::Start(u64::from(next))).is_err() {
+            return Ok(());
+        }
+        let Ok(entries) = u16at(&mut r, le) else { return Ok(()) };
+        if r.seek(std::io::SeekFrom::Current(i64::from(entries) * 12)).is_err() {
+            return Ok(());
+        }
+        let Ok(n) = u32at(&mut r, le) else { return Ok(()) };
+        next = n;
+    }
+    Ok(())
+}
+
 /// Decode a RAW file: embedded preview + metadata + histogram. Reads the file
 /// only; never writes near the source.
 pub fn decode_raw(path: &Path) -> Result<Decoded> {
+    guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
     let decoder = get_decoder(&src)
         .map_err(|e| anyhow!("no rawler decoder for {}: {e}", path.display()))?;
@@ -619,6 +719,7 @@ pub fn preview_only(path: &Path) -> Result<DynamicImage> {
 /// same thing in the full-res render. The dummy `raw_image` that carries the
 /// orientation decodes metadata only — no sensor decompression.
 fn camera_rendition(path: &Path) -> Result<Option<DynamicImage>> {
+    guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
     let decoder =
         get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", path.display()))?;
@@ -979,6 +1080,44 @@ mod tests {
     fn the_allocation_ceiling_refuses_equality_and_admits_one_byte_below() {
         assert!(allocation_over_ceiling(MAX_ALLOC));
         assert!(!allocation_over_ceiling(MAX_ALLOC - 1));
+    }
+
+    /// L02: the cyclic-IFD guard — a self-referential chain is refused, a
+    /// straight two-IFD chain passes, and a non-TIFF file passes through
+    /// untouched (rejecting there would break CR3/RAF/X3F).
+    #[test]
+    fn guard_tiff_chain_refuses_a_cycle_and_admits_a_straight_chain() {
+        fn tiff(ifds: &[(u32, u32)]) -> Vec<u8> {
+            // Little-endian header pointing at the first listed IFD, then one
+            // 1-entry IFD written at each (offset, next_ifd) pair.
+            let end = ifds.iter().map(|(o, _)| *o).max().unwrap_or(8) as usize + 32;
+            let mut b = vec![0u8; end];
+            b[..2].copy_from_slice(b"II");
+            b[2..4].copy_from_slice(&42u16.to_le_bytes());
+            b[4..8].copy_from_slice(&ifds[0].0.to_le_bytes());
+            for (off, next) in ifds {
+                let o = *off as usize;
+                b[o..o + 2].copy_from_slice(&1u16.to_le_bytes()); // one entry
+                b[o + 2..o + 14].copy_from_slice(&[0u8; 12]); // its 12 bytes
+                b[o + 14..o + 18].copy_from_slice(&next.to_le_bytes());
+            }
+            b
+        }
+        let dir = std::env::temp_dir().join("autoshop-tiff-guard-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let selfloop = dir.join("selfloop.tif");
+        std::fs::write(&selfloop, tiff(&[(8, 8)])).unwrap();
+        let err = guard_tiff_chain(&selfloop).unwrap_err().to_string();
+        assert!(err.contains("cyclic"), "{err}");
+        let two_cycle = dir.join("two.tif");
+        std::fs::write(&two_cycle, tiff(&[(8, 40), (40, 8)])).unwrap();
+        assert!(guard_tiff_chain(&two_cycle).is_err(), "A→B→A must be refused");
+        let straight = dir.join("straight.tif");
+        std::fs::write(&straight, tiff(&[(8, 40), (40, 0)])).unwrap();
+        guard_tiff_chain(&straight).expect("a straight chain must pass");
+        let foreign = dir.join("foreign.bin");
+        std::fs::write(&foreign, b"ftypcrx not a tiff at all").unwrap();
+        guard_tiff_chain(&foreign).expect("non-TIFF must pass through");
     }
 
     /// L02: the develop entry charges downstream bytes-per-pixel — the same
