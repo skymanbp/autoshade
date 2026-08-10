@@ -599,7 +599,7 @@ impl AutoshopApp {
             && let Some(o) = &vorigin
             && let Some(photo) = self.src_path.clone()
         {
-            self.spawn_master_load(photo, o.clone());
+            self.spawn_master_load(ctx, photo, o.clone());
         }
         // The strip's READER joins the repair rule: push_variant and
         // switch_variant sync the OUTGOING canvas into the strip, so a

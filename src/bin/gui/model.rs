@@ -578,3 +578,10 @@ pub(crate) type OpenedBase = (
 /// How many decoded preview bases to keep for instant photo revisits (~3.3 MB
 /// each at the default 1280 edge; culling flips between neighbours constantly).
 pub(crate) const BASE_CACHE_CAP: usize = 4;
+
+/// How many decoded cold-variant masters to keep, so revisiting a strip card
+/// is instant instead of a fresh multi-second decode. Entry-count, not bytes
+/// (the same weakness `BASE_CACHE_CAP` carries): ~3.3 MB each at the default
+/// 1280 edge but ~33 MB each at 4096, so the resident worst case tracks the
+/// px preference.
+pub(crate) const MASTER_CACHE_CAP: usize = 3;

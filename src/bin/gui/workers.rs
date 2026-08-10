@@ -33,14 +33,38 @@ impl AutoshopApp {
         });
     }
 
-    /// Decode a variant's retouched master off-thread. FULL resolution — a
-    /// 61 MP TIFF takes seconds — so the UI thread never does this inline.
+    /// Decode a variant's retouched master off-thread — a 61 MP TIFF takes
+    /// seconds, so the UI thread never does this inline — and install it at
+    /// `preview_edge`, like every other master install (open: `load_active`'s
+    /// worker; retouch: the retouch panel). This door used to keep the raster
+    /// at SENSOR size: ~0.5 GiB resident, a ~244 MB paint mask from
+    /// `refresh_active_pixels`, and a Before texture past the 8192 max
+    /// texture dimension of common backends (L02).
+    ///
+    /// `preview_edge`, not `canvas_edge()`: at cold-switch time the canvas
+    /// still holds the OUTGOING variant's raster, so `canvas_edge()` would
+    /// key the install to a stale edge — and `preview_edge` is exactly what
+    /// the open path files the same master under, so the two caches agree.
+    ///
     /// One in-flight decode per (photo, origin): repeat entries (re-clicks
     /// into a still-decoding card, a stash restore) coalesce instead of
-    /// stacking a fresh full-resolution decode thread each time. And
-    /// `decode::load_image`, not `image::open`: the master rides the same
-    /// 4 GiB decode budget and orientation handling as every other source.
-    pub(crate) fn spawn_master_load(&mut self, photo: PathBuf, origin: PathBuf) {
+    /// stacking a fresh decode thread each time; an already-decoded master
+    /// comes straight from `master_cache`. And `decode::load_image`, not
+    /// `image::open`: the master rides the same decode budget and
+    /// orientation handling as every other source.
+    pub(crate) fn spawn_master_load(
+        &mut self,
+        ctx: &egui::Context,
+        photo: PathBuf,
+        origin: PathBuf,
+    ) {
+        let edge = self.preview_edge.clamp(640, 8192);
+        // Cache probe first: a revisited card installs synchronously, with
+        // no worker and no "loading…" status to flash.
+        if let Some(arc) = self.cached_master(&origin, edge) {
+            self.install_master(ctx, &photo, &origin, arc);
+            return;
+        }
         if !self.master_loads.insert((photo.clone(), origin.clone())) {
             return;
         }
@@ -52,11 +76,92 @@ impl AutoshopApp {
         let (p2, o2) = (photo.clone(), origin.clone());
         self.spawn_worker(
             move || {
-                let img = autoshop::decode::load_image(&origin);
+                // The same >24 MP permit `request_thumb` takes: a master
+                // decode is deliberately not `busy`-gated, so N cold cards
+                // with distinct origins could otherwise decode N 60 MP
+                // rasters at once.
+                let _big_permit = image::ImageReader::open(&origin)
+                    .and_then(|r| r.into_dimensions().map_err(std::io::Error::other))
+                    .is_ok_and(|(w, h)| w as u64 * h as u64 > 24_000_000)
+                    .then(|| big_decode_gate().lock().unwrap_or_else(|p| p.into_inner()));
+                let img = autoshop::decode::load_image(&origin).map(|im| {
+                    // GUARDED shrink: plain `thumbnail` UPSCALES, which would
+                    // inflate a small master instead of bounding a large one.
+                    if im.width().max(im.height()) > edge {
+                        im.thumbnail(edge, edge)
+                    } else {
+                        im
+                    }
+                });
                 Msg::MasterLoaded { photo, origin, img: Box::new(img) }
             },
             move |e| Msg::MasterLoaded { photo: p2, origin: o2, img: Box::new(Err(e)) },
         );
+    }
+
+    /// Cold-master LRU lookup (most-recent kept last) — same shape and same
+    /// staleness guard as `cached_base`.
+    pub(crate) fn cached_master(
+        &mut self,
+        origin: &std::path::Path,
+        edge: u32,
+    ) -> Option<Arc<image::DynamicImage>> {
+        let stamp = file_stamp(origin);
+        let pos = self
+            .master_cache
+            .iter()
+            .position(|((p, e, t), _)| p == origin && *e == edge && *t == stamp)?;
+        let entry = self.master_cache.remove(pos);
+        let hit = entry.1.clone();
+        self.master_cache.push(entry);
+        Some(hit)
+    }
+
+    /// Remember a freshly decoded cold master under its own identity —
+    /// `remember_base`'s twin. The stamp is read HERE rather than captured
+    /// pre-decode: unlike the open path there is no ident riding the result,
+    /// and a master rewritten during the decode should MISS on the next
+    /// probe (stamp moved on) rather than serve pixels it never held.
+    pub(crate) fn remember_master(
+        &mut self,
+        origin: &std::path::Path,
+        edge: u32,
+        img: Arc<image::DynamicImage>,
+    ) {
+        let stamp = file_stamp(origin);
+        self.master_cache.retain(|((p, e, _), _)| !(p == origin && *e == edge));
+        self.master_cache.push(((origin.to_path_buf(), edge, stamp), img));
+        if self.master_cache.len() > MASTER_CACHE_CAP {
+            self.master_cache.remove(0); // least-recent first
+        }
+    }
+
+    /// Install decoded master pixels into every strip entry that still
+    /// references this exact master and still awaits pixels — by IDENTITY,
+    /// never by index, so a delete/reorder mid-decode cannot misfile them.
+    fn install_master(
+        &mut self,
+        ctx: &egui::Context,
+        photo: &PathBuf,
+        origin: &PathBuf,
+        arc: Arc<image::DynamicImage>,
+    ) {
+        if self.src_path.as_ref() != Some(photo) {
+            return;
+        }
+        let mut hit_active = false;
+        for (i, v) in self.variants.iter_mut().enumerate() {
+            if v.base.is_none() && v.origin.as_ref() == Some(origin) {
+                v.base = Some(arc.clone());
+                hit_active |= i == self.active;
+            }
+        }
+        if hit_active {
+            // The canvas was showing the disclosed source stand-in — swap in
+            // the real pixels now that they exist.
+            self.refresh_active_pixels(ctx);
+            self.set_canvas_status("restored the canvas pixels");
+        }
     }
 
     /// Queue a thumbnail decode for `idx` if it isn't cached/queued and we're
@@ -932,7 +1037,7 @@ impl AutoshopApp {
                                     v.origin = Some(o.clone());
                                 }
                                 if let Some(photo) = self.src_path.clone() {
-                                    self.spawn_master_load(photo, o);
+                                    self.spawn_master_load(ctx, photo, o);
                                 }
                             }
                             // Restore the BACKGROUND variants the stash
@@ -1586,20 +1691,12 @@ impl AutoshopApp {
                         match img {
                             Ok(im) => {
                                 let arc = Arc::new(im);
-                                let mut hit_active = false;
-                                for (i, v) in self.variants.iter_mut().enumerate() {
-                                    if v.base.is_none() && v.origin.as_ref() == Some(&origin) {
-                                        v.base = Some(arc.clone());
-                                        hit_active |= i == self.active;
-                                    }
-                                }
-                                if hit_active {
-                                    // The canvas was showing the disclosed
-                                    // source stand-in — swap in the real
-                                    // pixels now that they exist.
-                                    self.refresh_active_pixels(ctx);
-                                    self.set_canvas_status("restored the canvas pixels");
-                                }
+                                // Remember before installing: the key is the
+                                // master's own identity, so a revisit skips
+                                // the decode entirely.
+                                let edge = self.preview_edge.clamp(640, 8192);
+                                self.remember_master(&origin, edge, arc.clone());
+                                self.install_master(ctx, &photo, &origin, arc);
                             }
                             Err(e) => {
                                 let t = trf(

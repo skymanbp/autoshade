@@ -61,6 +61,12 @@ pub(crate) struct AutoshopApp {
     /// still-decoding cold card must coalesce, not stack a fresh full-res
     /// decode thread per click.
     pub(crate) master_loads: std::collections::HashSet<(PathBuf, PathBuf)>,
+    /// Decoded cold-variant masters, most-recent last. Keyed by the master's
+    /// OWN identity (path + the edge it was shrunk to + its file stamp), the
+    /// same rule as `base_cache` — a rewritten ./out master misses, and a px
+    /// preference change re-decodes at the new edge instead of serving the
+    /// old one.
+    pub(crate) master_cache: Vec<((PathBuf, u32, FileStamp), Arc<image::DynamicImage>)>,
     /// The open could not READ the saved develop (damaged file, or busy in
     /// another Autoshop process): the canvas baseline is not that save, so
     /// the next explicit save must version what it overwrites (save_xmp runs
@@ -1178,6 +1184,7 @@ impl Default for AutoshopApp {
             saved_strip: None,
             nav_stash: HashMap::new(),
             master_loads: std::collections::HashSet::new(),
+            master_cache: Vec::new(),
             open_unresolved: false,
             pasted_open: None,
             photo_knots: Vec::new(),
