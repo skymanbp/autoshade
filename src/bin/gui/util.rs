@@ -250,6 +250,8 @@ pub(crate) fn reorder_move(from: usize, insert: usize) -> (usize, impl Fn(usize)
 // boundaries, sharing the engine's own inscribed_dims / distort_norm formulas
 // and rotation convention (clockwise-positive, y-down) so GUI and render can
 // never disagree. recipe.crop stays in the view space — the export applies
+// the user crop AFTER the geometric chain, so the crop tool needs no mapping.
+// All maps are the identity when both controls are zero.
 
 /// View normalized point → original-frame normalized point. Thin wrapper over
 /// the engine's shared C2 interaction map (`render::view_to_original_norm`) —
