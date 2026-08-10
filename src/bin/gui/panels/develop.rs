@@ -155,6 +155,124 @@ impl AutoshopApp {
         self.histogram_ui(ui);
         ui.add_space(4.0);
 
+        changed |= self.dev_ai(ui);
+        // Lightroom-style grouping: a wall of 16 sliders scans terribly; four
+        // titled sections (tone open, the rest by activity) scan at a glance.
+        // A section whose values are non-neutral shows a ● so a collapsed
+        // active adjustment is never invisible. Flags are snapshot up front —
+        // Copy bools, so no borrow spans the section closures (E0500).
+        let (presence_active, detail_active, hsl_active, grade_active, curves_active) = {
+            let r = &self.recipe;
+            (
+                r.clarity != 0.0 || r.dehaze != 0.0 || r.vibrance != 0.0 || r.saturation != 0.0,
+                r.sharpening != 0.0 || r.noise_reduction != 0.0,
+                !r.hsl.is_neutral(),
+                !r.color_grade.is_neutral(),
+                !r.tone_curve.is_empty()
+                    || !r.red_curve.is_empty()
+                    || !r.green_curve.is_empty()
+                    || !r.blue_curve.is_empty(),
+            )
+        };
+        changed |= self.dev_tone_wb(ui);
+        changed |= self.dev_presence(ui, presence_active);
+        changed |= self.dev_curves(ui, curves_active);
+        changed |= self.dev_hsl(ui, hsl_active);
+        changed |= self.dev_grading(ui, grade_active);
+        changed |= self.dev_detail(ui, detail_active);
+        changed |= self.dev_lens(ui);
+        changed |= self.dev_crop(ui);
+        changed |= self.dev_masks(ui);
+        changed |= self.dev_versions(ui);
+        changed |= self.dev_export(ui);
+
+        if changed {
+            self.recipe.clamp();
+            self.dirty = true;
+        }
+    }
+
+    /// The variant strip (版本条): one card per rendition — 原片 / AI 生成 /
+    /// 反推 — with a live developed thumbnail. Click a card to switch (lossless;
+    /// each variant keeps its own base + recipe), × to drop one. This is the
+    /// selector that makes an AI develop a first-class, non-reverting version.
+    pub(crate) fn variant_strip(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let accent = self.theme.colors().accent_text; // Copy — safe in closures
+        let mut switch_to: Option<usize> = None;
+        let mut delete: Option<usize> = None;
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(tr(lang, "Variants")).strong());
+            ui.separator();
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for i in 0..self.variants.len() {
+                        let active = i == self.active;
+                        let kind = self.variants[i].kind;
+                        ui.vertical(|ui| {
+                            // Developed thumbnail (or a placeholder until the
+                            // variant has been developed once).
+                            let resp = if let Some(t) = &self.variants[i].thumb {
+                                let s = t.size_vec2();
+                                let h = 52.0;
+                                let w = (s.x / s.y.max(1.0) * h).clamp(30.0, 104.0);
+                                let (rect, resp) =
+                                    ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+                                let uv = egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                );
+                                if active {
+                                    ui.painter().rect_filled(
+                                        rect.expand(3.0),
+                                        5.0,
+                                        egui::Color32::from_rgba_unmultiplied(0xc9, 0xa1, 0x4a, 46),
+                                    );
+                                }
+                                ui.painter().image(t.id(), rect, uv, egui::Color32::WHITE);
+                                if active {
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        4.0,
+                                        egui::Stroke::new(2.0, PILL),
+                                    );
+                                }
+                                resp
+                            } else {
+                                ui.add_sized([64.0, 52.0], egui::Button::new("…"))
+                            };
+                            if resp.on_hover_text(tr(lang, "Click to switch to this variant (lossless)")).clicked() {
+                                switch_to = Some(i);
+                            }
+                            ui.horizontal(|ui| {
+                                let label = egui::RichText::new(tr(lang, kind.label())).small();
+                                ui.label(if active { label.strong().color(accent) } else { label });
+                                // Any variant except the sole Original can be dropped.
+                                if self.variants.len() > 1
+                                    && kind != VariantKind::Original
+                                    && ui.small_button("×").on_hover_text(tr(lang, "Delete this variant")).clicked()
+                                {
+                                    delete = Some(i);
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
+                });
+            });
+        });
+        if let Some(i) = switch_to {
+            self.switch_variant(i, ui.ctx());
+        } else if let Some(i) = delete {
+            self.delete_variant(i, ui.ctx());
+        }
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_ai(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
         // The AI area: everything one Analyze run reads or writes, in ONE
         // place (UX batch — Direction/Refine/Style used to be scattered
         // across two toolbar rows with Undo/Redo in between). Open whenever
@@ -249,25 +367,15 @@ impl AutoshopApp {
                     ui.label(format!("{:.0}%", self.style_strength * 100.0));
                 });
             });
+        false
+    }
 
-        // Lightroom-style grouping: a wall of 16 sliders scans terribly; four
-        // titled sections (tone open, the rest by activity) scan at a glance.
-        // A section whose values are non-neutral shows a ● so a collapsed
-        // active adjustment is never invisible. Flags are snapshot up front —
-        // Copy bools, so no borrow spans the section closures (E0500).
-        let (presence_active, detail_active, hsl_active, grade_active, curves_active) = {
-            let r = &self.recipe;
-            (
-                r.clarity != 0.0 || r.dehaze != 0.0 || r.vibrance != 0.0 || r.saturation != 0.0,
-                r.sharpening != 0.0 || r.noise_reduction != 0.0,
-                !r.hsl.is_neutral(),
-                !r.color_grade.is_neutral(),
-                !r.tone_curve.is_empty()
-                    || !r.red_curve.is_empty()
-                    || !r.green_curve.is_empty()
-                    || !r.blue_curve.is_empty(),
-            )
-        };
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_tone_wb(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
+
         let tone_active = {
             let r = &self.recipe;
             r.temperature_k.is_some()
@@ -359,6 +467,14 @@ impl AutoshopApp {
                 changed |= Self::slider(ui, lang, tr(lang, "Whites"), &mut r.whites, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Blacks"), &mut r.blacks, -100.0, 100.0, 0.0);
             });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_presence(&mut self, ui: &mut egui::Ui, presence_active: bool) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
 
         // LR-Basic order (UX batch): Presence sits directly under Tone & WB —
         // the two halves of Lightroom's Basic panel — then Curves, then the
@@ -376,6 +492,14 @@ impl AutoshopApp {
                 changed |= Self::slider(ui, lang, tr(lang, "Vibrance"), &mut r.vibrance, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Saturation"), &mut r.saturation, -100.0, 100.0, 0.0);
             });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_curves(&mut self, ui: &mut egui::Ui, curves_active: bool) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
 
         ui.add_space(6.0);
         // --- 曲线: master + RGB tone curves (engine + XMP already apply them,
@@ -386,6 +510,14 @@ impl AutoshopApp {
             .show(ui, |ui| {
                 changed |= self.curve_editor(ui);
             });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_hsl(&mut self, ui: &mut egui::Ui, hsl_active: bool) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
         ui.add_space(6.0);
 
         ui.add_space(6.0);
@@ -424,6 +556,14 @@ impl AutoshopApp {
                     });
                 }
             });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_grading(&mut self, ui: &mut egui::Ui, grade_active: bool) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
 
         ui.add_space(6.0);
         egui::CollapsingHeader::new(section_title(tr(lang, "Color Grading"), grade_active))
@@ -471,6 +611,14 @@ impl AutoshopApp {
                 changed |= Self::slider(ui, lang, tr(lang, "Blending"), &mut cg.blending, 0.0, 100.0, 50.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Balance"), &mut cg.balance, -100.0, 100.0, 0.0);
             });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_detail(&mut self, ui: &mut egui::Ui, detail_active: bool) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
 
         // Look ends here — detail, then geometry (lens BEFORE crop: the lens
         // profile / manual distortion redefine the frame the crop sits in).
@@ -517,6 +665,14 @@ impl AutoshopApp {
                         ));
                 });
             });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_lens(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
 
         // --- 镜头校正: in-camera profile + manual corrections -----------------
         ui.add_space(6.0);
@@ -608,6 +764,14 @@ impl AutoshopApp {
                     .small(),
                 );
             });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_crop(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
 
         // --- 裁剪 + 拉直: recipe.crop / straighten_deg (export + XMP paths) ---
         ui.add_space(6.0);
@@ -672,6 +836,14 @@ impl AutoshopApp {
                     .small(),
                 );
             });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_masks(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
 
         // Geometry ends here — local adjustments and management below.
         ui.add_space(6.0);
@@ -1425,6 +1597,13 @@ impl AutoshopApp {
                 );
             }
         });
+        changed
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_versions(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
 
         // --- 版本: recipe snapshots ≈ LR virtual copies (gap batch G) --------
         ui.add_space(6.0);
@@ -1504,6 +1683,13 @@ impl AutoshopApp {
                 }
                 }); // add_enabled_ui: inert while a photo is still opening
             });
+        false
+    }
+
+    /// One develop-panel section — body extracted verbatim from
+    /// develop_panel (round-12 decomposition; spacing included).
+    fn dev_export(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
 
         // --- 导出设置 (UX batch): moved out of the toolbar — touched once per
         // delivery, these are Export-dialog contents, not toolbar chrome. The
@@ -1571,87 +1757,6 @@ impl AutoshopApp {
                         .small(),
                 );
             });
-
-        if changed {
-            self.recipe.clamp();
-            self.dirty = true;
-        }
-    }
-
-    /// The variant strip (版本条): one card per rendition — 原片 / AI 生成 /
-    /// 反推 — with a live developed thumbnail. Click a card to switch (lossless;
-    /// each variant keeps its own base + recipe), × to drop one. This is the
-    /// selector that makes an AI develop a first-class, non-reverting version.
-    pub(crate) fn variant_strip(&mut self, ui: &mut egui::Ui) {
-        let lang = self.lang;
-        let accent = self.theme.colors().accent_text; // Copy — safe in closures
-        let mut switch_to: Option<usize> = None;
-        let mut delete: Option<usize> = None;
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(tr(lang, "Variants")).strong());
-            ui.separator();
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for i in 0..self.variants.len() {
-                        let active = i == self.active;
-                        let kind = self.variants[i].kind;
-                        ui.vertical(|ui| {
-                            // Developed thumbnail (or a placeholder until the
-                            // variant has been developed once).
-                            let resp = if let Some(t) = &self.variants[i].thumb {
-                                let s = t.size_vec2();
-                                let h = 52.0;
-                                let w = (s.x / s.y.max(1.0) * h).clamp(30.0, 104.0);
-                                let (rect, resp) =
-                                    ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
-                                let uv = egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                );
-                                if active {
-                                    ui.painter().rect_filled(
-                                        rect.expand(3.0),
-                                        5.0,
-                                        egui::Color32::from_rgba_unmultiplied(0xc9, 0xa1, 0x4a, 46),
-                                    );
-                                }
-                                ui.painter().image(t.id(), rect, uv, egui::Color32::WHITE);
-                                if active {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        4.0,
-                                        egui::Stroke::new(2.0, PILL),
-                                    );
-                                }
-                                resp
-                            } else {
-                                ui.add_sized([64.0, 52.0], egui::Button::new("…"))
-                            };
-                            if resp.on_hover_text(tr(lang, "Click to switch to this variant (lossless)")).clicked() {
-                                switch_to = Some(i);
-                            }
-                            ui.horizontal(|ui| {
-                                let label = egui::RichText::new(tr(lang, kind.label())).small();
-                                ui.label(if active { label.strong().color(accent) } else { label });
-                                // Any variant except the sole Original can be dropped.
-                                if self.variants.len() > 1
-                                    && kind != VariantKind::Original
-                                    && ui.small_button("×").on_hover_text(tr(lang, "Delete this variant")).clicked()
-                                {
-                                    delete = Some(i);
-                                }
-                            });
-                        });
-                        ui.add_space(6.0);
-                    }
-                });
-            });
-        });
-        if let Some(i) = switch_to {
-            self.switch_variant(i, ui.ctx());
-        } else if let Some(i) = delete {
-            self.delete_variant(i, ui.ctx());
-        }
+        false
     }
 }
