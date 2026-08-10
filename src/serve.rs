@@ -1588,11 +1588,18 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // rule): a failed XMP projection degrades to a warning — the old
             // `?` answered 500 and hid the committed save from the browser.
             let mut body = json!({ "recipe": recipe, "verdict": verdict, "saved": true });
-            if decode::is_raw(&raw)
-                && let Err(e) = pipeline::write_xmp(&raw, &recipe)
-            {
-                body["warning"] =
-                    json!(format!("saved, but the Lightroom XMP projection failed: {e:#}"));
+            if decode::is_raw(&raw) {
+                match pipeline::write_xmp(&raw, &recipe) {
+                    Ok((_, None)) => {}
+                    // Regenerated-not-merged rides the same reply — the
+                    // cross-surface disclosure rule.
+                    Ok((_, Some(m))) => body["warning"] = json!(m),
+                    Err(e) => {
+                        body["warning"] = json!(format!(
+                            "saved, but the Lightroom XMP projection failed: {e:#}"
+                        ));
+                    }
+                }
             }
             if let Some(n) = backed_up {
                 body["backed_up"] = json!(n);
@@ -2210,7 +2217,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // Recipe committed = saved (the cross-surface rule): a failed XMP
     // projection reports success WITH the warning instead of a 500 that
     // contradicts the on-disk state.
-    match pipeline::write_xmp_disclosed(&raw, &req.recipe) {
+    match pipeline::write_xmp(&raw, &req.recipe) {
         // A regenerated (rather than merged) sidecar is a LOSS of the user's
         // Lightroom-only properties, so it rides the same reply as the path —
         // reporting a bare success here is what made the loss silent.

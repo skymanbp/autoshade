@@ -1254,17 +1254,26 @@ impl AutoshopApp {
                                                 ),
                                                 None => tr(lang, "AI develop applied · saved to recipe.json").to_string(),
                                             };
-                                            if autoshop::decode::is_raw(&p)
-                                                && let Err(e) =
-                                                    autoshop::pipeline::write_xmp(&p, &stamped)
-                                            {
-                                                let t = trf(
-                                                    lang,
-                                                    "recipe saved — but the Lightroom XMP failed: {err}",
-                                                    &[("err", &e.to_string())],
-                                                );
-                                                self.toast(ToastKind::Error, t.clone());
-                                                s = t;
+                                            if autoshop::decode::is_raw(&p) {
+                                                match autoshop::pipeline::write_xmp(&p, &stamped) {
+                                                    Ok((_, None)) => {}
+                                                    // Regenerated-not-merged:
+                                                    // same disclosure as
+                                                    // Ctrl+S (toast + status).
+                                                    Ok((_, Some(m))) => {
+                                                        self.toast(ToastKind::Error, m.clone());
+                                                        s = format!("{s} — ⚠ {m}");
+                                                    }
+                                                    Err(e) => {
+                                                        let t = trf(
+                                                            lang,
+                                                            "recipe saved — but the Lightroom XMP failed: {err}",
+                                                            &[("err", &e.to_string())],
+                                                        );
+                                                        self.toast(ToastKind::Error, t.clone());
+                                                        s = t;
+                                                    }
+                                                }
                                             }
                                             s
                                         }

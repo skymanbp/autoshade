@@ -1609,11 +1609,19 @@ impl AutoshopApp {
                 // saved state (cross-surface rule), so a failed XMP projection
                 // must not abort the remaining photos or refuse to quit over a
                 // develop that IS durably saved.
-                if autoshop::decode::is_raw(p)
-                    && !generated
-                    && let Err(e) = autoshop::pipeline::write_xmp(p, &disk)
-                {
-                    xmp_warns.push(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                if autoshop::decode::is_raw(p) && !generated {
+                    match autoshop::pipeline::write_xmp(p, &disk) {
+                        Ok((_, None)) => {}
+                        // A regenerated (unmerged) sidecar loses LR-only
+                        // properties — Save-all's warning list is exactly
+                        // where that belongs (round-12 disclosure threading).
+                        Ok((_, Some(n))) => {
+                            xmp_warns.push(format!("{}: {n}", autoshop::pipeline::stem(p)));
+                        }
+                        Err(e) => {
+                            xmp_warns.push(format!("{}: {e}", autoshop::pipeline::stem(p)));
+                        }
+                    }
                 }
                         Ok(())
                     },
@@ -1970,8 +1978,13 @@ impl AutoshopApp {
                                     // reopening WOULD restore it, so the UI
                                     // must agree that it saved.
                                     match autoshop::pipeline::write_xmp(p, &rep.recipe) {
-                                        Ok(x) => {
+                                        Ok((x, merge_note)) => {
                                             note.push_str(&format!(" · XMP → {}", x.display()));
+                                            // Regenerated-not-merged: same
+                                            // disclosure as Ctrl+S.
+                                            if let Some(m) = merge_note {
+                                                note.push_str(&format!(" · ⚠ {m}"));
+                                            }
                                         }
                                         Err(e) => {
                                             note.push_str(" · ");

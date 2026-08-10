@@ -642,7 +642,7 @@ impl AutoshopApp {
                     self.pixels_on_disk = self.active_variant().and_then(|v| v.origin.clone());
                 }
                 let mut s = if raw {
-                    match autoshop::pipeline::write_xmp_disclosed(&path, &self.recipe) {
+                    match autoshop::pipeline::write_xmp(&path, &self.recipe) {
                         Ok((p, merge_note)) => {
                             // A sidecar we could not MERGE was regenerated, and
                             // that drops the user's Lightroom-only properties.
@@ -829,6 +829,7 @@ impl AutoshopApp {
                     // the status said "n XMP" and left the user to notice the
                     // shortfall by subtraction.
                     let mut xmp_fails: Vec<String> = Vec::new();
+                    let mut xmp_notes: Vec<String> = Vec::new();
                     for path in &targets {
                         let mut step = || -> anyhow::Result<bool> {
                             // Worker thread ⇒ Wait: queue behind whichever
@@ -859,16 +860,27 @@ impl AutoshopApp {
                                 // Recipe-write-decides: an XMP failure after
                                 // the recipe landed is a partial success —
                                 // reopening restores the paste regardless.
-                                if let Err(e) = autoshop::pipeline::write_xmp(path, &r) {
-                                    eprintln!(
-                                        "⚠ {}: recipe pasted, but the Lightroom XMP failed: {e}",
+                                match autoshop::pipeline::write_xmp(path, &r) {
+                                    Ok((_, None)) => {}
+                                    // Regenerated-not-merged loses LR-only
+                                    // properties — collected for the paste
+                                    // summary (stderr already heard it in
+                                    // write_xmp_doc).
+                                    Ok((_, Some(m))) => xmp_notes.push(format!(
+                                        "{}: {m}",
                                         autoshop::pipeline::stem(path)
-                                    );
-                                    xmp_fails.push(format!(
-                                        "{}: {e}",
-                                        autoshop::pipeline::stem(path)
-                                    ));
-                                    return Ok(false);
+                                    )),
+                                    Err(e) => {
+                                        eprintln!(
+                                            "⚠ {}: recipe pasted, but the Lightroom XMP failed: {e}",
+                                            autoshop::pipeline::stem(path)
+                                        );
+                                        xmp_fails.push(format!(
+                                            "{}: {e}",
+                                            autoshop::pipeline::stem(path)
+                                        ));
+                                        return Ok(false);
+                                    }
                                 }
                                 return Ok(true);
                             }
@@ -898,6 +910,14 @@ impl AutoshopApp {
                                 lang,
                                 " — ⚠ {n} XMP projection(s) failed (those pastes ARE saved): {detail}",
                                 &[("n", &xmp_fails.len().to_string()), ("detail", &d)],
+                            ));
+                        }
+                        if !xmp_notes.is_empty() {
+                            let d = brief_list(&xmp_notes);
+                            s.push_str(&trf(
+                                lang,
+                                " — {n} sidecar(s) regenerated rather than merged (Lightroom-only properties dropped): {detail}",
+                                &[("n", &xmp_notes.len().to_string()), ("detail", &d)],
                             ));
                         }
                         Ok(s)

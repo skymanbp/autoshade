@@ -545,6 +545,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "已保存，但有警告 — 窗口保持打开以便阅读；再次退出即可关闭：{detail}"),
     (" — ⚠ {n} XMP projection(s) failed (those pastes ARE saved): {detail}",
         " — ⚠ {n} 个 XMP 投影写入失败（粘贴本身已保存）：{detail}"),
+    (" — {n} sidecar(s) regenerated rather than merged (Lightroom-only properties dropped): {detail}",
+        " — {n} 个 XMP 文件因无法合并而重建（Lightroom 专有属性已丢失）：{detail}"),
     ("neutral recipe — saved edits cleared (saved files removed)",
         "中性配方 — 已清除保存的编辑（存档文件已删除）"),
     ("neutral recipe — nothing to save", "中性配方 — 无需保存"),

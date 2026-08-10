@@ -849,15 +849,14 @@ pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<PathBuf> {
-    write_xmp_disclosed(raw, recipe).map(|(p, _)| p)
-}
-
-/// [`write_xmp`], plus the note when the merge could not be performed and the
-/// sidecar was REGENERATED instead — see [`write_xmp_doc`] for why that is a
-/// loss worth telling the user about. Same single implementation; the two
-/// entry points differ only in whether the caller has somewhere to show it.
-pub fn write_xmp_disclosed(raw: &Path, recipe: &EditRecipe) -> Result<(PathBuf, Option<String>)> {
+/// Write the develop's XMP projection: the published path PLUS the note when
+/// the merge could not be performed and the sidecar was REGENERATED instead —
+/// see [`write_xmp_doc`] for why that is a loss worth telling the user about.
+/// Every caller receives the note (round-12 disclosure threading): the old
+/// note-dropping `write_xmp` wrapper was how five of seven surfaces stayed
+/// silent. stderr already hears every note via `write_xmp_doc`; UI surfaces
+/// route what they are handed here.
+pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<(PathBuf, Option<String>)> {
     use crate::store::SidecarRead;
     let target = xmp_target(raw);
     // MERGE, never regenerate over Lightroom's work (A11): the base is the
@@ -918,7 +917,7 @@ pub fn write_xmp_disclosed(raw: &Path, recipe: &EditRecipe) -> Result<(PathBuf, 
 /// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
 /// `-o`: the two halves of one develop must stay in the same folder, or the
 /// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
-pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
+pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<(PathBuf, Option<String>)> {
     use crate::store::SidecarRead;
     let mut notes: Vec<String> = Vec::new();
     let base = match crate::store::read_sidecar_checked(&out) {
@@ -933,9 +932,7 @@ pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<PathBuf> {
             None
         }
     };
-    // The note return is dropped (this entry point's callers have nowhere to
-    // show it) but write_xmp_doc eprintlns every note, so the CLI still says it.
-    write_xmp_doc(out, recipe, base, notes).map(|(p, _)| p)
+    write_xmp_doc(out, recipe, base, notes)
 }
 
 /// Returns the published path and, when the merge could not run, a note naming
@@ -1253,7 +1250,7 @@ mod guard_tests {
         )
         .unwrap();
         let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
-        let out = write_xmp(&raw, &r).unwrap();
+        let (out, _) = write_xmp(&raw, &r).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("crs:Texture=\"+21\""), "LR-only property survives the save");
         assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
@@ -1332,7 +1329,7 @@ mod guard_tests {
              crs:Texture=\"+21\"></rdf:Description>\n",
         )
         .unwrap();
-        let (out, note) = write_xmp_disclosed(&raw, &r).unwrap();
+        let (out, note) = write_xmp(&raw, &r).unwrap();
         assert!(note.is_none(), "a merge that worked has nothing to disclose: {note:?}");
         assert!(std::fs::read_to_string(&out).unwrap().contains("crs:Texture=\"+21\""));
 
@@ -1346,7 +1343,7 @@ mod guard_tests {
              crs:Texture=\"+21\">\n",
         )
         .unwrap();
-        let (out, note) = write_xmp_disclosed(&raw, &r).unwrap();
+        let (out, note) = write_xmp(&raw, &r).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
         assert!(!text.contains("crs:Texture"), "…by regenerating, so the LR property is gone");
@@ -1379,11 +1376,11 @@ mod guard_tests {
         let dev = crate::store::develop_dir(&raw);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::write(dir.join("_pipe_note_blank.xmp"), b"").unwrap();
-        let (_, note) = write_xmp_disclosed(&raw, &r).unwrap();
+        let (_, note) = write_xmp(&raw, &r).unwrap();
         assert!(note.is_none(), "an empty sidecar carries nothing to disclose: {note:?}");
         // Whitespace-only is the same emptiness.
         std::fs::write(dir.join("_pipe_note_blank.xmp"), b"  \n\t\n").unwrap();
-        let (_, note) = write_xmp_disclosed(&raw, &r).unwrap();
+        let (_, note) = write_xmp(&raw, &r).unwrap();
         assert!(note.is_none(), "whitespace is not a merge base: {note:?}");
         let _ = std::fs::remove_dir_all(&dev);
 
@@ -1398,7 +1395,7 @@ mod guard_tests {
             "<rdf:Description rdf:about=\"\" xmlns:crs=\"c\" crs:Texture=\"+21\">\n",
         )
         .unwrap();
-        let (_, note) = write_xmp_disclosed(&png, &r).unwrap();
+        let (_, note) = write_xmp(&png, &r).unwrap();
         assert!(note.is_none(), "a baked photo's neighbour .xmp is not read: {note:?}");
         let _ = std::fs::remove_dir_all(&dev_png);
 
@@ -1420,7 +1417,7 @@ mod guard_tests {
              xmp:Rating=\"5\" xmp:Label=\"Green\"></rdf:Description>\n \
              </rdf:RDF>\n</x:xmpmeta>\n";
         std::fs::write(&lr2, ratings).unwrap();
-        let (out2, note) = write_xmp_disclosed(&raw2, &r).unwrap();
+        let (out2, note) = write_xmp(&raw2, &r).unwrap();
         assert!(note.is_none(), "a foreign sidecar we CAN merge has no loss to report: {note:?}");
         let merged = std::fs::read_to_string(&out2).unwrap();
         assert!(merged.contains("xmp:Rating=\"5\""), "the user's rating survives: {merged}");
@@ -1433,7 +1430,7 @@ mod guard_tests {
         );
         // Saving AGAIN must not stack a second Description: the merged store
         // copy now carries crs, so the ordinary merge path takes over.
-        let (out2b, note) = write_xmp_disclosed(&raw2, &r).unwrap();
+        let (out2b, note) = write_xmp(&raw2, &r).unwrap();
         let again = std::fs::read_to_string(&out2b).unwrap();
         assert!(note.is_none(), "the second save has nothing to disclose either: {note:?}");
         assert_eq!(again.matches("crs:Exposure2012=").count(), 1, "one settings block, not two");
@@ -1465,7 +1462,7 @@ mod guard_tests {
                 ),
             )
             .unwrap();
-            let (out4, _) = write_xmp_disclosed(&raw4, &r).unwrap();
+            let (out4, _) = write_xmp(&raw4, &r).unwrap();
             let t = std::fs::read_to_string(&out4).unwrap();
             let settings = t.find("crs:Exposure2012").expect("our settings landed somewhere");
             let real_root = t.rfind("<rdf:RDF").expect("the real root survives");
@@ -1491,7 +1488,7 @@ mod guard_tests {
              crs:Texture=\"+21\">\n",
         )
         .unwrap();
-        let (_, note) = write_xmp_disclosed(&raw3, &r).unwrap();
+        let (_, note) = write_xmp(&raw3, &r).unwrap();
         let note = note.expect("an unaccountable base is a real loss");
         assert!(
             note.contains(&lr3.display().to_string()),
@@ -1530,7 +1527,7 @@ mod guard_tests {
         )
         .unwrap();
         let r1 = EditRecipe { exposure_ev: 0.5, ..Default::default() };
-        let (_, note) = write_xmp_disclosed(&raw, &r1).unwrap();
+        let (_, note) = write_xmp(&raw, &r1).unwrap();
         assert!(note.is_none(), "the mergeable base has nothing to disclose: {note:?}");
 
         // The sidecar balloons past the cap (Lightroom AI masks, or hostile).
@@ -1542,7 +1539,7 @@ mod guard_tests {
         std::fs::write(&lr, &big).unwrap();
 
         let r2 = EditRecipe { exposure_ev: 0.75, ..Default::default() };
-        let (out, note) = write_xmp_disclosed(&raw, &r2).unwrap();
+        let (out, note) = write_xmp(&raw, &r2).unwrap();
         // The fallback itself is CORRECT — the previous projection carries
         // forward what the first merge preserved, and the save must succeed.
         let text = std::fs::read_to_string(&out).unwrap();
