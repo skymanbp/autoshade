@@ -118,9 +118,14 @@ fn preserve_corrupt_settings(path: &std::path::Path, bytes: &[u8]) -> std::io::R
 }
 
 /// The rescue body, entered only with the settings lock held: re-verify the
-/// live file still holds exactly the corrupt bytes that were read, then claim
-/// a unique `.corrupt` copy and remove the live file. A changed or vanished
-/// live file means another process already replaced it — touch nothing.
+/// live file still holds exactly the corrupt bytes that were read, then MOVE
+/// it under a unique `.corrupt` name. A rename, never copy-then-delete
+/// (Codex R12 #3): the lock serializes the app's own writers, but the file
+/// is documented as hand-editable — an external editor's atomic replace
+/// landing inside the microsecond verify→act window used to be DELETED
+/// while the rescue copy held only the stale corrupt bytes. A rename
+/// preserves whatever is live: worst case the new content lands under the
+/// rescue name, which the warning prints, and nothing is ever destroyed.
 fn rescue_if_unchanged(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
     let live = crate::store::read_bytes_capped(path, crate::store::MAX_STORE_JSON)?;
     if live != bytes {
@@ -128,8 +133,6 @@ fn rescue_if_unchanged(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
             "the settings file changed while being rescued — nothing was removed",
         ));
     }
-    use std::io::Write as _;
-
     static CORRUPT_SEQ: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
     for _ in 0..16 {
@@ -138,6 +141,9 @@ fn rescue_if_unchanged(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
             std::process::id(),
             CORRUPT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
+        // Claim the name first (a crashed predecessor's recycled pid+seq
+        // must not be overwritten), then rename the live file over the
+        // claim — fs::rename replaces the destination on both platforms.
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -145,20 +151,23 @@ fn rescue_if_unchanged(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
             use std::os::unix::fs::OpenOptionsExt as _;
             opts.mode(0o600);
         }
-        let mut file = match opts.open(&kept) {
-            Ok(file) => file,
+        match opts.open(&kept) {
+            Ok(file) => drop(file),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
-        };
-        if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-            drop(file);
-            let _ = std::fs::remove_file(&kept);
+        }
+        if let Err(e) = std::fs::rename(path, &kept) {
+            let _ = std::fs::remove_file(&kept); // release the claim
             return Err(e);
         }
-        drop(file);
-        // The unique copy now owns the bytes; removing the malformed live
-        // file avoids rescuing the same incident again on every launch.
-        let _ = std::fs::remove_file(path);
+        // The rename carried the live file's own mode over the 0600 claim;
+        // the file holds API keys, so restore the tight mode (best-effort —
+        // Windows AppData is per-user already).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600));
+        }
         return Ok(kept);
     }
     Err(std::io::Error::other(

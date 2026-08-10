@@ -192,6 +192,13 @@ fn staged_sibling(out: &Path) -> PathBuf {
 /// published deliverable and must survive this run's failure — exactly the
 /// loss `discard_failed_output` inflicted at the shared name whenever its
 /// pre-spawn snapshot predated that publish. The GUI helper's lib-side twin.
+///
+/// Registered residual (Codex R12 #4): the probe and the remove are two
+/// steps, so a concurrent publish renaming onto the name BETWEEN them is
+/// still deleted. Closing that fully needs a handle-owned delete
+/// disposition, which stable std does not expose on Windows; this window is
+/// microseconds where the old shared-name cleanup deleted unconditionally
+/// across the whole sidecar runtime.
 fn release_empty_claim(p: &Path) {
     if std::fs::metadata(p).is_ok_and(|m| m.len() == 0) {
         let _ = std::fs::remove_file(p);
@@ -458,9 +465,19 @@ fn run_sidecar_with_budget(
     // single step — concurrent runs can no longer interleave into the
     // shared name, and this run's failure paths never touch it.
     if let Err(e) = std::fs::rename(&staged, output) {
-        let _ = std::fs::remove_file(&staged);
+        // The staged result SURVIVES a failed publish and the error names
+        // it (Codex R12 #5): on Windows a viewer holding the destination
+        // open without delete sharing fails this rename, and deleting the
+        // staging here turned that transient conflict into total loss of a
+        // minutes-long GPU result.
         release_empty_claim(output);
-        return Err(e).with_context(|| format!("publish denoise output {}", output.display()));
+        return Err(e).with_context(|| {
+            format!(
+                "publish denoise output {} — the finished result is kept at {}",
+                output.display(),
+                staged.display()
+            )
+        });
     }
     Ok(())
 }

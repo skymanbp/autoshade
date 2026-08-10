@@ -1637,7 +1637,12 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // The NEW revision rides the answer: the tab adopts it so its
             // own next Save does not 412 against this very analyze. (The
             // not-saved arms change nothing on disk — the tab's held tag
-            // stays valid, so they carry none.)
+            // stays valid, so they carry none.) Analyze itself takes NO
+            // If-Match, deliberately: its overwrite is version-protected —
+            // backup_saved_develop snapshots the existing save to v<N> and
+            // the reply discloses it — where the explicit Save path had no
+            // net at all. A 412 after a paid AI call would protect less
+            // than the snapshot already does.
             body["revision"] = json!(crate::store::recipe_revision(&raw));
             if decode::is_raw(&raw) {
                 match pipeline::write_xmp(&raw, &recipe) {
@@ -2887,18 +2892,35 @@ fn with_revision(resp: ResponseBox, rev: Option<&str>) -> ResponseBox {
 /// tabs' saves but cannot order them, so without this the later tab
 /// silently destroyed the earlier tab's edit (lost update, L01).
 fn precondition_failed(if_match: Option<&str>, current: Option<&str>) -> Option<ResponseBox> {
-    let want = if_match?.trim().trim_matches('"').to_string();
-    match current {
-        Some(cur) if *cur == want => None,
-        cur => Some(with_revision(
-            status_response(
-                412,
-                "this photo's develop changed since this tab loaded it — nothing was \
-                 overwritten; reselect the photo to load the newer save, then redo the change",
-            ),
-            cur,
-        )),
+    let raw = if_match?;
+    let matched = match current {
+        Some(cur) => {
+            // RFC 9110 shapes: a comma list admits when ANY listed tag
+            // matches (strong comparison — a `W/` tag never gates a write);
+            // `*` means "only if a saved state exists", which the "none"
+            // tag by definition is not. Each tag sheds ONE quote layer (the
+            // wire form); a bare tag is our own lenient form. Untaggable
+            // current state admits nothing — refusing beats overwriting
+            // what cannot be named.
+            (raw.trim() == "*" && cur != "none")
+                || raw.split(',').any(|t| {
+                    let t = t.trim();
+                    t.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(t) == cur
+                })
+        }
+        None => false,
+    };
+    if matched {
+        return None;
     }
+    Some(with_revision(
+        status_response(
+            412,
+            "this photo's develop changed since this tab loaded it — nothing was \
+             overwritten; reselect the photo to load the newer save, then redo the change",
+        ),
+        current,
+    ))
 }
 
 #[cfg(test)]
@@ -2930,6 +2952,17 @@ mod tests {
         let untagged =
             precondition_failed(Some("\"r1\""), None).expect("untaggable must refuse");
         assert_eq!(untagged.status_code().0, 412);
+        // RFC forms (Codex R12 #2): a list admits when ANY tag matches; a
+        // weak tag never gates a write; `*` requires an EXISTING saved
+        // state — "none" and untaggable both refuse it.
+        assert!(precondition_failed(Some("\"r0\", \"r1\""), Some("r1")).is_none());
+        let weak = precondition_failed(Some("W/\"r1\""), Some("r1")).expect("weak refuses");
+        assert_eq!(weak.status_code().0, 412);
+        assert!(precondition_failed(Some("*"), Some("r1")).is_none());
+        let star_none = precondition_failed(Some("*"), Some("none")).expect("no save yet");
+        assert_eq!(star_none.status_code().0, 412);
+        let star_untagged = precondition_failed(Some("*"), None).expect("untaggable");
+        assert_eq!(star_untagged.status_code().0, 412);
     }
 
     #[test]
