@@ -3786,6 +3786,54 @@ fn lens_geom_factor(rn: f32, dist_knots: &[f32], s_p: f32, k: f32, s: f32) -> f3
     f1 * f2
 }
 
+/// Composite fill scale over ALL channels (L04-2): the minimal extra zoom
+/// that keeps every channel's edge source sample inside the frame. The
+/// GREEN map is bounded on the edge band by construction
+/// ([`profile_fill_scale`] divides the spline; the manual term is exactly 1
+/// at r=1), but CA MULTIPLIES red/blue past it — a ca knot above 1 sent
+/// edge samples outside the source, where [`sample_bilinear_ch`] clamps and
+/// smears them into a radial plateau along the border (worst in the CA-only
+/// case, where s_p was hard-wired to 1 and no fill existed at all; present
+/// with distortion ON too, since the fill drives green to exactly 1 at the
+/// worst edge radius and CA multiplies past it).
+///
+/// Evaluated on the SAME [`LUT_N`] node grid the render interpolates over —
+/// the rendered per-channel factor is piecewise linear with node values
+/// `base[i]·ca(rn_i)`, so its band maximum sits AT a node and this bound is
+/// exact for the resampler. Returns ≥ 1.0, and exactly 1.0 whenever CA is
+/// off or no channel overshoots — those paths divide by 1.0 and stay
+/// bit-identical. All four map consumers (RGB render, RGBA overlay,
+/// forward/inverse norm) divide by the SAME value, so masks, the colour
+/// dropper and clone points cannot drift against the pixels (C2).
+fn geometry_fill_scale(
+    profile: &crate::recipe::LensProfile,
+    amount: f32,
+    dims: (f32, f32),
+) -> f32 {
+    let ca_on = profile.ca_on && !profile.ca_r.is_empty() && !profile.ca_b.is_empty();
+    if !ca_on {
+        return 1.0;
+    }
+    let dist_on = profile.distortion_on && !profile.distortion.is_empty();
+    let (w, h) = dims;
+    let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
+    let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
+    let s_p = if dist_on { profile_fill_scale(&profile.distortion, dims) } else { 1.0 };
+    let rmin = (w.min(h) / (w * w + h * h).sqrt().max(1e-6)).clamp(0.0, 1.0);
+    // Start at the last node ≤ rmin: linear interpolation between nodes
+    // means the band maximum is covered by the nodes bracketing it.
+    let start = ((rmin * (LUT_N - 1) as f32).floor() as usize).min(LUT_N - 1);
+    let mut m = 1.0f32;
+    for i in start..LUT_N {
+        let rn = i as f32 / (LUT_N - 1) as f32;
+        let g = lens_geom_factor(rn, dist_knots, s_p, k, s);
+        let ca = profile_knot_interp(&profile.ca_r, rn)
+            .max(profile_knot_interp(&profile.ca_b, rn));
+        m = m.max(g * ca);
+    }
+    m
+}
+
 /// The base image `camera_base_knots` should be fed for a photo whose canvas
 /// starts from a stamped lens profile: the neutral develop with the profile
 /// VIGNETTE applied (the camera JPEG the estimator matches against already
@@ -3862,7 +3910,9 @@ fn sample_bilinear_rgba8(src: &image::RgbaImage, x: f32, y: f32) -> image::Rgba<
 /// Alpha-preserving twin of [`apply_lens_geometry`] for UI overlay rasters
 /// (the paint canvas): the RGB16 photo path flattens transparency to opaque,
 /// which turned the whole canvas into a red wash the moment any geometry was
-/// active. Green map only — an overlay needs no chromatic refinement.
+/// active. Green map only — an overlay needs no chromatic refinement, but it
+/// MUST carry the composite CA fill scale (L04-2): the render's green map is
+/// zoomed by 1/fill, and an overlay skipping that drifts off the pixels.
 pub fn apply_lens_geometry_rgba(
     src: &image::RgbaImage,
     profile: &crate::recipe::LensProfile,
@@ -3874,10 +3924,15 @@ pub fn apply_lens_geometry_rgba(
     if src.width() == 0 || src.height() == 0 {
         return src.clone();
     }
-    if !dist_on && amount.abs() < 1e-3 {
+    let (w, h) = (src.width() as f32, src.height() as f32);
+    let fill = geometry_fill_scale(profile, amount, (w, h));
+    // fill > 1 means the RGB render moved every pixel even with distortion
+    // off — the overlay must move with it, so the early-out gains the
+    // fill==1 condition.
+    if !dist_on && amount.abs() < 1e-3 && fill == 1.0 {
         return src.clone();
     }
-    let (w, h) = (src.width() as f32, src.height() as f32);
+    let inv_fill = 1.0 / fill;
     let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
     let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
     let s_p = if dist_on { profile_fill_scale(&profile.distortion, (w, h)) } else { 1.0 };
@@ -3891,7 +3946,7 @@ pub fn apply_lens_geometry_rgba(
         for x in 0..ow {
             let dx = x as f32 - cx;
             let rn = ((dx * dx + dy * dy).sqrt() / rr).clamp(0.0, 1.0);
-            let f = lens_geom_factor(rn, dist_knots, s_p, k, s);
+            let f = lens_geom_factor(rn, dist_knots, s_p, k, s) * inv_fill;
             orow[x * 4..x * 4 + 4]
                 .copy_from_slice(&sample_bilinear_rgba8(src, cx + dx * f, cy + dy * f).0);
         }
@@ -3928,9 +3983,11 @@ pub fn rotate_straighten_rgba(src: &image::RgbaImage, deg: f32) -> image::RgbaIm
 }
 
 /// Corrected-frame normalised point → ORIGINAL-frame normalised point through
-/// the COMPOSED geometry (profile distortion + manual amount — the green map;
-/// CA is a render-only chromatic refinement the GUI never needs). Falls back
-/// to [`distort_norm`]'s exact math when the profile is inactive.
+/// the COMPOSED geometry (profile distortion + manual amount — the green map).
+/// CA's chromatic split stays render-only, but its composite FILL SCALE moves
+/// the shared map by a scalar (L04-2) — skipping it here drifted masks, the
+/// dropper and clone points off the rendered pixels. Falls back to
+/// [`distort_norm`]'s exact math when the whole map is the manual one.
 pub fn lens_geom_norm(
     nx: f32,
     ny: f32,
@@ -3939,16 +3996,18 @@ pub fn lens_geom_norm(
     amount: f32,
 ) -> (f32, f32) {
     let dist_on = profile.distortion_on && !profile.distortion.is_empty();
-    if !dist_on {
+    let fill = geometry_fill_scale(profile, amount, dims);
+    if !dist_on && fill == 1.0 {
         return distort_norm(nx, ny, dims, amount);
     }
     let (w, h) = dims;
     let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
-    let s_p = profile_fill_scale(&profile.distortion, dims);
+    let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
+    let s_p = if dist_on { profile_fill_scale(&profile.distortion, dims) } else { 1.0 };
     let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
     let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
     let rn = (dx * dx + dy * dy).sqrt() / rr;
-    let f = lens_geom_factor(rn, &profile.distortion, s_p, k, s);
+    let f = lens_geom_factor(rn, dist_knots, s_p, k, s) / fill;
     ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
 }
 
@@ -3965,12 +4024,16 @@ pub fn lens_ungeom_norm(
     amount: f32,
 ) -> (f32, f32) {
     let dist_on = profile.distortion_on && !profile.distortion.is_empty();
-    if !dist_on {
+    // Same composite fill as the forward map (L04-2) — inverting a map the
+    // render did not draw would un-roundtrip every C2 consumer.
+    let fill = geometry_fill_scale(profile, amount, dims);
+    if !dist_on && fill == 1.0 {
         return undistort_norm(nx, ny, dims, amount);
     }
     let (w, h) = dims;
     let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
-    let s_p = profile_fill_scale(&profile.distortion, dims);
+    let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
+    let s_p = if dist_on { profile_fill_scale(&profile.distortion, dims) } else { 1.0 };
     let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
     let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
     let rho = (dx * dx + dy * dy).sqrt() / rr;
@@ -3982,7 +4045,7 @@ pub fn lens_ungeom_norm(
     // barrel fix — folds back (the same shape undistort_norm's u_max clamp
     // handles). Scan for the peak first; originals beyond the reachable
     // maximum clamp there and land honestly off-screen, like undistort_norm.
-    let fwd = |rn: f32| rn * lens_geom_factor(rn, &profile.distortion, s_p, k, s);
+    let fwd = |rn: f32| rn * lens_geom_factor(rn, dist_knots, s_p, k, s) / fill;
     let mut hi = 2.0f32;
     let mut peak = 0.0f32;
     for i in 1..=256 {
@@ -4098,6 +4161,14 @@ pub fn apply_lens_geometry(
     let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
     let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
     let s_p = if dist_on { profile_fill_scale(&profile.distortion, (w, h)) } else { 1.0 };
+    // Composite CA fill (L04-2): every channel's LUT divides by ONE scalar
+    // (≥ 1; exactly 1 when no channel overshoots, keeping those paths
+    // bit-identical), so a ca knot above 1 zooms the whole frame in by up
+    // to that knot instead of sending red/blue edge samples outside the
+    // source, where the clamping sampler smeared them into a radial band.
+    // Per-channel renormalisation is NOT an option — dividing ca_r by its
+    // own max would cancel the near-constant correction it encodes.
+    let fill = geometry_fill_scale(profile, amount, (w, h));
     // Per-channel radial factor LUTs over rn ∈ [0,1]: one lookup per channel
     // per pixel instead of spline walks. CA multiplies the green map.
     let luts: [Vec<f32>; 3] = {
@@ -4106,16 +4177,16 @@ pub fn apply_lens_geometry(
             .collect();
         let chan = |knots: &[f32]| -> Vec<f32> {
             if !ca_on || knots.is_empty() {
-                return base.clone();
+                return base.iter().map(|f| f / fill).collect();
             }
             (0..LUT_N)
                 .map(|i| {
                     let rn = i as f32 / (LUT_N - 1) as f32;
-                    base[i] * profile_knot_interp(knots, rn)
+                    base[i] * profile_knot_interp(knots, rn) / fill
                 })
                 .collect()
         };
-        [chan(&profile.ca_r), base.clone(), chan(&profile.ca_b)]
+        [chan(&profile.ca_r), chan(&[]), chan(&profile.ca_b)]
     };
     let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
     let (cx, cy) = ((w - 1.0) * 0.5, (h - 1.0) * 0.5);
@@ -7492,5 +7563,144 @@ mod tests {
         assert_eq!(to_u16(f32::NAN), 0, "NaN clamps to black");
         assert_eq!(to_u16(f32::INFINITY), 65535, "inf saturates to white");
         assert_eq!(to_u16(f32::NEG_INFINITY), 0);
+    }
+
+    /// L04-2: a CA-only profile (ca knots past 1, distortion off) used to
+    /// sample red OUTSIDE the frame along the whole border — the clamping
+    /// sampler smeared a radial plateau there (red[(0,mid)] == red[(1,mid)]
+    /// on any ramp), because the fill scale was hard-wired to 1.0 whenever
+    /// distortion was off. The composite fill zooms all channels in by the
+    /// overshoot, so every source sample stays inside the frame.
+    #[test]
+    fn ca_only_profile_never_samples_outside_the_frame() {
+        use crate::recipe::LensProfile;
+        let profile = LensProfile {
+            ca_r: vec![1.02; 16],
+            ca_b: vec![0.98; 16],
+            ca_on: true,
+            ..Default::default()
+        };
+        let ramp = DynamicImage::ImageRgb16(ImageBuffer::from_fn(200, 100, |x, _| {
+            Rgb([(x as u16) * 300; 3])
+        }));
+        let out = apply_lens_geometry(&ramp, &profile, 0.0).to_rgb16();
+        let a = out.get_pixel(0, 50).0[0];
+        let b = out.get_pixel(1, 50).0[0];
+        assert_ne!(
+            a, b,
+            "the border red plateau is gone — no clamped out-of-frame samples"
+        );
+        // …and the zoom leaves no unfilled pixels: a white frame stays white.
+        let white =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(201, 101, image::Rgb([255; 3])));
+        let w = apply_lens_geometry(&white, &profile, 0.0).to_rgb16();
+        let min = w.pixels().flat_map(|p| p.0).min().unwrap();
+        assert!(min >= 65000, "unfilled pixels through the CA fill: min {min}");
+    }
+
+    /// L04-2: the fill is exactly 1.0 whenever no channel overshoots — real
+    /// profiles below unity (and CA-off entirely) cost nothing and stay
+    /// bit-identical: the green channel of a sub-unity-CA render equals the
+    /// CA-off render byte for byte (base LUT divided by exactly 1.0; the
+    /// two pixel branches use samplers with identical math).
+    #[test]
+    fn ca_fill_scale_is_identity_when_no_channel_overshoots() {
+        use crate::recipe::LensProfile;
+        let dims = (1200.0, 800.0);
+        let sub = LensProfile {
+            ca_r: vec![0.999; 16],
+            ca_b: vec![0.998; 16],
+            ca_on: true,
+            ..Default::default()
+        };
+        assert_eq!(geometry_fill_scale(&sub, 0.0, dims), 1.0);
+        assert_eq!(
+            geometry_fill_scale(&LensProfile::default(), 25.0, dims),
+            1.0,
+            "CA off is always exactly 1.0 — the manual path never pays"
+        );
+        let dist: Vec<f32> =
+            (0..16).map(|i| 1.0008 - 0.02 * (i as f32 / 15.0).powi(2)).collect();
+        let with_ca = LensProfile {
+            distortion: dist.clone(),
+            distortion_on: true,
+            ca_r: vec![0.999; 16],
+            ca_b: vec![0.999; 16],
+            ca_on: true,
+            ..Default::default()
+        };
+        let no_ca =
+            LensProfile { distortion: dist, distortion_on: true, ..Default::default() };
+        let ramp = DynamicImage::ImageRgb16(ImageBuffer::from_fn(160, 90, |x, y| {
+            Rgb([(x as u16) * 300, (x as u16) * 300 + (y as u16), (y as u16) * 500])
+        }));
+        let a = apply_lens_geometry(&ramp, &with_ca, 0.0).to_rgb16();
+        let b = apply_lens_geometry(&ramp, &no_ca, 0.0).to_rgb16();
+        assert!(
+            a.pixels().zip(b.pixels()).all(|(p, q)| p.0[1] == q.0[1]),
+            "green must be byte-identical when the fill is exactly 1"
+        );
+    }
+
+    /// L04-2: the C2 coordinate contract — the GUI's normalised maps carry
+    /// the SAME composite fill as the render, so masks/dropper/clone points
+    /// stay on the pixels; the fill-adjusted forward/inverse pair still
+    /// round-trips; and a CA-only profile no longer short-circuits the
+    /// shared map to the manual path.
+    #[test]
+    fn ca_fill_keeps_the_gui_map_in_step_with_the_render() {
+        use crate::recipe::LensProfile;
+        let profile = LensProfile {
+            distortion: (0..16).map(|i| 1.0008 - 0.053 * (i as f32 / 15.0).powi(2)).collect(),
+            ca_r: vec![1.004; 16],
+            ca_b: vec![0.997; 16],
+            distortion_on: true,
+            ca_on: true,
+            ..Default::default()
+        };
+        let dims = (1200.0, 800.0);
+        let fill = geometry_fill_scale(&profile, 0.0, dims);
+        assert!(fill > 1.0, "premise: this profile's red channel overshoots");
+        // The normalised map's radial factor at an edge point equals the
+        // render's green factor (base / fill) at the same rn.
+        let (nx, ny) = (0.98, 0.5);
+        let (ox, _) = lens_geom_norm(nx, ny, dims, &profile, 0.0);
+        let f_norm = (ox - 0.5) / (nx - 0.5);
+        let (w, h) = dims;
+        let rn = ((nx - 0.5) * w).abs() / (0.5 * (w * w + h * h).sqrt());
+        let s_p = profile_fill_scale(&profile.distortion, dims);
+        let expect = lens_geom_factor(rn, &profile.distortion, s_p, 0.0, 1.0) / fill;
+        assert!(
+            (f_norm - expect).abs() < 1e-4,
+            "the GUI map factor {f_norm} drifted from the render's {expect}"
+        );
+        // Forward/inverse still round-trip through the fill-adjusted pair.
+        for (px, py) in [(0.1, 0.2), (0.9, 0.85), (0.5, 0.05)] {
+            let (ax, ay) = lens_geom_norm(px, py, dims, &profile, 12.0);
+            let (bx, by) = lens_ungeom_norm(ax, ay, dims, &profile, 12.0);
+            assert!(
+                (bx - px).abs() < 2e-3 && (by - py).abs() < 2e-3,
+                "roundtrip ({px},{py}) → ({bx},{by})"
+            );
+        }
+        // Distortion OFF + overshooting CA: the shared map must move (the
+        // old early-return to the manual path skipped the fill entirely).
+        let ca_only = LensProfile {
+            ca_r: vec![1.02; 16],
+            ca_b: vec![0.98; 16],
+            ca_on: true,
+            ..Default::default()
+        };
+        let (mx, _) = lens_geom_norm(0.9, 0.5, dims, &ca_only, 0.0);
+        assert!(
+            (mx - 0.9).abs() > 1e-4,
+            "the composite fill moves the shared map even with distortion off"
+        );
+        let (fx, fy) = lens_geom_norm(0.8, 0.3, dims, &ca_only, 0.0);
+        let (ux, uy) = lens_ungeom_norm(fx, fy, dims, &ca_only, 0.0);
+        assert!(
+            (ux - 0.8).abs() < 2e-3 && (uy - 0.3).abs() < 2e-3,
+            "CA-only roundtrip ({ux},{uy})"
+        );
     }
 }
