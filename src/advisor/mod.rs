@@ -188,6 +188,20 @@ pub enum Decision {
     Reject,
 }
 
+/// The stable English catalogue key for a [`Decision`] — ONE authority for
+/// the GUI's verdict line and its toast, translated at DRAW time. The Debug
+/// spelling used to be baked into a `String` at worker landing, so a zh UI
+/// showed "Accept" forever; the typed decision now travels to the render
+/// site instead. (The audit extracts this fn's literals, so a fourth
+/// variant without a zh pair fails the i18n gate.)
+pub fn decision_key(d: &Decision) -> &'static str {
+    match d {
+        Decision::Accept => "Accept",
+        Decision::Revise => "Revise",
+        Decision::Reject => "Reject",
+    }
+}
+
 /// Acceptance-verification outcome (the analyst/verifier role).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Verdict {

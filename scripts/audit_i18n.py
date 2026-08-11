@@ -21,6 +21,17 @@ visible — and it is a GATE, not a report:
   * UI literals that bypass tr()     -> flagged unless allow-listed (a button
                                         label passed as a bare string never
                                         reaches the catalogue at all)
+  * zh values whose {placeholder}    -> a translation that drops, renames or
+    multiset differs from the key       un-duplicates a placeholder renders a
+                                        bare sentence or literal braces at
+                                        runtime: trf() leaves an unmatched
+                                        placeholder visible and never panics
+                                        or logs, so only this gate sees it
+
+Known NON-check, on purpose: caller-side trf() ARGS are not compared against
+the key's placeholders — persist_postponed builds its args in a runtime Vec
+(actions.rs), which no lexical extractor can see without a second registry
+to rot.
 
 Exit code 1 when anything is missing/dead/unregistered, so it can gate a
 release.  Run: python scripts/audit_i18n.py
@@ -33,6 +44,7 @@ see install_fonts in gui.rs), and is house style, not drift.
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from pathlib import Path
 import re
 
@@ -48,6 +60,7 @@ GUI = "\n".join(
 )
 I18N = (_GUI_DIR / "i18n.rs").read_text(encoding="utf-8")
 RECIPE = (REPO / "src" / "recipe.rs").read_text(encoding="utf-8")
+ADVISOR = (REPO / "src" / "advisor" / "mod.rs").read_text(encoding="utf-8")
 
 # ── Dynamic-key registry ────────────────────────────────────────────────────
 # Every `tr(lang, <non-literal>)` call site must match one of these argument
@@ -66,6 +79,7 @@ DYNAMIC_SITES = [
     (r"^label\b", "AI segmentation labels"),
     (r"^en\b", "MaskRole::en_name"),
     (r"^busy_key\b", "persist_postponed keys"),
+    (r"^(?:autoshop::)?advisor::decision_key\(", "advisor Decision keys"),
     (r"^\[", "inline literal array"),
 ]
 
@@ -84,6 +98,9 @@ DYNAMIC_SOURCES = [
     ("impl_fn", "gui", "impl VariantKind", "fn label"),
     ("impl_fn", "gui", "impl ThemePref", "fn label"),
     ("impl_fn", "recipe", "impl MaskRole", "fn en_name"),
+    # decision_key is a free fn; the "impl_fn" extractor only needs the fn's
+    # body braces, so anchoring on the pub declaration works the same way.
+    ("impl_fn", "advisor", "pub fn decision_key", "fn decision_key"),
     ("calls", "gui", "set_canvas_status("),
     # persist_postponed's key is its SECOND argument (after the error), so
     # the plain first-arg collector cannot see it: this kind takes the first
@@ -116,7 +133,7 @@ ALLOWED_BYPASS = {
     "Esc",        # keyboard key name (house style, like the shortcut combos)
 }
 
-SRC = {"gui": GUI, "recipe": RECIPE}
+SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR}
 
 
 def parse_literal(src: str, i: int) -> tuple[str, int]:
@@ -219,9 +236,9 @@ def tr_keys(src: str) -> tuple[set[str], list[tuple[int, str]]]:
     return keys, dynamic
 
 
-def zh_entries(src: str) -> list[str]:
-    """English keys of ZH_ENTRIES, in order (anchor on the DECLARATION —
-    doc comments reference the name earlier in the file)."""
+def zh_pairs(src: str) -> list[tuple[str, str]]:
+    """(english key, chinese value) pairs of ZH_ENTRIES, in order (anchor on
+    the DECLARATION — doc comments reference the name earlier in the file)."""
     j = src.index("[", src.index("static ZH_ENTRIES"))
     end = src.index("\n];", j)
     lits: list[str] = []
@@ -235,7 +252,36 @@ def zh_entries(src: str) -> list[str]:
             j += 1
     if len(lits) % 2:
         raise SystemExit("ZH_ENTRIES parse drift: odd literal count")
-    return lits[0::2]
+    return list(zip(lits[0::2], lits[1::2]))
+
+
+PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
+
+
+def placeholder_mismatches(pairs: list[tuple[str, str]]) -> list[str]:
+    """zh values whose {placeholder} MULTISET differs from their en key's.
+    A dropped placeholder renders a bare sentence, a renamed one prints
+    literal braces — trf() leaves unmatched placeholders visible and never
+    panics (i18n.rs docs), so only this gate sees the damage. Multiset, not
+    set: "{n} of {n}" needs {n} twice (repeated_placeholders_all_expand).
+    A bare `{` with no closer is NOT a placeholder — that matches trf()'s
+    own runtime rule; do not tighten this past what the runtime does.
+    Self-check first (the font gate's notdef idiom): a broken regex must
+    fail HERE, never pass by extracting nothing from every pair."""
+
+    def counts(s: str) -> Counter[str]:
+        return Counter(PLACEHOLDER.findall(s))
+
+    assert counts("{n} of {n}") != counts("{n} 次"), \
+        "placeholder self-check: a dropped repeat must be flagged"
+    assert counts("{a} {b}") == counts("{b}{a}"), \
+        "placeholder self-check: reordering must NOT be flagged"
+    out: list[str] = []
+    for en, zh in pairs:
+        a, b = counts(en), counts(zh)
+        if a != b:
+            out.append(f"{en!r}: en-only {dict(a - b)}, zh-only {dict(b - a)}")
+    return out
 
 
 def block_literals(src: str, start: int, opener: str, closer: str) -> set[str]:
@@ -357,9 +403,11 @@ def literal_bypasses(src: str) -> list[tuple[int, str]]:
 
 def main() -> int:
     keys, dynamic = tr_keys(GUI)
-    zh = zh_entries(I18N)
+    pairs = zh_pairs(I18N)
+    zh = [en for en, _ in pairs]
     zh_set = set(zh)
     dupes = sorted({k for k in zh if zh.count(k) > 1})
+    ph_bad = placeholder_mismatches(pairs)
 
     extracted, source_problems = extract_source_keys()
     # Inline literal arrays carry their key set IN the site expression.
@@ -394,7 +442,9 @@ def main() -> int:
                          ("keys with NO zh translation", missing),
                          ("zh entries matching NO call site", dead),
                          ("dynamic-source registry problems", source_problems),
-                         ("dead ALLOWED_BYPASS entries", dead_allow)]:
+                         ("dead ALLOWED_BYPASS entries", dead_allow),
+                         ("zh values whose {placeholder} multiset differs",
+                          ph_bad)]:
         print(f"\n== {len(items)} {title} ==")
         for k in items:
             print("  " + repr(str(k)[:100]))
@@ -405,7 +455,7 @@ def main() -> int:
     for line, lit in bypass:
         print(f"  gui.rs:{line}: {lit[:80]!r}")
     bad = (dupes or missing or dead or source_problems or dead_allow
-           or unregistered or bypass)
+           or unregistered or bypass or ph_bad)
     return 1 if bad else 0
 
 

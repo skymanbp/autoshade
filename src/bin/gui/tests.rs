@@ -2451,3 +2451,32 @@
             "the typed rename survives into the outgoing variant's snapshot"
         );
     }
+
+    /// L12#2A: the verdict is TYPED data rendered at draw time — the zh
+    /// catalogue must actually translate every decision word, or the map
+    /// silently falls back to English (tr's contract) and the gate that
+    /// exists to see that (audit_i18n's extraction of decision_key) would
+    /// be the only witness. This is the runtime half of that gate.
+    #[test]
+    fn a_verdict_names_its_decision_in_the_current_language() {
+        use autoshop::advisor::{decision_key, Decision};
+        // One authority: the typed decision maps to exactly these keys…
+        assert_eq!(decision_key(&Decision::Accept), "Accept");
+        assert_eq!(decision_key(&Decision::Revise), "Revise");
+        assert_eq!(decision_key(&Decision::Reject), "Reject");
+        // …and the catalogue actually translates each of them (tr falls
+        // back to English SILENTLY, so equality-with-key would be the only
+        // symptom). Literal keys on purpose — the audit treats non-literal
+        // tr() arguments as dynamic sites needing registration.
+        assert_eq!(tr(Lang::Zh, "Accept"), "接受");
+        assert_eq!(tr(Lang::Zh, "Revise"), "修订");
+        assert_eq!(tr(Lang::Zh, "Reject"), "驳回");
+        assert_eq!(tr(Lang::En, "Accept"), "Accept");
+        // The verdict line skeleton interpolates both halves.
+        let line = trf(
+            Lang::Zh,
+            "{decision} — {reasons}",
+            &[("decision", tr(Lang::Zh, "Revise")), ("reasons", "太亮")],
+        );
+        assert_eq!(line, "修订 — 太亮");
+    }

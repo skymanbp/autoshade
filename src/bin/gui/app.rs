@@ -21,7 +21,9 @@ pub(crate) struct AutoshopApp {
     pub(crate) busy: bool, // an analyze/export thread is running
     pub(crate) rx: Option<Receiver<Msg>>,
     pub(crate) tx: Sender<Msg>,
-    pub(crate) verdict: Option<String>,
+    // TYPED, not a baked string: the decision word + reasons are rendered
+    // (and translated) at draw time, so a language switch re-renders them.
+    pub(crate) verdict: Option<(autoshop::advisor::Decision, Vec<String>)>,
     pub(crate) rationale: String,
     pub(crate) style_strength: f32,
     pub(crate) hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance

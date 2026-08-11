@@ -1284,7 +1284,8 @@ impl AutoshopApp {
                         // Wholesale replacement: disarm index-carrying tools +
                         // refresh rationale, THEN install the fresh verdict.
                         self.resync_recipe_display();
-                        self.verdict = Some(format!("{:?} — {}", verdict.decision, verdict.reasons.join("; ")));
+                        self.verdict =
+                            Some((verdict.decision.clone(), verdict.reasons.clone()));
                         self.dirty = true;
                         self.busy = false;
                         // Persist like the CLI and the web do — the badge,
@@ -1303,7 +1304,7 @@ impl AutoshopApp {
                             let t = trf(
                                 lang,
                                 "AI develop applied — verdict {v}: NOT saved (Ctrl+S keeps it, Ctrl+Z steps back)",
-                                &[("v", &format!("{:?}", verdict.decision))],
+                                &[("v", tr(lang, autoshop::advisor::decision_key(&verdict.decision)))],
                             );
                             self.toast(ToastKind::Success, t.clone());
                             t

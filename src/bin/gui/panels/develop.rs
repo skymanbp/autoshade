@@ -282,15 +282,27 @@ impl AutoshopApp {
             .id_salt("sec_verdict")
             .default_open(true)
             .show(ui, |ui| {
-                if let Some(v) = &self.verdict {
+                if let Some((d, reasons)) = &self.verdict {
                     // Accept reads calm; anything else (Revise/Reject)
                     // gets the warn colour so it can't be skimmed past.
-                    let col = if v.starts_with("Accept") {
+                    // Matched on the TYPED decision, never its rendered
+                    // spelling — the old `starts_with("Accept")` sniff
+                    // would have flipped every verdict to warn the moment
+                    // the word was translated.
+                    let col = if matches!(d, autoshop::advisor::Decision::Accept) {
                         ui.visuals().strong_text_color()
                     } else {
                         ui.visuals().warn_fg_color
                     };
-                    ui.label(egui::RichText::new(v).color(col));
+                    let text = trf(
+                        lang,
+                        "{decision} — {reasons}",
+                        &[
+                            ("decision", tr(lang, autoshop::advisor::decision_key(d))),
+                            ("reasons", &reasons.join("; ")),
+                        ],
+                    );
+                    ui.label(egui::RichText::new(text).color(col));
                 }
                 if !self.rationale.is_empty() {
                     ui.label(
