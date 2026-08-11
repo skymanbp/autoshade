@@ -768,11 +768,13 @@ impl AutoshopApp {
                             self.start_heal(true);
                         }
                     });
-                    let src_is_raw = self
-                        .active_source_path()
-                        .is_some_and(|p| autoshop::decode::is_raw(&p));
-                    ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.heal_fullres, tr(lang, "Full-res")))
-                        .on_hover_text(tr(lang, "Heal the full-resolution develop (slow, RAW only)"));
+                    // Enabled for BAKED sources too (L09#4, user decision
+                    // 2026-08-11): heal honours the flag on both source
+                    // types since b4c6c30, but the RAW-only gate left a
+                    // 61 MP baked TIFF no way to opt out of the 2048px
+                    // downsample the unchecked path bakes into the master.
+                    ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res"))
+                        .on_hover_text(tr(lang, "Heal at full resolution (slow; without it a baked image is saved at 2048px)"));
                 });
                 ui.label(
                     egui::RichText::new(tr(lang,

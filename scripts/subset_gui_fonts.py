@@ -5,7 +5,7 @@ The GUI's font chain is: egui's bundled fonts -> these embedded subsets ->
 a system CJK font found at runtime. egui's bundle has no glyphs for most of
 the toolbar/panel symbols (⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 ...), and leaning on system
 fonts for them made the UI machine-dependent (tofu boxes on a stock Windows
-install, because DengXian lacks them too). So we ship tiny subsets of four
+install, because DengXian lacks them too). So we ship tiny subsets of five
 OFL-licensed Noto faces covering every symbol the GUI actually renders.
 
 Donor fonts (download from https://github.com/google/fonts, ofl/ tree):
@@ -19,8 +19,9 @@ Usage:
     python scripts/subset_gui_fonts.py --fonts-dir <dir with the five donors>
 
 The needed-glyph list is NOT hand-maintained: it is extracted from the string
-literals of src/bin/gui.rs + src/bin/i18n.rs (the same extraction the GUI's
-`embedded_fonts_cover_every_ui_symbol` test performs in Rust).
+literals of src/bin/gui/**/*.rs — the whole GUI module tree (the same
+extraction the GUI's `embedded_fonts_cover_every_ui_symbol` test performs
+in Rust).
 
 CJK is subsetted the same way, and deliberately WITHOUT margin blocks: only
 the hanzi the Chinese UI actually renders are embedded. A full CJK face is
@@ -40,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -156,13 +158,8 @@ def string_literal_chars(src: str) -> set[str]:
     return out
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--fonts-dir", required=True, type=Path,
-                    help="directory holding the four donor TTFs")
-    args = ap.parse_args()
-
-    needed = set()
+def extract_needed() -> set[int]:
+    needed: set[str] = set()
     for p in SOURCES:
         needed |= string_literal_chars(p.read_text(encoding="utf-8"))
     n_cjk = sum(1 for ch in needed if is_cjk(ord(ch)))
@@ -170,16 +167,72 @@ def main() -> int:
         f"{len(needed) - n_cjk} symbols + {n_cjk} CJK codepoints "
         "referenced by GUI string literals"
     )
+    return {ord(ch) for ch in needed}
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    remaining = {ord(ch) for ch in needed}
-    total_bytes = 0
-    for out_name, donor_name, variable, blocks in DONORS:
-        donor_path = args.fonts_dir / donor_name
-        if not donor_path.exists():
-            print(f"ERROR: donor missing: {donor_path}", file=sys.stderr)
+
+def check_shipped(needed: set[int]) -> int:
+    """--check: verify the SHIPPED assets against the extracted needed set,
+    writing nothing (CI-friendly — no donors required). CJK gaps are FATAL
+    (only the cjk-ui subset guarantees them; egui's bundle has no hanzi);
+    non-CJK gaps are reported for the Rust whole-chain gate to judge, since
+    egui's own bundle may legitimately cover them."""
+    union: set[int] = set()
+    for out_name, _, _, _ in DONORS:
+        p = OUT_DIR / out_name
+        if not p.exists():
+            print(f"ERROR: shipped subset missing: {p}", file=sys.stderr)
             return 1
-        font = TTFont(donor_path)
+        union |= set(TTFont(p).getBestCmap())
+    missing = sorted(needed - union)
+    cjk_gap = [cp for cp in missing if is_cjk(cp)]
+    for cp in missing:
+        kind = "CJK (FATAL)" if is_cjk(cp) else "left to egui's bundle"
+        print(f"  U+{cp:05X} {chr(cp)}  {kind}")
+    if cjk_gap:
+        print(f"ERROR: {len(cjk_gap)} needed CJK codepoint(s) not embedded — "
+              "re-run with --fonts-dir and commit assets/fonts/", file=sys.stderr)
+        return 1
+    print(f"check OK: {len(needed) - len(missing)}/{len(needed)} embedded; "
+          f"{len(missing)} left to egui's bundle")
+    return 0
+
+
+def main() -> int:
+    # Windows consoles default to the ANSI codepage — printing a reported
+    # codepoint (e.g. Thai) crashed the run mid-write before the L09#7
+    # restructure; now nothing is written by then, but keep prints total.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--fonts-dir", type=Path,
+                    help=f"directory holding the {len(DONORS)} donor TTFs")
+    ap.add_argument("--check", action="store_true",
+                    help="verify the shipped assets/fonts/ against the "
+                         "extracted needed set; writes nothing, needs no donors")
+    args = ap.parse_args()
+
+    needed = extract_needed()
+    if args.check:
+        return check_shipped(needed)
+    if args.fonts_dir is None:
+        ap.error("--fonts-dir is required unless --check is given")
+
+    # CHECK first (L09#7 先验后写): the old loop verified donor i+1 only
+    # after OVERWRITING subset i, so a missing fifth donor left assets/
+    # fonts/ half-updated — four fresh subsets beside a stale one, which
+    # still compiled. Nothing is written until every donor is present and
+    # every product verified.
+    missing_donors = [d for _, d, _, _ in DONORS
+                      if not (args.fonts_dir / d).exists()]
+    if missing_donors:
+        for d in missing_donors:
+            print(f"ERROR: donor missing: {args.fonts_dir / d}", file=sys.stderr)
+        return 1
+
+    remaining = set(needed)
+    built: list[tuple[Path, bytes, set[int]]] = []
+    for out_name, donor_name, variable, blocks in DONORS:
+        font = TTFont(args.fonts_dir / donor_name)
         if variable:
             # updateFontNames, or the shipped face keeps the DEFAULT instance's
             # name while carrying wght=400 outlines. NotoSansSC defaults to
@@ -200,10 +253,30 @@ def main() -> int:
         subsetter.subset(font)
         buf = io.BytesIO()
         font.save(buf)
-        out_path = OUT_DIR / out_name
-        out_path.write_bytes(buf.getvalue())
-        total_bytes += len(buf.getvalue())
-        print(f"  {out_name}: {len(take)} codepoints, {len(buf.getvalue()):,} bytes")
+        built.append((OUT_DIR / out_name, buf.getvalue(), take))
+
+    # VERIFY every product in memory before any byte lands on disk: the
+    # subset must actually carry what it claims to have donated.
+    for out_path, data, take in built:
+        got = set(TTFont(io.BytesIO(data)).getBestCmap())
+        shortfall = sorted(take - got)
+        if shortfall:
+            print(f"ERROR: {out_path.name} lost {len(shortfall)} requested "
+                  f"codepoint(s), e.g. U+{shortfall[0]:05X} — nothing written",
+                  file=sys.stderr)
+            return 1
+
+    # PUBLISH atomically per file (the render::stage_and_publish rule in
+    # Python): these bytes are include_bytes! build inputs, and a torn write
+    # either fails the build or panics ab_glyph at startup.
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    total_bytes = 0
+    for out_path, data, take in built:
+        tmp = out_path.with_suffix(".ttf.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, out_path)
+        total_bytes += len(data)
+        print(f"  {out_path.name}: {len(take)} codepoints, {len(data):,} bytes")
 
     if remaining:
         # Not fatal by itself: egui's own bundle may cover these (the Rust test

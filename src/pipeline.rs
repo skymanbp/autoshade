@@ -1778,6 +1778,30 @@ pub fn ensure_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The output-path preflight every PAID command runs BEFORE its first API
+/// call (L09#1): the read-only-library guard, a directory-target refusal,
+/// and the parent directory. An `-o` mistake used to surface only AFTER
+/// the analysis / image call had been billed — `autoshop analyze x.arw -o
+/// <existing dir>` paid for propose+verify, then write_recipe bailed with
+/// nothing saved. Trade-off, stated on purpose: creating the parent
+/// up-front can leave an empty directory behind if the paid call then
+/// fails — that beats burning the call (a REFUSAL leaving an empty dir is
+/// the case main.rs's apply path guards against; here money was spent).
+/// For the GUI/web surfaces this is a provable no-op: their `out` comes
+/// from `unique_out`, which already ensure_parents and create_new-claims
+/// the name.
+pub fn preflight_out(out: &Path, src: &Path) -> Result<()> {
+    guard_readonly(out, src)?;
+    if out.is_dir() {
+        anyhow::bail!(
+            "output target {} is a directory — pass a file path (e.g. {}/result.png)",
+            out.display(),
+            out.display()
+        );
+    }
+    ensure_parent(out)
+}
+
 pub fn stem(p: &Path) -> &str {
     p.file_stem().and_then(|s| s.to_str()).unwrap_or("out")
 }
@@ -2459,5 +2483,52 @@ mod tests {
             "the silent revert must be disclosed: {:?}",
             proposed.rationale
         );
+    }
+
+    /// L09#1: the pre-pay output preflight — a directory target refuses
+    /// with a message naming it (the case that used to bill the analysis
+    /// first and bail at write_recipe after).
+    #[test]
+    fn preflight_out_refuses_a_directory_target() {
+        let root =
+            std::env::temp_dir().join(format!("autoshop-preflight-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // The raw lives in its OWN folder: targeting the raw's folder trips
+        // the read-only-library guard first, which is correct but not what
+        // this test pins — the directory-shape refusal is.
+        let target_dir = root.join("exports");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let raw_dir = root.join("library");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        let raw = raw_dir.join("photo.arw");
+        let e = preflight_out(&target_dir, &raw).unwrap_err().to_string();
+        assert!(e.contains("is a directory"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// L09#1: a missing parent is created up-front (the documented
+    /// trade-off: an empty dir if the paid call then fails beats burning
+    /// the call), and a parent that is a FILE refuses — the exact failure
+    /// that used to land after payment.
+    #[test]
+    fn preflight_out_creates_a_missing_parent_and_refuses_a_file_parent() {
+        let root =
+            std::env::temp_dir().join(format!("autoshop-preflight-par-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Separate library dir — a target under the raw's own folder is the
+        // guard's case, not this test's (see the directory-target test).
+        let raw_dir = root.join("library");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        let raw = raw_dir.join("photo.arw");
+        let target = root.join("exports").join("a").join("c.png");
+        preflight_out(&target, &raw).expect("a missing parent chain is created");
+        assert!(root.join("exports").join("a").is_dir(), "the parent now exists");
+        let f = root.join("f.txt");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(
+            preflight_out(&f.join("x.png"), &raw).is_err(),
+            "a file in the parent chain refuses (create_dir_all fails)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -232,8 +232,10 @@ enum Command {
         /// Skip AI auto-detection (heal only the painted mask).
         #[arg(long)]
         no_auto: bool,
-        /// Heal the full-sensor develop (e.g. 61 MP) instead of a ≤2048px
-        /// develop. Slow; RAW only.
+        /// Retouch at FULL resolution instead of a ≤2048px base — the
+        /// full-sensor develop (e.g. 61 MP) for a RAW, the image itself for
+        /// a baked PNG/TIFF. Slow. WITHOUT it a baked input is thumbnailed
+        /// to 2048px and the saved master IS that thumbnail.
         #[arg(long)]
         full_res: bool,
         /// Output image (default: ./out/<stem>.heal.png).
@@ -404,7 +406,11 @@ fn same_path(a: &Path, b: &Path) -> bool {
 fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style: Option<f32>) -> Result<()> {
     let cfg = Config::load();
     if let Some(o) = &out {
-        pipeline::guard_readonly(o, raw)?;
+        // Full preflight BEFORE the paid propose+verify (L09#1) — an `-o`
+        // pointing at a directory used to bill first and bail at
+        // write_recipe, losing the recipe entirely. write_recipe keeps its
+        // own idempotent checks for the canonical (out = None) branch.
+        pipeline::preflight_out(o, raw)?;
     }
     // CLI analyze always proposes from the original (base = None); the refine /
     // "adjust current edit" path is a web-UI affordance.
@@ -570,16 +576,22 @@ fn auto_cmd(
 ) -> Result<()> {
     let cfg = Config::load();
     // Validate the render target BEFORE the PAID AI call (and before touching
-    // the saved develop): a refused -o used to be rejected only after the
-    // analysis had already been billed.
+    // the saved develop): the old comment CLAIMED this, but only the
+    // read-only guard was hoisted — the directory refusal and the parent
+    // creation still ran post-pay, and an ensure_parent failure lost the
+    // billed analysis with nothing saved (L09#1). The deliverable-format
+    // refusal is hoisted too, mirroring render_to_file's own post-pay
+    // check: `auto -o x.xyz` used to pay, save the develop, then fail the
+    // render (refuse-not-degrade for deliverables).
     // Default to a 16-bit TIFF master (highest fidelity); pass -o foo.jpg for a
     // smaller 8-bit file.
     let out = out.unwrap_or_else(|| default_out(raw, "developed", "tif"));
-    pipeline::guard_readonly(&out, raw)?;
+    pipeline::preflight_out(&out, raw)?;
+    image::ImageFormat::from_path(&out)
+        .with_context(|| format!("unsupported output format {}", out.display()))?;
     let style = style.unwrap_or(cfg.style_strength);
     let (recipe, verdict, _notes) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
     let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
-    ensure_parent(&out)?;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
         .then(|| denoise::DenoiseOpts::from_config(&cfg, denoise_model, denoise_strength.unwrap_or(1.0)));
@@ -1195,5 +1207,46 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+    /// L09#1 ordering: with a nonexistent RAW, a bad `-o` must fail on the
+    /// OUTPUT (pre-pay preflight), never on decode or a paid call.
+    #[test]
+    fn analyze_and_auto_refuse_a_bad_output_before_the_paid_call() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-prepay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is a directory"), "analyze: {e}");
+        let e = auto_cmd(
+            Path::new("no-such.arw"),
+            Some(dir.join("x.xyz")),
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("unsupported output format"), "auto: {e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L09#4: the `heal --full-res` help names the baked-source downsample
+    /// consequence and no longer claims "RAW only" (false since b4c6c30 —
+    /// the flag honours baked sources; WITHOUT it a baked input is
+    /// thumbnailed to 2048px and saved as the pixel master).
+    #[test]
+    fn heal_full_res_help_names_the_baked_downsample() {
+        use clap::CommandFactory as _;
+        let cmd = Cli::command();
+        let heal = cmd.get_subcommands().find(|c| c.get_name() == "heal").expect("heal subcommand");
+        let arg = heal.get_arguments().find(|a| a.get_id() == "full_res").expect("full-res arg");
+        let help = arg.get_long_help().or_else(|| arg.get_help()).expect("help text").to_string();
+        assert!(help.contains("baked"), "{help}");
+        assert!(help.contains("2048"), "{help}");
+        assert!(!help.contains("RAW only"), "{help}");
     }
 }

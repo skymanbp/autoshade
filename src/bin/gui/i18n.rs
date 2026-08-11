@@ -192,7 +192,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "那里该有什么，例如：移除垃圾桶、延展天空"),
     ("Full-res", "全分辨率"),
     ("Composite onto the full-sensor develop (slow, RAW only)", "合成到全分辨率显影上（慢，仅 RAW）"),
-    ("Heal the full-resolution develop (slow, RAW only)", "在全分辨率显影上修复（慢，仅 RAW）"),
+    // L09#4: heal honours --full-res on baked sources too (since b4c6c30);
+    // "RAW only" was fill's semantics, copied and never re-synced. The new
+    // text names the omission consequence the old one hid.
+    ("Heal at full resolution (slow; without it a baked image is saved at 2048px)",
+        "在全分辨率上修复（慢；不勾选时烘焙图会按 2048px 保存为母版）"),
     ("gpt-image render quality — higher looks better and costs more per image",
         "gpt-image 出图质量 — 越高画质越好、单张费用也越高"),
     ("high", "高"),

@@ -1143,4 +1143,41 @@ mod tests {
             "the painted stroke itself must still receive donor pixels"
         );
     }
+    /// L09#4 behaviour half: heal honours --full-res on a BAKED source —
+    /// without it the image is thumbnailed to 2048px and THAT is the saved
+    /// master; with it the source resolution survives. No API is reached
+    /// (auto_detect off, painted mask only).
+    #[test]
+    fn heal_downsamples_a_baked_source_without_full_res() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-heal-fullres-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("big.png");
+        image::RgbImage::from_fn(3000, 2000, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 241) as u8, 128])
+        })
+        .save(&src)
+        .unwrap();
+        // Painted mask: alpha-0 blob on an opaque field (plan_from_mask's
+        // convention), small raster — spot coords are normalised.
+        let mut mask = RgbaImage::from_pixel(100, 66, Rgba([0, 0, 0, 255]));
+        for y in 20..30 {
+            for x in 40..55 {
+                mask.put_pixel(x, y, Rgba([255, 0, 0, 0]));
+            }
+        }
+        let maskp = dir.join("mask.png");
+        mask.save(&maskp).unwrap();
+        let cfg = crate::config::Config::load();
+        let out_small = dir.join("small-out.png");
+        heal(&cfg, &src, Some(&maskp), false, false, &out_small).unwrap();
+        let d = image::image_dimensions(&out_small).unwrap();
+        assert_eq!(d.0.max(d.1), 2048, "without --full-res the saved master IS the 2048px thumbnail");
+        let out_full = dir.join("full-out.png");
+        heal(&cfg, &src, Some(&maskp), false, true, &out_full).unwrap();
+        let d = image::image_dimensions(&out_full).unwrap();
+        assert_eq!((d.0, d.1), (3000, 2000), "with --full-res the source resolution survives");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
