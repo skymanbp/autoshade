@@ -26,11 +26,17 @@ pub(crate) enum ToastKind {
 }
 
 impl Toast {
+    /// Display time scales with READING time (阶段5 手感): a per-kind base
+    /// plus 35 ms per char beyond the first 40, capped — a two-line path
+    /// list used to vanish before anyone finished it, while "Saved" never
+    /// needed its full window. Chars, not bytes: a hanzi is one read unit.
     pub(crate) fn ttl(&self) -> Duration {
-        match self.kind {
-            ToastKind::Success => Duration::from_secs(4),
-            ToastKind::Error => Duration::from_secs(8),
-        }
+        let extra = self.text.chars().count().saturating_sub(40) as u64 * 35;
+        let (base, cap) = match self.kind {
+            ToastKind::Success => (4_000, 10_000),
+            ToastKind::Error => (8_000, 14_000),
+        };
+        Duration::from_millis((base + extra).min(cap))
     }
 }
 

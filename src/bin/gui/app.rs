@@ -211,6 +211,12 @@ pub(crate) struct AutoshopApp {
     // vis_px/disp/ppp exist (canvas after_view, each frame) so the `1` key
     // can act at frame start, before layout. 1.0 until a first frame lands.
     pub(crate) zoom_one_to_one: f32,
+    // Where the zoom is HEADING: discrete jumps (Fit/1:1/keys/double-click)
+    // set only this and `zoom` glides there over ~120 ms (step_zoom_glide);
+    // continuous inputs (scroll) and photo opens write both, staying
+    // instant. Pan is never animated — view_uv's per-frame clamp re-solves
+    // it against the gliding zoom, which eases it for free.
+    pub(crate) zoom_target: f32,
     // Last frame's controls-panel rect: ↑/↓ walk the library EXCEPT over
     // this panel, where the same keys nudge a hovered slider.
     pub(crate) controls_rect: Option<egui::Rect>,
@@ -648,16 +654,20 @@ impl AutoshopApp {
             // Zoom keys act on the open photo's canvas. Fit/1:1 mirror their
             // buttons exactly (1:1 via the per-frame zoom_one_to_one twin);
             // +/− step about the view centre — pan holds, view_uv reclamps.
+            // All three set the TARGET only: the glide in update() carries
+            // `zoom` there, and +/− compound on the target so a key roll
+            // accumulates instead of fighting the animation.
             if self.src_path.is_some() {
                 if do_fit {
-                    self.zoom = 1.0;
+                    self.zoom_target = 1.0;
                     self.pan = egui::vec2(0.5, 0.5);
                 }
                 if do_one {
-                    self.zoom = self.zoom_one_to_one.clamp(1.0, 12.0);
+                    self.zoom_target = self.zoom_one_to_one.clamp(1.0, 12.0);
                 }
                 if zoom_key != 0.0 {
-                    self.zoom = (self.zoom * 1.25f32.powi(zoom_key as i32)).clamp(1.0, 12.0);
+                    self.zoom_target =
+                        (self.zoom_target * 1.25f32.powi(zoom_key as i32)).clamp(1.0, 12.0);
                 }
             }
             // Ctrl+C mirrors ⎘ Copy recipe (same guards + the pending-rename
@@ -1343,6 +1353,7 @@ impl Default for AutoshopApp {
             zoom: 1.0,
             pan: egui::vec2(0.5, 0.5),
             zoom_one_to_one: 1.0,
+            zoom_target: 1.0,
             controls_rect: None,
             crop_mode: false,
             crop_aspect: 0,
@@ -1462,6 +1473,13 @@ impl eframe::App for AutoshopApp {
         let hover_prev = self.hover_mask.take();
 
         self.upd_shortcuts(ctx);
+        // Glide the zoom toward its target BEFORE any layout reads it, so
+        // the canvas, the % readout and the pan clamp all see one value.
+        if self.zoom != self.zoom_target {
+            let dt = ctx.input(|i| i.stable_dt);
+            self.zoom = glide_step(self.zoom, self.zoom_target, dt);
+            ctx.request_repaint(); // keep stepping while in flight
+        }
         self.upd_dropped_and_title(ctx);
 
         self.upd_top_bar(ctx);
@@ -1524,38 +1542,63 @@ impl eframe::App for AutoshopApp {
             );
         }
 
-        // Transient toasts (bottom-right). Errors linger longer than successes.
+        // Transient toasts (bottom-right). Errors linger longer than
+        // successes, long texts longer than short ones (Toast::ttl), a click
+        // dismisses early, and the last 300 ms fade instead of blinking out.
         self.toasts.retain(|t| t.born.elapsed() < t.ttl());
         if !self.toasts.is_empty() {
+            let mut dismiss: Option<usize> = None;
+            let mut fading = false;
             egui::Area::new(egui::Id::new("toasts"))
                 .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -40.0))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     let c = self.theme.colors();
-                    for t in &self.toasts {
+                    for (idx, t) in self.toasts.iter().enumerate() {
                         let (bg, fg) = match t.kind {
                             ToastKind::Success => (c.toast_ok_bg, c.toast_ok_fg),
                             ToastKind::Error => (c.toast_err_bg, c.toast_err_fg),
                         };
+                        let left = t.ttl().saturating_sub(t.born.elapsed());
+                        let fade = (left.as_millis() as f32 / 300.0).min(1.0);
+                        fading |= fade < 1.0;
                         // Elevated pill: the theme's popup shadow + a faint
                         // text-tinted hairline lift it off the photo — a flat
                         // fill over arbitrary canvas content had no edge at
                         // all where the photo matched the toast colour.
-                        egui::Frame::none()
-                            .fill(bg)
-                            .stroke(egui::Stroke::new(1.0, fg.gamma_multiply(0.35)))
-                            .shadow(ui.visuals().popup_shadow)
+                        let mut shadow = ui.visuals().popup_shadow;
+                        shadow.color = shadow.color.gamma_multiply(fade);
+                        let r = egui::Frame::none()
+                            .fill(bg.gamma_multiply(fade))
+                            .stroke(egui::Stroke::new(1.0, fg.gamma_multiply(0.35 * fade)))
+                            .shadow(shadow)
                             .rounding(RADIUS_MD)
                             .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                             .show(ui, |ui| {
                                 ui.set_max_width(420.0);
-                                ui.label(egui::RichText::new(&t.text).color(fg));
-                            });
+                                ui.label(egui::RichText::new(&t.text).color(fg.gamma_multiply(fade)));
+                            })
+                            .response
+                            .interact(egui::Sense::click());
+                        if r.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if r.clicked() {
+                            dismiss = Some(idx);
+                        }
                         ui.add_space(SPACE_MD);
                     }
                 });
-            // Keep repainting so expiry doesn't wait for the next input event.
-            ctx.request_repaint_after(Duration::from_millis(200));
+            if let Some(i) = dismiss {
+                self.toasts.remove(i);
+            }
+            // Keep repainting so expiry doesn't wait for the next input
+            // event — per frame while a fade is running, else a coarse poll.
+            if fading {
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
         }
 
         // Land a finished edit gesture (slider release, AI Analyze, Reset) into

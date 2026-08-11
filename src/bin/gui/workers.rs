@@ -1201,6 +1201,7 @@ impl AutoshopApp {
                             self.region_drag = None;
                             // View + tool state is per-photo.
                             self.zoom = 1.0;
+                            self.zoom_target = 1.0; // instant — no glide across photos
                             self.pan = egui::vec2(0.5, 0.5);
                             self.disarm_tools();
                             // The \-latch is per-photo transient state:

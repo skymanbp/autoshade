@@ -406,14 +406,15 @@ impl AutoshopApp {
                     // Same ceiling as the render path (view_uv clamps at 12) —
                     // an unclamped value desynced zoom/pan math from the view.
                     // ppp: 1:1 means one texel per PHYSICAL pixel — the value
-                    // computed above, shared with the `1` key.
-                    self.zoom = self.zoom_one_to_one;
+                    // computed above, shared with the `1` key. Target only:
+                    // the update() glide carries `zoom` there.
+                    self.zoom_target = self.zoom_one_to_one;
                 }
                 // "Fit" is natural language, unlike its "1:1" sibling — it
                 // must route through `tr` like every user-facing literal
                 // (the i18n module contract; the audit now flags bypasses).
                 if ui.small_button(tr(lang, "Fit")).on_hover_text(tr(lang, "Fit the whole image to the canvas (double-click the image to toggle; key: 0)")).clicked() {
-                    self.zoom = 1.0;
+                    self.zoom_target = 1.0; // glides; the pan clamp eases the rest
                     self.pan = egui::vec2(0.5, 0.5);
                 }
                 if ui
@@ -512,7 +513,11 @@ impl AutoshopApp {
                     self.pan.x - half + fx * 2.0 * half,
                     self.pan.y - half + fy * 2.0 * half,
                 );
+                // Scroll stays INSTANT (it is already incremental, and the
+                // cursor-anchored pan re-solve needs the immediate zoom) —
+                // the target follows so no stale glide fights the wheel.
                 self.zoom = (self.zoom * (scroll * 0.003).exp()).clamp(1.0, 12.0);
+                self.zoom_target = self.zoom;
                 let nh = 0.5 / self.zoom;
                 self.pan = q - egui::vec2((fx - 0.5) * 2.0 * nh, (fy - 0.5) * 2.0 * nh);
             }
@@ -520,14 +525,18 @@ impl AutoshopApp {
         let tool_active = self.tool_armed();
         // Double-click toggles fit ↔ 1:1 (preview pixels) — but never while a
         // canvas tool is armed: a quick second tap inside brush/crop/pick used
-        // to teleport the view instead of reaching the tool.
+        // to teleport the view instead of reaching the tool. Targets only —
+        // the update() glide replaces the old teleport with a ~120 ms ease.
         if resp.double_clicked() && !tool_active {
-            if self.zoom > 1.01 {
-                self.zoom = 1.0;
+            if self.zoom_target > 1.01 {
+                self.zoom_target = 1.0;
                 self.pan = egui::vec2(0.5, 0.5);
             } else {
-                // Same physical-pixel 1:1 target as the button above.
-                self.zoom = (vis_px.x / (disp.x * ppp)).clamp(1.0, 12.0);
+                // Same physical-pixel 1:1 target as the button above — the
+                // zoom-invariant form computed at the top of this fn (the
+                // old `vis_px.x / (disp.x*ppp)` was only right at zoom≈1,
+                // which the pre-glide branch guard used to guarantee).
+                self.zoom_target = self.zoom_one_to_one;
             }
             // The pair's FIRST release cleared the AI region through the
             // plain-click path — a double-click means "toggle zoom", so put

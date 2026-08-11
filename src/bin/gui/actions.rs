@@ -710,6 +710,7 @@ impl AutoshopApp {
         self.disarm_tools();
         self.clone_src = None; // unlike a mere disarm, a variant switch drops the sample
         self.zoom = 1.0;
+        self.zoom_target = 1.0; // instant — a swap must not glide from the old view
         self.pan = egui::vec2(0.5, 0.5);
         self.verdict = None;
         self.dirty = true; // re-develop the newly active variant

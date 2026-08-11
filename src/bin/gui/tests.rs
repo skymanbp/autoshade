@@ -2662,9 +2662,11 @@
     }
 
     /// 阶段5 手感: the zoom keys are real state transitions, not just
-    /// cheat-sheet rows — `+` steps ×1.25 (clamped ≤12), `0` refits and
-    /// recentres, `1` jumps to the canvas-computed 1:1 twin. Driven through
-    /// a headless frame so the whole tier-C gate chain (no transient, no
+    /// cheat-sheet rows — `+` steps the TARGET ×1.25 (clamped ≤12, and it
+    /// compounds so a key roll accumulates), `0` refits and recentres, `1`
+    /// jumps to the canvas-computed 1:1 twin; the live zoom then GLIDES to
+    /// the target (util::glide_step, exercised below). Driven through a
+    /// headless frame so the whole tier-C gate chain (no transient, no
     /// focus) is exercised, not a hand-called helper.
     #[test]
     fn zoom_keys_step_fit_and_jump_to_one_to_one() {
@@ -2679,6 +2681,7 @@
             src_path: Some(PathBuf::from("x.png")),
             zoom_one_to_one: 4.0, // what the canvas computed last frame
             zoom: 2.0,
+            zoom_target: 2.0,
             pan: egui::vec2(0.7, 0.7),
             ..Default::default()
         };
@@ -2690,21 +2693,77 @@
             let _ = ctx.run(input, |ctx| app.upd_shortcuts(ctx));
         };
         run_key(&mut app, egui::Key::Plus);
-        assert!((app.zoom - 2.5).abs() < 1e-4, "`+` steps ×1.25, got {}", app.zoom);
+        assert!((app.zoom_target - 2.5).abs() < 1e-4, "`+` retargets ×1.25, got {}", app.zoom_target);
         run_key(&mut app, egui::Key::Minus);
-        assert!((app.zoom - 2.0).abs() < 1e-4, "`-` steps back, got {}", app.zoom);
+        assert!((app.zoom_target - 2.0).abs() < 1e-4, "`-` steps back, got {}", app.zoom_target);
         run_key(&mut app, egui::Key::Num1);
-        assert_eq!(app.zoom, 4.0, "`1` jumps to the stored 1:1 zoom");
+        assert_eq!(app.zoom_target, 4.0, "`1` targets the stored 1:1 zoom");
         run_key(&mut app, egui::Key::Num0);
-        assert_eq!(app.zoom, 1.0, "`0` refits");
-        assert_eq!(app.pan, egui::vec2(0.5, 0.5), "`0` recentres the pan");
+        assert_eq!(app.zoom_target, 1.0, "`0` refits");
+        assert_eq!(app.pan, egui::vec2(0.5, 0.5), "`0` recentres the pan (instant)");
         // Ceiling: from 11× one `+` press must stop at the 12× clamp.
-        app.zoom = 11.0;
+        app.zoom_target = 11.0;
         run_key(&mut app, egui::Key::Plus);
-        assert_eq!(app.zoom, 12.0, "zoom keys respect the 12x ceiling");
+        assert_eq!(app.zoom_target, 12.0, "zoom keys respect the 12x ceiling");
         // No photo → the keys are inert (same gate as the canvas buttons).
         app.src_path = None;
-        app.zoom = 3.0;
+        app.zoom_target = 3.0;
         run_key(&mut app, egui::Key::Num0);
-        assert_eq!(app.zoom, 3.0, "no photo: zoom keys must not act");
+        assert_eq!(app.zoom_target, 3.0, "no photo: zoom keys must not act");
+    }
+
+    /// 阶段5 手感: the glide that carries `zoom` to `zoom_target` must move
+    /// monotonically, never overshoot, terminate EXACTLY on the target
+    /// (snap inside 1e-3 — a forever-almost-there zoom would repaint every
+    /// frame for good), and settle in ~120 ms at 60 fps. Both directions.
+    #[test]
+    fn the_zoom_glide_converges_monotonically_and_terminates() {
+        for (from, to) in [(1.0f32, 8.0f32), (8.0, 1.0)] {
+            let mut z = from;
+            let mut frames = 0;
+            while z != to {
+                let next = glide_step(z, to, 1.0 / 60.0);
+                assert!(
+                    (to - next).abs() <= (to - z).abs(),
+                    "{from}->{to}: overshoot at frame {frames}: {z} -> {next}"
+                );
+                assert!(next != z, "{from}->{to}: stalled at {z} (frame {frames})");
+                z = next;
+                frames += 1;
+                assert!(frames < 120, "{from}->{to}: no convergence in 2 s of frames");
+            }
+            assert!(frames <= 30, "{from}->{to}: settled in {frames} frames — the ~120 ms promise");
+        }
+        // A pathological dt (window drag hitch) must not overshoot either.
+        assert_eq!(glide_step(2.0, 3.0, 10.0), glide_step(2.0, 3.0, 0.05), "dt is clamped");
+    }
+
+    /// 阶段5 手感: toast time scales with READING time — chars past the
+    /// first 40 buy 35 ms each, capped per kind; short texts keep their
+    /// historical 4 s / 8 s exactly, and a hanzi counts as one char, not
+    /// three bytes.
+    #[test]
+    fn toast_ttl_scales_with_length_and_caps() {
+        let mk = |text: &str, kind: ToastKind| Toast {
+            text: text.into(),
+            kind,
+            born: Instant::now(),
+        };
+        assert_eq!(mk("Saved", ToastKind::Success).ttl(), Duration::from_millis(4_000));
+        assert_eq!(mk("boom", ToastKind::Error).ttl(), Duration::from_millis(8_000));
+        let fifty = "x".repeat(50);
+        assert_eq!(
+            mk(&fifty, ToastKind::Success).ttl(),
+            Duration::from_millis(4_000 + 10 * 35),
+            "10 chars past 40 buy 350 ms"
+        );
+        let hanzi = "字".repeat(50); // 150 BYTES — must still be 50 chars
+        assert_eq!(
+            mk(&hanzi, ToastKind::Success).ttl(),
+            Duration::from_millis(4_000 + 10 * 35),
+            "chars, not bytes"
+        );
+        let epic = "y".repeat(1000);
+        assert_eq!(mk(&epic, ToastKind::Success).ttl(), Duration::from_millis(10_000), "success cap");
+        assert_eq!(mk(&epic, ToastKind::Error).ttl(), Duration::from_millis(14_000), "error cap");
     }
