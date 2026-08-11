@@ -251,9 +251,14 @@ pub fn fit_recipe_zoned(
             attach_zones(src, target, &mut report, &src_mask, &tgt_mask, mask_path);
         }
         Err(e) => {
-            report.recipe.rationale.push_str(&format!(
-                " Zoned sky fit unavailable ({e:#}) — global fit only.",
-            ));
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::ZONED_UNAVAILABLE,
+                    vec![("e", format!("{e:#}"))],
+                ),
+            );
         }
     }
     report
@@ -358,12 +363,17 @@ fn attach_zones(
     if !(MIN_ZONE_SHARE..=1.0 - MIN_ZONE_SHARE).contains(&s_share)
         || !(MIN_ZONE_SHARE..=1.0 - MIN_ZONE_SHARE).contains(&t_share)
     {
-        report.recipe.rationale.push_str(&format!(
-            " Zoned fit skipped: no usable sky partition (sky covers {:.0}% \
-             of the source frame, {:.0}% of the target's).",
-            s_share * 100.0,
-            t_share * 100.0,
-        ));
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONED_NO_PARTITION,
+                vec![
+                    ("s", format!("{:.0}", s_share * 100.0)),
+                    ("t", format!("{:.0}", t_share * 100.0)),
+                ],
+            ),
+        );
         std::fs::remove_file(mask_path).ok();
         return;
     }
@@ -402,12 +412,18 @@ fn attach_one_zone(
     let ms = zone_moments(&cur_px, sw);
     let mt = zone_moments(tgt_px, tw);
     if ms.share < MIN_ZONE_SHARE || mt.share < MIN_ZONE_SHARE {
-        report.recipe.rationale.push_str(&format!(
-            " The {label} zone covers too little of the frame (source {:.0}%, \
-             target {:.0}%) — skipped.",
-            ms.share * 100.0,
-            mt.share * 100.0,
-        ));
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_TOO_SMALL,
+                vec![
+                    ("label", label.to_string()),
+                    ("s", format!("{:.0}", ms.share * 100.0)),
+                    ("t", format!("{:.0}", mt.share * 100.0)),
+                ],
+            ),
+        );
         return false;
     }
     let d = fit_zone_dials(&ms, &mt);
@@ -481,45 +497,62 @@ fn attach_one_zone(
     {
         let m = report.recipe.masks.last().expect("zone mask just pushed");
         let g = m.color_gains.unwrap_or([1.0; 3]);
-        report.recipe.rationale.push_str(&format!(
-            " Zoned {label} correction attached ({label}-to-{label} moments → \
-             local exposure {:+.2} EV, colour gains [{:.2} {:.2} {:.2}], \
-             saturation {:+.0}): zone residual {:.3} → {:.3}. The correction \
-             is a BITMAP mask — rendered in-app; the Lightroom sidecar \
-             carries the global fit only (classic XMP cannot hold raster \
-             masks).",
-            m.exposure_ev, g[0], g[1], g[2], m.saturation, zone_before, zone_after,
-        ));
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_ATTACHED,
+                vec![
+                    ("label", label.to_string()),
+                    ("ev", format!("{:+.2}", m.exposure_ev)),
+                    ("g0", format!("{:.2}", g[0])),
+                    ("g1", format!("{:.2}", g[1])),
+                    ("g2", format!("{:.2}", g[2])),
+                    ("sat", format!("{:+.0}", m.saturation)),
+                    ("before", format!("{zone_before:.3}")),
+                    ("after", format!("{zone_after:.3}")),
+                ],
+            ),
+        );
         // Honest composition note: when the zone covers very different frame
         // shares on the two sides, the GLOBAL distributions cannot fully
         // reconcile no matter how well the zone matches (the real pair's
         // sky: 7.5% vs 22.6%).
         let (lo, hi) = (ms.share.min(mt.share), ms.share.max(mt.share));
         if hi > 2.0 * lo {
-            report.recipe.rationale.push_str(&format!(
-                " Note: the {label} zone covers {:.0}% of the source frame \
-                 but {:.0}% of the target's — the compositions differ, so the \
-                 overall distribution residual stays where the global fit \
-                 left it.",
-                ms.share * 100.0,
-                mt.share * 100.0,
-            ));
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::ZONE_SHARE_MISMATCH,
+                    vec![
+                        ("label", label.to_string()),
+                        ("s", format!("{:.0}", ms.share * 100.0)),
+                        ("t", format!("{:.0}", mt.share * 100.0)),
+                    ],
+                ),
+            );
         }
         report.err_after = zoned_err;
         report.recipe.confidence = (1.0 - zoned_err * 6.0).clamp(0.25, 0.95);
         true
     } else {
         report.recipe.masks.pop();
-        report.recipe.rationale.push_str(&format!(
-            " Zoned {label} correction dropped: zone residual {:.3} → {:.3} \
-             (needs ≤ {:.0}% of the original) with frame-global drift \
-             {:+.3} (tolerance {:+.3}).",
-            zone_before,
-            zone_after,
-            ZONE_ACCEPT_RATIO * 100.0,
-            zoned_err - report.err_after,
-            ZONE_GLOBAL_REGRESSION_TOL,
-        ));
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_DROPPED,
+                vec![
+                    ("label", label.to_string()),
+                    ("before", format!("{zone_before:.3}")),
+                    ("after", format!("{zone_after:.3}")),
+                    ("ratio", format!("{:.0}", ZONE_ACCEPT_RATIO * 100.0)),
+                    ("drift", format!("{:+.3}", zoned_err - report.err_after)),
+                    ("tol", format!("{ZONE_GLOBAL_REGRESSION_TOL:+.3}")),
+                ],
+            ),
+        );
         false
     }
 }

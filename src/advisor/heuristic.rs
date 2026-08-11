@@ -36,6 +36,20 @@ impl Advisor for HeuristicProposer {
         _guidance: Option<&str>,
         _hint: Option<&str>,
     ) -> Result<EditRecipe, AdvisorError> {
+        self.propose_noted(hist).map(|(r, _)| r)
+    }
+}
+
+impl HeuristicProposer {
+    /// The concrete entry `produce_recipe` calls (it holds this type, not a
+    /// `dyn Advisor`): the recipe PLUS its rationale as a typed note, so the
+    /// GUI can render the baseline explanation in the session language. The
+    /// recipe's `rationale` string is `render_one(&note)` byte-for-byte —
+    /// the L12#2B suffix contract with an empty prose prefix.
+    pub fn propose_noted(
+        &self,
+        hist: &Histogram,
+    ) -> Result<(EditRecipe, crate::rationale::Note), AdvisorError> {
         let total: u64 = hist.luma.iter().map(|&v| v as u64).sum::<u64>().max(1);
         let weighted: u64 = hist
             .luma
@@ -80,19 +94,25 @@ impl Advisor for HeuristicProposer {
         // numbers it quotes (temper soft-caps recovery strength), and a
         // rationale that contradicts the recipe's own values reads as a bug —
         // a real verifier run flagged exactly that mismatch.
-        let why = match &self.fallback_reason {
+        use crate::rationale::{keys, render_one, Note};
+        let mut args = vec![
+            ("mean", format!("{mean:.0}")),
+            ("clip_b", format!("{:.1}", hist.clip_black_pct)),
+            ("clip_w", format!("{:.1}", hist.clip_white_pct)),
+            ("ev", format!("{:+.1}", r.exposure_ev)),
+            ("hl", format!("{:.0}", r.highlights)),
+            ("sh", format!("{:.0}", r.shadows)),
+        ];
+        let note = match &self.fallback_reason {
             Some(e) => {
                 let e = super::BoundedUntrustedText::new(e, 512, &[]);
-                format!("AI vision unavailable (untrusted provider diagnostic): {e}")
+                args.push(("e", e.into_string()));
+                Note::new(keys::HEURISTIC_UNAVAILABLE, args)
             }
-            None => "no AI vision; OPENAI_API_KEY unset".to_string(),
+            None => Note::new(keys::HEURISTIC_NO_KEY, args),
         };
-        r.rationale = format!(
-            "Heuristic baseline ({why}). mean_luma={mean:.0}/255, \
-             clip black/white={:.1}%/{:.1}% → exposure {:+.1}EV, highlights {:.0}, shadows {:.0}.",
-            hist.clip_black_pct, hist.clip_white_pct, r.exposure_ev, r.highlights, r.shadows,
-        );
-        Ok(r)
+        r.rationale = render_one(&note);
+        Ok((r, note))
     }
 }
 

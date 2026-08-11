@@ -588,6 +588,7 @@ impl AutoshopApp {
         let vbase = v.base.clone();
         let vorigin = v.origin.clone();
         self.rationale = self.recipe.rationale.clone();
+        self.rationale_notes.clear(); // variant recipes carry no typed notes
         // A DISK-restored baked variant (cold strip restore) carries its
         // origin but no decoded base. The master is FULL resolution — a
         // 61 MP TIFF takes seconds — and this runs on the UI thread, so the
@@ -1258,6 +1259,10 @@ impl AutoshopApp {
 
     pub(crate) fn resync_recipe_display(&mut self) {
         self.rationale = self.recipe.rationale.clone();
+        // Typed notes described the PREVIOUS rationale — a swap without a
+        // clear would render a stale zh text over a different develop. The
+        // landings that produce fresh notes install them AFTER this call.
+        self.rationale_notes.clear();
         self.verdict = None;
         // A wholesale recipe swap (undo/redo/Reset/version load/AI apply)
         // disarms EVERY canvas tool — an armed index-carrying tool would fire
@@ -1997,7 +2002,7 @@ impl AutoshopApp {
         };
         self.spawn_worker(
             move || {
-                let res = (|| -> anyhow::Result<(EditRecipe, String, bool)> {
+                let res = (|| -> anyhow::Result<FitOutcome> {
                     let target = autoshop::decode::load_image(&tgt)?;
                     // The gate runs at PERSIST time (below), not up front:
                     // a pre-fit snapshot left the whole multi-minute
@@ -2028,19 +2033,13 @@ impl AutoshopApp {
                         }
                         _ => autoshop::fit::fit_recipe(&base, &target),
                     };
-                    let mut note = trf(
-                        lang,
-                        "Reverse-fit done: look residual {before}→{after} · created a「Reverse-fit」variant (editable / XMP / full-res)",
-                        &[
-                            ("before", &format!("{:.3}", rep.err_before)),
-                            ("after", &format!("{:.3}", rep.err_after)),
-                        ],
-                    );
+                    // FACTS, not prose (L12#4): the landing renders these
+                    // with the language live when the result LANDS — the old
+                    // trf calls here used the language captured at spawn,
+                    // minutes stale after a segmentation run.
+                    let mut status: Vec<FitNote> = Vec::new();
                     if !rep.recipe.masks.is_empty() {
-                        note.push_str(tr(
-                            lang,
-                            " · includes sky-zone correction (adjustable in the mask panel; XMP carries the global part only)",
-                        ));
+                        status.push(FitNote::IncludesSkyZone);
                     }
                     let mut persisted = false;
                     if let Some(p) = &src_path {
@@ -2092,11 +2091,7 @@ impl AutoshopApp {
                                 // already succeeded — same degrade shape as
                                 // the backup-gate branch below: the fit lands
                                 // on the canvas unsaved.
-                                note.push_str(&trf(
-                                    lang,
-                                    " · NOT persisted: saving the develop failed ({err}) — Ctrl+S to save explicitly",
-                                    &[("err", &e.to_string())],
-                                ));
+                                status.push(FitNote::NotPersistedCommit(e.to_string()));
                               }
                               Ok(()) => {
                                 persisted = true;
@@ -2109,53 +2104,43 @@ impl AutoshopApp {
                                     // must agree that it saved.
                                     match autoshop::pipeline::write_xmp(p, &rep.recipe) {
                                         Ok((x, merge_note)) => {
-                                            note.push_str(&format!(" · XMP → {}", x.display()));
+                                            status.push(FitNote::XmpWritten(x));
                                             // Regenerated-not-merged: same
                                             // disclosure as Ctrl+S.
                                             if let Some(m) = merge_note {
-                                                note.push_str(&format!(" · ⚠ {m}"));
+                                                status.push(FitNote::XmpMergeNote(m));
                                             }
                                         }
                                         Err(e) => {
-                                            note.push_str(" · ");
-                                            note.push_str(&trf(
-                                                lang,
-                                                "recipe saved — but the Lightroom XMP failed: {err}",
-                                                &[("err", &e.to_string())],
-                                            ));
+                                            status.push(FitNote::XmpFailed(e.to_string()));
                                         }
                                     }
                                 }
                                 if let Some(n) = backed {
-                                    note.push_str(&trf(
-                                        lang,
-                                        " · previous save backed up as v{n}",
-                                        &[("n", &n.to_string())],
-                                    ));
+                                    status.push(FitNote::BackedUpAs(*n));
                                 }
                               }
                               }
                             }
                             Err(e) => {
-                                note.push_str(&trf(
-                                    lang,
-                                    " · NOT persisted: backing up your existing save failed ({err}) — Ctrl+S to save explicitly",
-                                    &[("err", &e.to_string())],
-                                ));
+                                status.push(FitNote::NotPersistedBackup(e.to_string()));
                             }
                         }
                                 Ok(())
                             },
                         );
                         if let Err(e) = persist {
-                            note.push_str(&trf(
-                                lang,
-                                " · NOT persisted: the develop store could not be locked ({err}) — Ctrl+S to save explicitly",
-                                &[("err", &e.to_string())],
-                            ));
+                            status.push(FitNote::NotPersistedLock(e.to_string()));
                         }
                     }
-                    Ok((rep.recipe, note, persisted))
+                    Ok(FitOutcome {
+                        err_before: rep.err_before,
+                        err_after: rep.err_after,
+                        rationale_notes: rep.notes,
+                        recipe: rep.recipe,
+                        status,
+                        persisted,
+                    })
                 })();
                 Msg::Fitted(Box::new(res))
             },

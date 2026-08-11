@@ -969,6 +969,7 @@ impl AutoshopApp {
                             }
                             self.recipe = recipe.clone();
                             self.rationale = recipe.rationale.clone();
+                            self.rationale_notes.clear(); // disk restore carries no typed notes
                             self.variants = vec![Variant {
                                 // A PENDING master keeps its stashed kind: the
                                 // Fitted-or-Original collapse renamed a still-
@@ -1229,7 +1230,18 @@ impl AutoshopApp {
 
     /// `Msg::Analyzed` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_analyzed(&mut self, lang: Lang, epoch: u64, boxed: Box<anyhow::Result<(EditRecipe, autoshop::advisor::Verdict)>>) {
+    fn on_analyzed(
+        &mut self,
+        lang: Lang,
+        epoch: u64,
+        boxed: Box<
+            anyhow::Result<(
+                EditRecipe,
+                autoshop::advisor::Verdict,
+                Vec<autoshop::rationale::Note>,
+            )>,
+        >,
+    ) {
                     // Cleared whatever the epoch: the wire is free either way,
                     // and this is what re-arms the Analyze button.
                     self.analyze_inflight = false;
@@ -1243,7 +1255,7 @@ impl AutoshopApp {
                     }
                     self.gen_cancel = None;
                     match *boxed {
-                    Ok((recipe, verdict)) => {
+                    Ok((recipe, verdict, rationale_notes)) => {
                         // Sliders stay live while Analyze runs (10-30 s):
                         // flush a rename typed during the wait (the resync
                         // below clears the buffer — unflushed, the rename
@@ -1282,8 +1294,10 @@ impl AutoshopApp {
                         }
                         self.recipe = canvas;
                         // Wholesale replacement: disarm index-carrying tools +
-                        // refresh rationale, THEN install the fresh verdict.
+                        // refresh rationale, THEN install the fresh verdict
+                        // and the typed notes (resync cleared both).
                         self.resync_recipe_display();
+                        self.rationale_notes = rationale_notes;
                         self.verdict =
                             Some((verdict.decision.clone(), verdict.reasons.clone()));
                         self.dirty = true;
@@ -1848,21 +1862,66 @@ impl AutoshopApp {
                     }
     }
 
-    /// `Msg::Fitted` landing — body extracted verbatim from the
-    /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_fitted(&mut self, ctx: &egui::Context, lang: Lang, boxed: Box<anyhow::Result<(EditRecipe, String, bool)>>) {
+    /// Render one reverse-fit landing fact in the CURRENT language — the
+    /// worker returns [`FitNote`] facts, and this runs at landing time, so
+    /// a language switch during the multi-minute fit renders fresh (L12#4).
+    fn render_fit_note(lang: Lang, n: &FitNote) -> String {
+        match n {
+            FitNote::IncludesSkyZone => tr(
+                lang,
+                " · includes sky-zone correction (adjustable in the mask panel; XMP carries the global part only)",
+            )
+            .to_string(),
+            FitNote::NotPersistedCommit(e) => trf(
+                lang,
+                " · NOT persisted: saving the develop failed ({err}) — Ctrl+S to save explicitly",
+                &[("err", e)],
+            ),
+            FitNote::XmpWritten(p) => {
+                trf(lang, " · XMP → {path}", &[("path", &p.display().to_string())])
+            }
+            FitNote::XmpMergeNote(m) => trf(lang, " · ⚠ {note}", &[("note", m)]),
+            FitNote::XmpFailed(e) => {
+                let mut s = String::from(" · ");
+                s.push_str(&trf(
+                    lang,
+                    "recipe saved — but the Lightroom XMP failed: {err}",
+                    &[("err", e)],
+                ));
+                s
+            }
+            FitNote::BackedUpAs(n) => {
+                trf(lang, " · previous save backed up as v{n}", &[("n", &n.to_string())])
+            }
+            FitNote::NotPersistedBackup(e) => trf(
+                lang,
+                " · NOT persisted: backing up your existing save failed ({err}) — Ctrl+S to save explicitly",
+                &[("err", e)],
+            ),
+            FitNote::NotPersistedLock(e) => trf(
+                lang,
+                " · NOT persisted: the develop store could not be locked ({err}) — Ctrl+S to save explicitly",
+                &[("err", e)],
+            ),
+        }
+    }
+
+    /// `Msg::Fitted` landing — facts arrive typed and are rendered HERE
+    /// with the landing-time language (L12#4); the rationale's typed notes
+    /// install after `push_variant`'s reload cleared them (L12#2B).
+    fn on_fitted(&mut self, ctx: &egui::Context, lang: Lang, boxed: Box<anyhow::Result<FitOutcome>>) {
                 match *boxed {
                     // Either way the worker may have persisted a recipe.json
                     // (an Err can land after that write) — recompute badges.
-                    Ok((recipe, note, persisted)) => {
+                    Ok(out) => {
                         self.edited_badge.clear();
                         // Advance the ● baseline ONLY when the store actually
                         // holds the fit. A backup-gate refusal means nothing
                         // was written: leaving the baseline alone keeps
                         // ● unsaved lit and lets nav_stash protect the fit —
                         // the ordinary unsaved-edit path takes over.
-                        if persisted {
-                            self.saved_recipe = recipe.clone();
+                        if out.persisted {
+                            self.saved_recipe = out.recipe.clone();
                             self.nav_stash.remove(
                                 &self.src_path.clone().unwrap_or_default(),
                             );
@@ -1873,6 +1932,17 @@ impl AutoshopApp {
                             self.pixels_on_disk = None;
                         }
                         self.refresh_versions();
+                        let mut note = trf(
+                            lang,
+                            "Reverse-fit done: look residual {before}→{after} · created a「Reverse-fit」variant (editable / XMP / full-res)",
+                            &[
+                                ("before", &format!("{:.3}", out.err_before)),
+                                ("after", &format!("{:.3}", out.err_after)),
+                            ],
+                        );
+                        for n in &out.status {
+                            note.push_str(&Self::render_fit_note(lang, n));
+                        }
                         // The generated look, solved back into an editable recipe,
                         // becomes a NEW「反推」variant: base = the source neutral
                         // (same negative as Original), look carried by the recipe —
@@ -1881,13 +1951,16 @@ impl AutoshopApp {
                         self.push_variant(
                             Variant {
                                 kind: VariantKind::Fitted,
-                                recipe,
+                                recipe: out.recipe,
                                 base: None,
                                 origin: None,
                                 thumb: None,
                             },
                             ctx,
                         );
+                        // AFTER the variant load (which cleared them): the
+                        // fit rationale's typed copy, for draw-time zh.
+                        self.rationale_notes = out.rationale_notes;
                         self.done(note);
                     }
                     Err(e) => {

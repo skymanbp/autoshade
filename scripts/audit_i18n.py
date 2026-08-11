@@ -61,6 +61,7 @@ GUI = "\n".join(
 I18N = (_GUI_DIR / "i18n.rs").read_text(encoding="utf-8")
 RECIPE = (REPO / "src" / "recipe.rs").read_text(encoding="utf-8")
 ADVISOR = (REPO / "src" / "advisor" / "mod.rs").read_text(encoding="utf-8")
+RATIONALE = (REPO / "src" / "rationale.rs").read_text(encoding="utf-8")
 
 # ── Dynamic-key registry ────────────────────────────────────────────────────
 # Every `tr(lang, <non-literal>)` call site must match one of these argument
@@ -80,6 +81,8 @@ DYNAMIC_SITES = [
     (r"^en\b", "MaskRole::en_name"),
     (r"^busy_key\b", "persist_postponed keys"),
     (r"^(?:autoshop::)?advisor::decision_key\(", "advisor Decision keys"),
+    # develop.rs renders rationale Note templates at draw time (L12#2B).
+    (r"^n[.]key", "rationale Note keys"),
     (r"^\[", "inline literal array"),
 ]
 
@@ -101,6 +104,9 @@ DYNAMIC_SOURCES = [
     # decision_key is a free fn; the "impl_fn" extractor only needs the fn's
     # body braces, so anchoring on the pub declaration works the same way.
     ("impl_fn", "advisor", "pub fn decision_key", "fn decision_key"),
+    # The rationale note templates live in ONE module by contract, so a new
+    # note key without a zh pair fails this gate (L12#2B).
+    ("impl_fn", "rationale", "pub mod keys", "mod keys"),
     ("calls", "gui", "set_canvas_status("),
     # persist_postponed's key is its SECOND argument (after the error), so
     # the plain first-arg collector cannot see it: this kind takes the first
@@ -118,6 +124,9 @@ DECLARED_DYNAMIC = [
     "Sky", "Subject",
     # zone table (Original, Some(0.0)) rows / base-mask default name
     "Original",
+    # rationale::keys::HEAL_NOTE_SEP — pure punctuation, so the lettered()
+    # filter keeps it out of the mod-keys extraction; declared instead.
+    "; ",
 ]
 
 # ── Literal-bypass allowlist ────────────────────────────────────────────────
@@ -133,7 +142,7 @@ ALLOWED_BYPASS = {
     "Esc",        # keyboard key name (house style, like the shortcut combos)
 }
 
-SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR}
+SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR, "rationale": RATIONALE}
 
 
 def parse_literal(src: str, i: int) -> tuple[str, int]:

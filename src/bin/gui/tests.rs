@@ -2480,3 +2480,25 @@
         );
         assert_eq!(line, "修订 — 太亮");
     }
+
+    /// L12#2B: typed rationale notes describe ONE develop's rationale tail.
+    /// Every wholesale recipe swap (undo / version load / variant switch /
+    /// AI apply) goes through resync_recipe_display — if that did not clear
+    /// the vec, the panel would strip-and-render a stale zh text over a
+    /// DIFFERENT develop's rationale. The landings that produce fresh notes
+    /// install them AFTER the resync.
+    #[test]
+    fn a_recipe_swap_clears_stale_rationale_notes() {
+        let mut app = AutoshopApp::default();
+        app.recipe.rationale = "old english tail".into();
+        app.rationale_notes = vec![autoshop::rationale::Note::plain(
+            autoshop::rationale::keys::FIT_NOTE_SAT_PEGGED,
+        )];
+        app.recipe = EditRecipe { rationale: "a different develop".into(), ..Default::default() };
+        app.resync_recipe_display();
+        assert_eq!(app.rationale, "a different develop");
+        assert!(
+            app.rationale_notes.is_empty(),
+            "stale notes must not survive a recipe swap — they rendered another rationale"
+        );
+    }

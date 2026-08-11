@@ -19,6 +19,7 @@ pub mod generative;
 pub mod lensmeta;
 pub mod openai_models;
 pub mod pipeline;
+pub mod rationale;
 pub mod recipe;
 pub mod render;
 pub mod retouch;

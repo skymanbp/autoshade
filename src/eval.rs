@@ -285,7 +285,7 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         let user = parse_user_xmp(&xmp_text);
         // style_strength = 0: eval measures the raw AI proposal vs your edits, so
         // it must NOT pull toward your historical style (that would bias the gap).
-        let (ai, _verdict) = match pipeline::produce_recipe(raw, &cfg, false, None, None, 0.0) {
+        let (ai, _verdict, _notes) = match pipeline::produce_recipe(raw, &cfg, false, None, None, 0.0) {
             Ok(v) => v,
             Err(e) => {
                 println!("FAILED: {e}");

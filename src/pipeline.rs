@@ -29,7 +29,11 @@ pub fn produce_recipe(
     guidance: Option<&str>,
     base: Option<&EditRecipe>,
     style_strength: f32,
-) -> Result<(EditRecipe, Verdict)> {
+) -> Result<(EditRecipe, Verdict, Vec<crate::rationale::Note>)> {
+    // The third element (L12#2B): every DETERMINISTIC rationale fragment this
+    // call appended, as typed notes rendering the rationale string's SUFFIX
+    // (the prefix is the model's own prose). In-process only — the GUI
+    // renders them localized; CLI/web/persistence keep the English string.
     // decode_any: a camera RAW, or an already-baked PNG/TIFF/JPEG (PNG-source mode).
     let decoded = decode::decode_any(raw)?;
 
@@ -129,6 +133,7 @@ pub fn produce_recipe(
     // GPT vision when a key is set; on failure (quota/network) warn and fall back
     // to the heuristic so we still produce a recipe (disclosure, not masking).
     let openai = OpenAiProvider::new(cfg);
+    let mut det_notes: Vec<crate::rationale::Note> = Vec::new();
     let (mut recipe, can_revise) = if cfg.openai_api_key.is_some() {
         if verbose {
             println!("proposer : OpenAI ({})", cfg.openai_model);
@@ -151,7 +156,9 @@ pub fn produce_recipe(
                 // invisible in the windowed GUI, so the recipe's rationale is
                 // the only place the user can learn why the AI didn't run.
                 let heuristic = HeuristicProposer { fallback_reason: Some(e.to_string()) };
-                (heuristic.propose(&preview, meta, hist, None, None, None)?, false)
+                let (r, note) = heuristic.propose_noted(hist)?;
+                det_notes.push(note);
+                (r, false)
             }
         }
     } else {
@@ -172,7 +179,9 @@ pub fn produce_recipe(
             println!("proposer : heuristic baseline (set OPENAI_API_KEY to use GPT vision)");
         }
         let heuristic = HeuristicProposer::default();
-        (heuristic.propose(&preview, meta, hist, None, None, None)?, false)
+        let (r, note) = heuristic.propose_noted(hist)?;
+        det_notes.push(note);
+        (r, false)
     };
 
     // Verifier (analysis role): OAuth `claude` CLI by default, or an
@@ -212,22 +221,34 @@ pub fn produce_recipe(
         let revised = match openai.propose(&preview, meta, hist, ref_str, guidance, Some(&hint)) {
             Ok(r) => r,
             Err(e) => {
-                recipe.rationale.push_str(&format!(
-                    " [revision round {round} failed ({e}) — keeping the previous verified proposal]"
-                ));
+                crate::rationale::push_note(
+                    &mut recipe.rationale,
+                    &mut det_notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::REVISION_FAILED,
+                        vec![("round", round.to_string()), ("e", e.to_string())],
+                    ),
+                );
                 break;
             }
         };
         match verifier.verify(&revised, meta, hist) {
             Ok(v) => {
                 recipe = revised;
+                // Fresh model prose — the notes described the DISCARDED
+                // recipe's tail, so they reset with it (the suffix contract).
+                det_notes.clear();
                 verdict = v;
             }
             Err(e) => {
-                recipe.rationale.push_str(&format!(
-                    " [verification of revision round {round} failed ({e}) — keeping the previous \
-                     verified proposal]"
-                ));
+                crate::rationale::push_note(
+                    &mut recipe.rationale,
+                    &mut det_notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::REVISION_VERIFY_FAILED,
+                        vec![("round", round.to_string()), ("e", e.to_string())],
+                    ),
+                );
                 break;
             }
         }
@@ -250,12 +271,14 @@ pub fn produce_recipe(
         // -0.06EV/-20/+4 values) — then re-verify the FINAL recipe so the
         // returned verdict honestly reflects what will actually be applied.
         if recipe != pre_blend {
-            recipe.rationale.push_str(&format!(
-                " [style distillation then pulled the global sliders toward this user's past \
-                 edits (effective strength {:.0}%) — final values can differ from the \
-                 derivation above]",
-                style_strength.clamp(0.0, 1.0) * 0.6 * 100.0
-            ));
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut det_notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::STYLE_DISTILLED,
+                    vec![("pct", format!("{:.0}", style_strength.clamp(0.0, 1.0) * 0.6 * 100.0))],
+                ),
+            );
             // Degrade like the revision loop above: a transient verifier
             // failure at this LAST step used to error out the whole call,
             // discarding the paid, already-verified proposal. Keep the pair
@@ -263,10 +286,14 @@ pub fn produce_recipe(
             match verifier.verify(&recipe, meta, hist) {
                 Ok(v) => verdict = v,
                 Err(e) => {
-                    recipe.rationale.push_str(&format!(
-                        " [re-verification after style distillation failed ({e}) — the verdict \
-                         above describes the PRE-distillation recipe]"
-                    ));
+                    crate::rationale::push_note(
+                        &mut recipe.rationale,
+                        &mut det_notes,
+                        crate::rationale::Note::new(
+                            crate::rationale::keys::STYLE_REVERIFY_FAILED,
+                            vec![("e", e.to_string())],
+                        ),
+                    );
                 }
             }
         }
@@ -275,10 +302,14 @@ pub fn produce_recipe(
     // rationale is the one channel all three surfaces show. Every develop
     // that ASKED for style influence and silently got none says so here.
     if let Some(e) = &style_err {
-        recipe.rationale.push_str(&format!(
-            " [style reference unavailable ({e}) — the Style slider had no effect on this \
-             develop; rebuild it with: autoshop style-index <folder>]"
-        ));
+        crate::rationale::push_note(
+            &mut recipe.rationale,
+            &mut det_notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::STYLE_UNAVAILABLE,
+                vec![("e", e.clone())],
+            ),
+        );
     }
     // Base look, stamped in ONE place for every surface: the proposal and the
     // verification above both ran over the camera's embedded preview — the
@@ -331,9 +362,9 @@ pub fn produce_recipe(
     // gains, plus any manual lens correction. The result then auto-saves.
     // Carry those back from the base the user actually had.
     if let Some(b) = base {
-        carry_over_unrepresentable(&mut recipe, b);
+        carry_over_unrepresentable(&mut recipe, b, Some(&mut det_notes));
     }
-    Ok((recipe, verdict))
+    Ok((recipe, verdict, det_notes))
 }
 
 /// Re-attach what the AI's response schema CANNOT express, from the refine
@@ -347,7 +378,11 @@ pub fn produce_recipe(
 /// recipe auto-saves, so every AI-selected sky/subject mask, painted mask,
 /// reverse-fit zone (with its recolour gains) and hand-dialled lens
 /// correction silently disappeared the moment the user clicked Refine.
-pub(crate) fn carry_over_unrepresentable(recipe: &mut EditRecipe, base: &EditRecipe) {
+pub(crate) fn carry_over_unrepresentable(
+    recipe: &mut EditRecipe,
+    base: &EditRecipe,
+    notes: Option<&mut Vec<crate::rationale::Note>>,
+) {
     use crate::recipe::{MaskGeometry, MaskRole};
 
     let schema_loses = |m: &crate::recipe::LocalAdjustment| {
@@ -415,11 +450,13 @@ pub(crate) fn carry_over_unrepresentable(recipe: &mut EditRecipe, base: &EditRec
         // response path — and the rationale says what happened, because a
         // silent revert here reads as "the model ignored my masks".
         recipe.masks = base.masks.clone();
-        recipe.rationale.push_str(
-            "\n⚠ the response did not preserve mask identities (a mask was renamed or \
-             duplicated) — your masks were kept unchanged and the model's mask edits were \
-             discarded",
-        );
+        let note = crate::rationale::Note::plain(crate::rationale::keys::MASKS_NOT_PRESERVED);
+        recipe.rationale.push_str(&crate::rationale::render_one(&note));
+        if let Some(v) = notes
+            && v.len() < crate::rationale::MAX_NOTES
+        {
+            v.push(note);
+        }
     } else {
         carried_indices.sort_unstable();
         carried_indices.dedup();
@@ -1233,7 +1270,7 @@ mod guard_tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base);
+        carry_over_unrepresentable(&mut proposed, &base, None);
         assert_eq!(proposed.masks.len(), 2, "the bitmap mask must survive Refine");
         let MaskGeometry::Bitmap { path } = &proposed.masks[0].mask else {
             panic!("the carried mask must come first, got {:?}", proposed.masks[0].mask)
@@ -1252,7 +1289,7 @@ mod guard_tests {
         let mut stamped = EditRecipe::default();
         stamped.lens_profile.vignette = vec![1.0, 0.9];
         stamped.lens_profile.vignette_on = true;
-        carry_over_unrepresentable(&mut stamped, &EditRecipe::default());
+        carry_over_unrepresentable(&mut stamped, &EditRecipe::default(), None);
         assert!(stamped.lens_profile.vignette_on, "sentinel base leaves the stamp alone");
         assert!(!stamped.lens_profile.vignette.is_empty());
         // The model's own proposal is still there, after the carried one.
@@ -2338,7 +2375,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base);
+        carry_over_unrepresentable(&mut proposed, &base, None);
         assert!(!proposed.masks[0].enabled);
         assert_eq!(proposed.masks[0].components, vec![component]);
         assert_eq!(
@@ -2369,7 +2406,7 @@ mod tests {
             ..Default::default()
         };
         let mut refined = expected.clone();
-        carry_over_unrepresentable(&mut refined, &plain_base);
+        carry_over_unrepresentable(&mut refined, &plain_base, None);
         assert_eq!(refined, expected, "plain masks still take the model response exactly");
     }
 
@@ -2412,7 +2449,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base);
+        carry_over_unrepresentable(&mut proposed, &base, None);
         assert_eq!(
             proposed.masks, base.masks,
             "identity lost ⇒ the base masks stand, the response's mask edits are discarded"

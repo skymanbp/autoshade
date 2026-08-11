@@ -186,6 +186,12 @@ pub struct FitReport {
     pub recipe: EditRecipe,
     pub err_before: f32,
     pub err_after: f32,
+    /// The rationale as typed notes (L12#2B): `render_en(&notes)` is the
+    /// recipe's `rationale` byte-for-byte (empty prose prefix — the fit
+    /// rationale is fully deterministic), so the GUI renders it localized
+    /// while every persisted surface keeps the English string. In-process
+    /// only, never serialized.
+    pub notes: Vec<crate::rationale::Note>,
 }
 
 /// Fit an [`EditRecipe`] mapping `src` (untouched preview) onto the look of
@@ -373,52 +379,63 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
     // instead of wondering what went wrong (real-machine feedback,
     // 2026-07-09: a palette-transplant target produced a faithful-but-ugly
     // max-saturation fit with zero explanation).
-    let mut notes = String::new();
+    use crate::rationale::{keys, push_note, Note};
+    let mut notes: Vec<Note> = Vec::new();
+    let mut rationale = String::new();
+    // The summary comes first; the note fragments append after it. Two full
+    // summary keys instead of a nested English fragment argument — a
+    // fragment inside an arg would stay English in the zh rendering.
+    let summary_key = if recipe.tone_curve.is_empty() {
+        keys::FIT_SUMMARY_NO_CURVE
+    } else {
+        keys::FIT_SUMMARY_WITH_CURVE
+    };
+    push_note(
+        &mut rationale,
+        &mut notes,
+        Note::new(
+            summary_key,
+            vec![
+                ("err_before", format!("{err_before:.3}")),
+                ("err_after", format!("{err_after:.3}")),
+            ],
+        ),
+    );
     // Keyed on the RESIDUAL, not the pre-fit distance: a large but perfectly
     // fittable tone gap (2 EV of exposure) starts far and ends near — only a
     // look the model cannot approach deserves the warning.
     if err_after > 0.12 {
-        notes.push_str(&format!(
-            " NOTE: the fitted recipe still renders far from the target \
-             (residual {err_after:.2}) — this look exceeds what global \
-             sliders can express; consider the AI variant itself or a zoned \
-             edit.",
-        ));
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(keys::FIT_NOTE_FAR, vec![("err_after", format!("{err_after:.2}"))]),
+        );
     }
     if sat_pegged {
-        notes.push_str(" Saturation demand exceeded the model cap (±60).");
+        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_SAT_PEGGED));
     }
     if fit_regressed {
-        notes.push_str(
-            " The full fit rendered farther from the target than the untouched \
-             source at every saturation level — returning a NEUTRAL recipe \
-             (do-no-harm terminal case); this look is outside the global \
-             model's reach.",
-        );
+        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REGRESSED));
     } else if sat_reduced {
-        notes.push_str(&format!(
-            " Saturation was pulled back from the chroma-matched {sat_fitted:+.0} \
-             to {:+.0} after the full-strength fit rendered farther from the \
-             target than the untouched source (do-no-harm check).",
-            recipe.saturation,
-        ));
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_SAT_REDUCED,
+                vec![
+                    ("sat_fitted", format!("{sat_fitted:+.0}")),
+                    ("sat_now", format!("{:+.0}", recipe.saturation)),
+                ],
+            ),
+        );
     }
     if curves_rehue_blocked {
-        notes.push_str(
-            " Colour-cast curves were withheld: they would have re-hued a \
-             region of the frame (pixel-aligned hue-damage gates).",
-        );
+        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REHUE_BLOCKED));
     }
-    recipe.rationale = format!(
-        "Reverse-fit from a target rendition (statistical match; the target is not \
-         pixel-aligned, so local masks and per-band HSL are not recovered): luma-CDF \
-         → tone sliders {}, chroma → saturation, per-channel cast curves. Residual \
-         look error {err_before:.3} → {err_after:.3}.{notes}",
-        if recipe.tone_curve.is_empty() { "(no residual curve)" } else { "+ residual tone curve" },
-    );
+    recipe.rationale = rationale;
     recipe.confidence = (1.0 - err_after * 6.0).clamp(0.25, 0.95);
     recipe.clamp();
-    FitReport { recipe, err_before, err_after }
+    FitReport { recipe, err_before, err_after, notes }
 }
 
 // --------------------------------------------------------------------------

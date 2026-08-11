@@ -409,7 +409,7 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     // CLI analyze always proposes from the original (base = None); the refine /
     // "adjust current edit" path is a web-UI affordance.
     let style = style.unwrap_or(cfg.style_strength);
-    let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
+    let (recipe, verdict, _notes) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
@@ -577,7 +577,7 @@ fn auto_cmd(
     let out = out.unwrap_or_else(|| default_out(raw, "developed", "tif"));
     pipeline::guard_readonly(&out, raw)?;
     let style = style.unwrap_or(cfg.style_strength);
-    let (recipe, verdict) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
+    let (recipe, verdict, _notes) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
     let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
     ensure_parent(&out)?;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
@@ -1058,7 +1058,7 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
 
 fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Verdict> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
-    let (recipe, verdict) = produce_recipe(raw, cfg, false, None, None, cfg.style_strength)?;
+    let (recipe, verdict, _notes) = produce_recipe(raw, cfg, false, None, None, cfg.style_strength)?;
     // A non-Accept verdict may not auto-save (user decision). In a headless
     // batch that means NO sidecars and NO deliverable: the photo stays
     // pending, the caller's summary names it, and a re-run re-attempts it —

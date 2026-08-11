@@ -121,6 +121,12 @@ pub struct HealReport {
     pub spots: usize,
     pub rationale: String,
     pub dims: (u32, u32),
+    /// The rationale's DETERMINISTIC tail as typed notes (L12#2B):
+    /// `rationale` == the AI detector's own prose (possibly empty) followed
+    /// by `rationale::render_en(&notes)` byte-for-byte, so the GUI strips
+    /// the suffix and renders it localized while the CLI printout and the
+    /// `X-Heal-Rationale` header keep the English string. In-process only.
+    pub notes: Vec<crate::rationale::Note>,
 }
 
 // --- the deterministic heal engine -----------------------------------------
@@ -366,7 +372,7 @@ const MAX_DISK_COVERAGE: f64 = 16.0; // Σ (2r+1)² px ≤ 16 × mask px
 /// The second return is the budget note when regions were SKIPPED (planned
 /// ones still heal): raster-order deterministic, and the caller must surface
 /// it — the skipped regions are left untouched.
-pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<String>) {
+pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<crate::rationale::Note>) {
     let (w, h) = mask.dimensions();
     let wu = w as usize;
     let n_px = wu * h as usize;
@@ -495,16 +501,19 @@ pub fn plan_from_mask(mask: &RgbaImage) -> (Vec<HealSpot>, Option<String>) {
         });
     }
     let note = (skipped > 0).then(|| {
-        format!(
-            "healed {} of {} painted region(s) — the rest exceeded the retouch budget \
-             ({MAX_PAINTED_SPOTS} regions / {MAX_BBOX_COVERAGE}x bbox / {MAX_DISK_COVERAGE}x \
-             heal coverage) and were left UNTOUCHED; paint fewer or smaller regions",
-            spots.len(),
-            spots.len() + skipped
+        crate::rationale::Note::new(
+            crate::rationale::keys::HEAL_BUDGET,
+            vec![
+                ("n", spots.len().to_string()),
+                ("total", (spots.len() + skipped).to_string()),
+                ("max_spots", MAX_PAINTED_SPOTS.to_string()),
+                ("max_bbox", MAX_BBOX_COVERAGE.to_string()),
+                ("max_disk", MAX_DISK_COVERAGE.to_string()),
+            ],
         )
     });
     if let Some(n) = &note {
-        eprintln!("⚠ {n}");
+        eprintln!("⚠ {}", crate::rationale::render_one(n));
     }
     (spots, note)
 }
@@ -668,6 +677,7 @@ pub fn heal(
 
     let mut spots: Vec<HealSpot> = Vec::new();
     let mut rationale = String::new();
+    let mut notes: Vec<crate::rationale::Note> = Vec::new();
     let mut detect_failed = false;
     if auto_detect {
         // ≤1568px detection JPEG. `resize` allocates only the TARGET buffer
@@ -696,8 +706,15 @@ pub fn heal(
                 detect_failed = true;
                 eprintln!("⚠ AI spot-detection failed ({e}); healing the painted mask only.");
                 // stderr is invisible from the GUI — carry the disclosure in
-                // the report too.
-                rationale = format!("AI spot-detection failed ({e}); healed the painted mask only.");
+                // the report too (typed, so the GUI renders it localized).
+                crate::rationale::push_note(
+                    &mut rationale,
+                    &mut notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::HEAL_DETECT_FAILED,
+                        vec![("e", e.to_string())],
+                    ),
+                );
             }
         }
     }
@@ -709,9 +726,13 @@ pub fn heal(
         spots.extend(planned);
         if let Some(n) = note {
             if !rationale.is_empty() {
-                rationale.push_str("; ");
+                crate::rationale::push_note(
+                    &mut rationale,
+                    &mut notes,
+                    crate::rationale::Note::plain(crate::rationale::keys::HEAL_NOTE_SEP),
+                );
             }
-            rationale.push_str(&n);
+            crate::rationale::push_note(&mut rationale, &mut notes, n);
         }
     }
     if spots.is_empty() {
@@ -739,7 +760,7 @@ pub fn heal(
 
     let n = spots.len();
     heal_and_save(base, &spots, out)?;
-    Ok(HealReport { spots: n, rationale, dims: (w, h) })
+    Ok(HealReport { spots: n, rationale, dims: (w, h), notes })
 }
 
 /// Heal at the source's OWN depth, carry alpha through, and stage the result
@@ -886,7 +907,11 @@ pub fn clone_stamp(
     }
     let n = spots.len();
     heal_and_save(base, &spots, out)?;
-    Ok(HealReport { spots: n, rationale: budget_note.unwrap_or_default(), dims: (w, h) })
+    let (rationale, notes) = match budget_note {
+        Some(note) => (crate::rationale::render_one(&note), vec![note]),
+        None => (String::new(), Vec::new()),
+    };
+    Ok(HealReport { spots: n, rationale, dims: (w, h), notes })
 }
 
 #[cfg(test)]
@@ -1074,7 +1099,7 @@ mod tests {
         }
         let (spots, note) = plan_from_mask(&mask);
         assert_eq!(spots.len(), 512, "the cap plans exactly the budget");
-        let note = note.expect("over-budget must disclose");
+        let note = crate::rationale::render_one(&note.expect("over-budget must disclose"));
         assert!(note.contains("512 of 576"), "{note}");
     }
 

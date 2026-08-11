@@ -1675,7 +1675,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // user's unsaved lens toggles — pre-stripping here made every web Refine
     // revert them to the saved profile.
     let refine_base = req.base.clone();
-    let (recipe, verdict) =
+    let (recipe, verdict, _notes) =
         pipeline::produce_recipe(&raw, &cfg, false, guidance, refine_base.as_ref(), style)?;
     // A non-Accept verdict may not auto-save (user decision): the verifier
     // itself judged the result not ready, so the develop on disk stays

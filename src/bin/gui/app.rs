@@ -25,6 +25,12 @@ pub(crate) struct AutoshopApp {
     // (and translated) at draw time, so a language switch re-renders them.
     pub(crate) verdict: Option<(autoshop::advisor::Decision, Vec<String>)>,
     pub(crate) rationale: String,
+    /// The rationale's deterministic tail as typed notes (L12#2B). They
+    /// render, in order, `rationale`'s SUFFIX — the panel strips it and
+    /// draws the notes localized; on any mismatch (or when empty — a
+    /// develop restored from disk carries none) the raw English rationale
+    /// shows instead. Cleared wherever `rationale` is reloaded from disk.
+    pub(crate) rationale_notes: Vec<autoshop::rationale::Note>,
     pub(crate) style_strength: f32,
     pub(crate) hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance
     pub(crate) grade_region: usize,
@@ -1152,6 +1158,7 @@ impl Default for AutoshopApp {
             tx,
             verdict: None,
             rationale: String::new(),
+            rationale_notes: Vec::new(),
             style_strength: 0.30,
             hsl_tab: 0,
             grade_region: 0,

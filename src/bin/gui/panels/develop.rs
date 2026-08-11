@@ -304,9 +304,33 @@ impl AutoshopApp {
                     );
                     ui.label(egui::RichText::new(text).color(col));
                 }
-                if !self.rationale.is_empty() {
+                // The deterministic tail renders LOCALIZED when its typed
+                // notes ride along and still match the string's suffix
+                // (L12#2B); any mismatch — a truncation, a disk-restored
+                // develop with no notes — shows the raw English instead
+                // (silent-English fallback, user decision 2026-08-11).
+                let localized = (!self.rationale_notes.is_empty())
+                    .then(|| {
+                        let det: String = self
+                            .rationale_notes
+                            .iter()
+                            .map(autoshop::rationale::render_one)
+                            .collect();
+                        self.rationale.strip_suffix(det.as_str()).map(|prose| {
+                            let mut s = String::from(prose);
+                            for n in &self.rationale_notes {
+                                let args: Vec<(&str, &str)> =
+                                    n.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                                s.push_str(&trf(lang, n.key, &args));
+                            }
+                            s
+                        })
+                    })
+                    .flatten();
+                let shown = localized.as_deref().unwrap_or(&self.rationale);
+                if !shown.is_empty() {
                     ui.label(
-                        egui::RichText::new(format!("“{}”", self.rationale))
+                        egui::RichText::new(format!("“{shown}”"))
                             .italics()
                             .weak(),
                     );

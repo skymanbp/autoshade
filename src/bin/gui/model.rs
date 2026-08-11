@@ -193,8 +193,19 @@ pub(crate) enum Msg {
     /// (abandon-only — the advisor has no cancel checkpoints, so ✕ unblocks
     /// the UI now and the network call dies at its stall/progress deadline),
     /// and a cancelled call's late result must be discarded, not installed
-    /// and PERSISTED over whatever the user has since done.
-    Analyzed(u64, Box<anyhow::Result<(EditRecipe, autoshop::advisor::Verdict)>>),
+    /// and PERSISTED over whatever the user has since done. The third tuple
+    /// element is the deterministic-rationale notes (L12#2B) the landing
+    /// installs for draw-time localization.
+    Analyzed(
+        u64,
+        Box<
+            anyhow::Result<(
+                EditRecipe,
+                autoshop::advisor::Verdict,
+                Vec<autoshop::rationale::Note>,
+            )>,
+        >,
+    ),
     Exported(anyhow::Result<String>),
     /// A folder scan finished: (folder, sorted source paths).
     Folder(Box<anyhow::Result<(PathBuf, Vec<PathBuf>, usize)>>),
@@ -231,10 +242,11 @@ pub(crate) enum Msg {
     MaskRefined(anyhow::Result<(usize, String, PathBuf)>),
     /// Batch render advanced: `done` of `total` photos finished (ok or err).
     BatchProgress { done: usize, total: usize },
-    /// Reverse-fit finished: the fitted recipe + a status note (fit.rs).
-    /// (recipe, status note, persisted): `persisted` is false when the backup
-    /// gate refused the store write — the ● baseline must NOT be advanced then.
-    Fitted(Box<anyhow::Result<(EditRecipe, String, bool)>>),
+    /// Reverse-fit finished — see [`FitOutcome`]: FACTS, not prose, so the
+    /// landing renders the status in the language live at LANDING time
+    /// (L12#4 — the old String was translated inside the spawn closure with
+    /// the language captured at spawn, minutes stale by the time it landed).
+    Fitted(Box<anyhow::Result<FitOutcome>>),
     /// Settings → "Import develops from an old ./out folder": localized result.
     LegacyImported(anyhow::Result<String>),
     /// Style-prompt extraction finished: (the reusable prompt text, the
@@ -244,6 +256,41 @@ pub(crate) enum Msg {
     Models(anyhow::Result<Vec<String>>),
     /// A batch recipe paste finished: the human summary (counts; Err on any failure).
     Pasted(anyhow::Result<String>),
+}
+
+/// One reverse-fit landing fact (L12#4): the worker records WHAT happened
+/// on the persist path; `render_fit_note` (workers.rs) translates it when
+/// the result lands. Owned args only — stringified errors, paths, counts.
+pub(crate) enum FitNote {
+    /// The fit attached at least one zone mask.
+    IncludesSkyZone,
+    /// `commit_develop` failed — the fit stays on the canvas unsaved.
+    NotPersistedCommit(String),
+    /// The Lightroom XMP sidecar landed at this path.
+    XmpWritten(std::path::PathBuf),
+    /// write_xmp's regenerated-not-merged disclosure (library English).
+    XmpMergeNote(String),
+    /// recipe.json persisted but the XMP write failed.
+    XmpFailed(String),
+    /// The previous explicit save was snapshotted as v{n} first.
+    BackedUpAs(u32),
+    /// The backup gate refused — nothing was written.
+    NotPersistedBackup(String),
+    /// The develop store lock could not be taken.
+    NotPersistedLock(String),
+}
+
+/// The reverse-fit result: recipe + errors + typed notes. `persisted` is
+/// false when the backup gate refused the store write — the ● baseline
+/// must NOT be advanced then. `rationale_notes` are the fit rationale's
+/// typed copy (L12#2B), installed for draw-time localization.
+pub(crate) struct FitOutcome {
+    pub(crate) recipe: EditRecipe,
+    pub(crate) err_before: f32,
+    pub(crate) err_after: f32,
+    pub(crate) rationale_notes: Vec<autoshop::rationale::Note>,
+    pub(crate) status: Vec<FitNote>,
+    pub(crate) persisted: bool,
 }
 
 /// Default endpoint for the image-role OAuth preset: a local Codex bridge

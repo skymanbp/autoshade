@@ -939,6 +939,103 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Theme", "主题"),
     ("Dark", "深色"),
     ("Light", "浅色"),
+
+    // ── Round-12 L12#2B: deterministic-rationale note templates ──────────────
+    // Each en key is BYTE-IDENTICAL to its `autoshop::rationale::keys` const
+    // (the audit extracts that module and this table must cover it). The zh
+    // value must keep the exact {placeholder} multiset — the placeholder gate
+    // checks it.
+    ("Reverse-fit from a target rendition (statistical match; the target is not \
+      pixel-aligned, so local masks and per-band HSL are not recovered): luma-CDF \
+      → tone sliders + residual tone curve, chroma → saturation, per-channel cast \
+      curves. Residual look error {err_before} → {err_after}.",
+        "从目标成品反推（统计匹配；目标未像素对齐，故局部蒙版与分色相 HSL 无法恢复）：亮度 CDF → 影调滑杆 + 残差影调曲线，色度 → 饱和度，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
+    ("Reverse-fit from a target rendition (statistical match; the target is not \
+      pixel-aligned, so local masks and per-band HSL are not recovered): luma-CDF \
+      → tone sliders (no residual curve), chroma → saturation, per-channel cast \
+      curves. Residual look error {err_before} → {err_after}.",
+        "从目标成品反推（统计匹配；目标未像素对齐，故局部蒙版与分色相 HSL 无法恢复）：亮度 CDF → 影调滑杆（无残差曲线），色度 → 饱和度，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
+    (" NOTE: the fitted recipe still renders far from the target \
+      (residual {err_after}) — this look exceeds what global \
+      sliders can express; consider the AI variant itself or a zoned \
+      edit.",
+        " 注意：拟合配方的渲染结果仍与目标相距较远（残差 {err_after}）——此风格超出全局滑杆的表达范围；可考虑直接使用 AI 变体或分区编辑。"),
+    (" Saturation demand exceeded the model cap (±60).",
+        " 饱和度需求超出模型上限（±60）。"),
+    (" The full fit rendered farther from the target than the untouched \
+      source at every saturation level — returning a NEUTRAL recipe \
+      (do-no-harm terminal case); this look is outside the global \
+      model's reach.",
+        " 全强度拟合在每个饱和度档位上都比未处理原图离目标更远——返回中性配方（不伤害原则的终止情形）；此风格在全局模型能力之外。"),
+    (" Saturation was pulled back from the chroma-matched {sat_fitted} \
+      to {sat_now} after the full-strength fit rendered farther from the \
+      target than the untouched source (do-no-harm check).",
+        " 饱和度已从色度匹配的 {sat_fitted} 回撤至 {sat_now}：全强度拟合的渲染结果比未处理原图离目标更远（不伤害检查）。"),
+    (" Colour-cast curves were withheld: they would have re-hued a \
+      region of the frame (pixel-aligned hue-damage gates).",
+        " 色偏曲线已被扣留：它们会使画面某区域变色（像素对齐的色相损伤门）。"),
+    (" Zoned sky fit unavailable ({e}) — global fit only.",
+        " 分区天空拟合不可用（{e}）——仅保留全局拟合。"),
+    (" Zoned fit skipped: no usable sky partition (sky covers {s}% \
+      of the source frame, {t}% of the target's).",
+        " 分区拟合已跳过：没有可用的天空分割（天空占原图 {s}%、目标图 {t}%）。"),
+    (" The {label} zone covers too little of the frame (source {s}%, \
+      target {t}%) — skipped.",
+        " {label} 区占画面比例过小（原图 {s}%、目标 {t}%）——已跳过。"),
+    (" Zoned {label} correction attached ({label}-to-{label} moments → \
+      local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \
+      saturation {sat}): zone residual {before} → {after}. The correction \
+      is a BITMAP mask — rendered in-app; the Lightroom sidecar \
+      carries the global fit only (classic XMP cannot hold raster \
+      masks).",
+        " 已附加 {label} 区校正（{label} 对 {label} 矩 → 局部曝光 {ev} EV、色彩增益 [{g0} {g1} {g2}]、饱和度 {sat}）：区残差 {before} → {after}。该校正是位图蒙版——仅应用内渲染；Lightroom 边车只携带全局拟合（经典 XMP 无法承载栅格蒙版）。"),
+    (" Note: the {label} zone covers {s}% of the source frame \
+      but {t}% of the target's — the compositions differ, so the \
+      overall distribution residual stays where the global fit \
+      left it.",
+        " 注：{label} 区占原图 {s}% 而占目标图 {t}%——两者构图不同，整体分布残差停留在全局拟合的水平。"),
+    (" Zoned {label} correction dropped: zone residual {before} → {after} \
+      (needs ≤ {ratio}% of the original) with frame-global drift \
+      {drift} (tolerance {tol}).",
+        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%），全画面漂移 {drift}（容差 {tol}）。"),
+    (" [revision round {round} failed ({e}) — keeping the previous verified proposal]",
+        " [第 {round} 轮修订失败（{e}）——保留上一轮已验证的提案]"),
+    (" [verification of revision round {round} failed ({e}) — keeping the previous \
+      verified proposal]",
+        " [第 {round} 轮修订的验证失败（{e}）——保留上一轮已验证的提案]"),
+    (" [style distillation then pulled the global sliders toward this user's past \
+      edits (effective strength {pct}%) — final values can differ from the \
+      derivation above]",
+        " [风格蒸馏随后将全局滑杆拉向该用户的历史编辑（有效强度 {pct}%）——最终数值可能与上文推导不同]"),
+    (" [re-verification after style distillation failed ({e}) — the verdict \
+      above describes the PRE-distillation recipe]",
+        " [风格蒸馏后的复验失败（{e}）——上方判词描述的是蒸馏前的配方]"),
+    (" [style reference unavailable ({e}) — the Style slider had no effect on this \
+      develop; rebuild it with: autoshop style-index <folder>]",
+        " [风格参考不可用（{e}）——本次显影中风格滑杆未起作用；用 autoshop style-index <文件夹> 重建]"),
+    ("\n⚠ the response did not preserve mask identities (a mask was renamed or \
+      duplicated) — your masks were kept unchanged and the model's mask edits were \
+      discarded",
+        "\n⚠ 响应未保留蒙版身份（有蒙版被改名或复制）——你的蒙版保持原样，模型的蒙版编辑已丢弃"),
+    ("Heuristic baseline (AI vision unavailable (untrusted provider diagnostic): {e}). \
+      mean_luma={mean}/255, clip black/white={clip_b}%/{clip_w}% → exposure {ev}EV, \
+      highlights {hl}, shadows {sh}.",
+        "启发式基线（AI 视觉不可用（不受信提供方诊断）：{e}）。mean_luma={mean}/255，黑/白裁剪={clip_b}%/{clip_w}% → 曝光 {ev}EV、高光 {hl}、阴影 {sh}。"),
+    ("Heuristic baseline (no AI vision; OPENAI_API_KEY unset). \
+      mean_luma={mean}/255, clip black/white={clip_b}%/{clip_w}% → exposure {ev}EV, \
+      highlights {hl}, shadows {sh}.",
+        "启发式基线（无 AI 视觉；OPENAI_API_KEY 未设置）。mean_luma={mean}/255，黑/白裁剪={clip_b}%/{clip_w}% → 曝光 {ev}EV、高光 {hl}、阴影 {sh}。"),
+    ("AI spot-detection failed ({e}); healed the painted mask only.",
+        "AI 斑点检测失败（{e}）；仅修复了手绘蒙版。"),
+    ("; ", "；"),
+    ("healed {n} of {total} painted region(s) — the rest exceeded the retouch budget \
+      ({max_spots} regions / {max_bbox}x bbox / {max_disk}x \
+      heal coverage) and were left UNTOUCHED; paint fewer or smaller regions",
+        "已修复 {n}/{total} 个手绘区域——其余超出修饰预算（{max_spots} 区 / {max_bbox}x 包围盒 / {max_disk}x 修复覆盖），保持未动；请少画或画小一些"),
+
+    // ── Round-12 L12#4: reverse-fit landing facts rendered at landing ────────
+    (" · XMP → {path}", " · XMP → {path}"),
+    (" · ⚠ {note}", " · ⚠ {note}"),
 ];
 
 #[cfg(test)]
