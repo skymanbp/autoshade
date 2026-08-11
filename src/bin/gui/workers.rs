@@ -1779,6 +1779,11 @@ impl AutoshopApp {
                             );
                             self.status = format!("{} — ⚠ {}", self.status, w);
                         }
+                        // L12#3 tofu disclosure: a gallery name in a script
+                        // no installed face covers renders as boxes — say
+                        // so ONCE per script per session, at folder open
+                        // (the one cheap point; never per frame).
+                        self.disclose_undrawable_names();
                     }
                     Err(e) => {
                         self.fail(tr(lang, "scan failed"), e);

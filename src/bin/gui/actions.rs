@@ -47,6 +47,31 @@ impl AutoshopApp {
         app
     }
 
+    /// L12#3: disclose gallery names whose script no installed font can
+    /// draw — once per script per session. Runs over the CURRENT gallery
+    /// (folder-open granularity); pure classification, no file I/O.
+    pub(crate) fn disclose_undrawable_names(&mut self) {
+        let installed = installed_scripts();
+        let stems: Vec<String> = self
+            .gallery
+            .iter()
+            .map(|p| autoshop::pipeline::stem(p).to_string())
+            .collect();
+        for stem in &stems {
+            for (script, sample) in undrawable_scripts(stem, installed) {
+                if self.disclosed_scripts.insert(script) {
+                    let t = trf(
+                        self.lang,
+                        "some file names use characters no installed font can draw ({sample}) — they show as boxes",
+                        &[("sample", &sample.to_string())],
+                    );
+                    self.toast(ToastKind::Error, t.clone());
+                    self.status = t;
+                }
+            }
+        }
+    }
+
     pub(crate) fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
         let text = text.into();
         // An identical LIVE toast refreshes instead of duplicating: undoing

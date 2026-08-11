@@ -24,6 +24,9 @@ pub(crate) struct AutoshopApp {
     // TYPED, not a baked string: the decision word + reasons are rendered
     // (and translated) at draw time, so a language switch re-renders them.
     pub(crate) verdict: Option<(autoshop::advisor::Decision, Vec<String>)>,
+    /// Scripts already disclosed as undrawable this session (L12#3) — the
+    /// tofu warning fires once per script, not once per folder or frame.
+    pub(crate) disclosed_scripts: HashSet<&'static str>,
     pub(crate) rationale: String,
     /// The rationale's deterministic tail as typed notes (L12#2B). They
     /// render, in order, `rationale`'s SUFFIX — the panel strips it and
@@ -1157,6 +1160,7 @@ impl Default for AutoshopApp {
             rx: Some(rx),
             tx,
             verdict: None,
+            disclosed_scripts: HashSet::new(),
             rationale: String::new(),
             rationale_notes: Vec::new(),
             style_strength: 0.30,

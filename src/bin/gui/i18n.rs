@@ -1036,6 +1036,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Round-12 L12#4: reverse-fit landing facts rendered at landing ────────
     (" · XMP → {path}", " · XMP → {path}"),
     (" · ⚠ {note}", " · ⚠ {note}"),
+
+    // ── Round-12 L12#3: tofu disclosure for uncovered writing scripts ────────
+    ("some file names use characters no installed font can draw ({sample}) — they show as boxes",
+        "部分文件名使用了已安装字体无法绘制的字符（{sample}）——它们会显示为方块"),
 ];
 
 #[cfg(test)]

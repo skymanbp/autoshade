@@ -118,10 +118,13 @@
     /// Every symbol the GUI renders must have a glyph in the guaranteed font
     /// chain (egui's bundle + the embedded subsets) — system fonts vary, and
     /// this is exactly how the v0.22 tofu boxes (⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 …)
-    /// shipped: those glyphs existed only on SOME machines. Scans STRING
-    /// LITERALS of gui.rs + i18n.rs (comments never render); CJK ranges are
-    /// exempt — ideographs come from the runtime system-font fallback by
-    /// design. Fails ⇒ re-run scripts/subset_gui_fonts.py and commit the
+    /// shipped: those glyphs existed only on SOME machines. Scans the STRING
+    /// LITERALS of the whole GUI module tree (comments never render) —
+    /// including the CJK the zh catalogue renders, embedded since W18 (the
+    /// cjk-ui subset), so picking 中文 needs no system font. Only DYNAMIC
+    /// text (a user's own file names) still rides the runtime fallbacks;
+    /// `undrawable_scripts` + the folder-open disclosure own that half
+    /// (L12#3). Fails ⇒ re-run scripts/subset_gui_fonts.py and commit the
     /// refreshed assets/fonts/.
     #[test]
     fn embedded_fonts_cover_every_ui_symbol() {
@@ -2506,4 +2509,93 @@
             app.rationale_notes.is_empty(),
             "stale notes must not survive a recipe swap — they rendered another rationale"
         );
+    }
+
+    /// L12#3: the script classifier + the undrawable projection are pure —
+    /// `installed` is a parameter, so no real font is needed. Each probe
+    /// char must land in exactly one script, and a name in an uncovered
+    /// script names the char it cannot draw.
+    #[test]
+    fn undrawable_scripts_names_the_char_it_cannot_draw() {
+        // Probe chars are CONSTRUCTED, not literals: the font gate (and the
+        // subset extractor) scan this file's string literals, and a literal
+        // Thai/Hebrew probe would demand embedded glyphs for text no UI
+        // ever renders.
+        let ch = |u: u32| char::from_u32(u).expect("probe codepoint");
+        let probes: [(&str, u32); 9] = [
+            ("hebrew", 0x05D0),
+            ("arabic", 0x0628),
+            ("devanagari", 0x0915),
+            ("bengali", 0x0985),
+            ("tamil", 0x0B95),
+            ("thai", 0x0E01),
+            ("hangul", 0xAC00),
+            ("kana", 0x3042),
+            ("han", 0x5199),
+        ];
+        for (want, u) in probes {
+            assert_eq!(script_of(ch(u)), Some(want), "U+{u:04X} classifies as exactly {want}");
+        }
+        assert_eq!(script_of('A'), None, "Latin never discloses");
+        assert_eq!(
+            script_of(ch(0x25ED)),
+            None,
+            "symbols never disclose (embedded subsets own them)"
+        );
+
+        let thai_name = format!("DSC_{}{}{}_01", ch(0x0E1F), ch(0x0E49), ch(0x0E32));
+        let hits = undrawable_scripts(&thai_name, &[]);
+        assert_eq!(hits.len(), 1, "one script, one entry: {hits:?}");
+        assert_eq!(hits[0].0, "thai");
+        assert_eq!(script_of(hits[0].1), Some("thai"), "the sample char is from the name");
+        assert!(
+            undrawable_scripts(&thai_name, &["thai"]).is_empty(),
+            "an installed script is drawable — no disclosure"
+        );
+        let mixed = format!("{}{}_{}{}", ch(0xC11C), ch(0xC6B8), ch(0x062F), ch(0x0628));
+        let two = undrawable_scripts(&mixed, &["hangul"]);
+        assert_eq!(two.len(), 1, "only the uncovered script remains: {two:?}");
+        assert_eq!(two[0].0, "arabic");
+    }
+
+    /// L12#3: a runtime font read is bounded — stat before read, past-budget
+    /// skipped (never truncated: a cut font is a parse error at best), and
+    /// the folder-open disclosure fires ONCE per script per session.
+    #[test]
+    fn a_fallback_font_past_the_byte_cap_is_skipped_and_disclosed_once() {
+        // The cap logic, against on-disk fixtures with a tiny budget.
+        let dir = std::env::temp_dir().join(format!("autoshop-fontcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("small.ttf");
+        let big = dir.join("big.ttf");
+        std::fs::write(&small, b"tiny").unwrap();
+        std::fs::write(&big, vec![0u8; 64]).unwrap();
+        assert_eq!(
+            read_font_capped(small.to_str().unwrap(), 32).as_deref(),
+            Some(b"tiny".as_slice()),
+            "under budget reads whole"
+        );
+        assert!(
+            read_font_capped(big.to_str().unwrap(), 32).is_none(),
+            "past budget is skipped, not truncated"
+        );
+        assert!(read_font_capped(dir.join("absent.ttf").to_str().unwrap(), 32).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Disclosure-once: two folder opens with Thai names disclose once.
+        // (Constructed chars — see undrawable_scripts_names_the_char…)
+        let thai = char::from_u32(0x0E1F).expect("probe codepoint");
+        let mut app = AutoshopApp {
+            gallery: vec![std::path::PathBuf::from(format!("DSC_{thai}_01.arw"))],
+            ..Default::default()
+        };
+        // No fonts installed in a test process ⇒ installed_scripts() is
+        // empty or CJK-only; thai is never in it, so the disclosure fires.
+        app.disclose_undrawable_names();
+        let after_first = app.toasts.len();
+        assert_eq!(after_first, 1, "one script, one toast");
+        app.disclose_undrawable_names();
+        assert_eq!(app.toasts.len(), after_first, "the second open stays silent");
+        assert!(app.disclosed_scripts.contains("thai"));
     }

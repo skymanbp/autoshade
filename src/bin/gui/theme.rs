@@ -157,32 +157,101 @@ pub(crate) const EMBEDDED_SYMBOL_FONTS: &[(&str, &[u8])] = &[
     ("cjk-ui", include_bytes!("../../../assets/fonts/NotoSansSC-autoshop.ttf")),
 ];
 
+/// Per-face byte budget for a RUNTIME system font (L12#3): the old path
+/// `std::fs::read` an arbitrary file unbounded. Every real candidate is
+/// well under this (malgun.ttf, the largest, is ~13.5 MB).
+pub(crate) const MAX_FALLBACK_FONT_BYTES: u64 = 24 * 1024 * 1024;
+/// …and a budget on the SUM of all accepted runtime faces (CJK + scripts).
+pub(crate) const MAX_FALLBACK_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Script tags whose glyphs actually made it into the runtime chain —
+/// filled once by [`install_fonts`], read by [`installed_scripts`] for the
+/// tofu disclosure (a name in a script with no installed face renders as
+/// boxes; disclosure-not-silence).
+static INSTALLED_SCRIPTS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+
+pub(crate) fn installed_scripts() -> &'static [&'static str] {
+    INSTALLED_SCRIPTS.get().map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// The writing-script of one char, for the ranges the fallback chain knows
+/// about. `None` = Latin/symbols/etc — covered by egui's bundle + the
+/// embedded subsets, never disclosed.
+pub(crate) fn script_of(c: char) -> Option<&'static str> {
+    Some(match c as u32 {
+        0x0590..=0x05FF => "hebrew",
+        0x0600..=0x06FF | 0x0750..=0x077F => "arabic",
+        0x0900..=0x097F => "devanagari",
+        0x0980..=0x09FF => "bengali",
+        0x0B80..=0x0BFF => "tamil",
+        0x0E00..=0x0E7F => "thai",
+        0x1100..=0x11FF | 0xAC00..=0xD7AF => "hangul",
+        0x3040..=0x30FF => "kana",
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF => "han",
+        _ => return None,
+    })
+}
+
+/// The scripts in `text` that NO installed face covers, each with one
+/// sample char for the disclosure. Pure — `installed` is a parameter so
+/// tests need no real fonts. (The embedded cjk-ui subset covers the UI's
+/// own hanzi, so a han/kana file name MAY coincidentally render without a
+/// system CJK face — the disclosure stays, conservatively.)
+pub(crate) fn undrawable_scripts(
+    text: &str,
+    installed: &[&'static str],
+) -> Vec<(&'static str, char)> {
+    let mut out: Vec<(&'static str, char)> = Vec::new();
+    for c in text.chars() {
+        if let Some(s) = script_of(c)
+            && !installed.contains(&s)
+            && !out.iter().any(|(t, _)| *t == s)
+        {
+            out.push((s, c));
+        }
+    }
+    out
+}
+
+/// Read one system font under a byte budget — stat BEFORE read, so a
+/// mis-pointed path cannot balloon the heap; past-budget is disclosed and
+/// skipped, never truncated (a truncated font is a parse error at best).
+pub(crate) fn read_font_capped(p: &str, cap: u64) -> Option<Vec<u8>> {
+    let len = std::fs::metadata(p).ok()?.len();
+    if len > cap {
+        eprintln!("⚠ system font {p} is {len} bytes — past the {cap}-byte budget, skipped");
+        return None;
+    }
+    std::fs::read(p).ok()
+}
+
 /// Build the GUI font chain: egui defaults → embedded symbol subsets → system
-/// CJK. The embedded subsets are compile-time constants; the CJK face is read
-/// from the user's OS at runtime (no ~16 MB binary bloat for ideographs), and
-/// pre-validated with `ab_glyph` (egui's own backend) before handing it over —
-/// egui PANICS on a font it can't parse, so a missing/odd font must be skipped,
-/// not registered. Everything is appended as FALLBACKS so Latin text keeps
-/// egui's default look and egui's own icon glyphs keep theirs.
+/// CJK → per-script system faces (L12#3). The embedded subsets are
+/// compile-time constants; every runtime face is read under a byte budget
+/// and pre-validated with `ab_glyph` (egui's own backend) before handing it
+/// over — egui PANICS on a font it can't parse, so a missing/odd font must
+/// be skipped, not registered. Everything is appended as FALLBACKS, and the
+/// embedded subsets stay AHEAD of every runtime face, so Latin text keeps
+/// egui's default look and the symbol glyphs stay machine-independent.
 pub(crate) fn install_fonts(ctx: &egui::Context) {
     // Single-face TTFs first (always parse); TTC collections (face 0) last.
     // System font directories per OS (not user-specific paths); a miss just
     // falls through to the next candidate, so distro variance is harmless.
     #[cfg(target_os = "windows")]
-    const CANDIDATES: &[&str] = &[
+    const CJK_CANDIDATES: &[&str] = &[
         r"C:\Windows\Fonts\Deng.ttf",   // DengXian — clean modern UI face
         r"C:\Windows\Fonts\simhei.ttf", // SimHei
         r"C:\Windows\Fonts\msyh.ttc",   // Microsoft YaHei (collection, face 0)
         r"C:\Windows\Fonts\simsun.ttc", // SimSun (collection, face 0)
     ];
     #[cfg(target_os = "macos")]
-    const CANDIDATES: &[&str] = &[
+    const CJK_CANDIDATES: &[&str] = &[
         "/System/Library/Fonts/PingFang.ttc", // PingFang SC — macOS system CJK
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
     ];
     #[cfg(all(unix, not(target_os = "macos")))]
-    const CANDIDATES: &[&str] = &[
+    const CJK_CANDIDATES: &[&str] = &[
         // Noto Sans CJK across the major distro layouts, then WenQuanYi.
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", // Debian/Ubuntu
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",      // Arch
@@ -191,12 +260,65 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
     ];
-    let cjk = CANDIDATES.iter().find_map(|p| {
-        let b = std::fs::read(p).ok()?;
+    // Non-CJK scripts a user's own FILE NAMES can carry (L12#3): the CJK
+    // face covers none of Arabic/Thai/Hebrew/Hangul/Indic (probed with
+    // fontTools on this host, 2026-08-09 scan). Windows faces verified on
+    // this machine: micross (Arabic+Thai+Hebrew), Nirmala.ttc face 0
+    // (Devanagari+Bengali+Tamil), malgunsl (Hangul). macOS/Linux tables
+    // stay EMPTY on purpose — no path ships unverified into a const; the
+    // tofu disclosure covers those hosts honestly instead.
+    #[cfg(target_os = "windows")]
+    const SCRIPT_FALLBACKS: &[(&str, &[&str])] = &[
+        ("arabic", &[r"C:\Windows\Fonts\micross.ttf", r"C:\Windows\Fonts\tahoma.ttf"]),
+        ("hebrew", &[r"C:\Windows\Fonts\micross.ttf", r"C:\Windows\Fonts\tahoma.ttf"]),
+        ("thai", &[r"C:\Windows\Fonts\micross.ttf", r"C:\Windows\Fonts\LeelawUI.ttf"]),
+        ("hangul", &[r"C:\Windows\Fonts\malgunsl.ttf", r"C:\Windows\Fonts\malgun.ttf"]),
+        ("devanagari", &[r"C:\Windows\Fonts\Nirmala.ttc"]),
+        ("bengali", &[r"C:\Windows\Fonts\Nirmala.ttc"]),
+        ("tamil", &[r"C:\Windows\Fonts\Nirmala.ttc"]),
+    ];
+    #[cfg(not(target_os = "windows"))]
+    const SCRIPT_FALLBACKS: &[(&str, &[&str])] = &[];
+
+    let mut total: u64 = 0;
+    let mut load = |p: &str| -> Option<Vec<u8>> {
+        let b = read_font_capped(p, MAX_FALLBACK_FONT_BYTES)?;
+        if total + b.len() as u64 > MAX_FALLBACK_TOTAL_BYTES {
+            eprintln!("⚠ system font {p} would exceed the total runtime-font budget, skipped");
+            return None;
+        }
         // Only accept it if egui's backend can actually parse face 0 (no panic).
         ab_glyph::FontVec::try_from_vec_and_index(b.clone(), 0).ok()?;
+        total += b.len() as u64;
         Some(b)
-    });
+    };
+    let cjk = CJK_CANDIDATES.iter().find_map(|p| load(p));
+    // One face can serve several scripts (micross, Nirmala) — key the font
+    // data by PATH so shared bytes are inserted once.
+    let mut script_faces: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut installed: Vec<&'static str> = Vec::new();
+    for (script, candidates) in SCRIPT_FALLBACKS {
+        for p in *candidates {
+            if script_faces.iter().any(|(path, _)| path == p) {
+                installed.push(script);
+                break;
+            }
+            if let Some(b) = load(p) {
+                script_faces.push(((*p).to_string(), b));
+                installed.push(script);
+                break;
+            }
+        }
+    }
+    if cjk.is_some() {
+        // The CJK candidates all carry kana too (probed); han rides the
+        // same face. Without it, han/kana names fall to the embedded
+        // UI-subset's incidental coverage and the disclosure fires.
+        installed.push("han");
+        installed.push("kana");
+    }
+    let _ = INSTALLED_SCRIPTS.set(installed);
+
     let mut fonts = egui::FontDefinitions::default();
     for (name, bytes) in EMBEDDED_SYMBOL_FONTS {
         fonts
@@ -206,15 +328,25 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
     if let Some(bytes) = cjk.clone() {
         fonts.font_data.insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
     }
+    for (path, bytes) in &script_faces {
+        fonts
+            .font_data
+            .insert(format!("script:{path}"), egui::FontData::from_owned(bytes.clone()));
+    }
     for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         let list = fonts.families.entry(fam).or_default();
         for (name, _) in EMBEDDED_SYMBOL_FONTS {
             list.push((*name).to_owned());
         }
         if cjk.is_some() {
-            // Last: CJK faces carry some symbol glyphs too, and the embedded
-            // subsets must win those so rendering stays machine-independent.
+            // AFTER the embedded subsets: CJK faces carry some symbol
+            // glyphs too, and the embedded subsets must win those so
+            // rendering stays machine-independent.
             list.push("cjk".to_owned());
+        }
+        // Script faces last for the same reason.
+        for (path, _) in &script_faces {
+            list.push(format!("script:{path}"));
         }
     }
     ctx.set_fonts(fonts);
