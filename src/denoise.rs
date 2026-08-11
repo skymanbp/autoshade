@@ -41,10 +41,20 @@ pub(crate) fn sidecar_timeout() -> std::time::Duration {
 /// grow without bound (`Command::output()` offered neither — a stalled helper
 /// hung the CLI or GUI worker forever). Keeping the TAIL of each stream
 /// preserves the traceback line `sidecar_tail` reports.
+///
+/// `budget_env` names the env var the timeout message tells the user to
+/// raise — hard-coding AUTOSHOP_SIDECAR_TIMEOUT_SECS here sent the claude
+/// verifier's users to the wrong knob (it reads AUTOSHOP_HTTP_TIMEOUT_SECS).
+/// `group` is the child's [`crate::KillGroup`]: on the kill paths the WHOLE
+/// tree dies (before the reaping `wait`, the unix pgid rule), and on every
+/// path the group drops here — on Windows that close reaps any straggler
+/// still holding the pipes after a normal exit.
 pub(crate) fn bounded_child_output(
     mut child: std::process::Child,
     who: &str,
     budget: std::time::Duration,
+    budget_env: &str,
+    group: Option<crate::KillGroup>,
 ) -> Result<std::process::Output> {
     fn drain<R: std::io::Read + Send + 'static>(
         reader: Option<R>,
@@ -128,18 +138,26 @@ pub(crate) fn bounded_child_output(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if start.elapsed() >= budget => {
+                // The TREE first (before the reaping `wait` — the unix pgid
+                // rule), then the direct child as the belt.
+                if let Some(g) = &group {
+                    g.kill_tree();
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = join_bounded(stdout_thread, "stdout");
                 let _ = join_bounded(stderr_thread, "stderr");
                 bail!(
                     "{who} timed out after {:.1}s and was killed \
-                     (raise AUTOSHOP_SIDECAR_TIMEOUT_SECS if the first model download is legitimately slower)",
+                     (raise {budget_env} if your runs are legitimately slower)",
                     budget.as_secs_f32()
                 );
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
             Err(error) => {
+                if let Some(g) = &group {
+                    g.kill_tree();
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = join_bounded(stdout_thread, "stdout");
@@ -418,6 +436,9 @@ fn run_sidecar_with_budget(
         .stderr(Stdio::piped());
     // Don't flash a console window when the windowed GUI spawns the sidecar.
     crate::hide_child_console(&mut cmd);
+    // The whole process TREE dies with the budget, not just the launcher
+    // (L11#7): torch workers survived the old direct-child kill.
+    crate::arm_kill_group(&mut cmd);
     let run = (|| -> Result<std::process::Output> {
         let child = cmd.spawn().with_context(|| {
             format!(
@@ -426,7 +447,14 @@ fn run_sidecar_with_budget(
                 opts.script.display()
             )
         })?;
-        bounded_child_output(child, "denoise sidecar", budget)
+        let group = crate::assign_kill_group(&child);
+        bounded_child_output(
+            child,
+            "denoise sidecar",
+            budget,
+            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
+            group,
+        )
     })();
     let out = match run {
         Ok(out) => out,
@@ -817,5 +845,149 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         let _ = std::fs::remove_file(path);
+    }
+
+    // ── L11 sidecar-hardening source invariants ─────────────────────────────
+    // The fixes live in python/denoise.py and this repo has no Python test
+    // runner, so the gate is the established source-invariant idiom
+    // (include_str! + non-vacuity assertions, as advisor/mod.rs:1344 does for
+    // its own file): a regression edit to the sidecar fails a Rust test.
+    const SIDECAR_SRC: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/denoise.py"));
+
+    /// Every dict key on the same line as an entry of the named table, e.g.
+    /// `"color_25": …` between `NAME = {` and the closing `}`.
+    fn py_table_keys(name: &str) -> Vec<String> {
+        let start = SIDECAR_SRC
+            .find(&format!("{name} = {{"))
+            .unwrap_or_else(|| panic!("{name} table missing"));
+        let body = &SIDECAR_SRC[start..];
+        // The closing brace at line start — an f-string VALUE's own `}`
+        // (WEIGHT_URLS embeds {_BASE}) must not truncate the table.
+        let end = body.find("\n}").expect("table closes");
+        body[..end]
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                let key = l.strip_prefix('"')?;
+                Some(key[..key.find('"')?].to_string())
+            })
+            .collect()
+    }
+
+    /// L11#3: every downloadable weight is SHA-256 pinned AND byte-capped —
+    /// a partial pin would leave live unpinned download paths reachable from
+    /// the --model flag.
+    #[test]
+    fn scunet_weight_downloads_are_all_sha256_pinned() {
+        let urls = py_table_keys("WEIGHT_URLS");
+        let pins = py_table_keys("WEIGHT_SHA256");
+        let sizes = py_table_keys("WEIGHT_BYTES");
+        assert!(urls.len() >= 5, "extractor non-vacuity: {urls:?}");
+        assert_eq!(urls, pins, "every URL key has a digest, none extra");
+        assert_eq!(urls, sizes, "every URL key has a byte cap, none extra");
+        // Each digest is 64 lowercase hex chars.
+        for line in SIDECAR_SRC.lines() {
+            let t = line.trim();
+            if t.starts_with('"')
+                && t.contains("\": \"")
+                && t.ends_with("\",")
+                && let Some(v) = t.rsplit('"').nth(1)
+                && v.len() == 64
+            {
+                assert!(
+                    v.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                    "digest not lowercase hex: {v}"
+                );
+            }
+        }
+    }
+
+    /// L11#3/#5: no weight ever goes through the raw downloader — the
+    /// verified fetch (which also re-hashes an EXISTING cache) is the only
+    /// channel, and it carries the byte cap.
+    #[test]
+    fn the_denoise_sidecar_never_downloads_a_weight_unverified() {
+        assert!(
+            !SIDECAR_SRC.contains("_download(WEIGHT_URLS["),
+            "a weight download bypasses the verified fetch"
+        );
+        assert!(
+            SIDECAR_SRC.matches("_fetch_verified(").count() >= 3,
+            "def + the network file + the weights"
+        );
+        assert!(
+            SIDECAR_SRC.contains("def _download(url, dest, max_bytes):"),
+            "the downloader takes its cap"
+        );
+        assert!(
+            SIDECAR_SRC.contains("done > max_bytes"),
+            "the cap is enforced in-stream"
+        );
+    }
+
+    /// L11#5: a server that closes early must not publish a SHORT file onto
+    /// the cache name — the refusal sits textually BEFORE the publish.
+    #[test]
+    fn a_truncated_weight_download_is_never_published() {
+        let refusal = SIDECAR_SRC
+            .find("done != total")
+            .expect("the truncation refusal exists");
+        let publish = SIDECAR_SRC
+            .find("os.replace(tmp, dest)")
+            .expect("the publish exists");
+        assert!(refusal < publish, "the refusal must guard the publish");
+    }
+
+    /// L11#5: day-old orphaned `.part` files (a hard kill skips the python
+    /// `finally`) are reclaimed — on the dest prefix ONLY, so the sweep can
+    /// never touch the image-output .part names in the user's out/ dir.
+    #[test]
+    fn orphaned_download_parts_are_reclaimed() {
+        assert!(SIDECAR_SRC.contains("def _reclaim_stale_parts(dest):"));
+        assert!(
+            SIDECAR_SRC.contains("_reclaim_stale_parts(dest)\n    for attempt in"),
+            "the sweep runs at the top of every verified fetch"
+        );
+        assert!(
+            SIDECAR_SRC.contains("glob.escape(dest)"),
+            "globbing on the dest prefix, never a bare *.part"
+        );
+    }
+
+    /// L11#4: a torch too old for weights_only=True is REFUSED, never
+    /// degraded to an unsandboxed pickle load (a log line on a captured
+    /// stderr that only surfaces on failure reaches nobody).
+    #[test]
+    fn denoise_sidecar_never_loads_weights_without_weights_only() {
+        let loads: Vec<&str> = SIDECAR_SRC
+            .lines()
+            .filter(|l| l.contains("torch.load("))
+            .collect();
+        assert!(!loads.is_empty(), "extractor non-vacuity");
+        for l in &loads {
+            assert!(l.contains("weights_only=True"), "unsandboxed load: {l}");
+        }
+        assert!(SIDECAR_SRC.contains("refusing to load the SCUNet weights"));
+        assert!(!SIDECAR_SRC.contains("loading the weight pickle unsandboxed"));
+    }
+
+    /// L11#7b: every sidecar spawn is wrapped in a kill-group — the timeout
+    /// must reap the whole tree (torch workers survived the direct-child
+    /// kill), and a NEW spawn site must join the rule.
+    #[test]
+    fn every_sidecar_spawn_is_wrapped_in_a_kill_group() {
+        for (name, src) in [
+            ("denoise.rs", include_str!("denoise.rs")),
+            ("segment.rs", include_str!("segment.rs")),
+            ("advisor/claude.rs", include_str!("advisor/claude.rs")),
+        ] {
+            // Assembled needles: denoise.rs scans its own text, so literal
+            // needles here would match themselves (the advisor/mod.rs rule).
+            let arm = format!("arm{}kill_group", '_');
+            let assign = format!("assign{}kill_group", '_');
+            assert!(src.contains(&arm), "{name} spawns without arming a kill-group");
+            assert!(src.contains(&assign), "{name} spawns without assigning a kill-group");
+        }
     }
 }

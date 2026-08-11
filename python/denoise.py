@@ -59,13 +59,40 @@ NETWORK_URL = (
 # commit on 2026-08-04. A poisoned cache, a corrupted download or a MITM now
 # fails LOUDLY instead of executing.
 NETWORK_SHA256 = "77aeefd31e37080db7f0bf46bca5efcecc800fcfddb502081340a10b2b949c60"
+NETWORK_BYTES = 11445
+
+# Every weight download is pinned exactly like the network file: a .pth is a
+# PICKLE handed to torch, so the CHANNEL must be authenticated, not just the
+# loader flagged (weights_only defends the load; this defends the bytes).
+# All five digests + byte counts verified 2026-08-11 two independent ways:
+# streamed from github.com/cszn/KAIR/releases/download/v1.0/ and hashed, and
+# (for color_real_psnr / color_25) matched byte-for-byte against the local
+# cache this machine downloaded on 2026-06-26 — so existing caches revalidate
+# without a re-download. The KAIR v1.0 release assets are immutable tags; if
+# upstream ever re-cuts them the fetch fails loudly by design.
+WEIGHT_SHA256 = {
+    "color_real_psnr": "fa78899ba2caec9d235a900e91d96c689da71c42029230c2028b00f09f809c2e",
+    "color_real_gan": "892c83f812c59173273b74f4f34a14ecaf57a2fdb68df056664589beb55c966e",
+    "color_15": "fa3a95efb4add693a78917e70757a3d535c5a8c905ace9f93ba7e5897351e1b2",
+    "color_25": "6b4e572fe69b1530aade8b7856b18b9e6ddf9cf2bd87c21bf045b51662096320",
+    "color_50": "11f6839726c10dad327a75ce578be661a3e208f01fd7ab6d3eb763a5464bfdfe",
+}
+# Exact upstream sizes: the in-stream download cap (an endpoint that serves
+# more than the pinned asset is refused mid-transfer, before the disk fills).
+WEIGHT_BYTES = {
+    "color_real_psnr": 71982841,
+    "color_real_gan": 71982835,
+    "color_15": 71982831,
+    "color_25": 71982761,
+    "color_50": 71982757,
+}
 
 
 def log(msg):
     print(f"[denoise] {msg}", file=sys.stderr, flush=True)
 
 
-def _download(url, dest):
+def _download(url, dest, max_bytes):
     import requests
 
     log(f"downloading {os.path.basename(dest)} ...")
@@ -79,13 +106,29 @@ def _download(url, dest):
             done = 0
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1 << 20):
-                    f.write(chunk)
                     done += len(chunk)
+                    # Enforced DURING the stream, not after — a post-hoc
+                    # check runs with the disk already full. The cap comes
+                    # from the pinned byte tables, so overshooting it means
+                    # the endpoint is not serving the pinned asset.
+                    if done > max_bytes:
+                        raise SystemExit(
+                            f"refusing {os.path.basename(dest)}: the download exceeded "
+                            f"its pinned size ({max_bytes} bytes) — the endpoint is not "
+                            f"serving the pinned asset")
+                    f.write(chunk)
                     if total:
                         pct = 100 * done / total
                         print(f"\r[denoise]   {done >> 20}/{total >> 20} MB ({pct:4.1f}%)",
                               end="", file=sys.stderr, flush=True)
         print("", file=sys.stderr)
+        # A server (or proxy) that closed early must not publish a SHORT
+        # file onto the cache name — that surfaced later as a confusing
+        # torch/pickle error instead of the true reason.
+        if total and done != total:
+            raise SystemExit(
+                f"refusing {os.path.basename(dest)}: the download stopped at "
+                f"{done} of {total} bytes")
         os.replace(tmp, dest)
     finally:
         # A failed / interrupted download must not accumulate per-process
@@ -143,7 +186,32 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def _fetch_verified(url, dest, want_sha256, what):
+# Reclamation age for orphaned .part files: a HARD kill (the Rust side's
+# 30-minute budget is TerminateProcess — the `finally` never runs) orphans a
+# ~72 MB temp beside the cache. Well past 2x the default sidecar budget, so a
+# live peer's in-flight transfer can never be swept; do not tune down without
+# re-deriving from AUTOSHOP_SIDECAR_TIMEOUT_SECS.
+STALE_PART_SECS = 24 * 3600
+
+
+def _reclaim_stale_parts(dest):
+    """Remove day-old `<dest>.<pid>.part` orphans (and ONLY those — globbing
+    on the dest prefix keeps the sweep away from the image-output .part names
+    in the user's out/ directory)."""
+    import glob
+    import time
+
+    now = time.time()
+    for p in glob.glob(f"{glob.escape(dest)}.*.part"):
+        try:
+            if now - os.path.getmtime(p) > STALE_PART_SECS:
+                os.remove(p)
+                log(f"reclaimed orphaned download {os.path.basename(p)}")
+        except OSError:
+            pass  # why: a live peer's file or an AV lock — reclamation is never fatal
+
+
+def _fetch_verified(url, dest, want_sha256, max_bytes, what):
     """Download (if absent) and REFUSE to proceed unless the bytes match.
 
     A cache filled by an older build — which fetched this file from a moving
@@ -151,9 +219,10 @@ def _fetch_verified(url, dest, want_sha256, what):
     is verified too. One mismatch triggers a single re-download (the benign
     legacy-cache / truncated-download case); a second mismatch is fatal.
     """
+    _reclaim_stale_parts(dest)
     for attempt in (0, 1):
         if not os.path.exists(dest):
-            _download(url, dest)
+            _download(url, dest, max_bytes)
         if not os.path.exists(dest):
             # A download that produced nothing without raising must not crash
             # this gate with FileNotFoundError — refuse honestly instead.
@@ -183,13 +252,21 @@ def load_model(model_name, cache_dir, device):
     os.makedirs(cache_dir, exist_ok=True)
     net_path = os.path.join(cache_dir, "network_scunet.py")
     # Verified BEFORE exec_module — including a file an older build cached
-    # from the moving branch.
-    _fetch_verified(NETWORK_URL, net_path, NETWORK_SHA256, "the SCUNet network definition")
+    # from the moving branch. The small slack on the cap keeps an overshoot
+    # message about the ENDPOINT, not an off-by-one.
+    _fetch_verified(NETWORK_URL, net_path, NETWORK_SHA256, NETWORK_BYTES + 4096,
+                    "the SCUNet network definition")
+    if model_name not in WEIGHT_URLS or model_name not in WEIGHT_SHA256:
+        raise SystemExit(f"unknown or unpinned model '{model_name}'")
     weight_path = os.path.join(cache_dir, f"scunet_{model_name}.pth")
-    if not os.path.exists(weight_path):
-        if model_name not in WEIGHT_URLS:
-            raise SystemExit(f"unknown model '{model_name}'")
-        _download(WEIGHT_URLS[model_name], weight_path)
+    # Through the VERIFIED fetch, existing cache included — the whole point:
+    # this machine's own cache was fetched by pre-pinning code, and a
+    # poisoned cache is exactly the case the digest closes for the .py one
+    # call above. No exists() guard: _fetch_verified skips the download when
+    # the file is present and hashes it anyway.
+    _fetch_verified(WEIGHT_URLS[model_name], weight_path, WEIGHT_SHA256[model_name],
+                    WEIGHT_BYTES[model_name] + 4096,
+                    f"the SCUNet '{model_name}' weights")
 
     _install_timm_shim()
     spec = importlib.util.spec_from_file_location("network_scunet", net_path)
@@ -201,13 +278,20 @@ def load_model(model_name, cache_dir, device):
     # weights_only: a .pth is a PICKLE, and torch below 2.6 executes arbitrary
     # code while unpickling — a tampered or replaced weight download would run
     # as the user. A state dict is plain tensors, so the safe loader suffices.
-    # The fallback covers a torch too old to know the flag; it says so rather
-    # than pretending the load was sandboxed.
+    # A torch too old to know the flag is REFUSED, not degraded: the old
+    # fallback logged to a captured stderr that only surfaces on failure, so
+    # the unsandboxed load was silent in practice — and a code-execution
+    # boundary is exactly where refuse-not-degrade is non-negotiable. The
+    # except stays NARROW: a malformed checkpoint raises UnpicklingError /
+    # RuntimeError under weights_only=True and must keep propagating.
     try:
         state = torch.load(weight_path, map_location="cpu", weights_only=True)
-    except TypeError:
-        log("torch is too old for weights_only=True — loading the weight pickle unsandboxed")
-        state = torch.load(weight_path, map_location="cpu")
+    except TypeError as e:
+        raise SystemExit(
+            f"refusing to load the SCUNet weights: this torch ({torch.__version__}) "
+            f"predates weights_only=True, so the load would execute the weight "
+            f"pickle unsandboxed. Upgrade torch (pip install -U torch) and retry. ({e})"
+        )
     model.load_state_dict(state, strict=True)
     model.eval().to(device)
     return model

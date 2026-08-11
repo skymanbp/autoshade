@@ -73,6 +73,26 @@ rfd = { version = "0.15", optional = true }
 # to egui (egui panics on an unparseable font), so font loading degrades safely.
 ab_glyph = { version = "0.2", optional = true }
 
+# Sidecar kill-groups (L11#7): a timeout must reap the sidecar's WHOLE
+# process tree, not just the direct child — a launcher's python or a
+# GPU-holding torch worker used to survive the kill. Both crates were
+# already in Cargo.lock transitively (rawler/ureq pull them), so promoting
+# them adds no download and no new supply-chain surface; official bindings
+# beat hand-rolled `extern` declarations for a Job Object (user-ratified
+# 2026-08-11).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    # CreateJobObjectW's SECURITY_ATTRIBUTES param / the extended limit
+    # struct's IO_COUNTERS live behind these two gates.
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Embeds the Windows app icon into the executables (see build.rs).
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

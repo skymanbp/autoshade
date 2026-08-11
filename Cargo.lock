@@ -560,6 +560,7 @@ dependencies = [
  "egui",
  "getrandom 0.3.4",
  "image",
+ "libc",
  "qcms",
  "rawler",
  "rayon",
@@ -570,6 +571,7 @@ dependencies = [
  "tiff",
  "tiny_http",
  "ureq",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 

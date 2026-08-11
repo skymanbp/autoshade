@@ -71,6 +71,8 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
         .stderr(Stdio::piped());
     // Don't flash a console window when the windowed GUI spawns the sidecar.
     crate::hide_child_console(&mut cmd);
+    // Tree-wide kill on timeout — same rule as the denoise sidecar (L11#7).
+    crate::arm_kill_group(&mut cmd);
     let run = (|| -> Result<std::process::Output> {
         let child = cmd.spawn().with_context(|| {
             format!(
@@ -79,10 +81,13 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
                 opts.script.display()
             )
         })?;
+        let group = crate::assign_kill_group(&child);
         crate::denoise::bounded_child_output(
             child,
             "segmentation sidecar",
             crate::denoise::sidecar_timeout(),
+            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
+            group,
         )
     })();
     let out = match run {

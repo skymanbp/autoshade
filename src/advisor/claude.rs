@@ -75,8 +75,15 @@ impl Advisor for ClaudeProvider {
             &self.model,
             "--output-format",
             "json",
-        ])
-        .arg(&prompt);
+        ]);
+        // The prompt goes over STDIN, never argv (L11#7a): a recipe at the
+        // sanitize caps pretty-prints to ~90-100 KB, 3x past CreateProcessW's
+        // 32767-char command-line ceiling (measured: 32700 spawns, 33000
+        // raises WinError 206) — and argv is world-readable (/proc/<pid>/
+        // cmdline, WMI), while this prompt embeds the user's full recipe and
+        // model-authored rationale text. The CLI documents the channel:
+        // "Input must be provided either through stdin or as a prompt
+        // argument when using --print" (claude 2.1.210, measured).
         // This provider bills the user's Claude subscription via the stored
         // OAuth login by design. A stray ANTHROPIC_API_KEY in the inherited
         // environment (e.g. a machine-wide env var meant for other tools)
@@ -109,55 +116,46 @@ impl Advisor for ClaudeProvider {
             // builders' zero filter.
             .filter(|s: &u64| *s > 0)
             .unwrap_or(300u64);
-        cmd.stdin(std::process::Stdio::null());
+        cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // Tree-wide kill on timeout, like both python sidecars (L11#7b).
+        crate::arm_kill_group(&mut cmd);
         let mut child = cmd.spawn()?;
-        // Drain BOTH pipes concurrently while polling: a child that fills the
-        // ~64 KiB pipe buffer before exiting would otherwise block writing
-        // against our undrained pipe until the budget killed it — a verbose
-        // SUCCESSFUL run turned into a timeout. (`wait_with_output` drains,
-        // but only starts draining after try_wait already saw an exit.)
-        fn drain<R: std::io::Read + Send + 'static>(
-            r: Option<R>,
-        ) -> std::thread::JoinHandle<Vec<u8>> {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                if let Some(mut r) = r {
-                    let _ = r.read_to_end(&mut buf);
-                }
-                buf
-            })
-        }
-        let out_thread = drain(child.stdout.take());
-        let err_thread = drain(child.stderr.take());
-        let start = std::time::Instant::now();
-        let status = loop {
-            match child.try_wait()? {
-                Some(s) => break s,
-                None if start.elapsed().as_secs() >= budget => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(AdvisorError::ClaudeError(format!(
-                        "claude verifier timed out after {budget}s and was killed \
-                         (raise AUTOSHOP_HTTP_TIMEOUT_SECS if your runs are legitimately slower)"
-                    )));
-                }
-                None => std::thread::sleep(std::time::Duration::from_millis(200)),
+        let group = crate::assign_kill_group(&child);
+        // The prompt writer is a DEDICATED thread, not an inline write_all:
+        // the prompt routinely exceeds the ~64 KiB pipe buffer, so an inline
+        // write blocks until the child drains it while the child may already
+        // be blocked writing to a stdout nobody drains yet — a two-pipe
+        // deadlock. Dropping the handle closes stdin → the child sees EOF. A
+        // broken pipe (child exited early) is `let _ =` by design: the real
+        // diagnosis is the exit status plus the drained stderr. Joined AFTER
+        // bounded_child_output, never before — a child that ignores stdin
+        // must not park this caller past its own deadline.
+        let mut sink = child.stdin.take();
+        let payload = prompt.into_bytes();
+        let writer = std::thread::spawn(move || {
+            if let Some(mut s) = sink.take() {
+                let _ = std::io::Write::write_all(&mut s, &payload);
             }
-        };
-        // Killing the child (above) closes the pipes, so these joins cannot
-        // hang; a panicked reader degrades to empty output, reported below.
-        struct Output {
-            status: std::process::ExitStatus,
-            stdout: Vec<u8>,
-            stderr: Vec<u8>,
-        }
-        let output = Output {
-            status,
-            stdout: out_thread.join().unwrap_or_default(),
-            stderr: err_thread.join().unwrap_or_default(),
-        };
+        });
+        // The bounded drain + poll used to live here as a PRIVATE, weaker
+        // copy: an unbounded `read_to_end` Vec (the repo's last one), and an
+        // unconditional post-kill join whose "the pipes are closed" comment
+        // denoise.rs documents as false — a descendant holding the inherited
+        // pipe hung the analysis worker past its own deadline (L11#6). The
+        // shared primitive caps each stream at 1 MiB (16x above the 64 KiB
+        // verdict ceiling, so no legitimate run can regress), detaches a
+        // stuck drain after a bounded grace, and discloses truncation.
+        let output = crate::denoise::bounded_child_output(
+            child,
+            "claude verifier",
+            std::time::Duration::from_secs(budget),
+            "AUTOSHOP_HTTP_TIMEOUT_SECS",
+            group,
+        )
+        .map_err(|e| AdvisorError::ClaudeError(e.to_string()))?;
+        let _ = writer.join();
 
         // The CLI envelope; we only need these fields (serde ignores the rest).
         #[derive(serde::Deserialize)]
@@ -211,5 +209,212 @@ impl Advisor for ClaudeProvider {
         // {...} object and keep the LAST one that parses as a Verdict (the
         // model's final answer, past any example/prose objects).
         parse_verdict(&env.result, &[])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::advisor::Decision;
+
+    /// Unique-per-test fixture dir (the denoise stand-in idiom).
+    fn tdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-claude-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A stand-in "claude" that records its argv, copies its STDIN to a
+    /// file, and prints the given envelope file — all through absolute
+    /// paths, because the provider runs its child from a neutral cwd.
+    fn stand_in(dir: &std::path::Path, envelope: &str) -> String {
+        let env_file = dir.join("envelope.json");
+        std::fs::write(&env_file, envelope).unwrap();
+        #[cfg(windows)]
+        {
+            let p = dir.join("claude.bat");
+            let body = format!(
+                "@echo off\r\necho %* > \"{argv}\"\r\nfindstr \"^\" > \"{prompt}\"\r\ntype \"{env}\"\r\n",
+                argv = dir.join("argv.txt").display(),
+                prompt = dir.join("prompt.txt").display(),
+                env = env_file.display(),
+            );
+            std::fs::write(&p, body).unwrap();
+            p.to_string_lossy().into_owned()
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("claude.sh");
+            let body = format!(
+                "#!/bin/sh\nprintf '%%s ' \"$@\" > \"{argv}\"\ncat > \"{prompt}\"\ncat \"{env}\"\n",
+                argv = dir.join("argv.txt").display(),
+                prompt = dir.join("prompt.txt").display(),
+                env = env_file.display(),
+            );
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_string_lossy().into_owned()
+        }
+    }
+
+    fn fixture_meta() -> Meta {
+        Meta {
+            make: "TestCam".into(),
+            model: "T1".into(),
+            lens: None,
+            iso: Some(100),
+            shutter: Some("1/125".into()),
+            aperture: Some(4.0),
+            focal_length_mm: Some(50.0),
+            exposure_bias_ev: Some(0.0),
+            date_time: None,
+            width: 6000,
+            height: 4000,
+            as_shot_wb_coeffs: [1.0; 4],
+        }
+    }
+
+    fn fixture_hist() -> Histogram {
+        Histogram {
+            luma: vec![0; 256],
+            r: vec![0; 256],
+            g: vec![0; 256],
+            b: vec![0; 256],
+            clip_black_pct: 0.0,
+            clip_white_pct: 0.0,
+            sample_pixels: 1,
+        }
+    }
+
+    const ACCEPT_ENVELOPE: &str = r#"{"type":"result","is_error":false,"result":"{\"decision\":\"accept\",\"reasons\":[]}"}"#;
+
+    /// L11#7a: the prompt travels on STDIN, never argv — argv is capped at
+    /// 32767 chars by CreateProcessW (a caps-level recipe pretty-prints to
+    /// ~3x that) and is world-readable, while the prompt embeds the user's
+    /// full recipe. The positive control rides along: a well-behaved
+    /// envelope still parses through the bounded drain (L11#6).
+    #[test]
+    fn claude_verifier_sends_its_prompt_on_stdin_not_argv() {
+        let dir = tdir("stdin");
+        let provider = ClaudeProvider {
+            bin: stand_in(&dir, ACCEPT_ENVELOPE),
+            model: "test-model".into(),
+        };
+        let recipe = EditRecipe {
+            rationale: "MARKER_RATIONALE_ON_STDIN_XYZ".into(),
+            exposure_ev: 0.5,
+            ..Default::default()
+        };
+        let verdict = provider
+            .verify(&recipe, &fixture_meta(), &fixture_hist())
+            .expect("the stand-in answers a valid envelope");
+        assert!(matches!(verdict.decision, Decision::Accept));
+        let prompt = std::fs::read_to_string(dir.join("prompt.txt")).expect("stdin was written");
+        assert!(
+            prompt.contains("MARKER_RATIONALE_ON_STDIN_XYZ"),
+            "the recipe reaches the child on stdin"
+        );
+        let argv = std::fs::read_to_string(dir.join("argv.txt")).unwrap_or_default();
+        assert!(
+            !argv.contains("MARKER_RATIONALE_ON_STDIN_XYZ"),
+            "the recipe must NOT travel on argv: {argv}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A recipe at the sanitize caps produces a prompt past the Windows
+    /// 32767-char argv ceiling (measured: 32700 spawns, 33000 raises
+    /// WinError 206) — it must still reach the verifier. The premise is
+    /// asserted so it cannot rot.
+    #[test]
+    fn an_oversized_verify_prompt_still_reaches_the_verifier() {
+        use crate::recipe::{CurvePoint, LocalAdjustment, MaskGeometry};
+        let dir = tdir("oversized");
+        let provider = ClaudeProvider {
+            bin: stand_in(&dir, ACCEPT_ENVELOPE),
+            model: "test-model".into(),
+        };
+        let recipe = EditRecipe {
+            rationale: "r".repeat(4096),
+            tone_curve: (0..=255)
+                .map(|i| CurvePoint { input: i as u8, output: i as u8 })
+                .collect(),
+            masks: (0..64)
+                .map(|i| LocalAdjustment {
+                    mask: MaskGeometry::Radial {
+                        top: 0.1,
+                        left: 0.1,
+                        bottom: 0.9,
+                        right: 0.9,
+                        feather: 0.5,
+                        roundness: 0.0,
+                        flipped: false,
+                        angle: 0.0,
+                    },
+                    name: format!("mask {i}"),
+                    exposure_ev: 0.1,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let prompt = build_verify_prompt(&recipe, &fixture_meta(), &fixture_hist()).unwrap();
+        assert!(
+            prompt.len() > 32_767,
+            "premise: a caps-level prompt exceeds the argv ceiling (got {})",
+            prompt.len()
+        );
+        let verdict = provider
+            .verify(&recipe, &fixture_meta(), &fixture_hist())
+            .expect("an oversized prompt still verifies (argv would refuse at spawn)");
+        assert!(matches!(verdict.decision, Decision::Accept));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L11#6: a child that floods stdout can neither exhaust memory nor
+    /// hang the analysis worker — the shared bounded drain caps the stream
+    /// at 1 MiB and the truncation is disclosed in the error, not silent.
+    #[test]
+    fn claude_verifier_output_is_bounded_and_cannot_hang_the_worker() {
+        let dir = tdir("flood");
+        // ~1.2 MiB of noise instead of an envelope.
+        let big = dir.join("big.txt");
+        let line = format!("{}\n", "x".repeat(4095));
+        std::fs::write(&big, line.repeat(300)).unwrap();
+        #[cfg(windows)]
+        let bin = {
+            let p = dir.join("claude.bat");
+            std::fs::write(
+                &p,
+                format!("@echo off\r\nfindstr \"^\" > nul\r\ntype \"{}\"\r\n", big.display()),
+            )
+            .unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        #[cfg(not(windows))]
+        let bin = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("claude.sh");
+            std::fs::write(
+                &p,
+                format!("#!/bin/sh\ncat > /dev/null\ncat \"{}\"\n", big.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let provider = ClaudeProvider { bin, model: "test-model".into() };
+        let err = provider
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .expect_err("a flooded stdout is not a verdict");
+        let text = err.to_string();
+        assert!(
+            text.contains("exceeded 1 MiB"),
+            "the truncation is disclosed, not silent: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

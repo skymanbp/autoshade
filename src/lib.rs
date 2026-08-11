@@ -49,6 +49,119 @@ pub fn hide_child_console(cmd: &mut std::process::Command) {
     }
 }
 
+/// A kill-group over a sidecar child AND every descendant it spawns (L11#7).
+///
+/// The three sidecar kill sites used `Child::kill` — TerminateProcess /
+/// SIGKILL on the DIRECT child only — so a launcher's real python or a
+/// GPU-holding torch worker survived the timeout, kept the VRAM and its
+/// half-written `.part`, and held the inherited pipes open (the very case
+/// `denoise::bounded_child_output`'s bounded-join detach discloses; the
+/// group makes that belt mostly unreachable, and the belt stays).
+///
+/// Windows: a Job Object with `KILL_ON_JOB_CLOSE` — the whole tree dies
+/// when this handle closes, even if THIS process crashes first. Unix: the
+/// child leads its own process group (armed pre-spawn) and [`Self::kill_tree`]
+/// signals the group; there is no close-kills equivalent, so descendants
+/// surviving a NORMAL exit are not reaped there (registered — secondary
+/// platform, and the pipes still bound the drain).
+pub struct KillGroup {
+    #[cfg(windows)]
+    job: std::os::windows::io::OwnedHandle,
+    #[cfg(unix)]
+    pgid: i32,
+}
+
+impl KillGroup {
+    /// Kill every process in the group NOW — best-effort, idempotent. Call
+    /// BEFORE reaping the direct child (`Child::wait`): on unix the group id
+    /// is only guaranteed unrecycled while its leader is un-reaped.
+    pub fn kill_tree(&self) {
+        #[cfg(windows)]
+        // SAFETY: the handle is a live Job Object owned by `self`; terminating
+        // a job this process created is exactly its documented use.
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(
+                self.job.as_raw_handle(),
+                1,
+            );
+        }
+        #[cfg(unix)]
+        // SAFETY: plain syscall; a stale/invalid pgid returns ESRCH harmlessly.
+        unsafe {
+            libc::killpg(self.pgid, libc::SIGKILL);
+        }
+    }
+}
+
+/// Pre-spawn half of the kill-group: on unix the group must be created at
+/// `fork` time (`process_group(0)` makes the child its own leader). A no-op
+/// on Windows, where the group is a Job assigned after the spawn.
+pub fn arm_kill_group(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// Post-spawn half: wrap `child` (and every process it will spawn) in a
+/// [`KillGroup`]. `None` = the platform refused (e.g. an outer Job that
+/// forbids assignment) — DISCLOSED here once, and the sidecar keeps running
+/// unwrapped: the group is containment telemetry, not a deliverable, so a
+/// refusal must not take AI denoise down with it.
+pub fn assign_kill_group(child: &std::process::Child) -> Option<KillGroup> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        // SAFETY: straight Win32 sequence — create an anonymous job, set the
+        // close-kills limit, assign the freshly spawned (not yet reaped)
+        // child. Every failure path closes what was opened via OwnedHandle.
+        unsafe {
+            let raw = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if raw.is_null() {
+                eprintln!("⚠ sidecar kill-group unavailable (CreateJobObjectW failed) — descendants of a timed-out sidecar are not reaped");
+                return None;
+            }
+            let job = OwnedHandle::from_raw_handle(raw);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+                || AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) == 0
+            {
+                eprintln!("⚠ sidecar kill-group unavailable (job assignment failed) — descendants of a timed-out sidecar are not reaped");
+                return None;
+            }
+            Some(KillGroup { job })
+        }
+    }
+    #[cfg(unix)]
+    {
+        // `arm_kill_group` made the child its own group leader, so the group
+        // id IS the child's pid.
+        Some(KillGroup { pgid: child.id() as i32 })
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = child;
+        None
+    }
+}
+
 /// Snapshot of a sidecar's promised artifact path BEFORE the sidecar runs:
 /// `None` = nothing there, `Some((len, mtime))` = what already exists — a
 /// stale deliverable from an earlier export (the CLI's `default_out` names
