@@ -1282,6 +1282,180 @@
         assert!(why.contains("not UTF-8"), "{why}");
     }
 
+    /// L06#3: selection moved ⇒ every index-armed tool whose target is no
+    /// longer the selected mask dies with the old row — ↻ Redraw and
+    /// add-component arm silently (their indicators live inside the
+    /// selected-mask block and the canvas hint discards the PlaceTarget),
+    /// so a stranded arming rewrote the OLD mask while the user looked at
+    /// another row. A NewMask placement and the non-mask tools are spared.
+    #[test]
+    fn a_selection_switch_disarms_index_armed_tools() {
+        let mut app = AutoshopApp::default();
+        app.recipe.masks =
+            vec![autoshop::recipe::LocalAdjustment::default(), Default::default()];
+
+        app.placing_mask = Some((MaskKind::Linear, PlaceTarget::Redraw(0)));
+        app.place_start = Some((0.5, 0.5));
+        assert!(!app.disarm_selection_bound_tools(Some(1)), "no brush session died");
+        assert!(app.placing_mask.is_none(), "an armed Redraw dies with its row");
+        assert!(app.place_start.is_none(), "…and its gesture anchor with it");
+
+        app.placing_mask = Some((
+            MaskKind::Radial,
+            PlaceTarget::Component(0, autoshop::recipe::MaskCombine::Add),
+        ));
+        app.disarm_selection_bound_tools(None); // same-row deselect
+        assert!(app.placing_mask.is_none(), "deselecting disarms too");
+
+        // NewMask is NOT selection-bound — browsing the list keeps it armed;
+        // non-mask tools (crop) are none of this helper's business.
+        app.placing_mask = Some((MaskKind::Linear, PlaceTarget::NewMask));
+        app.crop_mode = true;
+        app.disarm_selection_bound_tools(Some(1));
+        assert!(app.placing_mask.is_some(), "a NewMask placement survives");
+        assert!(app.crop_mode, "non-mask tools survive");
+
+        // The kept row's own arming survives.
+        app.placing_mask = Some((MaskKind::Linear, PlaceTarget::Redraw(1)));
+        app.disarm_selection_bound_tools(Some(1));
+        assert!(app.placing_mask.is_some(), "the selected row keeps its arming");
+    }
+
+    /// L06#5: the plate under the canvas was replaced — a live brush
+    /// session is dimension-locked to the OLD plate (start_mask_brush sizes
+    /// canvas + weight buffer together), so it dies with it and 「Apply」
+    /// has nothing stale left to bake. A selection switch ends an
+    /// off-selection session the same way, disclosed; the kept row's
+    /// session survives.
+    #[test]
+    fn a_plate_replacement_ends_the_mask_brush_session() {
+        let mut app = AutoshopApp {
+            base_preview: Some(std::sync::Arc::new(image::DynamicImage::new_rgba8(8, 8))),
+            ..Default::default()
+        };
+        app.start_mask_brush(None);
+        assert!(
+            app.mask_brush.is_some() && app.mask_brush_gray.is_some() && app.paint_mode,
+            "fixture: a session is armed"
+        );
+
+        app.rebind_paint_canvas(16, 16);
+        assert!(app.mask_brush.is_none(), "the session dies with the plate");
+        assert!(app.mask_brush_gray.is_none(), "no weight buffer left to bake");
+        assert!(!app.paint_mode);
+        let m = app.mask_paint.as_ref().expect("a fresh canvas at the new size");
+        assert_eq!((m.width(), m.height()), (16, 16));
+
+        app.recipe.masks =
+            vec![autoshop::recipe::LocalAdjustment::default(), Default::default()];
+        app.start_mask_brush(Some(0));
+        assert!(
+            app.disarm_selection_bound_tools(Some(1)),
+            "an off-selection brush session dies, and says so (return drives the toast)"
+        );
+        assert!(app.mask_brush.is_none());
+
+        app.start_mask_brush(Some(1));
+        assert!(!app.disarm_selection_bound_tools(Some(1)));
+        assert!(app.mask_brush.is_some(), "the selected row keeps its session");
+    }
+
+    /// L06#4: a recipe edit made while the retouch worker runs survives as
+    /// its OWN undo step — committing only AFTER the plate swap folded it
+    /// into the pixel step, so one Ctrl+Z reverted both and the slider move
+    /// could not be kept while dropping the retouch.
+    #[test]
+    fn a_retouch_landing_does_not_fold_a_mid_flight_recipe_edit_into_the_pixel_step() {
+        let ctx = egui::Context::default();
+        let mut app = AutoshopApp::default();
+        let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
+        app.variants = vec![Variant {
+            kind: VariantKind::Original,
+            recipe: EditRecipe::default(),
+            base: Some(b0.clone()),
+            origin: None,
+            thumb: None,
+        }];
+        app.active = 0;
+        app.base_preview = Some(b0.clone());
+        app.reset_history(); // committed = (neutral recipe, b0)
+
+        // A slider edit still mid-gesture when the worker returns.
+        app.recipe.exposure_ev = 0.5;
+
+        let epoch = app.gen_epoch;
+        app.on_retouched(
+            &ctx,
+            Lang::En,
+            epoch,
+            Ok((
+                image::DynamicImage::new_rgba8(4, 4),
+                "healed".into(),
+                std::path::PathBuf::from("out/_retouch_order_test.png"),
+                RetouchKind::InPlace,
+            )),
+        );
+
+        assert_eq!(app.undo_stack.len(), 2, "slider step + pixel step, not one folded step");
+        let undone = app.undo_stack.last().unwrap();
+        assert_eq!(undone.recipe.exposure_ev, 0.5, "the slider edit is NOT in the pixel step");
+        assert!(
+            undone.base.as_ref().is_some_and(|b| std::sync::Arc::ptr_eq(b, &b0)),
+            "one Ctrl+Z drops the retouch and keeps the slider move"
+        );
+        assert!(
+            app.committed.base.as_ref().is_some_and(|b| !std::sync::Arc::ptr_eq(b, &b0)),
+            "the head holds the retouched pixels"
+        );
+    }
+
+    /// L06#6: a background card's thumb has exactly one writer (the
+    /// ACTIVE-only finish_redevelop) and the switch makes the acceptance
+    /// gate reject any frame still in flight — so leaving with an edit
+    /// pending must drop the card to the honest "…" placeholder, and a
+    /// settled switch must keep it.
+    #[test]
+    fn a_variant_switch_drops_a_card_whose_frame_never_landed() {
+        let ctx = egui::Context::default();
+        let mut app = AutoshopApp::default();
+        let tex = ctx.load_texture(
+            "l06_thumb",
+            egui::ColorImage::example(),
+            egui::TextureOptions::LINEAR,
+        );
+        app.variants = vec![
+            Variant {
+                kind: VariantKind::Original,
+                recipe: EditRecipe::default(),
+                base: None,
+                origin: None,
+                thumb: Some(tex),
+            },
+            Variant {
+                kind: VariantKind::Fitted,
+                recipe: EditRecipe::default(),
+                base: None,
+                origin: None,
+                thumb: None,
+            },
+        ];
+        app.active = 0;
+        app.dirty = false;
+        app.develop_inflight = false;
+        app.switch_variant(1, &ctx);
+        assert!(app.variants[0].thumb.is_some(), "a settled card keeps its thumb");
+
+        app.dirty = false;
+        app.develop_inflight = false;
+        app.switch_variant(0, &ctx);
+        app.dirty = true; // an edit awaiting dispatch — no frame depicts it
+        app.switch_variant(1, &ctx);
+        assert!(
+            app.variants[0].thumb.is_none(),
+            "no completed frame depicts the edit — the honest … placeholder takes over"
+        );
+    }
+
     #[test]
     fn a_stale_keep_request_is_refused_without_the_same_path_fact() {
         // The KEEP arm honours the request only when open_path's recorded

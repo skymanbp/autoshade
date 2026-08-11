@@ -1030,11 +1030,21 @@ impl AutoshopApp {
                             // Component selection belongs to ONE mask's list.
                             self.sel_component = None;
                             self.overlay_stale = true; // coverage follows the selection
-                            // The colour sampler is INDEX-armed: left live
-                            // across a selection change, the next canvas click
-                            // wrote a range into the OLD mask with no visible
-                            // feedback (its row's 🎯 label was gone).
-                            self.range_picking = None;
+                            // EVERY index-armed tool follows the selection —
+                            // the colour sampler was fixed first, then the
+                            // same class recurred for ↻ Redraw /
+                            // add-component / the raster-edit brush, whose
+                            // arming indicators all live inside the
+                            // selected-mask block (L06#3). The single owner
+                            // sits beside remap_mask_indices; the brush
+                            // teardown discards user paint, so it is said.
+                            if self.disarm_selection_bound_tools(self.sel_mask) {
+                                let t = tr(
+                                    self.lang,
+                                    "the raster-edit brush session ended — you selected another mask; its unbaked strokes were discarded",
+                                );
+                                self.toast(ToastKind::Error, t.to_string());
+                            }
                         }
                         if ui
                             .small_button("🗑")
@@ -1239,6 +1249,18 @@ impl AutoshopApp {
                             self.sel_mask = Some(i + 1);
                             self.sel_component = None;
                             self.overlay_stale = true;
+                            // The remap maps an armed Redraw(i)/brush(i) to
+                            // ITSELF (s > i is false at s == i) while the
+                            // selection jumps to the copy — armed on the
+                            // original, pointed at the duplicate (L06#3's
+                            // second instance). Selection moved ⇒ same rule.
+                            if self.disarm_selection_bound_tools(self.sel_mask) {
+                                let t = tr(
+                                    self.lang,
+                                    "the raster-edit brush session ended — you selected another mask; its unbaked strokes were discarded",
+                                );
+                                self.toast(ToastKind::Error, t.to_string());
+                            }
                             changed = true;
                         }
                     }

@@ -702,8 +702,23 @@ impl AutoshopApp {
             self.toast(ToastKind::Error, t);
             return;
         }
+        // Read BEFORE the &mut borrow below. `dirty` = an edit awaiting
+        // dispatch; `develop_inflight` = a frame the switch is about to make
+        // the acceptance gate reject. Either way no completed frame depicts
+        // the recipe snapshotted below.
+        let no_frame_landed = self.dirty || self.develop_inflight;
         if let Some(cur) = self.variants.get_mut(self.active) {
             cur.recipe = self.recipe.clone(); // don't lose the edits in progress
+            // …and don't keep a CARD that predates them: a background
+            // variant's thumb has exactly ONE writer (finish_redevelop,
+            // active-only), so an edit that has not landed a frame yet never
+            // will, and the card would advertise the pre-edit rendition for
+            // the rest of the session (L06#6). The strip's honest "…"
+            // placeholder takes over — the same remedy as the healed-sibling
+            // card drop in export.rs; switching back re-develops and refills.
+            if no_frame_landed {
+                cur.thumb = None;
+            }
         }
         self.active = idx;
         self.load_active(ctx);
@@ -740,8 +755,15 @@ impl AutoshopApp {
         // USER-initiated switch keeps the deliberate M15 drop — this flush
         // is the async thief's, committed into the recipe snapshotted below.
         self.commit_mask_name_buf();
+        // Same guarded card drop as switch_variant (L06#6): the async
+        // completion switches away from a variant whose latest edits may
+        // never have landed a frame.
+        let no_frame_landed = self.dirty || self.develop_inflight;
         if let Some(cur) = self.variants.get_mut(self.active) {
             cur.recipe = self.recipe.clone();
+            if no_frame_landed {
+                cur.thumb = None;
+            }
         }
         self.variants.push(v);
         self.active = self.variants.len() - 1;
@@ -833,15 +855,12 @@ impl AutoshopApp {
         // like Esc (gray buffer AND paint canvas — see disarm_tools: fill/heal
         // would inherit the strokes as a phantom retouch selection). Not a
         // new-mask fallback: that would resurrect a just-deleted mask.
-        if let Some((target, erase)) = self.mask_brush.take() {
+        if let Some((target, erase)) = self.mask_brush {
             match target.map(&f) {
                 None => self.mask_brush = Some((None, erase)),
                 Some(Some(j)) => self.mask_brush = Some((Some(j), erase)),
                 Some(None) => {
-                    self.mask_brush_gray = None;
-                    self.paint_mode = false;
-                    self.paint_last = None;
-                    self.clear_mask();
+                    self.end_mask_brush();
                 }
             }
         }
@@ -1156,19 +1175,58 @@ impl AutoshopApp {
         self.crop_drag = None;
         self.mask_drag = None;
         self.paint_last = None;
-        // The mask-brush session dies with its paint mode (Esc = cancel):
-        // strokes live in the canvas + gray buffer only until 「Apply」bakes
-        // them into a claimed raster, so dropping both IS the cancel. The
-        // canvas is cleared too — fill/heal would otherwise inherit the
-        // brush-mask strokes as a phantom retouch selection.
-        if self.mask_brush.take().is_some() {
-            self.mask_brush_gray = None;
-            self.clear_mask();
-        }
+        self.end_mask_brush();
         // A preset change armed for the crop tool must die with it — the
         // flag survived Esc / Done / a hold-B detour and rewrote the box as
         // a surprise on the next crop entry (CX5-4).
         self.crop_aspect_pending = false;
+    }
+
+    /// End a live mask-brush session (the Esc teardown, extracted from
+    /// `disarm_tools` so the three former hand-copies stay one owner):
+    /// strokes live in the canvas + gray buffer only until 「Apply」 bakes
+    /// them into a claimed raster, so dropping both IS the cancel. The
+    /// canvas is cleared too — fill/heal would otherwise inherit the
+    /// brush-mask strokes as a phantom retouch selection. Returns whether a
+    /// session was actually live, so a caller whose teardown is NOT
+    /// user-initiated can disclose the discarded strokes.
+    pub(crate) fn end_mask_brush(&mut self) -> bool {
+        if self.mask_brush.take().is_some() {
+            self.mask_brush_gray = None;
+            self.paint_mode = false;
+            self.clear_mask();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Selection moved: every INDEX-ARMED tool whose target is no longer
+    /// the selected mask dies with it — `remap_mask_indices`' twin (that
+    /// one covers list SHAPE changes; this one covers which row is live).
+    /// ↻ Redraw / add-component are the silent pair: their arming buttons
+    /// live inside the selected-mask block and the canvas hint discards the
+    /// PlaceTarget, so an armed Redraw(j) reads exactly like a fresh
+    /// gradient and the next drag rewrites mask j while the user is looking
+    /// at another row. A `NewMask` placement and the non-mask tools (crop,
+    /// WB picker, clone) are deliberately spared — they are not bound to a
+    /// selection. Returns whether a BRUSH session died (its strokes are
+    /// user paint), for the caller's disclosure.
+    pub(crate) fn disarm_selection_bound_tools(&mut self, keep: Option<usize>) -> bool {
+        if matches!(
+            self.placing_mask,
+            Some((_, PlaceTarget::Redraw(j) | PlaceTarget::Component(j, _))) if Some(j) != keep
+        ) {
+            self.placing_mask = None;
+            self.place_start = None;
+        }
+        // The colour sampler drops unconditionally — its 🎯 label lives on
+        // the row that was just left (the first fix of this class).
+        self.range_picking = None;
+        if matches!(self.mask_brush, Some((Some(j), _)) if Some(j) != keep) {
+            return self.end_mask_brush();
+        }
+        false
     }
 
     /// Any canvas tool armed? (the once-hand-written OR list)
@@ -1323,14 +1381,38 @@ impl AutoshopApp {
             let curve = self.recipe.base_curve.clone();
             self.set_before(ctx, &base, &curve);
             self.base_preview = Some(base);
-            self.mask_paint = Some(image::RgbaImage::new(mw, mh));
-            self.mask_tex = None;
-            self.mask_dirty = false;
-            self.paint_last = None;
+            self.rebind_paint_canvas(mw, mh);
         }
         self.overlay_ref = None;
         self.overlay_stale = true;
         self.last_rgb = None;
+    }
+
+    /// The base plate under the canvas was REPLACED (a preview-resolution
+    /// re-decode, a cold master landing, a retouch bake, a fresh open): the
+    /// paint canvas is resized to it — and any live mask-brush session dies
+    /// with the old plate, DISCLOSED. The session's weight buffer is
+    /// dimension-locked to the plate it was armed on (`start_mask_brush`
+    /// sizes both together), so a stroke stamped after the swap lands at
+    /// the wrong coordinates in it — and the always-visible 「✓ Apply」 row
+    /// would bake those misplaced weights into a durably-adopted raster. A
+    /// variant switch already gets the teardown via `load_active`'s
+    /// `disarm_tools`; the async landings never called it (L06#5). The
+    /// toast lives HERE so no future plate-replacement door can forget it;
+    /// a second rebind in the same landing finds no session and stays
+    /// silent.
+    pub(crate) fn rebind_paint_canvas(&mut self, w: u32, h: u32) {
+        if self.end_mask_brush() {
+            let t = tr(
+                self.lang,
+                "the mask-brush session ended — the canvas pixels underneath were replaced, so its strokes no longer line up",
+            );
+            self.toast(ToastKind::Error, t.to_string());
+        }
+        self.mask_paint = Some(image::RgbaImage::new(w, h));
+        self.mask_tex = None;
+        self.mask_dirty = false;
+        self.paint_last = None;
     }
 
     pub(crate) fn undo(&mut self, ctx: &egui::Context) {

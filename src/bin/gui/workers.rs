@@ -589,10 +589,7 @@ impl AutoshopApp {
                                 if active_source {
                                     let curve = self.recipe.base_curve.clone();
                                     self.set_before(ctx, &base, &curve);
-                                    self.mask_paint = Some(image::RgbaImage::new(mw, mh));
-                                    self.mask_tex = None;
-                                    self.mask_dirty = false;
-                                    self.paint_last = None;
+                                    self.rebind_paint_canvas(mw, mh);
                                     // The range-mask reference develop was computed
                                     // from the OLD base — recipe-only keying would
                                     // serve it stale against these new pixels.
@@ -647,10 +644,7 @@ impl AutoshopApp {
                                     // canvas recipe carries an empty curve.
                                     let curve = self.recipe.base_curve.clone();
                                     self.set_before(ctx, bimg, &curve);
-                                    self.mask_paint = Some(image::RgbaImage::new(bw, bh));
-                                    self.mask_tex = None;
-                                    self.mask_dirty = false;
-                                    self.paint_last = None;
+                                    self.rebind_paint_canvas(bw, bh);
                                     self.overlay_ref = None;
                                     self.overlay_stale = true;
                                     self.base_preview = Some(bimg.clone());
@@ -1001,11 +995,13 @@ impl AutoshopApp {
                                 let curve = self.recipe.base_curve.clone();
                                 self.set_before(ctx, &b, &curve);
                             }
-                            // A fresh, fully-transparent paint mask sized to the preview.
-                            self.mask_paint = Some(image::RgbaImage::new(mw, mh));
-                            self.mask_tex = None;
-                            self.mask_dirty = false;
-                            self.paint_last = None;
+                            // A fresh, fully-transparent paint mask sized to the
+                            // preview — and a brush session armed on the PREVIOUS
+                            // photo dies with its plate (this fresh-open arm never
+                            // called disarm_tools; the always-visible 「✓ Apply」
+                            // would have baked the old photo's strokes into this
+                            // photo's mask list).
+                            self.rebind_paint_canvas(mw, mh);
                             self.paint_mode = false;
                             if let Some((bimg, borigin, generated)) = pixels {
                                 // Restore the baked pixel master (persisted
@@ -1058,7 +1054,7 @@ impl AutoshopApp {
                                 let curve = self.recipe.base_curve.clone();
                                 self.set_before(ctx, &bimg, &curve);
                                 self.base_preview = Some(bimg);
-                                self.mask_paint = Some(image::RgbaImage::new(bw, bh));
+                                self.rebind_paint_canvas(bw, bh);
                             }
                             if let Some(o) = pending_master.clone() {
                                 // Re-attach the surviving identity and re-arm
@@ -1737,7 +1733,8 @@ impl AutoshopApp {
 
     /// `Msg::Retouched` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_retouched(&mut self, ctx: &egui::Context, lang: Lang, epoch: u64, done: RetouchDone) {
+    // pub(crate): the L06#4 commit-ordering test drives this landing directly.
+    pub(crate) fn on_retouched(&mut self, ctx: &egui::Context, lang: Lang, epoch: u64, done: RetouchDone) {
                     if epoch != self.gen_epoch {
                         // A cancelled task's late result: the user already
                         // moved on — never let it mutate the canvas. Its ./out
@@ -1776,6 +1773,18 @@ impl AutoshopApp {
                                 // AND repoint its origin at the saved full-res
                                 // artifact, so export / reverse-fit / a further
                                 // retouch all follow the retouched pixels.
+                                //
+                                // Sliders stay live while a retouch runs (minutes
+                                // for a generative fill) and `current_step` reads
+                                // the variant's base — committing only AFTER the
+                                // swap below folded a mid-flight recipe edit into
+                                // the pixel step, so one Ctrl+Z reverted both and
+                                // there was no way to keep the slider move while
+                                // dropping the retouch. Same rule, same reason as
+                                // the Analyze landing: commit (and flush a typed
+                                // rename) BEFORE the state swap.
+                                self.commit_mask_name_buf();
+                                self.commit_now();
                                 let img = Arc::new(img);
                                 let (mw, mh) = img.dimensions();
                                 if let Some(v) = self.variants.get_mut(self.active) {
@@ -1796,10 +1805,9 @@ impl AutoshopApp {
                                 self.base_preview = Some(img);
                                 // Keep the paint canvas sized to the new base (the
                                 // retouch result can differ in dimensions — e.g. a
-                                // non-square reimagine origin).
-                                self.mask_paint = Some(image::RgbaImage::new(mw, mh));
-                                self.mask_tex = None;
-                                self.mask_dirty = false;
+                                // non-square reimagine origin) — and end a brush
+                                // session armed on the replaced plate.
+                                self.rebind_paint_canvas(mw, mh);
                                 self.dirty = true;
                                 // The pixel swap must enter history THIS frame
                                 // — a same-frame Ctrl+Z otherwise undoes an
