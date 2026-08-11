@@ -189,17 +189,11 @@ impl AutoshopApp {
                         autoshop::denoise::DenoiseOpts::from_config(&autoshop::config::Config::load(), None, 1.0)
                     });
                     autoshop::render::render_to_file(&path, &recipe, &out, opts.as_ref(), Some(&export))?;
-                    Ok::<String, anyhow::Error>(if relook {
-                        format!(
-                            "{} — {}",
-                            out.display(),
-                            tr(
-                                lang,
-                                "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
-                            )
-                        )
-                    } else {
-                        out.display().to_string()
+                    // FACTS (L12#4): the landing renders the relook note in
+                    // the landing-time language.
+                    Ok::<ExportOutcome, anyhow::Error>(ExportOutcome::Single {
+                        out,
+                        relooked: relook,
                     })
                 })();
                 Msg::Exported(res)
@@ -244,7 +238,7 @@ impl AutoshopApp {
         }
         let ext = if self.save_jpeg { "jpg" } else { "tif" };
         let export = self.export_opts();
-        let lang = self.lang; // localise the UI status AND the worker's result strings
+        let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         self.busy = true;
         self.status = trf(
             lang,
@@ -286,7 +280,10 @@ impl AutoshopApp {
         }
         self.spawn_worker(
             move || {
-                let res = (|| {
+                // A plain block, not an IIFE: since the summary became typed
+                // facts (L12#4) nothing early-returns at this level — the
+                // per-photo closure below owns the `?` scope.
+                let res = {
                     let total = targets.len();
                     let (mut okn, mut errs) = (0usize, Vec::<String>::new());
                     // A selection can hold two same-stem photos (different
@@ -412,47 +409,17 @@ impl AutoshopApp {
                         }
                         let _ = tx.send(Msg::BatchProgress { done: okn + errs.len(), total });
                     }
-                    // Same-stem photos were kept apart — disclose WHICH
-                    // photo took WHICH name, or the user hunts for an export
-                    // that "vanished" (it was never under the bare name).
-                    let renames = if names.renamed.is_empty() {
-                        String::new()
-                    } else {
-                        trf(
-                            lang,
-                            " · same-name photos kept apart: {list}",
-                            &[("list", &names.renamed.join(", "))],
-                        )
-                    };
-                    let relook = if relooked == 0 {
-                        String::new()
-                    } else {
-                        trf(
-                            lang,
-                            " · {n} base look(s) re-estimated (a pre-era save rendered too dark)",
-                            &[("n", &relooked.to_string())],
-                        )
-                    };
-                    if errs.is_empty() {
-                        Ok(format!(
-                            "{}{renames}{relook}",
-                            trf(lang, "./out — batch {n} done", &[("n", &okn.to_string())])
-                        ))
-                    } else {
-                        anyhow::bail!(
-                            "{}{renames}{relook}",
-                            trf(
-                                lang,
-                                "Batch: {ok} succeeded, {fail} failed: {detail}",
-                                &[
-                                    ("ok", &okn.to_string()),
-                                    ("fail", &errs.len().to_string()),
-                                    ("detail", &errs.join("; ")),
-                                ],
-                            )
-                        )
-                    }
-                })();
+                    // FACTS (L12#4): the same-stem renames, the relook count
+                    // and the per-photo errors all render at the landing,
+                    // with the language live THERE — a batch runs minutes
+                    // and the language picker stays reachable throughout.
+                    Ok(ExportOutcome::Batch {
+                        ok: okn,
+                        errs,
+                        renamed: names.renamed,
+                        relooked,
+                    })
+                };
                 Msg::Exported(res)
             },
             |e| Msg::Exported(Err(e)),
@@ -865,7 +832,7 @@ impl AutoshopApp {
             self.resync_recipe_display();
             self.pasted_open = Some((open, live));
         }
-        let lang = self.lang; // localise the UI status AND the worker's result strings
+        let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         self.busy = true;
         self.status = trf(
             lang,
@@ -874,7 +841,10 @@ impl AutoshopApp {
         );
         self.spawn_worker(
             move || {
-                let res = (|| -> anyhow::Result<String> {
+                // A plain block, not an IIFE: the typed outcome (L12#4)
+                // removed the early bail — the per-target `step` closure
+                // owns the `?` scope.
+                let res: anyhow::Result<PasteOutcome> = {
                     let (mut okn, mut xmpn) = (0usize, 0usize);
                     let mut errs: Vec<String> = Vec::new();
                     // XMP-half failures are partial successes (recipe-write-
@@ -949,46 +919,11 @@ impl AutoshopApp {
                             Err(e) => errs.push(format!("{}: {e}", autoshop::pipeline::stem(path))),
                         }
                     }
-                    // Any failure surfaces as an error toast WITH the success count —
-                    // a partial failure must never read as a clean success.
-                    if errs.is_empty() {
-                        let mut s = trf(
-                            lang,
-                            "Recipe pasted to {ok} photos ({xmp} XMP) → develop store",
-                            &[("ok", &okn.to_string()), ("xmp", &xmpn.to_string())],
-                        );
-                        if !xmp_fails.is_empty() {
-                            let d = brief_list(&xmp_fails);
-                            s.push_str(&trf(
-                                lang,
-                                " — ⚠ {n} XMP projection(s) failed (those pastes ARE saved): {detail}",
-                                &[("n", &xmp_fails.len().to_string()), ("detail", &d)],
-                            ));
-                        }
-                        if !xmp_notes.is_empty() {
-                            let d = brief_list(&xmp_notes);
-                            s.push_str(&trf(
-                                lang,
-                                " — {n} sidecar(s) regenerated rather than merged (Lightroom-only properties dropped): {detail}",
-                                &[("n", &xmp_notes.len().to_string()), ("detail", &d)],
-                            ));
-                        }
-                        Ok(s)
-                    } else {
-                        anyhow::bail!(
-                            "{}",
-                            trf(
-                                lang,
-                                "{ok} succeeded, {fail} failed: {detail}",
-                                &[
-                                    ("ok", &okn.to_string()),
-                                    ("fail", &errs.len().to_string()),
-                                    ("detail", &errs.join(" · ")),
-                                ],
-                            )
-                        )
-                    }
-                })();
+                    // FACTS (L12#4): counts and detail lists render at the
+                    // landing; a partial failure keeps riding the error
+                    // channel there, so it never reads as a clean success.
+                    Ok(PasteOutcome { ok: okn, xmp: xmpn, errs, xmp_fails, xmp_notes })
+                };
                 Msg::Pasted(res)
             },
             |e| Msg::Pasted(Err(e)),

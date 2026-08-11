@@ -351,9 +351,70 @@ impl AutoshopApp {
                 Msg::Opened(boxed) => self.on_opened(ctx, lang, boxed),
                 Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
                 Msg::Analyzed(epoch, boxed) => self.on_analyzed(lang, epoch, boxed),
-                Msg::Exported(Ok(p)) => {
+                Msg::Exported(Ok(outcome)) => {
                     self.batch_progress = None; // the bar belongs to ONE batch run
-                    self.done(trf(lang, "exported → {path}", &[("path", p.as_str())]));
+                    match outcome {
+                        ExportOutcome::Single { out, relooked } => {
+                            let mut p = out.display().to_string();
+                            if relooked {
+                                p = format!(
+                                    "{p} — {}",
+                                    tr(
+                                        lang,
+                                        "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                                    )
+                                );
+                            }
+                            self.done(trf(lang, "exported → {path}", &[("path", &p)]));
+                        }
+                        ExportOutcome::Batch { ok, errs, renamed, relooked } => {
+                            // Same-stem photos were kept apart — disclose
+                            // WHICH photo took WHICH name, or the user hunts
+                            // for an export that "vanished".
+                            let renames = if renamed.is_empty() {
+                                String::new()
+                            } else {
+                                trf(
+                                    lang,
+                                    " · same-name photos kept apart: {list}",
+                                    &[("list", &renamed.join(", "))],
+                                )
+                            };
+                            let relook = if relooked == 0 {
+                                String::new()
+                            } else {
+                                trf(
+                                    lang,
+                                    " · {n} base look(s) re-estimated (a pre-era save rendered too dark)",
+                                    &[("n", &relooked.to_string())],
+                                )
+                            };
+                            if errs.is_empty() {
+                                self.done(format!(
+                                    "{}{renames}{relook}",
+                                    trf(lang, "./out — batch {n} done", &[("n", &ok.to_string())])
+                                ));
+                            } else {
+                                // A partial failure keeps the error channel,
+                                // exactly as the worker-side bail! did.
+                                self.fail(
+                                    tr(lang, "export failed"),
+                                    anyhow::anyhow!(
+                                        "{}{renames}{relook}",
+                                        trf(
+                                            lang,
+                                            "Batch: {ok} succeeded, {fail} failed: {detail}",
+                                            &[
+                                                ("ok", &ok.to_string()),
+                                                ("fail", &errs.len().to_string()),
+                                                ("detail", &errs.join("; ")),
+                                            ],
+                                        )
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
                 Msg::Exported(Err(e)) => {
                     self.batch_progress = None;
@@ -387,7 +448,24 @@ impl AutoshopApp {
                     Ok((prompt, note)) => {
                         // Into the Reimagine prompt: ready to restyle OTHER photos.
                         self.reimagine_prompt = prompt;
-                        self.done(note);
+                        let s = match &note {
+                            StyleNote::SavedCopy => tr(
+                                lang,
+                                "Style prompt extracted → filled into the Reimagine prompt (also saved ./out/<stem>.style.txt)",
+                            )
+                            .to_string(),
+                            StyleNote::SaveFailed(err) => trf(
+                                lang,
+                                "Style prompt extracted → filled into the Reimagine prompt (saving ./out/<stem>.style.txt failed: {err})",
+                                &[("err", err)],
+                            ),
+                            StyleNote::NotSaved => tr(
+                                lang,
+                                "Style prompt extracted → filled into the Reimagine prompt",
+                            )
+                            .to_string(),
+                        };
+                        self.done(s);
                     }
                     Err(e) => {
                         self.fail(tr(lang, "Style extraction failed"), e);
@@ -397,7 +475,11 @@ impl AutoshopApp {
                 Msg::LegacyImported(res) => {
                     self.edited_badge.clear(); // imported sidecars light ● badges
                     match res {
-                        Ok(s) => self.done(s),
+                        Ok((n, dir)) => self.done(trf(
+                            lang,
+                            "Imported saved develops for {n} photo(s) from {path}",
+                            &[("n", &n.to_string()), ("path", &dir.display().to_string())],
+                        )),
                         Err(e) => self.fail(tr(lang, "import failed"), e),
                     }
                 }
@@ -1767,6 +1849,52 @@ impl AutoshopApp {
                     }
     }
 
+    /// Render one retouch fact in the CURRENT language (L12#4) — the
+    /// worker returns [`RetouchNote`] facts; this runs at landing time.
+    fn render_retouch_note(lang: Lang, n: &RetouchNote) -> String {
+        match n {
+            RetouchNote::Filled(p) => trf(
+                lang,
+                "filled → {path} (updated current variant)",
+                &[("path", &p.display().to_string())],
+            ),
+            RetouchNote::Healed { n, out, ai_prose, notes } => {
+                let mut s = trf(
+                    lang,
+                    "healed {n} spot(s) → {path}",
+                    &[("n", &n.to_string()), ("path", &out.display().to_string())],
+                );
+                if !ai_prose.is_empty() || !notes.is_empty() {
+                    // AI prose stays raw (the model's own text); the typed
+                    // notes render localized (L12#2B).
+                    let mut tail = ai_prose.clone();
+                    for note in notes {
+                        let args: Vec<(&str, &str)> =
+                            note.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                        tail.push_str(&trf(lang, note.key, &args));
+                    }
+                    s = format!("{s} — ⚠ {tail}");
+                }
+                s
+            }
+            RetouchNote::Denoised(p) => trf(
+                lang,
+                "AI denoised → {path} (updated current variant)",
+                &[("path", &p.display().to_string())],
+            ),
+            RetouchNote::Cloned { n, out } => trf(
+                lang,
+                "Cloned {n} spot(s) → {path}",
+                &[("n", &n.to_string()), ("path", &out.display().to_string())],
+            ),
+            RetouchNote::Reimagined(p) => trf(
+                lang,
+                "「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
+                &[("path", &p.display().to_string())],
+            ),
+        }
+    }
+
     /// `Msg::Retouched` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
     // pub(crate): the L06#4 commit-ordering test drives this landing directly.
@@ -1780,7 +1908,8 @@ impl AutoshopApp {
                     }
                     self.gen_cancel = None;
                     match done {
-                    Ok((img, msg, saved, kind)) => {
+                    Ok((img, note, saved, kind)) => {
+                        let msg = Self::render_retouch_note(lang, &note);
                         self.clear_mask();
                         match kind {
                             RetouchKind::NewGenerated => {
@@ -1975,12 +2104,15 @@ impl AutoshopApp {
 
     /// `Msg::Pasted` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_pasted(&mut self, lang: Lang, res: anyhow::Result<String>) {
+    fn on_pasted(&mut self, lang: Lang, res: anyhow::Result<PasteOutcome>) {
                     // Sidecars were written (possibly partially on error) —
                     // recompute the gallery badges either way.
                     self.edited_badge.clear();
                     match res {
-                        Ok(s) => {
+                        // A partial failure keeps the error channel (as the
+                        // worker-side bail! did) — it must never read as a
+                        // clean success, and the ● baseline must not advance.
+                        Ok(out) if out.errs.is_empty() => {
                             // The open photo's paste is on disk: advance the
                             // ● baseline so the marker doesn't cry wolf. Only
                             // on FULL success — a partial failure could be
@@ -1994,7 +2126,46 @@ impl AutoshopApp {
                                 self.saved_recipe = r;
                                 self.nav_stash.remove(&p);
                             }
+                            let mut s = trf(
+                                lang,
+                                "Recipe pasted to {ok} photos ({xmp} XMP) → develop store",
+                                &[("ok", &out.ok.to_string()), ("xmp", &out.xmp.to_string())],
+                            );
+                            if !out.xmp_fails.is_empty() {
+                                let d = brief_list(&out.xmp_fails);
+                                s.push_str(&trf(
+                                    lang,
+                                    " — ⚠ {n} XMP projection(s) failed (those pastes ARE saved): {detail}",
+                                    &[("n", &out.xmp_fails.len().to_string()), ("detail", &d)],
+                                ));
+                            }
+                            if !out.xmp_notes.is_empty() {
+                                let d = brief_list(&out.xmp_notes);
+                                s.push_str(&trf(
+                                    lang,
+                                    " — {n} sidecar(s) regenerated rather than merged (Lightroom-only properties dropped): {detail}",
+                                    &[("n", &out.xmp_notes.len().to_string()), ("detail", &d)],
+                                ));
+                            }
                             self.done(s);
+                        }
+                        Ok(out) => {
+                            self.pasted_open = None;
+                            self.fail(
+                                tr(lang, "batch paste"),
+                                anyhow::anyhow!(
+                                    "{}",
+                                    trf(
+                                        lang,
+                                        "{ok} succeeded, {fail} failed: {detail}",
+                                        &[
+                                            ("ok", &out.ok.to_string()),
+                                            ("fail", &out.errs.len().to_string()),
+                                            ("detail", &out.errs.join(" · ")),
+                                        ],
+                                    )
+                                ),
+                            );
                         }
                         Err(e) => {
                             self.pasted_open = None;

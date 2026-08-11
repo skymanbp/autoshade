@@ -1390,7 +1390,12 @@
             epoch,
             Ok((
                 image::DynamicImage::new_rgba8(4, 4),
-                "healed".into(),
+                RetouchNote::Healed {
+                    n: 1,
+                    out: std::path::PathBuf::from("out/_retouch_order_test.png"),
+                    ai_prose: String::new(),
+                    notes: Vec::new(),
+                },
                 std::path::PathBuf::from("out/_retouch_order_test.png"),
                 RetouchKind::InPlace,
             )),

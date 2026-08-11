@@ -1895,12 +1895,9 @@ impl AutoshopApp {
                 // One directory scan for the whole gallery — the per-photo
                 // migrate_legacy_from re-scanned the (possibly huge) legacy
                 // folder once per photo, making import O(photos × entries).
+                // FACTS out (L12#4): the landing renders the summary.
                 let n = autoshop::store::migrate_legacy_from_many(&dir, &photos);
-                Msg::LegacyImported(Ok(trf(
-                    lang,
-                    "Imported saved develops for {n} photo(s) from {path}",
-                    &[("n", &n.to_string()), ("path", &dir.display().to_string())],
-                )))
+                Msg::LegacyImported(Ok((n, dir)))
             },
             |e| Msg::LegacyImported(Err(e)),
         );

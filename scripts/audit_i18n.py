@@ -81,8 +81,10 @@ DYNAMIC_SITES = [
     (r"^en\b", "MaskRole::en_name"),
     (r"^busy_key\b", "persist_postponed keys"),
     (r"^(?:autoshop::)?advisor::decision_key\(", "advisor Decision keys"),
-    # develop.rs renders rationale Note templates at draw time (L12#2B).
-    (r"^n[.]key", "rationale Note keys"),
+    # develop.rs (draw-time notes render) and workers.rs render_retouch_note
+    # (heal-tail notes at landing) both interpolate rationale Note templates
+    # (L12#2B) — the key set itself is extracted from rationale::keys above.
+    (r"^(?:n|note)[.]key", "rationale Note keys"),
     (r"^\[", "inline literal array"),
 ]
 
@@ -410,6 +412,30 @@ def literal_bypasses(src: str) -> list[tuple[int, str]]:
     return out
 
 
+def worker_side_translations(src: str) -> list[tuple[int, str]]:
+    """tr()/trf() lexically inside a spawn_worker(...) call (L12#4): the
+    result string would be rendered with the language captured at SPAWN,
+    stale by the time a minutes-long worker lands. Workers return typed
+    FACTS; the landings translate with the live language. Self-check: the
+    detector must flag a synthetic body, or a broken regex passes forever."""
+    probe = 'x.spawn_worker(move || { let s = tr(lang, "k"); Msg::X(s) }, |e| Msg::X(e))'
+    assert worker_bodies_hits(probe), "worker-translation self-check: the probe must flag"
+    return worker_bodies_hits(src)
+
+
+def worker_bodies_hits(src: str) -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    for m in re.finditer(r"\bspawn_worker\s*\(", src):
+        start = m.end() - 1
+        body = src[start:skip_call(src, start)]
+        for t in re.finditer(r"\btrf?\(", body):
+            if t.start() > 0 and (body[t.start() - 1].isalnum() or body[t.start() - 1] == "_"):
+                continue
+            line = src.count("\n", 0, start + t.start()) + 1
+            out.append((line, " ".join(body[t.start():t.start() + 60].split())))
+    return out
+
+
 def main() -> int:
     keys, dynamic = tr_keys(GUI)
     pairs = zh_pairs(I18N)
@@ -463,8 +489,12 @@ def main() -> int:
     print(f"\n== {len(bypass)} UI literals bypassing tr() ==")
     for line, lit in bypass:
         print(f"  gui.rs:{line}: {lit[:80]!r}")
+    worker_tr = worker_side_translations(GUI)
+    print(f"\n== {len(worker_tr)} tr()/trf() inside spawn_worker closures ==")
+    for line, snippet in worker_tr:
+        print(f"  gui.rs:{line}: {snippet}")
     bad = (dupes or missing or dead or source_problems or dead_allow
-           or unregistered or bypass or ph_bad)
+           or unregistered or bypass or ph_bad or worker_tr)
     return 1 if bad else 0
 
 

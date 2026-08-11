@@ -124,11 +124,60 @@ pub(crate) enum RetouchKind {
     InPlace,
 }
 
-/// A finished retouch from any of the four pixel paths (fill/heal/clone/
-/// reimagine): `(preview of the ./out result, status message, the saved
+/// What one finished retouch DID (L12#4): facts, not prose — the landing
+/// renders them in the landing-time language (`render_retouch_note`).
+pub(crate) enum RetouchNote {
+    /// Generative fill landed at this ./out artifact.
+    Filled(PathBuf),
+    /// Heal: spot count + artifact + the heal report's rationale split per
+    /// the L12#2B suffix contract (AI prose prefix + typed notes).
+    Healed {
+        n: usize,
+        out: PathBuf,
+        ai_prose: String,
+        notes: Vec<autoshop::rationale::Note>,
+    },
+    /// AI denoise baked into the active variant.
+    Denoised(PathBuf),
+    /// Clone stamp: spot count + artifact.
+    Cloned { n: usize, out: PathBuf },
+    /// Whole-frame reimagine → a new Generated variant.
+    Reimagined(PathBuf),
+}
+
+/// A finished retouch from any of the five pixel paths (fill/heal/denoise/
+/// clone/reimagine): `(preview of the ./out result, typed note, the saved
 /// full-resolution ./out artifact, kind)`. The saved path becomes the affected
 /// variant's `origin` — its export / reverse-fit / next-retouch source.
-pub(crate) type RetouchDone = anyhow::Result<(image::DynamicImage, String, PathBuf, RetouchKind)>;
+pub(crate) type RetouchDone =
+    anyhow::Result<(image::DynamicImage, RetouchNote, PathBuf, RetouchKind)>;
+
+/// Style-prompt extraction facts (L12#4): whether the ./out copy landed.
+pub(crate) enum StyleNote {
+    SavedCopy,
+    SaveFailed(String),
+    NotSaved,
+}
+
+/// Export result facts (L12#4) — one message enum for both export shapes.
+pub(crate) enum ExportOutcome {
+    /// A single render: the deliverable + whether the pre-era base look was
+    /// re-estimated on the way.
+    Single { out: PathBuf, relooked: bool },
+    /// A batch: counts + per-photo errors (library English, shown verbatim
+    /// as today) + the same-stem rename disclosures + relook count.
+    Batch { ok: usize, errs: Vec<String>, renamed: Vec<String>, relooked: usize },
+}
+
+/// Batch recipe-paste facts (L12#4). `errs` non-empty = partial failure —
+/// the landing must keep routing that through the error channel.
+pub(crate) struct PasteOutcome {
+    pub(crate) ok: usize,
+    pub(crate) xmp: usize,
+    pub(crate) errs: Vec<String>,
+    pub(crate) xmp_fails: Vec<String>,
+    pub(crate) xmp_notes: Vec<String>,
+}
 
 /// CPU-built preview frame. Everything expensive is worker-side: engine
 /// develop, geometry, the one RGB8 conversion, histogram, clipping pixels and
@@ -206,7 +255,7 @@ pub(crate) enum Msg {
             )>,
         >,
     ),
-    Exported(anyhow::Result<String>),
+    Exported(anyhow::Result<ExportOutcome>),
     /// A folder scan finished: (folder, sorted source paths).
     Folder(Box<anyhow::Result<(PathBuf, Vec<PathBuf>, usize)>>),
     /// A gallery thumbnail decoded. `generation` tags the folder generation so a
@@ -247,15 +296,17 @@ pub(crate) enum Msg {
     /// (L12#4 — the old String was translated inside the spawn closure with
     /// the language captured at spawn, minutes stale by the time it landed).
     Fitted(Box<anyhow::Result<FitOutcome>>),
-    /// Settings → "Import develops from an old ./out folder": localized result.
-    LegacyImported(anyhow::Result<String>),
+    /// Settings → "Import develops from an old ./out folder":
+    /// (photo count, the folder) — rendered at landing (L12#4).
+    LegacyImported(anyhow::Result<(usize, PathBuf)>),
     /// Style-prompt extraction finished: (the reusable prompt text, the
-    /// status note — which discloses whether the .style.txt copy landed).
-    Styled(Box<anyhow::Result<(String, String)>>),
+    /// typed fact of whether the .style.txt copy landed).
+    Styled(Box<anyhow::Result<(String, StyleNote)>>),
     /// A `GET /models` fetch finished: the account's model ids (Settings pick-list).
     Models(anyhow::Result<Vec<String>>),
-    /// A batch recipe paste finished: the human summary (counts; Err on any failure).
-    Pasted(anyhow::Result<String>),
+    /// A batch recipe paste finished — counts and per-photo details,
+    /// rendered at landing (L12#4).
+    Pasted(anyhow::Result<PasteOutcome>),
 }
 
 /// One reverse-fit landing fact (L12#4): the worker records WHAT happened

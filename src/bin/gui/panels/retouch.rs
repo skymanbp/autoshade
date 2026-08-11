@@ -179,7 +179,7 @@ impl AutoshopApp {
         if self.busy {
             return;
         }
-        let lang = self.lang; // localise UI statuses AND the worker's result string
+        let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         let prompt = self.fill_prompt.trim().to_string();
         if prompt.is_empty() {
             self.status = tr(lang, "write what should fill the painted area").into();
@@ -227,16 +227,9 @@ impl AutoshopApp {
                     // InPlace: refine the current rendition — bake into the active
                     // variant's base AND repoint its origin at this saved artifact
                     // so export / reverse-fit / next retouch follow the fill.
-                    Ok((
-                        img,
-                        trf(
-                            lang,
-                            "filled → {path} (updated current variant)",
-                            &[("path", &out.display().to_string())],
-                        ),
-                        out,
-                        RetouchKind::InPlace,
-                    ))
+                    // FACTS, not prose (L12#4): the landing renders these
+                    // with the language live when the result lands.
+                    Ok((img, RetouchNote::Filled(out.clone()), out, RetouchKind::InPlace))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);
@@ -260,7 +253,7 @@ impl AutoshopApp {
         if self.busy {
             return;
         }
-        let lang = self.lang; // localise UI statuses AND the worker's result string
+        let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         let mask_png = if use_mask {
             match self.export_mask_png() {
                 Some(b) => Some(b),
@@ -306,19 +299,23 @@ impl AutoshopApp {
                     }
                     let rep = rep?;
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
-                    let mut s = trf(
-                        lang,
-                        "healed {n} spot(s) → {path}",
-                        &[("n", &rep.spots.to_string()), ("path", &out.display().to_string())],
-                    );
                     // The report's rationale (AI-detect fallback, budget
-                    // skips) was dropped here — stderr is invisible in the
-                    // windowed GUI (L08 rule).
-                    if !rep.rationale.is_empty() {
-                        s = format!("{s} — ⚠ {}", rep.rationale);
-                    }
+                    // skips) must reach the status — stderr is invisible in
+                    // the windowed GUI (L08 rule). Split per the L12#2B
+                    // suffix contract: typed notes render localized at the
+                    // landing; on a mismatch the whole string rides as prose.
+                    let det = autoshop::rationale::render_en(&rep.notes);
+                    let (ai_prose, notes) = match rep.rationale.strip_suffix(det.as_str()) {
+                        Some(p) => (p.to_string(), rep.notes),
+                        None => (rep.rationale.clone(), Vec::new()),
+                    };
                     // InPlace: bake into the active variant's base + repoint origin.
-                    Ok((img, s, out, RetouchKind::InPlace))
+                    Ok((
+                        img,
+                        RetouchNote::Healed { n: rep.spots, out: out.clone(), ai_prose, notes },
+                        out,
+                        RetouchKind::InPlace,
+                    ))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);
@@ -346,7 +343,7 @@ impl AutoshopApp {
         if self.busy {
             return;
         }
-        let lang = self.lang; // localise UI statuses AND the worker's result string
+        let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         let Some(out) = unique_out(&path, "denoise") else {
             self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
             return;
@@ -371,16 +368,7 @@ impl AutoshopApp {
                     autoshop::denoise::denoise_active(&opts, &path, full_res, &out)?;
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
                     // InPlace: bake into the active variant's base + repoint origin.
-                    Ok((
-                        img,
-                        trf(
-                            lang,
-                            "AI denoised → {path} (updated current variant)",
-                            &[("path", &out.display().to_string())],
-                        ),
-                        out,
-                        RetouchKind::InPlace,
-                    ))
+                    Ok((img, RetouchNote::Denoised(out.clone()), out, RetouchKind::InPlace))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);
@@ -405,7 +393,7 @@ impl AutoshopApp {
         if self.busy {
             return;
         }
-        let lang = self.lang; // localise UI statuses AND the worker's result string
+        let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         let Some(src_pt) = self.clone_src else {
             self.status = tr(lang, "Alt+click to set the clone source first").into();
             return;
@@ -438,11 +426,7 @@ impl AutoshopApp {
                     // into the active variant's base + repoint origin at the artifact.
                     Ok((
                         img,
-                        trf(
-                            lang,
-                            "Cloned {n} spot(s) → {path}",
-                            &[("n", &rep.spots.to_string()), ("path", &out.display().to_string())],
-                        ),
+                        RetouchNote::Cloned { n: rep.spots, out: out.clone() },
                         out,
                         RetouchKind::InPlace,
                     ))
@@ -530,13 +514,8 @@ impl AutoshopApp {
                     // fidelity "high" keeps it recognisably the same photo.
                     autoshop::generative::reimagine(&cfg, &path, &prompt, "high", &cfg.openai_image_quality, &out)?;
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
-                    let msg = trf(
-                        lang,
-                        "「AI generated」variant created → {path} · keep tweaking or 「Reverse-fit」",
-                        &[("path", &out.display().to_string())],
-                    );
                     // NewGenerated: a whole-frame rendition → a new Generated variant.
-                    Ok((img, msg, out, RetouchKind::NewGenerated))
+                    Ok((img, RetouchNote::Reimagined(out.clone()), out, RetouchKind::NewGenerated))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);
@@ -564,12 +543,13 @@ impl AutoshopApp {
             return;
         }
         let src_path = self.src_path.clone();
-        let lang = self.lang; // localise the worker's result note
+        // No lang capture: the worker returns FACTS; the landing localises
+        // them with the language live at landing time (L12#4).
         self.busy = true;
         self.status = tr(self.lang, "Extracting style prompt… (vision, ~5-20s)").into();
         self.spawn_worker(
             move || {
-                let res = (|| -> anyhow::Result<(String, String)> {
+                let res = (|| -> anyhow::Result<(String, StyleNote)> {
                     let cfg = autoshop::config::Config::load();
                     let jpg = |img: &image::DynamicImage| -> anyhow::Result<Vec<u8>> {
                         let mut buf = Vec::new();
@@ -598,23 +578,11 @@ impl AutoshopApp {
                                     })
                                 })
                             {
-                                Ok(()) => tr(
-                                    lang,
-                                    "Style prompt extracted → filled into the Reimagine prompt (also saved ./out/<stem>.style.txt)",
-                                )
-                                .to_string(),
-                                Err(e) => trf(
-                                    lang,
-                                    "Style prompt extracted → filled into the Reimagine prompt (saving ./out/<stem>.style.txt failed: {err})",
-                                    &[("err", &e.to_string())],
-                                ),
+                                Ok(()) => StyleNote::SavedCopy,
+                                Err(e) => StyleNote::SaveFailed(e.to_string()),
                             }
                         }
-                        None => tr(
-                            lang,
-                            "Style prompt extracted → filled into the Reimagine prompt",
-                        )
-                        .to_string(),
+                        None => StyleNote::NotSaved,
                     };
                     Ok((prompt, note))
                 })();
