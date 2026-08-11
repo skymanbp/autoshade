@@ -230,6 +230,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
      "XMP 有 {n} 个数值设置无法读取（{list}）——已按中性恢复；保存会用这些中性值覆盖 sidecar"),
     ("a Lightroom sidecar sits beside this photo but could not be read ({why}) — any Lightroom edits in it are NOT reflected",
      "照片旁有一个 Lightroom sidecar 但无法读取（{why}）——其中的 Lightroom 编辑（如有）未生效"),
+    ("this RAW carries an embedded XMP develop that could not be read ({why}) — it is NOT reflected",
+     "此 RAW 内嵌的 XMP 显影无法读取（{why}）——未生效"),
     ("{n} unreadable item(s) skipped during the folder scan",
      "扫描文件夹时跳过了 {n} 个不可读条目"),
     ("bitmap raster unreadable ({list}) — this mask currently has NO effect",

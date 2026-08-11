@@ -1148,6 +1148,120 @@
         assert_eq!(batch.contrast, 33.0, "and it is the Lightroom edit");
     }
 
+    /// A minimal little-endian TIFF whose root IFD carries one XMP entry
+    /// (tag 0x02BC, type BYTE) — the decode-side reader has its own copy;
+    /// bin tests cannot reach lib test code.
+    fn tiff_with_xmp(payload: &[u8]) -> Vec<u8> {
+        let mut f: Vec<u8> = Vec::new();
+        f.extend(b"II");
+        f.extend(42u16.to_le_bytes());
+        f.extend(8u32.to_le_bytes());
+        f.extend(1u16.to_le_bytes());
+        f.extend(0x02BCu16.to_le_bytes());
+        f.extend(1u16.to_le_bytes());
+        f.extend((payload.len() as u32).to_le_bytes());
+        if payload.len() <= 4 {
+            let mut v = [0u8; 4];
+            v[..payload.len()].copy_from_slice(payload);
+            f.extend(v);
+        } else {
+            f.extend(26u32.to_le_bytes());
+        }
+        f.extend(0u32.to_le_bytes());
+        if payload.len() > 4 {
+            f.extend(payload);
+        }
+        f
+    }
+
+    /// L05#6: a DNG whose develop Lightroom baked INTO the file used to open
+    /// neutral with no word — the packet is now the strictly LOWEST-priority
+    /// restore source, on the open path and the batch snapshot alike (the
+    /// L13 rule: the surfaces answer one develop).
+    #[test]
+    fn an_embedded_raw_xmp_packet_restores_when_nothing_else_answers() {
+        let dir = std::env::temp_dir().join("autoshop-gui-packet-restore");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("_gui_packet.dng");
+        let doc = autoshop::xmp::recipe_to_xmp(&EditRecipe {
+            exposure_ev: 0.8,
+            ..Default::default()
+        });
+        std::fs::write(&src, tiff_with_xmp(doc.as_bytes())).unwrap();
+        let dev = autoshop::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
+
+        let restored = read_saved_develop(&src);
+        let SavedDevelop::Restored(r, kind) = restored.saved else {
+            panic!("the baked develop must restore");
+        };
+        assert_eq!(kind, "XMP (embedded in the RAW)");
+        assert_eq!(r.exposure_ev, 0.8);
+        assert!(restored.packet_unreadable.is_none());
+
+        // The batch snapshot answers the same develop (anti-drift).
+        let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
+        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap)
+            .unwrap()
+            .expect("the batch resolves the packet too");
+        assert_eq!(batch_kind, kind);
+        assert_eq!(batch.exposure_ev, 0.8);
+    }
+
+    /// The packet never outranks anything, and an explicit clear sticks
+    /// against it: the packet lives in a file this app never writes, so
+    /// without the marker gate Reset+Save would resurrect the baked develop
+    /// on the very next open. An unreadable packet is disclosed, not folded
+    /// into absence.
+    #[test]
+    fn an_embedded_packet_never_outranks_the_store_or_a_clear() {
+        let dir = std::env::temp_dir().join("autoshop-gui-packet-rank");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("_gui_packet_rank.dng");
+        let doc = autoshop::xmp::recipe_to_xmp(&EditRecipe {
+            exposure_ev: 0.8,
+            ..Default::default()
+        });
+        std::fs::write(&src, tiff_with_xmp(doc.as_bytes())).unwrap();
+        let dev = autoshop::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let _scrub = Scrub(vec![dir.clone(), dev.clone()]);
+
+        // (a) A stored develop outranks the packet.
+        std::fs::write(
+            autoshop::store::recipe_target(&src),
+            serde_json::to_string(&EditRecipe { exposure_ev: 0.5, ..Default::default() })
+                .unwrap(),
+        )
+        .unwrap();
+        let SavedDevelop::Restored(r, kind) = read_saved_develop(&src).saved else {
+            panic!("the store must answer");
+        };
+        assert_eq!(kind, "recipe.json");
+        assert_eq!(r.exposure_ev, 0.5);
+
+        // (b) An explicit clear sticks: marker present, no store files — the
+        // packet must NOT resurrect the cleared develop.
+        std::fs::remove_file(autoshop::store::recipe_target(&src)).unwrap();
+        std::fs::write(dev.join("cleared.txt"), b"cleared").unwrap();
+        assert!(
+            matches!(read_saved_develop(&src).saved, SavedDevelop::Nothing),
+            "a cleared develop stays cleared"
+        );
+        std::fs::remove_file(dev.join("cleared.txt")).unwrap();
+
+        // (c) Unreadable ≠ absent: a non-text packet is disclosed.
+        std::fs::write(&src, tiff_with_xmp(&[0xFF, 0xFE, 0x00, 0x01, 0x02])).unwrap();
+        let restored = read_saved_develop(&src);
+        assert!(matches!(restored.saved, SavedDevelop::Nothing));
+        let why = restored.packet_unreadable.expect("the unreadable packet is disclosed");
+        assert!(why.contains("not UTF-8"), "{why}");
+    }
+
     #[test]
     fn a_stale_keep_request_is_refused_without_the_same_path_fact() {
         // The KEEP arm honours the request only when open_path's recorded

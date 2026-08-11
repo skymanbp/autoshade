@@ -15,9 +15,11 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use image::{DynamicImage, GenericImageView};
 use rawler::decoders::RawDecodeParams;
-use rawler::formats::tiff::{Rational, SRational};
+use rawler::formats::tiff::reader::TiffReader;
+use rawler::formats::tiff::{GenericTiffReader, Rational, SRational, Value};
 use rawler::get_decoder;
 use rawler::rawsource::RawSource;
+use rawler::tags::TiffCommonTag;
 
 /// Camera + capture metadata pulled from the RAW, for display and for feeding
 /// the AI advisor later.
@@ -684,13 +686,94 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
     // fast even for a 60 MP embedded JPEG (see hist_copy).
     let histogram = compute_histogram(&hist_copy(&preview));
 
-    let embedded_xmp = decoder
-        .xpacket(&src, &params)
-        .ok()
-        .flatten()
-        .and_then(|b| String::from_utf8(b).ok());
+    // ONE implementation ([`embedded_xmp`]): the per-decoder `xpacket` this
+    // call used covers only CR2/CR3/RAF/TFR (rawler 0.7.2's default is
+    // `Ok(None)`), so a DNG — the format that actually bakes develops into
+    // the file — always reported "none" here. A read failure is disclosed,
+    // never folded into absent (the old `.ok()` did exactly that).
+    let embedded_xmp = match embedded_xmp(path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("⚠ {e}");
+            None
+        }
+    };
 
     Ok(Decoded { preview, meta, histogram, embedded_xmp })
+}
+
+/// The RAW's embedded XMP packet — the develop Lightroom bakes INTO a DNG
+/// ("Store presets with this catalog" workflows write it for CR2/RAF too) —
+/// bounded and honest: `Ok(None)` means genuinely no packet; a packet (or
+/// container) that cannot be read is `Err`, never folded into "absent".
+///
+/// TIFF containers (DNG/ARW/NEF/ORF/RW2/CR2/…) are read through the SAME
+/// bounded header walk the lens-metadata reader uses (`lensmeta::read`): a
+/// `BufReader` + [`GenericTiffReader`] with a chain cap — roughly a root-IFD
+/// parse, cheap enough for the open path. rawler's per-format `xpacket`
+/// overrides cover only CR2/CR3/RAF/TFR, which would MISS the DNG tag
+/// 0x02BC entirely; only the non-TIFF containers (CR3's BMFF, RAF's
+/// proprietary header) go through the decoder — that branch maps the whole
+/// file (`RawSource::new`), the cost `decode_raw` itself already pays, and
+/// is reached for those two extensions alone.
+pub fn embedded_xmp(path: &Path) -> Result<Option<String>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    let bytes: Option<Vec<u8>> = if matches!(ext.as_deref(), Some("cr3" | "raf")) {
+        guard_tiff_chain(path)?;
+        let src =
+            RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
+        let decoder = get_decoder(&src)
+            .map_err(|e| anyhow!("no rawler decoder for {}: {e}", path.display()))?;
+        decoder
+            .xpacket(&src, &RawDecodeParams { image_index: 0 })
+            .map_err(|e| anyhow!("read the XMP packet in {}: {e}", path.display()))?
+    } else {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("open RAW {}", path.display()))?;
+        let mut reader = std::io::BufReader::new(file);
+        // Same chain cap and rationale as `lensmeta::read` — see that call
+        // site. A file whose header does not walk as TIFF has no TIFF tag to
+        // hold a packet: that is absence, not unreadability (the photo
+        // itself will fail loudly elsewhere if it is genuinely corrupt).
+        let Ok(tiff) = GenericTiffReader::new(&mut reader, 0, 0, Some(16), &[]) else {
+            return Ok(None);
+        };
+        match tiff.root_ifd().get_entry(TiffCommonTag::Xmp) {
+            // BYTE is the spelling the XMP spec prescribes and rawler's own
+            // tfr decoder reads; UNDEFINED is the one other shape real
+            // writers use. Anything else is a packet we cannot account for —
+            // said, not skipped.
+            Some(entry) => match &entry.value {
+                Value::Byte(b) | Value::Undefined(b) => Some(b.clone()),
+                other => {
+                    return Err(anyhow!(
+                        "the XMP packet in {} has an unrecognised TIFF type ({})",
+                        path.display(),
+                        other.value_type()
+                    ));
+                }
+            },
+            None => None,
+        }
+    };
+    let Some(buf) = bytes else { return Ok(None) };
+    // The same 16 MiB ceiling every sidecar read enforces — refused, not
+    // truncated (a partial packet would parse to a DIFFERENT develop).
+    if buf.len() as u64 > crate::store::MAX_STORE_JSON {
+        return Err(anyhow!(
+            "the XMP packet in {} is larger than the {}-byte limit",
+            path.display(),
+            crate::store::MAX_STORE_JSON
+        ));
+    }
+    let text = String::from_utf8(buf)
+        .map_err(|_| anyhow!("the XMP packet in {} is not UTF-8 text", path.display()))?;
+    // Packets are xpacket-padded with trailing whitespace; blank-after-trim
+    // carries nothing to restore.
+    Ok((!text.trim().is_empty()).then_some(text))
 }
 
 /// Just the embedded preview, skipping metadata/histogram — for the UI grid and
@@ -1118,6 +1201,81 @@ mod tests {
         let foreign = dir.join("foreign.bin");
         std::fs::write(&foreign, b"ftypcrx not a tiff at all").unwrap();
         guard_tiff_chain(&foreign).expect("non-TIFF must pass through");
+    }
+
+    /// A minimal little-endian TIFF whose root IFD carries ONE entry: tag
+    /// 0x02BC (XMP), type BYTE, the given payload. Word-aligned data offset,
+    /// no image data — exactly what the packet reader consults.
+    fn tiff_with_xmp(payload: &[u8]) -> Vec<u8> {
+        let mut f: Vec<u8> = Vec::new();
+        f.extend(b"II");
+        f.extend(42u16.to_le_bytes());
+        f.extend(8u32.to_le_bytes()); // root IFD at byte 8
+        f.extend(1u16.to_le_bytes()); // one entry
+        f.extend(0x02BCu16.to_le_bytes());
+        f.extend(1u16.to_le_bytes()); // type BYTE
+        f.extend((payload.len() as u32).to_le_bytes());
+        if payload.len() <= 4 {
+            let mut v = [0u8; 4];
+            v[..payload.len()].copy_from_slice(payload);
+            f.extend(v);
+        } else {
+            f.extend(26u32.to_le_bytes()); // 8 header + 2 count + 12 entry + 4 next
+        }
+        f.extend(0u32.to_le_bytes()); // no next IFD
+        if payload.len() > 4 {
+            f.extend(payload);
+        }
+        f
+    }
+
+    /// L05#6: the packet lives in TIFF tag 0x02BC for every TIFF-container
+    /// RAW — DNG included, where rawler 0.7.2's per-format `xpacket` answers
+    /// None (only CR2/CR3/RAF/TFR override it). The reader is honest at both
+    /// edges: over the cap is REFUSED (a truncated packet would parse to a
+    /// different develop), and a non-text packet is an error, never "absent".
+    #[test]
+    fn an_embedded_xmp_packet_is_read_from_the_tiff_tag() {
+        let dir = std::env::temp_dir().join("autoshop-embedded-xmp-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = crate::xmp::recipe_to_xmp(&crate::recipe::EditRecipe {
+            exposure_ev: 0.8,
+            ..Default::default()
+        });
+        let dng = dir.join("packet.dng");
+        std::fs::write(&dng, tiff_with_xmp(doc.as_bytes())).unwrap();
+        let text = embedded_xmp(&dng).expect("readable").expect("present");
+        assert_eq!(crate::xmp::xmp_to_recipe(&text).exposure_ev, 0.8);
+
+        // No 0x02BC entry → genuinely no packet.
+        let plain = dir.join("plain.dng");
+        std::fs::write(&plain, {
+            let mut f = tiff_with_xmp(b"x");
+            f[10] = 0x00; // retag the entry: 0x02BC → 0x0200 (not XMP)
+            f
+        })
+        .unwrap();
+        assert!(embedded_xmp(&plain).expect("readable").is_none());
+
+        // A non-TIFF container (that is also not CR3/RAF) has no TIFF tag to
+        // hold a packet: absence, not an error.
+        let junk = dir.join("junk.dng");
+        std::fs::write(&junk, b"not a tiff").unwrap();
+        assert!(embedded_xmp(&junk).expect("no packet, no error").is_none());
+
+        // Non-UTF-8 packet bytes: an ERROR naming the file, never absence.
+        let bad = dir.join("badtext.dng");
+        std::fs::write(&bad, tiff_with_xmp(&[0xFF, 0xFE, 0x00, 0x01, 0x02])).unwrap();
+        let err = embedded_xmp(&bad).unwrap_err().to_string();
+        assert!(err.contains("not UTF-8"), "{err}");
+
+        // Over the cap: REFUSED with the limit named, not truncated.
+        let big = dir.join("big.dng");
+        let payload = vec![b'x'; crate::store::MAX_STORE_JSON as usize + 1];
+        std::fs::write(&big, tiff_with_xmp(&payload)).unwrap();
+        let err = embedded_xmp(&big).unwrap_err().to_string();
+        assert!(err.contains("larger than"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// L02: the develop entry charges downstream bytes-per-pixel — the same

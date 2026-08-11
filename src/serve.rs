@@ -1088,6 +1088,66 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             }
         }
     }
+    // The RAW's own embedded XMP packet — the develop Lightroom bakes INTO a
+    // DNG — as the strictly LOWEST-priority source, the same rule and clear
+    // gate as the GUI open path and the batch snapshot
+    // (store::embedded_packet_for_restore; the surfaces must answer alike).
+    match crate::store::embedded_packet_for_restore(raw) {
+        Ok(Some(text)) => {
+            let mut r = crate::xmp::xmp_to_recipe(&text);
+            if xmp_warn.is_none() {
+                xmp_warn = recipe_warning_header(&text);
+            }
+            if !r.is_noop() {
+                r.clamp();
+                // Same stamp rule as the XMP branches above: the packet was
+                // tuned in Lightroom over its own camera-profile base.
+                r.base_curve = fresh_base_knots(raw);
+                r.lens_profile = pipeline::fresh_lens_profile(raw);
+                if r.as_shot_k.is_none() {
+                    let (ask, ast) = pipeline::fresh_as_shot_wb(raw);
+                    r.as_shot_k = ask;
+                    r.as_shot_tint = ast;
+                }
+                let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"embedded-xmp"[..])
+                    .expect("static ASCII header");
+                let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);
+                if let Some(err) = &parse_err {
+                    eprintln!(
+                        "⚠ recipe.json for {} is unreadable ({err}) — serving the RAW's embedded XMP instead",
+                        raw.display()
+                    );
+                    if let Some(h) = header(
+                        "X-Recipe-Warning",
+                        "the saved recipe.json is unreadable - showing the RAW's embedded \
+                         XMP develop instead; saving overwrites the unreadable file",
+                    ) {
+                        resp = resp.with_header(h);
+                    }
+                }
+                if let Some(w) = xmp_warn.take() {
+                    resp = resp.with_header(w);
+                }
+                return Ok(resp);
+            }
+        }
+        Ok(None) => {}
+        // Unreadable ≠ absent: nothing else answered, so whatever the packet
+        // holds WOULD have been shown — disclosed on the fresh-open answer.
+        Err(why) => {
+            if xmp_warn.is_none() {
+                xmp_warn = header(
+                    "X-Recipe-Warning",
+                    "this RAW carries an embedded XMP develop that could not be read - \
+                     it is NOT reflected",
+                );
+                eprintln!(
+                    "⚠ embedded XMP develop in {} could not be read ({why}) — not reflected",
+                    raw.display()
+                );
+            }
+        }
+    }
     // A damaged recipe.json with nothing else to fall back on is an ERROR, not
     // "no recipe yet" — say so, or the UI silently pretends the photo is unedited.
     if let Some(err) = parse_err {

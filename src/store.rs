@@ -1683,6 +1683,13 @@ pub struct DevelopSnapshot {
     /// [`LrSidecar::Unreadable`] — a sidecar that EXISTS but cannot answer,
     /// never folded into absence (the caller discloses it).
     pub lr_unreadable: Option<&'static str>,
+    /// The RAW's embedded XMP packet ([`embedded_packet_for_restore`]) —
+    /// the open path's LOWEST-priority source, snapshotted so the batch
+    /// renderer answers like the open path (the L13 rule).
+    pub packet_xmp: Option<String>,
+    /// [`embedded_packet_for_restore`]'s `Err`: a packet that exists but
+    /// cannot be read — the caller discloses it.
+    pub packet_unreadable: Option<String>,
     /// [`read_pixel_source`]'s answer, taken under the same lock.
     pub pixel_source: Option<(PathBuf, bool)>,
     /// [`has_pixel_source`]'s answer — a recorded-but-unloadable master
@@ -1761,12 +1768,21 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
                 }
             }
         }
+        // The embedded packet, under the SAME lock as the markers that gate
+        // it (a clear completing between two unlocked reads must not let the
+        // packet answer for a develop that is being removed).
+        let (packet_xmp, packet_unreadable) = match embedded_packet_for_restore(src) {
+            Ok(v) => (v, None),
+            Err(why) => (None, Some(why)),
+        };
         Ok(DevelopSnapshot {
             recipe,
             recipe_err,
             lr_xmp,
             store_xmp,
             lr_unreadable,
+            packet_xmp,
+            packet_unreadable,
             pixel_source: read_pixel_source(src),
             pixel_recorded: has_pixel_source(src),
         })
@@ -2321,6 +2337,31 @@ pub fn read_sidecar(path: &Path) -> Option<String> {
         SidecarRead::Ok(s) => Some(s),
         SidecarRead::Missing | SidecarRead::Unreadable(_) => None,
     }
+}
+
+/// The RAW's embedded XMP packet AS A RESTORE SOURCE — strictly the
+/// LOWEST-priority answer (a develop Lightroom baked INTO a DNG must not
+/// outrank anything the user did since), and gated by the explicit-clear
+/// markers: unlike every other source, the packet lives inside a file this
+/// app never writes, so `clear_develop` cannot delete it — without the gate,
+/// Reset+Save would resurrect the baked develop on the very next open (the
+/// exact bug [`lightroom_sidecar`]'s cleared-marker contest was built to
+/// close). Known, accepted consequence of "strictly lowest": once any store
+/// file exists the packet is never consulted again — re-baking the DNG in
+/// Lightroom does not win (that would need an mtime rank a file we never
+/// write cannot express).
+///
+/// `Ok(None)` = no packet, or none a restore may consult. `Err(reason)` = a
+/// packet that EXISTS but cannot be read — disclosed by every caller, never
+/// folded into absence.
+pub fn embedded_packet_for_restore(src: &Path) -> Result<Option<String>, String> {
+    if !crate::decode::is_raw(src) {
+        return Ok(None);
+    }
+    if develop_dir(src).join("cleared.txt").exists() || clear_pending(src).exists() {
+        return Ok(None);
+    }
+    crate::decode::embedded_xmp(src).map_err(|e| e.to_string())
 }
 
 pub fn lightroom_sidecar(src: &Path) -> LrSidecar {

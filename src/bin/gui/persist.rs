@@ -51,6 +51,10 @@ pub(crate) struct RestoredDevelop {
     /// reason, verbatim from [`autoshop::store::SidecarRead`]) — whatever it
     /// holds is NOT in `saved`, and the user must hear that (L08).
     pub(crate) lr_unreadable: Option<&'static str>,
+    /// The RAW carries an embedded XMP packet that could not be read
+    /// (`autoshop::store::embedded_packet_for_restore`'s `Err`) — same
+    /// unreadable-is-not-absent rule as `lr_unreadable`, its own channel.
+    pub(crate) packet_unreadable: Option<String>,
 }
 
 impl Default for RestoredDevelop {
@@ -61,6 +65,7 @@ impl Default for RestoredDevelop {
             dropped_masks: 0,
             clamp: Default::default(),
             lr_unreadable: None,
+            packet_unreadable: None,
         }
     }
 }
@@ -135,6 +140,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
                 dropped_masks: dropped,
                 clamp: clamp_dropped,
                 lr_unreadable,
+                packet_unreadable: None,
             };
         }
     }
@@ -225,6 +231,31 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         }
         break; // same rule: the file that answered decides
     }
+    // The RAW's own embedded XMP packet — the develop Lightroom bakes INTO a
+    // DNG — as the strictly LOWEST-priority source, probed only when nothing
+    // above answered (so the common developed-photo open pays no TIFF walk).
+    // The clear gate and the "never consulted again after the first save"
+    // consequence live in `embedded_packet_for_restore`.
+    let mut packet_unreadable: Option<String> = None;
+    if fallback.is_none() {
+        match autoshop::store::embedded_packet_for_restore(src) {
+            Ok(Some(text)) => {
+                let mut r = autoshop::xmp::xmp_to_recipe(&text);
+                for k in autoshop::xmp::unparsable_crs_numbers(&text) {
+                    if !xmp_bad.contains(&k) {
+                        xmp_bad.push(k);
+                    }
+                }
+                if !r.is_noop() {
+                    clamp_dropped.absorb(r.clamp());
+                    dropped_masks = autoshop::xmp::unsupported_corrections(&text);
+                    fallback = Some((r, "XMP (embedded in the RAW)"));
+                }
+            }
+            Ok(None) => {}
+            Err(why) => packet_unreadable = Some(why),
+        }
+    }
     if let Some(err) = parse_err {
         return RestoredDevelop {
             saved: SavedDevelop::Unreadable { err, fallback },
@@ -232,6 +263,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             dropped_masks,
             clamp: clamp_dropped,
             lr_unreadable,
+            packet_unreadable,
         };
     }
     match (fallback, any) {
@@ -241,12 +273,14 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             dropped_masks,
             clamp: clamp_dropped,
             lr_unreadable,
+            packet_unreadable,
         },
         (None, true) => RestoredDevelop {
             saved: SavedDevelop::NoopOnly,
             xmp_bad,
             clamp: clamp_dropped,
             lr_unreadable,
+            packet_unreadable,
             ..Default::default()
         },
         (None, false) => RestoredDevelop {
@@ -254,6 +288,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             xmp_bad,
             clamp: clamp_dropped,
             lr_unreadable,
+            packet_unreadable,
             ..Default::default()
         },
     }

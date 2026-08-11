@@ -11,8 +11,10 @@ use super::*;
 /// NEUTRAL recipe falls through, the open rule) → the store's XMP
 /// projection. XMP-restored recipes get the same fresh-calibration stamp
 /// the open path applies (`persist::stamp_calibration` shape: knots when
-/// non-empty, lens, as-shot pinned only if None). `Ok(None)` = no saved
-/// develop (the caller's neutral + base-look fallback).
+/// non-empty, lens, as-shot pinned only if None). The RAW's embedded packet
+/// answers LAST, exactly as on open (`store::embedded_packet_for_restore`
+/// carries the clear gate; the snapshot read it under the develop lock).
+/// `Ok(None)` = no saved develop (the caller's neutral + base-look fallback).
 pub(crate) fn resolve_snapshot_develop(
     p: &std::path::Path,
     snap: &autoshop::store::DevelopSnapshot,
@@ -38,6 +40,11 @@ pub(crate) fn resolve_snapshot_develop(
     if let Some(hit) = snap.lr_xmp.as_ref().and_then(&from_xmp) {
         return Ok(Some(hit));
     }
+    let from_packet = || {
+        snap.packet_xmp
+            .as_ref()
+            .and_then(|text| from_xmp(&(text.clone(), "XMP (embedded in the RAW)")))
+    };
     if let Some((text, from)) = &snap.recipe {
         let mut r = serde_json::from_str::<EditRecipe>(text)?;
         if r.is_noop() {
@@ -45,7 +52,7 @@ pub(crate) fn resolve_snapshot_develop(
             // XMP with real edits may still exist beside it, else the photo
             // renders the fresh baseline (not the neutral recipe's stale
             // calibration).
-            return Ok(snap.store_xmp.as_ref().and_then(&from_xmp));
+            return Ok(snap.store_xmp.as_ref().and_then(&from_xmp).or_else(from_packet));
         }
         // The one restore path that never went through clamp: a stored
         // recipe with extreme-but-finite geometry rendered NaN weights into
@@ -64,7 +71,7 @@ pub(crate) fn resolve_snapshot_develop(
         // neutral over it would silently shed the user's edits.
         anyhow::bail!("{err}");
     }
-    Ok(snap.store_xmp.as_ref().and_then(&from_xmp))
+    Ok(snap.store_xmp.as_ref().and_then(&from_xmp).or_else(from_packet))
 }
 
 impl AutoshopApp {
@@ -322,6 +329,13 @@ impl AutoshopApp {
                                     // what the stored develop decided over.
                                     eprintln!(
                                         "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — the stored develop decides",
+                                        autoshop::pipeline::stem(p)
+                                    );
+                                }
+                                if let Some(why) = &snap.packet_unreadable {
+                                    // Same rule for the packet INSIDE the RAW.
+                                    eprintln!(
+                                        "⚠ {}: this RAW carries an embedded XMP develop that could not be read ({why}) — it is NOT reflected",
                                         autoshop::pipeline::stem(p)
                                     );
                                 }

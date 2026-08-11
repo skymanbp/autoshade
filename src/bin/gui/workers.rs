@@ -681,6 +681,7 @@ impl AutoshopApp {
                                 dropped_masks,
                                 clamp: clamp_dropped,
                                 lr_unreadable,
+                                packet_unreadable,
                             } = self
                                 .src_path
                                 .as_deref()
@@ -766,6 +767,18 @@ impl AutoshopApp {
                                     lang,
                                     "a Lightroom sidecar sits beside this photo but could not be read ({why}) — any Lightroom edits in it are NOT reflected",
                                     &[("why", why)],
+                                );
+                                open_note = merge_note(open_note, w);
+                            }
+                            // Same unreadable-is-not-absent rule for the
+                            // packet INSIDE the RAW — only probed when no
+                            // other source answered, so this fires exactly
+                            // when whatever it holds would have been shown.
+                            if let Some(why) = packet_unreadable {
+                                let w = trf(
+                                    lang,
+                                    "this RAW carries an embedded XMP develop that could not be read ({why}) — it is NOT reflected",
+                                    &[("why", &why)],
                                 );
                                 open_note = merge_note(open_note, w);
                             }
