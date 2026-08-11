@@ -203,6 +203,11 @@ def _reclaim_stale_parts(dest):
 
     now = time.time()
     for p in glob.glob(f"{glob.escape(dest)}.*.part"):
+        # ONLY the documented `<dest>.<pid>.part` shape — the wildcard alone
+        # would also delete an unrelated stale `<dest>.backup.part`.
+        middle = p[len(dest) + 1 : -len(".part")]
+        if not middle.isdigit():
+            continue
         try:
             if now - os.path.getmtime(p) > STALE_PART_SECS:
                 os.remove(p)

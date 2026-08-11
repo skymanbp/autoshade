@@ -147,15 +147,33 @@ impl Advisor for ClaudeProvider {
         // shared primitive caps each stream at 1 MiB (16x above the 64 KiB
         // verdict ceiling, so no legitimate run can regress), detaches a
         // stuck drain after a bounded grace, and discloses truncation.
-        let output = crate::denoise::bounded_child_output(
+        let outcome = crate::denoise::bounded_child_output(
             child,
             "claude verifier",
             std::time::Duration::from_secs(budget),
             "AUTOSHOP_HTTP_TIMEOUT_SECS",
             group,
-        )
-        .map_err(|e| AdvisorError::ClaudeError(e.to_string()))?;
-        let _ = writer.join();
+        );
+        // Joined on BOTH paths (Codex L11-1: the `?` used to skip the join on
+        // the error path, leaking a parked thread per failed verification) —
+        // and BOUNDED, the join_bounded philosophy: after the kill the pipe is
+        // closed and write_all errors out, but an escaped descendant still
+        // holding the read end would park the writer forever, and joining it
+        // then hangs this worker past the deadline it just enforced.
+        let grace = std::time::Instant::now();
+        while !writer.is_finished()
+            && grace.elapsed() < std::time::Duration::from_secs(2)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if writer.is_finished() {
+            let _ = writer.join();
+        } else {
+            eprintln!(
+                "⚠ a descendant still holds the claude verifier's stdin — abandoning the prompt writer"
+            );
+        }
+        let output = outcome.map_err(|e| AdvisorError::ClaudeError(e.to_string()))?;
 
         // The CLI envelope; we only need these fields (serde ignores the rest).
         #[derive(serde::Deserialize)]

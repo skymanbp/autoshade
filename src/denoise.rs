@@ -886,21 +886,28 @@ mod tests {
         assert!(urls.len() >= 5, "extractor non-vacuity: {urls:?}");
         assert_eq!(urls, pins, "every URL key has a digest, none extra");
         assert_eq!(urls, sizes, "every URL key has a byte cap, none extra");
-        // Each digest is 64 lowercase hex chars.
-        for line in SIDECAR_SRC.lines() {
+        // Every VALUE in the digest table is 64 lowercase hex chars —
+        // validated per entry, not filtered by length (a filter let a
+        // 63-char typo pass silently; Codex L11-4).
+        let start = SIDECAR_SRC.find("WEIGHT_SHA256 = {").unwrap();
+        let body = &SIDECAR_SRC[start..];
+        let body = &body[..body.find("\n}").unwrap()];
+        let mut digests = 0;
+        for line in body.lines() {
             let t = line.trim();
             if t.starts_with('"')
-                && t.contains("\": \"")
-                && t.ends_with("\",")
                 && let Some(v) = t.rsplit('"').nth(1)
-                && v.len() == 64
+                && !pins.iter().any(|k| k == v)
             {
+                digests += 1;
+                assert_eq!(v.len(), 64, "digest wrong length: {v}");
                 assert!(
                     v.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                     "digest not lowercase hex: {v}"
                 );
             }
         }
+        assert_eq!(digests, pins.len(), "one validated digest per pinned model");
     }
 
     /// L11#3/#5: no weight ever goes through the raw downloader — the

@@ -915,6 +915,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "栅格编辑笔刷会话已结束——你选中了另一个蒙版，未固化的涂抹已丢弃"),
     ("the mask-brush session ended — the canvas pixels underneath were replaced, so its strokes no longer line up",
         "蒙版笔刷会话已结束——其下方的画布像素已被替换，涂抹不再对齐"),
+    ("the AI result took the selection — a brush session on another mask ended; its unbaked strokes were discarded",
+        "AI 结果选中了它的蒙版——另一蒙版上的笔刷会话已结束，未固化的涂抹已丢弃"),
     ("Refining the mask to full resolution (decoding the full-size source) …",
         "正在将蒙版精修到全分辨率（解码全尺寸原图）……"),
     ("mask refined to full resolution — boundaries now follow the source's own edges",

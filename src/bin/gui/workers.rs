@@ -1533,6 +1533,17 @@ impl AutoshopApp {
                                 self.sel_mask = Some(self.recipe.masks.len() - 1);
                             }
                         }
+                        // The landing MOVED the selection — index-armed tools
+                        // bound to another row die with it, exactly like the
+                        // row-click sites (Codex L06-1: this async door was
+                        // missed and a stranded brush baked into the old mask).
+                        if self.disarm_selection_bound_tools(self.sel_mask) {
+                            let t = tr(
+                                lang,
+                                "the AI result took the selection — a brush session on another mask ended; its unbaked strokes were discarded",
+                            );
+                            self.toast(ToastKind::Error, t.to_string());
+                        }
                         self.overlay_stale = true; // fresh raster ⇒ fresh coverage
                         self.dirty = true; // committed-snapshot makes this one undo step
                         self.busy = false;
@@ -1593,6 +1604,16 @@ impl AutoshopApp {
                             Some(i) => {
                                 self.recipe.masks[i].mask = MaskGeometry::Bitmap { path: out_s };
                                 self.sel_mask = Some(i);
+                                // Same rule as the segmentation landing: the
+                                // selection moved, selection-bound tools on
+                                // another row follow it (Codex L06-1).
+                                if self.disarm_selection_bound_tools(self.sel_mask) {
+                                    let t = tr(
+                                        lang,
+                                        "the AI result took the selection — a brush session on another mask ended; its unbaked strokes were discarded",
+                                    );
+                                    self.toast(ToastKind::Error, t.to_string());
+                                }
                                 self.dirty = true;
                                 self.overlay_stale = true;
                                 self.busy = false;
