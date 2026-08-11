@@ -354,10 +354,17 @@ impl AutoshopApp {
         // spanned two physical pixels per texel, and "1:1" wasn't.
         let ppp = ui.ctx().pixels_per_point();
         let scale = disp.x * ppp / vis_px.x.max(1.0); // display (physical) px per image px
-        // The zoom that makes `scale` exactly 1.0 — zoom-invariant (vis_px.x
-        // scales as 1/zoom), stored for the `1` key which runs at frame
-        // start, before vis_px/disp exist. The 1:1 button reads it too.
-        self.zoom_one_to_one = (vis_px.x * self.zoom / (disp.x * ppp)).clamp(1.0, 12.0);
+        // The zoom that makes `scale` exactly 1.0, stored for the `1` key
+        // which runs at frame start, before vis_px/disp exist; the 1:1
+        // button and double-click read it too. Solved at FIT geometry:
+        // w_tex (full crop in texels) is zoom-invariant, but the naive
+        // vis/disp form was not — fit_in's 4× upscale cap makes disp track
+        // vis on small images, so that form varied with live zoom (Codex
+        // 阶段5 F2). Pane-bound displays give the identical value; a photo
+        // already coarser than 1:1 at fit clamps to 1 (fit is closest).
+        let w_tex = vis_px * self.zoom;
+        let disp_fit = fit_in(w_tex, max_w, avail_y);
+        self.zoom_one_to_one = (w_tex.x / (disp_fit.x * ppp)).clamp(1.0, 12.0);
 
         // Caption row: mode hint left, zoom readout + Fit / 1:1 right. Every
         // armed-tool hint names its exit (Esc), and the placement hint speaks

@@ -2767,3 +2767,43 @@
         assert_eq!(mk(&epic, ToastKind::Success).ttl(), Duration::from_millis(10_000), "success cap");
         assert_eq!(mk(&epic, ToastKind::Error).ttl(), Duration::from_millis(14_000), "error cap");
     }
+
+    /// Codex 阶段5 F1 closure: egui-winit swallows every Ctrl(+Shift)+C into
+    /// Event::Copy and emits NO Key event (is_copy_command returns early),
+    /// so a consume_key(COMMAND, C) binding can never fire on real input —
+    /// the first headless attempt pushed raw Key events and proved nothing.
+    /// This test feeds exactly what winit sends: the Copy EVENT plus the
+    /// modifier state. Shift is the discriminator — the bare event must
+    /// pass through untouched for egui's own selected-label copy.
+    #[test]
+    fn recipe_copy_rides_the_shift_chord_not_the_bare_copy_event() {
+        let mut app = AutoshopApp {
+            src_path: Some(PathBuf::from("x.png")),
+            ..Default::default()
+        };
+        app.recipe.exposure_ev = 1.5;
+        let ctx = egui::Context::default();
+        let run_copy = |app: &mut AutoshopApp, shift: bool| {
+            let input = egui::RawInput {
+                modifiers: egui::Modifiers {
+                    command: true,
+                    ctrl: true,
+                    shift,
+                    ..Default::default()
+                },
+                events: vec![egui::Event::Copy],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.upd_shortcuts(ctx));
+        };
+        run_copy(&mut app, false);
+        assert!(app.copied.is_none(), "bare Ctrl+C belongs to egui's text copy");
+        run_copy(&mut app, true);
+        let copied = app.copied.as_ref().expect("Ctrl+Shift+C copies the recipe");
+        assert_eq!(copied.exposure_ev, 1.5, "the CURRENT recipe is what's copied");
+        assert_eq!(
+            app.copied_from.as_deref(),
+            Some(std::path::Path::new("x.png")),
+            "provenance rides along (the paste-guard identity)"
+        );
+    }

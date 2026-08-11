@@ -461,11 +461,23 @@ impl AutoshopApp {
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Minus) { zoom_key = -1.0; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Num0) { do_fit = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Num1) { do_one = true; }
-                // Ctrl+C/V: keyboard twins of ⎘ Copy recipe / ⇩ Paste to
-                // selected. Tier C on purpose — while a text field holds
-                // focus these must stay egui's own copy/paste.
-                if i.consume_key(egui::Modifiers::COMMAND, egui::Key::C) { do_copy = true; }
-                if i.consume_key(egui::Modifiers::COMMAND, egui::Key::V) { do_paste = true; }
+                // Ctrl+Shift+C/V (LR's Copy/Paste Develop Settings):
+                // keyboard twins of ⎘ Copy recipe / ⇩ Paste to selected.
+                // EVENT-level, not consume_key: egui-winit swallows every
+                // Ctrl(+Shift)+C into Event::Copy and emits NO Key event
+                // (egui-winit lib.rs is_copy_command — the Codex 阶段5
+                // review caught the Key-based version as unreachable on
+                // real input). Shift is the discriminator: a plain Ctrl+C
+                // keeps egui's own selected-text copy, the Shift chord is
+                // ours and the event is removed so nothing double-fires.
+                if i.modifiers.command && i.modifiers.shift {
+                    let n = i.events.len();
+                    i.events.retain(|e| !matches!(e, egui::Event::Copy));
+                    do_copy |= i.events.len() < n;
+                    let n = i.events.len();
+                    i.events.retain(|e| !matches!(e, egui::Event::Paste(_)));
+                    do_paste |= i.events.len() < n;
+                }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) { do_escape = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::O) {
                     if crop_tool { do_crop_grid = true; } else { do_overlay = true; }
@@ -1209,7 +1221,7 @@ impl AutoshopApp {
                         ("Ctrl/⌘+Shift+E / Ctrl/⌘+E", tr(lang, "Export (settings in the Export section)")),
                         ("Ctrl/⌘+S", tr(lang, "Save develop (recipe + XMP for RAW)")),
                         ("Ctrl/⌘+Z / +Shift+Z / +Y", tr(lang, "Undo / Redo")),
-                        ("Ctrl/⌘+C / Ctrl/⌘+V", tr(lang, "Copy recipe / paste to selected")),
+                        ("Ctrl/⌘+Shift+C / +Shift+V", tr(lang, "Copy recipe / paste to selected")),
                         ("← / →", tr(lang, "Step through the library")),
                         ("↑ / ↓", tr(lang, "Step through the library (outside the controls panel)")),
                         ("+ / − / 0 / 1", tr(lang, "Zoom in / out / fit / 1:1")),
