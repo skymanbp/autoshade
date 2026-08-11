@@ -659,8 +659,10 @@ impl AutoshopApp {
             };
             let (dims, deg, dist) = self.geom_ctx();
             let vg = geom_to_view(target, dims, deg, &dist);
-            let geom_active = dist.amount != 0.0
-                || (dist.profile.distortion_on && !dist.profile.distortion.is_empty());
+            // Includes the CA composite fill (Codex AL F1): the true
+            // outline must warp whenever the pixels do.
+            let geom_active =
+                autoshop::render::geometry_moves_frame(&dist.profile, dist.amount);
             if let MaskGeometry::Radial { top, left, bottom, right, flipped, angle, .. } = target
                 && (deg != 0.0 || geom_active)
             {
@@ -1580,9 +1582,14 @@ impl AutoshopApp {
         // never moves an overlay), so it joins the transform key: switching
         // it must re-blit the canvas (knot data only changes per photo, and
         // opening a photo resets the texture anyway).
-        let profile_dist = self.recipe.lens_profile.distortion_on
-            && !self.recipe.lens_profile.distortion.is_empty();
-        let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion, profile_dist);
+        // Profile-side geometry beyond the manual amount: distortion OR
+        // the CA composite fill (Codex AL F1) - a CA-only overshoot moves
+        // the photo, and the paint overlay must ride the SAME map or
+        // strokes drift off the pixels they cover. The bool keys the
+        // cache too, so toggling CA re-blits.
+        let profile_geom =
+            autoshop::render::geometry_moves_frame(&self.recipe.lens_profile, 0.0);
+        let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion, profile_geom);
         let stale_xform = self.mask_tex.is_some() && self.mask_tex_xform != xform_now;
         if self.mask_dirty || stale_xform {
             // Fast path (the common no-geometry case): the change since the
@@ -1634,7 +1641,7 @@ impl AutoshopApp {
                     // flatten transparency to opaque, which turned the whole
                     // canvas into a red wash under any active geometry.
                     let mut img = m.clone();
-                    if xform_now.1 != 0.0 || profile_dist {
+                    if xform_now.1 != 0.0 || profile_geom {
                         img = autoshop::render::apply_lens_geometry_rgba(
                             &img,
                             &self.recipe.lens_profile,

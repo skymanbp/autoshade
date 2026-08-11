@@ -266,6 +266,19 @@ def main() -> int:
                   file=sys.stderr)
             return 1
 
+    # A needed CJK codepoint no donor claimed is FATAL BEFORE publishing
+    # (Codex AL F8): egui's bundle has no hanzi, so "left to egui" is a lie
+    # for CJK — the old flow published the half-covered set, printed the
+    # remainder and exited 0, leaving the Rust gate as the only witness.
+    cjk_gap = sorted(cp for cp in remaining if is_cjk(cp))
+    if cjk_gap:
+        for cp in cjk_gap:
+            print(f"  U+{cp:05X} {chr(cp)}  needed CJK, no donor claims it",
+                  file=sys.stderr)
+        print(f"ERROR: {len(cjk_gap)} needed CJK codepoint(s) uncovered — "
+              "check the NotoSansSC donor; nothing was written", file=sys.stderr)
+        return 1
+
     # PUBLISH atomically per file (the render::stage_and_publish rule in
     # Python): these bytes are include_bytes! build inputs, and a torn write
     # either fails the build or panics ab_glyph at startup.

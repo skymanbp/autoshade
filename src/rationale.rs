@@ -31,10 +31,17 @@ pub struct Note {
 
 /// Bound on notes riding one result: the RENDERED string is capped
 /// elsewhere (MAX_RATIONALE), but the vec itself must not grow without
-/// limit if a producer loops. Push helpers drop past this, keeping the
-/// string (which stays complete) authoritative — the strip rule above then
-/// falls back to raw English rather than showing a partial translation.
+/// limit if a producer loops. Past the bound, [`push_note`] plants ONE
+/// [`TRUNCATED_SENTINEL`] note whose rendering no rationale string carries,
+/// so the consumer's suffix strip MISSES and the whole raw English shows —
+/// never a partial translation. (Without the pill, 64 retained copies of a
+/// REPEATED note could still match the string's tail and localize a
+/// truncated subset while the overflow rode as fake "prose" — Codex AL F7.)
 pub const MAX_NOTES: usize = 64;
+
+/// Renders to text no rationale string contains (a NUL never enters the
+/// templates), so a truncated vec can never strip-match its string.
+pub const TRUNCATED_SENTINEL: &str = "\u{0}notes-truncated";
 
 impl Note {
     pub fn new(key: &'static str, args: Vec<(&'static str, String)>) -> Self {
@@ -196,6 +203,10 @@ pub fn push_note(rationale: &mut String, notes: &mut Vec<Note>, note: Note) {
     rationale.push_str(&render_one(&note));
     if notes.len() < MAX_NOTES {
         notes.push(note);
+    } else if notes.len() == MAX_NOTES {
+        // Poison pill (see MAX_NOTES): a truncated vec must never
+        // strip-match the (complete) string again.
+        notes.push(Note::plain(TRUNCATED_SENTINEL));
     }
 }
 
@@ -307,11 +318,21 @@ mod tests {
         for _ in 0..(MAX_NOTES + 3) {
             push_note(&mut r, &mut v, Note::plain(keys::FIT_NOTE_SAT_PEGGED));
         }
-        assert_eq!(v.len(), MAX_NOTES, "the vec is bounded");
+        assert_eq!(v.len(), MAX_NOTES + 1, "the bounded vec plus ONE poison pill");
+        assert_eq!(v.last().unwrap().key, TRUNCATED_SENTINEL);
         assert_eq!(
             r.len(),
             keys::FIT_NOTE_SAT_PEGGED.len() * (MAX_NOTES + 3),
             "the string keeps the complete record"
+        );
+        // Codex AL F7: with REPEATED notes the retained 64 renderings match
+        // the string's tail byte-for-byte — without the pill the consumer
+        // would localize a truncated subset and present the overflow as
+        // prose. The pill renders to text the string cannot contain, so the
+        // strip misses and the raw-English fallback engages.
+        assert!(
+            !r.ends_with(render_en(&v).as_str()),
+            "a truncated vec must never strip-match its string"
         );
         // Below the bound the two carriers are byte-lockstep — the suffix
         // rule that consumers strip on.

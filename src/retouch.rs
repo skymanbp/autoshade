@@ -661,6 +661,11 @@ pub fn heal(
     out: &Path,
 ) -> Result<HealReport> {
     let is_raw = decode::is_raw(src_path);
+    // FIRST, before decode and before the BILLED auto-detect call (Codex
+    // AL F2: the L09#1 preflight covered analyze/auto/reimagine/retouch,
+    // but heal paid for detect_spots and then failed on a directory -o at
+    // save time). No-op for GUI/web (unique_out prepared the path).
+    crate::pipeline::preflight_out(out, src_path)?;
     let base = if is_raw {
         // Preview mode develops AT ≤2048 (cap before tone/geometry) instead
         // of developing 61 MP and thumbnailing the result.
@@ -938,9 +943,14 @@ mod tests {
 
     #[test]
     fn heal_keeps_bit_depth_and_alpha_and_stages_the_master() {
-        let dir = std::env::temp_dir().join("autoshop-retouch-depth");
-        let _ = std::fs::remove_dir_all(&dir);
+        // src lives in its own subdir: heal's pre-pay preflight (Codex AL
+        // F2) runs guard_readonly, which refuses an out beside the source.
+        let root = std::env::temp_dir().join("autoshop-retouch-depth");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("library");
+        let out_dir = root.join("exports");
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
         // 16-bit RGBA source: grey field, dark defect at centre, alpha ramp.
         let (w, h) = (64u32, 64u32);
         let mut img: ImageBuffer<Rgba<u16>, Vec<u16>> = ImageBuffer::new(w, h);
@@ -959,7 +969,7 @@ mod tests {
         }
         let maskp = dir.join("mask.png");
         mask.save(&maskp).unwrap();
-        let outp = dir.join("healed.png");
+        let outp = out_dir.join("healed.png");
         let rep =
             heal(&Config::load(), &srcp, Some(&maskp), false, true, &outp).unwrap();
         assert!(rep.spots >= 1);
@@ -973,15 +983,17 @@ mod tests {
         let c = hb.get_pixel(32, 32).0;
         assert!(c[0] > 20000, "defect healed in the 16-bit domain, got {c:?}");
         assert_eq!(c[3], 32 * 1000, "alpha rides through untouched");
-        // The staged write leaves no residue beside the master.
-        let residue: Vec<String> = std::fs::read_dir(&dir)
+        // The staged write leaves no residue beside the master — scanned in
+        // the EXPORT dir, where the staged temp name would linger now that
+        // the F2 preflight split src and out into separate folders.
+        let residue: Vec<String> = std::fs::read_dir(&out_dir)
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains(".tmp."))
             .collect();
         assert!(residue.is_empty(), "no staging residue: {residue:?}");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1149,10 +1161,15 @@ mod tests {
     /// (auto_detect off, painted mask only).
     #[test]
     fn heal_downsamples_a_baked_source_without_full_res() {
-        let dir = std::env::temp_dir()
+        // src in its own subdir — heal's pre-pay preflight (Codex AL F2)
+        // refuses an out beside the source.
+        let root = std::env::temp_dir()
             .join(format!("autoshop-heal-fullres-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("library");
+        let out_dir = root.join("exports");
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
         let src = dir.join("big.png");
         image::RgbImage::from_fn(3000, 2000, |x, y| {
             image::Rgb([(x % 251) as u8, (y % 241) as u8, 128])
@@ -1170,14 +1187,14 @@ mod tests {
         let maskp = dir.join("mask.png");
         mask.save(&maskp).unwrap();
         let cfg = crate::config::Config::load();
-        let out_small = dir.join("small-out.png");
+        let out_small = out_dir.join("small-out.png");
         heal(&cfg, &src, Some(&maskp), false, false, &out_small).unwrap();
         let d = image::image_dimensions(&out_small).unwrap();
         assert_eq!(d.0.max(d.1), 2048, "without --full-res the saved master IS the 2048px thumbnail");
-        let out_full = dir.join("full-out.png");
+        let out_full = out_dir.join("full-out.png");
         heal(&cfg, &src, Some(&maskp), false, true, &out_full).unwrap();
         let d = image::image_dimensions(&out_full).unwrap();
         assert_eq!((d.0, d.1), (3000, 2000), "with --full-res the source resolution survives");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -2103,7 +2103,11 @@ mod tests {
 
     #[test]
     fn photo_scan_survives_a_directory_link_cycle_and_finds_each_raw_once() {
-        let dir = std::env::temp_dir().join("autoshop-scan-cycle");
+        // Per-process name (Codex AL F9): the fixture is MANDATORY, and a
+        // shared fixed path let a crashed prior run's junction — or a
+        // concurrent test process — fail the setup of an unrelated run.
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-scan-cycle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.arw"), b"raw").unwrap();

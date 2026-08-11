@@ -461,9 +461,17 @@ static DOTENV: std::sync::OnceLock<std::collections::HashMap<String, String>> =
 fn dotenv_map() -> &'static std::collections::HashMap<String, String> {
     DOTENV.get_or_init(|| {
         // dotenv_iter: the SAME cwd-upward file search as dotenv_override,
-        // minus every setenv (dotenvy 0.15 lib.rs/iter.rs).
+        // minus every setenv (dotenvy 0.15 lib.rs/iter.rs). take_while(ok)
+        // reproduces override's error order: it applied every line BEFORE
+        // the first malformed one and none after (flatten alone would skip
+        // the bad line and keep applying — Codex AL F5). KNOWN, ACCEPTED
+        // divergence, documented on purpose: dotenvy's $VAR interpolation
+        // inside the iterator resolves against the live environment only,
+        // no longer against earlier .env lines (override used to setenv as
+        // it went); no .env of this project uses interpolation, and full
+        // fidelity would mean vendoring the parser.
         let map: std::collections::HashMap<String, String> = dotenvy::dotenv_iter()
-            .map(|it| it.flatten().collect())
+            .map(|it| it.take_while(Result::is_ok).flatten().collect())
             .unwrap_or_default();
         for k in AMBIENT_UNSAFE_VARS {
             // Same trigger as the old post-override comparison: the .env

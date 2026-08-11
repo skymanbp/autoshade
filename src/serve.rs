@@ -1538,9 +1538,12 @@ fn view_for_mapping(raw: &Path, view: Option<&EditRecipe>) -> Option<EditRecipe>
 /// Does this viewing recipe transform the displayed frame (straighten / lens
 /// geometry)? Crop deliberately excluded — the web preview never crops.
 fn view_geometry_active(rec: &EditRecipe) -> bool {
+    // geometry_moves_frame, not a local distortion check (Codex AL F1):
+    // a CA-only profile with knots above 1 zooms the shared frame by the
+    // composite fill (L04-2), so a browser-painted mask unwarped as
+    // identity would land on the wrong pixels.
     rec.straighten_deg != 0.0
-        || rec.lens_distortion != 0.0
-        || (rec.lens_profile.distortion_on && !rec.lens_profile.distortion.is_empty())
+        || render::geometry_moves_frame(&rec.lens_profile, rec.lens_distortion)
 }
 
 /// Un-warp a browser-painted mask from the DISPLAYED (post-geometry) frame

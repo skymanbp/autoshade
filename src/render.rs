@@ -139,13 +139,19 @@ pub fn render_to_image_in(
     // rawler then skips calibration entirely.
     let calibration = if wide {
         let xyz2cam = camera_matrix(&rawimage)?;
-        let wb = normalise_wb(rawimage.wb_coeffs);
-        validate_calibration(&xyz2cam, wb, raw_path)?;
-        Some((xyz2cam, wb))
+        validate_calibration(&xyz2cam, rawimage.wb_coeffs, working, raw_path)?;
+        Some((xyz2cam, normalise_wb(rawimage.wb_coeffs)))
     } else {
         if rawimage.color_matrix.iter().next().is_some() {
             let xyz2cam = camera_matrix(&rawimage)?;
-            validate_calibration(&xyz2cam, normalise_wb(rawimage.wb_coeffs), raw_path)?;
+            // rawler's own develop targets sRGB — validate the matrix it
+            // effectively inverts.
+            validate_calibration(
+                &xyz2cam,
+                rawimage.wb_coeffs,
+                ExportColorSpace::Srgb,
+                raw_path,
+            )?;
         }
         None
     };
@@ -525,7 +531,20 @@ fn normalise_wb(wb: [f32; 4]) -> [f32; 3] {
 /// inf saturates to 65535 — so a singular matrix or corrupt WB published a
 /// committed all-black/all-white deliverable with `Ok` status. Every bail
 /// names the file and the measured value; no output is written.
-fn validate_calibration(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3], src: &Path) -> Result<()> {
+///
+/// The conditioning check runs on the matrix the render ACTUALLY inverts
+/// (Codex AL-review F3): `space2cam = xyz2cam × rgb_to_xyz(space)`, row-
+/// normalised exactly as [`camera_to_space_matrix`] does — validating the
+/// raw xyz2cam rows alone passed a matrix whose D65-weighted product row
+/// sums to ~0 and divides into infinities at render time. The raw-row
+/// degeneracy check is kept as well: no physical matrix has a zero raw row
+/// sum, and refusing garbage early is the cheap direction.
+fn validate_calibration(
+    xyz2cam: &[[f32; 3]; 3],
+    wb: [f32; 4],
+    space: ExportColorSpace,
+    src: &Path,
+) -> Result<()> {
     for row in xyz2cam {
         for v in row {
             if !v.is_finite() {
@@ -537,18 +556,15 @@ fn validate_calibration(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3], src: &Path) -> Re
             }
         }
     }
-    // Conditioning on the ROW-NORMALISED matrix (the same per-row
-    // normalisation camera_to_space_matrix applies — the DNG
-    // white-preservation rule). Real camera matrices land at O(0.1–1)
-    // there, so 1e-4 leaves ~3 decades of headroom; a degenerate row used
-    // to be SILENTLY left un-normalised, which is promoted to refusal here.
-    let mut norm = *xyz2cam;
-    for row in &mut norm {
+    let mut norm = mat_mul3(xyz2cam, &rgb_to_xyz(space_primaries(space), D65_XY));
+    for (i, row) in norm.iter_mut().enumerate() {
+        let raw = xyz2cam[i][0] + xyz2cam[i][1] + xyz2cam[i][2];
         let s = row[0] + row[1] + row[2];
-        if s.abs() <= 1e-6 {
+        if raw.abs() <= 1e-6 || s.abs() <= 1e-6 {
             bail!(
-                "camera colour matrix of {} has a degenerate row (sums to {s:e}) — \
-                 the file's calibration metadata is corrupt; no output was written",
+                "camera colour matrix of {} has a degenerate row (raw sum {raw:e}, \
+                 white-weighted sum {s:e}) — the file's calibration metadata is \
+                 corrupt; no output was written",
                 src.display()
             );
         }
@@ -560,6 +576,9 @@ fn validate_calibration(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3], src: &Path) -> Re
     let c01 = norm[1][2] * norm[2][0] - norm[1][0] * norm[2][2];
     let c02 = norm[1][0] * norm[2][1] - norm[1][1] * norm[2][0];
     let det = norm[0][0] * c00 + norm[0][1] * c01 + norm[0][2] * c02;
+    // Real camera matrices land at O(0.1–1) here (a sweep of rawler 0.7.2's
+    // 1331 bundled matrices bottoms out around 0.22), so 1e-4 leaves ~3
+    // decades of headroom.
     if det.abs() < 1e-4 {
         bail!(
             "camera colour matrix of {} is singular or near-singular \
@@ -568,17 +587,46 @@ fn validate_calibration(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3], src: &Path) -> Re
             src.display()
         );
     }
-    for v in wb {
+    let wb3 = normalise_wb(wb);
+    for v in wb3 {
         if !v.is_finite() || v <= 0.0 {
             bail!(
-                "AsShotNeutral/WB coefficients of {} are corrupt ({wb:?}) — \
+                "AsShotNeutral/WB coefficients of {} are corrupt ({wb3:?}) — \
                  a zero AsShotNeutral component becomes an infinite multiplier \
                  (all-white frame); no output was written",
                 src.display()
             );
         }
     }
+    // A REAL fourth coefficient (rawler leaves wb[3] NaN for 3-channel
+    // cameras) is consumed by rawler's own develop on 4-colour sensors —
+    // validate it the same way (Codex AL-review F4, the shallow half; a
+    // true 4-colour intermediate is refused post-develop as before).
+    if !wb[3].is_nan() && (!wb[3].is_finite() || wb[3] <= 0.0) {
+        bail!(
+            "the fourth WB coefficient of {} is corrupt ({}) — \
+             no output was written",
+            src.display(),
+            wb[3]
+        );
+    }
     Ok(())
+}
+
+/// Does the composed lens geometry MOVE the shared frame? THE predicate
+/// every geometry consumer must use (Codex AL-review F1): distortion-off +
+/// amount-0 is NOT identity once CA overshoots, because the composite fill
+/// (L04-2) zooms every channel. Dims-free and conservatively OVER-inclusive
+/// (any ca knot above 1 counts, whether or not the band max survives): a
+/// false positive routes through maps that are then identity anyway; a
+/// false negative desyncs masks/overlays/selections from the pixels.
+pub fn geometry_moves_frame(profile: &crate::recipe::LensProfile, amount: f32) -> bool {
+    (profile.distortion_on && !profile.distortion.is_empty())
+        || amount.abs() >= 1e-3
+        || (profile.ca_on
+            && !profile.ca_r.is_empty()
+            && !profile.ca_b.is_empty()
+            && profile.ca_r.iter().chain(&profile.ca_b).any(|k| *k > 1.0))
 }
 
 /// The delivery space's primaries.
@@ -7492,19 +7540,25 @@ mod tests {
     fn singular_camera_matrix_is_refused_not_rendered_black() {
         let good = inv3(&rgb_to_xyz(SRGB_PRIM, D65_XY));
         assert!(
-            validate_calibration(&good, [1.9, 1.0, 1.6], Path::new("x.dng")).is_ok(),
+            validate_calibration(
+                &good,
+                [1.9, 1.0, 1.6, f32::NAN],
+                ExportColorSpace::Srgb,
+                Path::new("x.dng"),
+            )
+            .is_ok(),
             "a real matrix + real WB validates"
         );
         let mut twin = good;
         twin[1] = twin[0]; // two identical rows ⇒ det == 0 after row-norm
-        let e = validate_calibration(&twin, [1.0; 3], Path::new("x.dng"))
+        let e = validate_calibration(&twin, [1.0, 1.0, 1.0, f32::NAN], ExportColorSpace::Srgb, Path::new("x.dng"))
             .unwrap_err()
             .to_string();
         assert!(e.contains("determinant"), "the refusal quotes the measurement: {e}");
         assert!(e.contains("x.dng"), "the refusal names the file: {e}");
         let mut nan = good;
         nan[2][1] = f32::NAN;
-        let e = validate_calibration(&nan, [1.0; 3], Path::new("x.dng"))
+        let e = validate_calibration(&nan, [1.0, 1.0, 1.0, f32::NAN], ExportColorSpace::Srgb, Path::new("x.dng"))
             .unwrap_err()
             .to_string();
         assert!(e.contains("non-finite"), "{e}");
@@ -7517,10 +7571,30 @@ mod tests {
     fn degenerate_matrix_row_is_disclosed_not_silently_unnormalised() {
         let mut degen = inv3(&rgb_to_xyz(SRGB_PRIM, D65_XY));
         degen[0] = [0.5, -1.0, 0.5]; // sums to 0
-        let e = validate_calibration(&degen, [1.0; 3], Path::new("x.dng"))
+        let e = validate_calibration(&degen, [1.0, 1.0, 1.0, f32::NAN], ExportColorSpace::Srgb, Path::new("x.dng"))
             .unwrap_err()
             .to_string();
         assert!(e.contains("degenerate row"), "{e}");
+        // Codex AL-review F3: a row can be healthy RAW but near-orthogonal
+        // to the white-weighted PRODUCT the render actually inverts - the
+        // validator must judge that product, not the raw rows alone.
+        let m = rgb_to_xyz(SRGB_PRIM, D65_XY);
+        let col_sums = [
+            m[0][0] + m[0][1] + m[0][2],
+            m[1][0] + m[1][1] + m[1][2],
+            m[2][0] + m[2][1] + m[2][2],
+        ];
+        let mut ortho = inv3(&rgb_to_xyz(SRGB_PRIM, D65_XY));
+        // row = [1, t, 0] with 1*col0 + t*col1 = 0  =>  raw sum 1+t != 0.
+        let t = -col_sums[0] / col_sums[1];
+        ortho[0] = [1.0, t, 0.0];
+        let e = validate_calibration(&ortho, [1.0, 1.0, 1.0, f32::NAN], ExportColorSpace::Srgb, Path::new("x.dng"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("degenerate row") || e.contains("determinant"),
+            "a white-orthogonal row must refuse even with a healthy raw sum: {e}"
+        );
     }
 
     /// L04-1: rawler turns a zero AsShotNeutral component into an INFINITE
@@ -7532,22 +7606,29 @@ mod tests {
     fn zero_as_shot_neutral_becomes_an_infinite_coefficient_and_is_refused() {
         let good = inv3(&rgb_to_xyz(SRGB_PRIM, D65_XY));
         for bad in [
-            [f32::INFINITY, 1.0, 1.0], // the DNG 1/0 case
-            [1.0, f32::NAN, 1.0],      // partial NaN — invisible to a [0]-only check
-            [1.0, -0.5, 1.0],
-            [1.0, 0.0, 1.0],
+            [f32::INFINITY, 1.0, 1.0, f32::NAN], // the DNG 1/0 case
+            [1.0, f32::NAN, 1.0, f32::NAN],      // partial NaN — invisible to a [0]-only check
+            [1.0, -0.5, 1.0, f32::NAN],
+            [1.0, 0.0, 1.0, f32::NAN],
         ] {
-            let e = validate_calibration(&good, bad, Path::new("x.dng"))
+            let e = validate_calibration(&good, bad, ExportColorSpace::Srgb, Path::new("x.dng"))
                 .unwrap_err()
                 .to_string();
             assert!(e.contains("AsShotNeutral"), "{bad:?} must refuse: {e}");
         }
+        // A REAL (non-NaN) fourth coefficient is validated too (Codex F4):
+        // rawler consumes it on 4-colour sensors.
+        let e = validate_calibration(&good, [1.0, 1.0, 1.0, f32::INFINITY], ExportColorSpace::Srgb, Path::new("x.dng"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("fourth WB coefficient"), "{e}");
+        assert!(validate_calibration(&good, [1.0, 1.0, 1.0, 1.2], ExportColorSpace::Srgb, Path::new("x.dng")).is_ok());
         assert_eq!(
             normalise_wb([f32::NAN, 9.0, 9.0, 9.0]),
             [1.0, 1.0, 1.0],
             "wb[0] NaN is rawler's documented UNKNOWN — neutral, not corrupt"
         );
-        assert!(validate_calibration(&good, normalise_wb([f32::NAN; 4]), Path::new("x")).is_ok());
+        assert!(validate_calibration(&good, [f32::NAN; 4], ExportColorSpace::Srgb, Path::new("x")).is_ok());
         assert_eq!(
             normalise_wb([f32::INFINITY, 1.0, 1.0, f32::NAN]),
             [f32::INFINITY, 1.0, 1.0],
