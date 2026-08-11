@@ -127,6 +127,7 @@ impl AutoshopApp {
                     };
                     let resp = egui::Frame::none()
                         .fill(fill)
+                        .rounding(RADIUS_SM) // selected-row fill follows the thumb radius
                         .inner_margin(egui::Margin::same(3.0))
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
@@ -137,14 +138,14 @@ impl AutoshopApp {
                                             t.id(),
                                             egui::vec2(THUMB_W, THUMB_H),
                                         ))
-                                        .rounding(3.0),
+                                        .rounding(RADIUS_SM),
                                     );
                                 } else {
                                     let (rect, _) = ui.allocate_exact_size(
                                         egui::vec2(THUMB_W, THUMB_H),
                                         egui::Sense::hover(),
                                     );
-                                    ui.painter().rect_filled(rect, 3.0, colors.thumb_placeholder);
+                                    ui.painter().rect_filled(rect, RADIUS_SM, colors.thumb_placeholder);
                                     to_request.push(i);
                                 }
                                 ui.vertical(|ui| {

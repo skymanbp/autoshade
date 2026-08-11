@@ -2622,3 +2622,41 @@
         assert_eq!(ExportFormat::Tiff8.ext(), "tif");
         assert_eq!(ExportFormat::Jpeg.ext(), "jpg");
     }
+
+    /// 阶段5: the installed theme must be the RENDERED theme, whatever the
+    /// OS reports. egui 0.29 defaults to ThemePreference::System and
+    /// `set_style` writes only the ACTIVE theme's style slot — before the
+    /// fix, on a light-mode OS the startup install landed in the dark slot
+    /// while the screen showed the STOCK light style (round-11's "亮色主题"
+    /// screenshot was this bug in plain sight). The adversarial host here
+    /// reports the OPPOSITE mode every frame; the app's choice must win,
+    /// and the styled content (our selection stroke, not egui's default)
+    /// must be what `ctx.style()` serves after a real frame.
+    #[test]
+    fn the_installed_theme_survives_an_opposite_mode_os() {
+        for (pref, want_dark) in [(ThemePref::Dark, true), (ThemePref::Light, false)] {
+            let ctx = egui::Context::default();
+            let os_reports =
+                if want_dark { egui::Theme::Light } else { egui::Theme::Dark };
+            let input = egui::RawInput {
+                system_theme: Some(os_reports),
+                ..Default::default()
+            };
+            // Startup order: install BEFORE the first frame (system theme
+            // unknown), exactly like main()'s creation closure.
+            install_theme(&ctx, pref);
+            // One real frame with the adversarial system theme — the moment
+            // the old bug swapped the stock style in.
+            let _ = ctx.run(input, |_| {});
+            assert_eq!(
+                ctx.style().visuals.dark_mode,
+                want_dark,
+                "{pref:?} must render as itself on an opposite-mode OS"
+            );
+            assert_eq!(
+                ctx.style().visuals.selection.stroke.color,
+                pref.colors().selection_stroke,
+                "{pref:?}: the rendered slot must carry OUR palette, not stock"
+            );
+        }
+    }

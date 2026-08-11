@@ -756,7 +756,7 @@ impl AutoshopApp {
                     // just discarded — showing them under neutral sliders lies.
                     self.resync_recipe_display();
                 }
-                ui.add_space(12.0);
+                ui.add_space(SPACE_LG);
                 if ui
                     .add_enabled(ready && !self.undo_stack.is_empty(), egui::Button::new(tr(lang, "↶ Undo")))
                     .on_hover_text(tr(lang, "Ctrl+Z · undo the last edit"))
@@ -773,7 +773,7 @@ impl AutoshopApp {
                     let ctx = ui.ctx().clone();
                     self.redo(&ctx);
                 }
-                ui.add_space(12.0);
+                ui.add_space(SPACE_LG);
                 // View mode: side-by-side vs a full-width edit (hold B =
                 // compare). ◫ lives in egui's bundled fonts — the old ⿲
                 // (U+2FF2) only rendered when the OPTIONAL CJK fallback font
@@ -782,7 +782,7 @@ impl AutoshopApp {
                     .on_hover_text(tr(lang, "Before/After side by side"));
                 ui.selectable_value(&mut self.view_mode, ViewMode::AfterOnly, tr(lang, "⬛ Single"))
                     .on_hover_text(tr(lang, "The edit fills the canvas; hold B to quickly compare the original"));
-                ui.add_space(12.0);
+                ui.add_space(SPACE_LG);
                 // Delivery ACTIONS (their settings live in the Develop panel's
                 // Export section; the hover echoes the current delivery state
                 // so it stays glanceable without a toolbar row of combos).
@@ -836,7 +836,7 @@ impl AutoshopApp {
                 {
                     self.save_xmp();
                 }
-                ui.add_space(12.0);
+                ui.add_space(SPACE_LG);
                 if ui.button(tr(lang, "⚙ Settings")).on_hover_text(tr(lang, "AI provider / model / API key")).clicked() {
                     // Reload the form only on the closed→open edge — reloading
                     // while open wiped everything already typed (incl. keys).
@@ -972,14 +972,18 @@ impl AutoshopApp {
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
     fn upd_central(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // The canvas sits on a bed one step below the panel fill (recessed
+        // stage / raised chrome) — keep the stock margins, swap the fill.
+        let bed = egui::Frame::central_panel(&ctx.style())
+            .fill(self.theme.colors().canvas_bed);
+        egui::CentralPanel::default().frame(bed).show(ctx, |ui| {
             // Empty state: a real landing surface instead of a blank canvas.
             if self.src_path.is_none() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.32);
                     ui.heading("Autoshop");
                     ui.label(egui::RichText::new(tr(self.lang, "AI auto-develop · RAW develop")).weak());
-                    ui.add_space(12.0);
+                    ui.add_space(SPACE_LG);
                     ui.horizontal(|ui| {
                         // Center the button pair by padding half the leftover width.
                         let w = 300.0;
@@ -1433,15 +1437,21 @@ impl eframe::App for AutoshopApp {
                             ToastKind::Success => (c.toast_ok_bg, c.toast_ok_fg),
                             ToastKind::Error => (c.toast_err_bg, c.toast_err_fg),
                         };
+                        // Elevated pill: the theme's popup shadow + a faint
+                        // text-tinted hairline lift it off the photo — a flat
+                        // fill over arbitrary canvas content had no edge at
+                        // all where the photo matched the toast colour.
                         egui::Frame::none()
                             .fill(bg)
-                            .rounding(6.0)
+                            .stroke(egui::Stroke::new(1.0, fg.gamma_multiply(0.35)))
+                            .shadow(ui.visuals().popup_shadow)
+                            .rounding(RADIUS_MD)
                             .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                             .show(ui, |ui| {
                                 ui.set_max_width(420.0);
                                 ui.label(egui::RichText::new(&t.text).color(fg));
                             });
-                        ui.add_space(6.0);
+                        ui.add_space(SPACE_MD);
                     }
                 });
             // Keep repainting so expiry doesn't wait for the next input event.

@@ -44,6 +44,9 @@ pub(crate) struct ThemeColors {
     pub(crate) sel_bg_dim: egui::Color32,
     /// Undecoded gallery-thumbnail placeholder block.
     pub(crate) thumb_placeholder: egui::Color32,
+    /// Central-canvas bed — one step below the panel fill, so the photo
+    /// sits on a recessed stage while the chrome reads as raised.
+    pub(crate) canvas_bed: egui::Color32,
     /// Histogram clipping triangles: armed-but-clean / disarmed.
     pub(crate) clip_tri_on: egui::Color32,
     pub(crate) clip_tri_off: egui::Color32,
@@ -76,6 +79,7 @@ pub(crate) const DARK_COLORS: ThemeColors = ThemeColors {
     // on multi-select rows, and that pairing sat at ~4.45:1 — just under AA.
     sel_bg_dim: egui::Color32::from_rgb(0x24, 0x1e, 0x0c),
     thumb_placeholder: egui::Color32::from_gray(24),
+    canvas_bed: egui::Color32::from_gray(19),
     clip_tri_on: egui::Color32::from_gray(130),
     clip_tri_off: egui::Color32::from_gray(60),
     toast_ok_bg: egui::Color32::from_rgb(22, 58, 34),
@@ -104,6 +108,7 @@ pub(crate) const LIGHT_COLORS: ThemeColors = ThemeColors {
     sel_bg: egui::Color32::from_rgb(0xf0, 0xe2, 0xc0),
     sel_bg_dim: egui::Color32::from_rgb(0xf6, 0xef, 0xdd),
     thumb_placeholder: egui::Color32::from_gray(224),
+    canvas_bed: egui::Color32::from_gray(238),
     clip_tri_on: egui::Color32::from_gray(95),
     clip_tri_off: egui::Color32::from_gray(190),
     toast_ok_bg: egui::Color32::from_rgb(0xdf, 0xf0, 0xe2),
@@ -352,6 +357,20 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Spacing tokens (round-12 阶段5): ONE scale for the whole GUI instead of
+/// per-site literals — breather / sub-group / section fence / group fence.
+/// The values are the dominant rhythm the panels already used; the tokens
+/// exist so every surface moves together when the scale is tuned.
+pub(crate) const SPACE_XS: f32 = 2.0;
+pub(crate) const SPACE_SM: f32 = 4.0;
+pub(crate) const SPACE_MD: f32 = 6.0;
+pub(crate) const SPACE_LG: f32 = 12.0;
+/// Radius tokens: small inline chrome (thumbnails, plot beds) / widgets
+/// (also toasts) / windows. Menus sit between MD and LG on purpose.
+pub(crate) const RADIUS_SM: f32 = 3.0;
+pub(crate) const RADIUS_MD: f32 = 6.0;
+pub(crate) const RADIUS_LG: f32 = 10.0;
+
 /// Install the full UI style for one theme: a fresh egui dark/light Visuals
 /// base (so toggling is idempotent — no residue from the other theme), the
 /// warm-gold accent family from [`ThemeColors`], softer rounding, a calmer
@@ -361,6 +380,24 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
 pub(crate) fn install_theme(ctx: &egui::Context, theme: ThemePref) {
     use egui::{FontFamily, FontId, Rounding, Stroke, TextStyle};
     let c = theme.colors();
+    // Pin egui's dark/light switch to the APP's choice. egui 0.29 defaults
+    // to ThemePreference::System and `set_style` writes only the ACTIVE
+    // theme's style slot (memory/mod.rs style_mut) — so on a light-mode OS
+    // the startup install landed in the dark slot while the screen rendered
+    // the STOCK light style: every token below was silently discarded and
+    // the Settings theme picker looked dead. Pinning first makes the slot
+    // we style the slot egui renders, on every OS mode.
+    ctx.options_mut(|o| {
+        o.theme_preference = match theme {
+            ThemePref::Dark => egui::ThemePreference::Dark,
+            ThemePref::Light => egui::ThemePreference::Light,
+        };
+    });
+    // …and ask the OS for a matching titlebar (no-op headless / unsupported).
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(match theme {
+        ThemePref::Dark => egui::SystemTheme::Dark,
+        ThemePref::Light => egui::SystemTheme::Light,
+    }));
     let mut style = (*ctx.style()).clone();
     style.visuals = match theme {
         ThemePref::Dark => egui::Visuals::dark(),
@@ -374,7 +411,7 @@ pub(crate) fn install_theme(ctx: &egui::Context, theme: ThemePref) {
     style.visuals.widgets.hovered.bg_stroke =
         Stroke::new(1.0, c.selection_stroke.gamma_multiply(0.55));
     style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, c.selection_stroke);
-    let rounding = Rounding::same(6.0);
+    let rounding = Rounding::same(RADIUS_MD);
     for w in [
         &mut style.visuals.widgets.noninteractive,
         &mut style.visuals.widgets.inactive,
@@ -384,8 +421,22 @@ pub(crate) fn install_theme(ctx: &egui::Context, theme: ThemePref) {
     ] {
         w.rounding = rounding;
     }
-    style.visuals.window_rounding = Rounding::same(10.0);
+    style.visuals.window_rounding = Rounding::same(RADIUS_LG);
     style.visuals.menu_rounding = Rounding::same(8.0);
+    // Depth: floating chrome casts a soft DOWNWARD penumbra — the stock
+    // diagonal (10,20) reads as a misregistered copy, a vertical one as
+    // elevation. Black-on-dark barely registers, so dark carries more alpha.
+    let elevation = |offset: f32, blur: f32| egui::epaint::Shadow {
+        offset: egui::vec2(0.0, offset),
+        blur,
+        spread: 0.0,
+        color: egui::Color32::from_black_alpha(match theme {
+            ThemePref::Dark => 140,
+            ThemePref::Light => 45,
+        }),
+    };
+    style.visuals.window_shadow = elevation(6.0, 18.0);
+    style.visuals.popup_shadow = elevation(3.0, 10.0);
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
     style.spacing.interact_size.y = 26.0;

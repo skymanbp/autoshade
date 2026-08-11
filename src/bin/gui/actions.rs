@@ -1602,7 +1602,7 @@ impl AutoshopApp {
                     // Informational since v0.22: Save-all persists each
                     // photo's whole variant strip (variants.json), so these
                     // are rescued WITH their photo, not lost.
-                    ui.add_space(6.0);
+                    ui.add_space(SPACE_MD);
                     ui.label(
                         egui::RichText::new(trf(
                             lang,
@@ -1613,7 +1613,7 @@ impl AutoshopApp {
                         .weak(),
                     );
                 }
-                ui.add_space(6.0);
+                ui.add_space(SPACE_MD);
                 // Safe escape far left, the destructive action fenced off by
                 // space, the primary (save) tinted and last — a 4px slip from
                 // Save must not land on an unrecoverable Discard.

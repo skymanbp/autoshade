@@ -17,7 +17,7 @@ impl AutoshopApp {
             egui::Sense::hover(),
         );
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 3.0, egui::Color32::from_gray(16));
+        p.rect_filled(rect, RADIUS_SM, egui::Color32::from_gray(16));
         let n = hist.len().max(1);
         let bar_w = rect.width() / n as f32;
         // Additive-ish RGB: draw each channel as translucent filled bars.
@@ -183,7 +183,7 @@ impl AutoshopApp {
         }
         let p = ui.painter_at(rect);
         let accent = CURVE_CHANNELS[self.curve_channel].1;
-        p.rect_filled(rect, 3.0, egui::Color32::from_gray(16));
+        p.rect_filled(rect, RADIUS_SM, egui::Color32::from_gray(16));
 
         // Value space: x = input 0..1 (left→right), y = output 0..1 (bottom→top).
         let to_screen = |x: f32, y: f32| {

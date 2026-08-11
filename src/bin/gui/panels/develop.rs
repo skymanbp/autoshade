@@ -153,7 +153,7 @@ impl AutoshopApp {
         let mut changed = false;
         ui.heading(tr(lang, "Develop"));
         self.histogram_ui(ui);
-        ui.add_space(4.0);
+        ui.add_space(SPACE_SM);
 
         changed |= self.dev_ai(ui);
         // Lightroom-style grouping: a wall of 16 sliders scans terribly; four
@@ -202,7 +202,7 @@ impl AutoshopApp {
         let mut switch_to: Option<usize> = None;
         let mut delete: Option<usize> = None;
         ui.horizontal(|ui| {
-            ui.add_space(4.0);
+            ui.add_space(SPACE_SM);
             ui.label(egui::RichText::new(tr(lang, "Variants")).strong());
             ui.separator();
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -224,9 +224,11 @@ impl AutoshopApp {
                                     egui::pos2(1.0, 1.0),
                                 );
                                 if active {
+                                    // Concentric with the 4.0-radius border
+                                    // below: outer radius = inner + expand.
                                     ui.painter().rect_filled(
                                         rect.expand(3.0),
-                                        5.0,
+                                        7.0,
                                         egui::Color32::from_rgba_unmultiplied(0xc9, 0xa1, 0x4a, 46),
                                     );
                                 }
@@ -257,7 +259,7 @@ impl AutoshopApp {
                                 }
                             });
                         });
-                        ui.add_space(6.0);
+                        ui.add_space(SPACE_MD);
                     }
                 });
             });
@@ -424,6 +426,7 @@ impl AutoshopApp {
                 || r.blacks != 0.0
         };
 
+        ui.add_space(SPACE_MD); // same section fence as every sibling
         egui::CollapsingHeader::new(section_title(tr(lang, "Tone & WB"), tone_active))
             .id_salt("sec_tone")
             .default_open(true)
@@ -517,7 +520,7 @@ impl AutoshopApp {
         // two colour sections; Detail moved BELOW them so colour work isn't
         // interrupted by sharpening. add_space fences each header so the ten
         // sections read as groups, not one undivided list.
-        ui.add_space(6.0);
+        ui.add_space(SPACE_MD);
         egui::CollapsingHeader::new(section_title(tr(lang, "Presence"), presence_active))
             .id_salt("sec_presence")
             .default_open(true)
@@ -537,7 +540,7 @@ impl AutoshopApp {
         let lang = self.lang;
         let mut changed = false;
 
-        ui.add_space(6.0);
+        ui.add_space(SPACE_MD);
         // --- 曲线: master + RGB tone curves (engine + XMP already apply them,
         // this is purely the editing surface — Lightroom's panel order) --------
         egui::CollapsingHeader::new(section_title(tr(lang, "Curves"), curves_active))
@@ -554,9 +557,7 @@ impl AutoshopApp {
     fn dev_hsl(&mut self, ui: &mut egui::Ui, hsl_active: bool) -> bool {
         let lang = self.lang;
         let mut changed = false;
-        ui.add_space(6.0);
-
-        ui.add_space(6.0);
+        ui.add_space(SPACE_MD);
         egui::CollapsingHeader::new(section_title(tr(lang, "Color Mixer (HSL)"), hsl_active))
             .id_salt("sec_hsl")
             .default_open(false)
@@ -601,7 +602,7 @@ impl AutoshopApp {
         let lang = self.lang;
         let mut changed = false;
 
-        ui.add_space(6.0);
+        ui.add_space(SPACE_MD);
         egui::CollapsingHeader::new(section_title(tr(lang, "Color Grading"), grade_active))
             .id_salt("sec_grade")
             .default_open(false)
@@ -658,9 +659,11 @@ impl AutoshopApp {
 
         // Look ends here — detail, then geometry (lens BEFORE crop: the lens
         // profile / manual distortion redefine the frame the crop sits in).
-        ui.add_space(6.0);
+        // Group boundary rhythm: fence + hairline + breather (deliberate —
+        // stronger than the plain SPACE_MD fence between sibling sections).
+        ui.add_space(SPACE_MD);
         ui.separator();
-        ui.add_space(2.0);
+        ui.add_space(SPACE_XS);
         egui::CollapsingHeader::new(section_title(tr(lang, "Detail"), detail_active))
             .id_salt("sec_detail")
             .default_open(false)
@@ -675,7 +678,7 @@ impl AutoshopApp {
                 // export-time denoise (the Export section toggle) stays for
                 // batch/full-res workflows, but nobody should have to export
                 // to find out what the denoiser does.
-                ui.add_space(4.0);
+                ui.add_space(SPACE_SM);
                 ui.horizontal(|ui| {
                     let ready = self.src_path.is_some() && !self.busy;
                     if ui
@@ -711,7 +714,7 @@ impl AutoshopApp {
         let mut changed = false;
 
         // --- 镜头校正: in-camera profile + manual corrections -----------------
-        ui.add_space(6.0);
+        ui.add_space(SPACE_MD);
         let lens_active = self.recipe.lens_vignette != 0.0
             || self.recipe.lens_distortion != 0.0
             || self.recipe.lens_profile.vignette_active()
@@ -810,7 +813,7 @@ impl AutoshopApp {
         let mut changed = false;
 
         // --- 裁剪 + 拉直: recipe.crop / straighten_deg (export + XMP paths) ---
-        ui.add_space(6.0);
+        ui.add_space(SPACE_MD);
         let crop_active = self.recipe.crop.is_some() || self.recipe.straighten_deg != 0.0;
         egui::CollapsingHeader::new(section_title(tr(lang, "Crop"), crop_active))
             .id_salt("sec_crop")
@@ -882,9 +885,10 @@ impl AutoshopApp {
         let mut changed = false;
 
         // Geometry ends here — local adjustments and management below.
-        ui.add_space(6.0);
+        // (Group boundary rhythm — see the Detail section's comment.)
+        ui.add_space(SPACE_MD);
         ui.separator();
-        ui.add_space(2.0);
+        ui.add_space(SPACE_XS);
         // --- 局部调整: manual masks — the SAME recipe.masks the AI writes -----
         let n_masks = self.recipe.masks.len();
         let n_masks_s = n_masks.to_string();
@@ -1681,7 +1685,7 @@ impl AutoshopApp {
         let lang = self.lang;
 
         // --- 版本: recipe snapshots ≈ LR virtual copies (gap batch G) --------
-        ui.add_space(6.0);
+        ui.add_space(SPACE_MD);
         let n_ver = self.versions.len();
         let n_ver_s = n_ver.to_string();
         egui::CollapsingHeader::new(section_title(&trf(lang, "Versions ({n})", &[("n", &n_ver_s)]), n_ver > 0))
@@ -1769,7 +1773,7 @@ impl AutoshopApp {
         // --- 导出设置 (UX batch): moved out of the toolbar — touched once per
         // delivery, these are Export-dialog contents, not toolbar chrome. The
         // toolbar keeps the ACTIONS; their hover echoes this section's state.
-        ui.add_space(6.0);
+        ui.add_space(SPACE_MD);
         let export_active = self.exp_format != ExportFormat::Tiff16
             || self.exp_long_edge != 0
             || self.exp_sharpen != 0.0
