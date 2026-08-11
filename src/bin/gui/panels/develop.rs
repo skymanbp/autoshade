@@ -251,9 +251,11 @@ impl AutoshopApp {
                                 let label = egui::RichText::new(tr(lang, kind.label())).small();
                                 ui.label(if active { label.strong().color(accent) } else { label });
                                 // Any variant except the sole Original can be dropped.
+                                // ✕ — the ONE close/cancel glyph app-wide (the
+                                // old bare × was the fourth variant of it).
                                 if self.variants.len() > 1
                                     && kind != VariantKind::Original
-                                    && ui.small_button("×").on_hover_text(tr(lang, "Delete this variant")).clicked()
+                                    && ui.small_button("✕").on_hover_text(tr(lang, "Delete this variant")).clicked()
                                 {
                                     delete = Some(i);
                                 }
@@ -820,7 +822,9 @@ impl AutoshopApp {
             .default_open(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let label = if self.crop_mode { tr(lang, "✅ Done") } else { tr(lang, "⛶ Enter crop") };
+                    // ✓ (geometric) — same finish-glyph as 「✓ Apply」; the
+                    // emoji ✅ was the odd one out of the check family.
+                    let label = if self.crop_mode { tr(lang, "✓ Done") } else { tr(lang, "⛶ Enter crop") };
                     if ui.button(label).clicked() {
                         let on = !self.crop_mode;
                         self.disarm_tools();
@@ -975,6 +979,19 @@ impl AutoshopApp {
                     self.start_segment("sky", "Sky");
                 }
             });
+            // Empty state: an open section with zero rows looked like a bug;
+            // one quiet line says where masks come from.
+            if n_masks == 0 {
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "No masks yet — draw one with the tools above; AI Analyze adds its own too.",
+                    ))
+                    .weak()
+                    .small(),
+                );
+            }
             // Mask list: click to select (shows overlay + sliders), 🗑 deletes;
             // HOVERING a row previews that mask's coverage without selecting.
             // hover_mask lives ONE frame: update() takes it each frame and this

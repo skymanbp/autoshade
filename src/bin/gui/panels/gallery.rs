@@ -29,6 +29,10 @@ impl AutoshopApp {
         // four dynamically sized controls in a fixed row clipped at narrow
         // panel widths.
         ui.horizontal_wrapped(|ui| {
+            // Wrap BETWEEN buttons, never inside one: without this the last
+            // button in a cramped row wrapped its own label one character
+            // per line (a vertical "渲染选中" pillar at the default width).
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             // `!busy` like both siblings below. `open_path` re-points
             // `src_path` immediately but `recipe` only refreshes when the
             // decode lands, so during an open this pairs photo A's recipe
@@ -84,7 +88,16 @@ impl AutoshopApp {
         }
         ui.separator();
         if self.gallery.is_empty() {
-            ui.label(egui::RichText::new(tr(lang, "Open a folder to browse your photos here.")).weak());
+            // Two different situations, two different messages: "no folder"
+            // invites opening one; "empty folder" says the folder itself has
+            // nothing to show (the old shared line read as a broken open).
+            let hint = if self.gallery_dir.is_some() {
+                tr(lang, "No photos in this folder — RAW / JPEG / PNG / TIFF would show up here.")
+            } else {
+                tr(lang, "Open a folder to browse your photos here.")
+            };
+            ui.add_space(SPACE_MD);
+            ui.label(egui::RichText::new(hint).weak());
             return;
         }
 

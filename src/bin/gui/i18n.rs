@@ -163,6 +163,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Include crop / straighten when pasting", "粘贴时含裁剪/拉直"),
     ("Off by default — composition rarely transfers between photos", "默认不带几何 — 构图在照片间通常不可复用"),
     ("Open a folder to browse your photos here.", "打开一个文件夹，在此浏览照片。"),
+    // Round-12 阶段5 empty-state ladder: empty folder ≠ no folder, and the
+    // controls panel / first develop say what happens next instead of
+    // dead-ending in a bare label.
+    ("No photos in this folder — RAW / JPEG / PNG / TIFF would show up here.",
+        "此文件夹里没有可显示的照片——RAW / JPEG / PNG / TIFF 都会出现在这里。"),
+    ("Click a thumbnail in the Library, or press Ctrl+O.",
+        "点击图库缩略图，或按 Ctrl+O 打开照片。"),
+    ("Preparing preview…", "正在准备预览…"),
+    ("No masks yet — draw one with the tools above; AI Analyze adds its own too.",
+        "还没有蒙版——用上面的工具画一个；AI 分析也会自动添加。"),
     ("✓ selected", "✓ 选中"),
     ("● edited", "● 已编辑"),
 
@@ -211,7 +221,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out.",
         "AI 自动识别灰尘/瑕疵，或涂抹蒙版后修复。按周围像素做像素级修饰；存 ./out。"),
     ("Clone Stamp", "仿制图章 · Clone Stamp"),
-    ("✅ Done", "✅ 完成"),
+    // ✓ (geometric) since 阶段5 — one finish-glyph family with 「✓ Apply」.
+    ("✓ Done", "✓ 完成"),
     ("Stamp: Alt+click to set the source → brush the target area → 「⎘ Clone painted area」",
         "图章：Alt+点击取源点 → 画笔涂目标区 → 「⎘ 克隆已涂区域」"),
     ("⎘ Clone painted area", "⎘ 克隆已涂区域"),

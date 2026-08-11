@@ -336,7 +336,12 @@ impl AutoshopApp {
         let lang = self.lang;
         let tex = if comparing { self.before_tex.as_ref() } else { self.after_tex.as_ref() };
         let Some((id, tex_size)) = tex.map(|t| (t.id(), t.size_vec2())) else {
-            ui.label(egui::RichText::new("…").weak());
+            // First develop still in flight: say so — a bare "…" read as a
+            // hang, a spinner reads as work.
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(egui::RichText::new(tr(lang, "Preparing preview…")).weak());
+            });
             return;
         };
 

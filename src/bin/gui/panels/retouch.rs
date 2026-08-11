@@ -790,7 +790,7 @@ impl AutoshopApp {
             .default_open(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let label = if self.clone_mode { tr(lang, "✅ Done") } else { tr(lang, "⎘ Enter stamp") };
+                    let label = if self.clone_mode { tr(lang, "✓ Done") } else { tr(lang, "⎘ Enter stamp") };
                     if ui
                         .button(label)
                         .on_hover_text(tr(lang, "Arm the stamp: Alt+click samples a source, the brush paints the target; your painted mask survives"))

@@ -951,7 +951,23 @@ impl AutoshopApp {
                         // ("AI verdict" section) — the output of the headline
                         // feature no longer hides below every adjustment section.
                     } else {
-                        ui.label(tr(self.lang, "No photo open."));
+                        // Empty state with the same voice as the canvas hero:
+                        // centered, quiet, and it says what to do next — a
+                        // bare left-aligned label read as a stuck error.
+                        ui.add_space(24.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new("🖼").size(26.0).weak());
+                            ui.add_space(SPACE_SM);
+                            ui.label(egui::RichText::new(tr(self.lang, "No photo open.")).weak());
+                            ui.label(
+                                egui::RichText::new(tr(
+                                    self.lang,
+                                    "Click a thumbnail in the Library, or press Ctrl+O.",
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                        });
                     }
                 });
             });
