@@ -204,6 +204,9 @@ pub(crate) struct AutoshopApp {
     pub(crate) show_clipping: bool,                   // clipping warnings: red blown / blue crushed (J)
     pub(crate) last_rgb: Option<image::RgbImage>,     // last accepted frame's pixels (instant clip toggle)
     pub(crate) clip_tex: Option<egui::TextureHandle>,
+    // First-frame OS titlebar sync (see update()'s head): viewport commands
+    // sent from the creation closure are dropped before the loop runs.
+    pub(crate) os_theme_synced: bool,
     // --- zoom / pan (per-photo, reset on open) ---
     pub(crate) zoom: f32,                             // 1.0 = fit; up to 12×
     pub(crate) pan: egui::Vec2,                       // visible-window centre in crop-window coords
@@ -1409,12 +1412,23 @@ impl Default for AutoshopApp {
             show_clipping: false,
             last_rgb: None,
             clip_tex: None,
+            os_theme_synced: false,
         }
     }
 }
 
 impl eframe::App for AutoshopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // First frame: re-issue the OS-titlebar theme. install_theme sends it
+        // from the creation closure, but viewport commands sent before the
+        // event loop runs are dropped — a FIRST-ever launch (no prefs, so no
+        // second install) kept the OS-default titlebar over dark chrome.
+        if !std::mem::replace(&mut self.os_theme_synced, true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(match self.theme {
+                ThemePref::Dark => egui::SystemTheme::Dark,
+                ThemePref::Light => egui::SystemTheme::Light,
+            }));
+        }
         self.poll_workers(ctx);
         // Window-close guard: the unsaved-edit protection (● + nav_stash)
         // used to stop at photo switching — the title-bar ✕ dropped the open
