@@ -350,16 +350,26 @@ pub struct ExportOpts {
     /// Output sharpening 0..=100: small-radius luma unsharp on the (resized)
     /// output. 0 = off. Screen-oriented (radius 1).
     pub sharpen: f32,
-    /// JPEG quality 1..=100 (ignored by TIFF/PNG, which stay 16-bit lossless).
+    /// JPEG quality 1..=100 (ignored by TIFF/PNG, which stay lossless).
     pub jpeg_quality: u8,
     /// Delivery color space — a REAL gamut transform + matching embedded
     /// profile, not a tag swap (gap batch D2).
     pub color_space: ExportColorSpace,
+    /// Write TIFF/PNG at 8 bits per channel instead of the 16-bit default
+    /// (round-12 阶段4 export normalisation: the extension alone cannot say
+    /// which depth a .png/.tif should carry). JPEG is 8-bit regardless.
+    pub eight_bit: bool,
 }
 
 impl Default for ExportOpts {
     fn default() -> Self {
-        Self { long_edge: None, sharpen: 0.0, jpeg_quality: 95, color_space: ExportColorSpace::Srgb }
+        Self {
+            long_edge: None,
+            sharpen: 0.0,
+            jpeg_quality: 95,
+            color_space: ExportColorSpace::Srgb,
+            eight_bit: false,
+        }
     }
 }
 
@@ -1000,16 +1010,30 @@ pub fn render_to_file(
             let mut wr = create(&staged)?;
             let mut enc = image::codecs::tiff::TiffEncoder::new(&mut wr);
             tag_icc(&mut enc, space);
-            img.write_with_encoder(enc)
-                .with_context(|| format!("encode tiff {}", out.display()))?;
+            // 8-bit on request (阶段4): the depth is an EXPORT SETTING, not
+            // an extension property — a .tif says nothing about bits.
+            if opts.eight_bit {
+                DynamicImage::ImageRgb8(img.to_rgb8())
+                    .write_with_encoder(enc)
+                    .with_context(|| format!("encode tiff {}", out.display()))?;
+            } else {
+                img.write_with_encoder(enc)
+                    .with_context(|| format!("encode tiff {}", out.display()))?;
+            }
             wr.flush().with_context(|| format!("flush {}", out.display()))?;
         }
         "png" => {
             let mut wr = create(&staged)?;
             let mut enc = image::codecs::png::PngEncoder::new(&mut wr);
             tag_icc(&mut enc, space);
-            img.write_with_encoder(enc)
-                .with_context(|| format!("encode png {}", out.display()))?;
+            if opts.eight_bit {
+                DynamicImage::ImageRgb8(img.to_rgb8())
+                    .write_with_encoder(enc)
+                    .with_context(|| format!("encode png {}", out.display()))?;
+            } else {
+                img.write_with_encoder(enc)
+                    .with_context(|| format!("encode png {}", out.display()))?;
+            }
             wr.flush().with_context(|| format!("flush {}", out.display()))?;
         }
         // Unknown extensions keep the generic 16-bit save (no ICC tag, so the
@@ -7783,5 +7807,44 @@ mod tests {
             (ux - 0.8).abs() < 2e-3 && (uy - 0.3).abs() < 2e-3,
             "CA-only roundtrip ({ux},{uy})"
         );
+    }
+
+    /// 阶段4: the export DEPTH is an ExportOpts setting, not an extension
+    /// property — a .png/.tif carries 16 bits by default and 8 on request,
+    /// and the staged publish keeps the contract for both.
+    #[test]
+    fn export_depth_follows_the_option_not_the_extension() {
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-export-depth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src_dir = dir.join("library");
+        let out_dir = dir.join("exports");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let src = src_dir.join("in.png");
+        RgbImage::from_fn(12, 8, |x, y| image::Rgb([x as u8 * 20, y as u8 * 30, 90]))
+            .save(&src)
+            .unwrap();
+        let recipe = EditRecipe::default();
+        for (name, eight, want8) in [
+            ("d16.png", false, false),
+            ("d8.png", true, true),
+            ("d16.tif", false, false),
+            ("d8.tif", true, true),
+        ] {
+            let out = out_dir.join(name);
+            let opts = ExportOpts { eight_bit: eight, ..Default::default() };
+            render_to_file(&src, &recipe, &out, None, Some(&opts)).unwrap();
+            let img = image::open(&out).unwrap();
+            let got8 = matches!(img.color(), image::ColorType::Rgb8 | image::ColorType::Rgba8);
+            assert_eq!(
+                got8, want8,
+                "{name}: eight_bit={eight} must decide the stored depth, got {:?}",
+                img.color()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

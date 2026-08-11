@@ -38,7 +38,10 @@ pub(crate) struct AutoshopApp {
     pub(crate) hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance
     pub(crate) grade_region: usize,
     pub(crate) guidance: String, // free-text direction for the AI ("warmer, moodier")
-    pub(crate) save_jpeg: bool,  // export/download as JPEG instead of 16-bit TIFF
+    // Delivery format + depth (阶段4) — replaces the old save_jpeg bool.
+    pub(crate) exp_format: ExportFormat,
+    // The folder the last Download… landed in; the dialog reopens there.
+    pub(crate) last_export_dir: Option<PathBuf>,
     // --- undo / redo (a drag is one step, committed on release). Each step
     // carries the recipe AND the active variant's pixel identity (base Arc +
     // origin), so a baked pixel retouch (heal / clone / generative fill) is
@@ -802,7 +805,7 @@ impl AutoshopApp {
                     ))
                     .clicked()
                 {
-                    let ext = if self.save_jpeg { "jpg" } else { "tif" };
+                    let ext = self.exp_format.ext();
                     // Suggest a name from the ACTIVE variant's pixel source (a
                     // Generated variant → its reimagine stem), matching what
                     // Export writes; the rendered pixels already follow it.
@@ -813,11 +816,16 @@ impl AutoshopApp {
                         .and_then(|s| s.to_str())
                         .unwrap_or("photo")
                         .to_string();
-                    if let Some(p) = rfd::FileDialog::new()
+                    let mut dlg = rfd::FileDialog::new()
                         .add_filter(ext, &[ext])
-                        .set_file_name(format!("{stem}.developed.{ext}"))
-                        .save_file()
-                    {
+                        .set_file_name(format!("{stem}.developed.{ext}"));
+                    // Reopen where the last Download landed (阶段4) —
+                    // persisted in Prefs, so it survives restarts.
+                    if let Some(d) = self.last_export_dir.clone().filter(|d| d.is_dir()) {
+                        dlg = dlg.set_directory(d);
+                    }
+                    if let Some(p) = dlg.save_file() {
+                        self.last_export_dir = p.parent().map(|d| d.to_path_buf());
                         self.start_render_to(p);
                     }
                 }
@@ -1167,7 +1175,8 @@ impl Default for AutoshopApp {
             hsl_tab: 0,
             grade_region: 0,
             guidance: String::new(),
-            save_jpeg: false,
+            exp_format: ExportFormat::Tiff16,
+            last_export_dir: None,
             committed: UndoStep::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1453,7 +1462,11 @@ impl eframe::App for AutoshopApp {
             &Prefs {
                 gallery_dir: self.gallery_dir.clone(),
                 style_strength: self.style_strength,
-                save_jpeg: self.save_jpeg,
+                // Both written: exp_format is the truth, save_jpeg keeps a
+                // pre-阶段4 build reading this prefs file sane.
+                save_jpeg: self.exp_format == ExportFormat::Jpeg,
+                exp_format: self.exp_format.pref_code(),
+                last_export_dir: self.last_export_dir.clone(),
                 save_denoise: self.save_denoise,
                 zoned_fit: self.zoned_fit,
                 view_mode: self.view_mode,

@@ -1044,6 +1044,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Round-12 L12#3: tofu disclosure for uncovered writing scripts ────────
     ("some file names use characters no installed font can draw ({sample}) — they show as boxes",
         "部分文件名使用了已安装字体无法绘制的字符（{sample}）——它们会显示为方块"),
+
+    // ── Round-12 阶段4: export format + depth (ExportFormat::label) ──────────
+    // "16-bit TIFF" already exists above; "JPEG" is allow-listed jargon.
+    ("8-bit TIFF", "8 位 TIFF"),
+    ("16-bit PNG", "16 位 PNG"),
+    ("8-bit PNG", "8 位 PNG"),
+    // Identical on purpose: format jargon (also in the bypass allow-list),
+    // but the label() extractor demands the pair exist.
+    ("JPEG", "JPEG"),
 ];
 
 #[cfg(test)]

@@ -12,7 +12,8 @@ impl AutoshopApp {
             cc.storage.and_then(|s| eframe::get_value::<Prefs>(s, eframe::APP_KEY))
         {
             app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
-            app.save_jpeg = prefs.save_jpeg;
+            app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
+            app.last_export_dir = prefs.last_export_dir.clone();
             app.save_denoise = prefs.save_denoise;
             app.zoned_fit = prefs.zoned_fit;
             app.view_mode = prefs.view_mode;

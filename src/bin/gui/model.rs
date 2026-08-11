@@ -38,12 +38,88 @@ impl Toast {
 /// next to the window geometry). Everything here must stay cheap to re-apply.
 /// `serde(default)` so prefs saved by an older build (missing newer keys) still
 /// load instead of silently resetting everything.
+/// The delivery format+depth the Export panel dials in (round-12 阶段4:
+/// the old `save_jpeg` bool could not say PNG, nor 8-bit TIFF). Stored in
+/// Prefs as a small integer (`pref_code`); `save_jpeg` is still written
+/// alongside for downgrade compatibility and consulted on load only when
+/// the new code is absent (a pre-阶段4 prefs file).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ExportFormat {
+    Tiff16,
+    Tiff8,
+    Png16,
+    Png8,
+    Jpeg,
+}
+
+impl ExportFormat {
+    pub(crate) const ALL: [ExportFormat; 5] = [
+        ExportFormat::Tiff16,
+        ExportFormat::Tiff8,
+        ExportFormat::Png16,
+        ExportFormat::Png8,
+        ExportFormat::Jpeg,
+    ];
+
+    /// English label — the i18n skeleton key (zh via `tr`; the audit
+    /// extracts this fn's literals).
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ExportFormat::Tiff16 => "16-bit TIFF",
+            ExportFormat::Tiff8 => "8-bit TIFF",
+            ExportFormat::Png16 => "16-bit PNG",
+            ExportFormat::Png8 => "8-bit PNG",
+            ExportFormat::Jpeg => "JPEG",
+        }
+    }
+
+    pub(crate) fn ext(self) -> &'static str {
+        match self {
+            ExportFormat::Tiff16 | ExportFormat::Tiff8 => "tif",
+            ExportFormat::Png16 | ExportFormat::Png8 => "png",
+            ExportFormat::Jpeg => "jpg",
+        }
+    }
+
+    pub(crate) fn eight_bit(self) -> bool {
+        matches!(self, ExportFormat::Tiff8 | ExportFormat::Png8 | ExportFormat::Jpeg)
+    }
+
+    pub(crate) fn pref_code(self) -> u8 {
+        match self {
+            ExportFormat::Tiff16 => 0,
+            ExportFormat::Tiff8 => 1,
+            ExportFormat::Png16 => 2,
+            ExportFormat::Png8 => 3,
+            ExportFormat::Jpeg => 4,
+        }
+    }
+
+    /// Prefs migration: an unknown/absent code (0 is also serde's default)
+    /// defers to the legacy `save_jpeg` bool, so a pre-阶段4 prefs file
+    /// keeps the format the user had chosen.
+    pub(crate) fn from_pref(code: u8, legacy_jpeg: bool) -> Self {
+        match code {
+            1 => ExportFormat::Tiff8,
+            2 => ExportFormat::Png16,
+            3 => ExportFormat::Png8,
+            4 => ExportFormat::Jpeg,
+            _ if legacy_jpeg => ExportFormat::Jpeg,
+            _ => ExportFormat::Tiff16,
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct Prefs {
     pub(crate) gallery_dir: Option<PathBuf>,
     pub(crate) style_strength: f32,
     pub(crate) save_jpeg: bool,
+    /// [`ExportFormat::pref_code`]; 0 defers to `save_jpeg` (migration).
+    pub(crate) exp_format: u8,
+    /// The folder the last Download… landed in — the dialog reopens there.
+    pub(crate) last_export_dir: Option<PathBuf>,
     pub(crate) save_denoise: bool,
     pub(crate) zoned_fit: bool,
     pub(crate) view_mode: ViewMode,
@@ -65,6 +141,8 @@ impl Default for Prefs {
             gallery_dir: None,
             style_strength: 0.30,
             save_jpeg: false,
+            exp_format: 0,
+            last_export_dir: None,
             save_denoise: false,
             // Zoned sky reverse-fit ON by default: it degrades gracefully to
             // the plain global fit when segmentation is unavailable.

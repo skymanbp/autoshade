@@ -2599,3 +2599,26 @@
         assert_eq!(app.toasts.len(), after_first, "the second open stays silent");
         assert!(app.disclosed_scripts.contains("thai"));
     }
+
+    /// 阶段4: the ExportFormat prefs code round-trips, a pre-阶段4 prefs
+    /// file (save_jpeg only) migrates to Jpeg, and ext/depth stay coherent
+    /// with what render_to_file expects.
+    #[test]
+    fn export_format_prefs_migrate_and_roundtrip() {
+        assert_eq!(
+            ExportFormat::from_pref(0, true),
+            ExportFormat::Jpeg,
+            "legacy save_jpeg=true without a code migrates to JPEG"
+        );
+        assert_eq!(ExportFormat::from_pref(0, false), ExportFormat::Tiff16);
+        assert_eq!(ExportFormat::from_pref(99, false), ExportFormat::Tiff16, "unknown code is safe");
+        for f in ExportFormat::ALL {
+            assert_eq!(ExportFormat::from_pref(f.pref_code(), false), f, "roundtrip {f:?}");
+        }
+        assert!(ExportFormat::Jpeg.eight_bit(), "JPEG is 8-bit by nature");
+        assert!(ExportFormat::Tiff8.eight_bit() && ExportFormat::Png8.eight_bit());
+        assert!(!ExportFormat::Tiff16.eight_bit() && !ExportFormat::Png16.eight_bit());
+        assert_eq!(ExportFormat::Png8.ext(), "png");
+        assert_eq!(ExportFormat::Tiff8.ext(), "tif");
+        assert_eq!(ExportFormat::Jpeg.ext(), "jpg");
+    }

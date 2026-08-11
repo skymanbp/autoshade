@@ -1770,7 +1770,7 @@ impl AutoshopApp {
         // delivery, these are Export-dialog contents, not toolbar chrome. The
         // toolbar keeps the ACTIONS; their hover echoes this section's state.
         ui.add_space(6.0);
-        let export_active = self.save_jpeg
+        let export_active = self.exp_format != ExportFormat::Tiff16
             || self.exp_long_edge != 0
             || self.exp_sharpen != 0.0
             || self.exp_space != 0
@@ -1784,10 +1784,12 @@ impl AutoshopApp {
                 ui.horizontal(|ui| {
                     ui.label(tr(lang, "Format"));
                     egui::ComboBox::from_id_salt("save_fmt")
-                        .selected_text(if self.save_jpeg { "JPEG" } else { tr(lang, "16-bit TIFF") })
+                        .selected_text(tr(lang, self.exp_format.label()))
+                        .width(130.0)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.save_jpeg, false, tr(lang, "16-bit TIFF"));
-                            ui.selectable_value(&mut self.save_jpeg, true, "JPEG");
+                            for f in ExportFormat::ALL {
+                                ui.selectable_value(&mut self.exp_format, f, tr(lang, f.label()));
+                            }
                         });
                 });
                 ui.horizontal(|ui| {
@@ -1809,7 +1811,7 @@ impl AutoshopApp {
                 Self::slider(ui, lang, tr(lang, "Output sharpening"), &mut self.exp_sharpen, 0.0, 100.0, 0.0);
                 // Always allocated, merely disabled for TIFF — the old
                 // appear/disappear reflowed every control to its right.
-                ui.add_enabled_ui(self.save_jpeg, |ui| {
+                ui.add_enabled_ui(self.exp_format == ExportFormat::Jpeg, |ui| {
                     Self::slider(ui, lang, tr(lang, "JPEG quality"), &mut self.exp_quality, 60.0, 100.0, 95.0);
                 });
                 ui.horizontal(|ui| {

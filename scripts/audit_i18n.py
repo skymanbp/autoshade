@@ -72,6 +72,7 @@ DYNAMIC_SITES = [
     (r"^plain\b", "set_canvas_status callers"),
     (r"^(?:self\.variants\[self\.active\]\.)?kind\.label\(\)", "VariantKind::label"),
     (r"^(?:self\.theme|t)\.label\(\)", "ThemePref::label"),
+    (r"^(?:self\.exp_format|f)\.label\(\)", "ExportFormat::label"),
     (r"^EXPORT_SPACES\[", "EXPORT_SPACES"),
     (r"^GRADE_REGIONS\[", "GRADE_REGIONS"),
     (r"^CROP_ASPECTS\[", "CROP_ASPECTS"),
@@ -102,6 +103,9 @@ DYNAMIC_SOURCES = [
     ("array", "gui", "const CROP_ASPECTS"),
     ("impl_fn", "gui", "impl VariantKind", "fn label"),
     ("impl_fn", "gui", "impl ThemePref", "fn label"),
+    # 阶段4 delivery format+depth labels (model.rs); a sixth variant without
+    # a zh pair fails the gate.
+    ("impl_fn", "gui", "impl ExportFormat", "fn label"),
     ("impl_fn", "recipe", "impl MaskRole", "fn en_name"),
     # decision_key is a free fn; the "impl_fn" extractor only needs the fn's
     # body braces, so anchoring on the pub declaration works the same way.

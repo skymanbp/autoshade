@@ -81,13 +81,13 @@ impl AutoshopApp {
     /// section instead of a toolbar row.
     pub(crate) fn export_summary(&self, lang: Lang) -> String {
         let mut parts: Vec<String> = Vec::new();
-        parts.push(if self.save_jpeg { "JPEG".into() } else { tr(lang, "16-bit TIFF").to_string() });
+        parts.push(tr(lang, self.exp_format.label()).to_string());
         parts.push(if self.exp_long_edge == 0 {
             tr(lang, "Original size").to_string()
         } else {
             format!("{} px", self.exp_long_edge)
         });
-        if self.save_jpeg {
+        if self.exp_format == ExportFormat::Jpeg {
             parts.push(format!("q{:.0}", self.exp_quality));
         }
         if self.exp_sharpen > 0.0 {
@@ -111,7 +111,7 @@ impl AutoshopApp {
             .and_then(|s| s.to_str())
             .unwrap_or("out")
             .to_string();
-        let ext = if self.save_jpeg { "jpg" } else { "tif" };
+        let ext = self.exp_format.ext();
         PathBuf::from("out").join(format!("{stem}.developed.{ext}"))
     }
 
@@ -209,6 +209,7 @@ impl AutoshopApp {
             long_edge: (self.exp_long_edge > 0).then_some(self.exp_long_edge),
             sharpen: self.exp_sharpen.clamp(0.0, 100.0),
             jpeg_quality: self.exp_quality.round().clamp(1.0, 100.0) as u8,
+            eight_bit: self.exp_format.eight_bit(),
             color_space: match self.exp_space {
                 1 => autoshop::render::ExportColorSpace::DisplayP3,
                 2 => autoshop::render::ExportColorSpace::AdobeRgb,
@@ -236,7 +237,7 @@ impl AutoshopApp {
         if targets.is_empty() {
             return;
         }
-        let ext = if self.save_jpeg { "jpg" } else { "tif" };
+        let ext = self.exp_format.ext().to_string();
         let export = self.export_opts();
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         self.busy = true;
