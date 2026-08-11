@@ -704,8 +704,11 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
 
 /// The RAW's embedded XMP packet — the develop Lightroom bakes INTO a DNG
 /// ("Store presets with this catalog" workflows write it for CR2/RAF too) —
-/// bounded and honest: `Ok(None)` means genuinely no packet; a packet (or
-/// container) that cannot be read is `Err`, never folded into "absent".
+/// bounded and honest: `Ok(None)` means no packet this reader can prove
+/// exists (including a container that does not walk as TIFF — such a photo
+/// fails loudly at decode, where the real diagnosis lives); a packet that
+/// provably EXISTS but cannot be used (over-cap, non-text, unrecognised
+/// type) is `Err`, never folded into "absent".
 ///
 /// TIFF containers (DNG/ARW/NEF/ORF/RW2/CR2/…) are read through the SAME
 /// bounded header walk the lens-metadata reader uses (`lensmeta::read`): a

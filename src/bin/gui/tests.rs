@@ -1244,6 +1244,26 @@
         assert_eq!(kind, "recipe.json");
         assert_eq!(r.exposure_ev, 0.5);
 
+        // (a2) A NEUTRAL recipe.json is a store file expressing neutral
+        // intent — it bars the packet too (Codex L05 EMBED-01: a web-side
+        // neutral save has no cleared.txt, and the packet must not
+        // out-answer it on the next open), on the open path AND the batch
+        // snapshot alike.
+        std::fs::write(
+            autoshop::store::recipe_target(&src),
+            serde_json::to_string(&EditRecipe::default()).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            matches!(read_saved_develop(&src).saved, SavedDevelop::NoopOnly),
+            "a neutral store file bars the packet"
+        );
+        let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
+        assert!(
+            crate::export::resolve_snapshot_develop(&src, &snap).unwrap().is_none(),
+            "the batch answers the same: neutral store, no packet"
+        );
+
         // (b) An explicit clear sticks: marker present, no store files — the
         // packet must NOT resurrect the cleared develop.
         std::fs::remove_file(autoshop::store::recipe_target(&src)).unwrap();

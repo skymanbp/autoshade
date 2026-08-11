@@ -1770,11 +1770,20 @@ pub fn read_develop_snapshot(src: &Path) -> std::io::Result<DevelopSnapshot> {
         }
         // The embedded packet, under the SAME lock as the markers that gate
         // it (a clear completing between two unlocked reads must not let the
-        // packet answer for a develop that is being removed).
-        let (packet_xmp, packet_unreadable) = match embedded_packet_for_restore(src) {
-            Ok(v) => (v, None),
-            Err(why) => (None, Some(why)),
-        };
+        // packet answer for a develop that is being removed). Filled only
+        // when NO store file exists at all — a NEUTRAL recipe.json or
+        // projection is a store file expressing neutral intent, and letting
+        // the packet answer past it resurrected the baked develop (Codex
+        // L05 EMBED-01; the open path draws the same `!any` line).
+        let (packet_xmp, packet_unreadable) =
+            if recipe.is_none() && recipe_err.is_none() && store_xmp.is_none() {
+                match embedded_packet_for_restore(src) {
+                    Ok(v) => (v, None),
+                    Err(why) => (None, Some(why)),
+                }
+            } else {
+                (None, None)
+            };
         Ok(DevelopSnapshot {
             recipe,
             recipe_err,

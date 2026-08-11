@@ -967,9 +967,16 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     }
     // Central first; then any legacy file a failed migration left behind.
     let mut parse_err: Option<String> = None;
+    // ANY store file read below — a NEUTRAL one included — bars the embedded
+    // packet at the tail (the GUI open path's `!any` rule; Codex L05
+    // EMBED-01: a neutral save must not be out-answered by the baked packet).
+    let mut store_answered = false;
     for path in [crate::store::recipe_target(raw), crate::store::legacy_recipe(raw)] {
         let text = match crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
-            Ok(t) => t,
+            Ok(t) => {
+                store_answered = true;
+                t
+            }
             // Missing IS absence; any OTHER read failure (permissions, I/O)
             // is an EXISTING save we could not honour — treating it as
             // absent silently resurrected stale legacy/XMP edits over it.
@@ -1042,6 +1049,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // photo's fresh base look — the same rule the GUI applies on open.
     for path in [pipeline::xmp_target(raw), crate::store::legacy_xmp(raw)] {
         if let Ok(text) = crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
+            store_answered = true;
             let mut r = crate::xmp::xmp_to_recipe(&text);
             // First consulted file wins the disclosure slot (GUI accumulates
             // the same way) — set regardless of noop-ness.
@@ -1092,7 +1100,12 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // DNG — as the strictly LOWEST-priority source, the same rule and clear
     // gate as the GUI open path and the batch snapshot
     // (store::embedded_packet_for_restore; the surfaces must answer alike).
-    match crate::store::embedded_packet_for_restore(raw) {
+    // A store file that EXISTS — neutral or unreadable — bars it.
+    match if store_answered || parse_err.is_some() {
+        Ok(None)
+    } else {
+        crate::store::embedded_packet_for_restore(raw)
+    } {
         Ok(Some(text)) => {
             let mut r = crate::xmp::xmp_to_recipe(&text);
             if xmp_warn.is_none() {

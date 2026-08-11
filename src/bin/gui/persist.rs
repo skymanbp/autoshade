@@ -232,12 +232,15 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         break; // same rule: the file that answered decides
     }
     // The RAW's own embedded XMP packet — the develop Lightroom bakes INTO a
-    // DNG — as the strictly LOWEST-priority source, probed only when nothing
-    // above answered (so the common developed-photo open pays no TIFF walk).
-    // The clear gate and the "never consulted again after the first save"
-    // consequence live in `embedded_packet_for_restore`.
+    // DNG — as the strictly LOWEST-priority source, probed only when NO store
+    // file exists at all (`!any`, not merely "nothing restored": a NEUTRAL
+    // recipe.json is a store file expressing neutral intent, and probing past
+    // it resurrected the baked develop that a web-side neutral save had just
+    // walked away from — Codex L05 EMBED-01; the clear-marker gate lives in
+    // `embedded_packet_for_restore`). The common developed-photo open
+    // therefore pays no TIFF walk.
     let mut packet_unreadable: Option<String> = None;
-    if fallback.is_none() {
+    if fallback.is_none() && !any {
         match autoshop::store::embedded_packet_for_restore(src) {
             Ok(Some(text)) => {
                 let mut r = autoshop::xmp::xmp_to_recipe(&text);
