@@ -207,6 +207,13 @@ pub(crate) struct AutoshopApp {
     // --- zoom / pan (per-photo, reset on open) ---
     pub(crate) zoom: f32,                             // 1.0 = fit; up to 12×
     pub(crate) pan: egui::Vec2,                       // visible-window centre in crop-window coords
+    // The zoom that puts one texel on one PHYSICAL pixel — computed where
+    // vis_px/disp/ppp exist (canvas after_view, each frame) so the `1` key
+    // can act at frame start, before layout. 1.0 until a first frame lands.
+    pub(crate) zoom_one_to_one: f32,
+    // Last frame's controls-panel rect: ↑/↓ walk the library EXCEPT over
+    // this panel, where the same keys nudge a hovered slider.
+    pub(crate) controls_rect: Option<egui::Rect>,
     // --- crop tool ---
     pub(crate) crop_mode: bool,                       // the crop overlay is active on the After image
     pub(crate) crop_aspect: usize,                    // index into CROP_ASPECTS
@@ -299,7 +306,8 @@ pub(crate) struct AutoshopApp {
 impl AutoshopApp {
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
-    fn upd_shortcuts(&mut self, ctx: &egui::Context) {
+    // pub(crate): the zoom-keys test drives a real headless frame through it.
+    pub(crate) fn upd_shortcuts(&mut self, ctx: &egui::Context) {
         // Tab's egui focus traversal fired last frame despite the consume (see
         // `defocus_next`): drop that focus now so the panel toggle doesn't
         // leave a surprise-focused widget eating every later shortcut.
@@ -383,6 +391,9 @@ impl AutoshopApp {
             let (mut do_wb, mut do_heal, mut do_brush) = (false, false, false);
             let (mut do_linear, mut do_radial) = (false, false);
             let (mut do_before, mut do_compare) = (false, false);
+            let (mut do_fit, mut do_one) = (false, false);
+            let (mut do_copy, mut do_paste) = (false, false);
+            let mut zoom_key: f32 = 0.0;
             let mut crop_nudge = (0.0f32, 0.0f32);
             let mut nav: i32 = 0;
             let mut brush_delta: f32 = 0.0;
@@ -390,6 +401,15 @@ impl AutoshopApp {
             // keys stay unconsumed (free for egui / future bindings).
             let brush_tool = self.paint_mode || self.clone_mode;
             let crop_tool = self.crop_mode;
+            // ↑/↓ walk the library ONLY while the pointer is off the controls
+            // panel: over it, the same keys nudge a hovered slider — and this
+            // handler runs FIRST each frame, so consuming here would eat the
+            // nudge before the slider ever saw the key. Last frame's rect
+            // (panels draw after the shortcuts) — one frame stale, harmless.
+            let over_controls = ctx
+                .input(|i| i.pointer.latest_pos())
+                .zip(self.controls_rect)
+                .is_some_and(|(p, r)| r.contains(p));
             ctx.input_mut(|i| {
                 if i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z) { do_redo = true; }
                 if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y) { do_redo = true; }
@@ -415,6 +435,28 @@ impl AutoshopApp {
                 }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) { nav = 1; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) { nav = -1; }
+                // ↑/↓: the vertical twins (a vertical list wants vertical
+                // keys) — gated on `over_controls` above.
+                if !over_controls {
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) { nav = 1; }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) { nav = -1; }
+                }
+                // Zoom keys — the canvas Fit / 1:1 buttons' twins. `=` is
+                // unshifted `+` on ANSI layouts; Shift++ covers the rest.
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Plus)
+                    || i.consume_key(egui::Modifiers::SHIFT, egui::Key::Plus)
+                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Equals)
+                {
+                    zoom_key = 1.0;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Minus) { zoom_key = -1.0; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Num0) { do_fit = true; }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Num1) { do_one = true; }
+                // Ctrl+C/V: keyboard twins of ⎘ Copy recipe / ⇩ Paste to
+                // selected. Tier C on purpose — while a text field holds
+                // focus these must stay egui's own copy/paste.
+                if i.consume_key(egui::Modifiers::COMMAND, egui::Key::C) { do_copy = true; }
+                if i.consume_key(egui::Modifiers::COMMAND, egui::Key::V) { do_paste = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) { do_escape = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::O) {
                     if crop_tool { do_crop_grid = true; } else { do_overlay = true; }
@@ -602,6 +644,37 @@ impl AutoshopApp {
                     self.gallery_scroll_to = Some(next as usize);
                     self.open_gallery_index(next as usize);
                 }
+            }
+            // Zoom keys act on the open photo's canvas. Fit/1:1 mirror their
+            // buttons exactly (1:1 via the per-frame zoom_one_to_one twin);
+            // +/− step about the view centre — pan holds, view_uv reclamps.
+            if self.src_path.is_some() {
+                if do_fit {
+                    self.zoom = 1.0;
+                    self.pan = egui::vec2(0.5, 0.5);
+                }
+                if do_one {
+                    self.zoom = self.zoom_one_to_one.clamp(1.0, 12.0);
+                }
+                if zoom_key != 0.0 {
+                    self.zoom = (self.zoom * 1.25f32.powi(zoom_key as i32)).clamp(1.0, 12.0);
+                }
+            }
+            // Ctrl+C mirrors ⎘ Copy recipe (same guards + the pending-rename
+            // flush); Ctrl+V mirrors ⇩ Paste to selected — and like the
+            // disabled buttons, a press that would not act stays silent.
+            if do_copy && self.src_path.is_some() && !self.busy {
+                self.commit_mask_name_buf();
+                self.copied = Some(self.recipe.clone());
+                self.copied_from = self.src_path.clone();
+                self.status = tr(
+                    self.lang,
+                    "Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”",
+                )
+                .to_string();
+            }
+            if do_paste && !self.busy && self.copied.is_some() && !self.multi_sel.is_empty() {
+                self.start_paste();
             }
         }
 
@@ -942,7 +1015,7 @@ impl AutoshopApp {
                 self.gallery_panel(ui);
             });
 
-            egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+            let controls = egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.src_path.is_some() {
                         self.develop_panel(ui);
@@ -971,6 +1044,12 @@ impl AutoshopApp {
                     }
                 });
             });
+            // ↑/↓ routing (see upd_shortcuts): over this panel the keys
+            // belong to a hovered slider; anywhere else they walk the
+            // library. One frame stale — panels draw after the shortcuts.
+            self.controls_rect = Some(controls.response.rect);
+        } else {
+            self.controls_rect = None;
         }
 
         // Re-develop AFTER the controls are read (so this frame reflects edits).
@@ -1112,12 +1191,15 @@ impl AutoshopApp {
                     // Runtime table (not `const`): the ZH column is resolved by
                     // `tr` at draw time. ASCII key combos carry no
                     // natural-language words, so they stay literal.
-                    let rows: [(&str, &str); 30] = [
+                    let rows: [(&str, &str); 33] = [
                         ("Ctrl/⌘+O", tr(lang, "Open photo")),
                         ("Ctrl/⌘+Shift+E / Ctrl/⌘+E", tr(lang, "Export (settings in the Export section)")),
                         ("Ctrl/⌘+S", tr(lang, "Save develop (recipe + XMP for RAW)")),
                         ("Ctrl/⌘+Z / +Shift+Z / +Y", tr(lang, "Undo / Redo")),
+                        ("Ctrl/⌘+C / Ctrl/⌘+V", tr(lang, "Copy recipe / paste to selected")),
                         ("← / →", tr(lang, "Step through the library")),
+                        ("↑ / ↓", tr(lang, "Step through the library (outside the controls panel)")),
+                        ("+ / − / 0 / 1", tr(lang, "Zoom in / out / fit / 1:1")),
                         ("R", tr(lang, "Enter / exit crop")),
                         ("Enter", tr(lang, "Commit the crop (exit the tool)")),
                         ("W", tr(lang, "WB eyedropper")),
@@ -1140,7 +1222,7 @@ impl AutoshopApp {
                         (tr(lang, "Space+drag / middle-drag"), tr(lang, "Pan")),
                         (tr(lang, "Drag when zoomed"), tr(lang, "Pan (Ctrl+drag = box-select)")),
                         (tr(lang, "Alt+click"), tr(lang, "Sample clone source")),
-                        (tr(lang, "Slider double-click"), tr(lang, "Reset to its default")),
+                        (tr(lang, "Slider double-click / right-click"), tr(lang, "Reset to its default")),
                         (tr(lang, "Curve: click / drag / drag-out"), tr(lang, "Add / move / delete point")),
                         (tr(lang, "Drag a mask handle"), tr(lang, "Reshape / move the selected mask")),
                     ];
@@ -1260,6 +1342,8 @@ impl Default for AutoshopApp {
             last_title: String::new(),
             zoom: 1.0,
             pan: egui::vec2(0.5, 0.5),
+            zoom_one_to_one: 1.0,
+            controls_rect: None,
             crop_mode: false,
             crop_aspect: 0,
             crop_aspect_pending: false,

@@ -233,8 +233,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Develop · shared slider helper ───────────────────────────────────────
     // NOT 归零: five sliders reset to a non-zero default (Temp 5500, Blending/
     // Midpoint 50, Lum. high 1.0, Feather 0.1) — matches 重置为默认值 in F1.
-    ("double-click resets · hover + ↑/↓ nudges (Shift ×10)",
-        "双击恢复默认值 · 悬停按 ↑/↓ 微调（Shift ×10）"),
+    ("double-click / right-click resets · hover + ↑/↓ nudges (Shift ×10)",
+        "双击 / 右键恢复默认值 · 悬停按 ↑/↓ 微调（Shift ×10）"),
 
     // ── Develop · panel + Tone & WB ──────────────────────────────────────────
     ("Develop", "显影 · Develop"),
@@ -401,8 +401,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "Before (source) — 再按一次 \\（或 Esc）回到编辑"),
     ("After — drag a box = local AI · scroll to zoom · space/middle-drag to pan · hold B to compare",
         "After — 拖框=局部AI · 滚轮缩放 · 空格/中键平移 · 按住B对比"),
-    ("Preview pixels 1:1 (double-click the image to toggle)", "预览像素 1:1（双击图片可切换）"),
-    ("Fit the whole image to the canvas (double-click the image to toggle)", "整图适配画布（双击图片可切换）"),
+    ("Preview pixels 1:1 (double-click the image to toggle; key: 1)", "预览像素 1:1（双击图片可切换；快捷键 1）"),
+    ("Fit the whole image to the canvas (double-click the image to toggle; key: 0)", "整图适配画布（双击图片可切换；快捷键 0）"),
     ("Fit", "适配"),
     ("Fit ↔ 1:1", "适配 ↔ 1:1"),
     ("Clipping warning (J): red = highlight clip, blue = shadow crush (judged on export pixels)",
@@ -707,7 +707,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("⌨ Shortcuts", "⌨ 快捷键 · Shortcuts"),
     ("Open photo", "打开照片"),
     ("Undo / Redo", "撤销 / 重做"),
+    ("Copy recipe / paste to selected", "复制配方 / 粘贴到选中"),
     ("Step through the library", "图库走图"),
+    ("Step through the library (outside the controls panel)", "图库走图（指针不在控制面板上时）"),
+    ("Zoom in / out / fit / 1:1", "放大 / 缩小 / 适配 / 1:1"),
     ("Enter / exit crop", "进入 / 退出裁剪"),
     ("Brush size (paint / clone armed)", "笔刷大小（画笔 / 克隆已启用时）"),
     ("Hide / show the side panels", "隐藏 / 显示侧栏"),
@@ -737,7 +740,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Pan (Ctrl+drag = box-select)", "平移（Ctrl+拖 = 框选）"),
     ("Alt+click", "Alt+点击"),
     ("Sample clone source", "克隆取源点"),
-    ("Slider double-click", "滑杆双击"),
+    ("Slider double-click / right-click", "滑杆双击 / 右键"),
     ("Curve: click / drag / drag-out", "曲线：点击/拖/拖出框"),
     ("Add / move / delete point", "加点 / 移点 / 删点"),
     ("Drag a mask handle", "蒙版手柄拖拽"),

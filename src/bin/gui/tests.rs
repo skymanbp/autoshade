@@ -2660,3 +2660,51 @@
             );
         }
     }
+
+    /// 阶段5 手感: the zoom keys are real state transitions, not just
+    /// cheat-sheet rows — `+` steps ×1.25 (clamped ≤12), `0` refits and
+    /// recentres, `1` jumps to the canvas-computed 1:1 twin. Driven through
+    /// a headless frame so the whole tier-C gate chain (no transient, no
+    /// focus) is exercised, not a hand-called helper.
+    #[test]
+    fn zoom_keys_step_fit_and_jump_to_one_to_one() {
+        let key = |k: egui::Key| egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut app = AutoshopApp {
+            src_path: Some(PathBuf::from("x.png")),
+            zoom_one_to_one: 4.0, // what the canvas computed last frame
+            zoom: 2.0,
+            pan: egui::vec2(0.7, 0.7),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        let run_key = |app: &mut AutoshopApp, k: egui::Key| {
+            let mut input = egui::RawInput::default();
+            input.events.push(key(k));
+            let _ = ctx.run(input, |ctx| app.upd_shortcuts(ctx));
+        };
+        run_key(&mut app, egui::Key::Plus);
+        assert!((app.zoom - 2.5).abs() < 1e-4, "`+` steps ×1.25, got {}", app.zoom);
+        run_key(&mut app, egui::Key::Minus);
+        assert!((app.zoom - 2.0).abs() < 1e-4, "`-` steps back, got {}", app.zoom);
+        run_key(&mut app, egui::Key::Num1);
+        assert_eq!(app.zoom, 4.0, "`1` jumps to the stored 1:1 zoom");
+        run_key(&mut app, egui::Key::Num0);
+        assert_eq!(app.zoom, 1.0, "`0` refits");
+        assert_eq!(app.pan, egui::vec2(0.5, 0.5), "`0` recentres the pan");
+        // Ceiling: from 11× one `+` press must stop at the 12× clamp.
+        app.zoom = 11.0;
+        run_key(&mut app, egui::Key::Plus);
+        assert_eq!(app.zoom, 12.0, "zoom keys respect the 12x ceiling");
+        // No photo → the keys are inert (same gate as the canvas buttons).
+        app.src_path = None;
+        app.zoom = 3.0;
+        run_key(&mut app, egui::Key::Num0);
+        assert_eq!(app.zoom, 3.0, "no photo: zoom keys must not act");
+    }

@@ -354,6 +354,10 @@ impl AutoshopApp {
         // spanned two physical pixels per texel, and "1:1" wasn't.
         let ppp = ui.ctx().pixels_per_point();
         let scale = disp.x * ppp / vis_px.x.max(1.0); // display (physical) px per image px
+        // The zoom that makes `scale` exactly 1.0 — zoom-invariant (vis_px.x
+        // scales as 1/zoom), stored for the `1` key which runs at frame
+        // start, before vis_px/disp exist. The 1:1 button reads it too.
+        self.zoom_one_to_one = (vis_px.x * self.zoom / (disp.x * ppp)).clamp(1.0, 12.0);
 
         // Caption row: mode hint left, zoom readout + Fit / 1:1 right. Every
         // armed-tool hint names its exit (Esc), and the placement hint speaks
@@ -398,16 +402,17 @@ impl AutoshopApp {
                 ui.label(egui::RichText::new(hint).weak().small());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("1:1").on_hover_text(tr(lang, "Preview pixels 1:1 (double-click the image to toggle)")).clicked() {
+                if ui.small_button("1:1").on_hover_text(tr(lang, "Preview pixels 1:1 (double-click the image to toggle; key: 1)")).clicked() {
                     // Same ceiling as the render path (view_uv clamps at 12) —
                     // an unclamped value desynced zoom/pan math from the view.
-                    // ppp: 1:1 means one texel per PHYSICAL pixel (see `scale`).
-                    self.zoom = (vis_px.x * self.zoom / (disp.x * ppp)).clamp(1.0, 12.0);
+                    // ppp: 1:1 means one texel per PHYSICAL pixel — the value
+                    // computed above, shared with the `1` key.
+                    self.zoom = self.zoom_one_to_one;
                 }
                 // "Fit" is natural language, unlike its "1:1" sibling — it
                 // must route through `tr` like every user-facing literal
                 // (the i18n module contract; the audit now flags bypasses).
-                if ui.small_button(tr(lang, "Fit")).on_hover_text(tr(lang, "Fit the whole image to the canvas (double-click the image to toggle)")).clicked() {
+                if ui.small_button(tr(lang, "Fit")).on_hover_text(tr(lang, "Fit the whole image to the canvas (double-click the image to toggle; key: 0)")).clicked() {
                     self.zoom = 1.0;
                     self.pan = egui::vec2(0.5, 0.5);
                 }

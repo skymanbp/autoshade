@@ -113,8 +113,10 @@ impl AutoshopApp {
                     .fixed_decimals(decimals)
                     .text(label),
             )
-            .on_hover_text(tr(lang, "double-click resets · hover + ↑/↓ nudges (Shift ×10)"));
-        if resp.double_clicked() && *value != default {
+            .on_hover_text(tr(lang, "double-click / right-click resets · hover + ↑/↓ nudges (Shift ×10)"));
+        // Right-click = reset too (阶段5 手感): the double-click twin — LR
+        // muscle memory, and reachable without the precise double timing.
+        if (resp.double_clicked() || resp.secondary_clicked()) && *value != default {
             *value = default;
             return true;
         }
