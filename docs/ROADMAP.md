@@ -307,6 +307,66 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **第十二轮·阶段 1–3 全清：在册 15 簇归零 + Codex 簇群复审闭合（2026-08-11，
+  未发版；计划见下方「第十二轮计划」）**
+
+  阶段 3 尾部五簇（本日十批提交，`971960e..4a59d08` 全推送）：
+
+  - **L14 测试质量 4（`971960e` 批 AC）**：付费 POST"恰一次"从死 grep
+    （needle `transport_retried` 早在 R12 b48 被删，空转两轮）改为
+    tiny_http 存根端点**计数真传输**（advisor 3 测 + generative 多部分
+    重试 1 测，脚本耗尽即关监听）；claude.rs 抽出 verify_command 纯移动
+    + argv 隔离契约两测（精确序列/--bare 缺席/API key 剥除/中性 cwd）；
+    junction 循环夹具改**强制**（symlink→mklink /J 双跌落，双败 panic，
+    别名路径断言）；引导滤波公共入口过产线 1024 瓦片 + 敌意 eps 地板。
+  - **L12 i18n 4（`3b6903c`/`f38afe8`/`c24971a`/`f2a888a` 批 AD–AG）**：
+    #6 审计第 7 门 zh 占位符多重集比对（自检哨兵+负控实测）；#2A 判词
+    类型化 (Decision,reasons) 绘制时翻译（starts_with("Accept") 配色陷阱
+    一并拆除）；#2B 确定性 rationale = 24 个模板键入 `src/rationale.rs`
+    keys 模块（审计机械抽取），Note 随行 FitReport/HealReport/
+    produce_recipe 三返回，**后缀契约**：notes 渲染 = rationale 串尾，
+    GUI strip_suffix 命中则本地化、失配整体回退英文（用户拍板"静默英文"；
+    持久化五面英文字节不动，金测钉住）；#4 七个 worker 结果全类型化
+    （ExportOutcome/RetouchNote/StyleNote/PasteOutcome/(n,dir)/FitNote），
+    落地时用落地语言渲染 + 审计第 9 门禁 spawn 闭包内 tr/trf；#3 非 CJK
+    文种运行时回退（Windows 实测 micross/Nirmala/malgunsl，mac/linux 表
+    留空不臆造），字节帽 stat-先行 24MiB/64MiB，开夹每文种一次性 tofu
+    披露（en+zh）。
+  - **L04 数值 3（`029ab3f`/`dcbc0d6` 批 AH/AI）**：#1 校准验证器——
+    非有限项/退化行/白点加权乘积矩阵行归一 det<1e-4/WB 非正即拒（rawler
+    1/0→inf 曾穿过 [0].is_nan 唯一护栏，to_u16 饱和成全黑全白 Ok 交付）；
+    #3 风格检索双保险（±1e3 物理带宽入门 + f64 累加 + total_cmp 全序）；
+    #2 CA 复合填充缩放 geometry_fill_scale（LUT 节点网格上取
+    green×max(ca) 带内最大，≥1、无越界恰为 1 逐位不变），三 LUT/RGBA
+    叠加层/正反 norm 映射五消费点同除一标量（用户拍板改像素）。
+  - **L09 CLI 3（`fd7fcdd` 批 AJ）**：preflight_out（只读护栏+目录拒+
+    父链建）前置**每个付费命令**（analyze/-o、auto 另加格式预拒、
+    reimagine/retouch 库函数首句）；heal --full-res 文案照实（"仅 RAW"
+    自 b4c6c30 即假）+ GUI 复选框对烘焙源解禁（用户拍板，默认不勾）；
+    subset_gui_fonts.py 改「查→建→验→原子发布」+ --check 模式 +
+    勘误三处。
+  - **L16 setenv 1（`5321f79` 批 AK）**：.env 改 **owned map**
+    （dotenv_iter 一次解析，进程环境永不写，unsafe set_var 连根拔——
+    其安全注释"主线程首载"前提对 GUI 二进制为假）；env_or_dotenv 供
+    五个域外消费点，dotenv_child_env（滤 17 保护名）显式喂三个子进程；
+    覆盖优先级/子进程可达性逐项保持；must_cover 从常量自导出（旧手抄
+    冻在 14 条时常量已 17 条）；顺带免费关掉 LOCALAPPDATA 未列名旁路。
+  - **Codex 簇群复审闭合（`4a59d08` 批 AL）**：9 发现采纳 7——F1（高）
+    CA-only 填充动帧但四个几何消费点（serve 掩膜反变形/GUI 锚点映射/
+    真轮廓/涂抹叠加缓存门）仍当恒等 → 统一
+    `render::geometry_moves_frame` 谓词；F2（高）heal 先付费后验 -o →
+    preflight 前置；F3 验证器改判**真被求逆**的白点加权乘积矩阵；F4 浅
+    半第四 WB 系数校验；F5 半 .env 解析错误止于首行；F7 MAX_NOTES 溢出
+    植毒丸防截断误本地化；F8 子集器 CJK 缺口发布前即致命；F9 夹具目录
+    带 pid。登记 3：dotenvy $VAR 插值域偏差（本项目 .env 无插值）、真
+    4 色中间态仍后置拒绝、部分粘贴 ● 保守常亮（AF 前同款安全方向）。
+
+  门（每批全过）：测试 370+5+49；等集累计 **+31/−0**（快照
+  current_names_AB→AL）；clippy 0；i18n 审计 9×0（zh 592 对）；字体
+  --check 776/776；每提交秘密扫描零命中。**余下：阶段 4 导出正规化 →
+  阶段 5 GUI 美化+手感（GUI 已解禁）→ 阶段 6 16 路全扫 → 阶段 7 收口
+  发布 v0.23.2。**
+
 - **第十一轮：队列四项 + 16 路并行全扫收敛 + GUI 首次真机 E2E（2026-08-09，
   v0.23.1）**
 
