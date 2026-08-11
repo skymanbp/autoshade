@@ -111,12 +111,13 @@ fn effective_user_field(r: &EditRecipe, name: &str, value: Option<f32>) -> f32 {
 /// vec if the tag is absent. The master tone curve is the single biggest "look"
 /// control that the flat-slider comparison above was completely blind to.
 fn parse_tone_curve(xmp: &str, tag: &str) -> Vec<(f32, f32)> {
-    let open = format!("<crs:{tag}>");
-    let close = format!("</crs:{tag}>");
-    let Some(s) = xmp.find(&open) else { return Vec::new() };
-    let body = &xmp[s + open.len()..];
-    let Some(e) = body.find(&close) else { return Vec::new() };
-    let body = &body[..e];
+    // The same name-matched finder the importer uses (xmp::owned_element_body):
+    // the literal `<crs:Tag>` scan this replaced could not see the
+    // attribute-carrying spelling, so the judge silently understated the gap
+    // score on documents the importer now reads.
+    let Ok(Some(body)) = crate::xmp::owned_element_body(xmp, &format!("crs:{tag}")) else {
+        return Vec::new();
+    };
     let mut pts = Vec::new();
     for chunk in body.split("<rdf:li>").skip(1) {
         let Some(end) = chunk.find("</rdf:li>") else { continue };

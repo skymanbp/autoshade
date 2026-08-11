@@ -1013,6 +1013,13 @@ fn write_xmp_doc(
     let recipe = &bounded;
     let base_path = merge_base.as_ref().map(|(p, _)| p.clone());
     let merged = merge_base.and_then(|(_, b)| xmp::merge_recipe_into_xmp(&b, recipe));
+    // A merge that SUCCEEDED can still have losses it could not avoid (the
+    // base's unrepresentable mask block giving way to the recipe's own
+    // masks) — its notes ride the same channel as the regeneration note.
+    let merged = merged.map(|mut o| {
+        notes.append(&mut o.notes);
+        o.doc
+    });
     if merged.is_none()
         && let Some(bp) = base_path
     {
@@ -1304,6 +1311,65 @@ mod guard_tests {
         assert!(text.contains("crs:Texture=\"+21\""), "LR-only property survives the save");
         assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "…with OUR value");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L05#4 end-to-end: a save whose recipe HAS masks over a sidecar
+    /// carrying a foreign (brush) mask block publishes the develop's own
+    /// masks and RETURNS the loss note — before, the projection showed the
+    /// old pass's masks, suppressed ours, and reported plain success.
+    #[test]
+    fn a_save_with_own_masks_reports_the_foreign_mask_block_it_replaced() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-maskintent");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_maskintent.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        let lr = dir.join("_pipe_maskintent.xmp");
+        std::fs::write(
+            &lr,
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+             <rdf:Description rdf:about=\"\"\n    \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
+             crs:Texture=\"+21\" crs:HasSettings=\"True\">\n   \
+             <crs:MaskGroupBasedCorrections><rdf:Seq>\n    \
+             <rdf:li><rdf:Description crs:What=\"Correction\" \
+             crs:CorrectionActive=\"true\">\n     \
+             <crs:CorrectionMasks><rdf:Seq>\n      \
+             <rdf:li crs:What=\"Mask/Brush\"/>\n     \
+             </rdf:Seq></crs:CorrectionMasks>\n    \
+             </rdf:Description></rdf:li>\n   \
+             </rdf:Seq></crs:MaskGroupBasedCorrections>\n  \
+             </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n",
+        )
+        .unwrap();
+        let mut r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
+        r.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Radial {
+                top: 0.2,
+                left: 0.2,
+                bottom: 0.8,
+                right: 0.8,
+                feather: 0.5,
+                roundness: 0.0,
+                flipped: false,
+                angle: 0.0,
+            },
+            exposure_ev: 0.4,
+            ..Default::default()
+        });
+        let (out, note) = write_xmp(&raw, &r).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.contains("Mask/CircularGradient"), "the develop's mask is published");
+        assert!(!text.contains("Mask/Brush"), "the foreign block is not resurrected");
+        assert!(text.contains("crs:Texture=\"+21\""), "LR-only globals still survive");
+        let note = note.expect("the replaced block must be disclosed");
+        assert!(note.contains("mask correction(s)"), "the note names the loss: {note}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }

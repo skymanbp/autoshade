@@ -730,17 +730,103 @@ fn next_xml_tag(doc: &str, mut from: usize) -> Option<(usize, usize, bool)> {
 
 
 
-/// The first `rdf:Description` opening tag that carries camera-raw settings
-/// (declares `xmlns:crs` or holds a `crs:` attribute).
+/// The first `rdf:Description` opening tag that carries camera-raw settings:
+/// it declares `xmlns:crs`, holds a `crs:` attribute, or holds a top-level
+/// `crs:` CHILD element. The child rule is what finds a Description whose
+/// `xmlns:crs` lives on an ANCESTOR (`rdf:RDF`) and whose settings are all in
+/// property-element form — a legal spelling the attribute-only test missed,
+/// which sent the merge down the insert path and spliced a SECOND settings
+/// Description into the same document. Depth is what keeps the child rule
+/// honest: a `crs:` element nested inside a foreign container marks its OWN
+/// parent Description, never an outer one — the parent is whatever element is
+/// open when the `crs:` child appears (single pass, one open-element stack),
+/// so a creative Look's baked parameters can only ever mark the settings
+/// Description that contains the Look, which is the right answer anyway.
 fn find_crs_description(doc: &str) -> Option<usize> {
+    // (name, open-tag start) for every open element. Close-tag mismatches pop
+    // nothing — malformed markup degrades to the old attribute-only rule
+    // instead of failing a document the flat scan used to find.
+    let mut stack: Vec<(&str, usize)> = Vec::new();
     let mut from = 0;
-    while let Some((start, end, _)) = next_xml_tag(doc, from) {
+    while let Some((start, end, self_closing)) = next_xml_tag(doc, from) {
         let tag = &doc[start..=end];
-        if !tag.starts_with("</") && tag_name(tag) == "rdf:Description" {
+        let name = tag_name(tag);
+        if tag.starts_with("</") {
+            if stack.last().is_some_and(|(n, _)| *n == name) {
+                stack.pop();
+            }
+            from = end + 1;
+            continue;
+        }
+        if name == "rdf:Description" {
             let mut cursor = 0;
             while let Some(a) = next_xml_attribute(tag, &mut cursor) {
                 if a.name == "xmlns:crs" || a.name.starts_with("crs:") {
                     return Some(start);
+                }
+            }
+        } else if name.starts_with("crs:")
+            && let Some(&(parent, parent_start)) = stack.last()
+            && parent == "rdf:Description"
+        {
+            return Some(parent_start);
+        }
+        if !self_closing {
+            stack.push((name, start));
+        }
+        from = end + 1;
+    }
+    None
+}
+
+const CRS_URI: &str = "http://ns.adobe.com/camera-raw-settings/1.0/";
+const RDF_URI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+
+/// Every scanner in this module identifies namespaces by the CONVENTIONAL
+/// prefixes (`crs:`, `rdf:`) — never by URI. A document that binds either
+/// namespace to a different prefix, or binds `crs`/`rdf` to a different URI,
+/// is therefore one these scanners silently misread: its settings import as
+/// neutral with no disclosure, and the merge — finding "no" crs Description —
+/// used to splice OUR settings in beside the foreign-prefixed ones, publishing
+/// one document with two contradictory camera-raw blocks and a clean "saved".
+/// This is the refusal gate: `Some(reason)` names the binding, the merge
+/// refuses (the caller regenerates AND discloses), and the import surfaces the
+/// same sentence. No known producer emits these bindings (Adobe and every
+/// interop tool use `crs`/`rdf`) — the gate exists because the consequence of
+/// degrading silently is a corrupted deliverable, not because the input is
+/// common.
+fn xmlns_conflict(doc: &str) -> Option<String> {
+    if doc.len() > MAX_XMP_BYTES {
+        return None;
+    }
+    let mut from = 0;
+    while let Some((start, end, _)) = next_xml_tag(doc, from) {
+        let tag = &doc[start..=end];
+        if !tag.starts_with("</") {
+            let mut cursor = 0;
+            while let Some(a) = next_xml_attribute(tag, &mut cursor) {
+                let Some(pfx) = a.name.strip_prefix("xmlns:") else { continue };
+                let uri = xml_unescape(a.value);
+                let uri = uri.as_ref();
+                if pfx == "crs" && uri != CRS_URI {
+                    return Some(format!(
+                        "xmlns:crs is bound to {uri}, not the camera-raw namespace"
+                    ));
+                }
+                if pfx != "crs" && uri == CRS_URI {
+                    return Some(format!(
+                        "the camera-raw namespace is bound to the `{pfx}:` prefix; \
+                         this build reads only `crs:`"
+                    ));
+                }
+                if pfx == "rdf" && uri != RDF_URI {
+                    return Some(format!("xmlns:rdf is bound to {uri}, not the RDF namespace"));
+                }
+                if pfx != "rdf" && uri == RDF_URI {
+                    return Some(format!(
+                        "the RDF namespace is bound to the `{pfx}:` prefix; \
+                         this build reads only `rdf:`"
+                    ));
                 }
             }
         }
@@ -908,6 +994,60 @@ fn tag_name(tag: &str) -> &str {
     let t = tag.trim_start_matches('<').trim_start_matches('/');
     let end = t.find(|c: char| c.is_whitespace() || c == '>' || c == '/').unwrap_or(t.len());
     &t[..end]
+}
+
+/// The start of the close tag ending the element whose open tag ends at
+/// `open_gt` — matched by NAME through [`next_xml_tag`], so the
+/// whitespace-carrying close (`</crs:Key >`, legal XML) and closes quoted
+/// inside comments/CDATA/PIs are both handled, and same-name nesting is
+/// depth-counted. `None` = the element never closes.
+fn element_close_start(doc: &str, name: &str, open_gt: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut from = open_gt + 1;
+    while let Some((start, end, self_closing)) = next_xml_tag(doc, from) {
+        let tag = &doc[start..=end];
+        if tag_name(tag) == name {
+            if tag.starts_with("</") {
+                if depth == 0 {
+                    return Some(start);
+                }
+                depth -= 1;
+            } else if !self_closing {
+                depth += 1;
+            }
+        }
+        from = end + 1;
+    }
+    None
+}
+
+/// The body of the first `<{name}>…</{name}>` element in `scope`, matched by
+/// tag NAME — so the attribute-carrying spelling
+/// (`<crs:ToneCurvePV2012 xml:lang="x-default">`) and a whitespace close both
+/// resolve to the same property, exactly as the writer's own strip does
+/// (see [`top_level_owned_spans`]; the literal predecessor here was the
+/// reader's last exact-string holdout, and every miss read as "absent").
+///
+/// `Ok(None)` = no such element. `Err(())` = the element OPENS but never
+/// closes — present-but-unreadable, which callers must disclose rather than
+/// fold into "absent" (a curve that cannot be read imports as a silent
+/// neutral, and the next save persists the neutral).
+pub(crate) fn owned_element_body<'a>(scope: &'a str, name: &str) -> Result<Option<&'a str>, ()> {
+    let mut from = 0;
+    while let Some((start, end, self_closing)) = next_xml_tag(scope, from) {
+        let tag = &scope[start..=end];
+        if !tag.starts_with("</") && tag_name(tag) == name {
+            if self_closing {
+                return Ok(Some(""));
+            }
+            return match element_close_start(scope, name, end) {
+                Some(close) => Ok(Some(&scope[end + 1..close])),
+                None => Err(()),
+            };
+        }
+        from = end + 1;
+    }
+    Ok(None)
 }
 
 /// Byte spans of the body's TOP-LEVEL owned property elements, in reverse
@@ -1130,24 +1270,45 @@ pub(crate) fn crs_own_scope(xmp: &str) -> std::borrow::Cow<'_, str> {
 /// scanner cannot splice) — the caller falls back to a fresh document,
 /// which is exactly the old behaviour.
 ///
-/// Fully supported masks are replaced wholesale as one block. If any correction
-/// is unsupported or partial, the original block remains byte-for-byte in the
-/// existing body and no mask projection is prepended; mixing the two would
-/// silently turn an unknown composition into an approximation.
+/// Fully supported masks are replaced wholesale as one block. If any
+/// correction is unsupported or partial AND the recipe has no masks of its
+/// own, the original block remains byte-for-byte in the existing body and no
+/// mask projection is prepended; mixing the two would silently turn an
+/// unknown composition into an approximation. When the recipe DOES have
+/// masks, the recipe wins — the save in hand IS the newest intent, and
+/// keeping the base's foreign block instead published a document whose masks
+/// were an older pass's while the develop's own never appeared, with no note
+/// (L05#4). The base's block is then dropped from the OUTPUT ONLY (the file
+/// it came from is not touched here) and the loss is named in
+/// [`MergeOutcome::notes`].
 ///
 /// Owned scalar crs
 /// properties are stripped in BOTH forms — attribute and property-element
 /// (`<crs:Exposure2012>…</crs:Exposure2012>`, a form Lightroom really
 /// writes and the reader really accepts); unowned properties survive in
 /// either form. Matching is
-/// by the CONVENTIONAL prefixes (`rdf:`, `crs:`) — a document binding the
-/// camera-raw namespace to another prefix (no known producer; Adobe and
-/// every interop tool use these) is judged unmergeable and regenerated,
-/// which is exactly the pre-merge behaviour.
-pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
+/// by the CONVENTIONAL prefixes (`rdf:`, `crs:`) — a document binding either
+/// namespace to another prefix (or those prefixes to another URI) is REFUSED
+/// here by [`xmlns_conflict`], so the caller regenerates and discloses.
+/// Degrading instead spliced a second, contradictory settings block into the
+/// user's file behind a clean "saved".
+pub struct MergeOutcome {
+    pub doc: String,
+    /// Losses a SUCCESSFUL merge could not avoid, for the caller's note
+    /// channel (the whole-document fallback is disclosed by the caller's own
+    /// regeneration note; these are the losses that happen inside a merge
+    /// that returns `Some`).
+    pub notes: Vec<String>,
+}
+
+pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutcome> {
     if existing.len() > MAX_XMP_BYTES {
         return None;
     }
+    if xmlns_conflict(existing).is_some() {
+        return None;
+    }
+    let mut notes: Vec<String> = Vec::new();
     let Some(desc_start) = find_crs_description(existing) else {
 
 
@@ -1158,7 +1319,7 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
         // the user could take. There is nothing of ours to splice INTO, but
         // there is somewhere to put it: adding our own Description to the
         // existing `rdf:RDF` keeps the file verbatim and makes the merge real.
-        return insert_crs_description(existing, r);
+        return insert_crs_description(existing, r).map(|doc| MergeOutcome { doc, notes });
     };
     let (gt, self_closing) = scan_tag_end(existing, desc_start)?;
 
@@ -1198,8 +1359,24 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
     // attribute-only strip left the old element value in the body beside
     // the attribute we append — one document, two conflicting answers.
     let mask_scope = crs_own_scope(existing);
-    let preserve_masks =
-        mask_summary(mask_scope.as_ref(), is_autoshop_sidecar(existing)).preserve_original;
+    let summary = mask_summary(mask_scope.as_ref(), is_autoshop_sidecar(existing));
+    // Preserve the base's foreign mask block ONLY while the recipe has no
+    // masks of its own. The recipe in hand is the newest intent by
+    // definition — it is what is being saved right now — so when both sides
+    // have masks, ours publish and the base's block goes, WITH the note
+    // below. (Ranking file mtimes here instead would misfire: every save
+    // flow commits recipe.json before projecting the XMP, so the store
+    // always looks newer than the sidecar by the time this runs.)
+    let preserve_masks = summary.preserve_original && r.masks.is_empty();
+    if summary.preserve_original && !r.masks.is_empty() {
+        notes.push(format!(
+            "the merge base carries {} mask correction(s) this build cannot represent — \
+             they are not in the new file, which carries this develop's {} mask(s) instead \
+             (the base file itself is not modified)",
+            summary.loss_count,
+            r.masks.len()
+        ));
+    }
     let mut owned_elements: std::collections::HashSet<String> = [
         "ToneCurvePV2012",
         "ToneCurvePV2012Red",
@@ -1232,7 +1409,7 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<String> {
     out.push_str(body.trim_end());
     out.push_str("\n  </rdf:Description>");
     out.push_str(&existing[tail_start..]);
-    Some(upgrade_era_marker(refresh_rationale_comment(out, r)))
+    Some(MergeOutcome { doc: upgrade_era_marker(refresh_rationale_comment(out, r)), notes })
 }
 
 // ───────────────────────── XMP → EditRecipe (reader) ─────────────────────────
@@ -1363,11 +1540,11 @@ pub(crate) fn crs_str<'a>(
                 if self_closing {
                     return Some(std::borrow::Cow::Borrowed(""));
                 }
-                let close = format!("</{name}>");
-                let body_start = end + 1;
-                let close_at =
-                    body_start + find_outside_constructs(&xmp[body_start..], &close)?;
-                return Some(xml_unescape(xmp[body_start..close_at].trim()));
+                // By NAME, not the literal `</crs:Key>`: `</crs:Key >` is the
+                // same close in XML, and the literal ran past it into the next
+                // occurrence (or off the document).
+                let close_at = element_close_start(xmp, &name, end)?;
+                return Some(xml_unescape(xmp[end + 1..close_at].trim()));
             }
         }
         from = end + 1;
@@ -1420,6 +1597,13 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
     ];
     if xmp.len() > MAX_XMP_BYTES {
         return vec!["XMP document exceeds the 16 MiB limit".to_string()];
+    }
+    // A foreign namespace binding means every scanner below is reading the
+    // wrong (or no) property — one entry naming the binding beats a silent
+    // fully-neutral import. Reaches the GUI open note, the web
+    // X-Recipe-Warning and the store trace through the existing plumbing.
+    if let Some(conflict) = xmlns_conflict(xmp) {
+        return vec![format!("{conflict} — its camera-raw settings were not imported")];
     }
 
     let scope = crs_own_scope(xmp);
@@ -1533,6 +1717,10 @@ fn xml_unescape(s: &str) -> std::borrow::Cow<'_, str> {
 
 
 /// The text between `open` and `close` (first occurrence of each, in order).
+/// For NON-MARKUP text patterns only (the rationale comment scan) — element
+/// lookups go through [`owned_element_body`], which matches by tag NAME so
+/// attribute-carrying and whitespace-close spellings resolve; a literal
+/// element scan here was the reader's silent-loss blind spot (L05#1).
 fn block_between<'a>(xmp: &'a str, open: &str, close: &str) -> Option<&'a str> {
     let start = xmp.find(open)? + open.len();
     let rest = &xmp[start..];
@@ -1543,10 +1731,12 @@ fn block_between<'a>(xmp: &'a str, open: &str, close: &str) -> Option<&'a str> {
 /// curve control points. A 2-point identity (0,0 → 255,255) collapses to empty:
 /// Lightroom ALWAYS writes the master curve (even "Linear"), while our writer
 /// omits empty curves — collapsing keeps a re-import equal to a recipe that
-/// never touched the curve.
+/// never touched the curve. An element that opens but never closes is `Err`,
+/// not "no curve": present-but-unreadable flows into the same disclosure as a
+/// value that does not parse.
 fn parse_curve_checked(xmp: &str, tag: &str) -> Result<Vec<CurvePoint>, ()> {
     const MAX_CURVE_POINTS_FROM_XMP: usize = 256;
-    let Some(body) = block_between(xmp, &format!("<crs:{tag}>"), &format!("</crs:{tag}>")) else {
+    let Some(body) = owned_element_body(xmp, &format!("crs:{tag}"))? else {
         return Ok(Vec::new());
     };
 
@@ -1588,16 +1778,12 @@ fn parse_curve(xmp: &str, tag: &str) -> Vec<CurvePoint> {
 /// AI masks and our own Bitmap rasters have no classic-XMP encoding; those
 /// corrections are skipped, matching the writer's own skip rule).
 fn parse_masks(xmp: &str, authored_by_autoshop: bool) -> Vec<LocalAdjustment> {
-
-
-    let Some(block) =
-        block_between(xmp, "<crs:MaskGroupBasedCorrections>", "</crs:MaskGroupBasedCorrections>")
-    else {
+    // Err (present-but-unterminated) imports no masks — the LOSS half of that
+    // outcome is `mask_summary`'s to report, and it does.
+    let Ok(Some(block)) = owned_element_body(xmp, "crs:MaskGroupBasedCorrections") else {
         return Vec::new();
     };
     mask_summary_from_block(block, authored_by_autoshop).supported
-
-
 }
 
 /// How many corrections in this sidecar the import CANNOT represent (LR
@@ -1636,12 +1822,21 @@ impl MaskSummary {
 }
 
 fn mask_summary(xmp: &str, authored_by_autoshop: bool) -> MaskSummary {
-    let Some(block) =
-        block_between(xmp, "<crs:MaskGroupBasedCorrections>", "</crs:MaskGroupBasedCorrections>")
-    else {
-        return MaskSummary::default();
-    };
-    mask_summary_from_block(block, authored_by_autoshop)
+    match owned_element_body(xmp, "crs:MaskGroupBasedCorrections") {
+        Ok(Some(block)) => mask_summary_from_block(block, authored_by_autoshop),
+        Ok(None) => MaskSummary::default(),
+        // The group OPENS but never closes: whatever corrections it holds
+        // cannot be counted, so the one honest summary is "a loss, preserve
+        // the original" — the old literal finder reported this exact document
+        // as loss_count 0 AND preserve_original false, which both hid the
+        // drop from the GUI toast and told the merge it was free to delete
+        // the block from the user's own sidecar.
+        Err(()) => {
+            let mut summary = MaskSummary::default();
+            summary.record_loss();
+            summary
+        }
+    }
 }
 
 fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSummary {
@@ -1880,9 +2075,9 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
     let mut range_count = 0usize;
     let mut unknown_component = false;
     let mut component_loss = false;
-    let Some(mask_block) =
-        block_between(seg, "<crs:CorrectionMasks>", "</crs:CorrectionMasks>")
-    else {
+    // By NAME (attribute-carrying spelling included); an unterminated element
+    // (`Err`) falls to the same loss classification as an absent one.
+    let Ok(Some(mask_block)) = owned_element_body(seg, "crs:CorrectionMasks") else {
         return if parse_one_correction(seg).is_some() {
             MaskCorrectionParse::Partial
         } else {
@@ -2026,7 +2221,7 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
             })
         } else if let Some(amount) = crs_f32(r, "ColorAmount") {
             // PointModels entry: "r g b px py 0" (writer + LR convention).
-            let li = block_between(r, "<rdf:li>", "</rdf:li>")?;
+            let li = owned_element_body(r, "rdf:li").ok().flatten()?;
             let v: Option<Vec<f32>> =
                 li.split_whitespace().map(|x| x.parse().ok()).collect();
             let v = v?;
@@ -2238,6 +2433,12 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
 mod tests {
     use super::*;
     use crate::recipe::{CurvePoint, EditRecipe, LocalAdjustment};
+
+    /// The merged document alone — most tests assert on the text; the ones
+    /// about [`MergeOutcome::notes`] call the real function.
+    fn merged_doc(existing: &str, r: &EditRecipe) -> Option<String> {
+        merge_recipe_into_xmp(existing, r).map(|o| o.doc)
+    }
 
     /// The scope scanner meets a sidecar that is hostile rather than merely
     /// unusual. Both halves were real defects: the close search restarted on
@@ -2744,7 +2945,7 @@ mod tests {
         assert!(unparsable_crs_numbers(&clean).is_empty());
         // A MERGE into an old Autoshop document rewrites the WB attributes in
         // absolute semantics — the era marker must upgrade with them.
-        let merged = merge_recipe_into_xmp(
+        let merged = merged_doc(
             old,
             &EditRecipe { temperature_k: Some(6200.0), ..Default::default() },
         )
@@ -2955,7 +3156,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let merged = merge_recipe_into_xmp(lr, &r).expect("a plain LR sidecar is mergeable");
+        let merged = merged_doc(lr, &r).expect("a plain LR sidecar is mergeable");
         // Everything Autoshop does not model survives.
         assert!(merged.contains("crs:Texture=\"+20\""), "global Texture survives");
         assert!(merged.contains("crs:CameraProfile=\"Adobe Color\""), "camera profile survives");
@@ -2980,7 +3181,7 @@ mod tests {
         // A second merge over the merged document stays single AND a cleared
         // curve REMOVES the block (a stale slider must not linger).
         let r2 = EditRecipe { exposure_ev: -0.5, ..Default::default() };
-        let merged2 = merge_recipe_into_xmp(&merged, &r2).expect("re-mergeable");
+        let merged2 = merged_doc(&merged, &r2).expect("re-mergeable");
         assert_eq!(merged2.matches("crs:Exposure2012=").count(), 1);
         assert!(merged2.contains("crs:Exposure2012=\"-0.50\""));
         assert!(merged2.contains("crs:Texture=\"+20\""), "still there after a second merge");
@@ -3007,7 +3208,7 @@ mod tests {
  </rdf:RDF>\n\
 </x:xmpmeta>\n";
         let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
-        let merged = merge_recipe_into_xmp(lr, &r).expect("mergeable");
+        let merged = merged_doc(lr, &r).expect("mergeable");
         assert!(!merged.contains("<crs:Exposure2012>"), "owned element stripped: {merged}");
         assert!(!merged.contains("<crs:Contrast2012>"), "owned element stripped");
         assert_eq!(merged.matches("crs:Exposure2012").count(), 1, "ours only: {merged}");
@@ -3052,7 +3253,7 @@ mod tests {
  </rdf:RDF>\n\
 </x:xmpmeta>\n";
         let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
-        let merged = merge_recipe_into_xmp(lr, &r).expect("mergeable");
+        let merged = merged_doc(lr, &r).expect("mergeable");
         // The Look keeps BOTH of its own baked parameters.
         assert!(
             merged.contains("<crs:Exposure2012>+0.35</crs:Exposure2012>"),
@@ -3092,7 +3293,7 @@ mod tests {
  </rdf:RDF>\n\
 </x:xmpmeta>\n";
         let r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
-        let merged = merge_recipe_into_xmp(lr, &r).expect("a CDATA section must stay mergeable");
+        let merged = merged_doc(lr, &r).expect("a CDATA section must stay mergeable");
         assert!(
             merged.contains("<![CDATA[client <proof> notes]]>"),
             "the foreign CDATA property must survive verbatim: {merged}"
@@ -3151,7 +3352,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let merged = merge_recipe_into_xmp(lr, &r).expect("mergeable");
+        let merged = merged_doc(lr, &r).expect("mergeable");
         assert_eq!(
             merged.matches("<crs:MaskGroupBasedCorrections>").count(),
             1,
@@ -3364,7 +3565,7 @@ mod tests {
              </rdf:Description>"
         );
         assert_eq!(xmp_to_recipe(&doc).exposure_ev, 0.65);
-        let merged = merge_recipe_into_xmp(
+        let merged = merged_doc(
             &doc,
             &EditRecipe { exposure_ev: 0.25, ..Default::default() },
         )
@@ -3422,7 +3623,7 @@ mod tests {
         let end = doc.find("</crs:MaskGroupBasedCorrections>").unwrap()
             + "</crs:MaskGroupBasedCorrections>".len();
         let original = &doc[start..end];
-        let merged = merge_recipe_into_xmp(
+        let merged = merged_doc(
             doc,
             &EditRecipe { exposure_ev: 0.25, ..Default::default() },
         )
@@ -3432,6 +3633,252 @@ mod tests {
         assert!(merged.contains(r#"crs:CorrectionActive="false""#));
         assert!(merged.contains(r#"crs:Angle="12""#));
         assert!(merged.contains(r#"crs:MaskBlendMode="0""#));
+    }
+
+    /// L05#4: the preserve rule yields to the recipe's own masks — the save
+    /// in hand is the newest intent, so the published document carries THIS
+    /// develop's masks, the foreign block goes, and the loss is a note
+    /// rather than a silence (before: the output showed an older pass's
+    /// masks and none of the develop's, reported as plain success).
+    #[test]
+    fn a_recipe_with_masks_outranks_the_bases_foreign_mask_block() {
+        let doc = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core">
+     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description rdf:about=""
+        xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+        crs:HasSettings="True">
+       <crs:MaskGroupBasedCorrections>
+        <rdf:Seq>
+         <rdf:li><rdf:Description crs:What="Correction" crs:CorrectionActive="true">
+          <crs:CorrectionMasks><rdf:Seq>
+           <rdf:li crs:What="Mask/Brush"/>
+          </rdf:Seq></crs:CorrectionMasks>
+         </rdf:Description></rdf:li>
+        </rdf:Seq>
+       </crs:MaskGroupBasedCorrections>
+      </rdf:Description>
+     </rdf:RDF>
+    </x:xmpmeta>"#;
+        let mut r = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        r.masks.push(LocalAdjustment {
+            mask: MaskGeometry::Radial {
+                top: 0.2,
+                left: 0.2,
+                bottom: 0.8,
+                right: 0.8,
+                feather: 0.5,
+                roundness: 0.0,
+                flipped: false,
+                angle: 0.0,
+            },
+            name: "face".into(),
+            exposure_ev: 0.4,
+            ..Default::default()
+        });
+        let out = merge_recipe_into_xmp(doc, &r).expect("mergeable");
+        assert!(
+            out.doc.contains("Mask/CircularGradient"),
+            "the develop's own mask is published: {}",
+            out.doc
+        );
+        assert!(!out.doc.contains("Mask/Brush"), "the foreign block is not resurrected");
+        assert_eq!(out.notes.len(), 1, "the replacement is disclosed: {:?}", out.notes);
+        assert!(
+            out.notes[0].contains("1 mask correction(s)") && out.notes[0].contains("1 mask(s)"),
+            "the note names both counts: {}",
+            out.notes[0]
+        );
+        // The mirror case stays preserved-without-note: nothing of the user's
+        // is suppressed when the recipe has no masks.
+        let out2 = merge_recipe_into_xmp(
+            doc,
+            &EditRecipe { exposure_ev: 0.25, ..Default::default() },
+        )
+        .expect("mergeable");
+        assert!(out2.doc.contains("Mask/Brush"), "no recipe masks → the block is preserved");
+        assert!(out2.notes.is_empty(), "a pure preserve has no loss to note: {:?}", out2.notes);
+    }
+
+    /// L05#1: the attribute-carrying spelling of an owned element is the SAME
+    /// property (legal XML; the writer's strip already matched it by name) —
+    /// the literal reader missed it, imported "no curve", and the merge then
+    /// deleted the element from the user's own sidecar with nothing written
+    /// in its place.
+    #[test]
+    fn an_attribute_form_curve_is_read_not_deleted() {
+        let doc = r#"<rdf:Description rdf:about=""
+        xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+        crs:HasSettings="True">
+       <crs:ToneCurvePV2012 xml:lang="x-default"><rdf:Seq>
+        <rdf:li>0, 20</rdf:li>
+        <rdf:li>255, 240</rdf:li>
+       </rdf:Seq></crs:ToneCurvePV2012>
+      </rdf:Description>"#;
+        let r = xmp_to_recipe(doc);
+        assert_eq!(
+            r.tone_curve,
+            vec![CurvePoint { input: 0, output: 20 }, CurvePoint { input: 255, output: 240 }],
+            "the attribute-form curve is read"
+        );
+        // Merging a NEW curve over it must not leave two curves behind: the
+        // attribute-form element is stripped (by name) and ours replaces it.
+        let merged = merged_doc(
+            doc,
+            &EditRecipe {
+                tone_curve: vec![
+                    CurvePoint { input: 0, output: 5 },
+                    CurvePoint { input: 255, output: 250 },
+                ],
+                ..Default::default()
+            },
+        )
+        .expect("mergeable");
+        assert!(!merged.contains("0, 20"), "the old spelling is stripped: {merged}");
+        assert_eq!(xmp_to_recipe(&merged).tone_curve[0].output, 5, "the new curve answers");
+    }
+
+    /// L05#1: an attribute-form mask GROUP is a real group — reading it as
+    /// "absent" reported zero unsupported corrections AND told the merge it
+    /// was free to replace the block.
+    #[test]
+    fn an_attribute_form_mask_group_counts_as_a_loss_and_survives_the_merge() {
+        let doc = r#"<rdf:Description rdf:about=""
+        xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+        crs:HasSettings="True">
+       <crs:MaskGroupBasedCorrections rdf:parseType="Resource">
+        <rdf:Seq>
+         <rdf:li><rdf:Description crs:What="Correction" crs:CorrectionActive="true">
+          <crs:CorrectionMasks><rdf:Seq>
+           <rdf:li crs:What="Mask/Brush"/>
+          </rdf:Seq></crs:CorrectionMasks>
+         </rdf:Description></rdf:li>
+        </rdf:Seq>
+       </crs:MaskGroupBasedCorrections>
+      </rdf:Description>"#;
+        assert_eq!(unsupported_corrections(doc), 1, "the brush correction is a counted loss");
+        let merged = merged_doc(
+            doc,
+            &EditRecipe { exposure_ev: 0.25, ..Default::default() },
+        )
+        .expect("mergeable");
+        assert!(merged.contains("Mask/Brush"), "the group survives the merge: {merged}");
+    }
+
+    /// A whitespace-carrying close tag (`</crs:Key >`) is the same close in
+    /// XML; the literal close scan ran past it.
+    #[test]
+    fn a_close_tag_with_trailing_space_still_ends_a_property_element() {
+        let doc = r#"<rdf:Description rdf:about=""
+        xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
+       <crs:Exposure2012>+0.65</crs:Exposure2012 >
+      </rdf:Description>"#;
+        assert_eq!(crs_f32(doc, "Exposure2012"), Some(0.65));
+    }
+
+    /// Present-but-unreadable is a DISCLOSED loss, not "no curve": the
+    /// attribute-form spelling used to make the element invisible to the
+    /// disclosure as well, so bad points imported as a silent neutral.
+    #[test]
+    fn an_unreadable_attribute_form_curve_is_named_by_unparsable_crs_numbers() {
+        let doc = r#"<rdf:Description rdf:about=""
+        xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
+       <crs:ToneCurvePV2012 xml:lang="x-default"><rdf:Seq>
+        <rdf:li>999, -5</rdf:li>
+       </rdf:Seq></crs:ToneCurvePV2012>
+      </rdf:Description>"#;
+        let bad = unparsable_crs_numbers(doc);
+        assert!(bad.iter().any(|v| v == "ToneCurvePV2012"), "disclosed: {bad:?}");
+        // An element that never closes is the same disclosed loss.
+        let unterminated = r#"<rdf:Description rdf:about=""
+        xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
+       <crs:ToneCurvePV2012><rdf:Seq><rdf:li>0, 0</rdf:li></rdf:Seq>
+      </rdf:Description>"#;
+        let bad = unparsable_crs_numbers(unterminated);
+        assert!(bad.iter().any(|v| v == "ToneCurvePV2012"), "disclosed: {bad:?}");
+    }
+
+    /// L05#7: a document binding the camera-raw namespace to another prefix
+    /// (or `crs` to another URI) is one every scanner here misreads — the
+    /// merge REFUSES (the caller regenerates and discloses) instead of
+    /// splicing a second, contradictory settings block beside the foreign
+    /// one, and the import discloses instead of coming back silently neutral.
+    #[test]
+    fn a_foreign_camera_raw_prefix_refuses_the_merge_and_is_disclosed() {
+        let doc = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description rdf:about=""
+        xmlns:cr="http://ns.adobe.com/camera-raw-settings/1.0/"
+        cr:Exposure2012="+1.00" cr:HasSettings="True">
+      </rdf:Description>
+     </rdf:RDF>
+    </x:xmpmeta>"#;
+        assert!(
+            merge_recipe_into_xmp(doc, &EditRecipe::default()).is_none(),
+            "a foreign camera-raw prefix is refused, never duplicated"
+        );
+        let bad = unparsable_crs_numbers(doc);
+        assert_eq!(bad.len(), 1, "one entry naming the binding: {bad:?}");
+        assert!(bad[0].contains("`cr:`"), "the prefix is named: {}", bad[0]);
+
+        let crooked = r#"<rdf:Description rdf:about=""
+        xmlns:crs="http://example.invalid/ns" crs:Exposure2012="+1.00">
+      </rdf:Description>"#;
+        assert!(
+            merge_recipe_into_xmp(crooked, &EditRecipe::default()).is_none(),
+            "a crs prefix bound to a foreign URI is not camera raw"
+        );
+        assert!(!unparsable_crs_numbers(crooked).is_empty());
+    }
+
+    /// L05#7 sub-item 4: `xmlns:crs` may legally live on an ANCESTOR
+    /// (`rdf:RDF`) with every setting in property-element form — the
+    /// attribute-only test missed that Description, and the merge spliced a
+    /// SECOND settings Description into the same document.
+    #[test]
+    fn a_description_whose_crs_children_declare_the_namespace_upstream_is_still_found() {
+        let doc = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+       xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
+      <rdf:Description rdf:about="">
+       <crs:Exposure2012>+0.80</crs:Exposure2012>
+      </rdf:Description>
+     </rdf:RDF>
+    </x:xmpmeta>"#;
+        assert_eq!(xmp_to_recipe(doc).exposure_ev, 0.8, "element-form settings are found");
+        let merged = merged_doc(
+            doc,
+            &EditRecipe { exposure_ev: 0.25, ..Default::default() },
+        )
+        .expect("mergeable");
+        assert_eq!(
+            merged.matches("<rdf:Description").count(),
+            1,
+            "spliced in place, not duplicated: {merged}"
+        );
+        assert_eq!(xmp_to_recipe(&merged).exposure_ev, 0.25);
+        assert!(!merged.contains("+0.80"), "the old element spelling is stripped");
+    }
+
+    /// The guard the refusal gate must not break: a genuinely settings-free
+    /// ratings sidecar still takes the INSERT path (that path exists because
+    /// regenerating over one reported an unfixable loss on every save).
+    #[test]
+    fn a_ratings_only_sidecar_still_takes_the_insert_path() {
+        let doc = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+        xmp:Rating="4">
+      </rdf:Description>
+     </rdf:RDF>
+    </x:xmpmeta>"#;
+        let out = merge_recipe_into_xmp(
+            doc,
+            &EditRecipe { exposure_ev: 0.25, ..Default::default() },
+        )
+        .expect("insertable");
+        assert!(out.doc.contains(r#"xmp:Rating="4""#), "the rating survives verbatim");
+        assert_eq!(xmp_to_recipe(&out.doc).exposure_ev, 0.25, "our settings are added");
+        assert!(out.notes.is_empty(), "a clean insert has no loss: {:?}", out.notes);
     }
 
     #[test]
@@ -3498,7 +3945,7 @@ mod tests {
         let oversized = "x".repeat(MAX_XMP_BYTES + 1);
         assert!(crs_own_scope(&oversized).is_empty());
         assert_eq!(xmp_to_recipe(&oversized), EditRecipe::default());
-        assert!(merge_recipe_into_xmp(&oversized, &EditRecipe::default()).is_none());
+        assert!(merged_doc(&oversized, &EditRecipe::default()).is_none());
         assert_eq!(
             unparsable_crs_numbers(&oversized),
             vec!["XMP document exceeds the 16 MiB limit".to_string()]
