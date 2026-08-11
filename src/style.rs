@@ -36,6 +36,15 @@ const CURRENT_INDEX_VERSION: u32 = 3;
 const MAX_STYLE_INDEX_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STYLE_EXEMPLARS: usize = 50_000;
 
+/// Physical band for feature / normalization values (L04-3): every real
+/// dimension is a ln() of a physical quantity or a bounded ratio (|v| ≲ 200
+/// by construction — see `feature_vector`), so 1e3 leaves 5× headroom. A
+/// merely-FINITE 1e38 passed the old check, overflowed `(v - mean)/std` to
+/// ±inf in `normalize`, and two exemplars straddling the mean then handed
+/// the retrieval sort a mixed NaN/inf key set — an unspecified ranking (a
+/// silently wrong style reference in a PAID prompt) or a sort panic.
+const MAX_FEATURE_ABS: f32 = 1e3;
+
 const REF_KEYS: [(&str, &str); 12] = [
     ("Exposure2012", "exposure"),
     ("Contrast2012", "contrast"),
@@ -178,9 +187,14 @@ fn is_self(e: &StyleExemplar, query_path: &str, query_stem: &str) -> bool {
 
 /// Every number an exemplar carries must be FINITE: serde_json writes a NaN
 /// as `null`, and the next LOAD of the index then fails wholesale — one bad
-/// EXIF field or curve point published an UNLOADABLE index.
+/// EXIF field or curve point published an UNLOADABLE index. Features are
+/// additionally BOUNDED ([`MAX_FEATURE_ABS`], L04-3): finite-but-huge
+/// values overflow the z-score arithmetic downstream, and no legitimately
+/// built index can produce one (every dim is a ln or a bounded ratio) —
+/// only a tampered or bit-rotted file on disk, this file's own stated
+/// threat model ("invariants at the door").
 fn exemplar_is_finite(e: &StyleExemplar) -> bool {
-    e.feat.iter().all(|v| v.is_finite())
+    e.feat.iter().all(|v| v.is_finite() && v.abs() <= MAX_FEATURE_ABS)
         && e.settings.values().all(|v| v.is_finite())
         && e.curve.is_none_or(|c| c.iter().all(|v| v.is_finite()))
 }
@@ -255,7 +269,7 @@ impl StyleIndex {
                                         Some(ex)
                                     } else {
                                         eprintln!(
-                                            "  skip {}: non-finite metadata/settings \
+                                            "  skip {}: non-finite or out-of-band metadata/settings \
                                              (would corrupt the index)",
                                             pipeline::stem(raw)
                                         );
@@ -397,11 +411,17 @@ impl StyleIndex {
                 path.display()
             );
         }
-        if !idx.mean.iter().all(|v| v.is_finite())
-            || !idx.std.iter().all(|v| v.is_finite() && *v >= 1e-4)
+        // Finite AND bounded (L04-3): a finite 1e38 mean overflowed
+        // `(v - mean)/std` to ±inf with the guaranteed-small divisor, and
+        // the retrieval sort then ordered NaN keys. With these bands the
+        // worst normalize() output is (1e3+1e3)/1e-4 = 2e7 — ~22 decades of
+        // f32 headroom on the summed distance.
+        if !idx.mean.iter().all(|v| v.is_finite() && v.abs() <= MAX_FEATURE_ABS)
+            || !idx.std.iter().all(|v| v.is_finite() && (1e-4..=MAX_FEATURE_ABS).contains(v))
         {
             anyhow::bail!(
-                "style index {} has invalid normalization values",
+                "style index {} has invalid normalization values (each must be finite \
+                 and within ±{MAX_FEATURE_ABS})",
                 path.display()
             );
         }
@@ -477,7 +497,7 @@ impl StyleIndex {
             .display()
             .to_string();
         let ex_stem = pipeline::stem(exclude);
-        let mut scored: Vec<(f32, &StyleExemplar)> = self
+        let mut scored: Vec<(f64, &StyleExemplar)> = self
             .exemplars
             .iter()
             .filter(|e| !is_self(e, &ex_path, ex_stem) && e.feat.len() == NDIM)
@@ -485,11 +505,24 @@ impl StyleIndex {
                 let mut ef = [0.0f32; NDIM];
                 ef.copy_from_slice(&e.feat);
                 let en = normalize(ef, &self.mean, &self.std);
-                let d2: f32 = (0..NDIM).map(|i| WEIGHTS[i] * (q[i] - en[i]).powi(2)).sum();
+                // f64 accumulator (L04-3, second belt): even a bounds-check
+                // bypass cannot overflow ((2·3.4e38)² · 1.5 · 14 ≈ 1e79 ≪
+                // 1.8e308), so the ranking stays deterministic; on real data
+                // this only removes f32 rounding in the sum.
+                let d2 = (0..NDIM)
+                    .map(|i| {
+                        let d = (q[i] - en[i]) as f64;
+                        WEIGHTS[i] as f64 * d * d
+                    })
+                    .sum::<f64>();
                 (d2, e)
             })
             .collect();
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // total_cmp, never partial_cmp-with-Equal-fallback: a NaN key made
+        // the comparator non-transitive — std documents an UNSPECIFIED
+        // order (and may panic) for a non-total comparator, i.e. a silently
+        // scrambled style reference. total_cmp orders every bit pattern.
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
         scored.into_iter().take(k).map(|(_, e)| e).collect()
     }
 
@@ -829,5 +862,164 @@ mod tests {
         assert!(StyleIndex::load(&path).is_err());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// L04-3, first belt: out-of-band magnitudes are refused at the door.
+    /// A finite 1e30 in feat/mean/std passed the old finiteness-only check
+    /// and manufactured inf/NaN inside normalize(); a legitimately built
+    /// index (every dim a ln or bounded ratio, |v| ≲ 200) cannot be
+    /// rejected by the 1e3 band.
+    #[test]
+    fn load_rejects_out_of_band_feature_magnitudes() {
+        let path = std::env::temp_dir()
+            .join(format!("autoshop-style-band-{}.json", std::process::id()));
+        let make = || StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![StyleExemplar {
+                stem: "photo".into(),
+                feat: vec![0.0; NDIM],
+                tag: "wide/mid/midday/landscape".into(),
+                settings: BTreeMap::new(),
+                curve: Some([0.0, 0.0]),
+                path: None,
+            }],
+            source_dir: None,
+        };
+        let write = |idx: &StyleIndex| {
+            std::fs::write(&path, serde_json::to_string(idx).unwrap()).unwrap();
+        };
+        for mutate in [
+            (|i: &mut StyleIndex| i.exemplars[0].feat[0] = 1e30) as fn(&mut StyleIndex),
+            |i| i.mean[0] = 1e30,
+            |i| i.std[0] = 1e30,
+        ] {
+            let mut bad = make();
+            mutate(&mut bad);
+            write(&bad);
+            assert!(StyleIndex::load(&path).is_err(), "1e30 must be refused at the door");
+        }
+        let mut fine = make();
+        fine.exemplars[0].feat[0] = 100.0;
+        write(&fine);
+        assert!(StyleIndex::load(&path).is_ok(), "a realistic magnitude still loads");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// L04-3, second belt (independent of load): even a POISONED index —
+    /// constructed in memory, bypassing the door — yields a deterministic,
+    /// panic-free ranking, because the distance accumulates in f64 and the
+    /// sort uses total_cmp (a total order for every bit pattern; the old
+    /// partial_cmp-Equal fallback broke transitivity on NaN keys, which
+    /// std documents as unspecified-order-and-may-panic).
+    #[test]
+    fn retrieve_ranking_is_total_under_poisoned_normalization() {
+        let ex = |stem: &str, f0: f32| StyleExemplar {
+            stem: stem.into(),
+            feat: {
+                let mut f = vec![0.0f32; NDIM];
+                f[0] = f0;
+                f
+            },
+            tag: "t".into(),
+            settings: BTreeMap::new(),
+            curve: None,
+            path: None,
+        };
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: {
+                let mut m = vec![0.0f32; NDIM];
+                m[0] = 1e38; // poisoned: finite, past any physical band
+                m
+            },
+            std: vec![1e-4; NDIM],
+            exemplars: vec![ex("a", 3e38), ex("b", -3e38)],
+            source_dir: None,
+        };
+        let meta = crate::decode::Meta {
+            make: "T".into(),
+            model: "T".into(),
+            lens: None,
+            iso: Some(100),
+            shutter: None,
+            aperture: None,
+            focal_length_mm: None,
+            exposure_bias_ev: None,
+            date_time: None,
+            width: 100,
+            height: 100,
+            as_shot_wb_coeffs: [1.0; 4],
+        };
+        let hist = crate::decode::Histogram {
+            luma: vec![1; 256],
+            r: vec![1; 256],
+            g: vec![1; 256],
+            b: vec![1; 256],
+            clip_black_pct: 0.0,
+            clip_white_pct: 0.0,
+            sample_pixels: 1,
+        };
+        let first = idx.retrieve(&meta, &hist, 2, Path::new("elsewhere.arw"));
+        assert_eq!(first.len(), 2, "both exemplars return — no panic, none lost");
+        let second = idx.retrieve(&meta, &hist, 2, Path::new("elsewhere.arw"));
+        let names =
+            |v: &[&StyleExemplar]| v.iter().map(|e| e.stem.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&first), names(&second), "the ranking is deterministic");
+    }
+
+    /// L04-3: the f32→f64 accumulator switch is a no-op on real data — the
+    /// nearest exemplar for a well-formed index is unchanged (only sub-1e-7
+    /// rounding ties could ever reorder, and those were already arbitrary).
+    #[test]
+    fn retrieve_distance_is_unchanged_for_a_well_formed_index() {
+        let ex = |stem: &str, f0: f32| StyleExemplar {
+            stem: stem.into(),
+            feat: {
+                let mut f = vec![0.1f32; NDIM];
+                f[0] = f0;
+                f
+            },
+            tag: "t".into(),
+            settings: BTreeMap::new(),
+            curve: None,
+            path: None,
+        };
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![ex("far", 150.0), ex("near", 0.5), ex("mid", 30.0)],
+            source_dir: None,
+        };
+        let meta = crate::decode::Meta {
+            make: "T".into(),
+            model: "T".into(),
+            lens: None,
+            iso: Some(100),
+            shutter: None,
+            aperture: None,
+            focal_length_mm: None,
+            exposure_bias_ev: None,
+            date_time: None,
+            width: 100,
+            height: 100,
+            as_shot_wb_coeffs: [1.0; 4],
+        };
+        let hist = crate::decode::Histogram {
+            luma: vec![1; 256],
+            r: vec![1; 256],
+            g: vec![1; 256],
+            b: vec![1; 256],
+            clip_black_pct: 0.0,
+            clip_white_pct: 0.0,
+            sample_pixels: 1,
+        };
+        let got = idx.retrieve(&meta, &hist, 1, Path::new("elsewhere.arw"));
+        assert_eq!(got.len(), 1);
+        // feature_vector's dim 0 for this hist/meta is a small number, so
+        // the exemplar nearest in dim 0 wins under EITHER accumulator.
+        assert_eq!(got[0].stem, "near", "the f64 accumulator picks the same neighbour");
     }
 }

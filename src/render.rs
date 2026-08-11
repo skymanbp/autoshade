@@ -127,22 +127,31 @@ pub fn render_to_image_in(
             )
         });
     }
+    // Calibration metadata is validated BEFORE any pixel work (L04-1): a
+    // singular/non-finite ColorMatrix or a corrupt AsShotNeutral (a zero
+    // component reaches here as an INFINITE coefficient — rawler's dng.rs
+    // builds wb as 1/levels) used to sail through, and `to_u16` then
+    // saturated the damage into a silently published all-black or all-white
+    // deliverable. Refuse-not-degrade: the render errors with the cause and
+    // no file is staged. The sRGB path validates too — rawler's own develop
+    // carries the identical `[0].is_nan()` blind spot — but only when a
+    // matrix is PRESENT: absence is the normal matrix-less-camera case and
+    // rawler then skips calibration entirely.
+    let calibration = if wide {
+        let xyz2cam = camera_matrix(&rawimage)?;
+        let wb = normalise_wb(rawimage.wb_coeffs);
+        validate_calibration(&xyz2cam, wb, raw_path)?;
+        Some((xyz2cam, wb))
+    } else {
+        if rawimage.color_matrix.iter().next().is_some() {
+            let xyz2cam = camera_matrix(&rawimage)?;
+            validate_calibration(&xyz2cam, normalise_wb(rawimage.wb_coeffs), raw_path)?;
+        }
+        None
+    };
     let inter = dev
         .develop_intermediate(&rawimage)
         .map_err(|e| anyhow!("develop: {e}"))?;
-    // The wide path still needs the sensor container's calibration metadata —
-    // copy it out now, so the mosaic itself can go before the float chain.
-    let calibration = if wide {
-        let xyz2cam = camera_matrix(&rawimage)?;
-        let wb = if rawimage.wb_coeffs[0].is_nan() {
-            [1.0, 1.0, 1.0]
-        } else {
-            [rawimage.wb_coeffs[0], rawimage.wb_coeffs[1], rawimage.wb_coeffs[2]]
-        };
-        Some((xyz2cam, wb))
-    } else {
-        None
-    };
     // The demosaiced float frame owns everything the pipeline needs from here
     // on; the ~120 MB u16 sensor mosaic would otherwise survive to the end of
     // the function, under denoise/tone/pack/geometry (A7).
@@ -401,8 +410,12 @@ fn mat_mul3(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     out
 }
 
-/// 3×3 inverse by adjugate / determinant. The primaries matrices are far from
-/// singular (their determinants are the gamut volumes), so plain f32 is fine.
+/// 3×3 inverse by adjugate / determinant, no conditioning guard of its own.
+/// The built-in primaries matrices are far from singular (their determinants
+/// are the gamut volumes); the FILE-SUPPLIED camera matrix that also flows
+/// through here is validated by [`validate_calibration`] before the render
+/// path calls in, and the metadata-only `as_shot_wb` path catches a
+/// non-finite inverse behind its own is_finite gate (L04-1).
 fn inv3(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     let c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
     let c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2];
@@ -496,6 +509,76 @@ fn camera_matrix(rawimage: &rawler::RawImage) -> Result<[[f32; 3]; 3]> {
         }
     }
     Ok(xyz2cam)
+}
+
+/// rawler's AsShotNeutral convention: `wb[0]` NaN ⇒ WB unknown ⇒ neutral
+/// [1,1,1]. Anything else passes through for [`validate_calibration`] to
+/// judge — an INFINITE coefficient (1/0 from a zero AsShotNeutral, rawler
+/// dng.rs), a negative, or a partial NaN is corrupt metadata, not
+/// "unknown", and the old `[0].is_nan()`-only guard let all three through.
+fn normalise_wb(wb: [f32; 4]) -> [f32; 3] {
+    if wb[0].is_nan() { [1.0, 1.0, 1.0] } else { [wb[0], wb[1], wb[2]] }
+}
+
+/// Validate the FILE-SUPPLIED calibration before it reaches [`inv3`] and
+/// the pixel chain (L04-1). `to_u16` clamps silently — NaN quantises to 0,
+/// inf saturates to 65535 — so a singular matrix or corrupt WB published a
+/// committed all-black/all-white deliverable with `Ok` status. Every bail
+/// names the file and the measured value; no output is written.
+fn validate_calibration(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3], src: &Path) -> Result<()> {
+    for row in xyz2cam {
+        for v in row {
+            if !v.is_finite() {
+                bail!(
+                    "camera colour matrix of {} has a non-finite entry ({v}) — \
+                     the file's calibration metadata is corrupt; no output was written",
+                    src.display()
+                );
+            }
+        }
+    }
+    // Conditioning on the ROW-NORMALISED matrix (the same per-row
+    // normalisation camera_to_space_matrix applies — the DNG
+    // white-preservation rule). Real camera matrices land at O(0.1–1)
+    // there, so 1e-4 leaves ~3 decades of headroom; a degenerate row used
+    // to be SILENTLY left un-normalised, which is promoted to refusal here.
+    let mut norm = *xyz2cam;
+    for row in &mut norm {
+        let s = row[0] + row[1] + row[2];
+        if s.abs() <= 1e-6 {
+            bail!(
+                "camera colour matrix of {} has a degenerate row (sums to {s:e}) — \
+                 the file's calibration metadata is corrupt; no output was written",
+                src.display()
+            );
+        }
+        for v in row.iter_mut() {
+            *v /= s;
+        }
+    }
+    let c00 = norm[1][1] * norm[2][2] - norm[1][2] * norm[2][1];
+    let c01 = norm[1][2] * norm[2][0] - norm[1][0] * norm[2][2];
+    let c02 = norm[1][0] * norm[2][1] - norm[1][1] * norm[2][0];
+    let det = norm[0][0] * c00 + norm[0][1] * c01 + norm[0][2] * c02;
+    if det.abs() < 1e-4 {
+        bail!(
+            "camera colour matrix of {} is singular or near-singular \
+             (row-normalised determinant {det:e}) — inverting it would render \
+             the whole frame black; no output was written",
+            src.display()
+        );
+    }
+    for v in wb {
+        if !v.is_finite() || v <= 0.0 {
+            bail!(
+                "AsShotNeutral/WB coefficients of {} are corrupt ({wb:?}) — \
+                 a zero AsShotNeutral component becomes an infinite multiplier \
+                 (all-white frame); no output was written",
+                src.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The delivery space's primaries.
@@ -607,11 +690,17 @@ fn planck_uv1960(t: f32) -> (f32, f32) {
 fn camera_to_space_matrix(xyz2cam: &[[f32; 3]; 3], space: ExportColorSpace) -> [[f32; 3]; 3] {
     let mut space2cam = mat_mul3(xyz2cam, &rgb_to_xyz(space_primaries(space), D65_XY));
     for row in &mut space2cam {
+        // Unconditional (L04-1): the sole production caller is the
+        // calibrate path, whose matrix `validate_calibration` has already
+        // refused when any row is degenerate — so the old silent
+        // `if s.abs() > 1e-6` skip, which quietly dropped the DNG
+        // white-preservation rule for exactly the broken inputs, no longer
+        // has a case to hide. (A zero row here would now divide to
+        // inf/NaN — loud downstream — instead of passing un-normalised
+        // as a plausible-but-wrong calibration.)
         let s = row[0] + row[1] + row[2];
-        if s.abs() > 1e-6 {
-            for v in row {
-                *v /= s;
-            }
+        for v in row {
+            *v /= s;
         }
     }
     inv3(&space2cam)
@@ -7323,5 +7412,85 @@ mod tests {
         }
         let empty = refine_mask_guided(&small, &DynamicImage::ImageRgb8(RgbImage::new(0, 0)), 2, 1e-4);
         assert_eq!(empty.as_raw(), small.as_raw(), "a 0x0 guide returns the mask unchanged");
+    }
+
+    /// L04-1: a file-supplied camera matrix that cannot be inverted is
+    /// REFUSED with the measured determinant — never rendered into a
+    /// silently-black frame — while a real, well-conditioned matrix passes.
+    #[test]
+    fn singular_camera_matrix_is_refused_not_rendered_black() {
+        let good = inv3(&rgb_to_xyz(SRGB_PRIM, D65_XY));
+        assert!(
+            validate_calibration(&good, [1.9, 1.0, 1.6], Path::new("x.dng")).is_ok(),
+            "a real matrix + real WB validates"
+        );
+        let mut twin = good;
+        twin[1] = twin[0]; // two identical rows ⇒ det == 0 after row-norm
+        let e = validate_calibration(&twin, [1.0; 3], Path::new("x.dng"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("determinant"), "the refusal quotes the measurement: {e}");
+        assert!(e.contains("x.dng"), "the refusal names the file: {e}");
+        let mut nan = good;
+        nan[2][1] = f32::NAN;
+        let e = validate_calibration(&nan, [1.0; 3], Path::new("x.dng"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("non-finite"), "{e}");
+    }
+
+    /// L04-1: a matrix row summing to zero used to be SILENTLY left
+    /// un-normalised by camera_to_space_matrix (the DNG white-preservation
+    /// rule quietly dropped) — the validator refuses it instead.
+    #[test]
+    fn degenerate_matrix_row_is_disclosed_not_silently_unnormalised() {
+        let mut degen = inv3(&rgb_to_xyz(SRGB_PRIM, D65_XY));
+        degen[0] = [0.5, -1.0, 0.5]; // sums to 0
+        let e = validate_calibration(&degen, [1.0; 3], Path::new("x.dng"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("degenerate row"), "{e}");
+    }
+
+    /// L04-1: rawler turns a zero AsShotNeutral component into an INFINITE
+    /// wb coefficient (dng.rs builds 1/levels), which the old
+    /// `wb[0].is_nan()`-only guard let straight into the pixel chain — as
+    /// did a partial NaN and a negative. All refuse now; the documented
+    /// "unknown" convention (wb[0] NaN ⇒ neutral) still validates.
+    #[test]
+    fn zero_as_shot_neutral_becomes_an_infinite_coefficient_and_is_refused() {
+        let good = inv3(&rgb_to_xyz(SRGB_PRIM, D65_XY));
+        for bad in [
+            [f32::INFINITY, 1.0, 1.0], // the DNG 1/0 case
+            [1.0, f32::NAN, 1.0],      // partial NaN — invisible to a [0]-only check
+            [1.0, -0.5, 1.0],
+            [1.0, 0.0, 1.0],
+        ] {
+            let e = validate_calibration(&good, bad, Path::new("x.dng"))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("AsShotNeutral"), "{bad:?} must refuse: {e}");
+        }
+        assert_eq!(
+            normalise_wb([f32::NAN, 9.0, 9.0, 9.0]),
+            [1.0, 1.0, 1.0],
+            "wb[0] NaN is rawler's documented UNKNOWN — neutral, not corrupt"
+        );
+        assert!(validate_calibration(&good, normalise_wb([f32::NAN; 4]), Path::new("x")).is_ok());
+        assert_eq!(
+            normalise_wb([f32::INFINITY, 1.0, 1.0, f32::NAN]),
+            [f32::INFINITY, 1.0, 1.0],
+            "an infinite coefficient is NOT collapsed to unknown — it must reach the refusal"
+        );
+    }
+
+    /// L04-1: WHY the refusal exists — the packer saturates silently. NaN
+    /// quantises to black, inf to white, and render_to_file would return Ok.
+    /// Pinned so a future refactor cannot re-open the silent path.
+    #[test]
+    fn nan_calibration_never_reaches_the_packer() {
+        assert_eq!(to_u16(f32::NAN), 0, "NaN clamps to black");
+        assert_eq!(to_u16(f32::INFINITY), 65535, "inf saturates to white");
+        assert_eq!(to_u16(f32::NEG_INFINITY), 0);
     }
 }
