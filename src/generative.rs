@@ -1295,16 +1295,129 @@ mod tests {
         assert_eq!(extract_b64(&serde_json::json!({"ok": true})), None);
     }
 
-        #[test]
-        fn generated_images_must_match_the_requested_contract() {
-            let one = DynamicImage::ImageRgba8(RgbaImage::new(1, 1));
-            let png = encode_png(&one).unwrap();
-            let err = canonical_generated_png(&png, "1024x1024")
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("returned 1x1"), "{err}");
+    #[test]
+    fn generated_images_must_match_the_requested_contract() {
+        let one = DynamicImage::ImageRgba8(RgbaImage::new(1, 1));
+        let png = encode_png(&one).unwrap();
+        let err = canonical_generated_png(&png, "1024x1024")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("returned 1x1"), "{err}");
 
-            let canonical = canonical_generated_png(&png, "1x1").unwrap();
-            assert_eq!(image::guess_format(&canonical).unwrap(), image::ImageFormat::Png);
+        let canonical = canonical_generated_png(&png, "1x1").unwrap();
+        assert_eq!(image::guess_format(&canonical).unwrap(), image::ImageFormat::Png);
+    }
+
+    /// Local copy of the advisor tests' scripted loopback endpoint (test
+    /// modules cannot share helpers across files without a fixture crate).
+    /// Bodies are recorded LOSSY — multipart carries PNG bytes, and the
+    /// part names asserted on are ASCII. Bind failure panics: a sandbox
+    /// that forbids loopback must fail this test, never skip it.
+    fn stub_endpoint(
+        script: Vec<(u16, &'static str, String)>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let server = tiny_http::Server::http("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("bind loopback stub endpoint: {e}"));
+        let url = format!(
+            "http://{}",
+            server.server_addr().to_ip().expect("loopback stub has an IP address")
+        );
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&seen);
+        let handle = std::thread::spawn(move || {
+            for (status, ctype, body) in script {
+                let Ok(mut req) = server.recv() else { return };
+                let mut raw = Vec::new();
+                let _ = std::io::Read::read_to_end(req.as_reader(), &mut raw);
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&raw).into_owned());
+                let resp = tiny_http::Response::from_string(body)
+                    .with_status_code(status)
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes())
+                            .expect("static content-type header"),
+                    );
+                let _ = req.respond(resp);
+            }
+        });
+        (url, seen, handle)
+    }
+
+    /// L14#2 (images side): each images/edits POST is billed PER IMAGE, so
+    /// a second POST may only ever follow a capability refusal — and the
+    /// dropped flag must actually be gone from the retry body. Counted over
+    /// a real loopback transport; the old guard was a source grep for an
+    /// identifier that no longer exists.
+    #[test]
+    fn the_images_edit_negotiation_never_re_bills_a_dropped_flag() {
+        let png_1024 =
+            encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(1024, 1024))).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_1024);
+        let (url, seen, handle) = stub_endpoint(vec![
+            (
+                400,
+                "application/json",
+                r#"{"error":{"param":"stream","message":"streaming unsupported"}}"#.into(),
+            ),
+            (200, "application/json", format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#)),
+        ]);
+        let cfg = Config {
+            openai_api_key: Some("test-key".into()),
+            openai_model: "test-chat".into(),
+            openai_base_url: url,
+            openai_image_model: "test-image".into(),
+            openai_image_quality: "auto".into(),
+            openai_image_max_px: 4_000_000,
+            image_provider: "api".into(),
+            analysis_provider: "oauth".into(),
+            analysis_model: "opus".into(),
+            claude_bin: "claude".into(),
+            analysis_api_key: None,
+            analysis_base_url: "http://127.0.0.1:1".into(),
+            python_bin: "python".into(),
+            denoise_model: "scunet_color_real_psnr".into(),
+            denoise_script: String::new(),
+            denoise_cache: String::new(),
+            segment_script: String::new(),
+            style_strength: 0.5,
+        };
+        let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
+        let sizes = SizePlan { flexible: None, enum_size: "1024x1024" };
+        let (bytes, used) =
+            call_images_edit(&cfg, &src, None, "brighten the sky", "high", &sizes, "auto")
+                .expect("the blocking retry succeeds");
+        assert_eq!(used, "1024x1024");
+        assert!(!bytes.is_empty(), "the accepted retry returns the image");
+
+        // Fully-consumed script, bounded wait (the join_bounded philosophy).
+        let grace = std::time::Instant::now();
+        while !handle.is_finished() && grace.elapsed() < std::time::Duration::from_secs(2) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert!(handle.is_finished(), "the stub script was not fully consumed");
+        let _ = handle.join();
+
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2, "one refusal, one retry — never a third billed POST");
+        assert!(
+            bodies[0].contains("name=\"stream\"")
+                && bodies[0].contains("name=\"partial_images\""),
+            "the first attempt streams"
+        );
+        assert!(
+            !bodies[1].contains("name=\"stream\"")
+                && !bodies[1].contains("name=\"partial_images\""),
+            "the dropped flag stays dropped"
+        );
+        assert!(
+            bodies[1].contains("name=\"input_fidelity\""),
+            "only the BLAMED flag drops — fidelity survives the stream retry"
+        );
+    }
 }

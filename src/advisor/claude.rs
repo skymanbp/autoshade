@@ -35,21 +35,13 @@ impl ClaudeProvider {
             model: cfg.analysis_model.clone(),
         }
     }
-}
 
-impl Advisor for ClaudeProvider {
-    fn name(&self) -> &'static str {
-        "claude"
-    }
-
-    fn verify(
-        &self,
-        recipe: &EditRecipe,
-        meta: &Meta,
-        hist: &Histogram,
-    ) -> Result<Verdict, AdvisorError> {
-        let prompt = build_verify_prompt(recipe, meta, hist)?;
-
+    /// The child's full SHAPE — argv, env, cwd, console — with no spawn.
+    /// The isolation contract lives here as one inspectable value
+    /// (`get_args` / `get_envs` / `get_current_dir` back the tests that
+    /// pin it); `verify()` adds only the run mechanics (stdio, kill
+    /// group, spawn, drain).
+    fn verify_command(&self) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.args([
             "-p",
@@ -104,6 +96,24 @@ impl Advisor for ClaudeProvider {
         cmd.current_dir(std::env::temp_dir());
         // Don't flash a console window when the windowed GUI spawns this CLI child.
         crate::hide_child_console(&mut cmd);
+        cmd
+    }
+}
+
+impl Advisor for ClaudeProvider {
+    fn name(&self) -> &'static str {
+        "claude"
+    }
+
+    fn verify(
+        &self,
+        recipe: &EditRecipe,
+        meta: &Meta,
+        hist: &Histogram,
+    ) -> Result<Verdict, AdvisorError> {
+        let prompt = build_verify_prompt(recipe, meta, hist)?;
+
+        let mut cmd = self.verify_command();
         // A hung `claude` child (network stall inside the CLI) used to block
         // the analysis worker FOREVER — `output()` has no deadline, while
         // every HTTP advisor path carries one. Spawn + poll with a hard
@@ -434,5 +444,65 @@ mod tests {
             "the truncation is disclosed, not silent: {text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L14#3: the isolation contract is the argv itself, so the test pins
+    /// the EXACT sequence — flag order, both empty-string values in their
+    /// adjacent positions, and no positional prompt (it travels on stdin).
+    /// A `contains` check would miss a dropped `""` or a reordered pair.
+    #[test]
+    fn the_verifier_child_argv_pins_every_isolation_flag() {
+        let provider = ClaudeProvider { bin: "claude-test".into(), model: "m-1".into() };
+        let cmd = provider.verify_command();
+        let args: Vec<String> =
+            cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(
+            refs,
+            [
+                "-p",
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--tools",
+                "",
+                "--model",
+                "m-1",
+                "--output-format",
+                "json",
+            ],
+            "the argv IS the isolation contract — no plugins/skills/hooks, no MCP, \
+             no slash commands, no tools, and no trailing prompt argument"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--bare"),
+            "--bare never reads the stored OAuth login (module docs) — it must not come back"
+        );
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("claude-test"));
+    }
+
+    /// A stray ANTHROPIC_API_KEY re-routes billing from the user's
+    /// subscription to metered credits, and a project-checkout cwd makes
+    /// headless `claude` exit 1 on workspace trust — both guards are part
+    /// of the child's shape and both are pinned here.
+    #[test]
+    fn the_verifier_child_strips_the_api_key_and_runs_from_a_neutral_cwd() {
+        let provider = ClaudeProvider { bin: "claude-test".into(), model: "m".into() };
+        let cmd = provider.verify_command();
+        // get_envs order is unspecified — assert membership of the
+        // (key, None) removal pair, never a position.
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == std::ffi::OsStr::new("ANTHROPIC_API_KEY") && v.is_none()),
+            "the child must strip ANTHROPIC_API_KEY (billing isolation)"
+        );
+        // Computed with the same call the builder makes — TMP/TEMP redirects
+        // must not fail this spuriously.
+        assert_eq!(
+            cmd.get_current_dir(),
+            Some(std::env::temp_dir().as_path()),
+            "the child runs from the neutral temp dir (workspace-trust isolation)"
+        );
     }
 }

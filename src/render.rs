@@ -7250,4 +7250,78 @@ mod tests {
             );
         }
     }
+
+    /// L14#7: the PRODUCTION tile geometry. The public entry hard-wires
+    /// GUIDED_REFINE_TILE_EDGE and every real caller crosses it (the GUI
+    /// refines at full decode resolution), yet the seam oracle above only
+    /// drives the parameterised internal — from its point of view the
+    /// shipped constant is dead code. The guide here exceeds the edge in
+    /// ONE axis (two real seams for ~100 K pixels; growing both axes would
+    /// square the cost for no added coverage), and the width is DERIVED
+    /// from the constant so the test keeps crossing two seams if the edge
+    /// ever changes. Same |delta| ≤ 1 tolerance: tiled and whole-frame
+    /// differ in f32 summation order, and bit-equality would be flaky
+    /// across targets.
+    #[test]
+    fn the_public_guided_refine_crosses_its_production_tile_seams_cleanly() {
+        let w = (GUIDED_REFINE_TILE_EDGE * 2 + 52) as u32;
+        let h = 48u32;
+        // Slanted high-contrast edge sweeping through the first seam column,
+        // plus per-channel dither — same generator family as the oracle test.
+        let guide = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let base: u8 = if x + y * 11 < w / 2 { 28 } else { 210 };
+            image::Rgb([
+                base,
+                base.saturating_add(((x * 5 + y * 3) % 17) as u8),
+                base.saturating_sub(((x * 2 + y * 7) % 13) as u8),
+            ])
+        }));
+        let small = image::GrayImage::from_fn(17, 5, |x, y| {
+            image::Luma([((x * 37 + y * 53 + (x * y % 7) * 19) % 256) as u8])
+        });
+        // eps matches the sole production caller (gui/masks.rs).
+        let public = refine_mask_guided(&small, &guide, 2, 1e-4);
+        let whole = refine_mask_guided_tiled(&small, &guide, 2, 1e-4, w.max(h) as usize);
+        for (k, (&got, &want)) in public.as_raw().iter().zip(whole.as_raw().iter()).enumerate() {
+            let x = k % w as usize;
+            let y = k / w as usize;
+            let delta = (got as i16 - want as i16).abs();
+            let on_seam = x != 0 && x.is_multiple_of(GUIDED_REFINE_TILE_EDGE);
+            assert!(
+                delta <= 1,
+                "pixel ({x}, {y}), production-seam-column={on_seam}: public {got}, \
+                 whole-frame {want}"
+            );
+        }
+    }
+
+    /// The public entry's OWN guards, unreachable through the internal fn
+    /// the seam tests drive: a hostile eps (NaN / negative / zero) is
+    /// floored to 1e-6 — not divided by (near-)zero variance and quantised
+    /// to black — and a 0×0 guide returns the mask unchanged.
+    #[test]
+    fn the_public_guided_refine_floors_a_hostile_eps() {
+        let (w, h) = (64u32, 32u32);
+        let guide = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, _| {
+            if x < w / 2 { image::Rgb([20, 20, 20]) } else { image::Rgb([220, 220, 220]) }
+        }));
+        let small = image::GrayImage::from_fn(9, 5, |x, y| {
+            image::Luma([((x * 41 + y * 59) % 256) as u8])
+        });
+        let floored = refine_mask_guided(&small, &guide, 2, 1e-6);
+        assert!(
+            floored.as_raw().iter().any(|&p| p > 0),
+            "premise: the floored reference is not all black"
+        );
+        for bad in [f32::NAN, -1.0, 0.0] {
+            let got = refine_mask_guided(&small, &guide, 2, bad);
+            assert_eq!(
+                got.as_raw(),
+                floored.as_raw(),
+                "eps {bad} must be floored to 1e-6, not quantise NaN to black"
+            );
+        }
+        let empty = refine_mask_guided(&small, &DynamicImage::ImageRgb8(RgbImage::new(0, 0)), 2, 1e-4);
+        assert_eq!(empty.as_raw(), small.as_raw(), "a 0x0 guide returns the mask unchanged");
+    }
 }

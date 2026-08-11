@@ -2003,25 +2003,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Build a directory link `link` → `target` by ANY unprivileged means:
+    /// a real symlink where the process may create one (unix always;
+    /// Windows with Developer Mode), else an NTFS junction (`mklink /J`,
+    /// no privilege needed — and std's `is_symlink()` is true for mount
+    /// points too, so `walk` traverses a junction identically). Ok names
+    /// the mechanism used; Err lists EVERY failure.
+    fn link_dir_cycle(
+        target: &std::path::Path,
+        link: &std::path::Path,
+    ) -> Result<&'static str, String> {
+        #[cfg(not(windows))]
+        {
+            std::os::unix::fs::symlink(target, link)
+                .map(|()| "symlink")
+                .map_err(|e| format!("symlink: {e}"))
+        }
+        #[cfg(windows)]
+        {
+            let sym = match std::os::windows::fs::symlink_dir(target, link) {
+                Ok(()) => return Ok("symlink"),
+                Err(e) => e,
+            };
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.arg("/C").arg("mklink").arg("/J").arg(link).arg(target);
+            crate::hide_child_console(&mut cmd);
+            match cmd.output() {
+                Ok(o) if o.status.success() => Ok("junction"),
+                Ok(o) => Err(format!(
+                    "symlink: {sym}; mklink /J exit {:?}: {}",
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stderr).trim()
+                )),
+                Err(e) => Err(format!("symlink: {sym}; spawn cmd: {e}")),
+            }
+        }
+    }
+
     #[test]
     fn photo_scan_survives_a_directory_link_cycle_and_finds_each_raw_once() {
         let dir = std::env::temp_dir().join("autoshop-scan-cycle");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.arw"), b"raw").unwrap();
-        // A directory link back to its own parent — the classic cycle. Link
-        // creation needs privilege on stock Windows (Developer Mode grants
-        // it); when unavailable the cycle arm is honestly skipped and the
-        // plain scan still verifies.
-        #[cfg(windows)]
-        let link = std::os::windows::fs::symlink_dir(&dir, dir.join("loop"));
-        #[cfg(not(windows))]
-        let link = std::os::unix::fs::symlink(&dir, dir.join("loop"));
+        // A directory link back to its own parent — the classic cycle. The
+        // fixture is MANDATORY: without a link every assertion below holds
+        // vacuously, and the old silent-skip variant (an eprintln! cargo
+        // swallows) reported green on exactly the machines — stock Windows,
+        // unprivileged CI — where the cycle guard went untested. A junction
+        // needs no privilege, so no legitimate silent skip remains; a
+        // link-hostile filesystem must fix the fixture, not mute the test.
+        let kind = link_dir_cycle(&dir, &dir.join("loop")).unwrap_or_else(|e| {
+            panic!("cannot build a directory-link cycle, so the cycle guard is UNTESTED: {e}")
+        });
         let found = find_raws(&dir).expect("scan");
-        assert_eq!(found.len(), 1, "one RAW, found ONCE — never once per traversal: {found:?}");
-        if link.is_err() {
-            eprintln!("note: symlink unavailable — the cycle arm was not exercised");
-        }
+        assert_eq!(
+            found.len(),
+            1,
+            "one RAW, found ONCE — never once per traversal (cycle via {kind}): {found:?}"
+        );
+        // Not just deduped by count: the one reported path must be the real
+        // spelling, never the alias — a scan that recursed once through the
+        // link and deduped by filename would pass the count alone.
+        assert!(
+            found.iter().all(|p| p.components().all(|c| c.as_os_str() != "loop")),
+            "the scan must not report a RAW through the link alias (cycle via {kind}): {found:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The link-free half of the cycle test, split out so a genuinely
+    /// link-hostile filesystem still keeps the plain-scan coverage while
+    /// the cycle test above fails loudly. Own fixture directory — sharing
+    /// one would race under cargo's parallel test threads.
+    #[test]
+    fn photo_scan_finds_one_raw_once_without_any_link() {
+        let dir = std::env::temp_dir().join("autoshop-scan-nolink");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.arw"), b"raw").unwrap();
+        let found = find_raws(&dir).expect("scan");
+        assert_eq!(found.len(), 1, "one RAW in a plain directory: {found:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
