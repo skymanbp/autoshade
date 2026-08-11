@@ -52,6 +52,14 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
     // `exists()` guard here never fired for them.
     let before = crate::artifact_state(output);
     let mut cmd = Command::new(&opts.python_bin);
+    // The .env's unprotected names travel to the child EXPLICITLY
+    // (L16#3): under dotenv_override they sat in the process environment
+    // and this child inherited them (HF_HOME / CUDA_VISIBLE_DEVICES /
+    // proxies); the owned map never writes the parent, so the reach is
+    // reproduced on the child's own block. Protected names (incl.
+    // PYTHON*) are filtered by dotenv_child_env, and `-E` below is the
+    // second layer.
+    cmd.envs(crate::config::dotenv_child_env());
     // `-E`: ignore PYTHON* environment variables — same import-hijack
     // guard as the denoise sidecar (config.rs protects them too).
     cmd.arg("-E")

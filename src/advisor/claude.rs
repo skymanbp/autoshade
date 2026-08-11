@@ -76,6 +76,12 @@ impl ClaudeProvider {
         // model-authored rationale text. The CLI documents the channel:
         // "Input must be provided either through stdin or as a prompt
         // argument when using --print" (claude 2.1.210, measured).
+        // The .env's unprotected names travel to the child EXPLICITLY
+        // (L16#3): under dotenv_override they sat in the process environment
+        // and were inherited; the owned map never writes the parent, so the
+        // reach is reproduced on the child's own block. BEFORE env_remove —
+        // a .env-carried ANTHROPIC_API_KEY must still be stripped below.
+        cmd.envs(crate::config::dotenv_child_env());
         // This provider bills the user's Claude subscription via the stored
         // OAuth login by design. A stray ANTHROPIC_API_KEY in the inherited
         // environment (e.g. a machine-wide env var meant for other tools)
@@ -119,8 +125,9 @@ impl Advisor for ClaudeProvider {
         // every HTTP advisor path carries one. Spawn + poll with a hard
         // budget (same env override as the HTTP paths); on expiry the child
         // is killed and the error says exactly what happened.
-        let budget = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
-            .ok()
+        // env_or_dotenv: same .env-honouring rule as the HTTP builders
+        // (the owned-map dotenv never touches the process environment).
+        let budget = crate::config::env_or_dotenv("AUTOSHOP_HTTP_TIMEOUT_SECS")
             .and_then(|s| s.parse().ok())
             // 0 would kill the child on arrival — same guard as the HTTP
             // builders' zero filter.

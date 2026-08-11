@@ -389,111 +389,156 @@ pub struct Config {
     pub style_strength: f32,
 }
 
+// A `.env` is AMBIENT INPUT by the same argument as a working-directory
+// settings file, and a stronger one: dotenvy searches the cwd and every
+// parent (`find.rs`), and dotenv precedence beats a variable the user
+// really set. So a `.env` dropped beside a shared archive of photos —
+// "extract, then run Autoshop in there" — could name the endpoint the
+// key is sent to while the key itself still resolved from the user's
+// own environment. That is the exfiltration route `without_ambient_
+// authority` closes for `autoshop.local.json`, re-opened through the
+// sibling file.
+//
+// The protected set is every variable that decides WHERE something is
+// sent or WHAT gets executed — not just the endpoints. Naming only the
+// base URLs left the strictly worse half open: `AUTOSHOP_CLAUDE_BIN`
+// and `AUTOSHOP_PYTHON` reach `Command::new` directly
+// (`advisor/claude.rs`, `denoise.rs`, `segment.rs`) and the two script
+// variables become that command's argv, so the very scenario this
+// comment describes yielded arbitrary process execution rather than
+// mere endpoint redirection. `autoshop.local.json` cannot reach these
+// at all (`LocalSettings` has no such field), so `.env` is the only
+// route and this is where it closes.
+//
+// Everything else — keys, model names, providers, tuning numbers — is
+// still honoured from `.env`, which is where this project's own key
+// lives. (A planted key can no longer read the user's photos back:
+// every Responses call sends `store: false`, so nothing persists in
+// the key owner's account — see advisor/openai.rs.)
+//
+// PYTHONPATH / PYTHONHOME join the protected set for the same reason
+// as the script variables: both Python sidecars inherit the process
+// environment, and a .env's `PYTHONPATH=.` beside a hostile
+// `numpy.py` is code execution at import time (the sidecars also
+// pass `-E` — defence in both layers). The weight cache joins
+// because a redirected cache is a poisoned-model path.
+pub(crate) const AMBIENT_UNSAFE_VARS: [&str; 17] = [
+    "AUTOSHOP_OPENAI_BASE_URL",
+    "AUTOSHOP_ANALYSIS_BASE_URL",
+    "AUTOSHOP_CLAUDE_BIN",
+    "AUTOSHOP_PYTHON",
+    "AUTOSHOP_DENOISE_SCRIPT",
+    "AUTOSHOP_SEGMENT_SCRIPT",
+    "PATH",
+    "AUTOSHOP_DATA_DIR",
+    "AUTOSHOP_ANALYSIS_PROVIDER",
+    "AUTOSHOP_ANALYSIS_MODEL",
+    "AUTOSHOP_CLAUDE_MODEL",
+    "AUTOSHOP_OPENAI_MODEL",
+    "AUTOSHOP_OPENAI_IMAGE_MODEL",
+    "AUTOSHOP_IMAGE_PROVIDER",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "AUTOSHOP_DENOISE_CACHE",
+];
+
+/// The `.env`, parsed ONCE per process into an OWNED map (L16#3): the
+/// process environment is NEVER written. The old path ran
+/// `dotenv_override` + a 17-name restore loop inside a OnceLock whose
+/// safety comment claimed "the first load happens on the main thread
+/// before any worker exists" — false for the GUI binary, whose `main()`
+/// never calls `Config::load` and which spawns a gallery worker inside
+/// the creation closure, so the `unsafe { env::set_var }` raced every
+/// concurrent `getenv` (UB on unix). With the owned map the `unsafe` is
+/// GONE rather than re-justified, `Config::load` is callable from any
+/// thread at any time, and no `.env` name can influence the live
+/// environment at all — which also closes the unlisted-name gap
+/// (e.g. LOCALAPPDATA siting the store root) for free. Residual
+/// unchanged: a `.env` edited mid-session applies on the next launch.
+static DOTENV: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+    std::sync::OnceLock::new();
+
+fn dotenv_map() -> &'static std::collections::HashMap<String, String> {
+    DOTENV.get_or_init(|| {
+        // dotenv_iter: the SAME cwd-upward file search as dotenv_override,
+        // minus every setenv (dotenvy 0.15 lib.rs/iter.rs).
+        let map: std::collections::HashMap<String, String> = dotenvy::dotenv_iter()
+            .map(|it| it.flatten().collect())
+            .unwrap_or_default();
+        for k in AMBIENT_UNSAFE_VARS {
+            // Same trigger as the old post-override comparison: the .env
+            // names a protected variable with a value that differs from the
+            // process's own.
+            if let Some(v) = map.get(k)
+                && env::var(k).ok().as_deref() != Some(v.as_str())
+            {
+                eprintln!(
+                    "warning: ignoring {k} from a .env file — a .env found in the working \
+                     directory (or any parent) is not trusted to choose where your API key \
+                     is sent or which program is run. Set it in your own environment."
+                );
+            }
+        }
+        map
+    })
+}
+
+/// Resolve `key` with dotenv precedence but WITHOUT environment mutation:
+/// the `.env` value wins for unprotected names (the dotenv_override
+/// contract this project chose on 2026-08-03 — this machine carries a
+/// User-scope OPENAI_API_KEY that must not out-rank the project's own
+/// .env key), the live environment is the fallback, and a PROTECTED name
+/// never resolves from a `.env` at all. Empty/whitespace counts as unset
+/// (an empty .env value therefore masks the process value, exactly as
+/// override-then-filter did). Out-of-crate consumers of `.env`-honoured
+/// names (the HTTP/sidecar timeout knobs, the legacy-out override) go
+/// through here, or they silently stop seeing `.env` values.
+pub fn env_or_dotenv(key: &str) -> Option<String> {
+    let live = || env::var(key).ok();
+    if AMBIENT_UNSAFE_VARS.contains(&key) {
+        return live().filter(|s| !s.trim().is_empty());
+    }
+    dotenv_map()
+        .get(key)
+        .cloned()
+        .or_else(live)
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// The `.env`'s UNPROTECTED entries, for a CHILD process's environment
+/// block. Under dotenv_override these names sat in the process
+/// environment and every child inherited them (third-party knobs like
+/// HF_HOME / CUDA_VISIBLE_DEVICES / proxy variables); the owned map keeps
+/// exactly that reach — `Command::envs` writes the CHILD's block, never
+/// the parent's — while the protected 17 are filtered precisely as the
+/// old restore loop kept them out of the parent.
+pub fn dotenv_child_env() -> Vec<(String, String)> {
+    dotenv_map()
+        .iter()
+        .filter(|(k, _)| !AMBIENT_UNSAFE_VARS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
 impl Config {
     pub fn load() -> Self {
-        // .env first (absence is fine; never prints the key), then the local file.
-        // 2026-08-03: `dotenv_override`, not `dotenv`. Why: plain `dotenv()`
-        // leaves an already-set process var alone, and this machine carries a
-        // User-scope OPENAI_API_KEY — so a run launched from a shell holding it
-        // silently billed that global key instead of this project's own .env
-        // key. Project .env is the default; the global stays the fallback for
-        // names .env does not define.
-        // ONCE per process: dotenv_override mutates the process environment
-        // (env::set_var), which is unsound to run concurrently with env reads
-        // on non-Windows — and Config::load() is called from request/worker
-        // threads (the web Settings hot-reload rebuilds the config). The
-        // first load happens on the main thread before any worker exists;
-        // later reloads reuse the already-applied environment. Recorded
-        // residuals, behaviour otherwise unchanged: the cwd-upward .env
-        // search (a run from another checkout's subtree adopts that tree's
-        // .env), and a .env edited mid-session now applies on the next
-        // launch rather than on the next settings save.
-        //
-        // A `.env` is AMBIENT INPUT by the same argument as a working-directory
-        // settings file, and a stronger one: dotenvy searches the cwd and every
-        // parent (`find.rs`), and `dotenv_override` beats a variable the user
-        // really set. So a `.env` dropped beside a shared archive of photos —
-        // "extract, then run Autoshop in there" — could name the endpoint the
-        // key is sent to while the key itself still resolved from the user's
-        // own environment. That is the exfiltration route `without_ambient_
-        // authority` closes for `autoshop.local.json`, re-opened through the
-        // sibling file.
-        //
-        // The protected set is every variable that decides WHERE something is
-        // sent or WHAT gets executed — not just the endpoints. Naming only the
-        // base URLs left the strictly worse half open: `AUTOSHOP_CLAUDE_BIN`
-        // and `AUTOSHOP_PYTHON` reach `Command::new` directly
-        // (`advisor/claude.rs`, `denoise.rs`, `segment.rs`) and the two script
-        // variables become that command's argv, so the very scenario this
-        // comment describes yielded arbitrary process execution rather than
-        // mere endpoint redirection. `autoshop.local.json` cannot reach these
-        // at all (`LocalSettings` has no such field), so `.env` is the only
-        // route and this is where it closes.
-        //
-        // Everything else — keys, model names, providers, tuning numbers — is
-        // still honoured from `.env`, which is where this project's own key
-        // lives. (A planted key can no longer read the user's photos back:
-        // every Responses call sends `store: false`, so nothing persists in
-        // the key owner's account — see advisor/openai.rs.)
-        //
-        // PYTHONPATH / PYTHONHOME join the protected set for the same reason
-        // as the script variables: both Python sidecars inherit the process
-        // environment, and a .env's `PYTHONPATH=.` beside a hostile
-        // `numpy.py` is code execution at import time (the sidecars also
-        // pass `-E` — defence in both layers). The weight cache joins
-        // because a redirected cache is a poisoned-model path.
-        const AMBIENT_UNSAFE_VARS: [&str; 17] = [
-            "AUTOSHOP_OPENAI_BASE_URL",
-            "AUTOSHOP_ANALYSIS_BASE_URL",
-            "AUTOSHOP_CLAUDE_BIN",
-            "AUTOSHOP_PYTHON",
-            "AUTOSHOP_DENOISE_SCRIPT",
-            "AUTOSHOP_SEGMENT_SCRIPT",
-            "PATH",
-            "AUTOSHOP_DATA_DIR",
-            "AUTOSHOP_ANALYSIS_PROVIDER",
-            "AUTOSHOP_ANALYSIS_MODEL",
-            "AUTOSHOP_CLAUDE_MODEL",
-            "AUTOSHOP_OPENAI_MODEL",
-            "AUTOSHOP_OPENAI_IMAGE_MODEL",
-            "AUTOSHOP_IMAGE_PROVIDER",
-            "PYTHONPATH",
-            "PYTHONHOME",
-            "AUTOSHOP_DENOISE_CACHE",
-        ];
-        static PRE_DOTENV: std::sync::OnceLock<[Option<String>; 17]> = std::sync::OnceLock::new();
-        let pre_dotenv = PRE_DOTENV.get_or_init(|| {
-            let before = AMBIENT_UNSAFE_VARS.map(|k| env::var(k).ok());
-            let _ = dotenvy::dotenv_override();
-            for (i, k) in AMBIENT_UNSAFE_VARS.iter().enumerate() {
-                if env::var(k).ok() != before[i] {
-                    eprintln!(
-                        "warning: ignoring {k} from a .env file — a .env found in the working \
-                         directory (or any parent) is not trusted to choose where your API key \
-                         is sent or which program is run. Set it in your own environment."
-                    );
-                }
-            }
-            // Reading protected values from the snapshot is insufficient for
-            // PATH and the data root: their consumers consult the live process
-            // environment. Restore every protected variable so later consumers
-            // see exactly the authority the process started with.
-            for (k, value) in AMBIENT_UNSAFE_VARS.iter().zip(before.iter()) {
-                // This is the same one-time, pre-worker initialization window
-                // in which dotenv_override above mutates the environment.
-                unsafe {
-                    match value {
-                        Some(value) => env::set_var(k, value),
-                        None => env::remove_var(k),
-                    }
-                }
-            }
-            before
-        });
-        let nonempty = |k: &str| env::var(k).ok().filter(|s| !s.trim().is_empty());
-        // The pre-.env value of a variable an ambient file must not own.
-        // Indices follow `AMBIENT_UNSAFE_VARS`.
-        let pre = |i: usize| pre_dotenv[i].clone().filter(|s: &String| !s.trim().is_empty());
+        // .env first (absence is fine; never prints the key), then the local
+        // file. See `dotenv_map` / `env_or_dotenv` above for the ownership
+        // and precedence story (L16#3: parsed once, owned, no setenv).
+        let dotenv = dotenv_map();
+        let nonempty = |k: &str| {
+            dotenv
+                .get(k)
+                .cloned()
+                .or_else(|| env::var(k).ok())
+                .filter(|s| !s.trim().is_empty())
+        };
+        // A variable an ambient file must not own resolves from the LIVE
+        // environment — which, with no setenv anywhere, IS the authority the
+        // process started with. Indices follow `AMBIENT_UNSAFE_VARS`.
+        let pre = |i: usize| {
+            env::var(AMBIENT_UNSAFE_VARS[i]).ok().filter(|s: &String| !s.trim().is_empty())
+        };
         let (local, origin) = load_local_settings_from();
         // A cwd-relative settings file is ambient input, not the user's own
         // configuration: it may pick models, never a key or the endpoint a key
@@ -716,47 +761,112 @@ mod tests {
     /// yielded arbitrary process execution. `.env` is the only route to these
     /// (`LocalSettings` has no such field), so this list is the whole guard.
     ///
-    /// This test reads the CONSTANT rather than the behaviour on purpose:
-    /// `dotenv_override` mutates the process environment once per process, so
-    /// a behavioural test here would fight every other test in the binary.
+    /// Re-derived from the CONSTANT itself (the old hand-copied list froze
+    /// at 14 entries while the constant grew to 17 — PYTHONPATH/PYTHONHOME/
+    /// AUTOSHOP_DENOISE_CACHE went uncovered while the assertion message
+    /// still claimed "14 entries"; the self-drift guard had drifted).
     #[test]
     fn every_variable_that_names_a_program_or_an_endpoint_is_ambient_unsafe() {
-        // Grepped from this file's own resolution block; each is either a
-        // base URL or lands in `Command::new`/its argv.
-        let must_cover = [
-            "AUTOSHOP_OPENAI_BASE_URL",
-            "AUTOSHOP_ANALYSIS_BASE_URL",
-            "AUTOSHOP_CLAUDE_BIN",
-            "AUTOSHOP_PYTHON",
-            "AUTOSHOP_DENOISE_SCRIPT",
-            "AUTOSHOP_SEGMENT_SCRIPT",
-            "PATH",
-            "AUTOSHOP_DATA_DIR",
-            "AUTOSHOP_ANALYSIS_PROVIDER",
-            "AUTOSHOP_ANALYSIS_MODEL",
-            "AUTOSHOP_CLAUDE_MODEL",
-            "AUTOSHOP_OPENAI_MODEL",
-            "AUTOSHOP_OPENAI_IMAGE_MODEL",
-            "AUTOSHOP_IMAGE_PROVIDER",
-        ];
         let src = include_str!("config.rs");
-        // The list in `Config::load` is the guard; if a variable is resolved
-        // through the live environment (`nonempty`) instead of the pre-.env
-        // snapshot (`pre`), an ambient file owns it.
-        for name in must_cover {
+        for name in super::AMBIENT_UNSAFE_VARS {
+            // A protected name must never resolve through the .env-honouring
+            // resolvers: `nonempty` (map-first inside load) or a stray
+            // `env_or_dotenv` literal — only `pre(i)` / live env reads.
             assert!(
                 !src.contains(&format!("nonempty(\"{name}\")")),
                 "{name} decides an endpoint or a program to run, so it must resolve from the \
-                 pre-.env snapshot, not from the live environment a .env can rewrite"
+                 live (never-mutated) environment, not through the .env-honouring resolver"
             );
         }
-        // And every variable that IS resolved from the snapshot must be in the
-        // documented list, so the two cannot drift apart silently.
-        assert_eq!(
-            must_cover.len(),
-            14,
-            "AMBIENT_UNSAFE_VARS has 14 entries; update both this list and the constant together"
+        // env_or_dotenv itself must refuse protected names at runtime, so
+        // even an out-of-crate consumer cannot hand one to a .env.
+        assert!(
+            src.contains("if AMBIENT_UNSAFE_VARS.contains(&key)"),
+            "env_or_dotenv lost its protected-name refusal"
         );
+    }
+
+    /// L16#3: `Config::load` never writes the process environment — the old
+    /// dotenv_override + restore loop did (unsafe `env::set_var`, racing
+    /// every concurrent getenv on unix; its safety comment's "first load on
+    /// the main thread before any worker" premise was FALSE for the GUI).
+    /// Source-invariant: this file carries no set_var/remove_var at all, and
+    /// the .env is consumed through dotenv_iter only.
+    #[test]
+    fn no_setenv_survives_on_the_config_load_path() {
+        let src = include_str!("config.rs");
+        // Assembled so this test's own literals don't match themselves.
+        for (prefix, name) in
+            [("env::", "set_var"), ("env::", "remove_var"), ("dotenvy::", "dotenv_override")]
+        {
+            let call = format!("{prefix}{name}(");
+            assert!(
+                !src.contains(&call),
+                "config.rs regained a process-environment write ({name})"
+            );
+        }
+        assert!(src.contains("dotenv_iter"), "the owned-map parse is gone");
+    }
+
+    /// L16#5: the out-of-config consumers of `.env`-honoured knobs resolve
+    /// through `env_or_dotenv` — a direct `env::var` there silently stops
+    /// seeing `.env` values now that nothing writes the environment. The
+    /// child-side reach survives via `dotenv_child_env` on all three spawns.
+    #[test]
+    fn out_of_config_consumers_still_honour_a_dotenv_knob() {
+        let consumers: [(&str, &str, &str); 4] = [
+            ("advisor/mod.rs", include_str!("advisor/mod.rs"), "AUTOSHOP_HTTP_TIMEOUT_SECS"),
+            ("advisor/claude.rs", include_str!("advisor/claude.rs"), "AUTOSHOP_HTTP_TIMEOUT_SECS"),
+            ("denoise.rs", include_str!("denoise.rs"), "AUTOSHOP_SIDECAR_TIMEOUT_SECS"),
+            ("store.rs", include_str!("store.rs"), "AUTOSHOP_LEGACY_OUT"),
+        ];
+        for (file, src, knob) in consumers {
+            assert!(
+                !src.contains(&format!("env::var(\"{knob}\")"))
+                    && !src.contains(&format!("env::var_os(\"{knob}\")")),
+                "{file}: {knob} is read directly from the environment — .env values are lost"
+            );
+            assert!(
+                src.contains(&format!("env_or_dotenv(\"{knob}\")")),
+                "{file}: {knob} no longer resolves through env_or_dotenv"
+            );
+        }
+        for (file, src) in [
+            ("advisor/claude.rs", include_str!("advisor/claude.rs")),
+            ("denoise.rs", include_str!("denoise.rs")),
+            ("segment.rs", include_str!("segment.rs")),
+        ] {
+            assert!(
+                src.contains("dotenv_child_env()"),
+                "{file}: the child lost the .env's unprotected names"
+            );
+        }
+    }
+
+    /// L16: `Config::load` is callable from any thread at any time — the
+    /// whole point of the owned map. Eight threads interleave loads with
+    /// PATH reads; PATH must be byte-identical afterwards (under the old
+    /// code the restore loop rewrote it concurrently with the readers).
+    #[test]
+    fn config_load_is_reentrant_from_many_threads() {
+        let before = env::var_os("PATH");
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    for _ in 0..10 {
+                        if i % 2 == 0 {
+                            let _ = Config::load();
+                        } else {
+                            let _ = env::var_os("PATH");
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(env::var_os("PATH"), before, "a load mutated the environment");
     }
 
     /// The guard above lives on the READ path. Saving settings is a WRITE
@@ -873,6 +983,90 @@ mod tests {
                 .env("AUTOSHOP_DATA_DIR", &trusted_data)
                 .env_remove("AUTOSHOP_ANALYSIS_PROVIDER")
                 .env_remove("AUTOSHOP_ANALYSIS_API_KEY")
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                output.status.success(),
+                "child failed:\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        /// L16#3, the owned-map contract end to end (child process, like the
+        /// authority test above — environment assertions must not race the
+        /// rest of the suite): parsing the .env mutates NOTHING — not even
+        /// UNPROTECTED names enter the process environment — while dotenv
+        /// precedence still holds (`.env` beats a process-set unprotected
+        /// var) and `env_or_dotenv` serves the map to out-of-config
+        /// consumers.
+        #[test]
+        fn dotenv_parsing_never_mutates_the_process_environment() {
+            const CHILD: &str = "AUTOSHOP_DOTENV_OWNEDMAP_TEST_CHILD";
+            if env::var_os(CHILD).is_some() {
+                let cfg = Config::load();
+                // (a) The unprotected .env name is in the MAP, not the env.
+                assert_eq!(
+                    env::var_os("AUTOSHOP_DENOISE_MODEL"),
+                    Some("env-model".into()),
+                    "parsing the .env mutated an UNPROTECTED process variable"
+                );
+                // (b) …and the .env still WINS for config resolution — the
+                // dotenv_override precedence this project chose (a machine-
+                // wide var must not out-rank the project's own .env).
+                assert_eq!(cfg.denoise_model, "dotenv-model");
+                // (c) out-of-config consumers see the map through the shared
+                // resolver, protected names never.
+                assert_eq!(
+                    super::env_or_dotenv("AUTOSHOP_SIDECAR_TIMEOUT_SECS").as_deref(),
+                    Some("123"),
+                    "env_or_dotenv lost the .env value"
+                );
+                assert_ne!(
+                    super::env_or_dotenv("PATH").as_deref(),
+                    Some("."),
+                    "a protected name resolved from the .env"
+                );
+                // (d) …and the child block for sidecars carries the
+                // unprotected names, minus every protected one.
+                let child_env = super::dotenv_child_env();
+                assert!(
+                    child_env.iter().any(|(k, v)| k == "AUTOSHOP_SIDECAR_TIMEOUT_SECS" && v == "123"),
+                    "the sidecar child block lost the .env's unprotected names"
+                );
+                assert!(
+                    !child_env.iter().any(|(k, _)| k == "PATH" || k == "PYTHONPATH"),
+                    "a protected name leaked into the sidecar child block"
+                );
+                return;
+            }
+
+            let dir = env::temp_dir().join(format!(
+                "autoshop-dotenv-ownedmap-{}-{}",
+                std::process::id(),
+                crate::store::next_tmp_seq()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(".env"),
+                "AUTOSHOP_DENOISE_MODEL=dotenv-model\n\
+                 AUTOSHOP_SIDECAR_TIMEOUT_SECS=123\n\
+                 PATH=.\n",
+            )
+            .unwrap();
+            let output = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::dotenv_parsing_never_mutates_the_process_environment",
+                    "--nocapture",
+                ])
+                .current_dir(&dir)
+                .env(CHILD, "1")
+                // A process-set UNPROTECTED var the .env must beat — and
+                // whose value must survive in the environment untouched.
+                .env("AUTOSHOP_DENOISE_MODEL", "env-model")
+                .env_remove("AUTOSHOP_SIDECAR_TIMEOUT_SECS")
                 .output()
                 .unwrap();
             let _ = std::fs::remove_dir_all(&dir);

@@ -308,8 +308,10 @@ pub(crate) fn transport_error(t: &ureq::Transport, default_secs: u64) -> Advisor
 /// endpoint's real latency class (the consts above); `AUTOSHOP_HTTP_TIMEOUT_SECS`
 /// overrides all of them for outlier deployments.
 pub(crate) fn post_with_timeout(url: &str, overall: std::time::Duration) -> ureq::Request {
-    let overall = std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
-        .ok()
+    // env_or_dotenv, not env::var: the .env carries this knob for some
+    // users, and the owned-map dotenv (L16#3) no longer writes the process
+    // environment - a direct read here would silently stop honouring it.
+    let overall = crate::config::env_or_dotenv("AUTOSHOP_HTTP_TIMEOUT_SECS")
         .and_then(|s| s.parse().ok())
         // 0 would arm an instant deadline and kill every call on arrival —
         // same guard as the stall builder below.
@@ -330,8 +332,7 @@ pub(crate) fn post_with_timeout(url: &str, overall: std::time::Duration) -> ureq
 /// instant read timeout and kill every call on arrival — an explicit low
 /// override is the user's call, zero is not.
 pub(crate) fn effective_stall_secs(default_secs: u64) -> u64 {
-    std::env::var("AUTOSHOP_HTTP_TIMEOUT_SECS")
-        .ok()
+    crate::config::env_or_dotenv("AUTOSHOP_HTTP_TIMEOUT_SECS")
         .and_then(|s| s.parse().ok())
         .filter(|s: &u64| *s > 0)
         .unwrap_or(default_secs)

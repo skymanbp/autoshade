@@ -29,8 +29,9 @@ const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
 /// many minutes downloading a model — a user shortening API timeouts must not
 /// silently cap the model download at the same number.
 pub(crate) fn sidecar_timeout() -> std::time::Duration {
-    let seconds = std::env::var("AUTOSHOP_SIDECAR_TIMEOUT_SECS")
-        .ok()
+    // env_or_dotenv: .env-set sidecar budgets kept working when the
+    // dotenv stopped writing the process environment (L16#3).
+    let seconds = crate::config::env_or_dotenv("AUTOSHOP_SIDECAR_TIMEOUT_SECS")
         .and_then(|s| s.parse().ok())
         .filter(|s: &u64| *s > 0)
         .unwrap_or(SIDECAR_DEFAULT_TIMEOUT_SECS);
@@ -412,6 +413,14 @@ fn run_sidecar_with_budget(
     let staged = staged_sibling(output);
     let before = crate::artifact_state(&staged);
     let mut cmd = Command::new(&opts.python_bin);
+    // The .env's unprotected names travel to the child EXPLICITLY
+    // (L16#3): under dotenv_override they sat in the process environment
+    // and this child inherited them (HF_HOME / CUDA_VISIBLE_DEVICES /
+    // proxies); the owned map never writes the parent, so the reach is
+    // reproduced on the child's own block. Protected names (incl.
+    // PYTHON*) are filtered by dotenv_child_env, and `-E` below is the
+    // second layer.
+    cmd.envs(crate::config::dotenv_child_env());
     // `-E`: ignore PYTHON* environment variables — a cwd .env's
     // `PYTHONPATH=.` beside a hostile `numpy.py` is code execution at
     // import time (config.rs also protects those vars; two layers).

@@ -2053,7 +2053,9 @@ pub fn settings_path() -> PathBuf {
 /// see every pre-store develop silently vanish.
 fn legacy_out_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(o) = std::env::var_os("AUTOSHOP_LEGACY_OUT") {
+    // env_or_dotenv (L16#3): a .env-set legacy root kept working when the
+    // dotenv stopped writing the process environment.
+    if let Some(o) = crate::config::env_or_dotenv("AUTOSHOP_LEGACY_OUT") {
         roots.push(PathBuf::from(o));
     }
     roots.push(PathBuf::from("out"));
