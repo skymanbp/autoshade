@@ -3263,3 +3263,71 @@
             std::thread::yield_now();
         }
     }
+
+    /// R14 (user report 2026-08-12): after the centering rework the variant
+    /// card sat visibly LOW-or-HIGH in the strip — the air above the
+    /// thumbnail must equal the air below the card column ("变成和下边一样
+    /// 距离"). Headless frame over the REAL variant_strip + REAL theme
+    /// style + the REAL panel height constant; the three test seams record
+    /// what actually laid out.
+    #[test]
+    fn the_variant_card_gets_equal_air_above_and_below() {
+        let mk = |kind: crate::model::VariantKind| crate::model::Variant {
+            kind,
+            recipe: Default::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        // Two states of the measured (first) card: the lone-Original
+        // placeholder, and a non-Original card in a two-variant strip —
+        // whose label row carries the ✕ delete button (review 2026-08-12
+        // finding 1: the ✕ row was never laid out by the single case).
+        let scenarios: [(&str, Vec<crate::model::Variant>); 2] = [
+            ("lone original", vec![mk(crate::model::VariantKind::Original)]),
+            (
+                "deletable card with ✕",
+                vec![
+                    mk(crate::model::VariantKind::Generated),
+                    mk(crate::model::VariantKind::Original),
+                ],
+            ),
+        ];
+        for (label, variants) in scenarios {
+            let mut app = AutoshopApp { variants, ..Default::default() };
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::TopBottomPanel::bottom("variants")
+                    .exact_height(AutoshopApp::VARIANT_STRIP_H)
+                    .show(ctx, |ui| app.variant_strip(ui));
+            });
+            let row = app.strip_row_rect.expect("the strip records its row (test seam)");
+            let card = app.strip_card_rect.expect("the strip records its card (test seam)");
+            // Gaps bracket the whole CARD COLUMN (review finding 3: measuring
+            // the top from the thumb keeps passing if something ever lands
+            // above it), and a floor keeps "0 air on both sides" from
+            // counting as centered (review finding 8).
+            let top = card.top() - row.top();
+            let bottom = row.bottom() - card.bottom();
+            eprintln!("strip geometry [{label}]: row={row:?} card={card:?} \
+                 top_gap={top:.1} bottom_gap={bottom:.1}");
+            assert!(
+                (top - bottom).abs() <= 1.0,
+                "[{label}] unequal air around the variant card: \
+                 {top:.1} above vs {bottom:.1} below"
+            );
+            assert!(
+                top >= 4.0,
+                "[{label}] the card column has no breathing room ({top:.1} px) — \
+                 it outgrew VARIANT_STRIP_H"
+            );
+        }
+    }

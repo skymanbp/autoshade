@@ -254,6 +254,12 @@ pub(crate) struct AutoshopApp {
     pub(crate) curve_drag: Option<usize>,             // control point being dragged (active channel)
     #[cfg(test)]
     pub(crate) curve_rect: Option<egui::Rect>,        // test seam: the editor square's last rect
+    #[cfg(test)]
+    pub(crate) strip_row_rect: Option<egui::Rect>,    // test seam: variant strip's inner row rect
+    #[cfg(test)]
+    pub(crate) strip_thumb_rect: Option<egui::Rect>,  // test seam: first variant card's thumb rect
+    #[cfg(test)]
+    pub(crate) strip_card_rect: Option<egui::Rect>,   // test seam: first variant card's column rect
     // --- batch recipe copy / paste ---
     pub(crate) multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     pub(crate) copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1031,6 +1037,15 @@ impl AutoshopApp {
         });
     }
 
+    /// Variant-strip panel height. Derivation: an 84 px card column (52 px
+    /// thumb, 6 px item_spacing, and a 26 px label row — egui rows are at
+    /// least interact_size.y tall), 8 px of air above and below the column
+    /// (variant_strip top-pads it into center), and the panel frame's
+    /// 2+2 px vertical margins. One authority — the strip geometry test
+    /// lays the real panel out at this same constant and asserts the two
+    /// airs are EQUAL.
+    pub(crate) const VARIANT_STRIP_H: f32 = 104.0;
+
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
     fn upd_strips_and_side_panels(&mut self, ctx: &egui::Context) {
@@ -1039,7 +1054,9 @@ impl AutoshopApp {
         // 原片 / AI 生成 / 反推 renditions.
         if self.src_path.is_some() {
             egui::TopBottomPanel::bottom("variants")
-                .exact_height(96.0)
+                // At the old 96 the cards' slack all pooled below the labels
+                // — height and its derivation live on VARIANT_STRIP_H.
+                .exact_height(Self::VARIANT_STRIP_H)
                 .show(ctx, |ui| {
                     self.variant_strip(ui);
                 });
@@ -1424,6 +1441,12 @@ impl Default for AutoshopApp {
             curve_drag: None,
             #[cfg(test)]
             curve_rect: None,
+            #[cfg(test)]
+            strip_row_rect: None,
+            #[cfg(test)]
+            strip_thumb_rect: None,
+            #[cfg(test)]
+            strip_card_rect: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,

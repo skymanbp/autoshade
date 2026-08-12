@@ -210,6 +210,22 @@ impl AutoshopApp {
         let accent = self.theme.colors().accent_text; // Copy — safe in closures
         let mut switch_to: Option<usize> = None;
         let mut delete: Option<usize> = None;
+        // The card column is centered by an EXPLICIT top pad, not by
+        // cross-align: Align::Center positioned the row before its content
+        // grew — egui seeds a horizontal row at interact_size.y, centered
+        // that 26 px stub in the panel, and the 84 px column then grew
+        // downward from it (37 px of air above, 21 px of column OVERFLOW
+        // below the panel; R14 user report). The column height is knowable
+        // up front — thumb + item gap + label row (egui rows are at least
+        // interact_size.y tall) — so the pad is exact and the geometry test
+        // asserts the air above equals the air below.
+        const THUMB_H: f32 = 52.0;
+        let card_h = THUMB_H + ui.spacing().item_spacing.y + ui.spacing().interact_size.y;
+        #[cfg(test)]
+        {
+            self.strip_row_rect = Some(ui.max_rect());
+        }
+        ui.add_space(((ui.available_height() - card_h) / 2.0).max(0.0));
         ui.horizontal(|ui| {
             ui.add_space(SPACE_SM);
             ui.label(egui::RichText::new(tr(lang, "Variants")).strong());
@@ -224,7 +240,7 @@ impl AutoshopApp {
                             // variant has been developed once).
                             let resp = if let Some(t) = &self.variants[i].thumb {
                                 let s = t.size_vec2();
-                                let h = 52.0;
+                                let h = THUMB_H;
                                 let w = (s.x / s.y.max(1.0) * h).clamp(30.0, 104.0);
                                 let (rect, resp) =
                                     ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
@@ -260,8 +276,12 @@ impl AutoshopApp {
                                 }
                                 resp
                             } else {
-                                ui.add_sized([64.0, 52.0], egui::Button::new("…"))
+                                ui.add_sized([64.0, THUMB_H], egui::Button::new("…"))
                             };
+                            #[cfg(test)]
+                            if i == 0 {
+                                self.strip_thumb_rect = Some(resp.rect);
+                            }
                             if resp.on_hover_text(tr(lang, "Click to switch to this variant (lossless)")).clicked() {
                                 switch_to = Some(i);
                             }
@@ -278,6 +298,10 @@ impl AutoshopApp {
                                     delete = Some(i);
                                 }
                             });
+                            #[cfg(test)]
+                            if i == 0 {
+                                self.strip_card_rect = Some(ui.min_rect());
+                            }
                         });
                         ui.add_space(SPACE_MD);
                     }
