@@ -929,6 +929,9 @@ impl AutoshopApp {
                         dlg = dlg.set_directory(d);
                     }
                     if let Some(p) = dlg.save_file() {
+                        // The format dropdown owns the container — the typed
+                        // name only picks the stem (normalize_export_target).
+                        let p = normalize_export_target(p, ext);
                         self.last_export_dir = p.parent().map(|d| d.to_path_buf());
                         self.start_render_to(p);
                     }

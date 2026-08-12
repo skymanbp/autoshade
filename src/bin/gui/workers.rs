@@ -368,6 +368,22 @@ impl AutoshopApp {
                         ExportOutcome::Single { out, relooked } => {
                             let mut p = out.display().to_string();
                             if relooked {
+                                // The export repaired its own COPY of this
+                                // canvas's washed base curve (export.rs) —
+                                // without repairing the canvas too, export
+                                // and preview stay divergent for the rest of
+                                // the session (the cross-surface class,
+                                // L14-3). Same photo anchor as the worker;
+                                // the repair memo is hot, so this is cheap.
+                                if let Some(photo) = self.src_path.clone()
+                                    && autoshop::pipeline::repair_pre_era_base_curve(
+                                        &photo,
+                                        &mut self.recipe,
+                                    )
+                                    .is_some()
+                                {
+                                    self.dirty = true;
+                                }
                                 p = format!(
                                     "{p} — {}",
                                     tr(

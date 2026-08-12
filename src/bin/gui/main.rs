@@ -52,6 +52,38 @@ use app::*;
 
 
 /// Decode the embedded Autoshop icon for the window title bar / taskbar.
+/// See main(): the last-crash report lands at `<store root>/panic.log`,
+/// and (Windows) a native message box points the user at it.
+fn install_panic_reporter() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let log = autoshop::store::store_root().join("panic.log");
+        let _ = std::fs::write(&log, format!("Autoshop crashed: {info}\n").as_bytes());
+        #[cfg(windows)]
+        message_box(&format!(
+            "Autoshop hit an internal error and must close.\n\n{info}\n\nA report was written to:\n{}",
+            log.display()
+        ));
+        default(info);
+    }));
+}
+
+/// Native blocking message box (user32, the store.rs raw-link pattern —
+/// windows-sys is in the tree but without the WindowsAndMessaging gate).
+#[cfg(windows)]
+fn message_box(text: &str) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        #[link_name = "MessageBoxW"]
+        fn message_box_w(hwnd: usize, text: *const u16, caption: *const u16, utype: u32) -> i32;
+    }
+    const MB_OK_ICONERROR: u32 = 0x0000_0010;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = "Autoshop".encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: NUL-terminated buffers, live across the synchronous call.
+    unsafe { message_box_w(0, wide.as_ptr(), title.as_ptr(), MB_OK_ICONERROR) };
+}
+
 fn app_icon() -> egui::IconData {
     let img = image::load_from_memory(include_bytes!("../../../assets/icon_256.png"))
         .expect("embedded icon decodes")
@@ -61,6 +93,11 @@ fn app_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    // A windowed release build has NO console: a panic wrote its report to a
+    // stderr nobody can see and the window simply vanished (L14-7). The hook
+    // writes the report beside the develop store and says so in a native
+    // message box — the one channel that needs no working event loop.
+    install_panic_reporter();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 880.0])

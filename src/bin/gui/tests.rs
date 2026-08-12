@@ -3,6 +3,20 @@
 // change by one byte). `super::*` still resolves to the root.
     use super::*;
 
+    /// L14-1: the format dropdown owns the downloaded file's container — a
+    /// typed foreign extension is rewritten, a same-container spelling is
+    /// kept exactly as typed.
+    #[test]
+    fn the_format_dropdown_owns_the_downloaded_extension() {
+        use std::path::PathBuf;
+        let n = |p: &str, ext: &str| normalize_export_target(PathBuf::from(p), ext);
+        assert_eq!(n("photo.png", "jpg"), PathBuf::from("photo.jpg"));
+        assert_eq!(n("photo", "tif"), PathBuf::from("photo.tif"));
+        assert_eq!(n("photo.jpeg", "jpg"), PathBuf::from("photo.jpeg"), "same container, as typed");
+        assert_eq!(n("photo.TIFF", "tif"), PathBuf::from("photo.TIFF"));
+        assert_eq!(n("photo.developed.png", "png"), PathBuf::from("photo.developed.png"));
+    }
+
     /// Both themes must keep every text-on-chrome pairing at WCAG AA (4.5:1
     /// for text, 3:1 for the armed indicator glyph). This is the contract the
     /// Light scheme was tuned against, and the guard that keeps a future

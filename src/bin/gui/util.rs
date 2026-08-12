@@ -327,6 +327,23 @@ pub(crate) fn same_base(a: &str, b: &str) -> bool {
     autoshop::config::same_endpoint(a, b)
 }
 
+/// The FORMAT dropdown owns the export container; a typed save-path only
+/// picks the name (the Lightroom model, L14-1): render_to_file derives its
+/// encoder from the extension, so "photo.png" typed under a JPEG-q60 export
+/// silently produced a PNG whose quality slider was ignored. Spellings of
+/// the SAME container (jpeg/jfif, tiff) are kept exactly as typed.
+pub(crate) fn normalize_export_target(mut p: std::path::PathBuf, ext: &str) -> std::path::PathBuf {
+    let typed = p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+    let same = matches!(
+        (ext, typed.as_deref()),
+        ("jpg", Some("jpg" | "jpeg" | "jfif")) | ("tif", Some("tif" | "tiff")) | ("png", Some("png"))
+    );
+    if !same {
+        p.set_extension(ext);
+    }
+    p
+}
+
 /// What the analysis model field should become when the provider radio flips
 /// (`None` = keep the user's value). Rewrites only what is KNOWN to belong to
 /// the other provider's vocabulary:
