@@ -1926,6 +1926,25 @@ pub fn recipe_revision(src: &Path) -> Option<String> {
     revision_of(&recipe_target(src))
 }
 
+/// The saved develop's revision tag for HTTP preconditions: the recipe.json
+/// revision, with the Lightroom sidecar's CONTENT identity folded in
+/// whenever that sidecar currently out-ranks the store — because it is then
+/// the very body `/api/recipe` serves. Tagging only the store file let a
+/// stale tab pass If-Match while the sidecar its answer was built from had
+/// changed underneath it (L04-4): the lost update the precondition exists
+/// to refuse. `None` (untaggable) when either side exists but cannot be
+/// read, the same stance as [`recipe_revision`].
+pub fn develop_revision(src: &Path) -> Option<String> {
+    let base = recipe_revision(src)?;
+    match lightroom_sidecar(src) {
+        LrSidecar::NewerThanStore(text) | LrSidecar::Only(text) => {
+            Some(format!("{base}+lr{:016x}", fnv1a64(text.as_bytes())))
+        }
+        LrSidecar::Unreadable(_) => None,
+        _ => Some(base),
+    }
+}
+
 fn revision_of(p: &Path) -> Option<String> {
     match read_bytes_capped(p, MAX_STORE_JSON) {
         Ok(b) => Some(format!("r{:016x}", fnv1a64(&b))),
@@ -4411,6 +4430,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
+
+    /// L04-4: the precondition tag must name what the answer was BUILT
+    /// from — when a Lightroom sidecar out-ranks the store, its content
+    /// joins the tag, and a content change re-tags even though the store
+    /// file never moved.
+    #[test]
+    fn the_develop_revision_folds_in_a_ranked_sidecar() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join("autoshop-store-test-revision-fold");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_rev_fold.arw"); // never read — only its neighbours are
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+
+        assert_eq!(
+            develop_revision(&raw).as_deref(),
+            Some("none"),
+            "no store file and no sidecar tags exactly like recipe_revision"
+        );
+
+        let lr = dir.join("_rev_fold.xmp");
+        let lr_v1 =
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: 30.0, ..Default::default() });
+        std::fs::write(&lr, &lr_v1).unwrap();
+        let t1 = develop_revision(&raw).unwrap();
+        assert!(t1.starts_with("none+lr"), "a ranked sidecar joins the tag: {t1}");
+
+        let lr_v2 =
+            crate::xmp::recipe_to_xmp(&EditRecipe { contrast: -30.0, ..Default::default() });
+        std::fs::write(&lr, &lr_v2).unwrap();
+        let t2 = develop_revision(&raw).unwrap();
+        assert_ne!(t1, t2, "a sidecar content change re-tags while the store never moved");
+
+        // Store newer than the sidecar → the sidecar no longer answers, and
+        // the tag is the bare store revision again.
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(
+            recipe_target(&raw),
+            serde_json::to_string(&EditRecipe { contrast: 10.0, ..Default::default() }).unwrap(),
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lr)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(7200))
+            .unwrap();
+        let t3 = develop_revision(&raw).unwrap();
+        assert!(t3.starts_with('r') && !t3.contains("+lr"), "store wins: {t3}");
+        assert_eq!(t3, recipe_revision(&raw).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
 
     /// L02-18: the double-crash window — a crashed publish left the .bak,
     /// and the RESTORE of that .bak crashed between its create_new claim and

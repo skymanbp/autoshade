@@ -693,6 +693,13 @@ fn api_upload(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         }
     }
 
+    if bytes.is_empty() {
+        // An empty body passed every gate and landed as a PERMANENT
+        // zero-byte gallery item nothing can open. The name said "photo";
+        // the payload must at least exist — deeper sniffing stays the
+        // decoder's job at open time.
+        return Ok(status_response(400, "the uploaded file is empty"));
+    }
     let dir = PathBuf::from("out").join("imported");
     std::fs::create_dir_all(&dir).context("create out/imported")?;
     // Same basename ≠ same photo: never truncate an existing import — pick
@@ -903,7 +910,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             // and the tag must name what this answer was built from. ONE
             // stamping site covers all six answer shapes.
             let resp = api_recipe_locked(&raw)?;
-            Ok(with_revision(resp, crate::store::recipe_revision(&raw).as_deref()))
+            Ok(with_revision(resp, crate::store::develop_revision(&raw).as_deref()))
         },
     );
 
@@ -953,15 +960,16 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             // The file EXISTS but cannot answer — the old fold into "absent"
             // answered from the store in silence (L08). The store still
             // answers below; the warning rides every answer.
-            xmp_warn = Header::from_bytes(
-                &b"X-Recipe-Warning"[..],
-                format!(
+            // Through header(), never raw from_bytes: {why} is a localized
+            // (often non-ASCII) OS error string, and the raw ASCII-only
+            // constructor silently killed this warning on such systems.
+            xmp_warn = header(
+                "X-Recipe-Warning",
+                &format!(
                     "a Lightroom sidecar sits beside this photo but could not be read ({why}) - \
                      any Lightroom edits in it are NOT reflected"
-                )
-                .as_bytes(),
-            )
-            .ok();
+                ),
+            );
         }
         _ => {}
     }
@@ -1035,7 +1043,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             // already surfaces this header for corrupt-recipe fallbacks.
             // ASCII by construction — it travels in an HTTP header.
             let mut resp = json_text(fixed);
-            if let Ok(h) = Header::from_bytes(&b"X-Recipe-Warning"[..], note.as_bytes()) {
+            if let Some(h) = header("X-Recipe-Warning", &note) {
                 resp.add_header(h);
             }
             return Ok(resp);
@@ -1048,7 +1056,33 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // was tuned in Lightroom over ITS camera-profile base, so it gets the
     // photo's fresh base look — the same rule the GUI applies on open.
     for path in [pipeline::xmp_target(raw), crate::store::legacy_xmp(raw)] {
-        if let Ok(text) = crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
+        let text = match crate::store::read_text_capped(&path, crate::store::MAX_STORE_JSON) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                // An EXISTING projection we cannot read is a save we cannot
+                // honour: the silent skip served 404 "not analyzed yet" over
+                // real saved edits — the same fold-into-absent this handler
+                // already refuses for the LR sidecar and for recipe.json.
+                // It bars the embedded packet below like any store file.
+                store_answered = true;
+                eprintln!(
+                    "⚠ the saved XMP projection {} exists but cannot be read ({e})",
+                    path.display()
+                );
+                if xmp_warn.is_none() {
+                    xmp_warn = header(
+                        "X-Recipe-Warning",
+                        &format!(
+                            "the saved XMP projection could not be read ({e}) - saved \
+                             edits are NOT reflected"
+                        ),
+                    );
+                }
+                continue;
+            }
+        };
+        {
             store_answered = true;
             let mut r = crate::xmp::xmp_to_recipe(&text);
             // First consulted file wins the disclosure slot (GUI accumulates
@@ -1190,7 +1224,9 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
 /// A6 disclosure header for XMP-derived recipes: numeric settings the import
 /// could not read became silent neutrals — the client shows this beside the
 /// SAVED verdict, because the next save overwrites the sidecar with those
-/// neutrals. ASCII by construction (crs key names). `None` when all parsed.
+/// neutrals. NOT ASCII by construction: the xmlns-conflict sentence carries
+/// an em dash, which is why this goes through `header` (L04-7). `None` when
+/// all parsed.
 fn recipe_warning_header(xmp_text: &str) -> Option<Header> {
     let bad = crate::xmp::unparsable_crs_numbers(xmp_text);
     if bad.is_empty() {
@@ -1202,7 +1238,7 @@ fn recipe_warning_header(xmp_text: &str) -> Option<Header> {
         bad.len(),
         bad.join(", ")
     );
-    Header::from_bytes(&b"X-Recipe-Warning"[..], msg.as_bytes()).ok()
+    header("X-Recipe-Warning", &msg)
 }
 
 /// The photo's FRESH camera-matched base-look knots, regardless of any saved
@@ -1637,7 +1673,16 @@ fn source_dims(raw: &Path) -> Option<(f32, f32)> {
 
 fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let stamp = request_gen(request);
-    let req: AnalyzeReq = read_json(request)?;
+    let mut req: AnalyzeReq = read_json(request)?;
+    // Untrusted network input — the same clamp the DevelopReq/XmpReq bodies
+    // get (both nested recipes feed view_for_mapping / the AI proposal, and
+    // an unclamped million-knot lens vector would occupy the handler).
+    if let Some(b) = req.base.as_mut() {
+        b.clamp();
+    }
+    if let Some(v) = req.view.as_mut() {
+        v.clamp();
+    }
     let raw = match state.at_checked(req.id, stamp) {
         Ok(r) => r,
         Err(resp) => return Ok(resp),
@@ -1721,7 +1766,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // the reply discloses it — where the explicit Save path had no
             // net at all. A 412 after a paid AI call would protect less
             // than the snapshot already does.
-            body["revision"] = json!(crate::store::recipe_revision(&raw));
+            body["revision"] = json!(crate::store::develop_revision(&raw));
             if decode::is_raw(&raw) {
                 match pipeline::write_xmp(&raw, &recipe) {
                     Ok((_, None)) => {}
@@ -1842,7 +1887,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     }
     let mut resp = jpeg_response(&after)?;
     if let Some(h) = preview_warning
-        .and_then(|m| Header::from_bytes(&b"X-Preview-Warning"[..], m.as_bytes()).ok())
+        .and_then(|m| header("X-Preview-Warning", &m))
     {
         resp = resp.with_header(h);
     }
@@ -1851,7 +1896,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // the recipe the client HOLDS still carries the washed curve until a
         // reselect refreshes it, or a save repairs it on the way to disk.
         .map(|m| format!("{m} - reselect the photo to refresh the loaded recipe"))
-        .and_then(|m| Header::from_bytes(&b"X-Recipe-Warning"[..], m.as_bytes()).ok())
+        .and_then(|m| header("X-Recipe-Warning", &m))
     {
         resp = resp.with_header(h);
     }
@@ -2090,7 +2135,7 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     }
     let mut resp = text_response(&out.display().to_string());
     if let Some(h) =
-        recipe_note.and_then(|m| Header::from_bytes(&b"X-Recipe-Warning"[..], m.as_bytes()).ok())
+        recipe_note.and_then(|m| header("X-Recipe-Warning", &m))
     {
         resp = resp.with_header(h);
     }
@@ -2163,7 +2208,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
         resp = resp.with_header(h);
     }
     if let Some(h) =
-        recipe_note.and_then(|m| Header::from_bytes(&b"X-Recipe-Warning"[..], m.as_bytes()).ok())
+        recipe_note.and_then(|m| header("X-Recipe-Warning", &m))
     {
         resp = resp.with_header(h);
     }
@@ -2264,7 +2309,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // develop, which destroys a lost update just as surely as a write.
     if let Some(resp) = precondition_failed(
         if_match.as_deref(),
-        crate::store::recipe_revision(&raw).as_deref(),
+        crate::store::develop_revision(&raw).as_deref(),
     ) {
         return Ok(resp);
     }
@@ -2320,7 +2365,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                 };
                 Ok(with_revision(
                     text_response(&format!("cleared — saved edits removed{note}")),
-                    crate::store::recipe_revision(&raw).as_deref(),
+                    crate::store::develop_revision(&raw).as_deref(),
                 ))
             }
             Err(e) => Ok(status_response(500, &format!("could not clear the saved edits: {e}"))),
@@ -2401,8 +2446,10 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // projection reports success WITH the warning instead of a 500 that
     // contradicts the on-disk state.
     // The NEW revision rides both success replies (recipe.json committed
-    // either way), so the tab adopts it without a re-GET.
-    let rev = crate::store::recipe_revision(&raw);
+    // either way), so the tab adopts it without a re-GET. Computed AFTER
+    // the projection write in each arm: the develop tag folds in a sidecar
+    // that out-ranks the store, and the tag the tab adopts must describe
+    // the state its next If-Match is compared against.
     match pipeline::write_xmp(&raw, &req.recipe) {
         // A regenerated (rather than merged) sidecar is a LOSS of the user's
         // Lightroom-only properties, so it rides the same reply as the path —
@@ -2414,14 +2461,14 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
                     "{}{save_note}{master_note}{merge_note}",
                     path.display()
                 )),
-                rev.as_deref(),
+                crate::store::develop_revision(&raw).as_deref(),
             ))
         }
         Err(e) => Ok(with_revision(
             text_response(&format!(
                 "saved (recipe.json) — but the Lightroom XMP projection failed: {e:#}{save_note}{master_note}"
             )),
-            rev.as_deref(),
+            crate::store::develop_revision(&raw).as_deref(),
         )),
     }
         },
@@ -2436,7 +2483,11 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 
     let stamp = request_gen(request);
-    let req: RetouchReq = read_json(request)?;
+    let mut req: RetouchReq = read_json(request)?;
+    // Untrusted network input — see api_analyze.
+    if let Some(v) = req.view.as_mut() {
+        v.clamp();
+    }
     let raw = match state.at_checked(req.id, stamp) {
         Ok(r) => r,
         Err(resp) => return Ok(resp),
@@ -2544,7 +2595,11 @@ fn default_true() -> bool {
 fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 
     let stamp = request_gen(request);
-    let req: HealReq = read_json(request)?;
+    let mut req: HealReq = read_json(request)?;
+    // Untrusted network input — see api_analyze.
+    if let Some(v) = req.view.as_mut() {
+        v.clamp();
+    }
     let raw = match state.at_checked(req.id, stamp) {
         Ok(r) => r,
         Err(resp) => return Ok(resp),
@@ -2799,23 +2854,36 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-/// Build a header, or `None` when the value is not a legal header value.
+/// Build a header whose VALUE is forced into printable ASCII.
 ///
 /// TWO hazards, and tiny_http covers only part of one. `Header::from_bytes`
 /// validates with `AsciiString::from_ascii`, which accepts every byte
-/// 0x00–0x7F — **including CR and LF** — and writes the value verbatim, so it
-/// rejects non-ASCII (hence `.ok()` rather than `.unwrap()`: a panicking
-/// handler thread answers with an EMPTY body via tiny_http's
-/// `impl Drop for Request`) but NOT response splitting. Today every value we
-/// emit is either a static ASCII string or percent-encoded at the call site,
-/// so nothing is exploitable; that safety rests entirely on a convention the
-/// next author has no way to see. Refuse control bytes here instead, so the
-/// guarantee lives with the constructor rather than with each caller's memory.
+/// 0x00–0x7F — **including CR and LF** — and writes the value verbatim: it
+/// rejects non-ASCII but NOT response splitting. Control bytes are therefore
+/// STRIPPED here, so the no-splitting guarantee lives with the constructor.
+/// Non-ASCII does not refuse either (L04-7): the dynamic strings that flow
+/// through here — localized Windows IO errors, the xmlns-conflict sentence's
+/// em dash — used to fail the ASCII check and die in an `.ok()`, which
+/// silenced X-Recipe-Warning in exactly the cases that most needed it. They
+/// degrade per-character instead (dashes kept legible, the rest `?`), so the
+/// warning always ships.
 fn header(field: &str, value: &str) -> Option<Header> {
-    if value.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        return None;
-    }
-    Header::from_bytes(field.as_bytes(), value.as_bytes()).ok()
+    let clean = ascii_sanitize(value);
+    Header::from_bytes(field.as_bytes(), clean.as_bytes()).ok()
+}
+
+/// See [`header`]: printable-ASCII projection of a header value — control
+/// bytes stripped, the house dashes kept legible, all other non-ASCII `?`.
+fn ascii_sanitize(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|c| match c {
+            '\u{2014}' | '\u{2013}' => Some('-'),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => None,
+            c if c.is_ascii() => Some(c),
+            _ => Some('?'),
+        })
+        .collect()
 }
 
 /// A JPEG body plus the `X-Output-Path` of the master that was saved, with the
@@ -3065,6 +3133,26 @@ fn precondition_failed(if_match: Option<&str>, current: Option<&str>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L04-7: the warning header must SURVIVE its worst real payloads — the
+    /// xmlns-conflict sentence carries an em dash, and localized IO errors
+    /// are non-ASCII; the raw ASCII-only constructor silently dropped both.
+    #[test]
+    fn the_warning_header_survives_a_non_ascii_disclosure() {
+        let doc = r#"<rdf:Description xmlns:crs="urn:other" crs:Exposure2012="+1.00"/>"#;
+        let h = recipe_warning_header(doc)
+            .expect("a conflict sentence with an em dash must still build the header");
+        assert!(h.value.as_str().is_ascii());
+        assert!(h.value.as_str().contains("not imported"), "{}", h.value.as_str());
+
+        let localized = header("X-Recipe-Warning", "cannot read (拒绝访问。) — not reflected")
+            .expect("a localized OS error must not kill the warning");
+        assert!(localized.value.as_str().is_ascii());
+
+        // The anti-splitting half is unchanged: control bytes are stripped.
+        let split = ascii_sanitize("a\r\nX-Injected: b");
+        assert!(!split.contains('\r') && !split.contains('\n'));
+    }
 
     /// C1/F10: an export slot claimed by a pre-canonical build under the
     /// LEXICAL key must keep matching its photo after the re-key — else a
