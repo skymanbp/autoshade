@@ -11,10 +11,9 @@ impl AutoshopApp {
         // doesn't force a re-fetch — and keep an in-flight fetch's flag alive:
         // zeroing it mid-fetch stopped the repaint pump AND re-armed the fetch
         // button (duplicate requests, stalled status).
-        let chat_choices = std::mem::take(&mut self.settings.chat_choices);
-        let image_gen_choices = std::mem::take(&mut self.settings.image_gen_choices);
-        let fetching_models = self.settings.fetching_models;
-        let models_from_base = std::mem::take(&mut self.settings.models_from_base);
+        let image_models = std::mem::take(&mut self.settings.image_models);
+        let analysis_models = std::mem::take(&mut self.settings.analysis_models);
+        let autofetched = self.settings.autofetched;
         self.settings = SettingsForm {
             analysis_provider_api: cfg.analysis_is_api(),
             image_provider_oauth: cfg.image_is_oauth(),
@@ -22,17 +21,42 @@ impl AutoshopApp {
             analysis_base_url: cfg.analysis_base_url.clone(),
             analysis_api_key: String::new(),
             analysis_key_present: cfg.analysis_api_key.is_some(),
+            analysis_effort: cfg.analysis_effort.clone().unwrap_or_default(),
             image_model: cfg.openai_model.clone(),
             image_base_url: cfg.openai_base_url.clone(),
             image_gen_model: cfg.openai_image_model.clone(),
             image_api_key: String::new(),
             image_key_present: cfg.openai_api_key.is_some(),
+            image_effort: cfg.image_effort.clone().unwrap_or_default(),
             status: String::new(),
-            chat_choices,
-            image_gen_choices,
-            fetching_models,
-            models_from_base,
+            image_models,
+            analysis_models,
+            autofetched,
         };
+        self.autofetch_models_once(&cfg);
+    }
+
+    /// First time Settings opens in a session, fill the pick-lists without
+    /// making the user find the button — "which models can I use here" is the
+    /// question the panel exists to answer, and a blank dropdown next to a
+    /// configured key reads as "none available".
+    ///
+    /// Once per session, and only for a role that already has a key: a probe
+    /// with no credential can only fail, and firing on every open would put a
+    /// network call behind "I came here to switch the language".
+    fn autofetch_models_once(&mut self, cfg: &autoshop::config::Config) {
+        if self.settings.autofetched {
+            return;
+        }
+        self.settings.autofetched = true;
+        if cfg.openai_api_key.is_some() {
+            self.fetch_models(ModelRole::Image);
+        }
+        // The analysis endpoint only has a catalogue to fetch in `api` mode —
+        // the OAuth verifier is the `claude` CLI, which serves no /models.
+        if cfg.analysis_is_api() && cfg.analysis_api_key.is_some() {
+            self.fetch_models(ModelRole::Analysis);
+        }
     }
 
     /// Persist the Settings form to autoshop.local.json (gitignored). A blank key
@@ -53,6 +77,11 @@ impl AutoshopApp {
             cur.image_model = Some(form.image_model.trim().to_string());
             cur.image_base_url = Some(form.image_base_url.trim().to_string());
             cur.image_gen_model = Some(form.image_gen_model.trim().to_string());
+            // Effort: an empty field is a real choice — "let the provider
+            // decide" — so it is stored as empty rather than skipped, or
+            // clearing the field could never take effect.
+            cur.analysis_effort = Some(form.analysis_effort.trim().to_string());
+            cur.image_effort = Some(form.image_effort.trim().to_string());
             // Secrets: only overwrite when a non-empty value was actually typed.
             let ak = form.analysis_api_key.trim().to_string();
             let ik = form.image_api_key.trim().to_string();
@@ -63,6 +92,11 @@ impl AutoshopApp {
                 cur.image_api_key = Some(ik);
             }
         });
+        // Did the user type a key on this save? Asked BEFORE the fields are
+        // cleared, so the refusal check below can tell "typed and rejected"
+        // from "left blank on purpose".
+        let typed_image = !self.settings.image_api_key.trim().is_empty();
+        let typed_analysis = !self.settings.analysis_api_key.trim().is_empty();
         match saved {
             Ok(p) => {
                 self.settings.analysis_api_key.clear();
@@ -73,8 +107,19 @@ impl AutoshopApp {
                 let cfg = autoshop::config::Config::load();
                 self.settings.analysis_key_present = cfg.analysis_api_key.is_some();
                 self.settings.image_key_present = cfg.openai_api_key.is_some();
-                self.settings.status =
-                    trf(self.lang, "saved → {path}", &[("path", &p.display().to_string())]);
+                // A key that cannot appear in an HTTP header is REFUSED by
+                // Config::load (`header_safe_key` — a newline or space from a
+                // paste is the usual cause). The refusal only prints to
+                // stderr, which the windowed GUI does not show, so "saved"
+                // beside a still-empty key state was the whole story the user
+                // got. Say it here instead.
+                let refused = (typed_image && !self.settings.image_key_present)
+                    || (typed_analysis && !self.settings.analysis_key_present);
+                self.settings.status = if refused {
+                    tr(self.lang, "saved, but the key was not accepted — it contains characters that cannot appear in an HTTP header (a stray space or newline from a copy/paste?). Re-copy it and save again.").into()
+                } else {
+                    trf(self.lang, "saved → {path}", &[("path", &p.display().to_string())])
+                };
                 self.status = tr(self.lang, "settings saved — applies to the next AI call (Analyze / Fill / Reimagine)").into();
             }
             Err(e) => {
@@ -84,50 +129,68 @@ impl AutoshopApp {
         }
     }
 
-    /// Fetch the account's model ids (`GET /models`) on a worker thread and fill the
-    /// Settings pick-lists. Uses the key/base typed in the form if present, else the
+    /// Fetch one role's model ids (`GET /models`) on a worker thread and fill that
+    /// role's pick-lists. Uses the key/base typed in the form if present, else the
     /// saved config — so it works whether or not the user has saved a key yet.
-    pub(crate) fn fetch_models(&mut self) {
-        if self.settings.fetching_models {
+    pub(crate) fn fetch_models(&mut self, role: ModelRole) {
+        let (form_key, form_base) = match role {
+            ModelRole::Image => (
+                self.settings.image_api_key.trim().to_string(),
+                self.settings.image_base_url.trim().to_string(),
+            ),
+            ModelRole::Analysis => (
+                self.settings.analysis_api_key.trim().to_string(),
+                self.settings.analysis_base_url.trim().to_string(),
+            ),
+        };
+        let cat = self.catalogue_mut(role);
+        if cat.fetching {
             return;
         }
-        self.settings.fetching_models = true;
-        self.settings.status = tr(self.lang, "fetching models…").into();
-        let form_key = self.settings.image_api_key.trim().to_string();
-        let form_base = self.settings.image_base_url.trim().to_string();
+        cat.fetching = true;
         // Drop the previous endpoint's lists NOW and stamp the base this fetch
         // targets: a failed fetch then leaves empty lists (grounded fallbacks)
         // rather than ids from the old server under the new URL's name.
-        self.settings.chat_choices.clear();
-        self.settings.image_gen_choices.clear();
-        self.settings.models_from_base = if form_base.is_empty() {
-            autoshop::config::Config::load().openai_base_url.clone()
+        cat.clear();
+        cat.from_base = if form_base.is_empty() {
+            match role {
+                ModelRole::Image => autoshop::config::Config::load().openai_base_url,
+                ModelRole::Analysis => autoshop::config::Config::load().analysis_base_url,
+            }
         } else {
             form_base.clone()
         };
-        // spawn_worker's catch_unwind guarantees the UI's `fetching_models`
-        // flag always clears — a panic still delivers Msg::Models(Err) (this
+        self.settings.status = tr(self.lang, "fetching models…").into();
+        // spawn_worker's catch_unwind guarantees the UI's `fetching` flag
+        // always clears — a panic still delivers Msg::Models(role, Err) (this
         // site used to hand-roll a Drop guard for exactly that; the helper
         // now covers every worker uniformly).
         self.spawn_worker(
             move || {
                 let cfg = autoshop::config::Config::load();
-                let base =
-                    if form_base.is_empty() { cfg.openai_base_url.clone() } else { form_base };
-                let key = if form_key.is_empty() {
-                    cfg.openai_api_key.clone().unwrap_or_default()
-                } else {
-                    form_key
+                let (cfg_base, cfg_key) = match role {
+                    ModelRole::Image => (cfg.openai_base_url, cfg.openai_api_key),
+                    ModelRole::Analysis => (cfg.analysis_base_url, cfg.analysis_api_key),
                 };
-                Msg::Models(autoshop::openai_models::list_models(&base, &key))
+                let base = if form_base.is_empty() { cfg_base } else { form_base };
+                let key =
+                    if form_key.is_empty() { cfg_key.unwrap_or_default() } else { form_key };
+                Msg::Models(role, autoshop::openai_models::list_models(&base, &key))
             },
-            |e| Msg::Models(Err(e)),
+            move |e| Msg::Models(role, Err(e)),
         );
+    }
+
+    pub(crate) fn catalogue_mut(&mut self, role: ModelRole) -> &mut ModelCatalogue {
+        match role {
+            ModelRole::Image => &mut self.settings.image_models,
+            ModelRole::Analysis => &mut self.settings.analysis_models,
+        }
     }
 
     pub(crate) fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let mut do_save = false;
-        let mut do_fetch = false;
+        let mut fetch: Option<ModelRole> = None;
         // `lang` is a Copy snapshot so `tr`/`trf` never borrow `self` — the
         // `let f = &mut self.settings` block below holds a partial borrow of self.
         let lang = self.lang;
@@ -198,14 +261,17 @@ impl AutoshopApp {
         {
             let f = &mut self.settings;
             // Fetched ids belong to the endpoint recorded at fetch time; once
-            // the Base/Bridge URL stops matching (typed edit, provider
-            // auto-swap), they describe a DIFFERENT server — self-invalidate
-            // so the pickers fall back to grounded defaults, not a stale menu.
-            if (!f.chat_choices.is_empty() || !f.image_gen_choices.is_empty())
-                && !same_base(&f.image_base_url, &f.models_from_base)
+            // that role's URL stops matching (typed edit, provider auto-swap),
+            // they describe a DIFFERENT server — self-invalidate so the
+            // pickers fall back to grounded defaults, not a stale menu.
+            if !f.image_models.is_empty() && !same_base(&f.image_base_url, &f.image_models.from_base)
             {
-                f.chat_choices.clear();
-                f.image_gen_choices.clear();
+                f.image_models.clear();
+            }
+            if !f.analysis_models.is_empty()
+                && !same_base(&f.analysis_base_url, &f.analysis_models.from_base)
+            {
+                f.analysis_models.clear();
             }
             ui.separator();
             ui.heading(tr(lang, "Analysis — the verifier"));
@@ -218,8 +284,12 @@ impl AutoshopApp {
                     // field and the picker presents it as the current choice
                     // (a claude alias sent to an OpenAI endpoint, or vice
                     // versa). Swap to this provider's default on a flip.
-                    let claude_alias =
-                        matches!(f.analysis_model.as_str(), "opus" | "sonnet" | "haiku");
+                    //
+                    // The alias test reads the CLI's own documented list
+                    // (`CLAUDE_ALIASES`), not a hardcoded trio: `fable` is an
+                    // alias too, and a stale trio silently rewrote it to
+                    // `opus` on any provider flip.
+                    let claude_alias = CLAUDE_ALIASES.contains(&f.analysis_model.as_str());
                     if f.analysis_provider_api && claude_alias {
                         f.analysis_model = "gpt-5.5".into();
                     } else if !f.analysis_provider_api && !claude_alias {
@@ -229,20 +299,25 @@ impl AutoshopApp {
             });
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Model"));
-                // OAuth uses Claude CLI aliases; API uses the fetched OpenAI chat ids,
-                // but only when the analysis endpoint matches the one we fetched from
-                // (the image key/base) — otherwise those ids may not exist there.
+                // OAuth uses Claude CLI aliases; API uses the ids fetched from
+                // the ANALYSIS endpoint — its own probe, not the image role's.
+                // Borrowing the image list meant a separate analysis endpoint
+                // offered nothing but two hardcoded ids.
                 let opts = if f.analysis_provider_api {
-                    let fetched = if same_base(&f.analysis_base_url, &f.image_base_url) {
-                        f.chat_choices.as_slice()
-                    } else {
-                        &[]
-                    };
-                    model_opts(fetched, &["gpt-5.5", "gpt-4o"], &f.analysis_model)
+                    model_opts(&f.analysis_models.chat, &["gpt-5.5", "gpt-4o"], &f.analysis_model)
                 } else {
-                    model_opts(&[], &["opus", "sonnet", "haiku"], &f.analysis_model)
+                    model_opts(&[], &CLAUDE_ALIASES, &f.analysis_model)
                 };
                 model_picker(ui, "set_analysis_model", &mut f.analysis_model, &opts, lang);
+            });
+            ui.horizontal(|ui| {
+                ui.label(tr(lang, "Reasoning effort"));
+                // The CLI and the API endpoints accept different tier names —
+                // offer the right list, and keep the free-text field for
+                // anything a given endpoint adds later.
+                let tiers: &[&str] =
+                    if f.analysis_provider_api { &EFFORT_TIERS_API } else { &EFFORT_TIERS_CLI };
+                effort_picker(ui, "set_analysis_effort", &mut f.analysis_effort, tiers, lang);
             });
             if f.analysis_provider_api {
                 ui.horizontal(|ui| {
@@ -252,7 +327,42 @@ impl AutoshopApp {
                 ui.horizontal(|ui| {
                     ui.label(tr(lang, "API Key"));
                     let hint = if f.analysis_key_present { tr(lang, "key set — blank keeps it") } else { tr(lang, "no key set") };
-                    ui.add(egui::TextEdit::singleline(&mut f.analysis_api_key).password(true).hint_text(hint));
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut f.analysis_api_key).password(true).hint_text(hint))
+                        .changed()
+                    {
+                        // Availability is CREDENTIAL-dependent as well as
+                        // URL-dependent — see the image role's key field.
+                        f.analysis_models.clear();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let label = if f.analysis_models.fetching {
+                        tr(lang, "fetching…")
+                    } else {
+                        tr(lang, "🔄 Fetch models")
+                    };
+                    if ui
+                        .add_enabled(!f.analysis_models.fetching, egui::Button::new(label))
+                        .on_hover_text(tr(
+                            lang,
+                            "List the models THIS endpoint serves (GET /models). The analysis role has its own endpoint and key, so it gets its own list.",
+                        ))
+                        .clicked()
+                    {
+                        fetch = Some(ModelRole::Analysis);
+                    }
+                    if !f.analysis_models.chat.is_empty() {
+                        ui.label(
+                            egui::RichText::new(trf(
+                                lang,
+                                "{chat} chat",
+                                &[("chat", &f.analysis_models.chat.len().to_string())],
+                            ))
+                            .weak()
+                            .small(),
+                        );
+                    }
                 });
             }
             ui.separator();
@@ -282,20 +392,20 @@ impl AutoshopApp {
                 }
             }
             ui.horizontal(|ui| {
-                let label = if f.fetching_models { tr(lang, "fetching…") } else { tr(lang, "🔄 Fetch models") };
+                let label = if f.image_models.fetching { tr(lang, "fetching…") } else { tr(lang, "🔄 Fetch models") };
                 let clicked = ui
-                    .add_enabled(!f.fetching_models, egui::Button::new(label))
+                    .add_enabled(!f.image_models.fetching, egui::Button::new(label))
                     .on_hover_text(tr(
                         lang,
                         "List the models this endpoint serves (GET /models) so you can pick instead of guess — and a live reachability check for the bridge/API. Uses the key/token typed below, or the saved one if blank.",
                     ))
                     .clicked();
                 if clicked {
-                    do_fetch = true;
+                    fetch = Some(ModelRole::Image);
                 }
-                if !f.chat_choices.is_empty() || !f.image_gen_choices.is_empty() {
-                    let cn = f.chat_choices.len().to_string();
-                    let im = f.image_gen_choices.len().to_string();
+                if !f.image_models.is_empty() {
+                    let cn = f.image_models.chat.len().to_string();
+                    let im = f.image_models.image_gen.len().to_string();
                     ui.label(
                         egui::RichText::new(trf(lang, "{chat} chat · {image} image", &[("chat", &cn), ("image", &im)]))
                             .weak()
@@ -309,8 +419,12 @@ impl AutoshopApp {
             });
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Vision model"));
-                let opts = model_opts(&f.chat_choices, &["gpt-5.5", "gpt-4o"], &f.image_model);
+                let opts = model_opts(&f.image_models.chat, &["gpt-5.5", "gpt-4o"], &f.image_model);
                 model_picker(ui, "set_vision_model", &mut f.image_model, &opts, lang);
+            });
+            ui.horizontal(|ui| {
+                ui.label(tr(lang, "Reasoning effort"));
+                effort_picker(ui, "set_image_effort", &mut f.image_effort, &EFFORT_TIERS_API, lang);
             });
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Image-gen model"));
@@ -321,7 +435,7 @@ impl AutoshopApp {
                 } else {
                     &["gpt-image-1.5", "gpt-image-2", "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest"]
                 };
-                let opts = model_opts(&f.image_gen_choices, fallbacks, &f.image_gen_model);
+                let opts = model_opts(&f.image_models.image_gen, fallbacks, &f.image_gen_model);
                 model_picker(ui, "set_imagegen_model", &mut f.image_gen_model, &opts, lang);
             });
             ui.horizontal(|ui| {
@@ -343,8 +457,7 @@ impl AutoshopApp {
                     // self-invalidation above can't see that. Typing a new
                     // key drops the fetched lists (the pickers fall back to
                     // grounded defaults until the next fetch).
-                    f.chat_choices.clear();
-                    f.image_gen_choices.clear();
+                    f.image_models.clear();
                 }
             });
             let note = if f.image_provider_oauth {
@@ -366,8 +479,8 @@ impl AutoshopApp {
         if do_save {
             self.save_settings_form();
         }
-        if do_fetch {
-            self.fetch_models();
+        if let Some(role) = fetch {
+            self.fetch_models(role);
         }
     }
 }

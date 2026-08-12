@@ -88,24 +88,60 @@
 >   level the ev = 0 design holds, three of the six one code below pure
 >   white (65534, the quantisation edge of clipping). The old `ev > 1`
 >   carve-out in the grid test is gone; one 128 bound covers the whole grid.
-> * **A settings file in the working directory is ambient input, and so is a
->   `.env`.** Either may pick models and providers; neither may supply an API
->   key, choose the endpoint one is sent to, **or name a program to run**
->   (`config::LocalSettings::without_ambient_authority`, and the
->   `AMBIENT_UNSAFE_VARS` snapshot taken before `dotenv_override` in
->   `Config::load` — the second half matters because `AUTOSHOP_CLAUDE_BIN` and
->   `AUTOSHOP_PYTHON` reach `Command::new` verbatim, so guarding only the base
->   URLs left the strictly worse outcome open on the same file). Resolution is
->   per FIELD, so a planted `autoshop.local.json` carrying only
+> * **Trust is a property of each SETTING, declared once** (`config::SETTINGS`,
+>   v0.23.2). Each setting is `Secret` (authenticates and bills the user),
+>   `Destination` (names where bytes go, which account pays, or what program
+>   runs), or `Preference` (which model / provider / tuning number). Each
+>   source is `Trusted` (the live environment; the settings file under a
+>   per-user store root), `DotEnv`, or `WorkingDirFile`. One match states the
+>   whole policy: `Trusted` may supply anything, a `.env` loses only
+>   `Destination`, an ambient file keeps only `Preference`. Everything else —
+>   which `.env` names are refused, which settings-file fields an ambient file
+>   loses, what reaches a child process's environment, which warnings fire —
+>   is derived from that table.
+>
+>   It replaced three hand-kept lists that had provably drifted: the guard's
+>   own test carried a copied 14-name array while the constant had grown to
+>   17, and `Config::load` read that array BY INDEX (`pre(11)` meant
+>   `AUTOSHOP_OPENAI_MODEL`), so adding or removing one name silently
+>   repointed unrelated config fields at the wrong variable. The `Destination`
+>   half is the one that matters most: `AUTOSHOP_CLAUDE_BIN` and
+>   `AUTOSHOP_PYTHON` reach `Command::new` verbatim and the script variables
+>   become that command's argv, so guarding only the base URLs left the
+>   strictly worse outcome open on the same file. `ANTHROPIC_API_KEY` /
+>   `_AUTH_TOKEN` / `_BASE_URL` are `Destination` too — for the `claude` child
+>   the credential IS the routing decision.
+>
+>   Resolution is per FIELD, so a planted `autoshop.local.json` carrying only
 >   `image_base_url` used to redirect the endpoint while the real key still
 >   came from the environment — the filesystem twin of the cross-origin hole
 >   §4.9 describes, and it needed nothing but running Autoshop inside an
->   extracted archive. Three routes to that outcome are now closed: the read
->   path (v0.18.0), the settings-SAVE path — which read-merge-wrote ambient
->   values into the trusted central file, where nothing strips them again —
->   and `.env`, which `dotenvy` searches for from the working directory
->   upward and which `dotenv_override` lets beat a variable the user really
->   set.
+>   extracted archive. Four routes to that outcome are closed: the read path
+>   (v0.18.0), the settings-SAVE path — which read-merge-wrote ambient values
+>   into the trusted central file, where nothing strips them again — `.env`,
+>   which `dotenvy` searches for from the working directory upward, and the
+>   STORE ROOT itself (v0.23.2): the per-user directory used to be
+>   `%LOCALAPPDATA%` on every platform, a variable Unix does not set, so every
+>   Linux/macOS build fell through to `/tmp/autoshop` and granted the settings
+>   file found there full central authority. Each platform now names its own
+>   per-account directory (`$XDG_DATA_HOME`, `$HOME/.local/share`), and a
+>   shared-temp fallback is LABELLED (`store::RootTrust::SharedFallback`) so
+>   the loader downgrades it to ambient rather than trusting it.
+>
+>   A `.env` keeps `Secret` on purpose — it is where this project's own key
+>   lives, a documented contract — which is also why a `.env` picking
+>   `AUTOSHOP_ANALYSIS_PROVIDER` is not an escalation: supplying
+>   `OPENAI_API_KEY` already routes the image proposer, and that call carries
+>   the PHOTO.
+> * **A key that cannot ride an HTTP header is refused at the boundary**
+>   (`config::header_safe_key`, v0.23.2). ureq builds the `Authorization`
+>   header eagerly and quotes the whole rejected line back — key included —
+>   into a `Transport` error, which then travels into rationale text, the
+>   Settings status line, and any log pasted into a bug report. A trailing
+>   newline from a copy/paste was enough. The value is trimmed and then
+>   refused if any byte cannot appear in a header; both transport arms
+>   (`post_ai_json`, `openai_models::list_models`) redact as the second layer,
+>   matching what their status arms already did.
 > * **A degraded save is disclosed, and the disclosure must be TRUE.** When an
 >   existing sidecar cannot be merged, the note names the file whose properties
 >   are lost (not the output), says whether that file was modified, and fires
@@ -307,8 +343,11 @@ nudge the last 10%" workflow.
 
 Since v0.13.0 Autoshop does **not** write it next to the `.ARW`: the source
 library is read-only, so the projection lands in the per-user develop store
-(`<AUTOSHOP_DATA_DIR | %LOCALAPPDATA%/autoshop>/develops/<stem>-<hash of the
-absolute path>/<stem>.xmp`), alongside `recipe.json` (the authoritative develop
+(`<AUTOSHOP_DATA_DIR | %LOCALAPPDATA%/autoshop | $XDG_DATA_HOME/autoshop |
+$HOME/.local/share/autoshop>/develops/<stem>-<hash of the absolute
+path>/<stem>.xmp` — see `store::store_root_with_trust`, and the trust bullet in
+§3 for why the shared-temp last resort is labelled rather than
+trusted), alongside `recipe.json` (the authoritative develop
 state), version snapshots, mask rasters, `pixels.json` (the baked pixel-master
 link) and, since v0.22.0, `variants.json` — the GUI's variant strip
 (background variants' kind/recipe/raster origin + the active card's

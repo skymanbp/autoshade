@@ -637,23 +637,34 @@ pub(crate) fn error_blames_param(body: &str, name: &str) -> bool {
 /// keeps emitting summary deltas WHILE it reasons — liveness through the
 /// otherwise-silent phase.
 ///
+/// `effort` is the user's reasoning-effort choice (`None` ⇒ send no such
+/// parameter at all, which is the only correct request for a model that does
+/// not reason). The wire spelling is per family and lives HERE, not in the
+/// callers: `/responses` carries it as `reasoning.effort` beside the summary
+/// stream, `/chat/completions` as a top-level `reasoning_effort`.
+///
 /// Negotiation (each flag drops at most once, on a 400-class status whose
 /// error actually blames that parameter — see [`error_blames_param`]):
-/// `reasoning` (models without summaries) → retry streaming without it;
-/// `stream` (thin OpenAI-compatible bridges) → retry ONCE as a blocking call
-/// under `budget_secs` as an OVERALL deadline. A server that accepts `stream`
-/// but answers plain JSON is handled by Content-Type dispatch. Returns the
-/// endpoint's BLOCKING response shape either way.
+/// the effort tier (an endpoint or model that has no such notion) → retry
+/// without it; `reasoning` (models without summaries) → retry streaming
+/// without it; `stream` (thin OpenAI-compatible bridges) → retry ONCE as a
+/// blocking call under `budget_secs` as an OVERALL deadline. A server that
+/// accepts `stream` but answers plain JSON is handled by Content-Type
+/// dispatch. Returns the endpoint's BLOCKING response shape either way.
 pub(crate) fn post_ai_json(
     url: &str,
     key: &str,
     body: serde_json::Value,
     budget_secs: u64,
     family: SseFamily,
+    effort: Option<&str>,
 ) -> Result<serde_json::Value, AdvisorError> {
     let mut use_stream = true;
-    let mut use_summary =
-        matches!(family, SseFamily::Responses) && body.get("reasoning").is_none();
+    // A caller that built its own `reasoning` object owns it completely —
+    // neither knob is grafted on top of a hand-written one.
+    let caller_owns_reasoning = body.get("reasoning").is_some();
+    let mut use_summary = matches!(family, SseFamily::Responses) && !caller_owns_reasoning;
+    let mut use_effort = effort.is_some() && !caller_owns_reasoning;
 
     loop {
         // Rebuild from the caller's body each attempt — dropping a negotiated
@@ -661,8 +672,27 @@ pub(crate) fn post_ai_json(
         let mut attempt = body.clone();
         if use_stream {
             attempt["stream"] = serde_json::Value::Bool(true);
-            if use_summary {
-                attempt["reasoning"] = serde_json::json!({"summary": "auto"});
+        }
+        match family {
+            SseFamily::Responses => {
+                // One object, two independent knobs. The summary stream only
+                // means anything while streaming; the effort tier applies to
+                // the blocking fallback too.
+                let mut reasoning = serde_json::Map::new();
+                if use_summary && use_stream {
+                    reasoning.insert("summary".into(), "auto".into());
+                }
+                if let Some(e) = effort.filter(|_| use_effort) {
+                    reasoning.insert("effort".into(), e.into());
+                }
+                if !reasoning.is_empty() {
+                    attempt["reasoning"] = serde_json::Value::Object(reasoning);
+                }
+            }
+            SseFamily::Chat => {
+                if let Some(e) = effort.filter(|_| use_effort) {
+                    attempt["reasoning_effort"] = e.into();
+                }
             }
         }
         let req = if use_stream {
@@ -747,6 +777,24 @@ pub(crate) fn post_ai_json(
                     use_summary = false;
                     continue;
                 }
+                // The effort tier goes SECOND: on /responses both knobs live
+                // under `reasoning`, so an endpoint that reports the parent
+                // rather than the child (`reasoning` instead of
+                // `reasoning.effort`) is ambiguous — dropping the summary
+                // first preserves the pre-effort behaviour, and this arm then
+                // catches an endpoint that has no effort notion at all.
+                if negotiable
+                    && use_effort
+                    && (error_blames_param(&b, "reasoning_effort")
+                        || error_blames_param(&b, "reasoning"))
+                {
+                    eprintln!(
+                        "  note: endpoint rejected the reasoning-effort tier — retrying without \
+                         it (the provider's own default applies)"
+                    );
+                    use_effort = false;
+                    continue;
+                }
                 if negotiable && use_stream && error_blames_param(&b, "stream") {
                     eprintln!(
                         "  note: endpoint rejected streaming — retrying as one blocking call \
@@ -765,7 +813,7 @@ pub(crate) fn post_ai_json(
                 // No elapsed-time observation proves that the provider did
                 // not accept and bill the request before the connection failed.
                 // Retrying is therefore an explicit user decision.
-                return Err(if use_stream {
+                let err = if use_stream {
                     stall_transport_error(
                         &t,
                         effective_stall_secs(budget_secs.max(STREAM_STALL_FLOOR_SECS)),
@@ -773,6 +821,21 @@ pub(crate) fn post_ai_json(
                     )
                 } else {
                     transport_error(&t, budget_secs)
+                };
+                // The Http arm above redacts; this one used to not — and it is
+                // the arm a KEY arrives in. ureq builds the Authorization
+                // header eagerly and quotes the WHOLE header line back when it
+                // rejects one (2.12.1 `header.rs:147`), so a key carrying an
+                // illegal byte — a newline from a copy/paste — reached the
+                // rationale, the GUI status line and any pasted log verbatim.
+                // `config::header_safe_key` refuses such a key at the
+                // boundary; this is the second layer, and it also covers a
+                // base URL that embedded credentials.
+                return Err(match err {
+                    AdvisorError::Transport(msg) => AdvisorError::Transport(
+                        BoundedUntrustedText::diagnostic(&msg, &[key]).into_string(),
+                    ),
+                    other => other,
                 });
             }
         }
@@ -1424,6 +1487,87 @@ mod tests {
         let _ = handle.join();
     }
 
+    /// The effort tier is spelled per FAMILY and negotiated away like every
+    /// other optional knob. Pinned on the wire, because the two families
+    /// disagree — `/responses` nests it under `reasoning` beside the summary
+    /// stream, `/chat/completions` takes a top-level `reasoning_effort` — and
+    /// a caller sending the wrong one gets a 400 on every real call.
+    #[test]
+    fn the_reasoning_effort_tier_is_spelled_per_family_and_dropped_on_refusal() {
+        // Responses: one knob object carrying BOTH the liveness summary and
+        // the tier. A plain-JSON 2xx returns straight through.
+        let (url, seen, handle) =
+            stub_endpoint(vec![(200, "application/json", r#"{"ok":true}"#.into())]);
+        let _ = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            Some("high"),
+        )
+        .expect("a plain 2xx is returned as-is");
+        join_stub(handle);
+        let body: serde_json::Value =
+            serde_json::from_str(&seen.lock().unwrap()[0]).expect("the stub records raw JSON");
+        assert_eq!(body["reasoning"]["effort"], "high", "responses nests the tier: {body}");
+        assert_eq!(
+            body["reasoning"]["summary"], "auto",
+            "…without displacing the liveness stream: {body}"
+        );
+        assert!(body.get("reasoning_effort").is_none(), "that is the CHAT spelling: {body}");
+
+        // Chat: the flat spelling, and a 400 that blames it drops the tier
+        // exactly once — the retry keeps everything else.
+        let (url, seen, handle) = stub_endpoint(vec![
+            (
+                400,
+                "application/json",
+                r#"{"error":{"param":"reasoning_effort","message":"unsupported"}}"#.into(),
+            ),
+            (200, "application/json", r#"{"ok":true}"#.into()),
+        ]);
+        let _ = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Chat,
+            Some("low"),
+        )
+        .expect("the retry without the tier succeeds");
+        join_stub(handle);
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2, "exactly one renegotiation POST");
+        let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert_eq!(first["reasoning_effort"], "low", "chat uses the flat key: {first}");
+        assert!(first.get("reasoning").is_none(), "that is the RESPONSES spelling: {first}");
+        assert!(second.get("reasoning_effort").is_none(), "the dropped tier stays dropped: {second}");
+        assert_eq!(second["model"], "m", "…and nothing else was lost with it: {second}");
+    }
+
+    /// No tier configured ⇒ no such parameter on the wire at all. A model
+    /// that does not reason must see the request it has always seen.
+    #[test]
+    fn no_effort_configured_sends_no_effort_parameter() {
+        let (url, seen, handle) =
+            stub_endpoint(vec![(200, "application/json", r#"{"ok":true}"#.into())]);
+        let _ = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Chat,
+            None,
+        )
+        .expect("a plain 2xx is returned as-is");
+        join_stub(handle);
+        let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+        assert!(body.get("reasoning_effort").is_none(), "{body}");
+        assert!(body.get("reasoning").is_none(), "{body}");
+    }
+
     /// A 2xx means the endpoint accepted the request, did the work and
     /// BILLED for it — an unreadable body must surface as an error after
     /// exactly ONE post, never buy a second charge. Only a counted
@@ -1438,6 +1582,7 @@ mod tests {
             serde_json::json!({"model": "m"}),
             5,
             SseFamily::Chat,
+            None,
         )
         .expect_err("an unreadable 2xx body is an error, not a retry");
         assert!(
@@ -1472,6 +1617,7 @@ mod tests {
             serde_json::json!({"model": "m"}),
             5,
             SseFamily::Chat,
+            None,
         )
         .expect("the blocking retry succeeds");
         assert_eq!(v["answer"], 42);
@@ -1496,6 +1642,7 @@ mod tests {
             serde_json::json!({"model": "m"}),
             5,
             SseFamily::Chat,
+            None,
         )
         .expect_err("a second stream refusal is terminal");
         assert!(matches!(err, AdvisorError::Http { status: 400, .. }), "{err}");
@@ -1524,6 +1671,7 @@ mod tests {
             serde_json::json!({"model": "m"}),
             5,
             SseFamily::Chat,
+            None,
         )
         .expect_err("a quota status is terminal");
         assert!(matches!(err, AdvisorError::Http { status: 429, .. }), "{err}");

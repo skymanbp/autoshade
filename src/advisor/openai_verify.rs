@@ -16,6 +16,8 @@ pub struct OpenAiVerifier {
     api_key: Option<String>,
     model: String,
     base_url: String,
+    /// The analysis role's reasoning-effort tier — see `OpenAiProvider`.
+    effort: Option<String>,
 }
 
 impl OpenAiVerifier {
@@ -24,6 +26,7 @@ impl OpenAiVerifier {
             api_key: cfg.analysis_api_key.clone(),
             model: cfg.analysis_model.clone(),
             base_url: cfg.analysis_base_url.clone(),
+            effort: cfg.analysis_effort.clone(),
         }
     }
 }
@@ -61,6 +64,7 @@ impl Advisor for OpenAiVerifier {
             body.clone(),
             super::VERIFY_TIMEOUT_SECS,
             super::SseFamily::Chat,
+            self.effort.as_deref(),
         ) {
             // Reasoning-class models accept only the DEFAULT temperature and
             // reject the deterministic pin with a 400 blaming it — the pin is
@@ -76,7 +80,14 @@ impl Advisor for OpenAiVerifier {
                 if let Some(o) = body.as_object_mut() {
                     o.remove("temperature");
                 }
-                super::post_ai_json(&url, key, body, super::VERIFY_TIMEOUT_SECS, super::SseFamily::Chat)?
+                super::post_ai_json(
+                    &url,
+                    key,
+                    body,
+                    super::VERIFY_TIMEOUT_SECS,
+                    super::SseFamily::Chat,
+                    self.effort.as_deref(),
+                )?
             }
             other => other?,
         };

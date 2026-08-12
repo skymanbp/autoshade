@@ -331,16 +331,67 @@ mod os_develop_lock {
     pub(super) fn unlock(_: &File) {}
 }
 
-/// Per-user store root: `AUTOSHOP_DATA_DIR` env override (tests, portable
-/// setups) → `%LOCALAPPDATA%/autoshop` → `<temp>/autoshop`. Absolute, so keys
-/// and targets never depend on the process cwd.
+/// Whether [`store_root`] resolved to a directory only this account can write,
+/// or to the last-resort shared temp fallback.
+///
+/// This is a TRUST label with teeth, not a breadcrumb. The settings file lives
+/// under the root ([`settings_path`]), and a settings file the loader considers
+/// CENTRAL may supply an API key *and* the endpoint that key is sent to
+/// (`config::SettingsOrigin`). `<temp>/autoshop` is writable by every account
+/// on the machine, so a file pre-planted there inherited exactly that
+/// authority — the same "extract a shared archive, run Autoshop" attack the
+/// ambient guards close for the working directory, through a world-writable
+/// directory instead. A shared root therefore carries AMBIENT authority.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RootTrust {
+    /// `AUTOSHOP_DATA_DIR` (from the user's own environment), `%LOCALAPPDATA%`,
+    /// `$XDG_DATA_HOME`, or `$HOME/.local/share` — per-account.
+    PerUser,
+    /// `<temp>/autoshop`: nothing better answered. Shared with every account.
+    SharedFallback,
+}
+
+/// Per-user store root and its trust label. Resolution order:
+/// `AUTOSHOP_DATA_DIR` (env override for tests / portable setups) → the
+/// platform's own per-account data directory → `<temp>/autoshop`. Absolute, so
+/// keys and targets never depend on the process cwd.
+///
+/// The per-account step used to be `%LOCALAPPDATA%` on EVERY platform — a
+/// variable Unix does not set. So every Linux/macOS build fell through to
+/// `/tmp/autoshop` and then handed the settings file found there full central
+/// authority, keys and base URLs included, on a directory any local account can
+/// write first. Each platform now names its own directory, and the shared
+/// fallback is LABELLED rather than trusted (the loader downgrades it).
+pub fn store_root_with_trust() -> (PathBuf, RootTrust) {
+    let (root, trust) = std::env::var_os("AUTOSHOP_DATA_DIR")
+        .map(|d| (PathBuf::from(d), RootTrust::PerUser))
+        .or_else(|| per_user_data_dir().map(|d| (d.join("autoshop"), RootTrust::PerUser)))
+        .unwrap_or_else(|| (std::env::temp_dir().join("autoshop"), RootTrust::SharedFallback));
+    (std::path::absolute(&root).unwrap_or(root), trust)
+}
+
 pub fn store_root() -> PathBuf {
-    let root = std::env::var_os("AUTOSHOP_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        std::env::var_os("LOCALAPPDATA")
-            .map(|d| PathBuf::from(d).join("autoshop"))
-            .unwrap_or_else(|| std::env::temp_dir().join("autoshop"))
-    });
-    std::path::absolute(&root).unwrap_or(root)
+    store_root_with_trust().0
+}
+
+/// The platform's per-account data directory, or `None` when the environment
+/// names none (a bare service account, a chroot without `HOME`). Read from the
+/// LIVE environment only — nothing in this project writes the process
+/// environment, so a `.env` cannot reach these names.
+#[cfg(windows)]
+fn per_user_data_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+}
+
+#[cfg(not(windows))]
+fn per_user_data_dir() -> Option<PathBuf> {
+    // XDG first (the spec's own override), then the HOME-relative default it
+    // documents. A RELATIVE `XDG_DATA_HOME` is ignored per the spec — and
+    // would otherwise reintroduce a cwd-relative store root.
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
 }
 
 /// FNV-1a 64-bit. Deliberately hand-rolled: `DefaultHasher` is NOT stable

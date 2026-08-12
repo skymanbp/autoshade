@@ -23,6 +23,11 @@ pub struct OpenAiProvider {
     api_key: Option<String>,
     model: String,
     base_url: String,
+    /// The image role's reasoning-effort tier, or `None` for the provider's
+    /// default. Validated in `config::effort`; spelled onto the wire by
+    /// `advisor::post_ai_json` and negotiated away if the endpoint has no
+    /// such notion.
+    effort: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -31,6 +36,7 @@ impl OpenAiProvider {
             api_key: cfg.openai_api_key.clone(),
             model: cfg.openai_model.clone(),
             base_url: cfg.openai_base_url.clone(),
+            effort: cfg.image_effort.clone(),
         }
     }
 }
@@ -168,6 +174,7 @@ follow it closely): ");
             body,
             super::PROPOSE_TIMEOUT_SECS,
             super::SseFamily::Responses,
+            self.effort.as_deref(),
         )?;
 
         let recipe_json = extract_output_text(&value).ok_or_else(|| AdvisorError::Transport(
@@ -248,6 +255,7 @@ so the same prompt can restyle ANY other photograph. Output ONLY the prompt text
         body,
         super::STYLE_TIMEOUT_SECS,
         super::SseFamily::Responses,
+        cfg.image_effort.as_deref(),
     )?;
     let text = extract_output_text(&value).ok_or_else(|| {
         AdvisorError::Transport("could not locate output text in OpenAI response".into())

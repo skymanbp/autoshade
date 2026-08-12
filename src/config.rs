@@ -22,16 +22,26 @@ use serde::{Deserialize, Serialize};
 
 /// The UI-written / hand-edited local config. Every field is optional; a present
 /// value overrides the environment. Lives in [`local_settings_path`] (gitignored).
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` is load-bearing: [`LocalSettings::names_beyond`] asks whether
+/// restricting a file to what its source may supply CHANGED it, so the
+/// "warn about what was ignored" check can never drift from the stripping
+/// itself (they used to be two hand-maintained field lists).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalSettings {
     pub analysis_provider: Option<String>,
     pub analysis_model: Option<String>,
     pub analysis_api_key: Option<String>,
     pub analysis_base_url: Option<String>,
+    /// Reasoning effort for the analysis role. `None` / empty ⇒ send nothing
+    /// and let the provider decide (the pre-v0.23.2 behaviour).
+    pub analysis_effort: Option<String>,
     pub image_api_key: Option<String>,
     pub image_model: Option<String>,
     pub image_base_url: Option<String>,
     pub image_gen_model: Option<String>,
+    /// Reasoning effort for the image (vision proposer) role. See above.
+    pub image_effort: Option<String>,
     /// `"oauth"` (ChatGPT-subscription via a local Codex bridge, e.g. CLIProxyAPI)
     /// or `"api"` (a real OpenAI-compatible key). Purely a UI/preset selector —
     /// both resolve to the same OpenAI-compatible HTTP path, differing only in
@@ -47,11 +57,16 @@ pub fn local_settings_path() -> PathBuf {
 }
 
 /// Where a [`LocalSettings`] came from. This is a TRUST label, not a
-/// breadcrumb: the two sources do not deserve the same authority.
+/// breadcrumb: the sources do not deserve the same authority.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsOrigin {
-    /// [`local_settings_path`] — under the per-user store root. The user's own.
+    /// [`local_settings_path`] under a PER-USER store root. The user's own.
     Central,
+    /// [`local_settings_path`] under the shared `<temp>/autoshop` fallback
+    /// ([`crate::store::RootTrust::SharedFallback`]) — the right PATH, but a
+    /// directory every account on the machine can write, so whoever created
+    /// the file first is not necessarily this user. Treated as ambient.
+    SharedRoot,
     /// A cwd-relative `autoshop.local.json`. AMBIENT: whatever directory the
     /// app happens to be launched from supplies it.
     WorkingDir,
@@ -59,8 +74,19 @@ pub enum SettingsOrigin {
     None,
 }
 
+impl SettingsOrigin {
+    /// What this origin is allowed to decide. Both ambient origins map to the
+    /// same capability — a file nobody can prove the user wrote.
+    pub(crate) fn source(self) -> Source {
+        match self {
+            SettingsOrigin::Central | SettingsOrigin::None => Source::Trusted,
+            SettingsOrigin::SharedRoot | SettingsOrigin::WorkingDir => Source::WorkingDirFile,
+        }
+    }
+}
+
 impl LocalSettings {
-    /// Drop the fields an AMBIENT file must not be allowed to choose.
+    /// Drop every field `src` is not allowed to choose.
     ///
     /// An API key and the endpoint it is sent to are one decision. The web
     /// server already refuses to let a page make it — `serve.rs`'s
@@ -72,23 +98,26 @@ impl LocalSettings {
     /// endpoint while the real key still came from `.env` / the environment.
     /// Extracting a shared archive and running Autoshop inside it was enough.
     ///
-    /// So an ambient file keeps the harmless selectors (models, providers) and
-    /// loses both halves of that decision. It cannot supply a key either: a
-    /// planted key would bill the user's work to someone else's account and
-    /// put their photos in it.
-    fn without_ambient_authority(mut self) -> Self {
-        self.image_api_key = None;
-        self.analysis_api_key = None;
-        self.image_base_url = None;
-        self.analysis_base_url = None;
+    /// WHICH fields survive is no longer restated here: it is read off
+    /// [`SETTINGS`], the one table that also decides what a `.env` may set and
+    /// what reaches a child process. Three hand-kept lists used to encode this
+    /// single policy in three vocabularies and drifted apart.
+    fn restricted_to(mut self, src: Source) -> Self {
+        for s in SETTINGS {
+            if let Some(field) = s.field
+                && !src.may_supply(s.trust)
+            {
+                *field(&mut self) = None;
+            }
+        }
         self
     }
 
-    fn names_any_ambient_field(&self) -> bool {
-        self.image_api_key.is_some()
-            || self.analysis_api_key.is_some()
-            || self.image_base_url.is_some()
-            || self.analysis_base_url.is_some()
+    /// Does this file name anything `src` may not supply? Answered by asking
+    /// whether the restriction above CHANGES it, so the warning and the
+    /// stripping can never disagree.
+    fn names_beyond(&self, src: Source) -> bool {
+        self.clone().restricted_to(src) != *self
     }
 }
 
@@ -187,11 +216,44 @@ fn rescue_if_unchanged(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
     ))
 }
 
+/// How a settings file should be NAMED in a diagnostic: its file name plus
+/// the ROLE of the folder it sits in. Never the absolute path — see the call
+/// site for why (stderr leaks the account name and profile layout).
+fn file_label(p: &Path, origin: SettingsOrigin) -> String {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "autoshop.local.json".to_string());
+    let place = match origin {
+        SettingsOrigin::Central => "in your Autoshop data folder",
+        SettingsOrigin::SharedRoot => "in the shared temp Autoshop folder",
+        SettingsOrigin::WorkingDir => "in the current working directory",
+        SettingsOrigin::None => "",
+    };
+    if place.is_empty() { name } else { format!("{name} ({place})") }
+}
+
 pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
+    // The central path is only CENTRAL when the root it sits under is
+    // per-account. `<temp>/autoshop` is the last-resort root and is writable
+    // by every local account, so a settings file found there gets ambient
+    // authority — the same treatment as one found in the working directory.
+    let (root, trust) = crate::store::store_root_with_trust();
+    let central = match trust {
+        crate::store::RootTrust::PerUser => SettingsOrigin::Central,
+        crate::store::RootTrust::SharedFallback => SettingsOrigin::SharedRoot,
+    };
+    debug_assert!(local_settings_path().starts_with(&root));
     for (p, origin) in [
-        (local_settings_path(), SettingsOrigin::Central),
+        (local_settings_path(), central),
         (PathBuf::from("autoshop.local.json"), SettingsOrigin::WorkingDir),
     ] {
+        // These warnings go to stderr — into logs, screenshots and pasted bug
+        // reports — so they name the FILE and the FOLDER ROLE, never the full
+        // path: `%LOCALAPPDATA%\autoshop\…` spells out the account name and
+        // the profile layout. Anyone who needs the real location has it on
+        // screen: the Settings panel prints the store root.
+        let file = file_label(&p, origin);
         let s = match crate::store::read_text_capped(&p, crate::store::MAX_STORE_JSON) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -199,7 +261,7 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
             // skip fell through to defaults with nothing to say why the
             // user's keys stopped applying.
             Err(e) => {
-                eprintln!("warning: {} cannot be read ({e}) — ignoring it", p.display());
+                eprintln!("warning: {file} cannot be read ({e}) — ignoring it");
                 continue;
             }
         };
@@ -211,12 +273,13 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
                 // second launch must not clobber the first rescue.
                 let kept = preserve_corrupt_settings(&p, s.as_bytes()).ok();
                 eprintln!(
-                    "warning: {} is not valid JSON ({e}) — ignoring it{}",
-                    p.display(),
-                    if let Some(kept) = &kept {
-                        format!("; your settings were preserved at {}", kept.display())
-                    } else {
-                        String::new()
+                    "warning: {file} is not valid JSON ({e}) — ignoring it{}",
+                    match kept.as_deref().and_then(std::path::Path::file_name) {
+                        Some(n) => format!(
+                            "; your settings were preserved beside it as {}",
+                            n.to_string_lossy()
+                        ),
+                        None => String::new(),
                     }
                 );
             }
@@ -237,10 +300,8 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
 /// next Analyze posts the real key to it. One settings save would have undone
 /// the whole guard.
 pub fn load_local_settings() -> LocalSettings {
-    match load_local_settings_from() {
-        (s, SettingsOrigin::WorkingDir) => s.without_ambient_authority(),
-        (s, _) => s,
-    }
+    let (s, origin) = load_local_settings_from();
+    s.restricted_to(origin.source())
 }
 
 /// Persist the local settings file (the POST /api/settings target).
@@ -362,6 +423,12 @@ pub struct Config {
     /// path is identical for both — this only distinguishes how the endpoint above
     /// was populated, so the Settings UI can restore the right mode.
     pub image_provider: String,
+    /// Reasoning effort for the image role, or `None` to send no such
+    /// parameter and let the provider pick (the pre-v0.23.2 behaviour, and
+    /// the only correct request for a model that does not reason at all).
+    /// Validated by [`effort`]; the wire spelling differs per endpoint family
+    /// and is applied in `advisor::post_ai_json`.
+    pub image_effort: Option<String>,
 
     // --- analysis role: the verifier (oauth = claude CLI, or api = OpenAI) -----
     /// `"oauth"` (default; the `claude` CLI) or `"api"` (OpenAI-compatible chat).
@@ -369,6 +436,11 @@ pub struct Config {
     /// Model for the analysis role: a `claude` alias/id for oauth (default
     /// `opus`), or a chat model id for api.
     pub analysis_model: String,
+    /// Reasoning effort for the analysis role, or `None` for the provider's
+    /// own default. `oauth` passes it as the `claude` CLI's `--effort`
+    /// (`low|medium|high|xhigh|max`, measured from `claude --help`); `api`
+    /// passes the OpenAI-compatible spelling. See [`effort`].
+    pub analysis_effort: Option<String>,
     /// Path/name of the `claude` executable (oauth analysis, reuses Claude OAuth).
     pub claude_bin: String,
     /// API key + base for the `api` analysis provider (independent of the image key).
@@ -389,58 +461,172 @@ pub struct Config {
     pub style_strength: f32,
 }
 
-// A `.env` is AMBIENT INPUT by the same argument as a working-directory
-// settings file, and a stronger one: dotenvy searches the cwd and every
-// parent (`find.rs`), and dotenv precedence beats a variable the user
-// really set. So a `.env` dropped beside a shared archive of photos —
-// "extract, then run Autoshop in there" — could name the endpoint the
-// key is sent to while the key itself still resolved from the user's
-// own environment. That is the exfiltration route `without_ambient_
-// authority` closes for `autoshop.local.json`, re-opened through the
-// sibling file.
+// --- the capability table ---------------------------------------------------
 //
-// The protected set is every variable that decides WHERE something is
-// sent or WHAT gets executed — not just the endpoints. Naming only the
-// base URLs left the strictly worse half open: `AUTOSHOP_CLAUDE_BIN`
-// and `AUTOSHOP_PYTHON` reach `Command::new` directly
-// (`advisor/claude.rs`, `denoise.rs`, `segment.rs`) and the two script
-// variables become that command's argv, so the very scenario this
-// comment describes yielded arbitrary process execution rather than
-// mere endpoint redirection. `autoshop.local.json` cannot reach these
-// at all (`LocalSettings` has no such field), so `.env` is the only
-// route and this is where it closes.
+// ONE policy, declared once. Everything that used to be a hand-kept list —
+// which `.env` names are refused, which settings-file fields an ambient file
+// loses, which names are withheld from a child process, and which warnings
+// fire — is derived from [`SETTINGS`] below.
 //
-// Everything else — keys, model names, providers, tuning numbers — is
-// still honoured from `.env`, which is where this project's own key
-// lives. (A planted key can no longer read the user's photos back:
-// every Responses call sends `store: false`, so nothing persists in
-// the key owner's account — see advisor/openai.rs.)
-//
-// PYTHONPATH / PYTHONHOME join the protected set for the same reason
-// as the script variables: both Python sidecars inherit the process
-// environment, and a .env's `PYTHONPATH=.` beside a hostile
-// `numpy.py` is code execution at import time (the sidecars also
-// pass `-E` — defence in both layers). The weight cache joins
-// because a redirected cache is a poisoned-model path.
-pub(crate) const AMBIENT_UNSAFE_VARS: [&str; 17] = [
-    "AUTOSHOP_OPENAI_BASE_URL",
-    "AUTOSHOP_ANALYSIS_BASE_URL",
-    "AUTOSHOP_CLAUDE_BIN",
-    "AUTOSHOP_PYTHON",
-    "AUTOSHOP_DENOISE_SCRIPT",
-    "AUTOSHOP_SEGMENT_SCRIPT",
-    "PATH",
-    "AUTOSHOP_DATA_DIR",
-    "AUTOSHOP_ANALYSIS_PROVIDER",
-    "AUTOSHOP_ANALYSIS_MODEL",
-    "AUTOSHOP_CLAUDE_MODEL",
-    "AUTOSHOP_OPENAI_MODEL",
-    "AUTOSHOP_OPENAI_IMAGE_MODEL",
-    "AUTOSHOP_IMAGE_PROVIDER",
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "AUTOSHOP_DENOISE_CACHE",
+// The three lists it replaces drifted, provably: the guard's own test carried
+// a copied 14-name array while the constant had grown to 17, so PYTHONPATH,
+// PYTHONHOME and the weight cache went unchecked. Worse, `Config::load` read
+// that array BY INDEX (`pre(11)` was AUTOSHOP_OPENAI_MODEL), so inserting or
+// removing a single name silently repointed unrelated config fields at the
+// wrong variable — which is exactly what narrowing the list required.
+
+/// What a setting DECIDES. This, and only this, determines who may set it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Trust {
+    /// Authenticates and bills the user for Autoshop's OWN calls. A planted
+    /// one spends a stranger's money on the user's work.
+    Secret,
+    /// Names WHERE bytes are sent, WHICH account pays, or WHAT program runs:
+    /// endpoints, executables, script paths, search paths, the store root, a
+    /// child's credentials. A planted one is exfiltration or code execution,
+    /// not a preference. `AUTOSHOP_CLAUDE_BIN` and `AUTOSHOP_PYTHON` reach
+    /// `Command::new` verbatim (`advisor/claude.rs`, `denoise.rs`,
+    /// `segment.rs`) and the script variables become that command's argv.
+    Destination,
+    /// Picks WHICH model / provider / tuning number. Carries no credential and
+    /// no address; the worst a planted one can do is choose a model the user
+    /// did not want — visible in Settings and in every rationale.
+    Preference,
+}
+
+/// Where a value came from, and therefore what it may decide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Source {
+    /// The live process environment, or the settings file under a per-user
+    /// store root. The authority the process was started with.
+    Trusted,
+    /// A `.env`. AMBIENT — dotenvy searches the cwd and every parent
+    /// (`find.rs`) — yet also where this project's own key lives.
+    DotEnv,
+    /// A settings file nobody can prove the user wrote: cwd-relative, or under
+    /// the shared `<temp>` root.
+    WorkingDirFile,
+}
+
+impl Source {
+    /// The whole trust policy, in one match.
+    pub(crate) fn may_supply(self, t: Trust) -> bool {
+        match self {
+            Source::Trusted => true,
+            // A `.env` keeps SECRETS on purpose: it is where this project's
+            // own key lives, and reversing that would break the documented
+            // contract (README). The half it loses is Destination — the half
+            // that turns a planted file into exfiltration or process
+            // execution. A planted key bills the planter, and every Responses
+            // call sends `store: false`, so the user's photos do not persist
+            // in that account (advisor/openai.rs).
+            //
+            // Model and provider names are Preference and therefore ALLOWED
+            // (user decision, 2026-08-11), which restores what README and
+            // ARCHITECTURE §3 have always promised. Note the boundary this
+            // draws: a photo pack's `.env` can now flip
+            // `AUTOSHOP_ANALYSIS_PROVIDER` from `oauth` to `api` — but the
+            // base URL and the key it would need stay Destination/…, so the
+            // call still goes to the user's own endpoint with the user's own
+            // key. That is a model choice, not endpoint redirection.
+            Source::DotEnv => t != Trust::Destination,
+            // The working-directory / shared-root file gets no exception: the
+            // app writes the CENTRAL file, so this one's only legitimate role
+            // is the pre-v0.13 migration affordance.
+            Source::WorkingDirFile => t == Trust::Preference,
+        }
+    }
+}
+
+/// One configurable setting: the environment variable that carries it, what it
+/// decides, and — when the Settings UI can write it — the [`LocalSettings`]
+/// field it binds to.
+pub(crate) struct Setting {
+    pub(crate) env: &'static str,
+    pub(crate) trust: Trust,
+    field: Option<fn(&mut LocalSettings) -> &mut Option<String>>,
+}
+
+const fn env_only(env: &'static str, trust: Trust) -> Setting {
+    Setting { env, trust, field: None }
+}
+
+const fn bound(
+    env: &'static str,
+    trust: Trust,
+    field: fn(&mut LocalSettings) -> &mut Option<String>,
+) -> Setting {
+    Setting { env, trust, field: Some(field) }
+}
+
+/// Every setting this program resolves, with what it decides.
+///
+/// A name absent from this table is `Preference` by default — that is the
+/// pass-through third-party knobs depend on (HF_HOME, CUDA_VISIBLE_DEVICES,
+/// proxy variables) and it preserves the `.env` contract for anything not
+/// listed. New Autoshop settings must be added here; the tests below fail if
+/// this file names an `AUTOSHOP_*` variable the table does not classify.
+pub(crate) const SETTINGS: &[Setting] = &[
+    // --- image role: the vision proposer + generative edits ------------------
+    bound("OPENAI_API_KEY", Trust::Secret, |s| &mut s.image_api_key),
+    bound("AUTOSHOP_OPENAI_BASE_URL", Trust::Destination, |s| &mut s.image_base_url),
+    bound("AUTOSHOP_OPENAI_MODEL", Trust::Preference, |s| &mut s.image_model),
+    bound("AUTOSHOP_OPENAI_IMAGE_MODEL", Trust::Preference, |s| &mut s.image_gen_model),
+    bound("AUTOSHOP_IMAGE_PROVIDER", Trust::Preference, |s| &mut s.image_provider),
+    bound("AUTOSHOP_IMAGE_EFFORT", Trust::Preference, |s| &mut s.image_effort),
+    env_only("AUTOSHOP_IMAGE_QUALITY", Trust::Preference),
+    env_only("AUTOSHOP_IMAGE_MAX_PX", Trust::Preference),
+    // --- analysis role: the verifier -----------------------------------------
+    bound("AUTOSHOP_ANALYSIS_API_KEY", Trust::Secret, |s| &mut s.analysis_api_key),
+    bound("AUTOSHOP_ANALYSIS_BASE_URL", Trust::Destination, |s| &mut s.analysis_base_url),
+    bound("AUTOSHOP_ANALYSIS_PROVIDER", Trust::Preference, |s| &mut s.analysis_provider),
+    bound("AUTOSHOP_ANALYSIS_MODEL", Trust::Preference, |s| &mut s.analysis_model),
+    bound("AUTOSHOP_ANALYSIS_EFFORT", Trust::Preference, |s| &mut s.analysis_effort),
+    env_only("AUTOSHOP_CLAUDE_MODEL", Trust::Preference), // legacy alias for ANALYSIS_MODEL
+    env_only("AUTOSHOP_CLAUDE_BIN", Trust::Destination),  // Command::new
+    // --- python sidecars ------------------------------------------------------
+    env_only("AUTOSHOP_PYTHON", Trust::Destination), // Command::new
+    env_only("AUTOSHOP_DENOISE_SCRIPT", Trust::Destination), // that command's argv
+    env_only("AUTOSHOP_SEGMENT_SCRIPT", Trust::Destination),
+    // A redirected weight cache is a poisoned-model path.
+    env_only("AUTOSHOP_DENOISE_CACHE", Trust::Destination),
+    env_only("AUTOSHOP_DENOISE_MODEL", Trust::Preference),
+    // --- store, tuning knobs ---------------------------------------------------
+    // Sites the TRUSTED settings file itself, so it decides where the key is
+    // read from — the root of the whole trust story.
+    env_only("AUTOSHOP_DATA_DIR", Trust::Destination),
+    env_only("AUTOSHOP_STYLE_STRENGTH", Trust::Preference),
+    env_only("AUTOSHOP_HTTP_TIMEOUT_SECS", Trust::Preference),
+    env_only("AUTOSHOP_SIDECAR_TIMEOUT_SECS", Trust::Preference),
+    // Names a directory to READ pre-v0.13 sidecars from during an explicitly
+    // user-started import. It writes nothing and runs nothing, so it stays a
+    // preference — the strictest reading would make it Destination, but that
+    // would silently break the documented `.env` migration knob.
+    env_only("AUTOSHOP_LEGACY_OUT", Trust::Preference),
+    // --- foreign names this process or its children obey ------------------------
+    env_only("PATH", Trust::Destination),
+    // Both Python sidecars inherit the environment, and a `.env`'s
+    // `PYTHONPATH=.` beside a hostile `numpy.py` is code execution at import
+    // time (the sidecars also pass `-E` — defence in both layers).
+    env_only("PYTHONPATH", Trust::Destination),
+    env_only("PYTHONHOME", Trust::Destination),
+    // The `claude` child's own routing. A credential is the routing decision
+    // here: with ANTHROPIC_API_KEY present the CLI bills metered API credits
+    // instead of the user's subscription (measured 2026-07-17, see
+    // advisor/claude.rs), and ANTHROPIC_BASE_URL repoints the verifier
+    // outright. Destination, so `.env` values never reach the child.
+    env_only("ANTHROPIC_API_KEY", Trust::Destination),
+    env_only("ANTHROPIC_AUTH_TOKEN", Trust::Destination),
+    env_only("ANTHROPIC_BASE_URL", Trust::Destination),
 ];
+
+/// What `name` decides. Unlisted ⇒ [`Trust::Preference`] (see [`SETTINGS`]).
+pub(crate) fn trust_of(name: &str) -> Trust {
+    SETTINGS
+        .iter()
+        .find(|s| s.env == name)
+        .map_or(Trust::Preference, |s| s.trust)
+}
 
 /// The `.env`, parsed ONCE per process into an OWNED map (L16#3): the
 /// process environment is NEVER written. The old path ran
@@ -473,17 +659,23 @@ fn dotenv_map() -> &'static std::collections::HashMap<String, String> {
         let map: std::collections::HashMap<String, String> = dotenvy::dotenv_iter()
             .map(|it| it.take_while(Result::is_ok).flatten().collect())
             .unwrap_or_default();
-        for k in AMBIENT_UNSAFE_VARS {
-            // Same trigger as the old post-override comparison: the .env
-            // names a protected variable with a value that differs from the
-            // process's own.
-            if let Some(v) = map.get(k)
+        // Warn only about what is actually being ignored. Same trigger as the
+        // old post-override comparison — the .env names something it may not
+        // supply, with a value that differs from the process's own — but the
+        // set is now derived, so narrowing the policy narrows the warning in
+        // the same edit. Model and provider names no longer trip it: warning
+        // about a documented, legitimate `.env` model choice was noise that
+        // contradicted README and ARCHITECTURE §3.
+        for (k, v) in &map {
+            if !Source::DotEnv.may_supply(trust_of(k))
                 && env::var(k).ok().as_deref() != Some(v.as_str())
             {
                 eprintln!(
                     "warning: ignoring {k} from a .env file — a .env found in the working \
                      directory (or any parent) is not trusted to choose where your API key \
-                     is sent or which program is run. Set it in your own environment."
+                     is sent, which account pays, or which program is run. Set it in your \
+                     own environment. (Model, provider and tuning values from a .env do \
+                     still apply.)"
                 );
             }
         }
@@ -492,25 +684,32 @@ fn dotenv_map() -> &'static std::collections::HashMap<String, String> {
 }
 
 /// Resolve `key` with dotenv precedence but WITHOUT environment mutation:
-/// the `.env` value wins for unprotected names (the dotenv_override
+/// the `.env` value wins for names it may supply (the dotenv_override
 /// contract this project chose on 2026-08-03 — this machine carries a
 /// User-scope OPENAI_API_KEY that must not out-rank the project's own
-/// .env key), the live environment is the fallback, and a PROTECTED name
-/// never resolves from a `.env` at all. Empty/whitespace counts as unset
-/// (an empty .env value therefore masks the process value, exactly as
+/// .env key), the live environment is the fallback, and a `Destination`
+/// name never resolves from a `.env` at all. Empty/whitespace counts as
+/// unset (an empty .env value therefore masks the process value, exactly as
 /// override-then-filter did). Out-of-crate consumers of `.env`-honoured
 /// names (the HTTP/sidecar timeout knobs, the legacy-out override) go
 /// through here, or they silently stop seeing `.env` values.
 pub fn env_or_dotenv(key: &str) -> Option<String> {
-    let live = || env::var(key).ok();
-    if AMBIENT_UNSAFE_VARS.contains(&key) {
-        return live().filter(|s| !s.trim().is_empty());
+    resolve_env(key)
+}
+
+/// THE environment resolver — one function for every name, protected or not.
+/// `Config::load` used to carry two more (`nonempty` for `.env`-honoured
+/// names, and a `pre(i)` closure that indexed the protected array
+/// POSITIONALLY), which is how moving a name between the two policies could
+/// silently repoint an unrelated config field at the wrong variable.
+pub(crate) fn resolve_env(name: &str) -> Option<String> {
+    let live = env::var(name).ok();
+    if Source::DotEnv.may_supply(trust_of(name)) {
+        dotenv_map().get(name).cloned().or(live)
+    } else {
+        live
     }
-    dotenv_map()
-        .get(key)
-        .cloned()
-        .or_else(live)
-        .filter(|s| !s.trim().is_empty())
+    .filter(|s| !s.trim().is_empty())
 }
 
 /// The `.env`'s UNPROTECTED entries, for a CHILD process's environment
@@ -523,47 +722,107 @@ pub fn env_or_dotenv(key: &str) -> Option<String> {
 pub fn dotenv_child_env() -> Vec<(String, String)> {
     dotenv_map()
         .iter()
-        .filter(|(k, _)| !AMBIENT_UNSAFE_VARS.contains(&k.as_str()))
+        .filter(|(k, _)| Source::DotEnv.may_supply(trust_of(k)))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
 
+/// Normalise a reasoning-effort value from any source into something safe on
+/// a JSON body AND on a child process's argv.
+///
+/// The vocabulary is deliberately NOT a closed set: `claude --help` documents
+/// `low|medium|high|xhigh|max` (measured 2026-08-11) while OpenAI-compatible
+/// endpoints carry their own tiers and third-party bridges add more — pinning
+/// a list here would make this app the bottleneck on someone else's roadmap.
+/// The value is BOUNDED instead: lowercase ASCII, digits, `-`/`_`, at most 32
+/// bytes, never leading `-`. An endpoint that does not know the tier answers
+/// 400 and the caller negotiates it away (`advisor::post_ai_json`). The bound
+/// is the part that matters — this string reaches `Command::args`, where an
+/// unbounded `.env`-supplied value would be argv injection.
+pub(crate) fn effort(v: Option<String>) -> Option<String> {
+    let v = v?.trim().to_ascii_lowercase();
+    if v.is_empty() {
+        return None;
+    }
+    let shaped = v.len() <= 32
+        && !v.starts_with('-')
+        && v.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+    if !shaped {
+        eprintln!(
+            "warning: ignoring an unusable reasoning-effort value — expected a short tier \
+             name such as low / medium / high"
+        );
+        return None;
+    }
+    Some(v)
+}
+
+/// Can `k` appear in an `Authorization` header value at all?
+///
+/// Visible ASCII only. RFC 9110 field values also allow SP and HTAB, but no
+/// real key contains either — and a space or a newline is exactly what a bad
+/// copy/paste adds. Shared with `openai_models::list_models`, which faces the
+/// same ureq diagnostic on the `GET /models` probe.
+pub(crate) fn key_is_header_safe(k: &str) -> bool {
+    !k.is_empty() && k.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// An API key as it will appear in an `Authorization` header, or `None`.
+///
+/// Trims surrounding whitespace — a key copied out of a web page carries a
+/// trailing newline more often than not — and then refuses any remaining byte
+/// that cannot appear in a header value.
+///
+/// Both halves are load-bearing, and this is the ROOT fix for a key leak:
+/// ureq builds the header eagerly and its rejection diagnostic quotes the
+/// WHOLE header line back, so `Authorization: Bearer <the real key>` ends up
+/// inside a `Transport` error (ureq 2.12.1 `header.rs:147`). That error string
+/// travels into rationale text, the Settings status line, and any log the user
+/// pastes into a bug report. Refusing the malformed key HERE means the
+/// diagnostic never exists; redacting at each error site is the second layer.
+/// Never prints the key itself.
+fn header_safe_key(v: Option<String>, name: &str) -> Option<String> {
+    let t = v?.trim().to_string();
+    if t.is_empty() {
+        return None;
+    }
+    if !key_is_header_safe(&t) {
+        eprintln!(
+            "warning: ignoring {name} — it contains characters that cannot appear in an HTTP \
+             header (a stray newline or space from a copy/paste?). Re-copy the key and set it \
+             again. Requests will run without a key until then."
+        );
+        return None;
+    }
+    Some(t)
+}
+
 impl Config {
     pub fn load() -> Self {
-        // .env first (absence is fine; never prints the key), then the local
-        // file. See `dotenv_map` / `env_or_dotenv` above for the ownership
-        // and precedence story (L16#3: parsed once, owned, no setenv).
-        let dotenv = dotenv_map();
-        let nonempty = |k: &str| {
-            dotenv
-                .get(k)
-                .cloned()
-                .or_else(|| env::var(k).ok())
-                .filter(|s| !s.trim().is_empty())
-        };
-        // A variable an ambient file must not own resolves from the LIVE
-        // environment — which, with no setenv anywhere, IS the authority the
-        // process started with. Indices follow `AMBIENT_UNSAFE_VARS`.
-        let pre = |i: usize| {
-            env::var(AMBIENT_UNSAFE_VARS[i]).ok().filter(|s: &String| !s.trim().is_empty())
-        };
+        // Every environment name — protected or not — goes through the ONE
+        // resolver, which applies the capability table per name (.env value
+        // first for what a .env may supply, live environment otherwise). The
+        // two closures this replaces (`nonempty` and a positional `pre(i)`
+        // into the protected array) encoded the same policy twice, by hand.
+        let env_val = resolve_env;
         let (local, origin) = load_local_settings_from();
-        // A cwd-relative settings file is ambient input, not the user's own
-        // configuration: it may pick models, never a key or the endpoint a key
-        // is sent to. See `LocalSettings::without_ambient_authority`.
-        let local = if origin == SettingsOrigin::WorkingDir {
-            if local.names_any_ambient_field() {
-                eprintln!(
-                    "warning: ignoring the API key and base-URL fields in ./autoshop.local.json \
-                     — a settings file found in the WORKING DIRECTORY is not trusted to choose \
-                     where your API key is sent. Save your settings in the app to store them \
-                     under your user profile instead."
-                );
-            }
-            local.without_ambient_authority()
-        } else {
-            local
-        };
+        // An ambient settings file may pick models, never a key or the
+        // endpoint a key is sent to. See `LocalSettings::restricted_to`.
+        let src = origin.source();
+        if src != Source::Trusted && local.names_beyond(src) {
+            let where_ = if origin == SettingsOrigin::SharedRoot {
+                "in a settings file under the SHARED temp folder (this machine has no per-user \
+                 data directory, so every account can write there)"
+            } else {
+                "in ./autoshop.local.json — a settings file found in the WORKING DIRECTORY"
+            };
+            eprintln!(
+                "warning: ignoring the API key and base-URL fields {where_}: it is not trusted \
+                 to choose where your API key is sent. Save your settings in the app, or set \
+                 AUTOSHOP_DATA_DIR to a folder only you can write."
+            );
+        }
+        let local = local.restricted_to(src);
         // local-file value wins over env; `pick` returns the first non-empty.
         let pick = |file: &Option<String>, e: Option<String>, default: &str| -> String {
             file.as_ref()
@@ -588,55 +847,76 @@ impl Config {
         // builds keep the repo cache and a packaged install stays beside
         // the exe.
         let denoise_script =
-            pre(4).unwrap_or_else(|| bundled_helper("python/denoise.py"));
-        let denoise_cache = pre(16).unwrap_or_else(|| {
+            env_val("AUTOSHOP_DENOISE_SCRIPT").unwrap_or_else(|| bundled_helper("python/denoise.py"));
+        let denoise_cache = env_val("AUTOSHOP_DENOISE_CACHE").unwrap_or_else(|| {
             Path::new(&denoise_script)
                 .parent()
                 .map(|d| d.join("weights").to_string_lossy().into_owned())
                 .unwrap_or_else(|| bundled_helper("python/weights"))
         });
         let segment_script =
-            pre(5).unwrap_or_else(|| bundled_helper("python/segment.py"));
+            env_val("AUTOSHOP_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
         Config {
-            openai_api_key: pick_opt(&local.image_api_key, nonempty("OPENAI_API_KEY")),
-            openai_model: pick(&local.image_model, pre(11), "gpt-5.5"),
-            openai_base_url: pick(&local.image_base_url, pre(0), default_base),
+            openai_api_key: header_safe_key(
+                pick_opt(&local.image_api_key, env_val("OPENAI_API_KEY")),
+                "the image API key",
+            ),
+            openai_model: pick(&local.image_model, env_val("AUTOSHOP_OPENAI_MODEL"), "gpt-5.5"),
+            openai_base_url: pick(
+                &local.image_base_url,
+                env_val("AUTOSHOP_OPENAI_BASE_URL"),
+                default_base,
+            ),
             openai_image_model: pick(
                 &local.image_gen_model,
-                pre(12),
+                env_val("AUTOSHOP_OPENAI_IMAGE_MODEL"),
                 "gpt-image-1.5",
             ),
-            openai_image_quality: nonempty("AUTOSHOP_IMAGE_QUALITY").unwrap_or_else(|| "high".to_string()),
-            openai_image_max_px: nonempty("AUTOSHOP_IMAGE_MAX_PX")
+            openai_image_quality: env_val("AUTOSHOP_IMAGE_QUALITY")
+                .unwrap_or_else(|| "high".to_string()),
+            openai_image_max_px: env_val("AUTOSHOP_IMAGE_MAX_PX")
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(8_294_400),
             image_provider: pick(
                 &local.image_provider,
-                pre(13),
+                env_val("AUTOSHOP_IMAGE_PROVIDER"),
                 "api",
             ),
+            image_effort: effort(pick_opt(&local.image_effort, env_val("AUTOSHOP_IMAGE_EFFORT"))),
 
             analysis_provider: pick(
                 &local.analysis_provider,
-                pre(8),
+                env_val("AUTOSHOP_ANALYSIS_PROVIDER"),
                 "oauth",
             ),
             analysis_model: pick(
                 &local.analysis_model,
-                pre(9).or_else(|| pre(10)),
+                env_val("AUTOSHOP_ANALYSIS_MODEL")
+                    .or_else(|| env_val("AUTOSHOP_CLAUDE_MODEL")),
                 "opus",
             ),
-            claude_bin: pre(2).unwrap_or_else(|| "claude".to_string()),
-            analysis_api_key: pick_opt(&local.analysis_api_key, nonempty("AUTOSHOP_ANALYSIS_API_KEY")),
-            analysis_base_url: pick(&local.analysis_base_url, pre(1), default_base),
+            analysis_effort: effort(pick_opt(
+                &local.analysis_effort,
+                env_val("AUTOSHOP_ANALYSIS_EFFORT"),
+            )),
+            claude_bin: env_val("AUTOSHOP_CLAUDE_BIN").unwrap_or_else(|| "claude".to_string()),
+            analysis_api_key: header_safe_key(
+                pick_opt(&local.analysis_api_key, env_val("AUTOSHOP_ANALYSIS_API_KEY")),
+                "the analysis API key",
+            ),
+            analysis_base_url: pick(
+                &local.analysis_base_url,
+                env_val("AUTOSHOP_ANALYSIS_BASE_URL"),
+                default_base,
+            ),
 
-            python_bin: pre(3).unwrap_or_else(|| "python".to_string()),
-            denoise_model: nonempty("AUTOSHOP_DENOISE_MODEL")
+            python_bin: env_val("AUTOSHOP_PYTHON").unwrap_or_else(|| "python".to_string()),
+            denoise_model: env_val("AUTOSHOP_DENOISE_MODEL")
                 .unwrap_or_else(|| "color_real_psnr".to_string()),
             denoise_script,
             denoise_cache,
             segment_script,
-            style_strength: nonempty("AUTOSHOP_STYLE_STRENGTH")
+            style_strength: env_val("AUTOSHOP_STYLE_STRENGTH")
                 .and_then(|s| s.parse::<f32>().ok())
                 // "NaN" parses as a valid f32 and SURVIVES clamp (clamp keeps
                 // NaN) — a non-finite blend strength would poison the style
@@ -734,10 +1014,15 @@ mod tests {
             image_provider: Some("api".into()),
             analysis_provider: Some("oauth".into()),
             image_gen_model: Some("gpt-image-2".into()),
+            image_effort: Some("high".into()),
+            analysis_effort: Some("high".into()),
         };
-        assert!(planted.names_any_ambient_field(), "the warning must fire for this file");
+        assert!(
+            planted.names_beyond(Source::WorkingDirFile),
+            "the warning must fire for this file"
+        );
 
-        let safe = planted.clone().without_ambient_authority();
+        let safe = planted.clone().restricted_to(Source::WorkingDirFile);
         assert_eq!(safe.image_base_url, None, "an ambient file chose the image endpoint");
         assert_eq!(safe.analysis_base_url, None, "an ambient file chose the analysis endpoint");
         assert_eq!(safe.image_api_key, None, "an ambient file supplied the image key");
@@ -751,10 +1036,16 @@ mod tests {
         assert_eq!(safe.image_provider.as_deref(), Some("api"));
         assert_eq!(safe.analysis_provider.as_deref(), Some("oauth"));
         assert_eq!(safe.image_gen_model.as_deref(), Some("gpt-image-2"));
+        assert_eq!(safe.image_effort.as_deref(), Some("high"), "effort is a preference");
 
         // A file with only harmless fields must NOT trigger the warning.
         let benign = LocalSettings { image_model: Some("m".into()), ..Default::default() };
-        assert!(!benign.names_any_ambient_field());
+        assert!(!benign.names_beyond(Source::WorkingDirFile));
+
+        // The SHARED-root origin is the same capability as the cwd file — the
+        // whole point of labelling `<temp>/autoshop` rather than trusting it.
+        assert_eq!(SettingsOrigin::SharedRoot.source(), Source::WorkingDirFile);
+        assert_eq!(SettingsOrigin::Central.source(), Source::Trusted);
     }
 
     /// The ambient-`.env` guard must cover every variable that decides WHERE
@@ -769,29 +1060,147 @@ mod tests {
     /// yielded arbitrary process execution. `.env` is the only route to these
     /// (`LocalSettings` has no such field), so this list is the whole guard.
     ///
-    /// Re-derived from the CONSTANT itself (the old hand-copied list froze
-    /// at 14 entries while the constant grew to 17 — PYTHONPATH/PYTHONHOME/
-    /// AUTOSHOP_DENOISE_CACHE went uncovered while the assertion message
-    /// still claimed "14 entries"; the self-drift guard had drifted).
+    /// Now stated as POLICY against the table rather than as a copy of it:
+    /// the old version re-derived its list from the constant it was guarding,
+    /// which is why it could not notice the constant being wrong. This list is
+    /// the specification — every name on it reaches `Command::new`, becomes
+    /// that command's argv, chooses an endpoint, decides which account pays,
+    /// or sites the trusted settings file itself.
     #[test]
     fn every_variable_that_names_a_program_or_an_endpoint_is_ambient_unsafe() {
+        for name in [
+            "AUTOSHOP_OPENAI_BASE_URL",
+            "AUTOSHOP_ANALYSIS_BASE_URL",
+            "AUTOSHOP_CLAUDE_BIN",
+            "AUTOSHOP_PYTHON",
+            "AUTOSHOP_DENOISE_SCRIPT",
+            "AUTOSHOP_SEGMENT_SCRIPT",
+            "AUTOSHOP_DENOISE_CACHE",
+            "AUTOSHOP_DATA_DIR",
+            "PATH",
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+        ] {
+            let t = trust_of(name);
+            assert_eq!(t, Trust::Destination, "{name} decides a destination or a program");
+            assert!(!Source::DotEnv.may_supply(t), "{name} resolved from a .env");
+            assert!(!Source::WorkingDirFile.may_supply(t), "{name} resolved from an ambient file");
+        }
+        // …and the six unblocked on 2026-08-11 (user decision): a `.env` picks
+        // models and providers again, exactly as README and ARCHITECTURE §3
+        // have always documented. The endpoint and the key stay above.
+        for name in [
+            "AUTOSHOP_ANALYSIS_PROVIDER",
+            "AUTOSHOP_ANALYSIS_MODEL",
+            "AUTOSHOP_CLAUDE_MODEL",
+            "AUTOSHOP_OPENAI_MODEL",
+            "AUTOSHOP_OPENAI_IMAGE_MODEL",
+            "AUTOSHOP_IMAGE_PROVIDER",
+        ] {
+            let t = trust_of(name);
+            assert_eq!(t, Trust::Preference, "{name} is a model/provider choice");
+            assert!(Source::DotEnv.may_supply(t), "{name} is documented as .env-settable");
+        }
+        // The asymmetry between the two ambient sources, stated once: a `.env`
+        // keeps secrets on purpose (it is where this project's key lives); a
+        // file dropped in the working directory never does.
+        assert!(Source::DotEnv.may_supply(Trust::Secret));
+        assert!(!Source::WorkingDirFile.may_supply(Trust::Secret));
+
+        // And the positional read is gone. `pre(i)` indexed the protected
+        // array, so removing one name shifted every later index onto the wrong
+        // variable — the exact edit this round had to make.
         let src = include_str!("config.rs");
-        for name in super::AMBIENT_UNSAFE_VARS {
-            // A protected name must never resolve through the .env-honouring
-            // resolvers: `nonempty` (map-first inside load) or a stray
-            // `env_or_dotenv` literal — only `pre(i)` / live env reads.
+        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !non_test.contains("pre(0)") && !non_test.contains("AMBIENT_UNSAFE_VARS["),
+            "config resolution regained a positional read of the protected list"
+        );
+    }
+
+    /// The table is only a single source of truth if nothing resolves around
+    /// it. Every `AUTOSHOP_*` variable named in this file's non-test code must
+    /// be classified — otherwise a new setting silently defaults to
+    /// `Preference` and a `.env` can set it.
+    #[test]
+    fn the_capability_table_classifies_every_variable_this_file_resolves() {
+        let src = include_str!("config.rs");
+        let non_test = src.split("#[cfg(test)]").next().unwrap();
+        let mut unclassified: Vec<&str> = Vec::new();
+        let mut rest = non_test;
+        while let Some(i) = rest.find("\"AUTOSHOP_") {
+            rest = &rest[i + 1..];
+            let Some(end) = rest.find('"') else { break };
+            let name = &rest[..end];
+            if !SETTINGS.iter().any(|s| s.env == name) && !unclassified.contains(&name) {
+                unclassified.push(name);
+            }
+        }
+        assert!(
+            unclassified.is_empty(),
+            "not in SETTINGS, so a .env may set them by default: {unclassified:?}"
+        );
+        // The out-of-crate consumers resolve through `env_or_dotenv`, which
+        // also consults the table — so their knobs must be in it too.
+        for knob in
+            ["AUTOSHOP_HTTP_TIMEOUT_SECS", "AUTOSHOP_SIDECAR_TIMEOUT_SECS", "AUTOSHOP_LEGACY_OUT"]
+        {
+            assert!(SETTINGS.iter().any(|s| s.env == knob), "{knob} is unclassified");
+        }
+        // No duplicate rows: `trust_of` takes the first match, so a second row
+        // for the same name would be dead policy that reads as live.
+        for (i, s) in SETTINGS.iter().enumerate() {
             assert!(
-                !src.contains(&format!("nonempty(\"{name}\")")),
-                "{name} decides an endpoint or a program to run, so it must resolve from the \
-                 live (never-mutated) environment, not through the .env-honouring resolver"
+                !SETTINGS[..i].iter().any(|e| e.env == s.env),
+                "{} appears twice in SETTINGS",
+                s.env
             );
         }
-        // env_or_dotenv itself must refuse protected names at runtime, so
-        // even an out-of-crate consumer cannot hand one to a .env.
-        assert!(
-            src.contains("if AMBIENT_UNSAFE_VARS.contains(&key)"),
-            "env_or_dotenv lost its protected-name refusal"
+    }
+
+    /// A key that cannot go in an HTTP header is refused AT THE BOUNDARY.
+    ///
+    /// ureq builds the header eagerly and quotes the whole line back on
+    /// failure — `invalid header 'Authorization: Bearer <the real key>'`
+    /// (2.12.1 `header.rs:147`) — and that string then travels as a transport
+    /// error into rationale text and the Settings status line. A trailing
+    /// newline from a copy/paste was enough. The trim handles the common case;
+    /// the refusal handles the rest, and neither ever prints the key.
+    #[test]
+    fn a_key_that_cannot_ride_a_header_never_reaches_one() {
+        assert_eq!(
+            header_safe_key(Some("  sk-good-key\n".into()), "k").as_deref(),
+            Some("sk-good-key"),
+            "surrounding whitespace is the common paste artefact — trim it, don't refuse it"
         );
+        for bad in ["sk-with space", "sk-with\nnewline", "sk-with\ttab", "sk-caf\u{e9}"] {
+            assert_eq!(
+                header_safe_key(Some(bad.into()), "k"),
+                None,
+                "{bad:?} would have been quoted back inside a transport error"
+            );
+        }
+        assert_eq!(header_safe_key(Some("   ".into()), "k"), None, "blank is unset");
+        assert_eq!(header_safe_key(None, "k"), None);
+    }
+
+    /// Reasoning effort is bounded, not enumerated: it reaches both a JSON
+    /// body and `Command::args`, and the accepted tiers differ per provider
+    /// (`claude --help`: low|medium|high|xhigh|max) and change over time.
+    #[test]
+    fn reasoning_effort_is_bounded_before_it_reaches_argv() {
+        assert_eq!(effort(Some(" High ".into())).as_deref(), Some("high"));
+        assert_eq!(effort(Some("xhigh".into())).as_deref(), Some("xhigh"));
+        assert_eq!(effort(Some("".into())), None, "empty means 'let the provider decide'");
+        assert_eq!(effort(None), None);
+        // A leading dash would be parsed as another CLI flag; the rest is
+        // ordinary argv/JSON hygiene on a value a .env can supply.
+        for bad in ["--dangerously-skip-permissions", "high high", "high\nmax", "x".repeat(33).as_str()] {
+            assert_eq!(effort(Some(bad.into())), None, "{bad:?} must not reach argv");
+        }
     }
 
     /// L16#3: `Config::load` never writes the process environment — the old
@@ -899,10 +1308,7 @@ mod tests {
             ..Default::default()
         };
         // What load_local_settings now hands a writer for an ambient file.
-        let base = match (ambient.clone(), SettingsOrigin::WorkingDir) {
-            (s, SettingsOrigin::WorkingDir) => s.without_ambient_authority(),
-            (s, _) => s,
-        };
+        let base = ambient.clone().restricted_to(SettingsOrigin::WorkingDir.source());
         // The writers' merge: the user changed only their analysis model, so
         // every other field rides through from the base into the central file.
         let incoming = LocalSettings { analysis_model: Some("opus".into()), ..Default::default() };
@@ -949,7 +1355,22 @@ mod tests {
                     pythonpath_before,
                     "dotenv planted a Python import path for the sidecars to inherit"
                 );
-                assert_eq!(cfg.analysis_provider, "oauth", "dotenv initiated an API verifier call");
+                // The provider IS settable from a .env again (user decision,
+                // 2026-08-11; README and ARCHITECTURE §3 always said so). It
+                // is not an escalation: a `.env` may supply keys by explicit
+                // project contract, and a planted OPENAI_API_KEY already
+                // routes the image proposer — which uploads the PHOTO — through
+                // the planter's account. Choosing which of the user's own
+                // endpoints answers adds no capability on top of that, while
+                // the endpoint itself stays protected below.
+                assert_eq!(
+                    cfg.analysis_provider, "api",
+                    "a .env may pick the provider — the documented contract"
+                );
+                assert_eq!(
+                    cfg.analysis_base_url, "https://api.openai.com/v1",
+                    "…but never the endpoint that provider talks to"
+                );
                 assert_eq!(
                     cfg.analysis_api_key.as_deref(),
                     Some("dotenv-key"),

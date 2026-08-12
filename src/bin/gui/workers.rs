@@ -483,7 +483,7 @@ impl AutoshopApp {
                         Err(e) => self.fail(tr(lang, "import failed"), e),
                     }
                 }
-                Msg::Models(res) => self.on_models(lang, res),
+                Msg::Models(role, res) => self.on_models(lang, role, res),
             }
         }
         // Keep the frame loop alive while any worker (analyze/export/thumbs/models/
@@ -496,7 +496,11 @@ impl AutoshopApp {
         // and the canvas kept showing the disclosed stand-in (16-lane scan L06).
         if self.busy
             || self.thumb_inflight > 0
-            || self.settings.fetching_models
+            // Either role's /models probe keeps the pump alive — the analysis
+            // endpoint has its own fetch now, and a fetch nobody repaints for
+            // lands silently with a stale "fetching…" button.
+            || self.settings.image_models.fetching
+            || self.settings.analysis_models.fetching
             || !self.master_loads.is_empty()
         {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -2180,40 +2184,45 @@ impl AutoshopApp {
                     }
     }
 
-    /// `Msg::Models` landing — body extracted verbatim from the
-    /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_models(&mut self, lang: Lang, res: anyhow::Result<Vec<String>>) {
-                match res {
-                    Ok(ids) => {
-                        let chat: Vec<String> = ids
-                            .iter()
-                            .filter(|s| autoshop::openai_models::is_chat_model(s))
-                            .cloned()
-                            .collect();
-                        let imgs: Vec<String> = ids
-                            .iter()
-                            .filter(|s| autoshop::openai_models::is_image_model(s))
-                            .cloned()
-                            .collect();
-                        self.settings.status = trf(
-                            lang,
-                            "fetched {n} models ({chat} chat · {img} image)",
-                            &[
-                                ("n", &ids.len().to_string()),
-                                ("chat", &chat.len().to_string()),
-                                ("img", &imgs.len().to_string()),
-                            ],
-                        );
-                        self.settings.chat_choices = chat;
-                        self.settings.image_gen_choices = imgs;
-                        self.settings.fetching_models = false;
-                    }
-                    Err(e) => {
-                        self.settings.fetching_models = false;
-                        self.settings.status =
-                            trf(lang, "fetch failed: {err}", &[("err", &e.to_string())]);
-                    }
-                }
+    /// `Msg::Models` landing. Keyed by ROLE: the two roles have their own
+    /// endpoint and key, so a result only ever fills the catalogue of the
+    /// role that asked for it.
+    fn on_models(&mut self, lang: Lang, role: ModelRole, res: anyhow::Result<Vec<String>>) {
+        match res {
+            Ok(ids) => {
+                let chat: Vec<String> = ids
+                    .iter()
+                    .filter(|s| autoshop::openai_models::is_chat_model(s))
+                    .cloned()
+                    .collect();
+                let imgs: Vec<String> = ids
+                    .iter()
+                    .filter(|s| autoshop::openai_models::is_image_model(s))
+                    .cloned()
+                    .collect();
+                self.settings.status = trf(
+                    lang,
+                    "fetched {n} models ({chat} chat · {img} image)",
+                    &[
+                        ("n", &ids.len().to_string()),
+                        ("chat", &chat.len().to_string()),
+                        ("img", &imgs.len().to_string()),
+                    ],
+                );
+                let cat = self.catalogue_mut(role);
+                cat.chat = chat;
+                // Only the image role generates images; keeping an image list
+                // on the analysis catalogue would let a picker offer ids from
+                // the wrong endpoint.
+                cat.image_gen = if role == ModelRole::Image { imgs } else { Vec::new() };
+                cat.fetching = false;
+            }
+            Err(e) => {
+                self.catalogue_mut(role).fetching = false;
+                self.settings.status =
+                    trf(lang, "fetch failed: {err}", &[("err", &e.to_string())]);
+            }
+        }
     }
 
 }

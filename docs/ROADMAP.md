@@ -307,6 +307,67 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **第十二轮·阶段 6 批 BA：配置信任面重构 + 推理等级 + 动态模型检测
+  （2026-08-11，未发版）**
+
+  用户令："先把 provider / base url / key 这些安全类问题解决掉，要优雅彻底；
+  设置里能调 OAuth/API、Model，最好再加推理等级。" 三项用户拍板（AskUserQuestion）：
+  ①单一能力表全量重构 ②推理等级两个角色各一个 ③放宽过滤 + 分析端独立拉 + 首开自动拉一次。
+
+  - **单一能力表（`config.rs`）**：`Trust{Secret,Destination,Preference}` ×
+    `Source{Trusted,DotEnv,WorkingDirFile}`，策略压成一个 `may_supply` match；
+    `SETTINGS` 表逐条声明每个设置的信任级与其 `LocalSettings` 绑定字段。
+    三份手写名单（`AMBIENT_UNSAFE_VARS` 17 名 / `without_ambient_authority`
+    4 字段 / `names_any_ambient_field` 同 4 字段）与 **13 个 `pre(i)` 位置下标**
+    全部废除，改为按名查表。旧下标是本轮改动的地雷：删一个名字，8 号之后
+    所有字段静默改读隔壁变量。新增两测：表覆盖漂移哨兵（非测试段每个
+    `"AUTOSHOP_*"` 字面量必须在表内）+ 重复行拒绝。
+  - **L10-2 兑现文档（用户定夺）**：六个模型/供应商名回到 `Preference`，
+    `.env` 恢复选模型能力（README:178 / ARCHITECTURE §3 一直如此承诺），
+    对合法 `.env` 模型名的无谓警告随之消失（警告集由表派生，不再手写）。
+    边界写进代码注释：照片包 `.env` 可切 `oauth→api`，但 base URL 仍是
+    `Destination`；而 `.env` 供 key 本就是既定契约，且 `OPENAI_API_KEY`
+    路由的是**带照片**的提案器——切供应商不构成能力扩张。
+  - **L10-1 信任根**：`store_root` 的 per-user 目录过去在所有平台都取
+    `%LOCALAPPDATA%`（Unix 不设该变量），故 Linux/macOS 一律落到
+    `/tmp/autoshop` 并把那里的设置文件当**中央可信**（含 key 与 base URL）。
+    改为分平台（`XDG_DATA_HOME`→`HOME/.local/share`；相对路径按 spec 忽略），
+    并新增 `RootTrust::SharedFallback` 标签 + `SettingsOrigin::SharedRoot`，
+    共享 tmp 根一律按环境态降权。
+  - **L08-1/L08-2 密钥泄漏（根治+纵深）**：`header_safe_key` 在配置边界 trim
+    并拒收不能进 HTTP 头的 key（ureq 2.12.1 `header.rs:147` 会把整条
+    `Authorization: Bearer <key>` 回引进 Transport 错误 → 进 rationale /
+    设置状态行 / 用户粘贴的日志）；`post_ai_json` 与 `list_models` 两处
+    Transport 臂补脱敏，与各自 Status 臂对齐；GUI 保存后若 key 被拒，
+    面板直接说明（stderr 在窗口化 GUI 里不可见）。
+  - **L08-3 子进程端点继承**：`ANTHROPIC_API_KEY`/`_AUTH_TOKEN`/`_BASE_URL`
+    入表为 `Destination`（对该子进程，凭据即路由决策），`dotenv_child_env`
+    据表过滤；claude.rs 原有 `env_remove` 保留，负责**继承**的那一半。
+  - **L10-5 路径泄漏**：设置加载/损坏告警改打文件名 + 文件夹角色
+    （`file_label`），不再把 `%LOCALAPPDATA%\<用户名>\...` 打进 stderr。
+  - **推理等级（新能力）**：`Config.{analysis,image}_effort` +
+    `LocalSettings` 两字段 + `AUTOSHOP_{ANALYSIS,IMAGE}_EFFORT`。线上拼写
+    按族分流并**协商降级**：Responses→`reasoning.effort`（与保活的
+    `summary:"auto"` 同对象，各自独立掉落）、Chat→顶层 `reasoning_effort`、
+    OAuth→`claude --effort`（`low|medium|high|xhigh|max`，实测自
+    `claude --help` 2026-08-11）。空值=不发该参数（对不推理的模型是唯一
+    正确请求）；值经 `config::effort` 限形（小写/数字/`-_`/≤32/不得以 `-`
+    开头）——它要进 argv。旧 claude 二进制不认 `--effort` 时按
+    `cli_rejected_effort` 去旗标重跑一次。三测钉线上形状与协商。
+  - **L08-10 动态模型**：`is_chat_model` 由「OpenAI 前缀白名单」改为排除法。
+    旧实现让"拉取本端点模型"实际等于"拉取 api.openai.com 的模型"：Codex 桥的
+    `claude-*`、LM Studio/vLLM/Qwen/DeepSeek 全被筛成 0，选择器静默退回两个
+    硬编码 id。**分析端点获得自己的 Fetch 按钮与自己的目录**（过去仅在两端
+    base URL 相同时借用图像端列表）；`Msg::Models` 带 `ModelRole` 标签；
+    `SettingsForm` 的四个平行字段收拢为两个 `ModelCatalogue`。
+  - **首开自动拉一次**：本会话首次打开设置且该角色已有 key 时自动拉取并缓存
+    （无 key 不发请求，之后手动刷新）。
+  - **`fable` 别名**：OAuth 模型列表与"切供应商是否为 claude 别名"判定改用
+    `CLAUDE_ALIASES`（含 `fable`，出自同一份 `--help`）。旧硬编码三元组会把
+    用户填的 `fable` 在切换供应商时静默改回 `opus`。
+  - 门：clippy 0；测试 374→377（`comm` 集差 0 删 3 增）；i18n 九门 0；
+    字体门重生成后 786/786；web/index.html 与 serve 设置路由同步新字段。
+
 - **第十二轮·阶段 1–3 全清：在册 15 簇归零 + Codex 簇群复审闭合（2026-08-11，
   未发版；计划见下方「第十二轮计划」）**
 

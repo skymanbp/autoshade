@@ -779,6 +779,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("fetched {n} models ({chat} chat · {img} image)",
         "已拉取 {n} 个模型（{chat} 对话 · {img} 图像）"),
     ("fetch failed: {err}", "拉取失败：{err}"),
+    ("{chat} chat", "{chat} 个对话模型"),
+    ("List the models THIS endpoint serves (GET /models). The analysis role has its own endpoint and key, so it gets its own list.",
+        "列出「这个」端点提供的模型（GET /models）。分析角色有自己的端点和密钥，因此有自己的列表。"),
+    ("Reasoning effort", "推理等级"),
+    ("provider default", "由供应商决定"),
+    ("or type a tier", "或直接输入等级"),
+    ("How hard the model is asked to think. Higher tiers cost more and take longer; blank leaves the choice to the provider. An endpoint that does not know the tier is retried without it.",
+        "要求模型思考的深度。等级越高越贵越慢；留空则交由供应商决定。端点若不认识该等级，会自动去掉它重试。"),
+    ("saved, but the key was not accepted — it contains characters that cannot appear in an HTTP header (a stray space or newline from a copy/paste?). Re-copy it and save again.",
+        "已保存，但密钥未被接受——其中含有 HTTP 头不允许的字符（复制粘贴时多带了空格或换行？）。请重新复制后再保存。"),
 
     // ── UX batch (toolbar slim-down · AI section · Export section · tools) ──
     ("AI", "AI"),

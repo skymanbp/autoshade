@@ -283,6 +283,7 @@
         <label class="chk"><input type="radio" name="an-provider" value="api" /> API (OpenAI-compatible)</label>
       </div>
       <div class="srow"><label>Model</label><input id="an-model" class="sinput" placeholder="opus (OAuth alias) — or a chat model id for API" /></div>
+      <div class="srow"><label>Reasoning effort</label><input id="an-effort" class="sinput" placeholder="blank = provider default (OAuth: low/medium/high/xhigh/max)" /></div>
       <div class="srow an-api"><label>Base URL</label><input id="an-base" class="sinput" placeholder="https://api.openai.com/v1" /></div>
       <div class="srow an-api"><label>API Key</label><input id="an-key" class="sinput" type="password" placeholder="leave blank to keep current" /><span class="keystat" id="an-keystat"></span></div>
     </section>
@@ -298,6 +299,7 @@
       <div class="srow"><label>Base URL</label><input id="im-base" class="sinput" placeholder="https://api.openai.com/v1" /></div>
       <div class="srow"><label>API Key</label><input id="im-key" class="sinput" type="password" placeholder="leave blank to keep current" /><span class="keystat" id="im-keystat"></span></div>
       <div class="srow"><label>Image-gen model</label><input id="im-gen" class="sinput" placeholder="gpt-image-1.5" /></div>
+      <div class="srow"><label>Reasoning effort</label><input id="im-effort" class="sinput" placeholder="blank = provider default (low/medium/high)" /></div>
     </section>
 
     <div class="srow" style="justify-content:flex-end; margin-top:10px">
@@ -1657,7 +1659,7 @@ settingsModal.addEventListener("keydown", e => {
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
 
-const SETTINGS_FIELDS = ["#an-model", "#an-base", "#an-key", "#im-model", "#im-base", "#im-gen", "#im-key"];
+const SETTINGS_FIELDS = ["#an-model", "#an-effort", "#an-base", "#an-key", "#im-model", "#im-base", "#im-gen", "#im-effort", "#im-key"];
 let settingsSeq = 0;
 async function openSettings() {
   settingsModal.hidden = false;
@@ -1683,12 +1685,14 @@ async function openSettings() {
     document.querySelector(`input[name="an-provider"][value="${ap}"]`).checked = true;
     anApiVisible(ap === "api");
     $("#an-model").value = d.analysis.model || "";
+    $("#an-effort").value = d.analysis.effort || "";
     $("#an-base").value = d.analysis.base_url || "";
     $("#an-key").value = "";
     $("#an-keystat").textContent = d.analysis.key_present ? "key set ✓" : "no key";
     $("#im-model").value = d.image.model || "";
     $("#im-base").value = d.image.base_url || "";
     $("#im-gen").value = d.image.gen_model || "";
+    $("#im-effort").value = d.image.effort || "";
     $("#im-key").value = "";
     $("#im-keystat").textContent = d.image.key_present ? "key set ✓" : "no key";
   } catch (e) {
@@ -1704,11 +1708,13 @@ $("#settings-save").onclick = async () => {
   const body = {
     analysis_provider: provider.value,
     analysis_model: $("#an-model").value.trim(),
+    analysis_effort: $("#an-effort").value.trim(),   // "" clears it back to the provider default
     analysis_base_url: $("#an-base").value.trim(),
     analysis_api_key: $("#an-key").value,          // blank ⇒ keep current
     image_model: $("#im-model").value.trim(),
     image_base_url: $("#im-base").value.trim(),
     image_gen_model: $("#im-gen").value.trim(),
+    image_effort: $("#im-effort").value.trim(),
     image_api_key: $("#im-key").value,             // blank ⇒ keep current
   };
   $("#settings-status").textContent = "saving…";

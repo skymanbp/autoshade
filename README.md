@@ -175,10 +175,31 @@ user profile, where nothing strips it again and one ordinary "save" undid the
 whole guard. And **a `.env` may no longer choose the endpoint**: `dotenvy`
 searches the working directory *and every parent*, and its override mode beats
 a variable you really set, so a `.env` dropped beside shared photos could
-redirect your key exactly as the settings file could. Keys and model names from
-`.env` still work — that is where this project's own key lives; only
-`AUTOSHOP_OPENAI_BASE_URL` and `AUTOSHOP_ANALYSIS_BASE_URL` are ignored from
-it, with a warning.
+redirect your key exactly as the settings file could.
+
+Since v0.23.2 that rule is stated **once**, as a property of each setting
+rather than as three hand-kept lists (`config::SETTINGS`). Every setting is
+one of three kinds:
+
+| kind | examples | who may set it |
+|---|---|---|
+| **secret** | `OPENAI_API_KEY`, `AUTOSHOP_ANALYSIS_API_KEY` | your environment, your `.env`, the Settings panel |
+| **destination** | the two base URLs, `AUTOSHOP_CLAUDE_BIN`, `AUTOSHOP_PYTHON`, the sidecar scripts and weight cache, `AUTOSHOP_DATA_DIR`, `PATH`, `PYTHONPATH`, `PYTHONHOME`, `ANTHROPIC_*` | your environment and the Settings panel **only** |
+| **preference** | every model id, both provider selectors, both reasoning-effort tiers, the tuning numbers | anything, including an ambient file |
+
+So keys and **models** from a `.env` work — that is where this project's own key
+lives — while nothing ambient can name where bytes go, which account pays, or
+what program runs. Only a destination coming from a `.env` is ignored, and only
+that prints a warning; a `.env` naming a model no longer warns about anything,
+which it used to (and which contradicted this page).
+
+Two consequences worth naming. A `.env` may switch `AUTOSHOP_ANALYSIS_PROVIDER`
+from `oauth` to `api` — but not the endpoint or, therefore, where the request
+goes; and it could already supply `OPENAI_API_KEY`, which is the strictly
+larger capability. And on Linux/macOS the store root now resolves through
+`$XDG_DATA_HOME` / `$HOME/.local/share`; if neither exists the fallback is the
+shared temp folder, and a settings file found **there** is treated as ambient
+too, because any account on the machine could have written it first.
 
 **White balance renders slightly differently.** The blackbody curve behind the
 Temp slider is a published piecewise fit whose branches did not meet: at
@@ -238,8 +259,17 @@ environment. The two sidecar knobs (`AUTOSHOP_PYTHON`,
 | `AUTOSHOP_ANALYSIS_MODEL` | `opus` | verifier model (claude alias for oauth; chat id for api) |
 | `AUTOSHOP_ANALYSIS_API_KEY` | — | verifier key when provider = `api` |
 | `AUTOSHOP_ANALYSIS_BASE_URL` | `https://api.openai.com/v1` | verifier API base when provider = `api` |
+| `AUTOSHOP_IMAGE_EFFORT` | — | image-role reasoning effort; blank ⇒ the provider decides |
+| `AUTOSHOP_ANALYSIS_EFFORT` | — | verifier reasoning effort; blank ⇒ the provider decides |
 | `AUTOSHOP_PYTHON` | `python` | interpreter for the denoise sidecar |
 | `AUTOSHOP_DENOISE_MODEL` | `color_real_psnr` | default SCUNet weights |
+
+Reasoning effort is a **suggestion, not a contract**: the tiers differ per
+provider (the `claude` CLI documents `low, medium, high, xhigh, max`;
+OpenAI-compatible endpoints take the first three), so the Settings pickers offer
+the right list beside a free-text field, and an endpoint that does not know the
+tier is automatically retried without it. Blank means "send no such parameter",
+which is the only correct request for a model that does not reason.
 
 ## Honest scope
 

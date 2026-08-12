@@ -346,6 +346,46 @@ pub(crate) fn model_picker(ui: &mut egui::Ui, salt: &str, value: &mut String, op
     );
 }
 
+/// A reasoning-effort picker: the tiers this provider documents, plus an
+/// explicit "provider default" that clears the value, plus a text field for a
+/// tier some endpoint adds later.
+///
+/// Empty is a REAL choice, not a missing one — it means "send no effort
+/// parameter at all", which is the only correct request for a model that does
+/// not reason. So the dropdown names it rather than leaving the field blank
+/// and ambiguous.
+pub(crate) fn effort_picker(
+    ui: &mut egui::Ui,
+    salt: &str,
+    value: &mut String,
+    tiers: &[&str],
+    lang: Lang,
+) {
+    let sel = if value.trim().is_empty() {
+        tr(lang, "provider default").to_owned()
+    } else {
+        value.clone()
+    };
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(sel)
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, String::new(), tr(lang, "provider default"));
+            for t in tiers {
+                ui.selectable_value(value, (*t).to_string(), *t);
+            }
+        });
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .desired_width(170.0)
+            .hint_text(tr(lang, "or type a tier")),
+    )
+    .on_hover_text(tr(
+        lang,
+        "How hard the model is asked to think. Higher tiers cost more and take longer; blank leaves the choice to the provider. An endpoint that does not know the tier is retried without it.",
+    ));
+}
+
 /// A [`StashEntry`]'s strip as a persistable record — the quit dialog's
 /// Save-all writes one per stashed photo so background variants survive the
 /// quit (before v0.22 they were "unsavable" and pinned the dialog forever).

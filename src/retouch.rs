@@ -567,12 +567,16 @@ If the photo is clean, return an empty list.";
     // and `busy` gates every GUI action. Streaming-first via the shared
     // helper: the propose budget bounds SILENCE, not healthy generation time,
     // and AUTOSHOP_HTTP_TIMEOUT_SECS still overrides.
+    //
+    // This is the IMAGE role (a vision call on the image key and base URL), so
+    // it takes the image role's reasoning-effort tier — not the analysis one.
     let value: serde_json::Value = crate::advisor::post_ai_json(
         &url,
         key,
         body,
         crate::advisor::PROPOSE_TIMEOUT_SECS,
         crate::advisor::SseFamily::Responses,
+        cfg.image_effort.as_deref(),
     )
     .map_err(|e| anyhow!("vision API: {e}"))?;
 

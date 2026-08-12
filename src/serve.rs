@@ -2656,12 +2656,16 @@ fn api_settings_get(state: &AppState) -> Result<ResponseBox> {
             "model": cfg.analysis_model,
             "base_url": cfg.analysis_base_url,
             "key_present": cfg.analysis_api_key.is_some(),
+            // "" means "send no effort parameter" — a real choice, not a
+            // missing value (see `config::LocalSettings::analysis_effort`).
+            "effort": cfg.analysis_effort.clone().unwrap_or_default(),
         },
         "image": {
             "model": cfg.openai_model,
             "base_url": cfg.openai_base_url,
             "gen_model": cfg.openai_image_model,
             "key_present": cfg.openai_api_key.is_some(),
+            "effort": cfg.image_effort.clone().unwrap_or_default(),
         },
         // The `claude` CLI has no image input in print mode → image-via-OAuth is
         // not available; the image role always uses an OpenAI-compatible API.
@@ -2700,6 +2704,15 @@ fn api_settings_post(request: &mut Request, state: &AppState) -> Result<Response
         }
         if inc.image_gen_model.is_some() {
             cur.image_gen_model = inc.image_gen_model;
+        }
+        // Effort rides the same "present ⇒ take it" rule as the other
+        // non-secret fields, so a request that sends `""` CLEARS the tier back
+        // to the provider default instead of being unable to express it.
+        if inc.analysis_effort.is_some() {
+            cur.analysis_effort = inc.analysis_effort;
+        }
+        if inc.image_effort.is_some() {
+            cur.image_effort = inc.image_effort;
         }
         // Secrets: only overwrite when a non-empty value was actually provided.
         if let Some(k) = inc.analysis_api_key.filter(|s| !s.trim().is_empty()) {

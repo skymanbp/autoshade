@@ -43,8 +43,22 @@ fn extract_model_ids(value: &serde_json::Value) -> Result<Vec<String>> {
 }
 
 pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
-    if api_key.trim().is_empty() {
+    // Trim BEFORE the header is built, and refuse what cannot ride one. ureq
+    // quotes the whole rejected header line back — `Authorization: Bearer
+    // <the real key>` (2.12.1 `header.rs:147`) — and this call's errors are
+    // shown verbatim in the Settings panel, so a key with a trailing newline
+    // from a copy/paste used to print itself into the UI. Same boundary rule
+    // as `config::header_safe_key`; the Transport arm below is the second
+    // layer.
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
         return Err(anyhow!("no API key — set one in Settings (save first), then fetch"));
+    }
+    if !crate::config::key_is_header_safe(api_key) {
+        return Err(anyhow!(
+            "the API key contains characters that cannot appear in an HTTP header \
+             (a stray space or newline from a copy/paste?) — re-copy it and save again"
+        ));
     }
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let resp = ureq::get(&url)
@@ -60,7 +74,14 @@ pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
                 crate::advisor::BoundedUntrustedText::diagnostic(&body, &[api_key]);
             return Err(anyhow!("models API {code}: {safe}"));
         }
-        Err(ureq::Error::Transport(t)) => return Err(anyhow!("transport: {t}")),
+        // Redacted like the Status arm above: a transport diagnostic can carry
+        // the header line (see the boundary check at the top) or a base URL
+        // with embedded credentials, and this string is displayed in Settings.
+        Err(ureq::Error::Transport(t)) => {
+            let safe =
+                crate::advisor::BoundedUntrustedText::diagnostic(&t.to_string(), &[api_key]);
+            return Err(anyhow!("transport: {safe}"));
+        }
     };
     extract_model_ids(&value)
 }
@@ -70,14 +91,25 @@ pub fn is_image_model(id: &str) -> bool {
     id.contains("image")
 }
 
-/// True if `id` looks like a text/vision chat model (the proposer/verifier roles),
-/// excluding audio/embedding/etc. variants that can't do vision-chat.
+/// True if `id` looks like a text/vision chat model (the proposer/verifier
+/// roles), excluding the modality-specific variants that cannot do vision-chat.
+///
+/// EXCLUSION, not an allowlist. This used to require an OpenAI-branded prefix
+/// (`gpt*`, `chatgpt*`, `o<digit>`), which quietly made "fetch the models this
+/// endpoint serves" mean "fetch the models api.openai.com serves": every id on
+/// any other OpenAI-compatible endpoint — a Codex bridge exposing `claude-*`,
+/// LM Studio, vLLM, Qwen, DeepSeek — was filtered to nothing and the picker
+/// silently fell back to two hardcoded ids. The base URL is configurable
+/// precisely so those endpoints work, so the classifier must not re-hardcode
+/// the vendor. False positives are cheap here: the picker is a suggestion list
+/// with a free-text field beside it, and a wrong pick fails loudly on the
+/// first call.
 pub fn is_chat_model(id: &str) -> bool {
-    let bad = ["audio", "realtime", "transcribe", "tts", "whisper", "embedding", "moderation"];
-    let family = id.starts_with("gpt")
-        || id.starts_with("chatgpt")
-        || (id.starts_with('o') && id.as_bytes().get(1).is_some_and(u8::is_ascii_digit));
-    family && !is_image_model(id) && !bad.iter().any(|b| id.contains(b))
+    let bad = [
+        "audio", "realtime", "transcribe", "tts", "whisper", "embedding", "moderation", "rerank",
+        "dall-e", "sora", "video", "speech", "guard",
+    ];
+    !id.is_empty() && !is_image_model(id) && !bad.iter().any(|b| id.contains(b))
 }
 
 #[cfg(test)]
@@ -99,6 +131,25 @@ mod tests {
         assert!(!is_chat_model("gpt-4o-audio-preview"));
         assert!(!is_chat_model("text-embedding-3-large"));
         assert!(!is_image_model("gpt-5.5"));
+
+        // The base URL is configurable, so the classifier must not be. Ids
+        // served by other OpenAI-compatible endpoints used to be filtered to
+        // nothing by an OpenAI-branded prefix test, which left the picker
+        // offering two hardcoded ids on every third-party endpoint.
+        for id in [
+            "claude-opus-4-6",          // a Codex/Claude bridge
+            "qwen2.5-vl-72b-instruct",  // vLLM / LM Studio
+            "deepseek-chat",
+            "llama-3.3-70b-instruct",
+            "mistral-large-latest",
+        ] {
+            assert!(is_chat_model(id), "{id} disappeared from the picker");
+        }
+        // …while the modality exclusions keep doing their job vendor-wide.
+        for id in ["qwen-audio-turbo", "bge-reranker-v2", "dall-e-3", "sora-2", "llama-guard-3"] {
+            assert!(!is_chat_model(id), "{id} cannot answer a vision-chat call");
+        }
+        assert!(!is_chat_model(""), "an empty id is not a model");
     }
 
         #[test]

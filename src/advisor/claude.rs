@@ -26,6 +26,30 @@ use super::{build_verify_prompt, parse_verdict, Advisor, AdvisorError, Verdict};
 pub struct ClaudeProvider {
     bin: String,
     model: String,
+    /// The analysis role's reasoning-effort tier, or `None` for the CLI's own
+    /// default. Passed as `--effort <level>`; `claude --help` documents
+    /// `low, medium, high, xhigh, max` (measured 2026-08-11). The value is
+    /// bounded by `config::effort` before it ever reaches argv.
+    effort: Option<String>,
+}
+
+/// Did the CLI refuse the run because it does not know `--effort`?
+///
+/// The flag exists in current builds, but this repo is public and an older
+/// `claude` must DEGRADE rather than fail every verification: clap answers an
+/// unknown flag with a non-zero exit and `unexpected argument '--effort'`
+/// (or `unknown option`), which arrives here as `CliFailed`. Matching the
+/// refusal text is the CLI-side equivalent of `error_blames_param` on the
+/// HTTP paths — attribution, not a blanket retry.
+fn cli_rejected_effort(e: &AdvisorError) -> bool {
+    let AdvisorError::CliFailed { stderr, .. } = e else {
+        return false;
+    };
+    let s = stderr.to_ascii_lowercase();
+    s.contains("--effort")
+        && (s.contains("unexpected argument")
+            || s.contains("unknown option")
+            || s.contains("unrecognized"))
 }
 
 impl ClaudeProvider {
@@ -33,15 +57,27 @@ impl ClaudeProvider {
         Self {
             bin: cfg.claude_bin.clone(),
             model: cfg.analysis_model.clone(),
+            effort: cfg.analysis_effort.clone(),
         }
     }
 
-    /// The child's full SHAPE — argv, env, cwd, console — with no spawn.
-    /// The isolation contract lives here as one inspectable value
-    /// (`get_args` / `get_envs` / `get_current_dir` back the tests that
-    /// pin it); `verify()` adds only the run mechanics (stdio, kill
-    /// group, spawn, drain).
+    /// The child's full SHAPE at this provider's CONFIGURED effort — argv,
+    /// env, cwd, console — with no spawn. The isolation contract lives here
+    /// as one inspectable value (`get_args` / `get_envs` / `get_current_dir`
+    /// back the tests that pin it); `run_verify` adds only the run mechanics
+    /// (stdio, kill group, spawn, drain).
+    ///
+    /// Test-only because the run path must name the effort it is ATTEMPTING —
+    /// the negotiation retry re-spawns at a different one — while the tests
+    /// pin the shape a configured provider actually produces.
+    #[cfg(test)]
     fn verify_command(&self) -> Command {
+        self.verify_command_with(self.effort.as_deref())
+    }
+
+    /// The same shape with an EXPLICIT effort, so the negotiation retry can
+    /// rebuild the child without it.
+    fn verify_command_with(&self, effort: Option<&str>) -> Command {
         let mut cmd = Command::new(&self.bin);
         cmd.args([
             "-p",
@@ -68,6 +104,13 @@ impl ClaudeProvider {
             "--output-format",
             "json",
         ]);
+        // Opt-in only: with no tier configured the flag is absent and the
+        // invocation is byte-identical to every prior release, so a CLI that
+        // predates `--effort` is never handed one unless the user asked for a
+        // tier — and even then `cli_rejected_effort` retries without it.
+        if let Some(e) = effort.filter(|e| !e.trim().is_empty()) {
+            cmd.args(["--effort", e]);
+        }
         // The prompt goes over STDIN, never argv (L11#7a): a recipe at the
         // sanitize caps pretty-prints to ~90-100 KB, 3x past CreateProcessW's
         // 32767-char command-line ceiling (measured: 32700 spawns, 33000
@@ -79,8 +122,19 @@ impl ClaudeProvider {
         // The .env's unprotected names travel to the child EXPLICITLY
         // (L16#3): under dotenv_override they sat in the process environment
         // and were inherited; the owned map never writes the parent, so the
-        // reach is reproduced on the child's own block. BEFORE env_remove —
-        // a .env-carried ANTHROPIC_API_KEY must still be stripped below.
+        // reach is reproduced on the child's own block.
+        //
+        // What that block may contain is decided by the capability table, not
+        // here: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+        // `ANTHROPIC_BASE_URL` are `Trust::Destination` — for this child the
+        // credential IS the routing decision — so a photo pack's `.env` can no
+        // longer repoint or re-bill the verifier. It used to: the filter named
+        // only Autoshop's own variables, and these three are the CLI's.
+        //
+        // The env_remove below is the OTHER half and stays: it strips an
+        // INHERITED key, which no table can reach. A live-environment
+        // `ANTHROPIC_BASE_URL` is deliberately left alone — that is a real
+        // user's corporate gateway, set in their own environment.
         cmd.envs(crate::config::dotenv_child_env());
         // This provider bills the user's Claude subscription via the stored
         // OAuth login by design. A stray ANTHROPIC_API_KEY in the inherited
@@ -118,8 +172,32 @@ impl Advisor for ClaudeProvider {
         hist: &Histogram,
     ) -> Result<Verdict, AdvisorError> {
         let prompt = build_verify_prompt(recipe, meta, hist)?;
+        // No tier configured ⇒ nothing to negotiate, and no second copy of a
+        // ~100 KB prompt to hold.
+        let Some(effort) = self.effort.as_deref() else {
+            return self.run_verify(prompt, None);
+        };
+        let retry = prompt.clone();
+        match self.run_verify(prompt, Some(effort)) {
+            Err(e) if cli_rejected_effort(&e) => {
+                eprintln!(
+                    "  note: this `claude` build does not accept --effort — retrying without it \
+                     (the CLI's own default applies)"
+                );
+                self.run_verify(retry, None)
+            }
+            other => other,
+        }
+    }
+}
 
-        let mut cmd = self.verify_command();
+impl ClaudeProvider {
+    /// ONE verification run at a fixed effort. Split out of `verify` so the
+    /// unknown-flag negotiation above can repeat it — the retry re-spawns a
+    /// child that never received the flag, rather than trying to edit an
+    /// already-built `Command`.
+    fn run_verify(&self, prompt: String, effort: Option<&str>) -> Result<Verdict, AdvisorError> {
+        let mut cmd = self.verify_command_with(effort);
         // A hung `claude` child (network stall inside the CLI) used to block
         // the analysis worker FOREVER — `output()` has no deadline, while
         // every HTTP advisor path carries one. Spawn + poll with a hard
@@ -337,6 +415,7 @@ mod tests {
         let provider = ClaudeProvider {
             bin: stand_in(&dir, ACCEPT_ENVELOPE),
             model: "test-model".into(),
+            effort: None,
         };
         let recipe = EditRecipe {
             rationale: "MARKER_RATIONALE_ON_STDIN_XYZ".into(),
@@ -371,6 +450,7 @@ mod tests {
         let provider = ClaudeProvider {
             bin: stand_in(&dir, ACCEPT_ENVELOPE),
             model: "test-model".into(),
+            effort: None,
         };
         let recipe = EditRecipe {
             rationale: "r".repeat(4096),
@@ -441,7 +521,7 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
             p.to_string_lossy().into_owned()
         };
-        let provider = ClaudeProvider { bin, model: "test-model".into() };
+        let provider = ClaudeProvider { bin, model: "test-model".into(), effort: None };
         let err = provider
             .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
             .expect_err("a flooded stdout is not a verdict");
@@ -453,13 +533,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The effort tier is OPT-IN on the wire: with none configured the argv
+    /// must be byte-identical to every prior release, so a `claude` build
+    /// that predates `--effort` is never handed one. With a tier configured
+    /// it is appended as a flag/value pair at the END, leaving the pinned
+    /// isolation sequence above untouched.
+    #[test]
+    fn the_effort_tier_reaches_argv_only_when_configured() {
+        let args = |p: &ClaudeProvider, e: Option<&str>| -> Vec<String> {
+            p.verify_command_with(e)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let plain = ClaudeProvider { bin: "claude-test".into(), model: "m".into(), effort: None };
+        assert!(
+            !args(&plain, None).iter().any(|a| a == "--effort"),
+            "an unconfigured tier must not change the invocation at all"
+        );
+        // Blank is the "provider default" choice the UI writes — same thing.
+        assert!(!args(&plain, Some("  ")).iter().any(|a| a == "--effort"));
+
+        let tiered =
+            ClaudeProvider { bin: "claude-test".into(), model: "m".into(), effort: Some("xhigh".into()) };
+        let got = args(&tiered, tiered.effort.as_deref());
+        assert_eq!(
+            got[got.len() - 2..],
+            ["--effort".to_string(), "xhigh".to_string()],
+            "the tier is appended last: {got:?}"
+        );
+        // …and the negotiation retry rebuilds the SAME child without it.
+        assert_eq!(args(&tiered, None), args(&plain, None), "the retry drops only the tier");
+
+        // Attribution, not a blanket retry: only a refusal that names the
+        // flag re-runs, and only from the CLI-failure shape.
+        let refused = AdvisorError::CliFailed {
+            bin: "claude".into(),
+            code: Some(2),
+            stderr: "error: unexpected argument '--effort' found".into(),
+        };
+        assert!(cli_rejected_effort(&refused));
+        let unrelated = AdvisorError::CliFailed {
+            bin: "claude".into(),
+            code: Some(1),
+            stderr: "Credit balance is too low".into(),
+        };
+        assert!(!cli_rejected_effort(&unrelated), "an unrelated failure must not re-run the call");
+        assert!(!cli_rejected_effort(&AdvisorError::ClaudeError("--effort".into())));
+    }
+
     /// L14#3: the isolation contract is the argv itself, so the test pins
     /// the EXACT sequence — flag order, both empty-string values in their
     /// adjacent positions, and no positional prompt (it travels on stdin).
     /// A `contains` check would miss a dropped `""` or a reordered pair.
     #[test]
     fn the_verifier_child_argv_pins_every_isolation_flag() {
-        let provider = ClaudeProvider { bin: "claude-test".into(), model: "m-1".into() };
+        let provider = ClaudeProvider { bin: "claude-test".into(), model: "m-1".into(), effort: None };
         let cmd = provider.verify_command();
         let args: Vec<String> =
             cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -495,7 +624,7 @@ mod tests {
     /// of the child's shape and both are pinned here.
     #[test]
     fn the_verifier_child_strips_the_api_key_and_runs_from_a_neutral_cwd() {
-        let provider = ClaudeProvider { bin: "claude-test".into(), model: "m".into() };
+        let provider = ClaudeProvider { bin: "claude-test".into(), model: "m".into(), effort: None };
         let cmd = provider.verify_command();
         // get_envs order is unspecified — assert membership of the
         // (key, None) removal pair, never a position.

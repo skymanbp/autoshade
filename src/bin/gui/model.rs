@@ -386,8 +386,12 @@ pub(crate) enum Msg {
     /// Style-prompt extraction finished: (the reusable prompt text, the
     /// typed fact of whether the .style.txt copy landed).
     Styled(Box<anyhow::Result<(String, StyleNote)>>),
-    /// A `GET /models` fetch finished: the account's model ids (Settings pick-list).
-    Models(anyhow::Result<Vec<String>>),
+    /// A `GET /models` fetch finished: the account's model ids (Settings
+    /// pick-list). Tagged with the ROLE that asked, because the two roles can
+    /// point at different endpoints with different catalogues — the analysis
+    /// picker used to borrow the image endpoint's ids and offer nothing at all
+    /// whenever the two base URLs differed.
+    Models(ModelRole, anyhow::Result<Vec<String>>),
     /// A batch recipe paste finished — counts and per-photo details,
     /// rendered at landing (L12#4).
     Pasted(anyhow::Result<PasteOutcome>),
@@ -438,6 +442,64 @@ pub(crate) const CODEX_BRIDGE_URL: &str = "http://127.0.0.1:8317/v1";
 /// image role into OAuth mode, so we can swap in the bridge URL automatically.
 pub(crate) const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1";
 
+/// Which role a `GET /models` probe was run for. The two roles have their own
+/// endpoint, their own key, and therefore their own catalogue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ModelRole {
+    /// The vision proposer + generative edits (`image_base_url`).
+    Image,
+    /// The verifier, in `api` mode (`analysis_base_url`).
+    Analysis,
+}
+
+/// One endpoint's live pick-lists, as last fetched.
+#[derive(Default)]
+pub(crate) struct ModelCatalogue {
+    /// Text/vision chat ids — the proposer and the API verifier.
+    pub(crate) chat: Vec<String>,
+    /// Image-generation ids. Only the image role has a use for these; the
+    /// analysis catalogue leaves it empty.
+    pub(crate) image_gen: Vec<String>,
+    /// A `GET /models` worker is in flight for this role.
+    pub(crate) fetching: bool,
+    /// The endpoint these ids came FROM. Editing the Base/Bridge URL (or the
+    /// provider auto-swap rewriting it) makes them ids of a different server —
+    /// the pickers self-invalidate instead of offering stale ids.
+    pub(crate) from_base: String,
+}
+
+impl ModelCatalogue {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.chat.is_empty() && self.image_gen.is_empty()
+    }
+
+    /// Forget everything fetched. Used when the endpoint or the credential
+    /// changes — both decide which ids exist.
+    pub(crate) fn clear(&mut self) {
+        self.chat.clear();
+        self.image_gen.clear();
+    }
+}
+
+/// Reasoning-effort tiers offered by the pickers. Suggestions, not a closed
+/// set: both pickers sit beside a free-text field, `config::effort` only
+/// BOUNDS the value, and an endpoint that rejects a tier is negotiated down
+/// (`advisor::post_ai_json`, `claude::cli_rejected_effort`).
+///
+/// The Claude CLI's list is quoted from `claude --help` on this machine
+/// (`--effort <level>  Effort level for the current session (low, medium,
+/// high, xhigh, max)`, measured 2026-08-11). OpenAI-compatible endpoints
+/// share the first three; anything else goes in the text field.
+pub(crate) const EFFORT_TIERS_CLI: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+pub(crate) const EFFORT_TIERS_API: [&str; 3] = ["low", "medium", "high"];
+
+/// The `claude` CLI's model ALIASES, from the same `--help` (`--model
+/// <model>  … Provide an alias for the latest model (e.g. 'fable', 'opus', or
+/// 'sonnet') …`). Used both as the OAuth picker's list and as the test for
+/// "is this id a Claude alias" when the provider radio flips — a hardcoded
+/// trio here used to rewrite a legitimate `fable` back to `opus`.
+pub(crate) const CLAUDE_ALIASES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+
 /// Editable buffers for the in-app Settings window. Key fields stay blank on
 /// load and only overwrite the stored key when non-empty (the form never shows
 /// an existing secret) — mirroring the web `/api/settings` contract.
@@ -449,20 +511,21 @@ pub(crate) struct SettingsForm {
     pub(crate) analysis_base_url: String,
     pub(crate) analysis_api_key: String,
     pub(crate) analysis_key_present: bool,
+    pub(crate) analysis_effort: String,
     pub(crate) image_model: String,
     pub(crate) image_base_url: String,
     pub(crate) image_gen_model: String,
     pub(crate) image_api_key: String,
     pub(crate) image_key_present: bool,
+    pub(crate) image_effort: String,
     pub(crate) status: String,
-    // --- live model pick-lists (populated by the "Fetch models" button) ---
-    pub(crate) chat_choices: Vec<String>,      // text/vision chat ids (proposer + api verifier)
-    pub(crate) image_gen_choices: Vec<String>, // gpt-image-* ids (generative edits)
-    pub(crate) fetching_models: bool,          // a GET /models worker is in flight
-    // The endpoint the lists were fetched FROM. Editing the Base/Bridge URL
-    // (or the provider auto-swap rewriting it) makes them ids of a different
-    // server — the pickers self-invalidate instead of offering stale ids.
-    pub(crate) models_from_base: String,
+    /// Live pick-lists, one per endpoint (see [`ModelCatalogue`]).
+    pub(crate) image_models: ModelCatalogue,
+    pub(crate) analysis_models: ModelCatalogue,
+    /// Whether this SESSION has already auto-filled the pick-lists on a
+    /// Settings open. Survives the form rebuild on every reopen, so the
+    /// convenience probe happens once, not on every visit to the panel.
+    pub(crate) autofetched: bool,
 }
 
 /// Pick radius (px) for on-image mask knobs — matches the crop handles' feel.
