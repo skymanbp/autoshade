@@ -1,8 +1,10 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.23.4 — a patch on v0.23.3 that signs the parody
-> app icon with a small "skymanbp's" wordmark on frames ≥ 64px; no code
-> change). The full decode → advise → verify → render
+> Status: **implemented** (v0.23.5 — a GUI patch on v0.23.4: the variant
+> strip's card column now centers with equal air above and below, pinned by
+> a headless geometry regression test; v0.23.4 signed the parody app icon
+> with a small "skymanbp's" wordmark on frames ≥ 64px). The full decode →
+> advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
@@ -10,7 +12,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 428 library + 7 CLI + 71 GUI tests pass in both build configurations.
+> 428 library + 7 CLI + 72 GUI tests pass in both build configurations.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
