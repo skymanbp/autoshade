@@ -769,7 +769,16 @@ fn find_crs_description(doc: &str) -> Option<usize> {
         if name == "rdf:Description" {
             let mut cursor = 0;
             while let Some(a) = next_xml_attribute(tag, &mut cursor) {
-                if a.name == "xmlns:crs" || a.name.starts_with("crs:") {
+                // The declaration only marks the settings Description when it
+                // binds the CANONICAL camera-raw URI. The scope-aware gate
+                // (R12-03) now lets an UNUSED foreign rebind through as
+                // harmless — but the merge keys on this very attribute, and
+                // splicing canonical-intent `crs:` settings into a scope
+                // where `crs` means something else would corrupt the
+                // document the gate just cleared.
+                if (a.name == "xmlns:crs" && xml_unescape(a.value).as_ref() == CRS_URI)
+                    || a.name.starts_with("crs:")
+                {
                     return Some(start);
                 }
             }
@@ -799,65 +808,129 @@ const RDF_URI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 /// one document with two contradictory camera-raw blocks and a clean "saved".
 /// This is the refusal gate: `Some(reason)` names the binding, the merge
 /// refuses (the caller regenerates AND discloses), and the import surfaces the
-/// same sentence. No known producer emits these bindings (Adobe and every
-/// interop tool use `crs`/`rdf`) — the gate exists because the consequence of
-/// degrading silently is a corrupted deliverable, not because the input is
-/// common.
+/// same sentence.
+///
+/// SCOPE-AWARE (R12-03): bindings are resolved through an element scope
+/// stack, XML-semantics style, and the gate fires only where a binding would
+/// actually corrupt this document's reading — a `crs:`/`rdf:` NAME (element
+/// or attribute) whose in-scope binding is not the canonical URI, a name
+/// under some OTHER prefix whose in-scope binding IS a canonical URI, or an
+/// unprefixed ELEMENT under a default namespace bound to one (unprefixed
+/// attributes take no namespace, per XML). A declaration nobody uses — a
+/// nested island rebinding `crs` around content that never says `crs:`, or a
+/// foreign alias for the camera-raw URI that no name ever resolves through —
+/// no longer refuses the whole document the way the flat scan did. An
+/// undeclared `crs:`/`rdf:` prefix still passes: the scanners read by
+/// prefix and never required a declaration.
 fn xmlns_conflict(doc: &str) -> Option<String> {
     if doc.len() > MAX_XMP_BYTES {
         return None;
     }
+    // One frame per OPEN element that declares namespaces, tagged with its
+    // depth so a closing tag pops exactly its own frame. `""` keys the
+    // default namespace. Closing-tag NAMES are not matched (the flat scan
+    // ignored them too; malformed nesting degrades toward refusal, never
+    // toward silent acceptance).
+    const MAX_NS_FRAMES: usize = 1024;
+    fn resolve<'a>(frames: &'a [(usize, Vec<(&str, String)>)], pfx: &str) -> Option<&'a str> {
+        frames
+            .iter()
+            .rev()
+            .find_map(|(_, ds)| ds.iter().rev().find(|(p, _)| *p == pfx).map(|(_, u)| u.as_str()))
+    }
+    fn against(uri: &str, pfx: Option<&str>) -> Option<String> {
+        match pfx {
+            Some("crs") => (uri != CRS_URI)
+                .then(|| format!("xmlns:crs is bound to {uri}, not the camera-raw namespace")),
+            Some("rdf") => (uri != RDF_URI)
+                .then(|| format!("xmlns:rdf is bound to {uri}, not the RDF namespace")),
+            Some(pfx) if uri == CRS_URI => Some(format!(
+                "the camera-raw namespace is bound to the `{pfx}:` prefix; \
+                 this build reads only `crs:`"
+            )),
+            Some(pfx) if uri == RDF_URI => Some(format!(
+                "the RDF namespace is bound to the `{pfx}:` prefix; \
+                 this build reads only `rdf:`"
+            )),
+            None if uri == CRS_URI || uri == RDF_URI => Some(format!(
+                "the {} namespace is bound as the DEFAULT namespace; this \
+                 build reads only the `crs:`/`rdf:` prefixes",
+                if uri == CRS_URI { "camera-raw" } else { "RDF" }
+            )),
+            _ => None,
+        }
+    }
+    let mut depth: usize = 0;
+    let mut frames: Vec<(usize, Vec<(&str, String)>)> = Vec::new();
     let mut from = 0;
-    while let Some((start, end, _)) = next_xml_tag(doc, from) {
+    while let Some((start, end, self_closing)) = next_xml_tag(doc, from) {
+        from = end + 1;
         let tag = &doc[start..=end];
-        if !tag.starts_with("</") {
-            let mut cursor = 0;
-            while let Some(a) = next_xml_attribute(tag, &mut cursor) {
-                let Some(pfx) = a.name.strip_prefix("xmlns:") else {
-                    // The DEFAULT namespace (bare `xmlns=`) binds every
-                    // unprefixed element below it: bound to camera-raw or
-                    // RDF, it hides settings in unprefixed spellings these
-                    // prefix scanners cannot see, and the merge would splice
-                    // a second contradictory settings block in beside them —
-                    // the very corruption the prefixed arms refuse.
-                    if a.name == "xmlns" {
-                        let uri = xml_unescape(a.value);
-                        let uri = uri.as_ref();
-                        if uri == CRS_URI || uri == RDF_URI {
-                            return Some(format!(
-                                "the {} namespace is bound as the DEFAULT namespace; this \
-                                 build reads only the `crs:`/`rdf:` prefixes",
-                                if uri == CRS_URI { "camera-raw" } else { "RDF" }
-                            ));
-                        }
-                    }
-                    continue;
-                };
-                let uri = xml_unescape(a.value);
-                let uri = uri.as_ref();
-                if pfx == "crs" && uri != CRS_URI {
-                    return Some(format!(
-                        "xmlns:crs is bound to {uri}, not the camera-raw namespace"
-                    ));
+        if tag.starts_with("</") {
+            if depth > 0 {
+                if frames.last().is_some_and(|f| f.0 == depth) {
+                    frames.pop();
                 }
-                if pfx != "crs" && uri == CRS_URI {
-                    return Some(format!(
-                        "the camera-raw namespace is bound to the `{pfx}:` prefix; \
-                         this build reads only `crs:`"
-                    ));
-                }
-                if pfx == "rdf" && uri != RDF_URI {
-                    return Some(format!("xmlns:rdf is bound to {uri}, not the RDF namespace"));
-                }
-                if pfx != "rdf" && uri == RDF_URI {
-                    return Some(format!(
-                        "the RDF namespace is bound to the `{pfx}:` prefix; \
-                         this build reads only `rdf:`"
-                    ));
-                }
+                depth -= 1;
+            }
+            continue;
+        }
+        depth += 1;
+        // Declarations bind the element they sit on (and its own other
+        // attributes) regardless of attribute order — collect them first.
+        let mut decls: Vec<(&str, String)> = Vec::new();
+        let mut cursor = 0;
+        while let Some(a) = next_xml_attribute(tag, &mut cursor) {
+            if let Some(pfx) = a.name.strip_prefix("xmlns:") {
+                decls.push((pfx, xml_unescape(a.value).into_owned()));
+            } else if a.name == "xmlns" {
+                decls.push(("", xml_unescape(a.value).into_owned()));
             }
         }
-        from = end + 1;
+        if !decls.is_empty() {
+            frames.push((depth, decls));
+            if frames.len() > MAX_NS_FRAMES {
+                // Beyond the tracking bound the gate cannot prove a binding
+                // harmless, so it refuses — conservative, and disclosed.
+                return Some(
+                    "more nested xmlns declarations than this build tracks; \
+                     namespace bindings cannot be verified"
+                        .to_string(),
+                );
+            }
+        }
+        // The element's own name…
+        let name = tag[1..]
+            .split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+            .next()
+            .unwrap_or("");
+        let elem_pfx = name.split_once(':').map(|(p, _)| p);
+        if let Some(uri) = resolve(&frames, elem_pfx.unwrap_or(""))
+            && let Some(why) = against(uri, elem_pfx)
+        {
+            return Some(why);
+        }
+        // …then every non-declaration attribute name. Unprefixed attributes
+        // take no namespace (not the default one), so only prefixed names
+        // resolve here.
+        let mut cursor = 0;
+        while let Some(a) = next_xml_attribute(tag, &mut cursor) {
+            if a.name == "xmlns" || a.name.starts_with("xmlns:") {
+                continue;
+            }
+            if let Some((pfx, _)) = a.name.split_once(':')
+                && let Some(uri) = resolve(&frames, pfx)
+                && let Some(why) = against(uri, Some(pfx))
+            {
+                return Some(why);
+            }
+        }
+        if self_closing {
+            if frames.last().is_some_and(|f| f.0 == depth) {
+                frames.pop();
+            }
+            depth -= 1;
+        }
     }
     None
 }
@@ -2538,6 +2611,101 @@ mod tests {
         let why = xmlns_conflict(doc).expect("a default-namespace binding to crs must refuse");
         assert!(why.contains("DEFAULT namespace"), "the reason names the binding: {why}");
         assert_eq!(xmp_to_recipe(doc).exposure_ev, 0.0);
+    }
+
+    /// R12-03: bindings resolve in SCOPE — a nested island that rebinds `crs`
+    /// around content that never says `crs:` is somebody else's metadata, not
+    /// a reason to throw away the whole document's settings.
+    #[test]
+    fn an_unused_nested_rebind_no_longer_refuses_the_document() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <rdf:Description rdf:about=\"\" \
+                   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                   crs:Exposure2012=\"+0.50\">\
+                   <dc:island xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+                   xmlns:crs=\"urn:other\"><dc:note>hi</dc:note></dc:island>\
+                   </rdf:Description></rdf:RDF></x:xmpmeta>";
+        assert!(xmlns_conflict(doc).is_none(), "an unused rebind is harmless");
+        assert_eq!(xmp_to_recipe(doc).exposure_ev, 0.5, "and the settings import");
+    }
+
+    /// R12-03: the rebind still refuses wherever a `crs:` name actually
+    /// RESOLVES through it — here on a descendant deep inside the island.
+    #[test]
+    fn a_rebind_refuses_exactly_where_a_name_resolves_through_it() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <dc:island xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+                   xmlns:crs=\"urn:other\">\
+                   <dc:inner crs:Shadows2012=\"+10\"/></dc:island>\
+                   </rdf:RDF></x:xmpmeta>";
+        let why = xmlns_conflict(doc).expect("a name resolving through the rebind refuses");
+        assert!(why.contains("urn:other"), "the reason names the binding: {why}");
+    }
+
+    /// R12-03: a foreign alias for the camera-raw URI is inert while no name
+    /// resolves through it, and a conflict the moment one does — settings
+    /// spelled through the alias are invisible to the `crs:` scanners.
+    #[test]
+    fn a_foreign_alias_for_the_crs_uri_refuses_only_when_used() {
+        let head = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                    xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \
+                    xmlns:zzz=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
+                    <rdf:Description rdf:about=\"\"";
+        let unused = format!("{head}/></rdf:RDF></x:xmpmeta>");
+        assert!(xmlns_conflict(&unused).is_none(), "declared but never used");
+        let used = format!("{head} zzz:Exposure2012=\"+1.00\"/></rdf:RDF></x:xmpmeta>");
+        let why = xmlns_conflict(&used).expect("a name through the alias refuses");
+        assert!(why.contains("`zzz:`"), "the reason names the prefix: {why}");
+    }
+
+    /// R12-03: a scope ends at its element's close tag — the island's rebind
+    /// must not leak forward onto a following sibling whose `crs:` names
+    /// resolve through the document-level canonical binding.
+    #[test]
+    fn a_closed_scope_releases_its_binding() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \
+                   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
+                   <dc:island xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+                   xmlns:crs=\"urn:other\"><dc:note>hi</dc:note></dc:island>\
+                   <rdf:Description rdf:about=\"\" crs:Exposure2012=\"+0.50\"/>\
+                   </rdf:RDF></x:xmpmeta>";
+        assert!(
+            xmlns_conflict(doc).is_none(),
+            "the sibling's crs resolves through the canonical ancestor binding"
+        );
+    }
+
+    /// R12-03 coordination: the scoped gate now clears a Description whose
+    /// foreign `xmlns:crs` is unused — so the merge's target finder must not
+    /// key on the attribute NAME alone, or it would splice canonical-intent
+    /// `crs:` settings into a scope where `crs` means something else.
+    #[test]
+    fn the_merge_skips_a_description_whose_crs_binding_is_foreign() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <rdf:Description rdf:about=\"\" xmlns:crs=\"urn:other\"/>\
+                   </rdf:RDF></x:xmpmeta>";
+        assert!(xmlns_conflict(doc).is_none(), "unused foreign binding is cleared");
+        assert_eq!(
+            find_crs_description(doc),
+            None,
+            "and the merge must not adopt that Description as its settings target"
+        );
+    }
+
+    /// R12-03: past the scope-tracking bound the gate cannot prove a binding
+    /// harmless, so it refuses conservatively — never silently accepts.
+    #[test]
+    fn deeper_xmlns_nesting_than_tracked_refuses_conservatively() {
+        let mut doc = String::new();
+        for _ in 0..1025 {
+            doc.push_str("<t xmlns:q=\"urn:x\">");
+        }
+        let why = xmlns_conflict(&doc).expect("beyond the bound is a refusal");
+        assert!(why.contains("more nested xmlns declarations"), "{why}");
     }
 
     /// L03-7: curve items are matched by tag name — a whitespace-spelled
