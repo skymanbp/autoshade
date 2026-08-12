@@ -367,12 +367,17 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     let icc_profile = match icc_profile {
         Some(p) => Some(p),
         None if format == Some(image::ImageFormat::Tiff) => {
+            // The re-probe obeys apply_icc_profile's own rule (its doc):
+            // unreadable colour management is a HARD error, never a silent
+            // assume-sRGB fall-through — "that fall-through IS the bug".
+            // The old .ok() pair folded a failed profile READ into "no
+            // profile" (L05-2). Ok(None) is the real no-profile case.
             image::codecs::tiff::TiffDecoder::new(std::io::BufReader::new(
                 std::fs::File::open(path)
                     .with_context(|| format!("open image {}", path.display()))?,
             ))
-            .ok()
-            .and_then(|mut d| d.icc_profile().ok().flatten())
+            .and_then(|mut d| d.icc_profile())
+            .with_context(|| format!("read the ICC profile of {}", path.display()))?
         }
         None => None,
     };
@@ -586,6 +591,27 @@ pub(crate) fn guard_tiff_chain(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The three-level embedded-rendition fallback: a level that ERRORS is a
+/// level that cannot answer — the chain's whole purpose is "this one can't,
+/// try the next" (L05-4/5: a corrupt mid-size preview used to abort files
+/// whose thumbnail or full-size JPEG was intact). Lazy, so a cheaper hit
+/// skips the larger decodes; the terminal failure names every reason.
+type RenditionLevel<'a, T> = (&'static str, &'a mut dyn FnMut() -> Result<Option<T>>);
+fn first_usable_rendition<T>(path: &Path, levels: &mut [RenditionLevel<'_, T>]) -> Result<T> {
+    let mut why: Vec<String> = Vec::new();
+    for (name, get) in levels.iter_mut() {
+        match get() {
+            Ok(Some(v)) => return Ok(v),
+            Ok(None) => {}
+            Err(e) => why.push(format!("{name}: {e:#}")),
+        }
+    }
+    if why.is_empty() {
+        anyhow::bail!("no embedded preview/thumbnail/full image in {}", path.display());
+    }
+    anyhow::bail!("no usable embedded rendition in {} ({})", path.display(), why.join("; "))
+}
+
 /// Decode a RAW file: embedded preview + metadata + histogram. Reads the file
 /// only; never writes near the source.
 pub fn decode_raw(path: &Path) -> Result<Decoded> {
@@ -601,22 +627,20 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
     // decoder in fact implements ONLY this level, so Sony files always
     // resolve here). Evaluated lazily to skip the larger JPEG decodes when a
     // cheaper level exists.
-    let preview = match decoder
-        .preview_image(&src, &params)
-        .map_err(|e| anyhow!("preview_image: {e}"))?
-    {
-        Some(p) => p,
-        None => match decoder
-            .thumbnail_image(&src, &params)
-            .map_err(|e| anyhow!("thumbnail_image: {e}"))?
-        {
-            Some(t) => t,
-            None => decoder
-                .full_image(&src, &params)
-                .map_err(|e| anyhow!("full_image: {e}"))?
-                .ok_or_else(|| anyhow!("no embedded preview/thumbnail/full image in {}", path.display()))?,
-        },
-    };
+    let preview = first_usable_rendition(
+        path,
+        &mut [
+            ("preview_image", &mut || {
+                decoder.preview_image(&src, &params).map_err(|e| anyhow!("{e}"))
+            }),
+            ("thumbnail_image", &mut || {
+                decoder.thumbnail_image(&src, &params).map_err(|e| anyhow!("{e}"))
+            }),
+            ("full_image", &mut || {
+                decoder.full_image(&src, &params).map_err(|e| anyhow!("{e}"))
+            }),
+        ],
+    )?;
 
     let md = decoder
         .raw_metadata(&src, &params)
@@ -629,7 +653,7 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
         .map_err(|e| anyhow!("raw_image(dummy): {e}"))?;
 
     let exif = &md.exif;
-    let meta = Meta {
+    let mut meta = Meta {
         make: md.make.trim().to_string(),
         model: md.model.trim().to_string(),
         lens: exif.lens_model.clone().or_else(|| exif.lens_make.clone()),
@@ -681,6 +705,14 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
     // in sensor orientation; see preview_only for the full rationale). Uses
     // the dummy raw's orientation, which is already decoded above for Meta.
     let preview = crate::render::oriented(preview, raw.orientation);
+    // The DELIVERED pixels are the embedded preview, and its dims are the
+    // camera's choice — they can differ from the sensor math above (a DNG
+    // can report 4024×6048 while its preview is 4000×6000). These numbers
+    // feed the AI prompt and the style index's aspect feature, and every
+    // pixel this build ever serves comes from this preview — so they must
+    // describe it (L05-6). The oriented image is already display-frame.
+    meta.width = preview.width() as usize;
+    meta.height = preview.height() as usize;
 
     // Histogram on a downscale-only copy of the preview — representative and
     // fast even for a 60 MP embedded JPEG (see hist_copy).
@@ -902,6 +934,39 @@ impl Decoded {
 
 #[cfg(test)]
 mod tests {
+
+    /// L05-4/5: a level that errors yields to the next level instead of
+    /// aborting the file, and a fully-dry chain names every reason.
+    #[test]
+    fn a_corrupt_rendition_level_yields_to_the_next() {
+        let p = Path::new("x.arw");
+        let got = first_usable_rendition::<u32>(
+            p,
+            &mut [
+                ("preview_image", &mut || Err(anyhow!("corrupt JPEG stream"))),
+                ("thumbnail_image", &mut || Ok(Some(7))),
+                ("full_image", &mut || panic!("laziness: never reached")),
+            ],
+        )
+        .expect("the intact thumbnail answers");
+        assert_eq!(got, 7);
+
+        let e = first_usable_rendition::<u32>(
+            p,
+            &mut [
+                ("preview_image", &mut || Err(anyhow!("corrupt JPEG stream"))),
+                ("thumbnail_image", &mut || Ok(None)),
+                ("full_image", &mut || Err(anyhow!("truncated blob"))),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("preview_image: corrupt JPEG stream") && e.contains("full_image: truncated blob"),
+            "the terminal failure names each level's reason: {e}"
+        );
+    }
+
     use super::*;
 
     /// `preview_only` and `embedded_preview` share `camera_rendition` and

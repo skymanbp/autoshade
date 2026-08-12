@@ -1103,18 +1103,15 @@ fn apply_develop_with_rasters(
     r: &EditRecipe,
     rasters: &MaskRasterSnapshot,
 ) {
-    // 0a) in-camera lens profile vignetting (lensmeta): the manufacturer's own
-    //     falloff map for THIS shot, a radial gain in LINEAR light. Runs before
-    //     the manual stage — both are multiplicative gains, so order between
-    //     them is cosmetic, but profile-as-base reads as "calibration first".
-    if r.lens_profile.vignette_active() {
-        apply_profile_vignette(data, w, h, &r.lens_profile.vignette);
-    }
-    // 0) lens vignette compensation — a radial gain in LINEAR light (falloff is
-    //    multiplicative on sensor irradiance), before any tonal work so the tone
-    //    curve sees evenly-lit pixels. Preview and export share this stage.
-    if r.lens_vignette != 0.0 {
-        apply_vignette(data, w, h, r.lens_vignette, r.lens_vignette_mid);
+    // 0/0a) vignette — the in-camera profile falloff map and the manual
+    //    slider compensation, both radial gains in LINEAR light, applied as
+    //    ONE composed pass. Two sequential passes were NOT equivalent: each
+    //    pass clamps to [0,1], so a profile gain and a manual correction
+    //    that should cancel multiplicatively could not cancel on clipped
+    //    pixels (the old "order between them is cosmetic" comment was only
+    //    true of un-clamped math — L01-6).
+    if let Some(lut) = vignette_gain_lut(r) {
+        apply_radial_gain(data, w, h, &lut);
     }
     // 0b) dehaze — pointwise atmospheric-veil removal in LINEAR light, before
     //    any tonal work: the airlight estimate then depends only on the capture
@@ -1202,30 +1199,47 @@ fn luma601(p: &[f32; 3]) -> f32 {
     0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]
 }
 
-/// Manual lens-vignette compensation: gain = 1 + k·rⁿ on the normalised
-/// corner-radius, applied in linear light. `amount` -100..=100 (positive
-/// brightens corners); `midpoint` 0..=100 shapes WHERE it lands via the radius
-/// exponent (0.6..3.0, ACR-default 50 → 1.8): low reaches toward the centre,
-/// high confines the correction to the corners. The exact LR falloff model is
+/// Manual lens-vignette compensation LUT: gain = 1 + k·rⁿ on the normalised
+/// corner-radius, in linear light. `amount` -100..=100 (positive brightens
+/// corners); `midpoint` 0..=100 shapes WHERE it lands via the radius exponent
+/// (0.6..3.0, ACR-default 50 → 1.8): low reaches toward the centre, high
+/// confines the correction to the corners. The exact LR falloff model is
 /// proprietary — this is our documented approximation (XMP carries the raw
 /// slider values, so Lightroom re-renders with its own model).
-fn apply_vignette(data: &mut [[f32; 3]], w: usize, h: usize, amount: f32, midpoint: f32) {
+fn manual_vignette_lut(amount: f32, midpoint: f32) -> Vec<f32> {
     let gamma = 0.6 + 2.4 * (midpoint.clamp(0.0, 100.0) / 100.0);
     let k = amount.clamp(-100.0, 100.0) / 100.0;
-    let gain_lut: Vec<f32> = (0..LUT_N)
+    (0..LUT_N)
         .map(|i| 1.0 + k * (i as f32 / (LUT_N - 1) as f32).powf(gamma))
-        .collect();
-    apply_radial_gain(data, w, h, &gain_lut);
+        .collect()
 }
 
-/// In-camera profile vignetting: per-knot linear-light GAINS over the
+/// In-camera profile vignetting LUT: per-knot linear-light GAINS over the
 /// normalised corner radius (knot placement (i+0.5)/(n−1) — see `lensmeta`),
 /// linearly interpolated. Gains come from the camera, not a slider model.
-fn apply_profile_vignette(data: &mut [[f32; 3]], w: usize, h: usize, knots: &[f32]) {
-    let gain_lut: Vec<f32> = (0..LUT_N)
+fn profile_vignette_lut(knots: &[f32]) -> Vec<f32> {
+    (0..LUT_N)
         .map(|i| profile_knot_interp(knots, i as f32 / (LUT_N - 1) as f32))
-        .collect();
-    apply_radial_gain(data, w, h, &gain_lut);
+        .collect()
+}
+
+/// The single radial-gain LUT for whichever vignette stages are active —
+/// `None` when neither is. Both active compose by MULTIPLYING the gains, so
+/// the one clamp in `apply_radial_gain` runs on the true combined gain and
+/// inverse corrections genuinely cancel (L01-6).
+fn vignette_gain_lut(r: &EditRecipe) -> Option<Vec<f32>> {
+    let profile = r
+        .lens_profile
+        .vignette_active()
+        .then(|| profile_vignette_lut(&r.lens_profile.vignette));
+    let manual =
+        (r.lens_vignette != 0.0).then(|| manual_vignette_lut(r.lens_vignette, r.lens_vignette_mid));
+    match (profile, manual) {
+        (Some(p), Some(m)) => Some(p.iter().zip(&m).map(|(a, b)| a * b).collect()),
+        (Some(p), None) => Some(p),
+        (None, Some(m)) => Some(m),
+        (None, None) => None,
+    }
 }
 
 /// Apply a radial gain LUT — indexed by the normalised corner radius — in
@@ -4291,6 +4305,45 @@ pub fn apply_lens_geometry(
 
 #[cfg(test)]
 mod tests {
+
+    /// L01-6: two active vignette stages compose into ONE clamped pass — the
+    /// per-pass clamp made mathematically inverse corrections irreversible on
+    /// bright pixels.
+    #[test]
+    fn opposing_vignette_stages_compose_into_one_clamped_pass() {
+        let knots = vec![2.0f32; 4];
+        let p_lut = profile_vignette_lut(&knots);
+        let m_lut = manual_vignette_lut(-50.0, 50.0);
+        let r = EditRecipe {
+            lens_vignette: -50.0,
+            lens_profile: crate::recipe::LensProfile {
+                vignette: knots,
+                vignette_on: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let lut = vignette_gain_lut(&r).expect("both stages active");
+        let last = *lut.last().unwrap();
+        assert!(
+            (last - p_lut.last().unwrap() * m_lut.last().unwrap()).abs() < 1e-6,
+            "the composed LUT is the product of the stage gains"
+        );
+        assert!((last - 1.0).abs() < 1e-3, "2.0 × 0.5 cancels at the corner: {last}");
+
+        // A bright corner pixel survives the composed pass untouched, where
+        // the clamped two-pass order permanently darkened it. 9×9: the
+        // radial geometry floors rmax at one PIXEL, so a frame this small
+        // is needed for the corner to actually reach rn = 1.0.
+        let mut composed = vec![[0.9f32; 3]; 81];
+        apply_radial_gain(&mut composed, 9, 9, &lut);
+        let mut two_pass = vec![[0.9f32; 3]; 81];
+        apply_radial_gain(&mut two_pass, 9, 9, &p_lut);
+        apply_radial_gain(&mut two_pass, 9, 9, &m_lut);
+        assert!((composed[0][0] - 0.9).abs() < 1e-3, "composed: {}", composed[0][0]);
+        assert!(two_pass[0][0] < 0.85, "the clamp loses the highlight: {}", two_pass[0][0]);
+    }
+
     use super::*;
     use crate::recipe::{EditRecipe, LocalAdjustment};
 
@@ -5584,7 +5637,7 @@ mod tests {
         let (w, h) = (9usize, 9usize);
         let flat = vec![[0.5_f32; 3]; w * h];
         let mut up = flat.clone();
-        apply_vignette(&mut up, w, h, 60.0, 50.0);
+        apply_radial_gain(&mut up, w, h, &manual_vignette_lut(60.0, 50.0));
         let centre = up[4 * w + 4][0];
         let mid = up[2 * w + 2][0]; // halfway toward the corner
         let corner = up[0][0];
@@ -5611,13 +5664,13 @@ mod tests {
         }
 
         let mut down = flat.clone();
-        apply_vignette(&mut down, w, h, -60.0, 50.0);
+        apply_radial_gain(&mut down, w, h, &manual_vignette_lut(-60.0, 50.0));
         assert!(down[0][0] < 0.38, "negative amount darkens the corner: {}", down[0][0]);
 
         // Higher midpoint confines the effect to the corners: the halfway
         // pixel moves LESS than with the default midpoint.
         let mut tight = flat.clone();
-        apply_vignette(&mut tight, w, h, 60.0, 100.0);
+        apply_radial_gain(&mut tight, w, h, &manual_vignette_lut(60.0, 100.0));
         assert!(tight[2 * w + 2][0] < mid, "midpoint 100 must spare the mid-field");
     }
 

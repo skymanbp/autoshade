@@ -203,6 +203,25 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
     let tp = pixels_of(&t_img);
     let err_before = look_err(&sp, &tp);
 
+    // A DEGENERATE pair carries no tone evidence: on a zero-variance source
+    // or target (lens-cap frame, blank card, an empty crop) the inverse CDF
+    // answers 1.0 everywhere, the fitted tone map collapses to a constant —
+    // and look_err of the same frame against itself scores that garbage 0,
+    // so it used to be ACCEPTED with no hint (L06-1/2). Refuse to fit: a
+    // neutral recipe plus the reason, through the same rationale channel
+    // sat_pegged uses.
+    if luma_variance(&sp) < DEGENERATE_LUMA_VAR || luma_variance(&tp) < DEGENERATE_LUMA_VAR {
+        let mut rationale = String::new();
+        let mut notes: Vec<crate::rationale::Note> = Vec::new();
+        crate::rationale::push_note(
+            &mut rationale,
+            &mut notes,
+            crate::rationale::Note::plain(crate::rationale::keys::FIT_DEGENERATE),
+        );
+        let recipe = EditRecipe { rationale, ..Default::default() };
+        return FitReport { recipe, err_before, err_after: err_before, notes };
+    }
+
     let mut recipe = EditRecipe::default();
 
     // --- 1) tone: exposure scan × linear solve on the engine's knot basis ----
@@ -887,6 +906,19 @@ pub(crate) fn quantile(cdf: &[f32], p: f32) -> f32 {
     ((lo - 1) as f32 + t) / (n - 1) as f32
 }
 
+/// Variance of the per-pixel channel mean — the degenerate-input probe
+/// (see the refusal at the top of [`fit_recipe`]). Zero for an empty slice.
+const DEGENERATE_LUMA_VAR: f32 = 1e-6;
+fn luma_variance(px: &[[f32; 3]]) -> f32 {
+    if px.is_empty() {
+        return 0.0;
+    }
+    let n = px.len() as f32;
+    let lum = |p: &[f32; 3]| (p[0] + p[1] + p[2]) / 3.0;
+    let mean: f32 = px.iter().map(lum).sum::<f32>() / n;
+    px.iter().map(|p| (lum(p) - mean).powi(2)).sum::<f32>() / n
+}
+
 fn mean_chroma(px: &[[f32; 3]]) -> f32 {
     if px.is_empty() {
         return 0.0;
@@ -960,6 +992,27 @@ fn round2(v: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// L06-1/2: a zero-variance pair (lens-cap frame against itself) must
+    /// refuse to fit — the CDF inverse would produce a constant tone map and
+    /// err==0 would accept it silently.
+    #[test]
+    fn a_degenerate_pair_refuses_to_fit_and_says_why() {
+        use image::{DynamicImage, RgbImage};
+        let black = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([0, 0, 0])));
+        let report = fit_recipe(&black, &black);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::FIT_DEGENERATE),
+            "the refusal is disclosed through the rationale channel: {:?}",
+            report.recipe.rationale
+        );
+        assert!(report.recipe.tone_curve.is_empty(), "no constant tone map is produced");
+        assert_eq!(report.recipe.exposure_ev, 0.0, "the recipe stays neutral");
+    }
+
     use super::*;
     use image::RgbImage;
 

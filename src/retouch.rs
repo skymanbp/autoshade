@@ -889,6 +889,12 @@ pub fn clone_stamp(
     out: &Path,
 ) -> Result<HealReport> {
     let is_raw = decode::is_raw(src_path);
+    // FIRST, before the decode — the exact preflight `heal` runs (L09-9
+    // made it symmetric): a bad `out` must refuse before minutes of
+    // full-res base work, and an `out` that would overwrite the library —
+    // clone_stamp(photo.arw, …, out = photo.arw) replaces a RAW with PNG
+    // bytes — is refused by the same guard. No-op for the GUI (unique_out).
+    crate::pipeline::preflight_out(out, src_path)?;
     // Same base contract as `heal`: the engine's OWN neutral develop (full or
     // ≤2048px), never the camera's baked preview — see the heal doc comment.
     let base = if is_raw {
@@ -927,6 +933,27 @@ pub fn clone_stamp(
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage, Rgba};
+
+    /// L09-9: clone_stamp carries heal's pre-decode preflight — an output
+    /// that lands in the photo's own library folder refuses before any base
+    /// work (the fixture photo does not even exist, so reaching the decode
+    /// would error differently).
+    #[test]
+    fn clone_stamp_refuses_a_library_output_before_any_work() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-clonestamp-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let src = lib.join("photo.arw");
+        let e = match clone_stamp(&src, &lib.join("mask.png"), (0.5, 0.5), false, &lib.join("photo.arw")) {
+            Ok(_) => panic!("a library output must refuse"),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("read-only"), "the library guard fires first: {e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     #[test]
     fn heal_engine_runs_at_sixteen_bits() {

@@ -75,6 +75,7 @@ pub mod keys {
          sliders can express; consider the AI variant itself or a zoned \
          edit.";
     pub const FIT_NOTE_SAT_PEGGED: &str = " Saturation demand exceeded the model cap (±60).";
+    pub const FIT_DEGENERATE: &str = " Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.";
     pub const FIT_NOTE_REGRESSED: &str =
         " The full fit rendered farther from the target than the untouched \
          source at every saturation level — returning a NEUTRAL recipe \

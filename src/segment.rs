@@ -121,6 +121,17 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
         crate::denoise::discard_failed_output(output, before);
         return wrote;
     }
+    // Byte-level acceptance is not MASK acceptance (L08-8): a sidecar that
+    // wrote garbage (a truncated PNG, an HTML error body) used to be adopted
+    // here and persist as the recipe's raster. The product must DECODE as a
+    // raster before anything references it.
+    if let Err(e) = crate::render::open_mask_bounded(output) {
+        crate::denoise::discard_failed_output(output, before);
+        return Err(e.context(format!(
+            "segmentation sidecar produced an undecodable mask {}",
+            output.display()
+        )));
+    }
     // The mask must be durable BEFORE any recipe references it (L03). The
     // sidecar fsyncs before its os.replace now — this adopt is the belt for
     // an older script on disk, at the cost of one flush.
@@ -172,6 +183,47 @@ mod tests {
 
         let err = segment_file(&opts, &input, &output).unwrap_err().to_string();
         assert!(err.contains("is empty"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L08-8: exit 0 + changed bytes is still not a mask — a sidecar that
+    /// writes garbage is refused, and the garbage does not persist.
+    #[test]
+    fn a_garbage_mask_from_the_sidecar_is_refused() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-seg-test-garbage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Writes non-PNG bytes to the --output argument (%6 / $6) and exits 0.
+        #[cfg(windows)]
+        let bin = {
+            let p = dir.join("garbage.bat");
+            std::fs::write(&p, "@echo this is not a png> \"%~6\"\r\n@exit /b 0\r\n").unwrap();
+            p
+        };
+        #[cfg(not(windows))]
+        let bin = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("garbage.sh");
+            std::fs::write(&p, "#!/bin/sh\necho not a png > \"$6\"\nexit 0\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let script = dir.join("segment.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        let opts = SegmentOpts {
+            python_bin: bin.to_string_lossy().into_owned(),
+            script,
+            target: "sky".into(),
+        };
+        let input = dir.join("in.png");
+        std::fs::write(&input, b"src bytes").unwrap();
+        let output = dir.join("mask.png");
+        std::fs::write(&output, b"").unwrap(); // the claim file
+
+        let err = segment_file(&opts, &input, &output).unwrap_err().to_string();
+        assert!(err.contains("undecodable mask"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

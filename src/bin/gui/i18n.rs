@@ -992,6 +992,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 注意：拟合配方的渲染结果仍与目标相距较远（残差 {err_after}）——此风格超出全局滑杆的表达范围；可考虑直接使用 AI 变体或分区编辑。"),
     (" Saturation demand exceeded the model cap (±60).",
         " 饱和度需求超出模型上限（±60）。"),
+    (" Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.",
+        " 拟合已拒绝：源图或目标图没有影调变化（空白或单色画面），统计匹配只会产生恒定影调映射——未生成拟合配方。"),
     (" The full fit rendered farther from the target than the untouched \
       source at every saturation level — returning a NEUTRAL recipe \
       (do-no-harm terminal case); this look is outside the global \

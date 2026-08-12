@@ -318,11 +318,72 @@ pub fn denoise_buffer(opts: &DenoiseOpts, data: &mut [[f32; 3]], w: usize, h: us
     Ok(())
 }
 
-/// Denoise an image file to another file (no decode/encode here — the sidecar
-/// reads/writes it, preserving bit depth). For already-baked PNG/TIFF/JPEG.
+/// Denoise an image file to another file (the sidecar reads/writes the
+/// pixels, preserving bit depth). For already-baked PNG/TIFF/JPEG. The
+/// input's ICC profile rides along afterwards — see [`carry_icc_profile`].
 pub fn denoise_file(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {
     crate::pipeline::ensure_parent(output)?;
-    run_sidecar(opts, input, output)
+    run_sidecar(opts, input, output)?;
+    carry_icc_profile(input, output)
+}
+
+/// The sidecar copies pixel NUMBERS, not colour metadata (its python side
+/// has no ICC handling at all) — so a ProPhoto/AdobeRGB input used to come
+/// back UNTAGGED and every downstream reader interpreted the wide-gamut
+/// numbers as sRGB (L09-11). Header-read the input's profile and, when one
+/// exists, re-encode the product with it attached: the numbers are still the
+/// input-space numbers, so the input's profile is their correct description.
+/// Costs one decode+encode only for tagged inputs.
+fn carry_icc_profile(input: &Path, output: &Path) -> Result<()> {
+    use image::ImageEncoder as _;
+    let profile = {
+        let mut dec = image::ImageReader::open(input)
+            .with_context(|| format!("open {}", input.display()))?
+            .into_decoder()
+            .with_context(|| format!("read image header {}", input.display()))?;
+        image::ImageDecoder::icc_profile(&mut dec)
+            .with_context(|| format!("read the colour profile of {}", input.display()))?
+    };
+    let Some(profile) = profile else { return Ok(()) };
+    let ext = output.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "tif" | "tiff") {
+        eprintln!(
+            "⚠ the denoise product .{ext} cannot carry the source ICC profile — its colours \
+             may be read as sRGB"
+        );
+        return Ok(());
+    }
+    // Plain pixel read — decode::load_image would colour-manage into sRGB,
+    // which is exactly what must NOT happen to numbers being re-tagged.
+    let img = image::open(output)
+        .with_context(|| format!("re-open denoise product {}", output.display()))?;
+    crate::render::stage_and_publish(output, |staged| {
+        let file = std::fs::File::create(staged)
+            .with_context(|| format!("create {}", staged.display()))?;
+        let mut w = std::io::BufWriter::new(file);
+        match ext.as_str() {
+            "png" => {
+                let mut enc = image::codecs::png::PngEncoder::new(&mut w);
+                let _ = enc.set_icc_profile(profile.clone());
+                enc.write_image(img.as_bytes(), img.width(), img.height(), img.color().into())
+                    .context("re-encode the denoise product with the source profile")?;
+            }
+            "jpg" | "jpeg" => {
+                let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, 95);
+                let _ = enc.set_icc_profile(profile.clone());
+                enc.write_image(img.as_bytes(), img.width(), img.height(), img.color().into())
+                    .context("re-encode the denoise product with the source profile")?;
+            }
+            _ => {
+                let mut enc = image::codecs::tiff::TiffEncoder::new(&mut w);
+                let _ = enc.set_icc_profile(profile.clone());
+                enc.write_image(img.as_bytes(), img.width(), img.height(), img.color().into())
+                    .context("re-encode the denoise product with the source profile")?;
+            }
+        }
+        use std::io::Write as _;
+        w.flush().context("flush the re-encoded product")
+    })
 }
 
 /// Denoise the ACTIVE working pixels for an on-canvas result (the GUI's
@@ -498,6 +559,37 @@ fn run_sidecar_with_budget(
         release_empty_claim(output);
         return Err(e);
     }
+    // A written artifact is still not a DELIVERABLE (L09-12): nothing here
+    // verified the product even decodes, matches the input's dimensions, or
+    // kept its bit depth — a 1×1 or an 8-bit file would have been published
+    // as this photo's master. Header-level reads only (no pixel decode).
+    let accepted = (|| -> Result<()> {
+        let (iw, ih) = image::image_dimensions(input)
+            .with_context(|| format!("read dimensions of {}", input.display()))?;
+        let (ow, oh) =
+            image::image_dimensions(&staged).context("the denoise product does not decode")?;
+        if (ow, oh) != (iw, ih) {
+            bail!("the denoise product is {ow}x{oh} but the input is {iw}x{ih}");
+        }
+        let bits_per_channel = |p: &Path| -> Result<u16> {
+            let dec = image::ImageReader::open(p)?.into_decoder()?;
+            let c = image::ImageDecoder::color_type(&dec);
+            Ok(c.bits_per_pixel() / u16::from(c.channel_count()))
+        };
+        let (ib, ob) = (bits_per_channel(input)?, bits_per_channel(&staged)?);
+        if ob < ib {
+            bail!(
+                "the denoise product dropped to {ob}-bit channels from the input's {ib}-bit — \
+                 the sidecar contract preserves bit depth"
+            );
+        }
+        Ok(())
+    })();
+    if let Err(e) = accepted {
+        discard_failed_output(&staged, before);
+        release_empty_claim(output);
+        return Err(e.context("denoise sidecar product rejected"));
+    }
     // Publish: ONE rename moves the finished bytes onto the promised name,
     // replacing the caller's 0-byte claim (or an older deliverable) in a
     // single step — concurrent runs can no longer interleave into the
@@ -593,6 +685,120 @@ fn to_u16(v: f32) -> u16 {
 
 #[cfg(test)]
 mod tests {
+
+    fn write_png(path: &std::path::Path, w: u32, h: u32) {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([90, 90, 90])))
+            .save(path)
+            .unwrap();
+    }
+
+    /// A stand-in "sidecar" that copies a prepared product onto the staged
+    /// path (arg %6 / $6 — python_bin is invoked as
+    /// `<bin> -E <script> --input <in> --output <staged> …`).
+    fn copying_stand_in(dir: &std::path::Path, product: &str) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            let p = dir.join("copy.bat");
+            std::fs::write(
+                &p,
+                format!("@copy /y \"%~dp0{product}\" \"%~6\" >nul\r\n@exit /b 0\r\n"),
+            )
+            .unwrap();
+            p
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("copy.sh");
+            std::fs::write(
+                &p,
+                format!("#!/bin/sh\ncp \"$(dirname \"$0\")/{product}\" \"$6\"\nexit 0\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        }
+    }
+
+    fn stand_in_opts(dir: &std::path::Path, bin: std::path::PathBuf) -> DenoiseOpts {
+        let script = dir.join("denoise.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        DenoiseOpts {
+            python_bin: bin.to_string_lossy().into_owned(),
+            script,
+            cache: dir.join("cache"),
+            model: "stand-in".into(),
+            strength: 1.0,
+        }
+    }
+
+    /// L09-12: a product whose dimensions differ from the input is refused —
+    /// a 1×1 PNG must never be published as this photo's master.
+    #[test]
+    fn a_wrong_size_denoise_product_is_refused() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-denoise-accept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_png(&dir.join("product.png"), 1, 1);
+        let opts = stand_in_opts(&dir, copying_stand_in(&dir, "product.png"));
+        let input = dir.join("in.png");
+        write_png(&input, 8, 8);
+        let output = dir.join("out.png");
+
+        let err = denoise_file(&opts, &input, &output).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("but the input is 8x8"),
+            "the acceptance names the mismatch: {err:#}"
+        );
+        assert!(
+            !output.exists() || std::fs::metadata(&output).unwrap().len() == 0,
+            "the wrong-size product was not published"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L09-11: the input's ICC profile rides onto the product — the sidecar
+    /// copies input-space numbers, and untagged wide-gamut numbers read as
+    /// sRGB everywhere downstream.
+    #[test]
+    fn the_denoise_product_carries_the_inputs_icc_profile() {
+        use image::ImageEncoder as _;
+        let dir =
+            std::env::temp_dir().join(format!("autoshop-denoise-icc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The stand-in's product: same dims, NO profile (the sidecar's own
+        // output never carries one).
+        write_png(&dir.join("product.png"), 8, 8);
+        let opts = stand_in_opts(&dir, copying_stand_in(&dir, "product.png"));
+
+        // The input carries a (dummy but structurally present) ICC profile.
+        let profile = b"fake-icc-profile-bytes".to_vec();
+        let input = dir.join("in.png");
+        {
+            let file = std::fs::File::create(&input).unwrap();
+            let mut enc = image::codecs::png::PngEncoder::new(std::io::BufWriter::new(file));
+            enc.set_icc_profile(profile.clone()).unwrap();
+            let img = image::RgbImage::from_pixel(8, 8, image::Rgb([90, 90, 90]));
+            enc.write_image(img.as_raw(), 8, 8, image::ExtendedColorType::Rgb8).unwrap();
+        }
+        let output = dir.join("out.png");
+        denoise_file(&opts, &input, &output).expect("the stand-in product is accepted");
+
+        let mut dec = image::ImageReader::open(&output)
+            .unwrap()
+            .into_decoder()
+            .unwrap();
+        let carried = image::ImageDecoder::icc_profile(&mut dec).unwrap();
+        assert_eq!(
+            carried.as_deref(),
+            Some(profile.as_slice()),
+            "the product now carries the input's profile"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     /// A unique-per-test fixture dir: fixed names let two concurrent test
@@ -701,9 +907,13 @@ mod tests {
     #[test]
     fn a_sidecar_that_writes_its_output_succeeds() {
         let dir = tdir("writes");
-        let opts = opts_for(&dir, true);
+        // Real images since L09-12: the acceptance now verifies the product
+        // decodes and matches the input's dimensions, so the old junk-bytes
+        // fixture would (rightly) be refused.
+        write_png(&dir.join("product.png"), 8, 8);
+        let opts = stand_in_opts(&dir, copying_stand_in(&dir, "product.png"));
         let input = dir.join("in.png");
-        std::fs::write(&input, b"not-really-a-png").unwrap();
+        write_png(&input, 8, 8);
         let output = dir.join("out.png");
 
         run_sidecar(&opts, &input, &output).unwrap();
