@@ -262,6 +262,13 @@ pub fn denoise_buffer(opts: &DenoiseOpts, data: &mut [[f32; 3]], w: usize, h: us
     if data.len() != w * h {
         bail!("denoise_buffer: buffer {} != {}x{}", data.len(), w, h);
     }
+    // Strength 0 is the IDENTITY, not "denoise then blend nothing": the
+    // 16-bit round trip below clamps to [0,1] and quantises, so a
+    // zero-strength pass changed bytes it promised not to touch — wide-gamut
+    // values carried out of range were clipped by a no-op (L09-10).
+    if opts.strength <= 0.0 {
+        return Ok(());
+    }
     let tmp_in = temp_path("autoshop_dn_in")?;
     let tmp_out = match temp_path("autoshop_dn_out") {
         Ok(path) => path,
@@ -730,6 +737,27 @@ mod tests {
             model: "stand-in".into(),
             strength: 1.0,
         }
+    }
+
+    /// L09-10: strength 0 is byte-identical identity — no clamp, no
+    /// quantisation, no sidecar (the opts point at nothing runnable, which
+    /// would fail loudly if the pipeline ran).
+    #[test]
+    fn zero_strength_denoise_is_the_identity() {
+        let opts = DenoiseOpts {
+            python_bin: "definitely-not-a-real-python".into(),
+            script: std::path::PathBuf::from("no-such-script.py"),
+            cache: std::path::PathBuf::new(),
+            model: "m".into(),
+            strength: 0.0,
+        };
+        let mut data = [[1.2f32, 0.5, -0.1]];
+        denoise_buffer(&opts, &mut data, 1, 1).expect("identity needs no sidecar");
+        assert_eq!(
+            data,
+            [[1.2f32, 0.5, -0.1]],
+            "out-of-range values survive untouched — nothing was clamped or quantised"
+        );
     }
 
     /// L09-12: a product whose dimensions differ from the input is refused —

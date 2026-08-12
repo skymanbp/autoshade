@@ -162,12 +162,38 @@ pub fn reimagine(
     };
     let small = DynamicImage::ImageRgb8(base.resize_exact(sw, sh, FilterType::Lanczos3).to_rgb8());
     let png = encode_png(&small)?;
+    // Enum-size fallback input — aspect must match the size requested (L09-2).
+    let fallback = sizes
+        .flexible
+        .is_some()
+        .then(|| -> Result<Vec<u8>> {
+            let (ew, eh) = parse_size(sizes.enum_size);
+            encode_png(&DynamicImage::ImageRgb8(
+                base.resize_exact(ew, eh, FilterType::Lanczos3).to_rgb8(),
+            ))
+        })
+        .transpose()?;
+    let primary_size = sizes.try_first().to_string();
     println!(
         "⚠ EXPERIMENTAL generative re-render via {} ({}, quality={quality} — regenerated pixels, not a master)",
         cfg.openai_image_model,
         sizes.try_first(),
     );
-    let (result, used) = call_images_edit(cfg, &png, None, prompt, fidelity, &sizes, quality)?;
+    let (result, used) = call_images_edit(
+        cfg,
+        &mut |size| {
+            if size != primary_size
+                && let Some(fb) = &fallback
+            {
+                return Ok((fb.clone(), None));
+            }
+            Ok((png.clone(), None))
+        },
+        prompt,
+        fidelity,
+        &sizes,
+        quality,
+    )?;
     if cancelled() {
         // The epoch already discards the UI-side result — writing the
         // artifact anyway left a persistent ./out master for an operation
@@ -246,6 +272,22 @@ pub fn retouch(
     let mask_img = crate::render::open_mask_bounded(mask_path)
         .with_context(|| format!("open mask {}", mask_path.display()))?;
     let mask_png = encode_png(&mask_img.resize_exact(sw, sh, FilterType::Nearest))?;
+    // The enum-size fallback pair, built EAGERLY from the same 16-bit base:
+    // the base is dropped just below (the A7 memory staging), and a retry
+    // must send an input whose aspect matches the size it requests (L09-2).
+    let fallback = sizes
+        .flexible
+        .is_some()
+        .then(|| -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+            let (ew, eh) = parse_size(sizes.enum_size);
+            let fpng = encode_png(&DynamicImage::ImageRgb8(
+                base.resize_exact(ew, eh, FilterType::Lanczos3).to_rgb8(),
+            ))?;
+            let fmask = encode_png(&mask_img.resize_exact(ew, eh, FilterType::Nearest))?;
+            Ok((fpng, Some(fmask)))
+        })
+        .transpose()?;
+    let primary_size = sizes.try_first().to_string();
 
     // The composite below needs only 8-bit pixels — take that form NOW and
     // let the 16-bit master go, so the minutes-long model call holds the
@@ -266,7 +308,21 @@ pub fn retouch(
         sizes.try_first(),
         if full_res && raw { "full-res" } else { "preview" }
     );
-    let (result, _used) = call_images_edit(cfg, &png, Some(&mask_png), prompt, "high", &sizes, quality)?;
+    let (result, _used) = call_images_edit(
+        cfg,
+        &mut |size| {
+            if size != primary_size
+                && let Some(fb) = &fallback
+            {
+                return Ok(fb.clone());
+            }
+            Ok((png.clone(), Some(mask_png.clone())))
+        },
+        prompt,
+        "high",
+        &sizes,
+        quality,
+    )?;
     if cancelled() {
         // The user gave up while the model ran; skip the (full-res) composite
         // — at 61 MP it is real work whose result would be discarded anyway.
@@ -302,7 +358,7 @@ pub fn retouch(
     if cancelled() {
         return Err(anyhow!("cancelled by user"));
     }
-    let feather = ((bw.min(bh) as usize) / 100).clamp(2, 64); // ~1% of short side, capped
+    let frame_feather = ((bw.min(bh) as usize) / 100).clamp(2, 64); // ~1% of short side, capped
     let weight = {
         let mask_full = mask_img.resize_exact(bw, bh, FilterType::Nearest).to_rgba8();
         let w: Vec<f32> = mask_full.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
@@ -310,6 +366,12 @@ pub fn retouch(
         // the weight plane are ~241 MB each at 61 MP and the blur below
         // never touches it.
         drop(mask_full);
+        // Feather scales with the SELECTION, not only the frame (L09-3):
+        // the frame rule alone put a 20 px blur on a 10 px selection at a
+        // 2048 frame — centre weight ~6%, and the fill "looked like it did
+        // nothing". The frame rule stays as the CEILING, so large
+        // selections keep their exact look.
+        let feather = frame_feather.min(selection_feather(&w, bw as usize));
         if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
     };
     if cancelled() {
@@ -459,6 +521,28 @@ fn composite_region(
     out
 }
 
+/// Feather radius from the painted SELECTION's bounding box — an eighth of
+/// its short side, at least 1 (see the weight-plane construction in
+/// [`retouch`]). An empty selection returns usize::MAX so the caller's frame
+/// rule stays the effective bound.
+fn selection_feather(weight: &[f32], w: usize) -> usize {
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+    for (i, &v) in weight.iter().enumerate() {
+        if v > 0.0 {
+            let (x, y) = (i % w, i / w);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if x0 == usize::MAX {
+        return usize::MAX;
+    }
+    let short = (x1 - x0 + 1).min(y1 - y0 + 1);
+    (short / 8).max(1)
+}
+
 /// The blend pass over an owned base copy. Each pixel is written at most once,
 /// so reading back from `out` is exact — no separate source plane needed (the
 /// memory-staged full-res path in [`retouch`] rides on that).
@@ -475,7 +559,11 @@ fn composite_in_place(out: &mut RgbaImage, gen_img: &RgbImage, weight: &[f32]) {
             let g = gen_img.get_pixel(x, y);
             let mix =
                 |bc: u8, gc: u8| (bc as f32 * (1.0 - a) + gc as f32 * a).round().clamp(0.0, 255.0) as u8;
-            out.put_pixel(x, y, Rgba([mix(b[0], g[0]), mix(b[1], g[1]), mix(b[2], g[2]), 255]));
+            // Alpha blends like the colour channels (generated content is
+            // opaque): forcing 255 turned every TOUCHED pixel opaque, so a
+            // 1%-weight feathered edge on a transparent PNG base grew an
+            // opaque halo around the mask (L09-5).
+            out.put_pixel(x, y, Rgba([mix(b[0], g[0]), mix(b[1], g[1]), mix(b[2], g[2]), mix(b[3], 255)]));
         }
     }
 }
@@ -664,11 +752,14 @@ fn part_file(buf: &mut Vec<u8>, boundary: &str, name: &str, filename: &str, byte
 ///   * the FLEXIBLE `size` — a gpt-image-2 capability; older models reject a
 ///     non-enum size, so we retry with the fixed enum size from the [`SizePlan`].
 ///
-/// Returns the image bytes and the size actually accepted.
+/// Returns the image bytes and the size actually accepted. `inputs` builds
+/// the image (+ optional mask) PNG pair FOR a requested size string — called
+/// once per size the negotiation attempts (memoize in the provider if
+/// rebuilding is expensive).
+type SizedInputs = (Vec<u8>, Option<Vec<u8>>);
 fn call_images_edit(
     cfg: &Config,
-    image_png: &[u8],
-    mask_png: Option<&[u8]>,
+    inputs: &mut dyn FnMut(&str) -> Result<SizedInputs>,
     prompt: &str,
     fidelity: &str,
     sizes: &SizePlan,
@@ -678,40 +769,6 @@ fn call_images_edit(
         .openai_api_key
         .as_ref()
         .ok_or_else(|| anyhow!("OPENAI_API_KEY not set — generative editing needs the OpenAI API"))?;
-
-    // Chosen over EVERY part this request can carry (both bodies of the
-    // negotiation loop draw from this same set) — see choose_boundary for why
-    // the const alone is not enough.
-    let boundary = choose_boundary(&[
-        cfg.openai_image_model.as_bytes(),
-        prompt.as_bytes(),
-        fidelity.as_bytes(),
-        sizes.enum_size.as_bytes(),
-        sizes.flexible.as_deref().unwrap_or_default().as_bytes(),
-        quality.as_bytes(),
-        image_png,
-        mask_png.unwrap_or_default(),
-    ])?;
-    let build_body = |include_fidelity: bool, size: &str, stream: bool| -> Vec<u8> {
-        let mut body = Vec::new();
-        part_text(&mut body, &boundary, "model", &cfg.openai_image_model);
-        part_text(&mut body, &boundary, "prompt", prompt);
-        if include_fidelity {
-            part_text(&mut body, &boundary, "input_fidelity", fidelity);
-        }
-        part_text(&mut body, &boundary, "size", size);
-        part_text(&mut body, &boundary, "quality", quality);
-        if stream {
-            part_text(&mut body, &boundary, "stream", "true");
-            part_text(&mut body, &boundary, "partial_images", &IMAGES_EDIT_PARTIALS.to_string());
-        }
-        part_file(&mut body, &boundary, "image", "image.png", image_png);
-        if let Some(m) = mask_png {
-            part_file(&mut body, &boundary, "mask", "mask.png", m);
-        }
-        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-        body
-    };
 
     let url = format!("{}/images/edits", cfg.openai_base_url.trim_end_matches('/'));
     let mut include_fidelity = true;
@@ -726,6 +783,48 @@ fn call_images_edit(
             sizes.flexible.as_deref().unwrap_or(sizes.enum_size)
         } else {
             sizes.enum_size
+        };
+        // The request's pixels are rebuilt AT the size being attempted
+        // (L09-2): the enum retry used to re-send the flexible-ratio input
+        // under an enum `size`, and the model's output — squeezed into an
+        // aspect the input never had — was then stretched to the base ratio
+        // on return: circles came back as ellipses on every panorama or
+        // square crop whose ratio is not one of the three enum ratios. With
+        // input ratio == requested ratio on every attempt, the return
+        // path's exact resize is a true inverse.
+        let (image_png, mask_png) = inputs(size)?;
+        let image_png = image_png.as_slice();
+        let mask_png = mask_png.as_deref();
+        // Chosen over EVERY part THIS attempt's body carries — see
+        // choose_boundary for why the const alone is not enough.
+        let boundary = choose_boundary(&[
+            cfg.openai_image_model.as_bytes(),
+            prompt.as_bytes(),
+            fidelity.as_bytes(),
+            size.as_bytes(),
+            quality.as_bytes(),
+            image_png,
+            mask_png.unwrap_or_default(),
+        ])?;
+        let build_body = |include_fidelity: bool, size: &str, stream: bool| -> Vec<u8> {
+            let mut body = Vec::new();
+            part_text(&mut body, &boundary, "model", &cfg.openai_image_model);
+            part_text(&mut body, &boundary, "prompt", prompt);
+            if include_fidelity {
+                part_text(&mut body, &boundary, "input_fidelity", fidelity);
+            }
+            part_text(&mut body, &boundary, "size", size);
+            part_text(&mut body, &boundary, "quality", quality);
+            if stream {
+                part_text(&mut body, &boundary, "stream", "true");
+                part_text(&mut body, &boundary, "partial_images", &IMAGES_EDIT_PARTIALS.to_string());
+            }
+            part_file(&mut body, &boundary, "image", "image.png", image_png);
+            if let Some(m) = mask_png {
+                part_file(&mut body, &boundary, "mask", "mask.png", m);
+            }
+            body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+            body
         };
         let body = build_body(include_fidelity, size, use_stream);
         // Each retry in this loop re-posts, so every attempt gets its own full
@@ -1359,6 +1458,99 @@ mod tests {
         (url, seen, handle)
     }
 
+    /// L09-2: the enum retry rebuilds its input AT the enum size — sending
+    /// the flexible-ratio pixels under an enum size request is how circles
+    /// came back as ellipses. Counted over a real loopback transport.
+    #[test]
+    fn the_enum_retry_requests_freshly_sized_input() {
+        let png_1024 =
+            encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(1024, 1024))).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_1024);
+        let (url, _seen, handle) = stub_endpoint(vec![
+            (
+                400,
+                "application/json",
+                r#"{"error":{"param":"size","message":"unsupported size"}}"#.into(),
+            ),
+            (200, "application/json", format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#)),
+        ]);
+        let cfg = Config {
+            openai_api_key: Some("test-key".into()),
+            openai_model: "test-chat".into(),
+            openai_base_url: url,
+            openai_image_model: "test-image".into(),
+            openai_image_quality: "auto".into(),
+            openai_image_max_px: 4_000_000,
+            image_provider: "api".into(),
+            image_effort: None,
+            analysis_provider: "oauth".into(),
+            analysis_model: "opus".into(),
+            analysis_effort: None,
+            claude_bin: "claude".into(),
+            analysis_api_key: None,
+            analysis_base_url: "http://127.0.0.1:1".into(),
+            python_bin: "python".into(),
+            denoise_model: "scunet_color_real_psnr".into(),
+            denoise_script: String::new(),
+            denoise_cache: String::new(),
+            segment_script: String::new(),
+            style_strength: 0.5,
+        };
+        let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
+        let sizes = SizePlan { flexible: Some("1600x912".into()), enum_size: "1024x1024" };
+        let mut asked: Vec<String> = Vec::new();
+        let (_bytes, used) = call_images_edit(
+            &cfg,
+            &mut |size| {
+                asked.push(size.to_string());
+                Ok((src.clone(), None))
+            },
+            "brighten the sky",
+            "high",
+            &sizes,
+            "auto",
+        )
+        .expect("the enum retry succeeds");
+        assert_eq!(used, "1024x1024");
+        assert!(
+            asked.contains(&"1600x912".to_string()) && asked.contains(&"1024x1024".to_string()),
+            "each attempted size asked for its own input: {asked:?}"
+        );
+        let grace = std::time::Instant::now();
+        while !handle.is_finished() && grace.elapsed() < std::time::Duration::from_secs(2) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = handle.join();
+    }
+
+    /// L09-3: the feather follows the painted selection's size, and an empty
+    /// selection defers to the caller's frame rule.
+    #[test]
+    fn the_feather_follows_the_selection_not_the_frame() {
+        let (w, h) = (100usize, 100usize);
+        let mut weight = vec![0.0f32; w * h];
+        for y in 40..50 {
+            for x in 40..50 {
+                weight[y * w + x] = 1.0;
+            }
+        }
+        assert_eq!(selection_feather(&weight, w), 1, "a 10 px selection feathers by 1 px");
+        assert_eq!(selection_feather(&vec![0.0f32; w * h], w), usize::MAX, "empty defers");
+        let _ = h;
+    }
+
+    /// L09-5: the blend carries the base ALPHA — a 1%-weight feathered edge
+    /// on a transparent base must stay (nearly) transparent, not become an
+    /// opaque halo.
+    #[test]
+    fn a_feathered_edge_on_a_transparent_base_stays_transparent() {
+        let mut out = RgbaImage::from_pixel(2, 1, image::Rgba([0, 0, 0, 0]));
+        let gen_img = RgbImage::from_pixel(2, 1, image::Rgb([255, 255, 255]));
+        composite_in_place(&mut out, &gen_img, &[0.01, 1.0]);
+        assert!(out.get_pixel(0, 0)[3] <= 5, "1% weight ≈ transparent: {:?}", out.get_pixel(0, 0));
+        assert_eq!(out.get_pixel(1, 0)[3], 255, "full weight is opaque");
+    }
+
     /// L14#2 (images side): each images/edits POST is billed PER IMAGE, so
     /// a second POST may only ever follow a capability refusal — and the
     /// dropped flag must actually be gone from the retry body. Counted over
@@ -1402,7 +1594,7 @@ mod tests {
         let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
         let sizes = SizePlan { flexible: None, enum_size: "1024x1024" };
         let (bytes, used) =
-            call_images_edit(&cfg, &src, None, "brighten the sky", "high", &sizes, "auto")
+            call_images_edit(&cfg, &mut |_| Ok((src.clone(), None)), "brighten the sky", "high", &sizes, "auto")
                 .expect("the blocking retry succeeds");
         assert_eq!(used, "1024x1024");
         assert!(!bytes.is_empty(), "the accepted retry returns the image");

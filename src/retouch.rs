@@ -337,7 +337,17 @@ fn heal_one<T: HealDepth>(
                     continue;
                 }
             }
-            let donor = px(src, tx + ox, ty + oy);
+            let (sx, sy) = (tx + ox, ty + oy);
+            // An out-of-bounds donor pixel is DROPPED — for target and donor
+            // alike, the consistent-rect rule — instead of edge-clamped: the
+            // clamp smeared column-0/row-0 stripes across the painted area
+            // whenever the picked clone source sat near the frame edge
+            // (L09-7). Auto-heal never trips this: find_donor only returns
+            // fully in-bounds offsets.
+            if sx < 0 || sy < 0 || sx >= w || sy >= h {
+                continue;
+            }
+            let donor = px(src, sx, sy);
             let base = px(src, tx, ty);
             let mut out = [T::from_chan(0.0); 3];
             for c in 0..3 {
@@ -933,6 +943,33 @@ pub fn clone_stamp(
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage, Rgba};
+
+    /// L09-7: an explicit clone source whose donor rect leaves the frame
+    /// drops those pixels instead of edge-replicating them across the target.
+    #[test]
+    fn an_out_of_bounds_clone_donor_is_dropped_not_edge_replicated() {
+        let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(32, 32, Rgb([200u8, 200, 200]));
+        for y in 0..32 {
+            img.put_pixel(0, y, Rgb([255, 0, 0])); // a distinctive edge column
+        }
+        let spots = vec![HealSpot {
+            cx: 0.5,
+            cy: 0.5,
+            radius: 0.1,
+            feather: 0.0,
+            source: Some([-2.0, 0.0]), // donor fully out of frame
+            coverage: None,
+            clone_raw: true,
+            label: "clone".into(),
+        }];
+        heal_image(&mut img, &spots);
+        assert_eq!(
+            *img.get_pixel(16, 16),
+            Rgb([200, 200, 200]),
+            "no donor pixel exists — the target stays untouched instead of smearing the red edge"
+        );
+    }
 
     /// L09-9: clone_stamp carries heal's pre-decode preflight — an output
     /// that lands in the photo's own library folder refuses before any base
