@@ -1,6 +1,8 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.23.3). The full decode → advise → verify → render
+> Status: **implemented** (v0.23.4 — a patch on v0.23.3 that signs the parody
+> app icon with a small "skymanbp's" wordmark on frames ≥ 64px; no code
+> change). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
