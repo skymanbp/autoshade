@@ -96,6 +96,16 @@ impl AutoshopApp {
             // painted pixels alive in the GPU texture indefinitely.
             self.mask_dirty_rect = None;
         }
+        // The display canvas and the greyscale weight buffer are a
+        // DUAL-WRITE pair (the brush writes both; Apply bakes the GRAY) —
+        // clearing only the display broke the session's own "bakes exactly
+        // what it shows" contract: Apply after Clear still committed the
+        // cleared strokes (L15-8). end_mask_brush clears the pair too.
+        if let Some(g) = &mut self.mask_brush_gray {
+            for p in g.pixels_mut() {
+                *p = image::Luma([0]);
+            }
+        }
         self.paint_last = None;
     }
 

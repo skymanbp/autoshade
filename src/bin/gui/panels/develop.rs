@@ -157,6 +157,12 @@ impl AutoshopApp {
         self.histogram_ui(ui);
         ui.add_space(SPACE_SM);
 
+        // Mid-open (decode in flight) these controls would edit the STASHED
+        // photo A while B lands and replaces the whole recipe — silent input
+        // loss (L15-2). Busy alone must NOT gate here: a 600 s analyze keeps
+        // the panel live; only the open transition freezes it.
+        let editable = !self.open_in_flight;
+        ui.add_enabled_ui(editable, |ui| {
         changed |= self.dev_ai(ui);
         // Lightroom-style grouping: a wall of 16 sliders scans terribly; four
         // titled sections (tone open, the rest by activity) scan at a glance.
@@ -187,6 +193,7 @@ impl AutoshopApp {
         changed |= self.dev_masks(ui);
         changed |= self.dev_versions(ui);
         changed |= self.dev_export(ui);
+        });
 
         if changed {
             self.recipe.clamp();
@@ -225,20 +232,29 @@ impl AutoshopApp {
                                     egui::pos2(0.0, 0.0),
                                     egui::pos2(1.0, 1.0),
                                 );
+                                // Card chrome tokens (L15-1): the glow is
+                                // the PILL accent at low alpha and its radius
+                                // is DERIVED — the literal 0xc9a14a/7.0 copy
+                                // silently detached from any theme change.
+                                const CARD_RADIUS: f32 = 4.0;
+                                const GLOW_EXPAND: f32 = 3.0;
                                 if active {
-                                    // Concentric with the 4.0-radius border
-                                    // below: outer radius = inner + expand.
                                     ui.painter().rect_filled(
-                                        rect.expand(3.0),
-                                        7.0,
-                                        egui::Color32::from_rgba_unmultiplied(0xc9, 0xa1, 0x4a, 46),
+                                        rect.expand(GLOW_EXPAND),
+                                        CARD_RADIUS + GLOW_EXPAND,
+                                        egui::Color32::from_rgba_unmultiplied(
+                                            PILL.r(),
+                                            PILL.g(),
+                                            PILL.b(),
+                                            46,
+                                        ),
                                     );
                                 }
                                 ui.painter().image(t.id(), rect, uv, egui::Color32::WHITE);
                                 if active {
                                     ui.painter().rect_stroke(
                                         rect,
-                                        4.0,
+                                        CARD_RADIUS,
                                         egui::Stroke::new(2.0, PILL),
                                     );
                                 }
@@ -632,7 +648,10 @@ impl AutoshopApp {
                     _ => (cg.global_hue, cg.global_sat, cg.global_lum),
                 };
                 let mut wheel_changed = false;
-                wheel_changed |= Self::slider(ui, lang, tr(lang, "Hue"), &mut hue, 0.0, 360.0, 0.0);
+                // 359.9, not 360: the recipe normalizes hue by rem_euclid(360),
+                // so a drag to the very end snapped the knob back to 0 — same
+                // colour, but the knob teleported under the pointer (L15-3).
+                wheel_changed |= Self::slider(ui, lang, tr(lang, "Hue"), &mut hue, 0.0, 359.9, 0.0);
                 wheel_changed |= Self::slider(ui, lang, tr(lang, "Saturation"), &mut sat, 0.0, 100.0, 0.0);
                 wheel_changed |= Self::slider(ui, lang, tr(lang, "Luminance"), &mut lum, -100.0, 100.0, 0.0);
                 if wheel_changed {
@@ -696,15 +715,15 @@ impl AutoshopApp {
                     {
                         self.start_ai_denoise();
                     }
-                    // RAW-only, exactly as the hover says — an enabled toggle
-                    // on a baked source promised a mode that changes nothing.
-                    let src_is_raw = self
-                        .active_source_path()
-                        .is_some_and(|p| autoshop::decode::is_raw(&p));
-                    ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.denoise_fullres, tr(lang, "Full-res")))
+                    // Enabled for BAKED sources too (L15-4, the heal-gate
+                    // rule): the engine honours the flag on both source
+                    // types (denoise_active), and the RAW-only gate left a
+                    // high-res baked TIFF no way to opt out of the ≤2048px
+                    // working copy.
+                    ui.checkbox(&mut self.denoise_fullres, tr(lang, "Full-res"))
                         .on_hover_text(tr(lang,
-                            "Denoise the full-sensor develop (slow, minutes on GPU); off = a ≤2048px working copy \
-                             for a quick on-canvas result",
+                            "Denoise at full resolution (the full-sensor develop for a RAW, the image itself for a \
+                             baked source; slow) — off = a ≤2048px working copy for a quick on-canvas result",
                         ));
                 });
             });
@@ -830,7 +849,7 @@ impl AutoshopApp {
                     if ui.button(label).clicked() {
                         let on = !self.crop_mode;
                         self.disarm_tools();
-                        self.crop_mode = on;
+                        self.set_crop_mode(on);
                     }
                     let prev_aspect = self.crop_aspect;
                     egui::ComboBox::from_id_salt("crop_aspect")
@@ -1349,12 +1368,16 @@ impl AutoshopApp {
                     });
                     // Rotation: the on-image grip (the knob parked above the
                     // ellipse) drags it too; the slider gives numeric entry.
+                    // -179.9: clamp_geometry normalizes to (-180, 180], so a
+                    // drag to the very left snapped the knob to +180 — the
+                    // ellipse never moved, the knob teleported (L15-6; the
+                    // hue-slider rule).
                     geo_ch |= Self::slider(
                         ui,
                         lang,
                         tr(lang, "Angle"),
                         angle,
-                        -180.0,
+                        -179.9,
                         180.0,
                         0.0,
                     );

@@ -348,7 +348,17 @@ impl AutoshopApp {
         let uv = self.view_uv();
         // Display size fits the VISIBLE window's aspect (in image pixels).
         let vis_px = egui::vec2(uv.width() * tex_size.x, uv.height() * tex_size.y);
-        let disp = fit_in(vis_px, max_w, avail_y);
+        // Past fit the 4× upscale cap is DROPPED (L13-2): the cap tamed tiny
+        // images at fit, but the visible window shrinks as zoom grows, so at
+        // deep zoom the cap re-fit the canvas SMALLER — zooming in shrank
+        // the picture and broke the cursor anchor. A zoomed view fills the
+        // pane box.
+        let disp = fit_in_capped(
+            vis_px,
+            max_w,
+            avail_y,
+            if self.zoom > 1.0 { f32::INFINITY } else { 4.0 },
+        );
         // PHYSICAL pixels per image pixel: disp is measured in egui logical
         // points — without pixels_per_point a "100%" readout on a 2× display
         // spanned two physical pixels per texel, and "1:1" wasn't.
@@ -662,8 +672,12 @@ impl AutoshopApp {
                 let ((bw, bh), deg, dist) = self.geom_ctx();
                 let a = orig_norm_to_view(l, t, (bw, bh), deg, &dist);
                 let b2 = orig_norm_to_view(rr, bb, (bw, bh), deg, &dist);
+                // from_two_pos, like the drag path above (L13-6): under a
+                // straighten the transformed corners can swap order, and
+                // from_min_max built a negative rect that was culled — the
+                // committed region turned invisible while still feeding AI.
                 draw(
-                    egui::Rect::from_min_max(xf.to_screen(a.0, a.1), xf.to_screen(b2.0, b2.1))
+                    egui::Rect::from_two_pos(xf.to_screen(a.0, a.1), xf.to_screen(b2.0, b2.1))
                         .intersect(rect),
                 );
             }
@@ -1305,14 +1319,21 @@ impl AutoshopApp {
                         // width units), not max(extents): max() can only grow
                         // past the stale axis, so an inward pull dominated by
                         // one axis left the corner pinned at the old size.
-                        let top_corner = h == 0 || h == 1;
+                        // The Y side follows the POINTER relative to the
+                        // anchor, exactly like x below (L13-8): pinning it to
+                        // the handle's original identity meant a TL corner
+                        // dragged past BR rebuilt the box on the anchor's far
+                        // side, away from the pointer — the un-ratio'd path's
+                        // min/max already handles crossing, and the asymmetry
+                        // was the defect.
+                        let above = y < ay;
                         let mut w_n = if dx.abs() >= dy.abs() * rn {
                             (x - ax).abs()
                         } else {
                             (y - ay).abs() * rn
                         };
                         let mut h_n = w_n / rn;
-                        let room = if top_corner { ay } else { 1.0 - ay };
+                        let room = if above { ay } else { 1.0 - ay };
                         if h_n > room {
                             h_n = room;
                             w_n = h_n * rn;
@@ -1327,7 +1348,7 @@ impl AutoshopApp {
                             h_n = w_n / rn;
                         }
                         x = if x >= ax { ax + w_n } else { ax - w_n };
-                        y = if top_corner { ay - h_n } else { ay + h_n };
+                        y = if above { ay - h_n } else { ay + h_n };
                     }
                     [x.min(ax), y.min(ay), x.max(ax), y.max(ay)]
                 };
@@ -1613,8 +1634,15 @@ impl AutoshopApp {
         // the photo, and the paint overlay must ride the SAME map or
         // strokes drift off the pixels they cover. The bool keys the
         // cache too, so toggling CA re-blits.
-        let profile_geom =
-            autoshop::render::geometry_moves_frame(&self.recipe.lens_profile, 0.0);
+        // BOTH profile toggles key the cache (L13-9): collapsed to one
+        // bool, "distortion + CA on → turn one off" still compared equal and
+        // the overlay kept the OLD warp — strokes floated off their pixels.
+        let profile_geom = (
+            self.recipe.lens_profile.distortion_on && !self.recipe.lens_profile.distortion.is_empty(),
+            self.recipe.lens_profile.ca_on
+                && !(self.recipe.lens_profile.ca_r.is_empty()
+                    && self.recipe.lens_profile.ca_b.is_empty()),
+        );
         let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion, profile_geom);
         let stale_xform = self.mask_tex.is_some() && self.mask_tex_xform != xform_now;
         if self.mask_dirty || stale_xform {
@@ -1623,7 +1651,7 @@ impl AutoshopApp {
             // sub-rectangle. Brushing used to clone and re-upload the WHOLE
             // canvas on every pointer move (at an 8192 working preview that
             // is a ~270 MB round trip per frame).
-            if xform_now == (0.0, 0.0, false) && !stale_xform && self.mask_dirty {
+            if xform_now == (0.0, 0.0, (false, false)) && !stale_xform && self.mask_dirty {
                 let rect = self.mask_dirty_rect;
                 if let (Some(m), Some(tex), Some([x0, y0, x1, y1])) =
                     (&self.mask_paint, &mut self.mask_tex, rect)
@@ -1654,7 +1682,7 @@ impl AutoshopApp {
             // (the stroke's final shape lands on the release frame, when the
             // pointer is no longer down).
             if !stale_xform
-                && xform_now != (0.0, 0.0, false)
+                && xform_now != (0.0, 0.0, (false, false))
                 && self.mask_tex.is_some()
                 && ctx.input(|i| i.pointer.any_down())
                 && self.mask_tex_built.elapsed() < std::time::Duration::from_millis(120)
@@ -1662,12 +1690,12 @@ impl AutoshopApp {
                 return; // mask_dirty stays armed; retried next frame
             }
             if let Some(m) = &self.mask_paint {
-                let ci = if xform_now != (0.0, 0.0, false) {
+                let ci = if xform_now != (0.0, 0.0, (false, false)) {
                     // Alpha-preserving RGBA twins: the RGB16 photo paths
                     // flatten transparency to opaque, which turned the whole
                     // canvas into a red wash under any active geometry.
                     let mut img = m.clone();
-                    if xform_now.1 != 0.0 || profile_geom {
+                    if xform_now.1 != 0.0 || profile_geom != (false, false) {
                         img = autoshop::render::apply_lens_geometry_rgba(
                             &img,
                             &self.recipe.lens_profile,

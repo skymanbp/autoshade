@@ -158,9 +158,18 @@ pub(crate) fn mask_handle_points(geom: &MaskGeometry, xf: ViewXform) -> Vec<(u8,
 /// Scale `tex_size` to fit a `max_w` × `avail_y` box (both dimensions — width
 /// alone lets a portrait overflow the panel), never upscaling past 4×.
 pub(crate) fn fit_in(tex_size: egui::Vec2, max_w: f32, avail_y: f32) -> egui::Vec2 {
+    fit_in_capped(tex_size, max_w, avail_y, 4.0)
+}
+
+/// [`fit_in`] with the upscale cap as a parameter. The 4× cap exists so a
+/// tiny image does not balloon at FIT — but past fit it fought the zoom
+/// itself: the visible window shrinks as zoom grows, the cap re-fit it
+/// smaller, and deep zoom SHRANK the canvas while cursor anchoring drifted
+/// (L13-2). A zoomed canvas passes `f32::INFINITY` and fills the pane box.
+pub(crate) fn fit_in_capped(tex_size: egui::Vec2, max_w: f32, avail_y: f32, cap: f32) -> egui::Vec2 {
     let s = (max_w / tex_size.x.max(1.0))
         .min(avail_y.max(1.0) / tex_size.y.max(1.0))
-        .clamp(0.01, 4.0);
+        .clamp(0.01, cap);
     tex_size * s
 }
 

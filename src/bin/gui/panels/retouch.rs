@@ -808,11 +808,11 @@ impl AutoshopApp {
                                 tr(lang, "Stamp: Alt+click to set the source → brush the target area → 「⎘ Clone painted area」").into();
                         }
                     }
-                    let src_is_raw = self
-                        .active_source_path()
-                        .is_some_and(|p| autoshop::decode::is_raw(&p));
-                    ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.clone_fullres, tr(lang, "Full-res")))
-                        .on_hover_text(tr(lang, "Clone on the full-resolution develop (slow, RAW only)"));
+                    // Enabled for BAKED sources too — clone_stamp honours
+                    // the flag on both source types (retouch.rs), the same
+                    // rule as Heal beside it (L15-7).
+                    ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res"))
+                        .on_hover_text(tr(lang, "Clone at full resolution (slow; without it a baked image is saved at 2048px)"));
                     ui.add_enabled_ui(!self.busy && self.clone_mode, |ui| {
                         if ui
                             .button(tr(lang, "⎘ Clone painted area"))

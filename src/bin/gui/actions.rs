@@ -153,6 +153,11 @@ impl AutoshopApp {
             // its own busy check. Said so, instead of claiming a live
             // scenario.
             self.keep_recipe = false;
+            // Refusal must be visible (the switch_variant rule: a silent
+            // no-op reads as a dead UI) — the EMPTY-STATE picker button has
+            // no busy gate, so this arm IS user-reachable (L11-4).
+            let t = tr(self.lang, "busy — the photo opens when the current task finishes");
+            self.toast(ToastKind::Error, t);
             return;
         }
         // Flush a typed-but-uncommitted mask rename before the stash below
@@ -367,18 +372,22 @@ impl AutoshopApp {
                     // it still resolves — decoded HERE so the UI thread never
                     // loads a 61 MP PNG. A missing/unreadable master degrades
                     // to the plain source open, never a failure.
+                    let mut baked_note = None;
                     let baked = autoshop::store::read_pixel_source(&path).and_then(
                         |(origin, generated)| {
                             let img = match autoshop::decode::load_image(&origin) {
                                 Ok(i) => i,
                                 Err(e) => {
-                                    // Disclosed, not silent: "the canvas came
-                                    // back un-retouched" must have a traceable
-                                    // cause in the log.
+                                    // Disclosed at LANDING too, not only in a
+                                    // log the windowed build cannot show
+                                    // (L11-3). Typed detail; on_opened
+                                    // localizes.
                                     eprintln!(
                                         "⚠ baked master {} failed to decode ({e}) — opening the un-retouched source",
                                         origin.display()
                                     );
+                                    baked_note =
+                                        Some(format!("{}: {e:#}", origin.display()));
                                     return None;
                                 }
                             };
@@ -387,7 +396,7 @@ impl AutoshopApp {
                     );
                     // Arc once here so every downstream sharer (variants, the
                     // preview worker) is an O(1) refcount bump, not a deep copy.
-                    Ok((Arc::new(thumb), knots, lens, as_shot, baked, src_ident))
+                    Ok((Arc::new(thumb), knots, lens, as_shot, baked, src_ident, baked_note))
                 })();
                 Msg::Opened(Box::new(res))
             },
@@ -709,10 +718,19 @@ impl AutoshopApp {
         self.overlay_ref = None;
         self.overlay_stale = true;
         self.last_rgb = None; // the retained frame belongs to the OLD variant
+        // …and so does the After texture (L11-2): its only writers are the
+        // develop/retouch landings, so until the new variant's first frame
+        // lands the canvas showed the OLD variant's pixels under the NEW
+        // variant's controls — seconds, on a large photo. The honest
+        // "Preparing preview…" placeholder takes over.
+        self.after_tex = None;
         self.disarm_tools();
         self.clone_src = None; // unlike a mere disarm, a variant switch drops the sample
         self.zoom = 1.0;
         self.zoom_target = 1.0; // instant — a swap must not glide from the old view
+        // The `1` key reads LAST frame's cached 1:1 solve; stale across a
+        // switch it jumped the new canvas to the old variant's ratio (L11-5).
+        self.zoom_one_to_one = 1.0;
         self.pan = egui::vec2(0.5, 0.5);
         self.verdict = None;
         self.dirty = true; // re-develop the newly active variant
@@ -732,6 +750,11 @@ impl AutoshopApp {
             self.toast(ToastKind::Error, t);
             return;
         }
+        // Flush a typed-but-uncommitted mask rename INTO the snapshot below
+        // (L11-1) — the same boundary rule open_path and Ctrl+C already
+        // apply: commit first, then load_active's M15 clear drops the
+        // buffer. Clearing without committing silently lost the rename.
+        self.commit_mask_name_buf();
         // Read BEFORE the &mut borrow below. `dirty` = an edit awaiting
         // dispatch; `develop_inflight` = a frame the switch is about to make
         // the acceptance gate reject. Either way no completed frame depicts
@@ -781,9 +804,9 @@ impl AutoshopApp {
         // "Nothing is lost" includes a rename still sitting in its TextEdit:
         // both callers are ASYNC completions (reverse-fit, generative edit)
         // that switch variants while the user may be mid-typing, and the
-        // switch's M15 boundary clear then discarded the typed name. A
-        // USER-initiated switch keeps the deliberate M15 drop — this flush
-        // is the async thief's, committed into the recipe snapshotted below.
+        // switch's M15 boundary clear then discarded the typed name.
+        // (switch_variant now flushes the same way — L11-1 — so every
+        // variant boundary commits before the M15 clear.)
         self.commit_mask_name_buf();
         // Same guarded card drop as switch_variant (L06#6): the async
         // completion switches away from a variant whose latest edits may
@@ -831,6 +854,33 @@ impl AutoshopApp {
             // deleted canvas's own disclosure forward as if it still applied.
             self.set_canvas_status("variant removed");
         }
+    }
+
+    /// Every crop_mode flip goes through here (L13-1): `pan` is stored in
+    /// the CURRENT window's coordinates — the committed crop normally, the
+    /// full frame while the crop tool is open (`view_uv`) — so the VALUE
+    /// must be rebased when the window changes. Left alone, entering the
+    /// tool reinterpreted a crop-relative pan as full-frame and the
+    /// viewport landed outside the crop box at higher zoom.
+    pub(crate) fn set_crop_mode(&mut self, on: bool) {
+        if self.crop_mode == on {
+            return;
+        }
+        if let Some(c) = &self.recipe.crop {
+            let (l, t) = (c.left.min(c.right), c.top.min(c.bottom));
+            let (w, h) =
+                ((c.right - c.left).abs().max(1e-6), (c.bottom - c.top).abs().max(1e-6));
+            self.pan = if on {
+                // crop-window coords → full-frame coords
+                egui::vec2(l + self.pan.x * w, t + self.pan.y * h)
+            } else {
+                // full-frame coords → crop-window coords
+                egui::vec2((self.pan.x - l) / w, (self.pan.y - t) / h)
+            };
+            // view_uv re-clamps against zoom each frame; keep it sane here.
+            self.pan = egui::vec2(self.pan.x.clamp(0.0, 1.0), self.pan.y.clamp(0.0, 1.0));
+        }
+        self.crop_mode = on;
     }
 
     /// Recipe snapshot path for version `n` — `v<n>.recipe.json` in the photo's
@@ -1195,7 +1245,7 @@ impl AutoshopApp {
     /// crop_drag used to hijack the next drag. clone_src (the sampled source
     /// pin) deliberately survives — samples stay for resuming, like paint.
     pub(crate) fn disarm_tools(&mut self) {
-        self.crop_mode = false;
+        self.set_crop_mode(false);
         self.paint_mode = false;
         self.clone_mode = false;
         self.wb_picking = false;
@@ -1754,6 +1804,13 @@ impl AutoshopApp {
                         }
                         if self.src_path.as_deref() == Some(p.as_path()) {
                             self.saved_strip = strip.clone();
+                            // The FOURTH mirror of the single-save set
+                            // (export.rs): pixels.json for the ACTIVE photo
+                            // just committed, and without this the ● badge
+                            // and the exit re-check compared against a stale
+                            // master link — a just-saved retouch was
+                            // re-reported as unsaved (L11-6).
+                            self.pixels_on_disk = pix.as_ref().map(|(o, _)| o.clone());
                         }
                     }
                     Err(e) => {

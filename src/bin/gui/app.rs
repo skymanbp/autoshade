@@ -165,7 +165,7 @@ pub(crate) struct AutoshopApp {
     pub(crate) mask_paint: Option<image::RgbaImage>,  // painted overlay (red where painted), at preview res
     pub(crate) mask_tex: Option<egui::TextureHandle>, // overlay texture
     pub(crate) mask_dirty: bool,                      // re-upload the overlay
-    pub(crate) mask_tex_xform: (f32, f32, bool), // (straighten, distortion, profile geometry on) at build
+    pub(crate) mask_tex_xform: (f32, f32, (bool, bool)), // (straighten, distortion, (profile distortion, profile CA)) at build
     // Union of the brush segments painted since the last texture upload
     // (canvas px, [x0,y0,x1,y1] half-open). With no geometry active, only
     // this sub-rectangle is uploaded (set_partial) — brushing used to clone
@@ -542,13 +542,13 @@ impl AutoshopApp {
             if do_crop && self.src_path.is_some() {
                 let on = !self.crop_mode;
                 self.disarm_tools();
-                self.crop_mode = on;
+                self.set_crop_mode(on);
             }
             // Enter commits the crop (LR, D13): the box is already live in
             // recipe.crop — committing is dropping the grab and disarming.
             if do_crop_commit {
                 self.crop_drag = None;
-                self.crop_mode = false;
+                self.set_crop_mode(false);
             }
             if crop_nudge != (0.0, 0.0)
                 && let Some(c) = self.recipe.crop
@@ -1363,7 +1363,7 @@ impl Default for AutoshopApp {
             mask_dirty_rect: None,
             mask_tex_built: Instant::now(),
             mask_dirty: false,
-            mask_tex_xform: (0.0, 0.0, false),
+            mask_tex_xform: (0.0, 0.0, (false, false)),
             paint_last: None,
             fill_prompt: String::new(),
             fill_quality: 0,
@@ -1640,6 +1640,12 @@ impl eframe::App for AutoshopApp {
         // Land a finished edit gesture (slider release, AI Analyze, Reset) into
         // the undo history — once per gesture, after all controls are read.
         self.commit_if_settled(ctx);
+        // LAST, after every panel had its chance to spawn (L12-3): evaluated
+        // at the top of update (inside poll_workers) the gate judged a frame
+        // whose spawns had not happened yet, so the FIRST batch of workers
+        // each frame started with no completion pump armed and their results
+        // sat in the channel until the next input event.
+        self.pump_repaint_gate(ctx);
     }
 
     /// Persist the prefs (last folder, view mode, export options) — restored by

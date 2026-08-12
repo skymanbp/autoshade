@@ -319,6 +319,9 @@ pub(crate) enum Msg {
     /// non-RAW sources, missing embedded previews, or a near-identity map —
     /// see `render::camera_base_knots`).
     Opened(Box<anyhow::Result<OpenedBase>>),
+    // (MasterLoaded carries the SPAWN-time edge and file stamp: the landing
+    // used to stat and read preferences at completion time, filing the
+    // pixels under an identity they never had — L12-2/L12-6.)
     /// A synchronous GUI develop used to block egui's update loop. Preview work
     /// now returns here from a single latest-wins worker.
     Developed(Box<anyhow::Result<PreviewDone>>),
@@ -352,6 +355,11 @@ pub(crate) enum Msg {
     MasterLoaded {
         photo: PathBuf,
         origin: PathBuf,
+        /// SPAWN-time identity (L12-2/L12-6): the landing files the pixels
+        /// under the edge + stamp the decode actually ran with, never under
+        /// completion-time preferences or a completion-time stat.
+        edge: u32,
+        stamp: FileStamp,
         img: Box<anyhow::Result<image::DynamicImage>>,
     },
     /// A generative-fill / heal / clone / reimagine result — see [`RetouchDone`].
@@ -784,8 +792,12 @@ pub(crate) struct ViewXform {
 
 impl ViewXform {
     pub(crate) fn to_norm(self, p: egui::Pos2) -> (f32, f32) {
-        let fx = ((p.x - self.rect.min.x) / self.rect.width().max(1.0)).clamp(0.0, 1.0);
-        let fy = ((p.y - self.rect.min.y) / self.rect.height().max(1.0)).clamp(0.0, 1.0);
+        // .max(1e-6), the same floor to_screen uses (L13-11): max(1.0)
+        // REPLACED a sub-point rect dimension with a full point, compressing
+        // the inverse map's whole axis — an extreme-panorama edge (>600:1)
+        // put every crop/mask/brush gesture at the wrong coordinate.
+        let fx = ((p.x - self.rect.min.x) / self.rect.width().max(1e-6)).clamp(0.0, 1.0);
+        let fy = ((p.y - self.rect.min.y) / self.rect.height().max(1e-6)).clamp(0.0, 1.0);
         (self.uv.min.x + fx * self.uv.width(), self.uv.min.y + fy * self.uv.height())
     }
 
@@ -843,6 +855,11 @@ pub(crate) type OpenedBase = (
     Option<(f32, f32)>,
     Option<BakedBase>,
     (u32, FileStamp, PixelIdentity),
+    // A baked master that FAILED to decode (the canvas degraded to the
+    // un-retouched source): the error detail, surfaced as a landing toast —
+    // stderr is invisible in the windowed build (L11-3). Never cached
+    // (remember_base stores None), so a revisit does not re-toast.
+    Option<String>,
 );
 
 /// How many decoded preview bases to keep for instant photo revisits (~3.3 MB

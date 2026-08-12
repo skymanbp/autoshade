@@ -84,6 +84,13 @@ impl AutoshopApp {
             "loading this variant's retouched master… (showing the source develop meanwhile)",
         )
         .into();
+        // Identity BEFORE the read (the curve-memo / remember_base rule,
+        // L12-2): a master rewritten DURING the decode must MISS on the next
+        // probe — stat'ing at landing filed the OLD pixels under the NEW
+        // stamp, a false HIT. The spawn edge rides along too (L12-6): the
+        // landing used to read the CURRENT preference, so a mid-flight px
+        // change filed these pixels under a resolution they never had.
+        let stamp = file_stamp(&origin);
         let (p2, o2) = (photo.clone(), origin.clone());
         self.spawn_worker(
             move || {
@@ -104,9 +111,11 @@ impl AutoshopApp {
                         im
                     }
                 });
-                Msg::MasterLoaded { photo, origin, img: Box::new(img) }
+                Msg::MasterLoaded { photo, origin, edge, stamp, img: Box::new(img) }
             },
-            move |e| Msg::MasterLoaded { photo: p2, origin: o2, img: Box::new(Err(e)) },
+            move |e| {
+                Msg::MasterLoaded { photo: p2, origin: o2, edge, stamp, img: Box::new(Err(e)) }
+            },
         );
     }
 
@@ -129,17 +138,18 @@ impl AutoshopApp {
     }
 
     /// Remember a freshly decoded cold master under its own identity —
-    /// `remember_base`'s twin. The stamp is read HERE rather than captured
-    /// pre-decode: unlike the open path there is no ident riding the result,
-    /// and a master rewritten during the decode should MISS on the next
-    /// probe (stamp moved on) rather than serve pixels it never held.
+    /// `remember_base`'s twin. The stamp is the SPAWN-TIME capture riding
+    /// the message (L12-2): the old landing-time stat argued it made a
+    /// mid-decode rewrite miss, but it did the opposite — the NEW stamp was
+    /// filed with the OLD pixels, so the next probe HIT on pixels the file
+    /// never held. Keyed pre-read, a rewrite moves the stamp on and misses.
     pub(crate) fn remember_master(
         &mut self,
         origin: &std::path::Path,
         edge: u32,
+        stamp: FileStamp,
         img: Arc<image::DynamicImage>,
     ) {
-        let stamp = file_stamp(origin);
         self.master_cache.retain(|((p, e, _), _)| !(p == origin && *e == edge));
         self.master_cache.push(((origin.to_path_buf(), edge, stamp), img));
         if self.master_cache.len() > MASTER_CACHE_CAP {
@@ -459,7 +469,9 @@ impl AutoshopApp {
                 Msg::MaskRefined(res) => self.on_mask_refined(lang, res),
                 Msg::Folder(boxed) => self.on_folder(lang, *boxed),
                 Msg::Thumb { generation, idx, img } => self.on_thumb(ctx, generation, idx, *img),
-                Msg::MasterLoaded { photo, origin, img } => self.on_master_loaded(ctx, lang, photo, origin, *img),
+                Msg::MasterLoaded { photo, origin, edge, stamp, img } => {
+                    self.on_master_loaded(ctx, lang, photo, origin, edge, stamp, *img)
+                }
                 Msg::Progress(epoch, m) => {
                     // Liveness lines from a running generative worker. Epoch-
                     // gated: after Cancel + an immediate re-run, the abandoned
@@ -513,19 +525,22 @@ impl AutoshopApp {
                 Msg::Models(role, generation, res) => self.on_models(lang, role, generation, res),
             }
         }
-        // Keep the frame loop alive while any worker (analyze/export/thumbs/models/
-        // master decodes) runs — but at a 100 ms poll, not frame rate: worker
-        // completion only surfaces through the mpsc poll above, and a full-rate
-        // repaint burned CPU for the whole life of a stalled 600 s AI call. Input
-        // still repaints immediately; 100 ms only bounds COMPLETION latency.
-        // `master_loads` is in the gate because a cold-variant master decode is
-        // NOT `busy`: without it, MasterLoaded sat unread until the next input
-        // and the canvas kept showing the disclosed stand-in (16-lane scan L06).
+    }
+
+    /// Keep the frame loop alive while any worker (analyze/export/thumbs/
+    /// models/master decodes) runs — at a 100 ms poll, not frame rate:
+    /// worker completion only surfaces through the mpsc poll, and a
+    /// full-rate repaint burned CPU for the whole life of a stalled 600 s AI
+    /// call. Input still repaints immediately; 100 ms only bounds COMPLETION
+    /// latency. `master_loads` is in the gate because a cold-variant master
+    /// decode is NOT `busy` (16-lane scan L06). Called at the END of
+    /// update() — after every panel had its chance to spawn (L12-3): inside
+    /// poll_workers (the top of the frame) it judged a frame whose spawns
+    /// had not happened yet, and the first batch of workers ran with no
+    /// completion pump armed.
+    pub(crate) fn pump_repaint_gate(&mut self, ctx: &egui::Context) {
         if self.busy
             || self.thumb_inflight > 0
-            // Either role's /models probe keeps the pump alive — the analysis
-            // endpoint has its own fetch now, and a fetch nobody repaints for
-            // lands silently with a stale "fetching…" button.
             || self.settings.image_models.fetching
             || self.settings.analysis_models.fetching
             || !self.master_loads.is_empty()
@@ -549,8 +564,20 @@ impl AutoshopApp {
                     let edge_revert = self.edge_before_flight.take();
                     self.open_in_flight = false; // both arms: the transition ended
                     match *boxed {
-                    Ok((base, knots, lens, as_shot, baked, src_ident)) => {
+                    Ok((base, knots, lens, as_shot, baked, src_ident, baked_note)) => {
                         self.busy = false;
+                        // Surfaced BEFORE anything else can early-return
+                        // (L11-3): the worker degraded to the un-retouched
+                        // source, and stderr is invisible in the windowed
+                        // build. Same channel as the MasterLoaded failure.
+                        if let Some(err) = &baked_note {
+                            let t = trf(
+                                lang,
+                                "this variant's saved master could not be loaded ({err}) — showing the un-retouched source develop instead",
+                                &[("err", err)],
+                            );
+                            self.toast(ToastKind::Error, t);
+                        }
                         if let Some(p) = self.src_path.clone() {
                             self.remember_base(
                                 &p,
@@ -561,6 +588,9 @@ impl AutoshopApp {
                                     as_shot,
                                     baked.clone(),
                                     src_ident.clone(),
+                                    // Never cached: a revisit decodes
+                                    // nothing, so it must not re-toast.
+                                    None,
                                 ),
                             );
                             // C1/F10 alias disclosure rides the open (once
@@ -1855,7 +1885,8 @@ impl AutoshopApp {
 
     /// `Msg::MasterLoaded` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_master_loaded(&mut self, ctx: &egui::Context, lang: Lang, photo: PathBuf, origin: PathBuf, img: anyhow::Result<image::DynamicImage>) {
+    #[allow(clippy::too_many_arguments)]
+    fn on_master_loaded(&mut self, ctx: &egui::Context, lang: Lang, photo: PathBuf, origin: PathBuf, edge: u32, stamp: FileStamp, img: anyhow::Result<image::DynamicImage>) {
                     // The in-flight marker clears on EVERY outcome — photo
                     // mismatch included — or one failed decode would block
                     // all retries for the rest of the session.
@@ -1867,11 +1898,12 @@ impl AutoshopApp {
                         match img {
                             Ok(im) => {
                                 let arc = Arc::new(im);
-                                // Remember before installing: the key is the
-                                // master's own identity, so a revisit skips
-                                // the decode entirely.
-                                let edge = self.preview_edge.clamp(640, 8192);
-                                self.remember_master(&origin, edge, arc.clone());
+                                // Remember before installing, under the
+                                // SPAWN-time edge + stamp (L12-2/L12-6): the
+                                // current preference may have moved while
+                                // this decoded, and these pixels are the
+                                // spawn's, not the preference's.
+                                self.remember_master(&origin, edge, stamp, arc.clone());
                                 self.install_master(ctx, &photo, &origin, arc);
                             }
                             Err(e) => {
@@ -1938,9 +1970,16 @@ impl AutoshopApp {
     pub(crate) fn on_retouched(&mut self, ctx: &egui::Context, lang: Lang, epoch: u64, done: RetouchDone) {
                     if epoch != self.gen_epoch {
                         // A cancelled task's late result: the user already
-                        // moved on — never let it mutate the canvas. Its ./out
-                        // artifact stays on disk (harmless, and Err is just as
-                        // silent).
+                        // moved on — never let it mutate the canvas. And the
+                        // cancel toast PROMISES "the late result is
+                        // discarded" (L12-7): a late SUCCESS's ./out artifact
+                        // is unreferenced by construction (unique_out claimed
+                        // a fresh name; nothing installed it), so it is
+                        // removed instead of accumulating one orphan
+                        // full-res file per cancel. Err stays silent.
+                        if let Ok((_, _, saved, _)) = &done {
+                            let _ = std::fs::remove_file(saved);
+                        }
                         return; // was `continue` — the match was the loop's last statement
                     }
                     self.gen_cancel = None;

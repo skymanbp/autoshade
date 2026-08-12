@@ -3,6 +3,125 @@
 // change by one byte). `super::*` still resolves to the root.
     use super::*;
 
+    /// L15-8: Clear must clear what Apply BAKES (the greyscale weight
+    /// buffer), not only what the canvas shows — the session's own contract
+    /// is "bakes exactly what it shows".
+    #[test]
+    fn clearing_the_brush_clears_what_apply_would_bake() {
+        let mut app = AutoshopApp {
+            mask_paint: Some(image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 64, 64, 160]))),
+            mask_brush_gray: Some(image::GrayImage::from_pixel(4, 4, image::Luma([255]))),
+            ..Default::default()
+        };
+        app.clear_mask();
+        assert!(
+            app.mask_brush_gray.unwrap().pixels().all(|p| p[0] == 0),
+            "Apply after Clear must bake nothing"
+        );
+    }
+
+    /// L13-11: the inverse map keeps working on a sub-point drawn rect — the
+    /// old max(1.0) floor replaced the tiny dimension with a full point and
+    /// compressed the whole axis.
+    #[test]
+    fn to_norm_survives_a_sub_point_rect() {
+        let xf = ViewXform {
+            rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(0.5, 300.0)),
+            uv: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        };
+        let (nx, _) = xf.to_norm(egui::pos2(0.25, 150.0));
+        assert!((nx - 0.5).abs() < 1e-3, "the middle of a 0.5-pt-wide rect is uv 0.5: {nx}");
+    }
+
+    /// L13-2: past fit the 4× upscale cap is dropped — a zoomed canvas fills
+    /// the pane instead of being re-fit SMALLER as the visible window
+    /// shrinks.
+    #[test]
+    fn a_zoomed_canvas_is_never_re_fit_smaller() {
+        let fit = fit_in(egui::vec2(50.0, 50.0), 600.0, 450.0);
+        assert_eq!(fit, egui::vec2(200.0, 200.0), "fit view keeps the 4× cap");
+        let zoomed = fit_in_capped(egui::vec2(50.0, 50.0), 600.0, 450.0, f32::INFINITY);
+        assert_eq!(zoomed, egui::vec2(450.0, 450.0), "a zoomed view fills the pane box");
+    }
+
+    /// L13-1: `pan` is stored in the current WINDOW's coordinates, so the
+    /// crop-mode flip must rebase the value — not reinterpret it.
+    #[test]
+    fn entering_crop_mode_rebases_the_pan_it_reinterprets() {
+        let mut app = AutoshopApp::default();
+        app.recipe.crop =
+            Some(autoshop::recipe::Crop { left: 0.5, top: 0.5, right: 1.0, bottom: 1.0 });
+        app.pan = egui::vec2(0.5, 0.5); // centre of the CROP window
+        app.set_crop_mode(true);
+        assert!(
+            (app.pan.x - 0.75).abs() < 1e-4 && (app.pan.y - 0.75).abs() < 1e-4,
+            "the same viewport centre, now in full-frame coords: {:?}",
+            app.pan
+        );
+        app.set_crop_mode(false);
+        assert!(
+            (app.pan.x - 0.5).abs() < 1e-4 && (app.pan.y - 0.5).abs() < 1e-4,
+            "leaving the tool rebases back: {:?}",
+            app.pan
+        );
+    }
+
+    /// L12-7: the cancel toast promises "the late result is discarded" — a
+    /// late SUCCESS's unreferenced ./out artifact is removed, not
+    /// accumulated.
+    #[test]
+    fn a_cancelled_retouchs_late_artifact_is_discarded_from_disk() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-gui-late-artifact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let artifact = dir.join("late.retouch.png");
+        std::fs::write(&artifact, b"orphan bytes").unwrap();
+
+        let ctx = egui::Context::default();
+        // The cancel already bumped past this task's epoch 6.
+        let mut app = AutoshopApp { gen_epoch: 7, ..Default::default() };
+        app.on_retouched(
+            &ctx,
+            Lang::En,
+            6,
+            Ok((
+                image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2)),
+                RetouchNote::Filled(artifact.clone()),
+                artifact.clone(),
+                RetouchKind::InPlace,
+            )),
+        );
+        assert!(!artifact.exists(), "the promised discard includes the disk artifact");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L12-2: the master cache keys on the SPAWN-time stamp — a file
+    /// rewritten during the decode must MISS on the next probe instead of
+    /// serving the old pixels under the new identity.
+    #[test]
+    fn a_master_rewritten_during_decode_misses_the_cache() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-gui-master-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("master.png");
+        std::fs::write(&p, b"generation A").unwrap();
+        let spawn_stamp = file_stamp(&p);
+        // The rewrite that lands while the decode is still running (longer
+        // content — the stamp's length half moves even on coarse mtime).
+        std::fs::write(&p, b"generation B, longer bytes").unwrap();
+
+        let mut app = AutoshopApp::default();
+        let pixels = std::sync::Arc::new(image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2)));
+        app.remember_master(&p, 1280, spawn_stamp, pixels);
+        assert!(
+            app.cached_master(&p, 1280).is_none(),
+            "the old pixels were filed under the OLD identity, so the rewritten file misses"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// L14-1: the format dropdown owns the downloaded file's container — a
     /// typed foreign extension is rewritten, a same-container spelling is
     /// kept exactly as typed.
@@ -850,6 +969,7 @@
                 None,
                 None,
                 (1280, None, None),
+                None,
             )))))
             .unwrap();
         app.poll_workers(&ctx);
@@ -1514,6 +1634,7 @@
                 None,
                 None,
                 (1280, None, None),
+                None,
             )))))
             .unwrap();
         app.poll_workers(&ctx);
@@ -1530,6 +1651,7 @@
                 None,
                 None,
                 (1280, None, None),
+                None,
             )))))
             .unwrap();
         app.poll_workers(&ctx);
@@ -1550,6 +1672,7 @@
                 None,
                 None,
                 (1280, None, None),
+                None,
             )))))
             .unwrap();
         app.poll_workers(&ctx);
@@ -1688,6 +1811,7 @@
                 None,
                 None,
                 (4096, None, None),
+                None,
             )))))
             .unwrap();
         app.poll_workers(&ctx);
@@ -1730,6 +1854,7 @@
                 None,
                 Some((master.clone(), abs, false)),
                 (4096, None, None),
+                None,
             )))))
             .unwrap();
         app.poll_workers(&ctx);
@@ -1993,6 +2118,7 @@
                 None,
                 None,
                 (4096, None, None),
+                None,
             )))))
             .unwrap();
         app.poll_workers(&ctx);
@@ -2035,6 +2161,7 @@
                 None,
                 None,
                 (4096, None, None),
+                None,
             )))))
             .unwrap();
         app.poll_workers(&ctx);
@@ -2343,6 +2470,7 @@
                 Some((4830.0, 6.0)),
                 None,
                 (2560, None, None),
+                None,
             ),
         );
         let hit = app.cached_base(p, 2560);
@@ -2362,7 +2490,7 @@
         for o in &others {
             app.remember_base(
                 o,
-                &(base.clone(), Vec::new(), Default::default(), None, None, (1280, None, None)),
+                &(base.clone(), Vec::new(), Default::default(), None, None, (1280, None, None), None),
             );
         }
         assert!(app.cached_base(p, 2560).is_none(), "least-recent evicted at cap");
@@ -2379,7 +2507,7 @@
         let mut app = AutoshopApp::default();
         let master = Arc::new(image::DynamicImage::new_rgb8(6, 4));
         let p = std::path::Path::new("D:/__autoshop_nonexistent__/master.tif");
-        app.remember_master(p, 1280, master.clone());
+        app.remember_master(p, 1280, file_stamp(p), master.clone());
         let hit = app.cached_master(p, 1280).expect("same path + edge hits");
         assert_eq!(hit.dimensions(), (6, 4), "the decoded pixels ride the entry");
         assert!(
@@ -2387,13 +2515,13 @@
             "a different edge must MISS — the entry holds 1280-edge pixels"
         );
         // Re-remembering the same (path, edge) replaces rather than stacks.
-        app.remember_master(p, 1280, master.clone());
+        app.remember_master(p, 1280, file_stamp(p), master.clone());
         assert_eq!(app.master_cache.len(), 1, "same key replaces its entry");
         let others: Vec<std::path::PathBuf> = (0..MASTER_CACHE_CAP)
             .map(|i| std::path::PathBuf::from(format!("D:/__autoshop_nonexistent__/m{i}.tif")))
             .collect();
         for o in &others {
-            app.remember_master(o, 1280, master.clone());
+            app.remember_master(o, 1280, file_stamp(o), master.clone());
         }
         assert!(app.cached_master(p, 1280).is_none(), "least-recent evicted at cap");
         assert!(app.cached_master(&others[1], 1280).is_some(), "newer entries survive");
