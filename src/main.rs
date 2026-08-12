@@ -270,8 +270,14 @@ fn main() -> Result<()> {
         Command::Reimagine { raw, prompt, fidelity, quality, out } => {
             let cfg = Config::load();
             let out = out.unwrap_or_else(|| default_out(&raw, "reimagine", "png"));
-            pipeline::guard_readonly(&out, &raw)?; // never write into the source library
+            // Full pre-pay preflight (L10 family): the first API call comes
+            // only after a full-size decode+resize+encode, so every CERTAIN
+            // failure — key, closed-set tiers, output path — refuses first.
+            pipeline::preflight_out(&out, &raw)?; // includes the read-only-library guard
+            require_choice("--fidelity", &fidelity, &["high", "low"])?;
             let q = quality.unwrap_or_else(|| cfg.openai_image_quality.clone());
+            require_choice("--quality (or the configured default)", &q, &["low", "medium", "high", "auto"])?;
+            require_image_key(&cfg, "reimagine")?;
             generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, &out)
         }
         Command::Match { raw, target, render, zoned, style_prompt, out } => {
@@ -280,8 +286,17 @@ fn main() -> Result<()> {
         Command::Retouch { raw, mask, prompt, quality, full_res, out } => {
             let cfg = Config::load();
             let out = out.unwrap_or_else(|| default_out(&raw, "retouch", "png"));
-            pipeline::guard_readonly(&out, &raw)?; // never write into the source library
+            // Full pre-pay preflight — see Reimagine.
+            pipeline::preflight_out(&out, &raw)?; // includes the read-only-library guard
+            if !mask.is_file() {
+                anyhow::bail!(
+                    "--mask {} does not exist — checked before any decode or paid call",
+                    mask.display()
+                );
+            }
             let q = quality.unwrap_or_else(|| cfg.openai_image_quality.clone());
+            require_choice("--quality (or the configured default)", &q, &["low", "medium", "high", "auto"])?;
+            require_image_key(&cfg, "retouch")?;
             generative::retouch(&cfg, &raw, &mask, &prompt, &q, full_res, &out)
         }
         Command::Heal { src, mask, no_auto, full_res, out } => heal_cmd(&src, mask, no_auto, full_res, out),
@@ -401,6 +416,28 @@ fn same_path(a: &Path, b: &Path) -> bool {
         return na.to_string_lossy().to_lowercase() == nb.to_string_lossy().to_lowercase();
     }
     false
+}
+
+/// The non-output half of the pre-pay preflight (the L09#1 rule made whole
+/// — 16-lane scan, L10 family): a requirement the command is CERTAIN to hit
+/// is checked before the first paid call or heavyweight decode.
+fn require_image_key(cfg: &Config, what: &str) -> Result<()> {
+    if cfg.openai_api_key.is_none() {
+        anyhow::bail!(
+            "{what} needs the image API and no OPENAI_API_KEY (or stored image key) is \
+             configured — checked before any decode or paid call"
+        );
+    }
+    Ok(())
+}
+
+/// Closed-set CLI values are refused at the door (L10-10): the server used
+/// to reject an unknown tier only AFTER the decode/resize/encode work.
+fn require_choice(flag: &str, value: &str, allowed: &[&str]) -> Result<()> {
+    if allowed.contains(&value) {
+        return Ok(());
+    }
+    anyhow::bail!("{flag} must be one of {} (got {value:?})", allowed.join("|"))
 }
 
 fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style: Option<f32>) -> Result<()> {
@@ -538,6 +575,11 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     // The guard FIRST: a refused -o must not pay a RAW decode for the repair
     // below, nor print a disclosure for a render that never runs.
     pipeline::guard_readonly(out, raw)?;
+    // The deliverable-format refusal joins it (L10-11, mirroring auto_cmd):
+    // `apply -o x.xyz` used to render minutes of full-resolution pixels and
+    // only then learn nothing can encode them.
+    image::ImageFormat::from_path(out)
+        .with_context(|| format!("unsupported output format {}", out.display()))?;
     // Render from the SAME source every other deliverable uses (auto_cmd,
     // serve, the GUI batch): a saved heal/clone or generative master IS this
     // develop's source, and a recorded master that cannot be honoured refuses
@@ -912,7 +954,26 @@ fn heal_cmd(
 ) -> Result<()> {
     let cfg = Config::load();
     let out = out.unwrap_or_else(|| default_out(src, "heal", "png"));
-    pipeline::guard_readonly(&out, src)?;
+    // Full pre-pay preflight (L10 family): `heal --mask missing.png` used to
+    // run the PAID auto-detect first and die at the mask read; `--no-auto`
+    // with no mask decoded the whole photo to conclude "nothing to heal".
+    // Every certain failure refuses before the paid call and the decode —
+    // the same shape analyze_cmd/auto_cmd already have.
+    pipeline::preflight_out(&out, src)?; // includes the read-only-library guard
+    if let Some(m) = &mask
+        && !m.is_file()
+    {
+        anyhow::bail!(
+            "--mask {} does not exist — checked before the paid auto-detect",
+            m.display()
+        );
+    }
+    if no_auto && mask.is_none() {
+        anyhow::bail!("--no-auto heals only a painted mask, and no --mask was given — nothing to do");
+    }
+    if !no_auto {
+        require_image_key(&cfg, "heal's AI auto-detect (use --no-auto with --mask to heal without it)")?;
+    }
     println!(
         "pixel retouch (heal) — {}{} ...",
         if no_auto { "painted mask only" } else { "AI auto-detect" },
@@ -1156,6 +1217,76 @@ fn sparkline(bins: &[u32]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// L10 preflight family: certain failures refuse at the door.
+    #[test]
+    fn the_cli_preflights_refuse_certain_failures_before_any_paid_work() {
+        use autoshop::config::Config;
+        // Closed-set values (L10-10).
+        assert!(require_choice("--fidelity", "high", &["high", "low"]).is_ok());
+        let e = require_choice("--fidelity", "medium", &["high", "low"])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("high|low") && e.contains("medium"), "{e}");
+
+        // Missing image key (L10-13) — a config with no key refuses with the
+        // reason, not a late server error.
+        let cfg = Config {
+            openai_api_key: None,
+            openai_model: "m".into(),
+            openai_base_url: "http://127.0.0.1:1".into(),
+            openai_image_model: "m".into(),
+            openai_image_quality: "auto".into(),
+            openai_image_max_px: 4_000_000,
+            image_provider: "api".into(),
+            image_effort: None,
+            analysis_provider: "oauth".into(),
+            analysis_model: "opus".into(),
+            analysis_effort: None,
+            claude_bin: "claude".into(),
+            analysis_api_key: None,
+            analysis_base_url: "http://127.0.0.1:1".into(),
+            python_bin: "python".into(),
+            denoise_model: "m".into(),
+            denoise_script: String::new(),
+            denoise_cache: String::new(),
+            segment_script: String::new(),
+            style_strength: 0.5,
+        };
+        let e = require_image_key(&cfg, "reimagine").unwrap_err().to_string();
+        assert!(e.contains("OPENAI_API_KEY"), "{e}");
+    }
+
+    /// L10-9 + L10-12: heal refuses a missing mask and a maskless --no-auto
+    /// BEFORE the paid auto-detect / the decode (the fixture photo does not
+    /// even exist, so reaching either would error differently).
+    #[test]
+    fn heal_refuses_mask_problems_before_the_paid_auto_detect() {
+        let root =
+            std::env::temp_dir().join(format!("autoshop-heal-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("library").join("missing.arw");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+
+        let e = heal_cmd(
+            &src,
+            Some(root.join("no-such-mask.png")),
+            false,
+            false,
+            Some(root.join("exports").join("h.png")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("--mask") && e.contains("does not exist"), "{e}");
+
+        let e = heal_cmd(&src, None, true, false, Some(root.join("exports").join("h2.png")))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--no-auto") && e.contains("nothing to do"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     use super::*;
 
     #[test]

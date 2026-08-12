@@ -7,10 +7,9 @@ impl AutoshopApp {
     /// re-open the library the user was browsing. Window geometry itself is
     /// restored by eframe's own persistence layer.
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut app = Self::default();
         // The REAL event-loop context replaces default()'s headless one:
         // workers wake the loop through this clone (see `spawn_worker`).
-        app.egui_ctx = cc.egui_ctx.clone();
+        let mut app = Self { egui_ctx: cc.egui_ctx.clone(), ..Self::default() };
         if let Some(prefs) =
             cc.storage.and_then(|s| eframe::get_value::<Prefs>(s, eframe::APP_KEY))
         {

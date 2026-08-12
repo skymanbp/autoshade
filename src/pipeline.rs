@@ -34,6 +34,18 @@ pub fn produce_recipe(
     // call appended, as typed notes rendering the rationale string's SUFFIX
     // (the prefix is the model's own prose). In-process only — the GUI
     // renders them localized; CLI/web/persistence keep the English string.
+    //
+    // The verifier's key is a requirement this flow is CERTAIN to hit, and
+    // the old order discovered it only after the proposal had been billed —
+    // a missing analysis key threw the paid proposal away (L10-8). Checked
+    // before even the decode; the OAuth provider needs no key.
+    if cfg.analysis_is_api() && cfg.analysis_api_key.is_none() {
+        anyhow::bail!(
+            "the analysis provider is 'api' but no analysis API key is configured — the \
+             verify step would fail AFTER the paid proposal; set the key in Settings (or \
+             AUTOSHOP_ANALYSIS_API_KEY), or switch the analysis provider to oauth"
+        );
+    }
     // decode_any: a camera RAW, or an already-baked PNG/TIFF/JPEG (PNG-source mode).
     let decoded = decode::decode_any(raw)?;
 
@@ -1799,7 +1811,31 @@ pub fn preflight_out(out: &Path, src: &Path) -> Result<()> {
             out.display()
         );
     }
-    ensure_parent(out)
+    ensure_parent(out)?;
+    // An EXISTING parent never proved it was writable (L10-7): an ACL-denied
+    // export dir used to surface only after the paid call. Probe with a
+    // uniquely-named sibling (pid + process-wide seq — the sibling_tmp rule),
+    // removed immediately; the refusal names the directory.
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let probe = parent.join(format!(
+            ".autoshop-write-probe.{}.{}",
+            std::process::id(),
+            crate::store::next_tmp_seq()
+        ));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+            Ok(f) => {
+                drop(f);
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "output directory {} is not writable ({e}) — checked before the paid call",
+                    parent.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn stem(p: &Path) -> &str {
@@ -2508,6 +2544,69 @@ mod tests {
         let e = preflight_out(&target_dir, &raw).unwrap_err().to_string();
         assert!(e.contains("is a directory"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// L10-7: the write probe consumes itself — an export dir must not
+    /// accumulate probe residue on every preflighted command.
+    #[test]
+    fn preflight_out_leaves_no_probe_residue() {
+        let root =
+            std::env::temp_dir().join(format!("autoshop-preflight-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let raw_dir = root.join("library");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        let raw = raw_dir.join("photo.arw");
+        let target = root.join("exports").join("x.png");
+        preflight_out(&target, &raw).expect("a writable parent passes");
+        let leftovers: Vec<_> = std::fs::read_dir(root.join("exports"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "the probe cleaned up after itself: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// L10-8: a missing analysis key refuses BEFORE the paid proposal (and
+    /// before the decode — the fixture path does not even exist).
+    #[test]
+    fn a_missing_analysis_key_refuses_before_the_paid_proposal() {
+        let cfg = crate::config::Config {
+            openai_api_key: Some("test-key".into()),
+            openai_model: "test-chat".into(),
+            openai_base_url: "http://127.0.0.1:1".into(),
+            openai_image_model: "test-image".into(),
+            openai_image_quality: "auto".into(),
+            openai_image_max_px: 4_000_000,
+            image_provider: "api".into(),
+            image_effort: None,
+            analysis_provider: "api".into(),
+            analysis_model: "gpt-5.5".into(),
+            analysis_effort: None,
+            claude_bin: "claude".into(),
+            analysis_api_key: None,
+            analysis_base_url: "http://127.0.0.1:1".into(),
+            python_bin: "python".into(),
+            denoise_model: "scunet_color_real_psnr".into(),
+            denoise_script: String::new(),
+            denoise_cache: String::new(),
+            segment_script: String::new(),
+            style_strength: 0.5,
+        };
+        let e = produce_recipe(
+            Path::new("this-file-does-not-exist.arw"),
+            &cfg,
+            false,
+            None,
+            None,
+            0.0,
+        )
+        .expect_err("no analysis key + api provider must refuse up front")
+        .to_string();
+        assert!(
+            e.contains("analysis") && e.contains("AFTER the paid proposal"),
+            "the refusal names the reason, not a decode error: {e}"
+        );
     }
 
     /// L09#1: a missing parent is created up-front (the documented
