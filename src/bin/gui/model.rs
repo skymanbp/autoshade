@@ -390,8 +390,10 @@ pub(crate) enum Msg {
     /// pick-list). Tagged with the ROLE that asked, because the two roles can
     /// point at different endpoints with different catalogues — the analysis
     /// picker used to borrow the image endpoint's ids and offer nothing at all
-    /// whenever the two base URLs differed.
-    Models(ModelRole, anyhow::Result<Vec<String>>),
+    /// whenever the two base URLs differed. The `u64` is the catalogue
+    /// generation captured at launch ([`ModelCatalogue::gen`]): a completion
+    /// is installed only if nothing invalidated the catalogue while it flew.
+    Models(ModelRole, u64, anyhow::Result<Vec<String>>),
     /// A batch recipe paste finished — counts and per-photo details,
     /// rendered at landing (L12#4).
     Pasted(anyhow::Result<PasteOutcome>),
@@ -466,6 +468,28 @@ pub(crate) struct ModelCatalogue {
     /// provider auto-swap rewriting it) makes them ids of a different server —
     /// the pickers self-invalidate instead of offering stale ids.
     pub(crate) from_base: String,
+    /// Validity stamp for in-flight fetches: bumped by every [`clear`], and
+    /// captured by `fetch_models` into [`Msg::Models`]. A completion whose
+    /// stamp no longer matches was fetched for a world (key, endpoint) that a
+    /// mid-flight edit invalidated — installing it would resurrect the OLD
+    /// credential's ids under the new one's name. Same claim/installed shape
+    /// as serve.rs's folder generations.
+    ///
+    /// [`clear`]: ModelCatalogue::clear
+    pub(crate) generation: u64,
+    /// Fingerprint of the credential the ids were fetched WITH (availability
+    /// is credential-dependent, not just URL-dependent). Compared on a
+    /// Settings reopen, where another surface (the web panel) may have
+    /// replaced the saved key since this list was fetched. See
+    /// `util::key_fingerprint` — an in-memory staleness stamp, never
+    /// persisted, never displayed.
+    pub(crate) from_key: u64,
+    /// This role's once-per-session convenience probe has been DISPATCHED.
+    /// Consumed at dispatch, not at Settings-open: a role that only becomes
+    /// eligible later in the session (key added, provider flipped to `api`)
+    /// still gets its one auto-fetch, while an already-probed role never
+    /// re-probes a metered endpoint on every reopen.
+    pub(crate) autofetched: bool,
 }
 
 impl ModelCatalogue {
@@ -474,10 +498,12 @@ impl ModelCatalogue {
     }
 
     /// Forget everything fetched. Used when the endpoint or the credential
-    /// changes — both decide which ids exist.
+    /// changes — both decide which ids exist. Bumps `gen`: whatever is still
+    /// in flight was fetched for the world this clear just discarded.
     pub(crate) fn clear(&mut self) {
         self.chat.clear();
         self.image_gen.clear();
+        self.generation += 1;
     }
 }
 
@@ -519,13 +545,12 @@ pub(crate) struct SettingsForm {
     pub(crate) image_key_present: bool,
     pub(crate) image_effort: String,
     pub(crate) status: String,
-    /// Live pick-lists, one per endpoint (see [`ModelCatalogue`]).
+    /// Live pick-lists, one per endpoint (see [`ModelCatalogue`]). Each
+    /// carries its own once-per-session auto-fetch guard: one global boolean
+    /// here was consumed by the first Settings open even when NO role was
+    /// eligible yet, so a key saved later in the session never got its probe.
     pub(crate) image_models: ModelCatalogue,
     pub(crate) analysis_models: ModelCatalogue,
-    /// Whether this SESSION has already auto-filled the pick-lists on a
-    /// Settings open. Survives the form rebuild on every reopen, so the
-    /// convenience probe happens once, not on every visit to the panel.
-    pub(crate) autofetched: bool,
 }
 
 /// Pick radius (px) for on-image mask knobs — matches the crop handles' feel.

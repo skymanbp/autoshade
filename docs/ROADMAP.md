@@ -447,6 +447,62 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   - 门：clippy 0；测试 380 lib + 5 CLI + 55 GUI 全绿（`comm` 对上一提交
     0 删 3 增）；i18n 九门 0；字体门 786/786；密钥扫描空。
 
+  **(e) GUI 面复审闭合（2026-08-12，用户经 AskUserQuestion 选定补审；Codex
+  gpt-5.6-sol xhigh 只读，`--background` 提交后回执）**：6 发现（1 HIGH /
+  4 MEDIUM / 1 LOW），7 问中 6 问判有缺陷、1 问（settings_ui 借用/顺序）判
+  CLEAN。逐条亲证全部成立，按最上游成因归并为**五组根因**（F1 两面同根）。
+
+  - **ROOT I（HIGH，F1 两面）：互斥的提供商共用一个 model/base/key 槽，槽不记
+    得内容物属于谁。** 凭证面：OAuth 翻转把 base 自动换成本地桥，而存储的云
+    key 仍然上膛——下一次图像调用把 `Bearer <云 key>` 发给桥端口上监听的任何
+    进程（反向翻转则把桥 token 送云端）。修法（不变量层）：**存储的凭证绑定它
+    保存时的端点**——两个写入端（GUI 表单 + serve POST）打 `*_api_key_base`
+    归属戳，`config::file_key_for` 在解析时拒绝把 key 发往别处，`fetch_models`
+    的探测同守此规；环境变量 key 不受限（用户自己的明示配对）；旧存档无戳=
+    放行，直到一次 base 稳定的保存或重新键入记下归属（`reconcile_key_homes`
+    统一在 `update_local_settings` 内治理，base 变更的保存**不得**祝福新配对
+    ——残留已在注释与 README 写明）。模型面：CLI 接受别名**和完整 id**
+    （config.rs「alias/id」、claude.rs 原样传递），翻转分类却按「非别名⇒非
+    Claude」把合法 `claude-opus-4-6` 改写成 `opus`。抽出可测的
+    `analysis_model_on_flip`：只改写**确证属于对方词表**的值（API 向仅别名；
+    OAuth 向放行别名与 `claude-*`）。
+  - **ROOT II（MEDIUM，F2）：显式空白死在 `pick_opt`。** 两个写入面都把清空的
+    effort 存成 `""`（=「让供应商决定」），通用 `pick_opt` 先滤空再落环境——
+    环境 tier 一设，这个字段唯一存在的那个选择恰好表达不出。修法：effort 走
+    专用 `explicit_or_env`（缺席⇒环境可补；显式空⇒连环境一起沉默），语义写进
+    LocalSettings/Config 字段文档与 README。
+  - **ROOT III（MEDIUM，F5）：web 表单的权威是启动时缓存。** serve 的 `cfg`
+    只在自己 POST 后换新，GET 一直端出开机快照；两个客户端保存时又无条件提交
+    全部非密字段——桌面 GUI 存的 `high` 被 web 端一次无关保存的
+    `image_effort:""` 抹掉。修法：`api_settings_get` 改读文件现值
+    （`Config::load`），缓存仍只在 POST 换（喂 AI 调用的语义不因 GET 变）；
+    残留=两表单同时开着的固有窗口，GUI 对称路径同理（表单语义使然，已记录）。
+  - **ROOT IV（MEDIUM，F3）：拉取的完成没有身份。** 目录只记 `from_base`，
+    `Msg::Models` 只带角色——K1 发起的航班在换成 K2 之后落地照装，URL 相同便
+    把 K1 的清单顶着 K2 的名义端出；换 key 后重开窗口同样端旧单。修法（与
+    serve 目录代同构）：`ModelCatalogue.generation` 由每次 `clear()` 递增、
+    `fetch_models` 捕获进消息，落地代不符=丢弃（单飞故 `fetching` 无条件清）；
+    另加 `from_key` 凭证指纹（DefaultHasher，仅存内存），`load_settings_form`
+    重开时对今日 key 比对、不符即清——web 端换 key 的那半张脸由此闭合。
+  - **ROOT V（MEDIUM，F4）：worker 事件不叫醒事件循环，而泵门在拉取起飞之前
+    已经跑完。** mpsc send 不唤醒 egui；`poll_workers` 在 update 顶部决定要不要
+    续 100ms 泵，同帧稍后 `fetch_models` 才把 `fetching` 置真——指针不动，
+    「fetching…」画不出来，完成也躺在信道里等下一次输入。修法（上游一次）：
+    `spawn_worker` 自己在两端请求重绘（起飞端排下一帧；完成端由 worker 线程
+    `ctx.request_repaint()`），app 持 `egui_ctx`（创建时接真实件，测试用无头
+    默认）；100ms 泵保留为兜底。
+  - **ROOT VI（LOW，F6）：一个全局 autofetched 在任何角色够格之前就被消费。**
+    首次打开设置（哪怕没有任何 key）就花光全会话机会，五分钟后存好 key 的角色
+    再也不被自动探测。修法：守卫入 `ModelCatalogue` 按角色分立，**在 dispatch
+    时消费**（`fetch_models` 置位，手动拉取同样计数）；复审确认的另一半——
+    绝不反复探测计费端点——原样保持。
+  - 八条新测试两轮**反向变异亲证**（M1–M8，逐一改回缺陷）：第一轮 lib 侧 4 变异
+    → 恰红 4 条 config/serve 新测试、其余 380 绿；第二轮 GUI 侧 4 变异 → 恰红
+    4 条 GUI 新测试、其余 55 绿。全部逆向恢复后三套 384+59+5 全绿。
+  - 门：clippy 0；`comm` 对上一提交 **0 删 8 增**；i18n 九门 0（新增 1 条丢弃
+    提示 + 修订 1 条 fetch 提示的中英对）；字体门 786/786（无新字形）；密钥
+    扫描空。README 新增「key 记得自己为哪个端点保存」段并修订 effort 段。
+
 - **第十二轮·阶段 1–3 全清：在册 15 簇归零 + Codex 簇群复审闭合（2026-08-11，
   未发版；计划见下方「第十二轮计划」）**
 

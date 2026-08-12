@@ -320,11 +320,46 @@ pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist
     }
 }
 
-/// Two API base URLs are the "same endpoint" ignoring whitespace / a trailing slash.
-/// Used so model ids fetched with the image key are only offered to the analysis
-/// picker when both roles point at the same server.
+/// Two API base URLs are the "same endpoint". Delegates to the library's one
+/// definition — the pick-list invalidation here and `config`'s key-home gate
+/// must never disagree about what "same" means.
 pub(crate) fn same_base(a: &str, b: &str) -> bool {
-    a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
+    autoshop::config::same_endpoint(a, b)
+}
+
+/// What the analysis model field should become when the provider radio flips
+/// (`None` = keep the user's value). Rewrites only what is KNOWN to belong to
+/// the other provider's vocabulary:
+///
+/// - API-ward, only CLI aliases are rewritten — a full `claude-*` id is
+///   legitimate on an OpenAI-compatible bridge.
+/// - OAuth-ward, anything that is neither an alias nor a `claude-*` id is
+///   swapped for `opus` — but the CLI accepts full ids as well as aliases
+///   (config.rs: "a claude alias/id"; claude.rs passes the value verbatim),
+///   so "not an alias" must not be read as "not a Claude model": a valid
+///   `claude-opus-4-6` used to be silently rewritten on every flip.
+pub(crate) fn analysis_model_on_flip(current: &str, to_api: bool) -> Option<&'static str> {
+    let m = current.trim();
+    let claude_alias = CLAUDE_ALIASES.contains(&m);
+    let claude_id = claude_alias || m.to_ascii_lowercase().starts_with("claude-");
+    if to_api && claude_alias {
+        Some("gpt-5.5")
+    } else if !to_api && !claude_id {
+        Some("opus")
+    } else {
+        None
+    }
+}
+
+/// In-memory stamp for "which credential fetched this pick-list": a plain
+/// `DefaultHasher`, session-local only — never persisted, never displayed,
+/// and deliberately not a cryptographic commitment (a collision merely keeps
+/// a stale pick-list until the next fetch).
+pub(crate) fn key_fingerprint(key: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    h.finish()
 }
 
 /// A model picker: a dropdown of `options` that writes the chosen id into `value`,

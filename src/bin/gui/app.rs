@@ -21,6 +21,12 @@ pub(crate) struct AutoshopApp {
     pub(crate) busy: bool, // an analyze/export thread is running
     pub(crate) rx: Option<Receiver<Msg>>,
     pub(crate) tx: Sender<Msg>,
+    /// Clone of the runtime egui context, installed at creation
+    /// (`actions.rs::new`). Worker spawn and completion request repaints
+    /// through it: a plain mpsc send does not wake the event loop, and the
+    /// 100 ms pump's gate (`poll_workers`) runs BEFORE any panel can start a
+    /// fetch in the same frame. Tests get the headless default.
+    pub(crate) egui_ctx: egui::Context,
     // TYPED, not a baked string: the decision word + reasons are rendered
     // (and translated) at draw time, so a language switch re-renders them.
     pub(crate) verdict: Option<(autoshop::advisor::Decision, Vec<String>)>,
@@ -1294,6 +1300,7 @@ impl Default for AutoshopApp {
             busy: false,
             rx: Some(rx),
             tx,
+            egui_ctx: egui::Context::default(),
             verdict: None,
             disclosed_scripts: HashSet::new(),
             rationale: String::new(),

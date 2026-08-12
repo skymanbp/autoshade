@@ -202,6 +202,18 @@ complement of a denylist. Anything else a `.env` names is dropped, and the app
 says which. Your own environment is unaffected: the children inherit it, so an
 `HF_HOME` or `HTTPS_PROXY` you set yourself still reaches them.
 
+A saved key also remembers **which endpoint it was saved for**. The two image
+providers share one key slot, and flipping to OAuth swaps the base URL to the
+local bridge — which used to leave the cloud key armed, so the next call sent
+`Authorization: Bearer <cloud key>` to whatever listened on the bridge port
+(and a saved bridge token rode to the cloud on the flip back). Each save now
+records the base the key was typed beside, and the key is simply not sent
+anywhere else: flip back and it works again; move endpoints and Settings says
+"no key set" until you enter one for that endpoint. Keys from your environment
+are exempt — that pairing is your own. Keys saved before v0.23.2 have no
+recorded home and keep working everywhere until a save records one (any save
+that doesn't change the base, or a re-type, does).
+
 Two consequences worth naming. A `.env` may switch `AUTOSHOP_ANALYSIS_PROVIDER`
 from `oauth` to `api` — but not the endpoint or, therefore, where the request
 goes; and it could already supply `OPENAI_API_KEY`, which is the strictly
@@ -278,7 +290,10 @@ provider (the `claude` CLI documents `low, medium, high, xhigh, max`;
 OpenAI-compatible endpoints take the first three), so the Settings pickers offer
 the right list beside a free-text field, and an endpoint that does not know the
 tier is automatically retried without it. Blank means "send no such parameter",
-which is the only correct request for a model that does not reason. On
+which is the only correct request for a model that does not reason — and a
+blank **saved in Settings** is a real choice: it silences an
+`AUTOSHOP_*_EFFORT` from the environment instead of falling through to it,
+because the local file wins over the environment here as everywhere. On
 `/responses` the tier and the liveness summary stream ride inside one
 `reasoning` object, and the retry drops whichever child the endpoint **named**:
 a refused tier costs the tier, not the progress stream that keeps a long

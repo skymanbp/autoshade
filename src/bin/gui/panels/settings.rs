@@ -10,10 +10,10 @@ impl AutoshopApp {
         // Keep any model lists already fetched this session so reopening Settings
         // doesn't force a re-fetch — and keep an in-flight fetch's flag alive:
         // zeroing it mid-fetch stopped the repaint pump AND re-armed the fetch
-        // button (duplicate requests, stalled status).
+        // button (duplicate requests, stalled status). The catalogues also
+        // carry the per-role auto-fetch guards and generation stamps.
         let image_models = std::mem::take(&mut self.settings.image_models);
         let analysis_models = std::mem::take(&mut self.settings.analysis_models);
-        let autofetched = self.settings.autofetched;
         self.settings = SettingsForm {
             analysis_provider_api: cfg.analysis_is_api(),
             image_provider_oauth: cfg.image_is_oauth(),
@@ -31,8 +31,23 @@ impl AutoshopApp {
             status: String::new(),
             image_models,
             analysis_models,
-            autofetched,
         };
+        // Availability is credential-dependent: another surface (the web
+        // Settings) may have replaced a saved key since these lists were
+        // fetched, and the URL-keyed self-invalidation in `settings_ui`
+        // cannot see that. Compare each kept catalogue's credential stamp
+        // against today's key and drop a stale list here, at the one moment
+        // the resolved config is already in hand.
+        for role in [ModelRole::Image, ModelRole::Analysis] {
+            let fp = key_fingerprint(match role {
+                ModelRole::Image => cfg.openai_api_key.as_deref().unwrap_or(""),
+                ModelRole::Analysis => cfg.analysis_api_key.as_deref().unwrap_or(""),
+            });
+            let cat = self.catalogue_mut(role);
+            if !cat.is_empty() && cat.from_key != fp {
+                cat.clear();
+            }
+        }
         self.autofetch_models_once(&cfg);
     }
 
@@ -41,20 +56,25 @@ impl AutoshopApp {
     /// question the panel exists to answer, and a blank dropdown next to a
     /// configured key reads as "none available".
     ///
-    /// Once per session, and only for a role that already has a key: a probe
-    /// with no credential can only fail, and firing on every open would put a
-    /// network call behind "I came here to switch the language".
-    fn autofetch_models_once(&mut self, cfg: &autoshop::config::Config) {
-        if self.settings.autofetched {
-            return;
-        }
-        self.settings.autofetched = true;
-        if cfg.openai_api_key.is_some() {
+    /// Once per session PER ROLE, and only for a role that already has a key:
+    /// a probe with no credential can only fail, and firing on every open
+    /// would put a network call behind "I came here to switch the language".
+    ///
+    /// The guard is consumed at DISPATCH (`fetch_models` marks the role), not
+    /// by the visit itself: one global open-consumed boolean meant a Settings
+    /// visit before any key existed spent the whole session's opportunity, so
+    /// the role that became eligible five minutes later — key saved, provider
+    /// flipped to `api` — was never probed on any later open.
+    pub(crate) fn autofetch_models_once(&mut self, cfg: &autoshop::config::Config) {
+        if cfg.openai_api_key.is_some() && !self.settings.image_models.autofetched {
             self.fetch_models(ModelRole::Image);
         }
         // The analysis endpoint only has a catalogue to fetch in `api` mode —
         // the OAuth verifier is the `claude` CLI, which serves no /models.
-        if cfg.analysis_is_api() && cfg.analysis_api_key.is_some() {
+        if cfg.analysis_is_api()
+            && cfg.analysis_api_key.is_some()
+            && !self.settings.analysis_models.autofetched
+        {
             self.fetch_models(ModelRole::Analysis);
         }
     }
@@ -82,14 +102,21 @@ impl AutoshopApp {
             // clearing the field could never take effect.
             cur.analysis_effort = Some(form.analysis_effort.trim().to_string());
             cur.image_effort = Some(form.image_effort.trim().to_string());
-            // Secrets: only overwrite when a non-empty value was actually typed.
+            // Secrets: only overwrite when a non-empty value was actually
+            // typed — and a typed key is FOR the endpoint on screen beside
+            // it, so record that home (`config::file_key_for` enforces it at
+            // load: a later provider flip or base edit cannot re-route it).
             let ak = form.analysis_api_key.trim().to_string();
             let ik = form.image_api_key.trim().to_string();
             if !ak.is_empty() {
                 cur.analysis_api_key = Some(ak);
+                cur.analysis_api_key_base =
+                    cur.analysis_base_url.clone().filter(|s| !s.trim().is_empty());
             }
             if !ik.is_empty() {
                 cur.image_api_key = Some(ik);
+                cur.image_api_key_base =
+                    cur.image_base_url.clone().filter(|s| !s.trim().is_empty());
             }
         });
         // Did the user type a key on this save? Asked BEFORE the fields are
@@ -132,6 +159,11 @@ impl AutoshopApp {
     /// Fetch one role's model ids (`GET /models`) on a worker thread and fill that
     /// role's pick-lists. Uses the key/base typed in the form if present, else the
     /// saved config — so it works whether or not the user has saved a key yet.
+    ///
+    /// The base and key resolve HERE, on the UI thread, so the catalogue's
+    /// `from_base`/`from_key` stamps describe exactly what the worker sends
+    /// (the worker used to re-load Config on its own thread, so the stamp and
+    /// the request could disagree about which credential was used).
     pub(crate) fn fetch_models(&mut self, role: ModelRole) {
         let (form_key, form_base) = match role {
             ModelRole::Image => (
@@ -143,41 +175,49 @@ impl AutoshopApp {
                 self.settings.analysis_base_url.trim().to_string(),
             ),
         };
+        let cfg = autoshop::config::Config::load();
+        let (cfg_base, cfg_key) = match role {
+            ModelRole::Image => (cfg.openai_base_url, cfg.openai_api_key),
+            ModelRole::Analysis => (cfg.analysis_base_url, cfg.analysis_api_key),
+        };
+        let base = if form_base.is_empty() { cfg_base.clone() } else { form_base };
+        // The SAVED key is only ever sent to the endpoint it is saved beside —
+        // `config::file_key_for` is this same rule at load time. Probing a
+        // freshly TYPED endpoint takes a typed (or first saved) credential;
+        // silently reusing the old endpoint's key against the new URL is the
+        // provider-flip misroute in miniature. With no usable key the probe
+        // fails immediately with "no API key — set one in Settings", which is
+        // the accurate instruction.
+        let key = if !form_key.is_empty() {
+            form_key
+        } else if autoshop::config::same_endpoint(&base, &cfg_base) {
+            cfg_key.unwrap_or_default()
+        } else {
+            String::new()
+        };
         let cat = self.catalogue_mut(role);
         if cat.fetching {
             return;
         }
         cat.fetching = true;
-        // Drop the previous endpoint's lists NOW and stamp the base this fetch
+        // Any dispatch — auto or manual — spends this role's convenience probe.
+        cat.autofetched = true;
+        // Drop the previous endpoint's lists NOW (bumping `gen`, so an older
+        // in-flight completion can no longer land) and stamp what this fetch
         // targets: a failed fetch then leaves empty lists (grounded fallbacks)
         // rather than ids from the old server under the new URL's name.
         cat.clear();
-        cat.from_base = if form_base.is_empty() {
-            match role {
-                ModelRole::Image => autoshop::config::Config::load().openai_base_url,
-                ModelRole::Analysis => autoshop::config::Config::load().analysis_base_url,
-            }
-        } else {
-            form_base.clone()
-        };
+        cat.from_base = base.clone();
+        cat.from_key = key_fingerprint(&key);
+        let generation = cat.generation;
         self.settings.status = tr(self.lang, "fetching models…").into();
         // spawn_worker's catch_unwind guarantees the UI's `fetching` flag
-        // always clears — a panic still delivers Msg::Models(role, Err) (this
-        // site used to hand-roll a Drop guard for exactly that; the helper
-        // now covers every worker uniformly).
+        // always clears — a panic still delivers Msg::Models(role, gen, Err)
+        // (this site used to hand-roll a Drop guard for exactly that; the
+        // helper now covers every worker uniformly).
         self.spawn_worker(
-            move || {
-                let cfg = autoshop::config::Config::load();
-                let (cfg_base, cfg_key) = match role {
-                    ModelRole::Image => (cfg.openai_base_url, cfg.openai_api_key),
-                    ModelRole::Analysis => (cfg.analysis_base_url, cfg.analysis_api_key),
-                };
-                let base = if form_base.is_empty() { cfg_base } else { form_base };
-                let key =
-                    if form_key.is_empty() { cfg_key.unwrap_or_default() } else { form_key };
-                Msg::Models(role, autoshop::openai_models::list_models(&base, &key))
-            },
-            move |e| Msg::Models(role, Err(e)),
+            move || Msg::Models(role, generation, autoshop::openai_models::list_models(&base, &key)),
+            move |e| Msg::Models(role, generation, Err(e)),
         );
     }
 
@@ -283,17 +323,14 @@ impl AutoshopApp {
                     // Without this the OTHER provider's model id stays in the
                     // field and the picker presents it as the current choice
                     // (a claude alias sent to an OpenAI endpoint, or vice
-                    // versa). Swap to this provider's default on a flip.
-                    //
-                    // The alias test reads the CLI's own documented list
-                    // (`CLAUDE_ALIASES`), not a hardcoded trio: `fable` is an
-                    // alias too, and a stale trio silently rewrote it to
-                    // `opus` on any provider flip.
-                    let claude_alias = CLAUDE_ALIASES.contains(&f.analysis_model.as_str());
-                    if f.analysis_provider_api && claude_alias {
-                        f.analysis_model = "gpt-5.5".into();
-                    } else if !f.analysis_provider_api && !claude_alias {
-                        f.analysis_model = "opus".into();
+                    // versa). Swap to this provider's default on a flip —
+                    // but ONLY what provably belongs to the other provider:
+                    // see `analysis_model_on_flip` for what a name can and
+                    // cannot decide here.
+                    if let Some(m) =
+                        analysis_model_on_flip(&f.analysis_model, f.analysis_provider_api)
+                    {
+                        f.analysis_model = m.into();
                     }
                 }
             });
@@ -397,7 +434,7 @@ impl AutoshopApp {
                     .add_enabled(!f.image_models.fetching, egui::Button::new(label))
                     .on_hover_text(tr(
                         lang,
-                        "List the models this endpoint serves (GET /models) so you can pick instead of guess — and a live reachability check for the bridge/API. Uses the key/token typed below, or the saved one if blank.",
+                        "List the models this endpoint serves (GET /models) so you can pick instead of guess — and a live reachability check for the bridge/API. Uses the key/token typed below; a saved key is only used at the endpoint it was saved for.",
                     ))
                     .clicked();
                 if clicked {

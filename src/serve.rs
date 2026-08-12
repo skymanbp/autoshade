@@ -2648,8 +2648,15 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 
 /// Current provider/model settings for the Settings panel. Never returns the raw
 /// API keys — only whether each is present.
-fn api_settings_get(state: &AppState) -> Result<ResponseBox> {
-    let cfg = state.config();
+///
+/// Reads the FILE's current truth (`Config::load`), not this server's cached
+/// snapshot: the desktop GUI merges onto the same settings file, and a form
+/// filled from a boot-time cache round-tripped that stale snapshot on the
+/// next save — a web save of an unrelated field erased whatever the GUI had
+/// set since the server started (the cache itself still only swaps on POST:
+/// it feeds AI calls, and a GET must not change what calls use).
+fn api_settings_get(_state: &AppState) -> Result<ResponseBox> {
+    let cfg = Config::load();
     let body = json!({
         "analysis": {
             "provider": cfg.analysis_provider,
@@ -2714,12 +2721,19 @@ fn api_settings_post(request: &mut Request, state: &AppState) -> Result<Response
         if inc.image_effort.is_some() {
             cur.image_effort = inc.image_effort;
         }
-        // Secrets: only overwrite when a non-empty value was actually provided.
+        // Secrets: only overwrite when a non-empty value was actually
+        // provided — and a provided key is FOR the base being saved with it
+        // (the base fields were applied above), so record that home:
+        // `config::file_key_for` refuses to send it anywhere else later.
         if let Some(k) = inc.analysis_api_key.filter(|s| !s.trim().is_empty()) {
             cur.analysis_api_key = Some(k);
+            cur.analysis_api_key_base =
+                cur.analysis_base_url.clone().filter(|s| !s.trim().is_empty());
         }
         if let Some(k) = inc.image_api_key.filter(|s| !s.trim().is_empty()) {
             cur.image_api_key = Some(k);
+            cur.image_api_key_base =
+                cur.image_base_url.clone().filter(|s| !s.trim().is_empty());
         }
     })
     .map_err(|e| anyhow!("write settings: {e}"))?;
@@ -3141,6 +3155,36 @@ mod tests {
         assert_eq!(star_none.status_code().0, 412);
         let star_untagged = precondition_failed(Some("*"), None).expect("untaggable");
         assert_eq!(star_untagged.status_code().0, 412);
+    }
+
+    /// GUI review 2026-08-12 F5: both Settings clients submit every
+    /// non-secret field on save, so the form they were FILLED from must be
+    /// current. This server's `cfg` cache only swaps on its own POST — a web
+    /// form filled from it round-tripped a boot-time snapshot, and saving any
+    /// unrelated web field then erased whatever the desktop GUI had saved
+    /// since the server started (`image_effort: ""` over a GUI-set tier).
+    #[test]
+    fn the_settings_form_is_filled_from_the_file_not_the_boot_snapshot() {
+        use std::io::Read as _;
+        use std::sync::atomic::AtomicU64;
+        let mut boot = Config::load();
+        boot.analysis_model = "boot-snapshot-sentinel-7f3a".into();
+        let state = AppState {
+            dir: RwLock::new(PathBuf::new()),
+            raws: RwLock::new(Vec::new()),
+            cfg: RwLock::new(boot),
+            dir_gen: AtomicU64::new(0),
+            installed_gen: AtomicU64::new(0),
+            port: 0,
+        };
+        let resp = api_settings_get(&state).expect("settings GET");
+        let mut body = String::new();
+        resp.into_reader().read_to_string(&mut body).expect("read body");
+        assert!(
+            !body.contains("boot-snapshot-sentinel-7f3a"),
+            "the GET served the server's cached snapshot, not the settings file"
+        );
+        assert!(body.contains("\"analysis\""), "sanity: the response shape is intact");
     }
 
     #[test]

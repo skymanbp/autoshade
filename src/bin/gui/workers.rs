@@ -19,6 +19,13 @@ impl AutoshopApp {
         on_panic: impl FnOnce(anyhow::Error) -> Msg + Send + 'static,
     ) {
         let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
+        // Starting a worker schedules the next frame itself: the repaint
+        // pump's gate (`poll_workers`, at the top of update) has already run
+        // by the time a panel can start one in the same frame, so without
+        // this the "fetching…"/busy state is not drawn and the 100 ms pump
+        // never re-arms until the next input event.
+        self.egui_ctx.request_repaint();
         std::thread::spawn(move || {
             let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
                 .unwrap_or_else(|p| {
@@ -30,6 +37,10 @@ impl AutoshopApp {
                     on_panic(anyhow::anyhow!("worker panicked: {s}"))
                 });
             let _ = tx.send(msg);
+            // An mpsc send does not wake egui: with the pointer held still, a
+            // completed result used to sit unread in the channel until the
+            // next mouse or key event happened to produce a frame.
+            ctx.request_repaint();
         });
     }
 
@@ -483,7 +494,7 @@ impl AutoshopApp {
                         Err(e) => self.fail(tr(lang, "import failed"), e),
                     }
                 }
-                Msg::Models(role, res) => self.on_models(lang, role, res),
+                Msg::Models(role, generation, res) => self.on_models(lang, role, generation, res),
             }
         }
         // Keep the frame loop alive while any worker (analyze/export/thumbs/models/
@@ -2186,8 +2197,24 @@ impl AutoshopApp {
 
     /// `Msg::Models` landing. Keyed by ROLE: the two roles have their own
     /// endpoint and key, so a result only ever fills the catalogue of the
-    /// role that asked for it.
-    fn on_models(&mut self, lang: Lang, role: ModelRole, res: anyhow::Result<Vec<String>>) {
+    /// role that asked for it — and by GENERATION: a completion is installed
+    /// only if nothing invalidated the catalogue while it flew.
+    pub(crate) fn on_models(&mut self, lang: Lang, role: ModelRole, generation: u64, res: anyhow::Result<Vec<String>>) {
+        // Single-flight per role (`fetch_models` refuses to start a second
+        // while one flies), so whatever lands, THE flight for this role is
+        // over — stale or not, the flag must clear or the fetch button and
+        // the auto-probe stay disarmed for the rest of the session.
+        self.catalogue_mut(role).fetching = false;
+        // …but the ids belong to the world the fetch was LAUNCHED in. A key
+        // replaced or a URL swapped mid-flight bumped `gen` (via `clear`);
+        // installing this completion would resurrect the ids the OLD
+        // credential could see and offer them under the new one's name.
+        if generation != self.catalogue_mut(role).generation {
+            self.settings.status =
+                tr(lang, "model list discarded — settings changed while it was being fetched")
+                    .into();
+            return;
+        }
         match res {
             Ok(ids) => {
                 let chat: Vec<String> = ids
@@ -2215,10 +2242,8 @@ impl AutoshopApp {
                 // on the analysis catalogue would let a picker offer ids from
                 // the wrong endpoint.
                 cat.image_gen = if role == ModelRole::Image { imgs } else { Vec::new() };
-                cat.fetching = false;
             }
             Err(e) => {
-                self.catalogue_mut(role).fetching = false;
                 self.settings.status =
                     trf(lang, "fetch failed: {err}", &[("err", &e.to_string())]);
             }

@@ -8,6 +8,9 @@ impl AutoshopApp {
     /// restored by eframe's own persistence layer.
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::default();
+        // The REAL event-loop context replaces default()'s headless one:
+        // workers wake the loop through this clone (see `spawn_worker`).
+        app.egui_ctx = cc.egui_ctx.clone();
         if let Some(prefs) =
             cc.storage.and_then(|s| eframe::get_value::<Prefs>(s, eframe::APP_KEY))
         {

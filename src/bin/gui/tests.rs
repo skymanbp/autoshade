@@ -2807,3 +2807,153 @@
             "provenance rides along (the paste-guard identity)"
         );
     }
+
+    /// GUI review 2026-08-12 F3: a catalogue knew WHERE its ids came from
+    /// (`from_base`) but not WHEN — `Msg::Models` carried only the role, so a
+    /// completion launched under key K1 landed unconditionally after the user
+    /// had already replaced the key with K2, and the URL check happily kept
+    /// K1's ids under K2's name. Every `clear` now bumps a generation and a
+    /// completion must still match it to install.
+    #[test]
+    fn a_completion_from_a_superseded_fetch_is_discarded_not_installed() {
+        let mut app = AutoshopApp::default();
+        // A typed loopback base + typed token keep the real worker's probe
+        // off the network entirely (connection refused before any header).
+        app.settings.image_base_url = "http://127.0.0.1:9/v1".into();
+        app.settings.image_api_key = "typed-test-token".into();
+        app.fetch_models(ModelRole::Image);
+        let stale_gen = app.settings.image_models.generation;
+        assert!(app.settings.image_models.fetching, "the flight is up");
+        // The user replaces the key mid-flight — the key field's handler
+        // clears the catalogue, and clearing bumps the generation:
+        app.settings.image_models.clear();
+        // The old flight lands, delivered exactly as the pump would:
+        app.on_models(Lang::En, ModelRole::Image, stale_gen, Ok(vec!["stale-model".into()]));
+        assert!(
+            app.settings.image_models.chat.is_empty(),
+            "ids fetched with the OLD credential must not be offered under the new one"
+        );
+        assert!(!app.settings.image_models.fetching, "stale or not, THE flight is over");
+        // A fresh fetch's completion still installs normally:
+        app.fetch_models(ModelRole::Image);
+        let live_gen = app.settings.image_models.generation;
+        app.on_models(Lang::En, ModelRole::Image, live_gen, Ok(vec!["fresh-model".into()]));
+        assert_eq!(app.settings.image_models.chat, vec!["fresh-model".to_string()]);
+        assert!(!app.settings.image_models.fetching);
+    }
+
+    /// GUI review 2026-08-12 F6: one global "auto-fetched" boolean was
+    /// consumed by the first Settings open even when NO role had a key, so a
+    /// key saved five minutes later never got its convenience probe on any
+    /// later open. The guard is per role and consumed at DISPATCH.
+    #[test]
+    fn the_autofetch_opportunity_survives_until_a_role_is_actually_eligible() {
+        let mut app = AutoshopApp::default();
+        // Any dispatch stays strictly on loopback: a typed form base wins
+        // over the machine's saved config, and the saved-key rule withholds
+        // any real credential from an endpoint it was not saved for.
+        app.settings.image_base_url = "http://127.0.0.1:9/v1".into();
+        let mut cfg = autoshop::config::Config {
+            openai_api_key: None,
+            openai_model: "test-chat".into(),
+            openai_base_url: "http://127.0.0.1:9/v1".into(),
+            openai_image_model: "test-image".into(),
+            openai_image_quality: "auto".into(),
+            openai_image_max_px: 4_000_000,
+            image_provider: "api".into(),
+            image_effort: None,
+            analysis_provider: "oauth".into(),
+            analysis_model: "opus".into(),
+            analysis_effort: None,
+            claude_bin: "claude".into(),
+            analysis_api_key: None,
+            analysis_base_url: "http://127.0.0.1:9/v1".into(),
+            python_bin: "python".into(),
+            denoise_model: "scunet_color_real_psnr".into(),
+            denoise_script: String::new(),
+            denoise_cache: String::new(),
+            segment_script: String::new(),
+            style_strength: 0.5,
+        };
+        // First open: no credential — nothing to probe, and the VISIT itself
+        // must not spend the session's opportunity.
+        app.autofetch_models_once(&cfg);
+        assert!(
+            !app.settings.image_models.autofetched,
+            "an ineligible open must not consume the role's probe"
+        );
+        assert!(!app.settings.image_models.fetching);
+        // The key arrives (saved on another surface); the NEXT open probes.
+        cfg.openai_api_key = Some("typed-test-token".into());
+        app.autofetch_models_once(&cfg);
+        assert!(app.settings.image_models.autofetched, "consumed at dispatch");
+        assert!(app.settings.image_models.fetching, "the probe launched");
+        // …and only once per session: a reopen never re-probes a metered
+        // endpoint (the review verified this half held; it must keep holding).
+        app.settings.image_models.fetching = false;
+        app.autofetch_models_once(&cfg);
+        assert!(!app.settings.image_models.fetching, "the one probe is spent");
+    }
+
+    /// GUI review 2026-08-12 F1 (model face): the CLI accepts full ids as
+    /// well as aliases, so a provider flip may only rewrite what PROVABLY
+    /// belongs to the other provider's vocabulary — a valid `claude-opus-4-6`
+    /// configured against an API bridge used to be silently replaced with
+    /// `opus` on every flip to OAuth.
+    #[test]
+    fn a_provider_flip_rewrites_only_the_other_providers_vocabulary() {
+        // OAuth-ward (to_api = false):
+        assert_eq!(analysis_model_on_flip("gpt-5.5", false), Some("opus"), "an OpenAI id yields");
+        assert_eq!(analysis_model_on_flip("claude-opus-4-6", false), None, "a full Claude id is CLI-valid");
+        assert_eq!(analysis_model_on_flip("Claude-Opus-4-6", false), None, "…case-folded, like every id test");
+        assert_eq!(analysis_model_on_flip("fable", false), None, "every documented alias survives");
+        // API-ward (to_api = true):
+        assert_eq!(analysis_model_on_flip("opus", true), Some("gpt-5.5"), "an alias is CLI-only vocabulary");
+        assert_eq!(analysis_model_on_flip("claude-opus-4-6", true), None, "a bridge legitimately serves claude-*");
+        assert_eq!(analysis_model_on_flip("gpt-5.5", true), None, "already at home");
+    }
+
+    /// GUI review 2026-08-12 F4: worker completion arrives on a plain mpsc
+    /// channel, which does not wake egui — and the 100 ms pump's gate
+    /// (`poll_workers`) runs before any panel can start a fetch in the same
+    /// frame, so with the pointer held still a click on "Fetch models" showed
+    /// nothing (not even "fetching…") until the next input event. Both edges
+    /// now request a repaint from inside `spawn_worker`.
+    #[test]
+    fn worker_spawn_and_completion_both_wake_the_event_loop() {
+        let app = AutoshopApp::default();
+        // Drain the fresh context's startup frames (egui schedules a couple
+        // on its own) until it reports quiet.
+        for _ in 0..8 {
+            let _ = app.egui_ctx.run(Default::default(), |_| {});
+        }
+        assert!(!app.egui_ctx.has_requested_repaint(), "sanity: context drained");
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        app.spawn_worker(
+            move || {
+                let _ = gate_rx.recv();
+                Msg::Models(ModelRole::Image, 0, Ok(Vec::new()))
+            },
+            |e| Msg::Models(ModelRole::Image, 0, Err(e)),
+        );
+        // Edge 1: STARTING a worker schedules the next frame (the pump's
+        // gate has already run this frame by the time a panel can spawn).
+        assert!(app.egui_ctx.has_requested_repaint(), "spawn must wake the loop");
+        // Consume that request the way real frames would; the worker is
+        // still gated, so quiet must return…
+        for _ in 0..8 {
+            let _ = app.egui_ctx.run(Default::default(), |_| {});
+        }
+        assert!(!app.egui_ctx.has_requested_repaint(), "sanity: drained again");
+        // …until the worker completes: edge 2, the completion itself must
+        // wake the loop — the mpsc send alone never does.
+        gate_tx.send(()).expect("the worker is waiting on the gate");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !app.egui_ctx.has_requested_repaint() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a completed worker never asked for a repaint — its result would sit unread until the next input event"
+            );
+            std::thread::yield_now();
+        }
+    }

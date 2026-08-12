@@ -32,15 +32,28 @@ pub struct LocalSettings {
     pub analysis_provider: Option<String>,
     pub analysis_model: Option<String>,
     pub analysis_api_key: Option<String>,
+    /// The endpoint `analysis_api_key` was saved FOR (see `image_api_key_base`).
+    pub analysis_api_key_base: Option<String>,
     pub analysis_base_url: Option<String>,
-    /// Reasoning effort for the analysis role. `None` / empty ⇒ send nothing
-    /// and let the provider decide (the pre-v0.23.2 behaviour).
+    /// Reasoning effort for the analysis role. Absent ⇒ the environment may
+    /// still supply a tier; explicitly `""` ⇒ "send no effort parameter",
+    /// silencing the environment too (see [`explicit_or_env`]).
     pub analysis_effort: Option<String>,
     pub image_api_key: Option<String>,
+    /// The endpoint `image_api_key` was saved FOR — stamped by both Settings
+    /// writers when a key is typed, consulted by [`Config::load`]: a stored
+    /// credential authenticates ONE endpoint, and a later provider flip or
+    /// base-URL edit must not silently re-route it (the GUI's OAuth flip
+    /// swaps the base to a local bridge while the cloud key stayed armed).
+    /// Absent ⇒ a pre-v0.23.2 save; the key is allowed anywhere until the
+    /// next save records a home. Not a secret and not an endpoint CHOICE —
+    /// its only power is to WITHHOLD a key, so it needs no [`SETTINGS`] row.
+    pub image_api_key_base: Option<String>,
     pub image_model: Option<String>,
     pub image_base_url: Option<String>,
     pub image_gen_model: Option<String>,
-    /// Reasoning effort for the image (vision proposer) role. See above.
+    /// Reasoning effort for the image (vision proposer) role. Same
+    /// absent-vs-explicitly-blank semantics as `analysis_effort`.
     pub image_effort: Option<String>,
     /// `"oauth"` (ChatGPT-subscription via a local Codex bridge, e.g. CLIProxyAPI)
     /// or `"api"` (a real OpenAI-compatible key). Purely a UI/preset selector —
@@ -118,6 +131,49 @@ impl LocalSettings {
     /// stripping can never disagree.
     fn names_beyond(&self, src: Source) -> bool {
         self.clone().restricted_to(src) != *self
+    }
+
+    /// Keep each stored key's HOME (`*_api_key_base`) coherent after a
+    /// settings mutation. Runs inside [`update_local_settings`], so BOTH
+    /// writers (the GUI form and `serve.rs`'s POST) inherit one rule:
+    ///
+    /// - A key the writer just typed was stamped BY the writer with the base
+    ///   on screen beside it — an existing stamp is never second-guessed.
+    /// - A pre-v0.23.2 key with no home inherits the current base, but only
+    ///   from a save that did NOT change the base: a base-changing save is
+    ///   exactly the re-route this stamp exists to catch, and blessing the
+    ///   new pairing there would launder the old key to the new endpoint.
+    ///   (Residual, documented: such a key stays home-less — and therefore
+    ///   allowed anywhere — until a base-stable save or a re-type.)
+    /// - No key ⇒ no home.
+    fn reconcile_key_homes(&mut self, before: &LocalSettings) {
+        fn one(
+            key: &Option<String>,
+            home: &mut Option<String>,
+            base: &Option<String>,
+            before_home: &Option<String>,
+            before_base: &Option<String>,
+        ) {
+            if key.is_none() {
+                *home = None;
+            } else if home.is_none() && before_home.is_none() && base == before_base {
+                *home = base.clone().filter(|s| !s.trim().is_empty());
+            }
+        }
+        one(
+            &self.image_api_key,
+            &mut self.image_api_key_base,
+            &self.image_base_url,
+            &before.image_api_key_base,
+            &before.image_base_url,
+        );
+        one(
+            &self.analysis_api_key,
+            &mut self.analysis_api_key_base,
+            &self.analysis_base_url,
+            &before.analysis_api_key_base,
+            &before.analysis_base_url,
+        );
     }
 }
 
@@ -392,7 +448,10 @@ pub fn update_local_settings(
 ) -> std::io::Result<PathBuf> {
     crate::store::with_settings_lock(crate::store::DevelopLockMode::Wait, || {
         let mut cur = load_local_settings();
+        let before = cur.clone();
         mutate(&mut cur);
+        // One rule for both writers: see `reconcile_key_homes`.
+        cur.reconcile_key_homes(&before);
         save_local_settings(&cur)
     })
 }
@@ -802,6 +861,59 @@ pub fn dotenv_child_env() -> Vec<(String, String)> {
 /// 400 and the caller negotiates it away (`advisor::post_ai_json`). The bound
 /// is the part that matters — this string reaches `Command::args`, where an
 /// unbounded `.env`-supplied value would be argv injection.
+/// Two API base URLs name the same endpoint, ignoring whitespace and a
+/// trailing slash. ONE definition: the GUI's pick-list invalidation and the
+/// key-home check below must never disagree about what "same" means.
+pub fn same_endpoint(a: &str, b: &str) -> bool {
+    a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
+}
+
+/// Resolve an optional setting where an EXPLICIT empty is itself a choice.
+///
+/// Both Settings surfaces store a cleared effort field as `""` — "let the
+/// provider decide" — but the generic `pick_opt` filters empties out before
+/// consulting the environment, so with `AUTOSHOP_*_EFFORT` set the one choice
+/// the field exists to express was the one choice it could not make: the
+/// blank fell through, the env tier came back, and Settings showed the tier
+/// the user had just cleared. Absent (the field was never saved) still defers
+/// to the environment.
+fn explicit_or_env(file: &Option<String>, env: Option<String>) -> Option<String> {
+    match file {
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(s.clone()),
+        None => env,
+    }
+}
+
+/// The FILE-stored key for a role — but only at the endpoint it was saved
+/// for. A stored credential authenticates one endpoint; when the resolved
+/// base has moved (a provider flip's auto-swap, a typed edit, another
+/// surface's save), sending the old key there is silent credential
+/// misrouting — a cloud key handed to whatever listens on a local bridge
+/// port, or a bridge gate token handed to the cloud. A key with no recorded
+/// home (a pre-v0.23.2 save) stays allowed until a save records one.
+/// Environment keys never pass through here: the env contract has no home
+/// concept and is the user's own explicit pairing.
+fn file_key_for(
+    key: &Option<String>,
+    home: &Option<String>,
+    resolved_base: &str,
+    name: &str,
+) -> Option<String> {
+    let k = key.clone()?;
+    match home {
+        Some(h) if !same_endpoint(h, resolved_base) => {
+            eprintln!(
+                "warning: not sending {name} — it was saved for {h}, but the configured \
+                 endpoint is now {resolved_base}. Enter a key for this endpoint in Settings \
+                 (or re-save the old one there); requests run without a key until then."
+            );
+            None
+        }
+        _ => Some(k),
+    }
+}
+
 pub(crate) fn effort(v: Option<String>) -> Option<String> {
     let v = v?.trim().to_ascii_lowercase();
     if v.is_empty() {
@@ -902,6 +1014,13 @@ impl Config {
         };
 
         let default_base = "https://api.openai.com/v1";
+        // Bases resolve FIRST: each file-stored key is gated on the endpoint
+        // it was saved for (`file_key_for`), so the key pick needs the
+        // resolved base in hand.
+        let image_base =
+            pick(&local.image_base_url, env_val("AUTOSHOP_OPENAI_BASE_URL"), default_base);
+        let analysis_base =
+            pick(&local.analysis_base_url, env_val("AUTOSHOP_ANALYSIS_BASE_URL"), default_base);
         // Bundled sidecar helpers resolve against the PROGRAM's own tree,
         // never the cwd (see `bundled_helper`): a photo pack carrying
         // `python/denoise.py` used to have that file executed as the user
@@ -921,15 +1040,19 @@ impl Config {
             env_val("AUTOSHOP_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
         Config {
             openai_api_key: header_safe_key(
-                pick_opt(&local.image_api_key, env_val("OPENAI_API_KEY")),
+                pick_opt(
+                    &file_key_for(
+                        &local.image_api_key,
+                        &local.image_api_key_base,
+                        &image_base,
+                        "the image API key",
+                    ),
+                    env_val("OPENAI_API_KEY"),
+                ),
                 "the image API key",
             ),
             openai_model: pick(&local.image_model, env_val("AUTOSHOP_OPENAI_MODEL"), "gpt-5.5"),
-            openai_base_url: pick(
-                &local.image_base_url,
-                env_val("AUTOSHOP_OPENAI_BASE_URL"),
-                default_base,
-            ),
+            openai_base_url: image_base,
             openai_image_model: pick(
                 &local.image_gen_model,
                 env_val("AUTOSHOP_OPENAI_IMAGE_MODEL"),
@@ -945,7 +1068,12 @@ impl Config {
                 env_val("AUTOSHOP_IMAGE_PROVIDER"),
                 "api",
             ),
-            image_effort: effort(pick_opt(&local.image_effort, env_val("AUTOSHOP_IMAGE_EFFORT"))),
+            // `explicit_or_env`, not `pick_opt`: a saved `""` is the explicit
+            // choice "send no effort parameter" and must silence an env tier.
+            image_effort: effort(explicit_or_env(
+                &local.image_effort,
+                env_val("AUTOSHOP_IMAGE_EFFORT"),
+            )),
 
             analysis_provider: pick(
                 &local.analysis_provider,
@@ -958,20 +1086,24 @@ impl Config {
                     .or_else(|| env_val("AUTOSHOP_CLAUDE_MODEL")),
                 "opus",
             ),
-            analysis_effort: effort(pick_opt(
+            analysis_effort: effort(explicit_or_env(
                 &local.analysis_effort,
                 env_val("AUTOSHOP_ANALYSIS_EFFORT"),
             )),
             claude_bin: env_val("AUTOSHOP_CLAUDE_BIN").unwrap_or_else(|| "claude".to_string()),
             analysis_api_key: header_safe_key(
-                pick_opt(&local.analysis_api_key, env_val("AUTOSHOP_ANALYSIS_API_KEY")),
+                pick_opt(
+                    &file_key_for(
+                        &local.analysis_api_key,
+                        &local.analysis_api_key_base,
+                        &analysis_base,
+                        "the analysis API key",
+                    ),
+                    env_val("AUTOSHOP_ANALYSIS_API_KEY"),
+                ),
                 "the analysis API key",
             ),
-            analysis_base_url: pick(
-                &local.analysis_base_url,
-                env_val("AUTOSHOP_ANALYSIS_BASE_URL"),
-                default_base,
-            ),
+            analysis_base_url: analysis_base,
 
             python_bin: env_val("AUTOSHOP_PYTHON").unwrap_or_else(|| "python".to_string()),
             denoise_model: env_val("AUTOSHOP_DENOISE_MODEL")
@@ -1071,6 +1203,12 @@ mod tests {
             // And what it would take if it could.
             image_api_key: Some("planted".into()),
             analysis_api_key: Some("planted".into()),
+            // Key homes are POWERLESS alone (they can only WITHHOLD a
+            // file-stored key, and the keys above are stripped), so
+            // `restricted_to` deliberately leaves them; planted here to keep
+            // that reasoning exercised.
+            image_api_key_base: Some("https://attacker.example/v1".into()),
+            analysis_api_key_base: Some("https://attacker.example/v1".into()),
             // Harmless selectors an ambient file is still allowed to set.
             image_model: Some("gpt-5.6-sol".into()),
             analysis_model: Some("opus".into()),
@@ -1264,6 +1402,91 @@ mod tests {
         for bad in ["--dangerously-skip-permissions", "high high", "high\nmax", "x".repeat(33).as_str()] {
             assert_eq!(effort(Some(bad.into())), None, "{bad:?} must not reach argv");
         }
+    }
+
+    /// GUI review 2026-08-12 F2: both Settings surfaces persist a cleared
+    /// effort field as `""` — the explicit choice "send no effort parameter".
+    /// The generic `pick_opt` filtered that empty out and fell through to the
+    /// environment, so with `AUTOSHOP_IMAGE_EFFORT=high` set, selecting
+    /// "provider default" saved, reopened as `high`, and kept sending `high`:
+    /// the one choice the field exists to express was the one it could not
+    /// make.
+    #[test]
+    fn an_explicitly_blank_effort_silences_the_environment_tier() {
+        let env = || Some("high".to_string());
+        // Never saved → the environment may still supply the tier.
+        assert_eq!(explicit_or_env(&None, env()).as_deref(), Some("high"));
+        // An explicit tier wins outright (file over env, as everywhere).
+        assert_eq!(explicit_or_env(&Some("xhigh".into()), env()).as_deref(), Some("xhigh"));
+        // An explicit blank is a VALUE, not a hole for the env to fill.
+        assert_eq!(explicit_or_env(&Some(String::new()), env()), None);
+        assert_eq!(explicit_or_env(&Some("  ".into()), env()), None);
+    }
+
+    /// GUI review 2026-08-12 F1 (HIGH): the providers are mutually exclusive
+    /// but share one key slot, and flipping the image role to OAuth swaps the
+    /// base URL to the local bridge while the CLOUD key stays armed — the
+    /// next call sends `Authorization: Bearer <cloud key>` to whatever
+    /// listens on the bridge port (and a saved bridge token rides to the
+    /// cloud on the way back). The stored credential is now bound to the
+    /// endpoint it was saved for.
+    #[test]
+    fn a_saved_key_is_only_sent_to_the_endpoint_it_was_saved_for() {
+        let key = Some("sk-relativized0test".to_string());
+        let cloud = "https://api.openai.com/v1";
+        let bridge = "http://127.0.0.1:8317/v1";
+        // At home (modulo a trailing slash) → sent.
+        let home = Some(format!("{cloud}/"));
+        assert!(file_key_for(&key, &home, cloud, "k").is_some());
+        // Saved for the cloud, endpoint now the bridge → withheld; and the
+        // reverse flip withholds a bridge token from the cloud.
+        assert_eq!(file_key_for(&key, &Some(cloud.into()), bridge, "k"), None);
+        assert_eq!(file_key_for(&key, &Some(bridge.into()), cloud, "k"), None);
+        // A pre-v0.23.2 save recorded no home → allowed until one is saved.
+        assert!(file_key_for(&key, &None, bridge, "k").is_some());
+        // No key → nothing to gate.
+        assert_eq!(file_key_for(&None, &Some(cloud.into()), cloud, "k"), None);
+    }
+
+    /// The home stamp's lifecycle (`reconcile_key_homes`, shared by both
+    /// writers through `update_local_settings`): a writer's own stamp is
+    /// never second-guessed; a legacy key inherits a home only from a
+    /// base-STABLE save; a base-changing save must not bless the new pairing.
+    #[test]
+    fn a_key_home_is_grandfathered_only_by_a_base_stable_save() {
+        let legacy = LocalSettings {
+            image_api_key: Some("sk-relativized0test".into()),
+            image_base_url: Some("https://a.example/v1".into()),
+            ..Default::default()
+        };
+        // Base unchanged → the pairing the user had on screen is recorded.
+        let mut cur = legacy.clone();
+        cur.reconcile_key_homes(&legacy);
+        assert_eq!(cur.image_api_key_base.as_deref(), Some("https://a.example/v1"));
+        // Base changed in the same save → stays home-less, not re-homed.
+        let mut cur = legacy.clone();
+        cur.image_base_url = Some("http://127.0.0.1:8317/v1".into());
+        cur.reconcile_key_homes(&legacy);
+        assert_eq!(cur.image_api_key_base, None);
+        // The writer stamped this save's typed key → kept verbatim.
+        let mut cur = legacy.clone();
+        cur.image_base_url = Some("http://127.0.0.1:8317/v1".into());
+        cur.image_api_key_base = Some("http://127.0.0.1:8317/v1".into());
+        cur.reconcile_key_homes(&legacy);
+        assert_eq!(cur.image_api_key_base.as_deref(), Some("http://127.0.0.1:8317/v1"));
+        // No key → no home; and the analysis role rides the same rule.
+        let mut cur = LocalSettings {
+            image_api_key_base: Some("https://a.example/v1".into()),
+            analysis_api_key: Some("sk-relativized0test".into()),
+            analysis_base_url: Some("https://b.example/v1".into()),
+            ..Default::default()
+        };
+        cur.reconcile_key_homes(&LocalSettings {
+            analysis_base_url: Some("https://b.example/v1".into()),
+            ..Default::default()
+        });
+        assert_eq!(cur.image_api_key_base, None);
+        assert_eq!(cur.analysis_api_key_base.as_deref(), Some("https://b.example/v1"));
     }
 
     /// L16#3: `Config::load` never writes the process environment — the old
