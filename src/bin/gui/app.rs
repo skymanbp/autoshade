@@ -793,7 +793,11 @@ impl AutoshopApp {
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
     fn upd_top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+        // egui's side_top_panel frame keeps only 2px of vertical margin —
+        // at that spacing the action row visually touches the strip edges.
+        let frame = egui::Frame::side_top_panel(&ctx.style())
+            .inner_margin(egui::Margin::symmetric(8.0, SPACE_MD));
+        egui::TopBottomPanel::top("top").frame(frame).show(ctx, |ui| {
             let lang = self.lang;
             // ONE wrapped row of ACTIONS only (UX batch): settings that used
             // to live here moved to where they are used — export options into

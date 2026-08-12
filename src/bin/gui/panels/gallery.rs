@@ -40,9 +40,14 @@ impl AutoshopApp {
             // suppresses the "bitmap mask(s) not pasted" warning, so the
             // mismatch INVERTS that guard and writes A's raster masks into
             // B's saved develop.
+            // These chips keep the compact Small label but wear a full button
+            // frame: egui's small_button hard-zeroes vertical padding AND
+            // skips the interact-size floor, so the boxes came out squat and
+            // no style token could talk them out of it.
+            let chip = |text: String| egui::Button::new(egui::RichText::new(text).small());
             ui.add_enabled_ui(self.src_path.is_some() && !self.busy, |ui| {
                 if ui
-                    .small_button(tr(lang, "⎘ Copy recipe"))
+                    .add(chip(tr(lang, "⎘ Copy recipe").to_string()))
                     .on_hover_text(tr(lang, "Copy every develop setting from the current photo"))
                     .clicked()
                 {
@@ -58,7 +63,7 @@ impl AutoshopApp {
             ui.add_enabled_ui(self.copied.is_some() && n > 0 && !self.busy, |ui| {
                 let n_s = n.to_string();
                 if ui
-                    .small_button(trf(lang, "⇩ Paste to selected ({n})", &[("n", &n_s)]))
+                    .add(chip(trf(lang, "⇩ Paste to selected ({n})", &[("n", &n_s)])))
                     .on_hover_text(tr(lang, "Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing."))
                     .clicked()
                 {
@@ -68,7 +73,7 @@ impl AutoshopApp {
             ui.add_enabled_ui(n > 0 && !self.busy, |ui| {
                 let n_s = n.to_string();
                 if ui
-                    .small_button(trf(lang, "🖼 Render selected ({n})", &[("n", &n_s)]))
+                    .add(chip(trf(lang, "🖼 Render selected ({n})", &[("n", &n_s)])))
                     .on_hover_text(tr(
                         lang,
                         "Each renders by its own saved develop from the store (neutral develop if none) → ./out/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
@@ -78,7 +83,7 @@ impl AutoshopApp {
                     self.start_batch_render();
                 }
             });
-            if n > 0 && ui.small_button("✕").on_hover_text(tr(lang, "Clear selection")).clicked() {
+            if n > 0 && ui.add(chip("✕".to_string())).on_hover_text(tr(lang, "Clear selection")).clicked() {
                 self.multi_sel.clear();
             }
         });
