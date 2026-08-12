@@ -827,16 +827,24 @@ fn xmlns_conflict(doc: &str) -> Option<String> {
         return None;
     }
     // One frame per OPEN element that declares namespaces, tagged with its
-    // depth so a closing tag pops exactly its own frame. `""` keys the
-    // default namespace. Closing-tag NAMES are not matched (the flat scan
-    // ignored them too; malformed nesting degrades toward refusal, never
-    // toward silent acceptance).
-    const MAX_NS_FRAMES: usize = 1024;
-    fn resolve<'a>(frames: &'a [(usize, Vec<(&str, String)>)], pfx: &str) -> Option<&'a str> {
-        frames
-            .iter()
-            .rev()
-            .find_map(|(_, ds)| ds.iter().rev().find(|(p, _)| *p == pfx).map(|(_, u)| u.as_str()))
+    // depth AND its element name: a close tag pops a frame only when both
+    // match, so a surplus or misnamed close (round-13 review R13-01) leaves
+    // the frame in place — malformed nesting degrades toward refusal, never
+    // toward releasing a foreign binding early. `""` keys the default
+    // namespace. The bound counts LIVE DECLARATIONS, not frames (R13-02): a
+    // single tag can carry a declaration flood, and `resolve` walks every
+    // live declaration per name, so the budget is what keeps an adversarial
+    // 16 MiB document from going quadratic.
+    const MAX_NS_DECLS: usize = 256;
+    struct NsFrame<'a> {
+        depth: usize,
+        name: &'a str,
+        decls: Vec<(&'a str, String)>,
+    }
+    fn resolve<'a>(frames: &'a [NsFrame<'_>], pfx: &str) -> Option<&'a str> {
+        frames.iter().rev().find_map(|f| {
+            f.decls.iter().rev().find(|(p, _)| *p == pfx).map(|(_, u)| u.as_str())
+        })
     }
     fn against(uri: &str, pfx: Option<&str>) -> Option<String> {
         match pfx {
@@ -861,15 +869,17 @@ fn xmlns_conflict(doc: &str) -> Option<String> {
         }
     }
     let mut depth: usize = 0;
-    let mut frames: Vec<(usize, Vec<(&str, String)>)> = Vec::new();
+    let mut live_decls: usize = 0;
+    let mut frames: Vec<NsFrame> = Vec::new();
     let mut from = 0;
     while let Some((start, end, self_closing)) = next_xml_tag(doc, from) {
         from = end + 1;
         let tag = &doc[start..=end];
         if tag.starts_with("</") {
             if depth > 0 {
-                if frames.last().is_some_and(|f| f.0 == depth) {
-                    frames.pop();
+                if frames.last().is_some_and(|f| f.depth == depth && f.name == tag_name(tag)) {
+                    let f = frames.pop().expect("just matched");
+                    live_decls -= f.decls.len();
                 }
                 depth -= 1;
             }
@@ -887,23 +897,22 @@ fn xmlns_conflict(doc: &str) -> Option<String> {
                 decls.push(("", xml_unescape(a.value).into_owned()));
             }
         }
+        let name = tag_name(tag);
         if !decls.is_empty() {
-            frames.push((depth, decls));
-            if frames.len() > MAX_NS_FRAMES {
-                // Beyond the tracking bound the gate cannot prove a binding
-                // harmless, so it refuses — conservative, and disclosed.
+            live_decls += decls.len();
+            frames.push(NsFrame { depth, name, decls });
+            if live_decls > MAX_NS_DECLS {
+                // Beyond the tracking budget the gate cannot prove a binding
+                // harmless (or resolve names affordably), so it refuses —
+                // conservative, and disclosed.
                 return Some(
-                    "more nested xmlns declarations than this build tracks; \
+                    "more xmlns declarations than this build tracks; \
                      namespace bindings cannot be verified"
                         .to_string(),
                 );
             }
         }
         // The element's own name…
-        let name = tag[1..]
-            .split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
-            .next()
-            .unwrap_or("");
         let elem_pfx = name.split_once(':').map(|(p, _)| p);
         if let Some(uri) = resolve(&frames, elem_pfx.unwrap_or(""))
             && let Some(why) = against(uri, elem_pfx)
@@ -926,8 +935,9 @@ fn xmlns_conflict(doc: &str) -> Option<String> {
             }
         }
         if self_closing {
-            if frames.last().is_some_and(|f| f.0 == depth) {
-                frames.pop();
+            if frames.last().is_some_and(|f| f.depth == depth) {
+                let f = frames.pop().expect("just matched");
+                live_decls -= f.decls.len();
             }
             depth -= 1;
         }
@@ -2705,7 +2715,37 @@ mod tests {
             doc.push_str("<t xmlns:q=\"urn:x\">");
         }
         let why = xmlns_conflict(&doc).expect("beyond the bound is a refusal");
-        assert!(why.contains("more nested xmlns declarations"), "{why}");
+        assert!(why.contains("more xmlns declarations"), "{why}");
+    }
+
+    /// R13-01 (round-13 Codex review): a SURPLUS or MISNAMED close tag must
+    /// not release a foreign binding early — pops are paired by name, not by
+    /// arithmetic alone, so malformed nesting degrades toward refusal.
+    #[test]
+    fn a_mismatched_close_does_not_release_a_foreign_binding() {
+        let doc = "<rdf:Description \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \
+                   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
+                   <island xmlns:crs=\"urn:foreign\"></bogus>\
+                   <crs:Exposure2012>+2.0</crs:Exposure2012>\
+                   </island></rdf:Description>";
+        let why = xmlns_conflict(doc)
+            .expect("the crs name still resolves through the un-closed island's rebind");
+        assert!(why.contains("urn:foreign"), "the reason names the live binding: {why}");
+    }
+
+    /// R13-02 (round-13 Codex review): the tracking bound counts LIVE
+    /// DECLARATIONS, not frames — a single tag carrying a declaration flood
+    /// is past what the gate can resolve affordably, so it refuses.
+    #[test]
+    fn a_flat_declaration_flood_refuses_conservatively() {
+        let mut doc = String::from("<t");
+        for i in 0..257 {
+            doc.push_str(&format!(" xmlns:q{i}=\"urn:x\""));
+        }
+        doc.push('>');
+        let why = xmlns_conflict(&doc).expect("a declaration flood is a refusal");
+        assert!(why.contains("more xmlns declarations"), "{why}");
     }
 
     /// L03-7: curve items are matched by tag name — a whitespace-spelled
