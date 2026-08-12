@@ -51,6 +51,14 @@ fn xml_attr_escape(s: &str) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
+            // Attribute-value normalization (XML 1.0 §3.3.3) folds a RAW
+            // tab/newline/CR to a space in every compliant parser — a mask
+            // name holding one would change on its first round trip through
+            // Lightroom. Character references are exempt from normalization,
+            // and our own reader's xml_unescape decodes them back.
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
             _ => out.push(c),
         }
     }
@@ -805,7 +813,26 @@ fn xmlns_conflict(doc: &str) -> Option<String> {
         if !tag.starts_with("</") {
             let mut cursor = 0;
             while let Some(a) = next_xml_attribute(tag, &mut cursor) {
-                let Some(pfx) = a.name.strip_prefix("xmlns:") else { continue };
+                let Some(pfx) = a.name.strip_prefix("xmlns:") else {
+                    // The DEFAULT namespace (bare `xmlns=`) binds every
+                    // unprefixed element below it: bound to camera-raw or
+                    // RDF, it hides settings in unprefixed spellings these
+                    // prefix scanners cannot see, and the merge would splice
+                    // a second contradictory settings block in beside them —
+                    // the very corruption the prefixed arms refuse.
+                    if a.name == "xmlns" {
+                        let uri = xml_unescape(a.value);
+                        let uri = uri.as_ref();
+                        if uri == CRS_URI || uri == RDF_URI {
+                            return Some(format!(
+                                "the {} namespace is bound as the DEFAULT namespace; this \
+                                 build reads only the `crs:`/`rdf:` prefixes",
+                                if uri == CRS_URI { "camera-raw" } else { "RDF" }
+                            ));
+                        }
+                    }
+                    continue;
+                };
                 let uri = xml_unescape(a.value);
                 let uri = uri.as_ref();
                 if pfx == "crs" && uri != CRS_URI {
@@ -1626,6 +1653,27 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
             bad.push(tag.to_string());
         }
     }
+    // A structurally inconsistent crop (HasCrop="True" with a missing
+    // coordinate, an out-of-domain value, or inverted ordering) imports as a
+    // SILENT None and the next save persists HasCrop="False" — a deletion
+    // nobody asked for. Individually unparsable coordinates are named by the
+    // generic scan above; absence and ordering are only visible to a check
+    // of the structure as a whole (the curve rule, applied to the crop).
+    if crs_str(&scope, "HasCrop").as_deref() == Some("True") {
+        let coord = |k: &str| crs_f32(&scope, k).filter(|v| (0.0..=1.0).contains(v));
+        let consistent = match (
+            coord("CropLeft"),
+            coord("CropTop"),
+            coord("CropRight"),
+            coord("CropBottom"),
+        ) {
+            (Some(l), Some(t), Some(r), Some(b)) => l < r && t < b,
+            _ => false,
+        };
+        if !consistent && !bad.iter().any(|k| k.starts_with("Crop")) {
+            bad.push("Crop (HasCrop=\"True\" with missing or inconsistent coordinates)".to_string());
+        }
+    }
     bad
 }
 
@@ -1741,12 +1789,24 @@ fn parse_curve_checked(xmp: &str, tag: &str) -> Result<Vec<CurvePoint>, ()> {
     };
 
     let mut pts = Vec::new();
-    for chunk in body.split("<rdf:li>").skip(1) {
-        if pts.len() >= MAX_CURVE_POINTS_FROM_XMP {
-            return Err(());
+    // Items are matched by tag NAME through the shared tag scanner: the old
+    // literal `"<rdf:li>"` split read a whitespace-spelled `<rdf:li >` item
+    // as NO item at all — a present curve imported silently empty and the
+    // next save deleted it, while the module's own standard (1719-1723,
+    // owned_element_body) says present-but-unreadable must flow into
+    // disclosure, never into silence.
+    let mut from = 0;
+    while let Some((start, end, self_closing)) = next_xml_tag(body, from) {
+        let tag = &body[start..=end];
+        if tag.starts_with("</") || tag_name(tag) != "rdf:li" {
+            from = end + 1;
+            continue;
         }
-        let end = chunk.find("</rdf:li>").ok_or(())?;
-        let mut it = chunk[..end].split(',');
+        if self_closing || pts.len() >= MAX_CURVE_POINTS_FROM_XMP {
+            return Err(()); // an empty <rdf:li/> holds no "x, y" point
+        }
+        let close = element_close_start(body, "rdf:li", end).ok_or(())?;
+        let mut it = body[end + 1..close].split(',');
         let x = it.next().ok_or(())?.trim().parse::<f32>().map_err(|_| ())?;
         let y = it.next().ok_or(())?.trim().parse::<f32>().map_err(|_| ())?;
         if it.next().is_some() || !x.is_finite() || !y.is_finite() {
@@ -1761,6 +1821,7 @@ fn parse_curve_checked(xmp: &str, tag: &str) -> Result<Vec<CurvePoint>, ()> {
             return Err(());
         }
         pts.push(CurvePoint { input: x as u8, output: y as u8 });
+        from = close + 1;
     }
 
     let identity = [CurvePoint { input: 0, output: 0 }, CurvePoint { input: 255, output: 255 }];
@@ -2282,6 +2343,15 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     if xmp.len() > MAX_XMP_BYTES {
         return EditRecipe::default();
     }
+    // The disclosure scan answers a namespace conflict with "its camera-raw
+    // settings were not imported" — and every restore surface pairs the two
+    // calls. This reader kept importing anyway, reading properties through
+    // the very prefixes the gate just declared unreliable: the two faces of
+    // one document contradicted each other. Neutral is the only import the
+    // disclosure sentence keeps honest.
+    if xmlns_conflict(xmp).is_some() {
+        return EditRecipe::default();
+    }
     let ours = is_autoshop_sidecar(xmp);
 
 
@@ -2432,6 +2502,110 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L03-3: the import gate must MATCH the disclosure sentence — a
+    /// conflicting crs binding imports nothing, because the scanners would
+    /// read properties through a prefix the document bound elsewhere.
+    #[test]
+    fn a_conflicting_crs_binding_imports_nothing() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <rdf:Description rdf:about=\"\" xmlns:crs=\"urn:other\" \
+                   crs:Exposure2012=\"+2.50\"/></rdf:RDF></x:xmpmeta>";
+        assert!(xmlns_conflict(doc).is_some(), "the binding is a conflict");
+        let r = xmp_to_recipe(doc);
+        assert_eq!(
+            r.exposure_ev, 0.0,
+            "settings under a conflicting binding must not import — the disclosure says they were not"
+        );
+        assert!(
+            unparsable_crs_numbers(doc)[0].contains("not imported"),
+            "and the disclosure names the refusal"
+        );
+    }
+
+    /// L03-4: the DEFAULT namespace declaration (bare `xmlns=`) bound to the
+    /// camera-raw or RDF namespace is the same conflict as a foreign prefix —
+    /// it hides settings in unprefixed spellings the scanners cannot see.
+    #[test]
+    fn a_default_namespace_binding_to_crs_is_a_conflict() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <rdf:Description rdf:about=\"\" \
+                   xmlns=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
+                   <Exposure2012>+1.00</Exposure2012>\
+                   </rdf:Description></rdf:RDF></x:xmpmeta>";
+        let why = xmlns_conflict(doc).expect("a default-namespace binding to crs must refuse");
+        assert!(why.contains("DEFAULT namespace"), "the reason names the binding: {why}");
+        assert_eq!(xmp_to_recipe(doc).exposure_ev, 0.0);
+    }
+
+    /// L03-7: curve items are matched by tag name — a whitespace-spelled
+    /// `<rdf:li >` is a real item, not an invisible one that empties the
+    /// curve (and lets the next save delete it).
+    #[test]
+    fn a_whitespace_spelled_curve_item_is_still_a_curve_point() {
+        let scope = "<crs:ToneCurvePV2012><rdf:Seq>\
+                     <rdf:li >128, 64</rdf:li >\
+                     <rdf:li>255, 255</rdf:li>\
+                     </rdf:Seq></crs:ToneCurvePV2012>";
+        assert_eq!(
+            parse_curve_checked(scope, "ToneCurvePV2012"),
+            Ok(vec![
+                CurvePoint { input: 128, output: 64 },
+                CurvePoint { input: 255, output: 255 },
+            ]),
+            "both spellings are legal XML for the same element"
+        );
+    }
+
+    /// L03-9: HasCrop="True" whose coordinates are missing or inverted still
+    /// imports as no-crop (clamping half a geometry would change coverage),
+    /// but the drop is DISCLOSED — the next save persists HasCrop="False",
+    /// and silence made that a deletion nobody asked for.
+    #[test]
+    fn an_inconsistent_crop_is_disclosed_not_silently_dropped() {
+        let head = "<rdf:Description rdf:about=\"\" \
+                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                    crs:HasCrop=\"True\" crs:CropLeft=\"0.1\" crs:CropTop=\"0.1\" \
+                    crs:CropRight=\"0.9\"/>";
+        assert!(xmp_to_recipe(head).crop.is_none(), "a missing coordinate cannot crop");
+        assert!(
+            unparsable_crs_numbers(head).iter().any(|k| k.starts_with("Crop")),
+            "the missing coordinate is disclosed: {:?}",
+            unparsable_crs_numbers(head)
+        );
+
+        let inverted = "<rdf:Description rdf:about=\"\" \
+                        xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                        crs:HasCrop=\"True\" crs:CropLeft=\"0.8\" crs:CropTop=\"0.1\" \
+                        crs:CropRight=\"0.2\" crs:CropBottom=\"0.9\"/>";
+        assert!(xmp_to_recipe(inverted).crop.is_none());
+        assert!(
+            unparsable_crs_numbers(inverted).iter().any(|k| k.starts_with("Crop")),
+            "inverted ordering is disclosed"
+        );
+
+        let fine = "<rdf:Description rdf:about=\"\" \
+                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                    crs:HasCrop=\"True\" crs:CropLeft=\"0.1\" crs:CropTop=\"0.1\" \
+                    crs:CropRight=\"0.9\" crs:CropBottom=\"0.9\"/>";
+        assert!(xmp_to_recipe(fine).crop.is_some());
+        assert!(
+            unparsable_crs_numbers(fine).is_empty(),
+            "a consistent crop discloses nothing"
+        );
+    }
+
+    /// L03-18: raw tab/newline in an attribute value would be folded to
+    /// spaces by any compliant parser's attribute-value normalization —
+    /// character references survive it, and our reader decodes them back.
+    #[test]
+    fn attribute_control_characters_survive_as_character_references() {
+        assert_eq!(xml_attr_escape("a\tb\nc\rd"), "a&#9;b&#10;c&#13;d");
+        assert_eq!(xml_unescape("a&#9;b&#10;c&#13;d").as_ref(), "a\tb\nc\rd");
+    }
+
     use crate::recipe::{CurvePoint, EditRecipe, LocalAdjustment};
 
     /// The merged document alone — most tests assert on the text; the ones
