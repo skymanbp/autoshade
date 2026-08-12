@@ -114,11 +114,21 @@ where
         enum Gate<R> {
             Ran(R),
             Superseded,
+            Fenced,
         }
         let ran: Result<Gate<Result<T, E>>, io::Error> =
             with_path_lock(dev.join(".develop.lock"), mode, || {
                 if dev.join("superseded-by.txt").exists() {
                     return Ok(Gate::Superseded);
+                }
+                // The fence is checked AT THE AUTHORITY GATE, not only by the
+                // memoized resolver probe (review R12-01): a session that
+                // probed "no marker" before a concurrent adoption started —
+                // and memoized it — must still refuse to run against the
+                // half-copied dir. The resume runs OUTSIDE this lock (it
+                // takes source→dest in the fixed order) and the loop retries.
+                if dev.join("adopting-from.txt").exists() {
+                    return Ok(Gate::Fenced);
                 }
                 let body = f.take().expect("the develop-lock body runs once");
                 Ok(Gate::Ran(body()))
@@ -126,6 +136,17 @@ where
         match ran {
             Ok(Gate::Ran(out)) => return out,
             Ok(Gate::Superseded) => forget_resolved_key(root, src),
+            Ok(Gate::Fenced) => {
+                if let Err(e) = resume_marked_adoption(&dev) {
+                    return Err(E::from(io::Error::new(
+                        e.kind(),
+                        format!(
+                            "this photo's develop dir is mid-adoption and finishing it failed \
+                             ({e}) — the touch is refused rather than run against a fenced dir"
+                        ),
+                    )));
+                }
+            }
             Err(e) => return Err(E::from(e)),
         }
     }
@@ -790,7 +811,10 @@ fn resolve_key_in(root: &Path, src: &Path) -> String {
 /// without this the half-copied dir is served as if it were complete.
 /// WouldBlock is not memoized (the next touch retries); any other failure is
 /// disclosed and memoized — a stable, disclosed degradation beats re-probing
-/// a broken source on every touch.
+/// a broken source on every touch. The memo is an OPTIMIZATION only (review
+/// R12-01): the develop lock re-checks the fence on every locked touch, so a
+/// "no marker" memoized before a concurrent adoption started cannot grant
+/// the fenced dir authority.
 fn resume_orphan_adoption_once(root: &Path, ck: &str) {
     use std::sync::{Mutex, OnceLock};
     static CHECKED: OnceLock<Mutex<std::collections::HashSet<(PathBuf, String)>>> =
@@ -860,10 +884,21 @@ fn adoption_skips(name: &str) -> bool {
 fn adopt_or_choose(root: &Path, abs: &Path, ck: &str, lk: &str) -> Option<String> {
     let cd = root.join("develops").join(ck);
     let ld = root.join("develops").join(lk);
-    let contentful = |d: &Path| -> bool {
-        std::fs::read_dir(d).ok().is_some_and(|it| {
-            it.flatten().any(|e| !adoption_skips(&e.file_name().to_string_lossy()))
-        })
+    // NotFound is the one honest "empty"; any other enumeration error must
+    // not make an EXISTING develop look empty (review R12-02) — pre-lock
+    // callers key lexically and retry, the in-lock recheck propagates.
+    let contentful = |d: &Path| -> std::io::Result<bool> {
+        let it = match std::fs::read_dir(d) {
+            Ok(it) => it,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        for e in it {
+            if !adoption_skips(&e?.file_name().to_string_lossy()) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     };
     // Already superseded by an earlier session's adoption — nothing to redo.
     if ld.join("superseded-by.txt").exists() {
@@ -889,11 +924,22 @@ fn adopt_or_choose(root: &Path, abs: &Path, ck: &str, lk: &str) -> Option<String
         ld.clone()
     };
     if !resume {
-        if !contentful(&ld) {
+        let (ld_full, cd_full) = match (contentful(&ld), contentful(&cd)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!(
+                    "⚠ probing the develops for {} failed ({e}) — this session keys the photo \
+                     by its path spelling and the adoption retries later",
+                    abs.display()
+                );
+                return Some(lk.to_string());
+            }
+        };
+        if !ld_full {
             // Fresh photo (or only lock litter): the canonical key, no copy.
             return Some(ck.to_string());
         }
-        if contentful(&cd) {
+        if cd_full {
             // GENUINE collision: both spellings hold a develop and no
             // adoption was in flight. Canonical wins, the alias stays on
             // disk untouched, and the fact is durable + surfaced (once).
@@ -964,7 +1010,7 @@ fn adopt_or_choose(root: &Path, abs: &Path, ck: &str, lk: &str) -> Option<String
                     // result instead of copying over it.
                     return Ok(AdoptOutcome::AlreadyAdopted);
                 }
-                if !cd.join("adopting-from.txt").exists() && contentful(&cd) {
+                if !cd.join("adopting-from.txt").exists() && contentful(&cd)? {
                     // cd gained real content between probe and lock: a
                     // GENUINE collision now — copying would franken-merge
                     // two develops.
@@ -1071,12 +1117,45 @@ fn adopt_files(cd: &Path, source: &Path) -> std::io::Result<()> {
         Ok(())
     };
     copy_dir(source, cd)?;
+    // SYNCHRONIZE, not overlay (review R12-02): while the marker fences the
+    // destination it has NO authority, and that includes members the source
+    // no longer has — a clear made under the still-authoritative alias
+    // between attempts must not be resurrected by a stale destination copy
+    // that the supersede below would then freeze as truth.
+    for e in std::fs::read_dir(cd)? {
+        let e = e?;
+        let name = e.file_name();
+        let name_s = name.to_string_lossy();
+        if adoption_skips(&name_s) {
+            continue;
+        }
+        let p = e.path();
+        if p.is_dir() {
+            continue; // unknown dirs stay under disclosure, as on the copy side
+        }
+        if !source.join(&name).is_file() {
+            std::fs::remove_file(&p)?;
+        }
+    }
     durable_write(&cd.join("adopted-from.txt"), format!("{}\n", source.display()).as_bytes())?;
     durable_write(
         &source.join("superseded-by.txt"),
         format!("{}\n", cd.display()).as_bytes(),
     )?;
-    let _ = std::fs::remove_file(cd.join("adopting-from.txt"));
+    // The fence must CONSUME or FAIL (the clear-marker rule, review
+    // R12-01): reporting success with the marker still on disk leaves the
+    // dir fenced — every later locked touch re-runs the (idempotent) resume
+    // and the session believes the adoption completed.
+    match std::fs::remove_file(cd.join("adopting-from.txt")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!("the finished adoption could not consume its marker ({e})"),
+            ));
+        }
+    }
     settle_consumed_marker(&cd.join("adopting-from.txt"));
     Ok(())
 }
@@ -1935,8 +2014,17 @@ pub fn recipe_revision(src: &Path) -> Option<String> {
 /// to refuse. `None` (untaggable) when either side exists but cannot be
 /// read, the same stance as [`recipe_revision`].
 pub fn develop_revision(src: &Path) -> Option<String> {
+    develop_revision_of(src, &lightroom_sidecar(src))
+}
+
+/// The tag for a sidecar ranking the CALLER already holds (review R12-04):
+/// the GET handler's body and its ETag must come from ONE sidecar read —
+/// Lightroom holds none of our locks, so a second read could describe a
+/// file the body was not built from (body A shipped under ETag B, and the
+/// client's later If-Match: B silently overwrote B with stale A).
+pub fn develop_revision_of(src: &Path, ranked: &LrSidecar) -> Option<String> {
     let base = recipe_revision(src)?;
-    match lightroom_sidecar(src) {
+    match ranked {
         LrSidecar::NewerThanStore(text) | LrSidecar::Only(text) => {
             Some(format!("{base}+lr{:016x}", fnv1a64(text.as_bytes())))
         }
@@ -4533,6 +4621,9 @@ mod tests {
         }
         std::fs::write(cd.join("adopting-from.txt"), format!("{}\n", old.display())).unwrap();
         std::fs::write(cd.join("recipe.json"), b"stale-frozen-copy").unwrap();
+        // A member the SOURCE no longer has (cleared under the alias between
+        // attempts) — synchronization must drop it (review R12-02).
+        std::fs::write(cd.join("variants.json"), b"stale-destination-only").unwrap();
         std::fs::write(old.join("recipe.json"), b"newest-under-old").unwrap();
         std::fs::write(old.join("pixels.json"), b"pixels-under-old").unwrap();
         // The CURRENT spelling holds a decoy: a resume that copies "from the
@@ -4547,6 +4638,10 @@ mod tests {
             "the resume copies from the marker's source and REPLACES the frozen half-copy"
         );
         assert_eq!(std::fs::read(cd.join("pixels.json")).unwrap(), b"pixels-under-old");
+        assert!(
+            !cd.join("variants.json").exists(),
+            "a destination-only member is REMOVED, not resurrected (sync, not overlay)"
+        );
         assert!(!cd.join("adopting-from.txt").exists(), "the finished resume consumed its marker");
         assert!(old.join("superseded-by.txt").exists(), "the true source is marked superseded");
         assert!(
@@ -4613,6 +4708,47 @@ mod tests {
         });
         assert!(out.is_err(), "a superseded dir must refuse the touch, not absorb the write");
         assert!(!ran, "no body may run against a frozen alias backup");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R12-01: the develop LOCK is the fence's authority gate — a session
+    /// that probed "no marker" before a concurrent adoption started (and
+    /// memoized it) must still finish the adoption before its locked touch
+    /// runs, instead of serving the half-copied dir.
+    #[test]
+    fn a_locked_touch_finishes_a_pending_adoption_first() {
+        let root = std::env::temp_dir().join("autoshop-store-test-fence-gate");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = std::env::temp_dir().join("autoshop-store-test-fence-gate-photos");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_fence_gate.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+
+        // The pre-adoption probe: memoizes "no marker" for this photo.
+        let ck = resolve_key_in(&root, &raw);
+        let cd = root.join("develops").join(&ck);
+        // NOW a concurrent alias session starts an adoption and crashes
+        // half-copied: marker present, member missing.
+        let old = root.join("develops").join("crashed-alias");
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("recipe.json"), b"the-real-develop").unwrap();
+        std::fs::write(cd.join("adopting-from.txt"), format!("{}\n", old.display())).unwrap();
+
+        let mut seen = None;
+        with_develop_lock_in(&root, &raw, DevelopLockMode::Wait, || {
+            seen = Some(std::fs::read(cd.join("recipe.json")).map(|b| b.to_vec()));
+            Ok::<_, std::io::Error>(())
+        })
+        .unwrap();
+        assert_eq!(
+            seen.unwrap().ok().as_deref(),
+            Some(b"the-real-develop".as_slice()),
+            "the locked body ran only AFTER the fence was resolved"
+        );
+        assert!(!cd.join("adopting-from.txt").exists(), "the gate consumed the fence");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&dir);
     }

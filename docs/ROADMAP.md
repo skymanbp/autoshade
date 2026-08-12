@@ -307,6 +307,149 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **第十二轮·阶段 6b：九批 67 条全清 + 两条移交深查闭合（2026-08-12，未发版；
+  用户令"按顺序推完"）**
+
+  16 路盲扫 184 发现的确证待修 72 条中，BA 批（前条）之外的九批 67 条 +
+  修复期深查 2 条，全部按最上游根因归并落地，十次提交（8e87e01..ca1bcdb）：
+
+  - **BB 耐久 `39634c9`**（store.rs 10 条）：adoption 簇六洞一体重做——resume
+    以 marker 记录的源为准（三拼写不再混代）、marker 在场期目的地无权威
+    （source-wins 替换复制）、规范拼写快路径每 (root,key) 一次 marker 探测并
+    续作、锁内复验预锁探测（superseded 收敛/collision 转披露臂）、枚举错传播、
+    写路径在 develop 锁内探测 superseded 标记并重解析（lexical 回退会话不再
+    整会话写进冻结备份）；commit 族三小修（cdir 父 fsync、staged 成员超
+    16MiB 恢复帽即拒存、COMMIT 标记按契约先亡）；clear 标记消费失败必须
+    Err（批 S 陷阱经失败路径复活的那半）；零字节 live=死声明（双崩窗口，
+    锁内清除后还原 .bak）。7 测，M1-M7 恰红。
+  - **BF xmp `d0e4381`**（4 条）：xmp_to_recipe 落实披露句承诺的 xmlns 门 +
+    默认命名空间（裸 xmlns=CRS/RDF）同判冲突；曲线 li 项改共享标签扫描
+    （白空拼写不再静默清曲线）；HasCrop 结构一致性入披露扫描（缺坐标/倒序
+    不再静默删裁切）；属性值 \t\n\r 改字符引用（合规解析器归一化不再改名）。
+    5 测，MF1-MF5 恰红。
+  - **BG serve `cf97685`**（5 条）：header() 强制可打印 ASCII（em dash 句与
+    本地化 IO 错误不再杀死 X-Recipe-Warning——七处动态构造收拢；控制字节
+    仍剥，防拆分不变）；store::develop_revision 把在位 LR sidecar 的内容哈希
+    折进 If-Match 标签（GET 贴章/POST 前置/三处回执同语，保存回执改写后
+    计算）；不可读 store XMP 披露并挡内嵌包；空上传 400；Analyze/Retouch/
+    Heal 的嵌套配方补 clamp（对称 DevelopReq）。2 测 +3 条 handler 级注记
+    E2E 面，MG2/MG3 恰红。
+  - **BH CLI 预检 `321a339`**（7 条一族）：L09#1"付费前预检"规则补全非输出面
+    ——produce_recipe 顶部查分析 key（缺 key 不再烧掉已付费提案，两 UI 同
+    受益）；heal 预检 mask 存在/--no-auto 语义/图像 key；reimagine/retouch
+    预检 key+封闭集值+mask；apply 预检扩展名；preflight_out 写权限探针。
+    附带：clippy 门自此含 `--bins --features gui`（抓出上一提交漏网的
+    field_reassign）。4 测，MH1-MH4 恰红。
+  - **BE 引擎 `4eca147`**（9 条归 6 改）：双 vignette 合成单 LUT 单遍（钳制
+    不再吃掉互逆校正）；三级内嵌回退 Err=让位下一级（尾错列全因）；TIFF
+    ICC 重探失败=硬错（假 sRGB 兜底正是该函数自定义的 bug）；Meta 尺寸改
+    实际交付 preview（喂 AI 与 style 特征）；退化输入拒拟合（零方差对不再
+    产被 err=0 接受的自信垃圾，FIT_DEGENERATE 双语键）；clone_stamp 补
+    preflight；分割/降噪产物验收（可解码/等尺寸/位深不降——1×1 PNG 不再能
+    发布为 master）；denoise_file 搬运 ICC（ProPhoto 不再被当 sRGB 读）。
+    字体子集重生成 786→790。7 测，ME1-ME7 恰红。
+  - **BI 生成几何 `7d8bc88`**（5 条）：call_images_edit 改按尝试尺寸重建输入
+    （enum 回退不再把圆拉成椭圆；计费不变量测试仍绿）；feather 改按选区
+    包围盒定标（帧规则保留为上限）；合成 alpha 随权重混合（透明底不再长
+    不透明光晕）；clone 供体出界丢弃不复制边缘；strength=0 恒等提前返回。
+    5 测，MI1-MI5 恰红。
+  - **BD 导出 `58b18f4`**（3 条）：另存对话框扩展名跟随格式下拉（同容器
+    拼写保留）；Single 导出 relook 回修画布并 dirty（导出与预览不再整会话
+    分歧）；GUI panic 钩→store 根 panic.log + user32 MessageBoxW（窗口化
+    构建的 panic 不再无声消失）。1 测，MD1 恰红。
+  - **BC GUI `126c27f`**（19 条三族）：门/几何——clear_mask 连清烘焙灰度
+    （"清除后 Apply 仍提交"闭）、Full-res 复选框撤 RAW 门（denoise/clone，
+    引擎早已尊重烘焙源）、develop 面板中开窗口冻结（open_in_flight 非
+    busy）、Hue/Angle 滑杆端点让出规范化奇点（拖到头不再瞬移）、活动卡
+    chrome 令牌化、crop_mode 翻转重基 pan、深缩放撤 4× 帽（画布不再反缩）、
+    区域重绘 from_two_pos、变换键携双 profile 开关、to_norm 亚点下限对齐
+    to_screen；状态——switch_variant 先 commit 重命名、切换清 after_tex 与
+    1:1 缓存、烘焙 master 解码失败落 toast（Opened 元组携带、不入缓存）、
+    open_path busy 臂可见拒绝、Save-all 补 pixels_on_disk 镜像；worker——
+    MasterLoaded 携带 spawn 时 edge+stamp（旧注释论证方向颠倒：完成时取戳
+    是假命中不是 miss）、重绘泵门移到 update() 末尾（首批 worker 不再无泵）、
+    取消后迟到成功的 ./out 孤儿删除。6 测，MC1-MC6 恰红。
+  - **BJ 接缝 `1e5cf67`**（9 条）：resolve_snapshot_develop 补齐 open 路径的
+    披露（warns 通道上 Batch 回执双臂，中英对）；HSL_BANDS 改导入（i18n
+    审计登记随迁）；导出格式线号字面钉死；export_opts 全旋钮测试；zoom
+    滑翔抽 apply_zoom_glide 接缝；快捷键排他门首个阴性测试（附阳性对照；
+    变异第一次打错层被抓——工具层有自己的门）；resync 走真实换源路径
+    （load_version）测试；L16-13 注记（四启动点共用已测 canvas_edge，一行
+    调用面）。5 测，MJ1-MJ5 恰红（MJ4 重瞄真门）。
+  - **深查闭合 `ca1bcdb`**（L08-5/L08-6）：verdict 恢复臂"歧义即拒"——同一
+    回复出现两个**不同**verdict 形对象即拒（last-wins 可被回显注入翻案，
+    first-wins 只是换边；逐字重复仍收）；阻塞 verify 查 finish_reason
+    （length/content_filter 截断响应不再靠 serde default 凑成合法 Accept；
+    缺席仍放行旧桥）。2 测，MDX1/MDX2 恰红。
+
+  纪律与门：每批变异亲证（改回缺陷→恰红本批新测试）+ 五门（clippy 0 含
+  GUI bin/等集 comm 只增/i18n 九门/字体 790/密钥+路径扫描）+ 单独提交。
+  累计等集 +44/−0（384→414 lib、59→71 GUI、5→7 CLI）。**E2E 第十二轮
+  26/26 真进程通过**（十一轮 18 项回归 + 本轮 8 项：heal/apply/reimagine
+  预检拒绝、serve 空上传 400、xmlns 冲突警告头带 em dash 端到端幸存、GUI
+  真机启动+截图+优雅关窗+沙箱 prefs）。E2E 沙箱剥离全部 AI key——任何
+  回归都撞预检断言而不是计费。
+  注记残留：L02-7/9/11/13 无故障注入不可变异测（机理注释在场）；BG 三条
+  handler 级由 E2E 面覆盖；L16-13 一行调用面注记。
+
+  **Codex xhigh 只读复审闭合（同日，gpt-5.6-sol --background 回执 13 发现
+  =6H/6M/1L，逐条对源码亲证后 11 采纳实修 + 2 有据登记，一次提交）**：
+
+  - **R12-08（HIGH，计费）采纳**：SSE 结构化错误臂在 2xx 后重投，而
+    `read_sse_image` 的 partial 计数在错误路径被丢弃——partial 帧证明生成已
+    在计费。修=计数编进错误**前缀**（"image stream error after N
+    partial(s):"），既有"前缀必需=计费安全"规则自动拒绝 post-partial 重协商；
+    零 partial 的即时拒绝（第八轮实测存在）保留可协商。复审对 BI 的
+    input-provider 重构本体判无独立缺陷。
+  - **R12-12（HIGH）采纳**：Verdict 容忍未知字段，直接解析成功时嵌套的
+    不同 verdict 形对象绕过歧义拒绝——`{"decision":"accept","echo":
+    {"decision":"reject"}}` 曾判干净 Accept。修=解析成功后深度受限遍历全部
+    后代对象，任一解析为**不同** Verdict 即拒（逐字回显仍收）。
+  - **R12-13（MEDIUM）半采纳**：`tool_calls` 从可接受终态中移除（它宣告的
+    是下一步工具请求，旁边的 content 是半成品）；**缺席 finish_reason 放行
+    =有据登记**（旧桥兼容，代码注释在案，复审自己也注明 admitted）。
+  - **R12-01（HIGH）采纳**：adoption 围栏只有 memo 化探测，权威门（develop
+    锁）只查 superseded——并发采纳开始前探测过的会话被 memo 永久放行。修=
+    锁内加 `adopting-from.txt` 围栏检查（锁外续作后重试；失败即拒触碰），
+    memo 降级为纯优化（文档明示）；adopt_files 的 marker 消费失败改 Err
+    （clear 标记同规）。
+  - **R12-02（MEDIUM）采纳**：source-wins 是覆盖不是同步——目的地独有成员
+    不删，别名会话在两次尝试间清掉的 recipe 会被复活并随 supersede 冻结为
+    真相。修=拷贝后同步清除源中不存在的非机械成员文件；`contentful` 的枚举
+    错误不再折叠成"空"（NotFound 才是空；预锁臂披露退 lexical，锁内臂传播）。
+  - **R12-04（HIGH）采纳**：GET 的 body 与 ETag 来自两次独立 sidecar 读，
+    Lightroom 不持我们的锁——body A 可顶着 ETag B 发出，随后 If-Match: B
+    静默覆盖 B。修=`develop_revision_of(src, &ranked)`：migrate 后**一次**
+    `lightroom_sidecar` 读同时喂 body 与贴章。残留登记：POST 前置条件之后、
+    write_xmp 之前的 LR 换档窗口——与 Lightroom 无共同锁，固有。
+  - **R12-05（MEDIUM）采纳**：`xmp_warn` 累积后，有效 recipe.json 的两个
+    返回臂与 422 终态臂都不附带——"sidecar 不可读"恰在 store 有答案时消失。
+    修=全部返回形状统一附带。
+  - **R12-06（HIGH）采纳**：预检族三缺口——batch 在 `produce_recipe`（付费）
+    之后才 ensure_parent（修=循环前对首个已认领名跑全预检）；heal 只查
+    mask 存在不查可解码（修=预检改 `open_mask_bounded` 有界解码）；
+    `preflight_out` 只证目录可写不证既有目标文件可替换（修=存在即开写探测）。
+  - **R12-07（HIGH）采纳**：denoise 验收只看头——截断 IDAT 过检；
+    位/通道折叠使 RGB16 顶替 RGBA16（alpha 消灭）；ICC 补挂在发布**之后**，
+    失败留下未标注成品顶着错误返回。修=验收**全解码**+等尺寸+通道数不降+
+    位深不降，解码像素复用给 ICC 重编码，ICC 落在 staged 文件上、发布仅一次。
+  - **R12-09（MEDIUM）采纳**：直通道 RGB 与 alpha 独立混合——1% 权重白色
+    盖透明黑得 (3,3,3,3)，下游合成近黑边缘。修=预乘 source-over（生成侧
+    不透明故除法安全；不透明底数学上退化为旧行为，正常照片零变化）。
+  - **R12-10（LOW）采纳**：panic 钩不建目录不查写入结果却宣称"报告已写入"。
+    修=create_dir_all+按写入结果分文案。
+  - **R12-11（MEDIUM）采纳**：`xmp_arm` 在 no-op 导入时提前返回丢掉坏数字
+    披露（persist 规则是 consulted 即披露——Codex 32-#1 同源），且从不调
+    `unsupported_corrections`。修=两披露前移/补齐。
+  - **R12-03（MEDIUM）登记**：xmlns 冲突门无作用域栈，嵌套局部重绑触发全文
+    拒绝。按门自身文档这是有意保守面（拒+披露+无已知生产者触发）；作用域化
+    命名空间解析=独立硬化项，登记。
+
+  6 新测试 + 变异轮 MR1-MR7 恰红 9 条（MR5 覆盖 3 条 denoise 验收，预期
+  集合内）；E2E 26/26 重跑全过（heal 预检文案随解码检查更新）。终态
+  420 lib + 71 GUI + 7 CLI；累计等集 +52/−0；全门绿。ARCHITECTURE 的
+  If-Match 段改述 develop_revision 折叠语义。
+
 - **第十二轮·阶段 6 批 BA：配置信任面重构 + 推理等级 + 动态模型检测
   （2026-08-11，未发版）**
 

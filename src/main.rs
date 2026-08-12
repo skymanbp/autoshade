@@ -960,13 +960,14 @@ fn heal_cmd(
     // Every certain failure refuses before the paid call and the decode —
     // the same shape analyze_cmd/auto_cmd already have.
     pipeline::preflight_out(&out, src)?; // includes the read-only-library guard
-    if let Some(m) = &mask
-        && !m.is_file()
-    {
-        anyhow::bail!(
-            "--mask {} does not exist — checked before the paid auto-detect",
-            m.display()
-        );
+    // DECODED, not merely present (review R12-06): a corrupt mask billed
+    // the auto-detect and then died at its own deterministic read. The mask
+    // will be decoded anyway; paying its bounded decode up front converts a
+    // certain post-pay failure into a free refusal.
+    if let Some(m) = &mask {
+        autoshop::render::open_mask_bounded(m).with_context(|| {
+            format!("--mask {} cannot be used — checked before the paid auto-detect", m.display())
+        })?;
     }
     if no_auto && mask.is_none() {
         anyhow::bail!("--no-auto heals only a painted mask, and no --mask was given — nothing to do");
@@ -1024,10 +1025,20 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
     // deviations BEFORE the batch runs instead of after a file was destroyed.
     let outs: Vec<Option<PathBuf>> = {
         let mut names = autoshop::pipeline::BatchNames::default();
-        let outs = work
+        let outs: Vec<Option<PathBuf>> = work
             .iter()
             .map(|r| if render { Some(names.claim(r, "developed", "tif")) } else { None })
             .collect();
+    // The paid loop must not start against an unusable ./out (review
+    // R12-06): ensure_parent used to run per photo AFTER produce_recipe,
+    // and its failure threw the billed analysis away. One full preflight of
+    // the first claimed name covers the shared parent for the whole run.
+    if let (Some(first_out), Some(first_raw)) =
+        (outs.iter().flatten().next(), pending.first())
+    {
+        pipeline::preflight_out(first_out, first_raw)?;
+    }
+
         for line in &names.renamed {
             println!("  same-name RAW keeps a separate deliverable: {line}");
         }
@@ -1278,7 +1289,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(e.contains("--mask") && e.contains("does not exist"), "{e}");
+        assert!(e.contains("--mask") && e.contains("cannot be used"), "{e}");
 
         let e = heal_cmd(&src, None, true, false, Some(root.join("exports").join("h2.png")))
             .unwrap_err()

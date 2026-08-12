@@ -557,13 +557,31 @@ fn composite_in_place(out: &mut RgbaImage, gen_img: &RgbImage, weight: &[f32]) {
             }
             let b = *out.get_pixel(x, y);
             let g = gen_img.get_pixel(x, y);
-            let mix =
-                |bc: u8, gc: u8| (bc as f32 * (1.0 - a) + gc as f32 * a).round().clamp(0.0, 255.0) as u8;
-            // Alpha blends like the colour channels (generated content is
-            // opaque): forcing 255 turned every TOUCHED pixel opaque, so a
-            // 1%-weight feathered edge on a transparent PNG base grew an
-            // opaque halo around the mask (L09-5).
-            out.put_pixel(x, y, Rgba([mix(b[0], g[0]), mix(b[1], g[1]), mix(b[2], g[2]), mix(b[3], 255)]));
+            // PREMULTIPLIED source-over (L09-5 + review R12-09): blending
+            // straight RGB and alpha independently made a 1%-weight white
+            // edge over a TRANSPARENT base come out (3,3,3,3) — nearly
+            // black once composited downstream; the correct straight
+            // result is (255,255,255,3). Generated content is opaque, so
+            // the source term needs no unpremultiply, and out_a >= a > 0
+            // here, so the division is safe. An OPAQUE base (ab = 1)
+            // reduces to the old linear mix exactly — no rendering change
+            // on normal photos.
+            let ab = b[3] as f32 / 255.0;
+            let out_a = a + (1.0 - a) * ab;
+            let mix = |bc: u8, gc: u8| {
+                let premul = a * gc as f32 + (1.0 - a) * bc as f32 * ab;
+                (premul / out_a).round().clamp(0.0, 255.0) as u8
+            };
+            out.put_pixel(
+                x,
+                y,
+                Rgba([
+                    mix(b[0], g[0]),
+                    mix(b[1], g[1]),
+                    mix(b[2], g[2]),
+                    (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+                ]),
+            );
         }
     }
 }
@@ -899,9 +917,14 @@ fn call_images_edit(
                         // the other (`/api/retouch` died on `Invalid size
                         // '2048x1360'` while the blocking path would have
                         // retried at 1536x1024). A structured VALIDATION
-                        // refusal means the generation never started, so a
-                        // re-post cannot double-bill. Same knobs, same
-                        // one-shot flags as the 400 arm.
+                        // refusal that arrived BEFORE ANY PARTIAL FRAME
+                        // means the generation never started, so a re-post
+                        // cannot double-bill — and only that spelling
+                        // matches the prefix (review R12-08: an error AFTER
+                        // a partial reads "image stream error after N
+                        // partial(s):", which the prefix rule rejects, so
+                        // billable work is never re-POSTed). Same knobs,
+                        // same one-shot flags as the 400 arm.
                         if use_flexible && streamed_refusal_blames(&top, "size") {
                             eprintln!(
                                 "  note: {} rejected flexible size {size} in-stream — \
@@ -1064,8 +1087,9 @@ fn extract_b64(value: &serde_json::Value) -> Option<&str> {
 /// (`advisor::error_blames_param`): a structured `error.param` wins, and only
 /// a QUOTED mention counts as a fallback — a message merely containing a
 /// common word like "size" is not a capability signal. Only messages carrying
-/// the exact prefix qualify; read/parse failures (which may follow a billed
-/// generation) never negotiate.
+/// the exact prefix qualify; read/parse failures AND post-partial stream
+/// errors ("image stream error after N partial(s):", review R12-08) never
+/// negotiate — both may follow a billed generation.
 fn streamed_refusal_blames(top: &str, param: &str) -> bool {
     top.strip_prefix("image stream error: ")
         .is_some_and(|payload| crate::advisor::error_blames_param(payload, param))
@@ -1114,6 +1138,15 @@ fn read_sse_image(
         return Err(anyhow!("cancelled by user"));
     }
     if let Some(f) = failure {
+        // The partial count decides negotiability (review R12-08): a partial
+        // frame proves the generation was ALIVE — and billable — before the
+        // error, so the caller must never re-POST then. Encoding the count
+        // into the message PREFIX makes the existing prefix rule do the
+        // gating: `streamed_refusal_blames` only matches the exact
+        // zero-partial spelling ("prefix required = billing safety").
+        if partials > 0 {
+            return Err(anyhow!("image stream error after {partials} partial(s): {f}"));
+        }
         return Err(anyhow!("image stream error: {f}"));
     }
     completed.ok_or_else(|| {
@@ -1458,6 +1491,37 @@ mod tests {
         (url, seen, handle)
     }
 
+    /// R12-08: a streamed refusal that arrives AFTER a partial frame is
+    /// TERMINAL — the partial proves billable generation, and the message
+    /// prefix is what carries that fact into the negotiation gate.
+    #[test]
+    fn a_streamed_refusal_after_a_partial_never_renegotiates() {
+        let refusal = r#"{"type":"error","error":{"param":"size","message":"Invalid size"}}"#;
+        assert!(
+            streamed_refusal_blames(&format!("image stream error: {refusal}"), "size"),
+            "the zero-partial spelling still negotiates"
+        );
+        assert!(
+            !streamed_refusal_blames(
+                &format!("image stream error after 2 partial(s): {refusal}"),
+                "size"
+            ),
+            "a post-partial refusal must never re-POST"
+        );
+
+        // And read_sse_image really emits the post-partial spelling.
+        let sse = concat!(
+            "data: {\"type\":\"image_edit.partial_image\",\"b64_json\":\"eA==\"}\n\n",
+            "data: {\"type\":\"error\",\"error\":{\"param\":\"size\",\"message\":\"Invalid size\"}}\n\n",
+        );
+        let e = read_sse_image(std::io::Cursor::new(sse.as_bytes().to_vec()), None)
+            .expect_err("the error event fails the stream");
+        assert!(
+            e.to_string().starts_with("image stream error after 1 partial(s):"),
+            "{e}"
+        );
+    }
+
     /// L09-2: the enum retry rebuilds its input AT the enum size — sending
     /// the flexible-ratio pixels under an enum size request is how circles
     /// came back as ellipses. Counted over a real loopback transport.
@@ -1548,6 +1612,13 @@ mod tests {
         let gen_img = RgbImage::from_pixel(2, 1, image::Rgb([255, 255, 255]));
         composite_in_place(&mut out, &gen_img, &[0.01, 1.0]);
         assert!(out.get_pixel(0, 0)[3] <= 5, "1% weight ≈ transparent: {:?}", out.get_pixel(0, 0));
+        // R12-09: STRAIGHT colour survives — independent RGB/alpha mixing
+        // gave (3,3,3,3), a dark fringe once composited downstream.
+        assert!(
+            out.get_pixel(0, 0)[0] >= 250,
+            "straight RGB stays the generated colour: {:?}",
+            out.get_pixel(0, 0)
+        );
         assert_eq!(out.get_pixel(1, 0)[3], 255, "full weight is opaque");
     }
 

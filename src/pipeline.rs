@@ -1812,6 +1812,19 @@ pub fn preflight_out(out: &Path, src: &Path) -> Result<()> {
         );
     }
     ensure_parent(out)?;
+    // An EXISTING destination must itself be replaceable (review R12-06):
+    // the sibling probe below proves the DIRECTORY writes, not that a
+    // read-only file already sitting at the name can be replaced. The GUI's
+    // unique_out claims are its own 0-byte files, so this stays a no-op
+    // there.
+    if out.is_file()
+        && let Err(e) = std::fs::OpenOptions::new().write(true).open(out)
+    {
+        anyhow::bail!(
+            "output file {} exists and is not writable ({e}) — checked before the paid call",
+            out.display()
+        );
+    }
     // An EXISTING parent never proved it was writable (L10-7): an ACL-denied
     // export dir used to surface only after the paid call. Probe with a
     // uniquely-named sibling (pid + process-wide seq — the sibling_tmp rule),

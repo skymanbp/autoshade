@@ -115,8 +115,10 @@ impl Advisor for OpenAiVerifier {
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("finish_reason"))
             .and_then(Value::as_str);
+        // "tool_calls" is NOT terminal either (review R12-13): it announces
+        // a requested tool step, so any content beside it is preliminary.
         if let Some(f) = finish
-            && !matches!(f, "stop" | "tool_calls")
+            && f != "stop"
         {
             return Err(AdvisorError::ModelFailure(format!(
                 "the verifier's reply was cut off (finish_reason {f:?}) — a truncated verdict \
@@ -182,6 +184,25 @@ mod tests {
     /// ONE verification is ONE negotiation, even though it is negotiated at
     /// two levels: the temperature pin here, every other knob inside
     /// `post_ai_json`. When the capability knowledge lived only inside that
+    /// R12-13: finish_reason "tool_calls" is a requested next step, not a
+    /// finished judgement — content beside it must not verify.
+    #[test]
+    fn a_tool_call_reply_is_not_a_verdict() {
+        const TOOLY: &str = r#"{"choices":[{"finish_reason":"tool_calls","message":{"content":"{\"decision\":\"accept\",\"reasons\":[]}"}}]}"#;
+        let (url, _seen, handle) = stub_endpoint(vec![(200, "application/json", TOOLY.into())]);
+        let verifier = OpenAiVerifier {
+            api_key: Some("test-key".into()),
+            model: "m".into(),
+            base_url: url,
+            effort: None,
+        };
+        let e = verifier
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .expect_err("finish_reason=tool_calls refuses");
+        assert!(format!("{e}").contains("cut off"), "{e}");
+        join_stub(handle);
+    }
+
     /// L08-6: a reply the endpoint itself marks truncated must not verify,
     /// however clean the recovered JSON looks.
     #[test]

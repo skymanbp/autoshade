@@ -57,13 +57,27 @@ use app::*;
 fn install_panic_reporter() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let log = autoshop::store::store_root().join("panic.log");
-        let _ = std::fs::write(&log, format!("Autoshop crashed: {info}\n").as_bytes());
+        // The claim must match the outcome (review R12-10): on a first
+        // launch the store root may not exist yet, and a failed write must
+        // not direct the user at a report that is not there.
+        let root = autoshop::store::store_root();
+        let _ = std::fs::create_dir_all(&root);
+        let log = root.join("panic.log");
+        let wrote = std::fs::write(&log, format!("Autoshop crashed: {info}\n").as_bytes()).is_ok();
         #[cfg(windows)]
-        message_box(&format!(
-            "Autoshop hit an internal error and must close.\n\n{info}\n\nA report was written to:\n{}",
-            log.display()
-        ));
+        message_box(&if wrote {
+            format!(
+                "Autoshop hit an internal error and must close.\n\n{info}\n\nA report was written to:\n{}",
+                log.display()
+            )
+        } else {
+            format!(
+                "Autoshop hit an internal error and must close.\n\n{info}\n\n(a report could NOT be written to {})",
+                log.display()
+            )
+        });
+        #[cfg(not(windows))]
+        let _ = wrote;
         default(info);
     }));
 }

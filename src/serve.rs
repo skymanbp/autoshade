@@ -905,19 +905,23 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         &raw,
         crate::store::DevelopLockMode::Wait,
         || {
-            // The tag is computed AFTER the locked read: migrate_legacy and
-            // the .bak recovery inside can themselves (re)write recipe.json,
-            // and the tag must name what this answer was built from. ONE
-            // stamping site covers all six answer shapes.
-            let resp = api_recipe_locked(&raw)?;
-            Ok(with_revision(resp, crate::store::develop_revision(&raw).as_deref()))
+            // One-time, per-photo migration FIRST (it can rewrite
+            // recipe.json), then ONE sidecar read feeds BOTH the body and
+            // the tag (review R12-04): Lightroom holds none of our locks,
+            // so a second read inside develop_revision could rank a file
+            // the body was not built from — body A under ETag B, and the
+            // client's later If-Match: B overwrote B with stale A.
+            crate::store::migrate_legacy(&raw);
+            let ranked = crate::store::lightroom_sidecar(&raw);
+            let resp = api_recipe_locked(&raw, &ranked)?;
+            Ok(with_revision(
+                resp,
+                crate::store::develop_revision_of(&raw, &ranked).as_deref(),
+            ))
         },
     );
 
-    fn api_recipe_locked(raw: &Path) -> Result<ResponseBox> {
-    // One-time, per-photo migration of pre-store ./out sidecars into the
-    // central develop dir (no-op when nothing legacy remains).
-    crate::store::migrate_legacy(raw);
+    fn api_recipe_locked(raw: &Path, ranked: &crate::store::LrSidecar) -> Result<ResponseBox> {
     // The sidecar BESIDE the RAW is the one file Lightroom itself writes —
     // newest intent wins, the same contract as the GUI's read_saved_develop
     // (store::lightroom_sidecar: our own copied projection is skipped, ties
@@ -929,10 +933,10 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // next save then overwrites it. The warning rides every answer below,
     // the 404 "not analyzed yet" included.
     let mut xmp_warn: Option<Header> = None;
-    match crate::store::lightroom_sidecar(raw) {
+    match ranked {
         crate::store::LrSidecar::NewerThanStore(text) | crate::store::LrSidecar::Only(text) => {
-            let mut r = crate::xmp::xmp_to_recipe(&text);
-            xmp_warn = recipe_warning_header(&text);
+            let mut r = crate::xmp::xmp_to_recipe(text);
+            xmp_warn = recipe_warning_header(text);
             if !r.is_noop() {
                 r.clamp();
                 // Same stamp rule as the XMP fallback below: Lightroom tuned
@@ -1046,9 +1050,20 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             if let Some(h) = header("X-Recipe-Warning", &note) {
                 resp.add_header(h);
             }
+            // The accumulated sidecar warning rides EVERY answer shape
+            // (review R12-05): the valid-recipe returns used to drop it,
+            // so "the Lightroom sidecar could not be read" vanished exactly
+            // when a store recipe answered.
+            if let Some(w) = xmp_warn.take() {
+                resp = resp.with_header(w);
+            }
             return Ok(resp);
         }
-        return Ok(json_text(text));
+        let mut resp = json_text(text.clone());
+        if let Some(w) = xmp_warn.take() {
+            resp = resp.with_header(w);
+        }
+        return Ok(resp);
     }
     // No recipe.json → fall back to the XMP sidecar, exactly like the GUI's
     // `read_saved_develop`: a foreign / neutral sidecar parses to a no-op recipe,
@@ -1198,7 +1213,12 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
     // A damaged recipe.json with nothing else to fall back on is an ERROR, not
     // "no recipe yet" — say so, or the UI silently pretends the photo is unedited.
     if let Some(err) = parse_err {
-        return Ok(status_response(422, &format!("recipe.json is unreadable: {err}")));
+        let mut resp = status_response(422, &format!("recipe.json is unreadable: {err}"));
+        // Same rule on the terminal error shape (review R12-05).
+        if let Some(w) = xmp_warn.take() {
+            resp = resp.with_header(w);
+        }
+        return Ok(resp);
     }
     // Still 404 ("not analyzed yet" drives the client's fresh-open UI state),
     // but the body carries the photo's camera-matched base look so the fresh

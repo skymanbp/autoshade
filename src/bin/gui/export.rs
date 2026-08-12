@@ -92,9 +92,10 @@ fn xmp_arm(
     warns: &mut Vec<String>,
 ) -> Option<(EditRecipe, &'static str)> {
     let mut r = autoshop::xmp::xmp_to_recipe(text);
-    if r.is_noop() {
-        return None;
-    }
+    // Collected for EVERY consulted file — a no-op import included (the
+    // persist.rs rule, Codex 32-#1 + review R12-11): a sidecar whose ONLY
+    // edit is corrupt restores nothing, and the next save overwrites it in
+    // silence unless the corruption is named here.
     let bad = autoshop::xmp::unparsable_crs_numbers(text);
     if !bad.is_empty() {
         warns.push(format!(
@@ -102,6 +103,17 @@ fn xmp_arm(
             bad.len(),
             bad.join(", ")
         ));
+    }
+    // …and the open path's second disclosure too (review R12-11): foreign
+    // corrections the import cannot model are retained-but-not-applied.
+    let dropped_masks = autoshop::xmp::unsupported_corrections(text);
+    if dropped_masks > 0 {
+        warns.push(format!(
+            "{dropped_masks} unsupported Lightroom correction(s) not applied"
+        ));
+    }
+    if r.is_noop() {
+        return None;
     }
     clamp_disclosed(&mut r, warns);
     let knots = autoshop::pipeline::photo_base_knots(p);
