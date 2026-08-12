@@ -513,6 +513,16 @@ impl AutoshopApp {
                 }
             });
         }
+        // The icon's fine print (round-13 easter egg).
+        ui.add_space(SPACE_SM);
+        ui.label(
+            egui::RichText::new(tr(
+                lang,
+                "skymanbp's AS — the “As” stands for Autoshop, not an Adobe subscription. Rent paid to date: $0.00.",
+            ))
+            .weak()
+            .small(),
+        );
         if do_save {
             self.save_settings_form();
         }

@@ -1078,6 +1078,18 @@ impl AutoshopApp {
                                 .weak()
                                 .small(),
                             );
+                            ui.add_space(SPACE_MD);
+                            // Round-13 easter egg — quiet enough to miss,
+                            // which is the point of an easter egg.
+                            ui.label(
+                                egui::RichText::new(tr(
+                                    self.lang,
+                                    "Fun fact: this empty state finished loading while Photoshop's splash screen would still be painting its clouds.",
+                                ))
+                                .weak()
+                                .small()
+                                .italics(),
+                            );
                         });
                     }
                 });
@@ -1280,6 +1292,16 @@ impl AutoshopApp {
                             },
                         );
                     });
+                    ui.add_space(SPACE_SM);
+                    // Round-13 easter egg: the pricing model, disclosed.
+                    ui.label(
+                        egui::RichText::new(tr(
+                            lang,
+                            "Every shortcut above ships free — no Creative tier, no Cloud, no monthly ransom.",
+                        ))
+                        .weak()
+                        .small(),
+                    );
                 });
             if !open {
                 self.show_shortcuts = false;

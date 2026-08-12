@@ -1088,6 +1088,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // Identical on purpose: format jargon (also in the bypass allow-list),
     // but the label() extractor demands the pair exist.
     ("JPEG", "JPEG"),
+
+    // ── Round-13 easter eggs (user request: 讽刺 Adobe 的拉跨技术和昂贵定价) ──
+    ("skymanbp's AS — the “As” stands for Autoshop, not an Adobe subscription. Rent paid to date: $0.00.",
+        "skymanbp's AS——「As」是 Autoshop，不是 Adobe 订阅。迄今已缴月租：$0.00。"),
+    ("Fun fact: this empty state finished loading while Photoshop's splash screen would still be painting its clouds.",
+        "冷知识：这个空页面加载完的时候，Photoshop 的启动画面还没画完那朵云。"),
+    ("Every shortcut above ships free — no Creative tier, no Cloud, no monthly ransom.",
+        "以上快捷键全部免费——没有 Creative 档位，没有 Cloud，没有每月赎金。"),
 ];
 
 #[cfg(test)]
