@@ -95,10 +95,31 @@
 >   source is `Trusted` (the live environment; the settings file under a
 >   per-user store root), `DotEnv`, or `WorkingDirFile`. One match states the
 >   whole policy: `Trusted` may supply anything, a `.env` loses only
->   `Destination`, an ambient file keeps only `Preference`. Everything else —
->   which `.env` names are refused, which settings-file fields an ambient file
->   loses, what reaches a child process's environment, which warnings fire —
->   is derived from that table.
+>   `Destination`, an ambient file keeps only `Preference`. Which `.env` names
+>   are refused, which settings-file fields an ambient file loses, and which
+>   warnings fire are all derived from that table.
+>
+>   **A child process's environment is the one thing NOT derived from it**, and
+>   that distinction is the point. `Trust` classifies Autoshop's own settings —
+>   a CLOSED set, where "not in the table" means "not a setting of ours", so
+>   defaulting an unlisted name to `Preference` is safe. A child's environment
+>   is an OPEN set, where "not in the table" includes every loader and
+>   interpreter hook the platform defines. Reusing one predicate for both
+>   answered the second question with the first one's default, and a photo
+>   pack's `.env` saying `LD_PRELOAD=./evil.so` rode into both Python sidecars
+>   — `ld.so` acts before `-E`, which only filters `PYTHON*`, has any say.
+>   (Pre-existing; the 17-name denylist this table replaced did not list it
+>   either. Codex named the shared cause during the v0.23.2 review.)
+>   `config::CHILD_ENV_PASSTHROUGH` is therefore an ALLOWLIST, admitting only
+>   names that select COMPUTE BEHAVIOUR — no path, no endpoint, no credential,
+>   nothing that loads code — which deliberately excludes the cache knobs
+>   (`HF_HOME`, `TORCH_HOME`: a redirected cache is a poisoned-model path, the
+>   same reason `AUTOSHOP_DENOISE_CACHE` is `Destination`) and the proxy
+>   variables (a proxy decides where bytes go). The reach this costs is small
+>   and recoverable: a child INHERITS the parent's environment — nothing calls
+>   `env_clear` — so a user's own `HF_HOME` or `HTTPS_PROXY` still arrives
+>   untouched. Only a `.env`'s attempt to add or override one is refused, and
+>   it says so.
 >
 >   It replaced three hand-kept lists that had provably drifted: the guard's
 >   own test carried a copied 14-name array while the constant had grown to

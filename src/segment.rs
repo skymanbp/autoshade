@@ -52,13 +52,14 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
     // `exists()` guard here never fired for them.
     let before = crate::artifact_state(output);
     let mut cmd = Command::new(&opts.python_bin);
-    // The .env's unprotected names travel to the child EXPLICITLY
-    // (L16#3): under dotenv_override they sat in the process environment
-    // and this child inherited them (HF_HOME / CUDA_VISIBLE_DEVICES /
-    // proxies); the owned map never writes the parent, so the reach is
-    // reproduced on the child's own block. Protected names (incl.
-    // PYTHON*) are filtered by dotenv_child_env, and `-E` below is the
-    // second layer.
+    // What a `.env` may push at this child is an ALLOWLIST, not "everything
+    // the capability table did not refuse" — see `config::dotenv_child_env`.
+    // Compute knobs (CUDA_VISIBLE_DEVICES, thread counts) pass; anything that
+    // names a path, a host, a credential or a library to load does not, which
+    // is what stops a photo pack's `.env` from handing this process
+    // LD_PRELOAD. The user's OWN environment is unaffected: nothing calls
+    // env_clear, so the child still inherits it. `-E` below is the second
+    // layer for PYTHON* specifically.
     cmd.envs(crate::config::dotenv_child_env());
     // `-E`: ignore PYTHON* environment variables — same import-hijack
     // guard as the denoise sidecar (config.rs protects them too).

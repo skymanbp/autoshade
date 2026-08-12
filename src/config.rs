@@ -712,19 +712,82 @@ pub(crate) fn resolve_env(name: &str) -> Option<String> {
     .filter(|s| !s.trim().is_empty())
 }
 
-/// The `.env`'s UNPROTECTED entries, for a CHILD process's environment
-/// block. Under dotenv_override these names sat in the process
-/// environment and every child inherited them (third-party knobs like
-/// HF_HOME / CUDA_VISIBLE_DEVICES / proxy variables); the owned map keeps
-/// exactly that reach — `Command::envs` writes the CHILD's block, never
-/// the parent's — while the protected 17 are filtered precisely as the
-/// old restore loop kept them out of the parent.
+/// Foreign environment names a `.env` may push INTO a child process.
+///
+/// An ALLOWLIST, and it has to be one. [`Trust`] classifies AUTOSHOP's own
+/// settings — a CLOSED set, where "not in the table" means "not a setting of
+/// ours", so defaulting to `Preference` is safe. A child's environment is an
+/// OPEN set, where "not in the table" includes every loader and interpreter
+/// hook the platform defines. Reusing the same predicate for both answered the
+/// second question with the first one's default: a photo pack's `.env` saying
+/// `LD_PRELOAD=./evil.so` rode into both Python sidecars, and `ld.so` loads
+/// that library before `-E` — which only filters `PYTHON*` — has any say.
+/// (Pre-existing: the 17-name denylist this table replaced did not list it
+/// either. Codex R12-BA #2 named the shared cause.)
+///
+/// Enumerating `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`,
+/// `NODE_OPTIONS`, `GCONV_PATH` … is enumerating the attacker's options. This
+/// list enumerates OURS, and the membership rule is the same three-way test
+/// the table uses: a name qualifies only if it selects COMPUTE BEHAVIOUR —
+/// no path, no endpoint, no credential, nothing that loads code. That
+/// deliberately excludes the cache knobs the old comment advertised
+/// (`HF_HOME`, `TORCH_HOME`): a redirected cache is a poisoned-model path,
+/// which is exactly why `AUTOSHOP_DENOISE_CACHE` is `Destination`. It equally
+/// excludes the proxy variables: a proxy decides where bytes go.
+///
+/// The reach this costs is small and recoverable, because a child INHERITS the
+/// parent's environment (nothing here calls `env_clear`): a user's own
+/// `HF_HOME` or `HTTPS_PROXY` still reaches the sidecars untouched. Only a
+/// `.env`'s attempt to ADD or OVERRIDE one is refused — and refused out loud.
+const CHILD_ENV_PASSTHROUGH: &[&str] = &[
+    // torch / CUDA device selection and allocator tuning. Numbers and device
+    // indices; no filesystem path, no host.
+    "CUDA_VISIBLE_DEVICES",
+    "CUDA_DEVICE_ORDER",
+    "PYTORCH_CUDA_ALLOC_CONF",
+    // Thread-count knobs every BLAS/OpenMP stack under torch reads.
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "TOKENIZERS_PARALLELISM",
+    // Booleans that only say "do not go online" — strictly more restrictive
+    // than the default, and they name nothing.
+    "HF_HUB_OFFLINE",
+    "TRANSFORMERS_OFFLINE",
+];
+
+/// The `.env` entries a CHILD process may receive.
+///
+/// Under `dotenv_override` these names sat in the process environment and
+/// every child inherited them; the owned map reproduces that reach on the
+/// child's own block (`Command::envs` writes the CHILD's block, never the
+/// parent's) — but only for [`CHILD_ENV_PASSTHROUGH`]. Everything else the
+/// `.env` names is dropped, with one warning naming what was dropped: a
+/// silently-ignored knob is the failure mode that made the old pass-through
+/// feel harmless.
 pub fn dotenv_child_env() -> Vec<(String, String)> {
-    dotenv_map()
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let map = dotenv_map();
+    let (kept, dropped): (Vec<_>, Vec<_>) = map
         .iter()
-        .filter(|(k, _)| Source::DotEnv.may_supply(trust_of(k)))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
+        .partition(|(k, _)| CHILD_ENV_PASSTHROUGH.contains(&k.as_str()));
+    if !dropped.is_empty() {
+        WARNED.get_or_init(|| {
+            // The table's own refusals already warned when they were parsed
+            // (see `dotenv_map`); this names the rest, so a `.env` knob that
+            // stops reaching a sidecar says so instead of just not working.
+            let mut names: Vec<&str> = dropped.iter().map(|(k, _)| k.as_str()).collect();
+            names.sort_unstable();
+            eprintln!(
+                "note: these .env names are not passed to the AI/denoise/segment child \
+                 processes — a .env is ambient input and a child's environment is where a \
+                 planted one becomes code execution: {}. Set them in your own environment \
+                 instead; children inherit it.",
+                names.join(", ")
+            );
+        });
+    }
+    kept.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
 /// Normalise a reasoning-effort value from any source into something safe on
@@ -1457,17 +1520,30 @@ mod tests {
                     Some("."),
                     "a protected name resolved from the .env"
                 );
-                // (d) …and the child block for sidecars carries the
-                // unprotected names, minus every protected one.
+                // (d) The child block is an ALLOWLIST, not the complement of
+                // the table's denylist. `Trust` classifies OUR settings — a
+                // closed set where "unlisted" means "not ours", so defaulting
+                // to Preference is safe; a child's environment is an OPEN set
+                // where "unlisted" includes every loader hook the platform
+                // defines. Reusing one predicate for both let a photo pack's
+                // `.env` hand `LD_PRELOAD` to both Python sidecars, where
+                // ld.so acts before `-E` (which only filters PYTHON*) can.
                 let child_env = super::dotenv_child_env();
+                let has = |n: &str| child_env.iter().any(|(k, _)| k == n);
                 assert!(
-                    child_env.iter().any(|(k, v)| k == "AUTOSHOP_SIDECAR_TIMEOUT_SECS" && v == "123"),
-                    "the sidecar child block lost the .env's unprotected names"
+                    child_env.iter().any(|(k, v)| k == "CUDA_VISIBLE_DEVICES" && v == "1"),
+                    "an allowlisted compute knob lost its way to the sidecars"
                 );
+                assert!(!has("LD_PRELOAD"), "a .env loaded code into a child process");
+                assert!(!has("HTTP_PROXY"), "a .env chose where a child sends bytes");
+                assert!(!has("HF_HOME"), "a .env chose which weights a child loads");
                 assert!(
-                    !child_env.iter().any(|(k, _)| k == "PATH" || k == "PYTHONPATH"),
+                    !has("PATH") && !has("PYTHONPATH"),
                     "a protected name leaked into the sidecar child block"
                 );
+                // Not an allowlist of everything harmless-looking: a knob the
+                // PARENT reads has no business in the child's block either.
+                assert!(!has("AUTOSHOP_SIDECAR_TIMEOUT_SECS"), "parent-side knob pushed at a child");
                 return;
             }
 
@@ -1481,7 +1557,11 @@ mod tests {
                 dir.join(".env"),
                 "AUTOSHOP_DENOISE_MODEL=dotenv-model\n\
                  AUTOSHOP_SIDECAR_TIMEOUT_SECS=123\n\
-                 PATH=.\n",
+                 PATH=.\n\
+                 CUDA_VISIBLE_DEVICES=1\n\
+                 LD_PRELOAD=./evil.so\n\
+                 HTTP_PROXY=http://attacker.example:8080\n\
+                 HF_HOME=./poisoned-weights\n",
             )
             .unwrap();
             let output = std::process::Command::new(env::current_exe().unwrap())

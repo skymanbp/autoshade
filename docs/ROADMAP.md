@@ -368,6 +368,36 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   - 门：clippy 0；测试 374→377（`comm` 集差 0 删 3 增）；i18n 九门 0；
     字体门重生成后 786/786；web/index.html 与 serve 设置路由同步新字段。
 
+  **BA 复审闭合（同日，Codex 信任面 xhigh 只读复审回执）**：#1 十三个 `pre(i)`
+  下标逐一对齐判 CLEAN（回执附完整对照表）、#3 信任根降权判 CLEAN；#4 #5 属其
+  口径外未跑到，我自行补证闭合（两个设置写入方均走 `update_local_settings`；三处
+  `Authorization` 构造的 key 全经 `header_safe_key` 边界校验）。**#2 判 HIGH 并
+  成立**：
+
+  - 现象：`.env` 里的 `LD_PRELOAD=./evil.so` 会被递给三个子进程（claude 验证器、
+    python 降噪、python 分割），Linux 上 `ld.so` 在 Python 的 `-E` 生效之前就装载
+    它。**非本批引入**——被替换的 17 名单同样不含该名字，重构原样保留了这个洞。
+  - **根因（复审点破，比现象更上游）**：`Source::DotEnv.may_supply(trust_of(k))`
+    这一个谓词被拿去回答了两个性质相反的问题。它本来回答"`.env` 能否决定
+    **Autoshop 自己的这个设置**"——那是**封闭集**，未登记即不存在，故"未知从宽"
+    安全；而 `dotenv_child_env` 用它回答"这个**任意名字**能否递给子进程"——那是
+    **开放集**，未登记恰恰囊括了平台定义的全部加载器钩子。同一个默认值，前者正确
+    后者灾难。
+  - 修法（一次系统性改动，非枚举攻击面）：子进程环境块改为**白名单**
+    `CHILD_ENV_PASSTHROUGH`，准入规则沿用同一套三分法——只收**选择计算行为**的
+    名字（`CUDA_VISIBLE_DEVICES`/线程数/离线开关），凡涉路径、主机、凭据、代码
+    加载一律不收。这**故意**排除了旧注释宣传的 `HF_HOME`/`TORCH_HOME`（被重定向
+    的缓存＝投毒模型路径，正是 `AUTOSHOP_DENOISE_CACHE` 判 `Destination` 的同一
+    理由）与代理变量（代理决定字节去哪）。代价可控且可恢复：全仓无 `env_clear`
+    亲证，子进程本就继承父环境，用户自己设的 `HF_HOME`/`HTTPS_PROXY` 照常抵达；
+    被拒的只是 `.env` 的追加/覆盖，且**逐名告警**不静默。
+  - 测试：`dotenv_parsing_never_mutates_the_process_environment` 的子进程夹具
+    扩为五名（正向锚点 `CUDA_VISIBLE_DEVICES=1` 证明 .env 确被解析并放行，
+    `LD_PRELOAD`/`HTTP_PROXY`/`HF_HOME`/`PATH` 四条阴性），并断言父侧知识的
+    `AUTOSHOP_SIDECAR_TIMEOUT_SECS` 也不再推给子进程。
+  - 门：clippy 0；测试 377 全绿（`comm` 对 AS 基线累计 0 删 6 增）；i18n 九门 0；
+    字体门 786/786。
+
 - **第十二轮·阶段 1–3 全清：在册 15 簇归零 + Codex 簇群复审闭合（2026-08-11，
   未发版；计划见下方「第十二轮计划」）**
 

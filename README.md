@@ -193,6 +193,15 @@ what program runs. Only a destination coming from a `.env` is ignored, and only
 that prints a warning; a `.env` naming a model no longer warns about anything,
 which it used to (and which contradicted this page).
 
+One place the table deliberately does **not** apply: what a `.env` may push
+into the child processes (the `claude` verifier and the two Python sidecars).
+There, "unlisted" is not a closed set — it includes every loader hook the
+platform defines — so that block is an **allowlist** of compute knobs
+(`CUDA_VISIBLE_DEVICES`, thread counts, the offline flags) rather than the
+complement of a denylist. Anything else a `.env` names is dropped, and the app
+says which. Your own environment is unaffected: the children inherit it, so an
+`HF_HOME` or `HTTPS_PROXY` you set yourself still reaches them.
+
 Two consequences worth naming. A `.env` may switch `AUTOSHOP_ANALYSIS_PROVIDER`
 from `oauth` to `api` — but not the endpoint or, therefore, where the request
 goes; and it could already supply `OPENAI_API_KEY`, which is the strictly

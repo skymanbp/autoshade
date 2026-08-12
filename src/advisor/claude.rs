@@ -119,20 +119,17 @@ impl ClaudeProvider {
         // model-authored rationale text. The CLI documents the channel:
         // "Input must be provided either through stdin or as a prompt
         // argument when using --print" (claude 2.1.210, measured).
-        // The .env's unprotected names travel to the child EXPLICITLY
-        // (L16#3): under dotenv_override they sat in the process environment
-        // and were inherited; the owned map never writes the parent, so the
-        // reach is reproduced on the child's own block.
-        //
-        // What that block may contain is decided by the capability table, not
-        // here: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
-        // `ANTHROPIC_BASE_URL` are `Trust::Destination` — for this child the
-        // credential IS the routing decision — so a photo pack's `.env` can no
-        // longer repoint or re-bill the verifier. It used to: the filter named
-        // only Autoshop's own variables, and these three are the CLI's.
+        // What a `.env` may push at this child is an ALLOWLIST — compute
+        // knobs only, nothing that names a path, a host, a credential or a
+        // library to load (`config::dotenv_child_env`). So `ANTHROPIC_*` from
+        // a `.env` cannot repoint or re-bill this verifier, and neither can
+        // any loader hook the platform defines. The earlier shape — "whatever
+        // the capability table did not refuse" — answered an OPEN-set question
+        // with a CLOSED-set default and was the same defect in both places.
         //
         // The env_remove below is the OTHER half and stays: it strips an
-        // INHERITED key, which no table can reach. A live-environment
+        // INHERITED key, which no allowlist can reach (the child inherits the
+        // parent's environment; nothing calls env_clear). A live-environment
         // `ANTHROPIC_BASE_URL` is deliberately left alone — that is a real
         // user's corporate gateway, set in their own environment.
         cmd.envs(crate::config::dotenv_child_env());
