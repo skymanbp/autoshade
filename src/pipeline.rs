@@ -744,17 +744,137 @@ pub fn photo_calibration(raw: &Path) -> PhotoCalibration {
             as_shot_k: r.as_shot_k,
             as_shot_tint: r.as_shot_tint,
         },
-        None => {
-            let (as_shot_k, as_shot_tint) = fresh_as_shot_wb(raw);
-            PhotoCalibration {
-                version: crate::recipe::CALIB_ERA,
-                base_curve: photo_base_knots(raw),
-                lens_profile: fresh_lens_profile(raw),
-                as_shot_k,
-                as_shot_tint,
-            }
-        }
+        None => fresh_photo_calibration(raw),
     }
+}
+
+/// [`photo_calibration`]'s fresh arm on its own — era-stamped by
+/// construction (these estimates come from THIS build's sampler).
+pub(crate) fn fresh_photo_calibration(raw: &Path) -> PhotoCalibration {
+    let (as_shot_k, as_shot_tint) = fresh_as_shot_wb(raw);
+    PhotoCalibration {
+        version: crate::recipe::CALIB_ERA,
+        base_curve: photo_base_knots(raw),
+        lens_profile: fresh_lens_profile(raw),
+        as_shot_k,
+        as_shot_tint,
+    }
+}
+
+/// True when a calibration carries NOTHING the render would act on — no
+/// base curve, no active lens component (the recipe's own activity
+/// predicates — re-implementing them here is the drift the codebase
+/// already fixed once), no as-shot WB anchor.
+pub fn calibration_is_neutral(cal: &PhotoCalibration) -> bool {
+    cal.base_curve.is_empty()
+        && !cal.lens_profile.vignette_active()
+        && !cal.lens_profile.geometry_active()
+        && cal.as_shot_k.is_none()
+}
+
+/// The calibration authority for REVERSE-FIT surfaces (CLI `match` + GUI
+/// 反推): saved-first like [`photo_calibration`], but an all-NEUTRAL saved
+/// calibration falls through to the fresh estimate. A neutral saved
+/// calibration is either a pre-base-curve legacy save or a previous
+/// UNSTAMPED fit (the R15 poison: an old fit recipe with an empty curve
+/// became the saved-first authority, so every later fit inherited the
+/// empty base and the seed never engaged). Falling through is safe for a
+/// fit specifically — the solve compensates ON TOP of whatever base it is
+/// given, so the final look is unchanged; only the conditioning improves —
+/// while ordinary develops keep the legacy render-as-saved contract via
+/// [`photo_calibration`].
+/// Narrow disclosed edge: a photo whose saved develop turned every lens
+/// component OFF and has neither curve nor as-shot anchor reads as
+/// "neutral" and a fit re-stamps the fresh all-on profile — a fit is a NEW
+/// develop, and all-on matches the in-camera default that stamping always
+/// produces. Branching on the snapshot directly keeps the fresh estimate
+/// (a demosaic for a RAW) to at most ONE run.
+pub fn fit_calibration(raw: &Path) -> PhotoCalibration {
+    match saved_recipe_snapshot(raw) {
+        Some(r) => {
+            let cal = PhotoCalibration {
+                version: r.version,
+                base_curve: r.base_curve,
+                lens_profile: r.lens_profile,
+                as_shot_k: r.as_shot_k,
+                as_shot_tint: r.as_shot_tint,
+            };
+            if calibration_is_neutral(&cal) { fresh_photo_calibration(raw) } else { cal }
+        }
+        None => fresh_photo_calibration(raw),
+    }
+}
+
+/// Stamp a reverse-fit recipe with the photo's calibration — ONE rule shared
+/// by the CLI `match` command and the GUI 反推 worker: without it the fitted
+/// deltas landed on a much darker base than the one they were solved
+/// against, and the render disagreed with the fit's own numbers. The era
+/// stamp rides WITH the curve (the paste rule): the fitted recipe is era-2
+/// by Default, and stamping a saved era-1 curve under it would launder the
+/// provenance the pre-era repair keys on.
+pub fn stamp_fit_calibration(recipe: &mut crate::recipe::EditRecipe, cal: PhotoCalibration) {
+    recipe.version = cal.version;
+    recipe.base_curve = cal.base_curve;
+    recipe.lens_profile = cal.lens_profile;
+    recipe.as_shot_k = cal.as_shot_k;
+    recipe.as_shot_tint = cal.as_shot_tint;
+}
+
+/// The reverse-fit SEED (R15 root fix): develop `src` through the photo's
+/// calibration ONCE — base curve and lens profile; the as-shot WB anchors
+/// only RIDE (no temperature is set, so `apply_recipe_wb` never fires —
+/// they exist for the develop panel's WB baseline) — so the fit solves only
+/// the camera-look → target delta. Fitting from the raw NEUTRAL spent the
+/// model's whole bounded capacity (±60 saturation, the cast rotation
+/// budget, the slider ranges) re-deriving the 0.6–1.4 EV camera look
+/// first, and the actual grade got the leftovers: on the real pair the
+/// solve pegged saturation, had its cast curves vetoed and dropped a
+/// genuinely-helpful sky zone (2026-08-12 user report).
+///
+/// DOMAIN HONESTY: the two-pass solve domain (seed render, then grade) and
+/// the canvas's one-pass composed `user(base(x))` agree only up to
+/// `scale_chroma`'s per-channel clamp ORDER — the seed pass clips
+/// saturated channels irreversibly where the composed LUT clamps once at
+/// the end. Near-grey content and mild grades sit at quantisation level
+/// (≈0.2–1.0/255 mean); on saturated content under a strongly negative
+/// fitted EV the gap GROWS with saturation (review fixture ~6.4/255 mean,
+/// this crate's harsher fixture ~18.7, per-pixel peaks past 100 codes) —
+/// the canvas then renders BETTER (less clipped) than the numbers
+/// describe, never worse. The full fix — composing the base into the
+/// solve's own closed-loop renders — is the registered follow-up (R16);
+/// both regimes are pinned by
+/// `the_seeded_solve_domain_matches_the_canvas_render`.
+///
+/// Returns `None` when the calibration is all-neutral (baked PNG/TIFF
+/// sources, where even the fresh estimate has nothing): the pixels already
+/// carry their look and the extra develop would be an identity render. The
+/// caller then fits the pixels as they are and stamps nothing.
+pub fn fit_calibration_seed(
+    raw: &Path,
+    src: &image::DynamicImage,
+) -> Option<(image::DynamicImage, PhotoCalibration)> {
+    seed_from_calibration(fit_calibration(raw), src)
+}
+
+/// [`fit_calibration_seed`]'s pure half (unit-testable without a photo on
+/// disk): `None` on an all-neutral calibration, else the calibration-look
+/// develop of `src` plus the calibration to stamp.
+pub fn seed_from_calibration(
+    cal: PhotoCalibration,
+    src: &image::DynamicImage,
+) -> Option<(image::DynamicImage, PhotoCalibration)> {
+    if calibration_is_neutral(&cal) {
+        return None;
+    }
+    let seed = crate::recipe::EditRecipe {
+        version: cal.version,
+        base_curve: cal.base_curve.clone(),
+        lens_profile: cal.lens_profile.clone(),
+        as_shot_k: cal.as_shot_k,
+        as_shot_tint: cal.as_shot_tint,
+        ..Default::default()
+    };
+    Some((crate::render::develop_preview(src, &seed), cal))
 }
 
 /// Fresh in-camera lens profile for `raw`, stamped "all available components
@@ -2535,6 +2655,224 @@ mod tests {
             proposed.rationale.contains("did not preserve mask identities"),
             "the silent revert must be disclosed: {:?}",
             proposed.rationale
+        );
+    }
+
+    /// R15: the fit calibration stamp copies ALL FIVE fields — era, curve,
+    /// lens profile, both as-shot anchors. A partial stamp re-opens the
+    /// dark-base disagreement the stamp exists to close.
+    #[test]
+    fn the_fit_stamp_carries_the_whole_calibration() {
+        let cal = PhotoCalibration {
+            version: 1,
+            base_curve: vec![[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]],
+            lens_profile: crate::recipe::LensProfile {
+                vignette: vec![1.0, 1.1],
+                vignette_on: true,
+                ..Default::default()
+            },
+            as_shot_k: Some(5476.0),
+            as_shot_tint: Some(15.2),
+        };
+        let mut r = EditRecipe::default();
+        stamp_fit_calibration(&mut r, cal);
+        assert_eq!(r.version, 1, "the era stamp rides WITH the curve");
+        assert_eq!(r.base_curve, vec![[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]]);
+        assert!(r.lens_profile.vignette_on && r.lens_profile.vignette == vec![1.0, 1.1]);
+        assert_eq!((r.as_shot_k, r.as_shot_tint), (Some(5476.0), Some(15.2)));
+    }
+
+    /// R15: the seed refuses an all-neutral calibration (a baked source has
+    /// nothing to compose) and a real curve produces a render that visibly
+    /// differs from the source — the camera-look base the solve starts from.
+    #[test]
+    fn the_fit_seed_engages_exactly_when_the_calibration_acts() {
+        let src = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([(x * 4).min(255) as u8, (y * 5).min(255) as u8, 128])
+        }));
+        let neutral = PhotoCalibration {
+            version: crate::recipe::CALIB_ERA,
+            base_curve: Vec::new(),
+            lens_profile: Default::default(),
+            as_shot_k: None,
+            as_shot_tint: None,
+        };
+        assert!(calibration_is_neutral(&neutral));
+        assert!(
+            seed_from_calibration(neutral, &src).is_none(),
+            "an all-neutral calibration must fit the pixels as they are"
+        );
+        let curved = PhotoCalibration {
+            version: crate::recipe::CALIB_ERA,
+            base_curve: vec![[0.0, 0.0], [0.25, 0.4], [0.6, 0.8], [1.0, 1.0]],
+            lens_profile: Default::default(),
+            as_shot_k: None,
+            as_shot_tint: None,
+        };
+        let (seeded, cal) =
+            seed_from_calibration(curved, &src).expect("a real curve engages the seed");
+        assert_eq!(cal.base_curve.len(), 4, "the calibration rides out for the stamp");
+        let (a, b) = (src.to_rgb8(), seeded.to_rgb8());
+        let mean: f64 = a
+            .pixels()
+            .zip(b.pixels())
+            .map(|(p, q)| (0..3).map(|c| (p[c] as f64 - q[c] as f64).abs()).sum::<f64>())
+            .sum::<f64>()
+            / (a.width() * a.height() * 3) as f64;
+        assert!(mean > 2.0, "the calibration develop moved the pixels (mean |Δ| {mean:.2})");
+    }
+
+    /// R15 domain pin, TWO regimes with HONEST bounds. The canvas composes
+    /// the fitted sliders OVER the stamped base (`user(base(x))`, one LUT)
+    /// while the solve ran on a PRE-developed calibration render; the two
+    /// differ by `scale_chroma`'s per-channel clamp ORDER (the seed pass
+    /// clips saturated channels irreversibly, the composed LUT clamps once
+    /// at the end — review 2026-08-12), NOT by mere quantisation:
+    /// - near-grey content + mild grade sits at quantisation level (≤1.5);
+    /// - saturated content + a strongly negative EV grade — the regime
+    ///   seeding itself steers toward — GROWS with saturation (this fixture
+    ///   measures ~18.7/255 mean; per-pixel peaks run past 100 codes), so
+    ///   its ceiling is a generous STRUCTURAL one, not a promise;
+    /// - a DOUBLE-APPLIED base measures ~25/255 on the MILD inputs, where
+    ///   the clamp-order effect is ~0.3 — an 80× separation, so the 1.5
+    ///   pin still catches the bug this test exists for.
+    /// The clamp-order gap closes for real when the base composes into the
+    /// solve's own closed-loop renders (registered follow-up, R16).
+    #[test]
+    fn the_seeded_solve_domain_matches_the_canvas_render() {
+        let mean_delta = |a: &image::DynamicImage, b: &image::DynamicImage| -> f64 {
+            let (a, b) = (a.to_rgb8(), b.to_rgb8());
+            a.pixels()
+                .zip(b.pixels())
+                .map(|(p, q)| (0..3).map(|c| (p[c] as f64 - q[c] as f64).abs()).sum::<f64>())
+                .sum::<f64>()
+                / (a.width() * a.height() * 3) as f64
+        };
+        let lifting_curve = vec![[0.0, 0.0], [0.22, 0.26], [0.48, 0.74], [1.0, 1.0]];
+        let cal = |curve: &[[f32; 2]]| PhotoCalibration {
+            version: crate::recipe::CALIB_ERA,
+            base_curve: curve.to_vec(),
+            lens_profile: Default::default(),
+            as_shot_k: None,
+            as_shot_tint: None,
+        };
+        // Regime 1: near-grey ramp × mild positive grade — quantisation only.
+        let grey = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(96, 64, |x, y| {
+            image::Rgb([
+                (40 + x * 2).min(255) as u8,
+                (30 + y * 3).min(255) as u8,
+                (60 + x + y).min(255) as u8,
+            ])
+        }));
+        let mild = EditRecipe {
+            exposure_ev: 0.3,
+            contrast: 20.0,
+            saturation: 25.0,
+            ..Default::default()
+        };
+        let (seeded, c) = seed_from_calibration(cal(&lifting_curve), &grey).unwrap();
+        let solve_side = crate::render::develop_preview(&seeded, &mild);
+        let mut stamped = mild.clone();
+        stamp_fit_calibration(&mut stamped, c);
+        let canvas_side = crate::render::develop_preview(&grey, &stamped);
+        let m1 = mean_delta(&solve_side, &canvas_side);
+        assert!(m1 <= 1.5, "near-grey regime out of quantisation bounds (mean |Δ| {m1:.3}/255)");
+        // Regime 2: saturated content × negative-EV grade — the clamp-order
+        // gap, bounded but real; the canvas clips LESS than the solve saw.
+        let vivid = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(96, 64, |x, y| {
+            image::Rgb([
+                (170 + (x % 40)).min(255) as u8,
+                (40 + (y % 30)) as u8,
+                (200 - (x % 60)) as u8,
+            ])
+        }));
+        let dark = EditRecipe { exposure_ev: -1.2, saturation: 40.0, ..Default::default() };
+        let (seeded, c) = seed_from_calibration(cal(&lifting_curve), &vivid).unwrap();
+        let solve_side = crate::render::develop_preview(&seeded, &dark);
+        let mut stamped = dark;
+        stamp_fit_calibration(&mut stamped, c);
+        let canvas_side = crate::render::develop_preview(&vivid, &stamped);
+        let m2 = mean_delta(&solve_side, &canvas_side);
+        assert!(
+            m2 <= 32.0,
+            "saturated/negative-EV clamp-order gap blew past even its generous \
+             structural ceiling (mean |Δ| {m2:.3}/255, fixture-typical ≈18.7)"
+        );
+        // The double-base detector runs on the MILD inputs, where clamp-order
+        // noise is ~0.3/255 and a doubled base separates by ~80×: stamping
+        // onto the ALREADY-seeded render must blow far past the 1.5 pin.
+        let (seeded_grey, c2) = seed_from_calibration(cal(&lifting_curve), &grey).unwrap();
+        let mut doubled = EditRecipe {
+            exposure_ev: 0.3,
+            contrast: 20.0,
+            saturation: 25.0,
+            ..Default::default()
+        };
+        stamp_fit_calibration(&mut doubled, c2);
+        let double_side = crate::render::develop_preview(&seeded_grey, &doubled);
+        let mut clean = EditRecipe {
+            exposure_ev: 0.3,
+            contrast: 20.0,
+            saturation: 25.0,
+            ..Default::default()
+        };
+        stamp_fit_calibration(&mut clean, cal(&lifting_curve));
+        let canvas_grey = crate::render::develop_preview(&grey, &clean);
+        let m3 = mean_delta(&double_side, &canvas_grey);
+        assert!(
+            m3 > 8.0,
+            "a double-applied base must stand far above quantisation noise \
+             (measured {m3:.3}/255)"
+        );
+    }
+
+    /// R15 real-pair harness (ignored): set AUTOSHOP_FIT_REPRO_RAW and
+    /// AUTOSHOP_FIT_REPRO_TARGET to a photo and a rendition of it, then run
+    /// with `-- --ignored r15 --nocapture`. Prints the OLD neutral-source
+    /// fit next to the NEW calibration-seeded fit. Pure lib calls — the
+    /// develop store is read (calibration authority) but never written.
+    #[test]
+    #[ignore = "real-photo repro: needs AUTOSHOP_FIT_REPRO_RAW/_TARGET"]
+    fn r15_seeded_fit_on_a_real_pair() {
+        let (Ok(raw), Ok(tgt)) = (
+            std::env::var("AUTOSHOP_FIT_REPRO_RAW"),
+            std::env::var("AUTOSHOP_FIT_REPRO_TARGET"),
+        ) else {
+            panic!("set AUTOSHOP_FIT_REPRO_RAW and AUTOSHOP_FIT_REPRO_TARGET");
+        };
+        let raw = std::path::PathBuf::from(raw);
+        let neutral =
+            crate::render::render_to_image(&raw, &EditRecipe::default(), None, Some(1280))
+                .expect("neutral develop");
+        let target =
+            crate::decode::load_image(std::path::Path::new(&tgt)).expect("target loads");
+        let old = crate::fit::fit_recipe(&neutral, &target);
+        eprintln!(
+            "OLD (neutral source):      err {:.4} -> {:.4}, ev {:+.2}, sat {:+.1}, cast {}",
+            old.err_before,
+            old.err_after,
+            old.recipe.exposure_ev,
+            old.recipe.saturation,
+            if old.recipe.red_curve.is_empty() { "withheld/empty" } else { "attached" },
+        );
+        let (seeded, cal) =
+            fit_calibration_seed(&raw, &neutral).expect("a RAW must seed (fresh fallback)");
+        let mut new = crate::fit::fit_recipe(&seeded, &target);
+        stamp_fit_calibration(&mut new.recipe, cal);
+        eprintln!(
+            "NEW (calibration-seeded): err {:.4} -> {:.4}, ev {:+.2}, sat {:+.1}, cast {}, base {} pts",
+            new.err_before,
+            new.err_after,
+            new.recipe.exposure_ev,
+            new.recipe.saturation,
+            if new.recipe.red_curve.is_empty() { "withheld/empty" } else { "attached" },
+            new.recipe.base_curve.len(),
+        );
+        assert!(
+            new.err_after <= old.err_after + 1e-3,
+            "seeding must not regress the fit ({:.4} vs {:.4})",
+            new.err_after,
+            old.err_after
         );
     }
 

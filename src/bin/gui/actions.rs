@@ -691,7 +691,9 @@ impl AutoshopApp {
         if let Some(base) = base {
             let (mw, mh) = base.dimensions();
             // Before compares under the canvas recipe's own base calibration
-            // (empty for legacy / fit recipes — deliberate). This covers
+            // (empty for legacy recipes — deliberate; a v0.24.0+ fit recipe
+            // CARRIES its calibration, so a Fitted variant's Before now shows
+            // the camera look instead of the 0.6–1.4 EV dark neutral). Covers
             // BAKED variants too: an InPlace master is a NEUTRAL develop whose
             // recipe keeps its curve (Before must show the camera look on the
             // healed pixels, not the dark neutral), while a Generated
@@ -2106,16 +2108,39 @@ impl AutoshopApp {
                     // touched, so the pass no longer needs the backup gate;
                     // superseded rasters stay on disk (tiny greyscale PNGs —
                     // v<N> snapshots freeze their own copies regardless).
-                    let rep = match (zoned, &src_path) {
+                    // R15 root fix: solve from the photo's CALIBRATION render,
+                    // not the raw neutral. Fitting from the neutral spent the
+                    // bounded model (±60 saturation, the cast rotation budget,
+                    // the slider ranges) re-deriving the 0.6–1.4 EV camera
+                    // look before the actual grade got a say — on the real
+                    // pair the solve pegged saturation, had its cast curves
+                    // vetoed and dropped a genuinely-helpful sky zone. See
+                    // pipeline::fit_calibration_seed for the domain-honesty
+                    // note (solve ≈ canvas; exact bounds live on the test).
+                    let (fit_src, cal) = match src_path
+                        .as_deref()
+                        .and_then(|p| autoshop::pipeline::fit_calibration_seed(p, &base))
+                    {
+                        Some((img, c)) => (std::sync::Arc::new(img), Some(c)),
+                        None => (base.clone(), None),
+                    };
+                    let mut rep = match (zoned, &src_path) {
                         (true, Some(p)) => {
                             let cfg = autoshop::config::Config::load();
                             let seg =
                                 autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
                             let mask = autoshop::store::claim_raster(p, "mask-zone-sky")?;
-                            autoshop::fit_zoned::fit_recipe_zoned(&base, &target, &seg, &mask)
+                            autoshop::fit_zoned::fit_recipe_zoned(&fit_src, &target, &seg, &mask)
                         }
-                        _ => autoshop::fit::fit_recipe(&base, &target),
+                        _ => autoshop::fit::fit_recipe(&fit_src, &target),
                     };
+                    // …and stamp the SAME calibration into the deliverable
+                    // (the CLI match rule, one shared helper): the canvas and
+                    // every persisted surface compose the fitted sliders OVER
+                    // this base look — exactly the domain the solve ran in.
+                    if let Some(c) = cal {
+                        autoshop::pipeline::stamp_fit_calibration(&mut rep.recipe, c);
+                    }
                     // FACTS, not prose (L12#4): the landing renders these
                     // with the language live when the result LANDS — the old
                     // trf calls here used the language captured at spawn,

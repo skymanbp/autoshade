@@ -226,6 +226,17 @@ impl AutoshopApp {
             self.strip_row_rect = Some(ui.max_rect());
         }
         ui.add_space(((ui.available_height() - card_h) / 2.0).max(0.0));
+        // LAYOUT INVARIANT (probed, R14+R15): egui places the scroll area
+        // centered by its 26 px DECLARED seed against the row's height at
+        // placement time, then grows content DOWNWARD — (current−26)/2 of
+        // offset. Keeping every child before the scroll area ≤ 26 px tall
+        // makes that offset exactly 0, which is what the geometry test pins.
+        // (Both Align::Center forms re-broke it: whole-row centering gave
+        // 37/−21, fixed-height card_h gave 29/−29, a taller title wrapper
+        // gave 11.8/−3.8 — all matching the formula.) The title/divider
+        // therefore stay on the seed row — their ~29 px offset from the card
+        // center is a KNOWN cosmetic nit; centering them needs absolute
+        // positioning (ui.put), not worth the machinery here.
         ui.horizontal(|ui| {
             ui.add_space(SPACE_SM);
             ui.label(egui::RichText::new(tr(lang, "Variants")).strong());

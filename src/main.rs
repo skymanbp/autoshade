@@ -814,15 +814,13 @@ fn match_cmd(
     // base and the render disagreed with the fit's own numbers. The lens
     // profile and the as-shot WB anchor ride the same snapshot (the fitted
     // recipe was built from EditRecipe::default and silently dropped both).
-    let cal = pipeline::photo_calibration(raw);
-    // The era stamp rides WITH the curve (the paste rule): the fitted recipe
-    // is era-2 by Default, and stamping a saved era-1 curve under it
-    // laundered the provenance the pre-era repair keys on.
-    rep.recipe.version = cal.version;
-    rep.recipe.base_curve = cal.base_curve;
-    rep.recipe.lens_profile = cal.lens_profile;
-    rep.recipe.as_shot_k = cal.as_shot_k;
-    rep.recipe.as_shot_tint = cal.as_shot_tint;
+    // The GUI 反推 worker shares this stamp — and goes one step further by
+    // SOLVING from the engine's own calibration render
+    // (`pipeline::fit_calibration_seed`); the CLI keeps the embedded-preview
+    // source on purpose (`preview_only` needs no demosaic, and this
+    // command's contract was validated on it).
+    let cal = pipeline::fit_calibration(raw);
+    pipeline::stamp_fit_calibration(&mut rep.recipe, cal);
     println!(
         "  look error {:.3} → {:.3}  (0 = identical distributions; masks/local edits are not recoverable)",
         rep.err_before, rep.err_after
