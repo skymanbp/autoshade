@@ -103,6 +103,26 @@ impl Advisor for OpenAiVerifier {
             other => other?,
         };
 
+        // A truncated reply is NOT a verdict (L08-6): `length` /
+        // `content_filter` mean the model was cut off, and a Verdict that
+        // happens to close before the cut still reflects an unfinished
+        // judgement — `reasons`/`revised_hint` are #[serde(default)], so a
+        // cut-off `{"decision":"accept"` recovers into a clean Accept. An
+        // ABSENT finish_reason stays accepted (older bridges omit it); a
+        // present one must say the model stopped on its own.
+        let finish = value
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(Value::as_str);
+        if let Some(f) = finish
+            && !matches!(f, "stop" | "tool_calls")
+        {
+            return Err(AdvisorError::ModelFailure(format!(
+                "the verifier's reply was cut off (finish_reason {f:?}) — a truncated verdict \
+                 is not a verdict"
+            )));
+        }
         let text = value
             .get("choices")
             .and_then(|c| c.get(0))
@@ -162,6 +182,25 @@ mod tests {
     /// ONE verification is ONE negotiation, even though it is negotiated at
     /// two levels: the temperature pin here, every other knob inside
     /// `post_ai_json`. When the capability knowledge lived only inside that
+    /// L08-6: a reply the endpoint itself marks truncated must not verify,
+    /// however clean the recovered JSON looks.
+    #[test]
+    fn a_truncated_verifier_reply_is_not_a_verdict() {
+        const CUT: &str = r#"{"choices":[{"finish_reason":"length","message":{"content":"{\"decision\":\"accept\",\"reasons\":[]}"}}]}"#;
+        let (url, _seen, handle) = stub_endpoint(vec![(200, "application/json", CUT.into())]);
+        let verifier = OpenAiVerifier {
+            api_key: Some("test-key".into()),
+            model: "m".into(),
+            base_url: url,
+            effort: None,
+        };
+        let e = verifier
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .expect_err("finish_reason=length refuses");
+        assert!(format!("{e}").contains("cut off"), "{e}");
+        join_stub(handle);
+    }
+
     /// call, the retry below started from nothing and re-offered what this
     /// endpoint had just refused — a POST per refusal, spent to learn the same
     /// answer a second time (6 for one verify at worst, against 4 before the
