@@ -333,6 +333,9 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   跑全绿：428+71+7、clippy 0、E2E 22/22 真进程（GUI 4 项由十三轮解禁补
   跑覆盖，禁令在场）。用户桌面旧图标成因=旧 exe + Windows 图标缓存，
   刷新指引写入 release notes（ie4uinit.exe -show / 重启 Explorer）。
+  **分发拍板（2026-08-12，AskUserQuestion）：不做安装包，维持绿色版双
+  exe**（免安装、全资产内嵌；用户本机直用构建目录，外发走 Releases 页
+  Assets 直下）——未来会话勿再提案 Inno/MSI，除非分发场景变化。
 
 - **v0.23.3 RELEASED（2026-08-12）** — tag v0.23.3 → 866357b；assets 字节
   验证与本地构建精确相等：cli `633c4796…` = 28 260 608 B、gui
