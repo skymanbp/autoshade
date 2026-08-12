@@ -404,7 +404,7 @@ impl AutoshopApp {
                             }
                             self.done(trf(lang, "exported → {path}", &[("path", &p)]));
                         }
-                        ExportOutcome::Batch { ok, errs, renamed, relooked } => {
+                        ExportOutcome::Batch { ok, errs, renamed, relooked, warns } => {
                             // Same-stem photos were kept apart — disclose
                             // WHICH photo took WHICH name, or the user hunts
                             // for an export that "vanished".
@@ -426,9 +426,21 @@ impl AutoshopApp {
                                     &[("n", &relooked.to_string())],
                                 )
                             };
+                            // The open path's develop warnings, on the batch
+                            // outcome (L16-2) — both reply arms, so a partial
+                            // failure keeps its disclosures too.
+                            let develop_warns = if warns.is_empty() {
+                                String::new()
+                            } else {
+                                trf(
+                                    lang,
+                                    " · {n} develop warning(s): {detail}",
+                                    &[("n", &warns.len().to_string()), ("detail", &warns.join(" / "))],
+                                )
+                            };
                             if errs.is_empty() {
                                 self.done(format!(
-                                    "{}{renames}{relook}",
+                                    "{}{renames}{relook}{develop_warns}",
                                     trf(lang, "./out — batch {n} done", &[("n", &ok.to_string())])
                                 ));
                             } else {
@@ -437,7 +449,7 @@ impl AutoshopApp {
                                 self.fail(
                                     tr(lang, "export failed"),
                                     anyhow::anyhow!(
-                                        "{}{renames}{relook}",
+                                        "{}{renames}{relook}{develop_warns}",
                                         trf(
                                             lang,
                                             "Batch: {ok} succeeded, {fail} failed: {detail}",

@@ -18,33 +18,21 @@ use super::*;
 pub(crate) fn resolve_snapshot_develop(
     p: &std::path::Path,
     snap: &autoshop::store::DevelopSnapshot,
+    warns: &mut Vec<String>,
 ) -> anyhow::Result<Option<(EditRecipe, &'static str)>> {
-    let stamp_fresh = |mut r: EditRecipe| {
-        r.clamp();
-        let knots = autoshop::pipeline::photo_base_knots(p);
-        if !knots.is_empty() {
-            r.base_curve = knots;
-        }
-        r.lens_profile = autoshop::pipeline::fresh_lens_profile(p);
-        if r.as_shot_k.is_none() {
-            let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(p);
-            r.as_shot_k = ask;
-            r.as_shot_tint = ast;
-        }
-        r
-    };
-    let from_xmp = |(text, kind): &(String, &'static str)| {
-        let r = autoshop::xmp::xmp_to_recipe(text);
-        (!r.is_noop()).then(|| (stamp_fresh(r), *kind))
-    };
-    if let Some(hit) = snap.lr_xmp.as_ref().and_then(&from_xmp) {
+    // `warns` (L16-2): the disclosures the OPEN path surfaces for the same
+    // develop — silent-neutral XMP values, out-of-range clamp drops — used
+    // to vanish entirely on this twin: a batch export silently applied a
+    // degraded develop the interactive open would have warned about. The
+    // caller prefixes each entry with the photo and ships them on the batch
+    // outcome. (Full unification with persist::read_saved_develop_locked
+    // stays registered on the structure track — the WARNING parity is what
+    // this closes.)
+    if let Some((text, kind)) = snap.lr_xmp.as_ref()
+        && let Some(hit) = xmp_arm(p, text, kind, warns)
+    {
         return Ok(Some(hit));
     }
-    let from_packet = || {
-        snap.packet_xmp
-            .as_ref()
-            .and_then(|text| from_xmp(&(text.clone(), "XMP (embedded in the RAW)")))
-    };
     if let Some((text, from)) = &snap.recipe {
         let mut r = serde_json::from_str::<EditRecipe>(text)?;
         if r.is_noop() {
@@ -52,13 +40,23 @@ pub(crate) fn resolve_snapshot_develop(
             // XMP with real edits may still exist beside it, else the photo
             // renders the fresh baseline (not the neutral recipe's stale
             // calibration).
-            return Ok(snap.store_xmp.as_ref().and_then(&from_xmp).or_else(from_packet));
+            if let Some((t, k)) = snap.store_xmp.as_ref()
+                && let Some(hit) = xmp_arm(p, t, k, warns)
+            {
+                return Ok(Some(hit));
+            }
+            if let Some(t) = snap.packet_xmp.as_ref()
+                && let Some(hit) = xmp_arm(p, t, "XMP (embedded in the RAW)", warns)
+            {
+                return Ok(Some(hit));
+            }
+            return Ok(None);
         }
         // The one restore path that never went through clamp: a stored
         // recipe with extreme-but-finite geometry rendered NaN weights into
         // a published export. render_to_file now clamps too — this keeps
         // the batch recipe equal to what OPENING the photo would show.
-        r.clamp();
+        clamp_disclosed(&mut r, warns);
         // Rasters re-anchor to whichever dir the recipe was read from
         // (central store first, else a legacy ./out sidecar).
         if let Some(base) = from.parent() {
@@ -71,7 +69,60 @@ pub(crate) fn resolve_snapshot_develop(
         // neutral over it would silently shed the user's edits.
         anyhow::bail!("{err}");
     }
-    Ok(snap.store_xmp.as_ref().and_then(&from_xmp).or_else(from_packet))
+    if let Some((t, k)) = snap.store_xmp.as_ref()
+        && let Some(hit) = xmp_arm(p, t, k, warns)
+    {
+        return Ok(Some(hit));
+    }
+    if let Some(t) = snap.packet_xmp.as_ref()
+        && let Some(hit) = xmp_arm(p, t, "XMP (embedded in the RAW)", warns)
+    {
+        return Ok(Some(hit));
+    }
+    Ok(None)
+}
+
+/// One XMP source arm of [`resolve_snapshot_develop`]: import, disclose what
+/// the import could not read (the open path's A6 rule), stamp the fresh
+/// calibration. `None` = a no-op import, fall through.
+fn xmp_arm(
+    p: &std::path::Path,
+    text: &str,
+    kind: &'static str,
+    warns: &mut Vec<String>,
+) -> Option<(EditRecipe, &'static str)> {
+    let mut r = autoshop::xmp::xmp_to_recipe(text);
+    if r.is_noop() {
+        return None;
+    }
+    let bad = autoshop::xmp::unparsable_crs_numbers(text);
+    if !bad.is_empty() {
+        warns.push(format!(
+            "{} numeric XMP setting(s) unreadable ({}) — restored as neutral",
+            bad.len(),
+            bad.join(", ")
+        ));
+    }
+    clamp_disclosed(&mut r, warns);
+    let knots = autoshop::pipeline::photo_base_knots(p);
+    if !knots.is_empty() {
+        r.base_curve = knots;
+    }
+    r.lens_profile = autoshop::pipeline::fresh_lens_profile(p);
+    if r.as_shot_k.is_none() {
+        let (ask, ast) = autoshop::pipeline::fresh_as_shot_wb(p);
+        r.as_shot_k = ask;
+        r.as_shot_tint = ast;
+    }
+    Some((r, kind))
+}
+
+/// Clamp with the open path's disclosure — a batch drop was silent (L16-2).
+fn clamp_disclosed(r: &mut EditRecipe, warns: &mut Vec<String>) {
+    let dropped = r.clamp();
+    if !dropped.is_empty() {
+        warns.push(format!("out-of-range values discarded ({})", dropped.describe()));
+    }
 }
 
 impl AutoshopApp {
@@ -297,7 +348,11 @@ impl AutoshopApp {
                     // Disclosure counter, like `names.renamed`: this worker
                     // was the one reader that repaired with nobody watching.
                     let mut relooked = 0usize;
+                    // Per-photo develop disclosures (L16-2) — the open
+                    // path's warnings, shipped on the batch outcome.
+                    let mut warns: Vec<String> = Vec::new();
                     for p in &targets {
+                        let mut photo_warns: Vec<String> = Vec::new();
                         let one = (|| -> anyhow::Result<()> {
                             // ONE locked snapshot per photo when DISK decides
                             // (L01): recipe text, pixel source and the .bak
@@ -321,14 +376,17 @@ impl AutoshopApp {
                                 (lr.clone(), pix.clone())
                             } else {
                                 let snap = autoshop::store::read_develop_snapshot(p)?;
-                                if let Some(why) = snap.lr_unreadable {
-                                    // Unreadable is not absent (L08): the
-                                    // batch summary line for this photo says
-                                    // what the stored develop decided over.
+                                if let Some(why) = &snap.lr_unreadable {
+                                    // Unreadable is not absent (L08): stderr
+                                    // for the log AND the batch outcome for
+                                    // the user (L16-2 — the windowed build
+                                    // has no console).
                                     eprintln!(
                                         "⚠ {}: a Lightroom sidecar sits beside this photo but could not be read ({why}) — the stored develop decides",
                                         autoshop::pipeline::stem(p)
                                     );
+                                    photo_warns
+                                        .push(format!("Lightroom sidecar unreadable ({why})"));
                                 }
                                 if let Some(why) = &snap.packet_unreadable {
                                     // Same rule for the packet INSIDE the RAW.
@@ -336,8 +394,9 @@ impl AutoshopApp {
                                         "⚠ {}: this RAW carries an embedded XMP develop that could not be read ({why}) — it is NOT reflected",
                                         autoshop::pipeline::stem(p)
                                     );
+                                    photo_warns.push(format!("embedded XMP unreadable ({why})"));
                                 }
-                                let recipe = match resolve_snapshot_develop(p, &snap)? {
+                                let recipe = match resolve_snapshot_develop(p, &snap, &mut photo_warns)? {
                                     Some((r, _kind)) => r,
                                     // No saved develop → export what the canvas
                                     // WOULD show: neutral + the photo's camera-
@@ -408,6 +467,13 @@ impl AutoshopApp {
                             Ok(()) => okn += 1,
                             Err(e) => errs.push(format!("{}: {e}", autoshop::pipeline::stem(p))),
                         }
+                        if !photo_warns.is_empty() {
+                            warns.push(format!(
+                                "{}: {}",
+                                autoshop::pipeline::stem(p),
+                                photo_warns.join("; ")
+                            ));
+                        }
                         let _ = tx.send(Msg::BatchProgress { done: okn + errs.len(), total });
                     }
                     // FACTS (L12#4): the same-stem renames, the relook count
@@ -419,6 +485,7 @@ impl AutoshopApp {
                         errs,
                         renamed: names.renamed,
                         relooked,
+                        warns,
                     })
                 };
                 Msg::Exported(res)

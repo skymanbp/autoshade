@@ -16,6 +16,20 @@ impl AutoshopApp {
     /// `preview_edge` remains the DECODE edge (`open_path`) — a source-based
     /// canvas is developed from a source decoded AT it, so those two agree by
     /// construction.
+    /// Glide the zoom one step toward its target — run BEFORE any layout
+    /// reads it, so the canvas, the % readout and the pan clamp all see one
+    /// value. Extracted as the testable seam (L16-10): tests used to drive
+    /// the pure glide_step while the update-loop call could be deleted with
+    /// every test green; this method IS the behaviour now, and update() is
+    /// one call.
+    pub(crate) fn apply_zoom_glide(&mut self, ctx: &egui::Context) {
+        if self.zoom != self.zoom_target {
+            let dt = ctx.input(|i| i.stable_dt);
+            self.zoom = glide_step(self.zoom, self.zoom_target, dt);
+            ctx.request_repaint(); // keep stepping while in flight
+        }
+    }
+
     pub(crate) fn canvas_edge(&self) -> u32 {
         self.base_preview
             .as_ref()

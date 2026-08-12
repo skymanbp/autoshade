@@ -97,7 +97,9 @@ DYNAMIC_SITES = [
 #   ("calls", src, "name(")           literal FIRST arguments of name(...)
 DYNAMIC_SOURCES = [
     ("array", "gui", "const CURVE_CHANNELS"),
-    ("array", "gui", "const HSL_BANDS"),
+    # Round-12 L16-7: the GUI re-exports the recipe's own band table (one
+    # source of truth), so the literal array now lives in recipe.rs.
+    ("array", "recipe", "pub const HSL_BANDS"),
     ("array", "gui", "const GRADE_REGIONS"),
     ("array", "gui", "const EXPORT_SPACES"),
     ("array", "gui", "const CROP_ASPECTS"),

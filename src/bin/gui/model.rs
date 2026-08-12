@@ -178,7 +178,10 @@ pub(crate) const GALLERY_ROW_H: f32 = 50.0; // fixed row height for ScrollArea::
 
 pub(crate) const MAX_THUMB_INFLIGHT: usize = 6; // cap concurrent thumbnail decodes
 
-pub(crate) const HSL_BANDS: [&str; 8] = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"];
+// ONE band table (L16-7): the GUI indexes the recipe's HSL arrays with
+// this order, so it must BE the recipe's order — a literal copy could be
+// reordered on either side and silently mislabel every band.
+pub(crate) use autoshop::recipe::HSL_BANDS;
 
 // Representative swatch per HSL band (row markers in the mixer — approximate
 // band-centre hues, display-only; the engine's band maths lives in render.rs).
@@ -249,8 +252,9 @@ pub(crate) enum ExportOutcome {
     /// re-estimated on the way.
     Single { out: PathBuf, relooked: bool },
     /// A batch: counts + per-photo errors (library English, shown verbatim
-    /// as today) + the same-stem rename disclosures + relook count.
-    Batch { ok: usize, errs: Vec<String>, renamed: Vec<String>, relooked: usize },
+    /// as today) + the same-stem rename disclosures + relook count + the
+    /// per-photo develop warnings the OPEN path would have surfaced (L16-2).
+    Batch { ok: usize, errs: Vec<String>, renamed: Vec<String>, relooked: usize, warns: Vec<String> },
 }
 
 /// Batch recipe-paste facts (L12#4). `errs` non-empty = partial failure —

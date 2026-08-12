@@ -1,6 +1,7 @@
 //! Zero-dependency i18n for the native GUI (English skeleton · Chinese overlay).
 //!
-//! English is the SKELETON: every user-facing string literal in `gui.rs` is
+//! English is the SKELETON: every user-facing string literal in the GUI
+//! modules (`src/bin/gui/*`) is
 //! passed to [`tr`] AS its English text, which doubles as the lookup key.
 //! [`Lang::En`] returns that key verbatim (no table walk); [`Lang::Zh`] looks it
 //! up in the single [`ZH_ENTRIES`] catalogue and FALLS BACK to the English key
@@ -14,7 +15,8 @@
 //! substitutions and `trf` does a plain string replace — identical behaviour in
 //! English and Chinese, and the placeholder order is free to differ per language.
 //!
-//! This file is a PRIVATE submodule of `gui.rs` (`mod i18n;`), not a binary —
+//! This file is a PRIVATE submodule of the GUI binary (`mod i18n;` in its
+//! root), not a binary itself —
 //! see `autobins = false` in Cargo.toml for why that distinction matters.
 
 use std::collections::HashMap;
@@ -629,6 +631,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "忙碌中 — 当前任务完成后变体才可切换/删除"),
     ("busy — the photo opens when the current task finishes",
         "忙碌中 — 当前任务完成后照片才会打开"),
+    (" · {n} develop warning(s): {detail}",
+        " · {n} 条显影警告：{detail}"),
     ("busy — undo and redo unlock when the current task finishes",
         "忙碌中 — 当前任务完成后才可撤销/重做"),
     ("opened the first photo — {n} more ignored (drop their folder to browse them all)",

@@ -3,6 +3,159 @@
 // change by one byte). `super::*` still resolves to the root.
     use super::*;
 
+    /// L16-2: the batch resolver surfaces the disclosures the OPEN path
+    /// would — a silent-neutral XMP value must reach the batch outcome.
+    #[test]
+    fn the_batch_resolver_discloses_what_the_open_path_would() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-batch-warns-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("photo.arw");
+        std::fs::write(&src, b"raw").unwrap();
+        let xmp = r#"<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" crs:Exposure2012="+1.00" crs:Contrast2012="bogus"/>"#;
+        let snap = autoshop::store::DevelopSnapshot {
+            recipe: None,
+            recipe_err: None,
+            lr_xmp: Some((xmp.to_string(), "Lightroom sidecar")),
+            store_xmp: None,
+            lr_unreadable: None,
+            packet_xmp: None,
+            packet_unreadable: None,
+            pixel_source: None,
+            pixel_recorded: false,
+        };
+        let mut warns = Vec::new();
+        let (r, kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut warns)
+            .unwrap()
+            .expect("a non-noop sidecar resolves");
+        assert_eq!(kind, "Lightroom sidecar");
+        assert!((r.exposure_ev - 1.0).abs() < 1e-3);
+        assert!(
+            warns.iter().any(|w| w.contains("unreadable") && w.contains("Contrast2012")),
+            "the silent neutral is disclosed on the batch surface: {warns:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L16-9: every export dial reaches the renderer's options — this block
+    /// could previously be deleted with every GUI test green.
+    #[test]
+    fn export_opts_carries_every_dial_to_the_renderer() {
+        let app = AutoshopApp {
+            exp_long_edge: 2560,
+            exp_sharpen: 35.0,
+            exp_quality: 88.0,
+            exp_space: 1,
+            exp_format: ExportFormat::Png8,
+            ..Default::default()
+        };
+        let o = app.export_opts();
+        assert_eq!(o.long_edge, Some(2560));
+        assert!((o.sharpen - 35.0).abs() < 1e-6);
+        assert_eq!(o.jpeg_quality, 88);
+        assert!(o.eight_bit, "Png8 is 8-bit");
+        assert!(matches!(o.color_space, autoshop::render::ExportColorSpace::DisplayP3));
+        let flat = AutoshopApp { exp_long_edge: 0, ..Default::default() };
+        assert_eq!(flat.export_opts().long_edge, None, "0 = no resize");
+    }
+
+    /// L16-10: the glide runs through its production seam — the method the
+    /// update loop calls, not the pure helper alone.
+    #[test]
+    fn the_zoom_glide_seam_moves_toward_the_target() {
+        let ctx = egui::Context::default();
+        let mut app = AutoshopApp { zoom: 1.0, zoom_target: 4.0, ..Default::default() };
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.apply_zoom_glide(ctx));
+        assert!(
+            app.zoom > 1.0 && app.zoom < 4.0,
+            "one glide step moved toward the target: {}",
+            app.zoom
+        );
+    }
+
+    /// L16-11: the shortcut exclusivity gates, tested NEGATIVELY — deleting
+    /// the transient guard used to fail nothing.
+    #[test]
+    fn a_transient_window_swallows_canvas_shortcuts() {
+        let ctx = egui::Context::default();
+        let key = |k| egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Positive control first: with NO transient up, R arms the crop —
+        // proving this harness actually reaches the tool tier.
+        let mut app = AutoshopApp {
+            src_path: Some(std::path::PathBuf::from("D:/library/x.arw")),
+            ..Default::default()
+        };
+        let mut input = egui::RawInput::default();
+        input.events.push(key(egui::Key::R));
+        let _ = ctx.run(input, |ctx| app.upd_shortcuts(ctx));
+        assert!(app.crop_mode, "positive control: R arms the crop tool");
+
+        // The negative: a transient (Settings) swallows the tool tier…
+        let mut app = AutoshopApp {
+            src_path: Some(std::path::PathBuf::from("D:/library/x.arw")),
+            show_settings: true,
+            ..Default::default()
+        };
+        let mut input = egui::RawInput::default();
+        input.events.push(key(egui::Key::R));
+        let _ = ctx.run(input, |ctx| app.upd_shortcuts(ctx));
+        assert!(!app.crop_mode, "R is dead while a modal transient is up");
+        // …and Esc dismisses the transient instead of leaking anywhere.
+        let mut input = egui::RawInput::default();
+        input.events.push(key(egui::Key::Escape));
+        let _ = ctx.run(input, |ctx| app.upd_shortcuts(ctx));
+        assert!(!app.show_settings, "Esc dismissed the transient");
+        assert!(!app.crop_mode);
+    }
+
+    /// L16-12: the display resync is exercised through a REAL swap path
+    /// (load_version), not by calling the helper directly.
+    #[test]
+    fn a_version_load_resyncs_the_display_state() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-version-resync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("photo.arw");
+        std::fs::write(&src, b"raw").unwrap();
+        let dev = autoshop::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let versioned = EditRecipe {
+            exposure_ev: 0.75,
+            rationale: "v1 marker rationale".into(),
+            ..Default::default()
+        };
+        std::fs::write(
+            autoshop::store::version_target(&src, 1),
+            serde_json::to_string(&versioned).unwrap(),
+        )
+        .unwrap();
+
+        let mut app = AutoshopApp {
+            src_path: Some(src.clone()),
+            sel_mask: Some(3), // stale index into the OLD mask list
+            rationale: "stale rationale".into(),
+            ..Default::default()
+        };
+        app.load_version(1);
+        assert!((app.recipe.exposure_ev - 0.75).abs() < 1e-3, "the version landed");
+        assert_eq!(
+            app.rationale, "v1 marker rationale",
+            "the swap path resynced the rationale display"
+        );
+        assert_eq!(app.sel_mask, None, "a stale mask selection cannot linger");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
     /// L15-8: Clear must clear what Apply BAKES (the greyscale weight
     /// buffer), not only what the canvas shows — the session's own contract
     /// is "bakes exactly what it shows".
@@ -1240,7 +1393,7 @@
         )
         .unwrap();
         let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
-        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap)
+        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new())
             .unwrap()
             .expect("an XMP-only develop must resolve for the batch");
         let SavedDevelop::Restored(open, open_kind) = read_saved_develop(&src).saved else {
@@ -1271,7 +1424,7 @@
             .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
             .unwrap();
         let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
-        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap)
+        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new())
             .unwrap()
             .expect("the Lightroom develop must resolve for the batch");
         assert!(batch_kind.contains("Lightroom"), "{batch_kind}");
@@ -1340,7 +1493,7 @@
 
         // The batch snapshot answers the same develop (anti-drift).
         let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
-        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap)
+        let (batch, batch_kind) = crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new())
             .unwrap()
             .expect("the batch resolves the packet too");
         assert_eq!(batch_kind, kind);
@@ -1397,7 +1550,7 @@
         );
         let snap = autoshop::store::read_develop_snapshot(&src).unwrap();
         assert!(
-            crate::export::resolve_snapshot_develop(&src, &snap).unwrap().is_none(),
+            crate::export::resolve_snapshot_develop(&src, &snap, &mut Vec::new()).unwrap().is_none(),
             "the batch answers the same: neutral store, no packet"
         );
 
@@ -2754,8 +2907,19 @@
         );
         assert_eq!(ExportFormat::from_pref(0, false), ExportFormat::Tiff16);
         assert_eq!(ExportFormat::from_pref(99, false), ExportFormat::Tiff16, "unknown code is safe");
-        for f in ExportFormat::ALL {
-            assert_eq!(ExportFormat::from_pref(f.pref_code(), false), f, "roundtrip {f:?}");
+        // The wire numbering is a PERSISTED contract (gui-prefs.ron) —
+        // pinned literally, never derived from pref_code itself: a
+        // coordinated swap of two variants' codes passed the derived
+        // roundtrip while every stored preference changed meaning (L16-8).
+        for (code, f) in [
+            (0u8, ExportFormat::Tiff16),
+            (1, ExportFormat::Tiff8),
+            (2, ExportFormat::Png16),
+            (3, ExportFormat::Png8),
+            (4, ExportFormat::Jpeg),
+        ] {
+            assert_eq!(f.pref_code(), code, "persisted numbering is frozen: {f:?}");
+            assert_eq!(ExportFormat::from_pref(code, false), f, "roundtrip {f:?}");
         }
         assert!(ExportFormat::Jpeg.eight_bit(), "JPEG is 8-bit by nature");
         assert!(ExportFormat::Tiff8.eight_bit() && ExportFormat::Png8.eight_bit());

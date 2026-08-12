@@ -1509,13 +1509,7 @@ impl eframe::App for AutoshopApp {
         let hover_prev = self.hover_mask.take();
 
         self.upd_shortcuts(ctx);
-        // Glide the zoom toward its target BEFORE any layout reads it, so
-        // the canvas, the % readout and the pan clamp all see one value.
-        if self.zoom != self.zoom_target {
-            let dt = ctx.input(|i| i.stable_dt);
-            self.zoom = glide_step(self.zoom, self.zoom_target, dt);
-            ctx.request_repaint(); // keep stepping while in flight
-        }
+        self.apply_zoom_glide(ctx);
         self.upd_dropped_and_title(ctx);
 
         self.upd_top_bar(ctx);
