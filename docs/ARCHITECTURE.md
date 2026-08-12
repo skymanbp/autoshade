@@ -1,6 +1,6 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.23.1). The full decode → advise → verify → render
+> Status: **implemented** (v0.23.3). The full decode → advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
 > (`serve`) — plus the CLI, AI denoise (SCUNet sidecar), the PNG/TIFF
@@ -8,7 +8,23 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 281 library + 3 CLI + 37 GUI tests pass in both build configurations.
+> 428 library + 7 CLI + 71 GUI tests pass in both build configurations.
+> v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
+> through an element SCOPE STACK and refuses only where a binding would
+> actually corrupt this document's reading (a nested rebound island nobody
+> resolves through no longer rejects the whole file); the merge-target finder
+> requires the `xmlns:crs` declaration VALUE to be canonical, not just the
+> attribute name; frame pops are name-matched (malformed closes degrade toward
+> refusal) and a 256-live-declaration budget keeps adversarial documents from
+> going quadratic. Also: the "As" parody app icon, three easter eggs (en/zh),
+> and vertical-spacing fixes in the GUI toolbar and Library chips.
+> v0.23.2 (round 12) split the single-file GUI into the `src/bin/gui/*`
+> module tree, normalised export (save dialog + format/depth settings),
+> rebuilt the settings trust model around one capability table (§3), cleared
+> the 16-lane scan's entire confirmed backlog (72 findings) and closed its
+> Codex review (billing-safe SSE prefix rule, adoption fenced at the develop
+> lock, one sidecar read feeding both a GET's body and its ETag, full-decode
+> product acceptance for denoise/segment).
 > v0.23.1 (16-lane parallel scan round) landed the deferred quartet and the
 > scan's verified fixes: restore-time clamp disclosure travels ALL FOUR
 > `ClampSummary` fields (masks/components/curve points/string bytes) to every

@@ -305,7 +305,72 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 - **C1/F10 词法路径身份**：~~维持既有取舍（source.txt 面包屑），仅登记~~
   → 用户翻案（2026-08-09 拍板），本轮实修，见上方阶段 3。
 
+## 第十三轮计划（🔒 用户锁定 2026-08-12 —— ✅ 已完成，v0.23.3；执行记录见「当前状态」首条）
+
+> 用户原话（2026-08-12）："1.改应用图标。按照我们的风格改成类似恶搞adobe的PS的
+> 图标，我举个例子：'skymanbp's AS'。2.在合适的地方加入一些彩蛋，讽刺Adobe的
+> 拉跨技术和昂贵定价。3.看截图，GUI这里的按钮上下有点挤，稍微分开一点点？然后
+> 下面的小按钮框框上下太短了，拉大一点？4.全量更新文档，彻查漂移。定版0.23.3。"
+> 追加："roadmap记得全部清完。更新并锁住ccm计划，然后根据计划全部推完。"
+
+1. **图标改版**：恶搞 Adobe Ps 的 "As" 瓦片（同款深藏青 #001E36 + 亮蓝
+   #31A8FF 字母，Noto Sans SC OFL 600 字重，4096px 超采样降出全尺寸资产）。
+2. **彩蛋**：讽刺 Adobe 定价/技术，i18n 双语，藏而不扰。
+3. **GUI 垂直间距**：顶栏按钮上下留白 + Library 小按钮框拉高（溯源根因修）。
+4. **ROADMAP 在册清完**：唯一可行动登记项 R12-03（xmlns 作用域化）实修。
+5. **文档全量漂移彻查** + Codex xhigh 只读复审 + 发版 v0.23.3。
+   **GUI 启动禁令本轮全程在场**（视觉验收=用户自己的截图）。
+
 ## 当前状态（已完成，勿重做）
+
+- **第十三轮：恶搞图标 + 彩蛋 + 间距 + R12-03 清账（2026-08-12，v0.23.3）**
+
+  - **图标 `9e1e83e`**：光圈轮让位 "As" 恶搞瓦片（build.rs winresource 嵌
+    `assets/autoshop.ico`、gui/main.rs 读 `icon_256.png`，零代码变更；从
+    构建产物提取图标资源验证嵌入，未启动 GUI）。
+  - **间距 `3987fd2`**：顶栏根因=egui side_top_panel 默认垂直内边距仅 2px
+    → 顶面板显式 frame 带 SPACE_MD(6px)；Library 芯片根因=egui
+    `Button::small()` 硬清零垂直 padding 且跳过 interact-size 下限
+    （egui-0.29.1 button.rs:202/263，样式令牌无从救）→ 四枚芯片换全框按钮
+    +Small 字号（panels/gallery.rs 本地 `chip` 构造器）。
+  - **彩蛋 `cd42923`**：三处（Settings 页脚"skymanbp's AS——As 是 Autoshop
+    不是 Adobe 订阅，迄今月租 $0.00"、空态"比 Photoshop 启动画面快"、快捷键
+    窗页脚"没有 Creative 档位没有 Cloud 没有每月赎金"），全部 weak/small 走
+    tr()，ZH_ENTRIES 标注分组；新增汉字使字体子集 790→802（re-run
+    subset_gui_fonts，check OK 802/802）。
+  - **R12-03 实修 `5b61687`**（在册清单自此归零）：`xmlns_conflict` 从平铺
+    全文扫描改**作用域栈解析**——只在绑定实际腐蚀本文档读取处拒绝：crs:/rdf:
+    名字（元素或属性）在作用域内解析到非正典 URI；其它前缀解析到正典 URI
+    （设置藏进扫描器看不见的拼写）；无前缀**元素**处于绑定到正典 URI 的默认
+    命名空间（无前缀属性依 XML 规范不入命名空间）。未被解析经过的声明惰性
+    （嵌套孤岛重绑不再拒全文）；未声明的 crs:/rdf: 照旧放行。同改协同堵洞：
+    `find_crs_description` 曾仅凭 `xmlns:crs` **属性名**认合并目标——作用域
+    门放行的"未使用异绑 Description"会被选中并拼入正典意图设置 → 认定改为
+    声明**值**必须正典。6 新测试 + 五路变异恰红（平铺化/属性检查失效/不弹栈
+    /只看名字/无帽；变异 B 额外红了 BF 批既有测试
+    a_foreign_camera_raw_prefix_refuses_the_merge_and_is_disclosed——同机理
+    第四探测器，夹具 xmp.rs:4152 亲证）。
+  - **Codex xhigh 只读复审闭合 `3f3df86`**（2 发现均 MEDIUM，先第一性红测
+    复现再修，双变异恰红）：**R13-01** 帧按深度算术弹栈——冒名/多余闭合标签
+    （`</bogus>`）提前释放孤岛异绑，旧平铺门拒绝的文档穿过作用域门（我注释
+    宣称"malformed 只朝拒绝退化"被证伪）→ 弹栈需深度+元素名双匹配
+    （tag_name），不匹配=帧存续（只会过拒）。**R13-02** resolve 每名字线性扫
+    全部活声明、单标签声明数无界 → 16MiB 信封内可构造二次方 → 1024 帧帽换
+    **活声明预算 256**（弹栈递减；超限保守拒绝+披露；真实生产者 ~10 条）。
+    frames 结构化为 NsFrame。GUI/i18n/合并路径复审为阴性（插入路径自声明
+    正典 xmlns:crs，异绑无从俘获）。
+  - **文档漂移彻查**：ARCHITECTURE 状态行 v0.23.1→v0.23.3、测试计数
+    281/3/37→428/7/71（多轮陈账）；本文件「关键架构事实」两处 gui.rs 锚点
+    改指模块树真实位置（十二轮拆分后失效）；README/M1_PLAN/V2_PLAN 逐一核过
+    无现状式漂移。
+  - **收口**：428 lib + 71 GUI + 7 CLI 全绿；全轮 `#[test]` 等集 +8/−0
+    （diff 级验证）；clippy 0（lib+bins+gui all-targets）；i18n 九门 0；字体
+    802/802；每提交密钥+路径扫描 0。**E2E round-13 真进程 22/22 全过**（新
+    发布二进制；xmlns 冲突警告头在作用域门下端到端幸存），GUI 4 项按禁令
+    **跳过并披露**（视觉验收=用户截图）。ccm 计划第十三轮用户锁定后逐步
+    执行完毕。
+
+
 
 - **v0.23.2 RELEASED（2026-08-12）** — tag v0.23.2 → 4754999；assets 字节
   验证与本地构建精确相等：cli `47dac880…` = 28 295 525 B、gui `8a8955ee…`
@@ -450,7 +515,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
     `unsupported_corrections`。修=两披露前移/补齐。
   - **R12-03（MEDIUM）登记**：xmlns 冲突门无作用域栈，嵌套局部重绑触发全文
     拒绝。按门自身文档这是有意保守面（拒+披露+无已知生产者触发）；作用域化
-    命名空间解析=独立硬化项，登记。
+    命名空间解析=独立硬化项，登记。**→ 第十三轮实修销账（`5b61687` +
+    复审闭合 `3f3df86`，见「当前状态」首条）。**
 
   6 新测试 + 变异轮 MR1-MR7 恰红 9 条（MR5 覆盖 3 条 denoise 验收，预期
   集合内）；E2E 26/26 重跑全过（heal 预检文案随解码检查更新）。终态
@@ -3292,9 +3358,13 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 关键架构事实（新会话必读）
 
-- 所有图上交互经 `ViewXform`（屏幕↔全幅归一化，gui.rs）；工具互斥分发在
-  `after_view`（crop > placing > wb_pick > range_pick > clone > paint >
-  box-select）。
+> gui.rs 已于第十二轮拆为 `src/bin/gui/*` 模块树（app/actions/canvas/
+> workers/export/persist/masks/model/util/i18n/theme/panels/*）。下文与
+> ①-⑤ 历史条目里的 "gui.rs" 锚点指其对应模块。
+
+- 所有图上交互经 `ViewXform`（屏幕↔全幅归一化，gui/model.rs）；工具互斥
+  分发在 `after_view`（gui/canvas.rs；crop > placing > wb_pick >
+  range_pick > clone > paint > box-select）。
 - **EXIF 方向在链条最前端**（55e7e07 起）：引擎 `orient_f32` 在 develop
   之前转正 f32 缓冲，decode 端 `preview_only`/`decode_raw` 用同一
   `render::oriented`（pub(crate)）转正内嵌预览——GUI 显示帧 == 引擎
@@ -3306,10 +3376,11 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   `rotate_straighten`（拉直）完成（导出路径同函数、同顺序）。
 - **坐标空间约定（④起，C2 扩展）**：original →（畸变校正）→ corrected →
   （旋转+内接裁剪）→ view；`recipe.crop` 存 view 空间；masks/画笔/吸管/
-  region 存 original 空间——gui.rs `view_norm_to_orig / orig_norm_to_view /
-  geom_to_view`（三者带 `dist` 参数，来源 `geom_ctx`）在数据边界换算，共用
-  引擎 `inscribed_dims / distort_norm / undistort_norm`，全零恒等。完整
-  合约见 render.rs "Manual lens distortion" 注释块。
+  region 存 original 空间——gui/util.rs `view_norm_to_orig /
+  orig_norm_to_view / geom_to_view`（三者带 `dist` 参数，来源 `geom_ctx`）
+  在数据边界换算，共用引擎 `inscribed_dims / distort_norm /
+  undistort_norm`，全零恒等。完整合约见 render.rs "Manual lens
+  distortion" 注释块。
 - tone 模型单一事实来源：`render::TONE_KNOTS_X / tone_slider_basis /
   tone_exposure_curve`（pub(crate)，fit.rs 逆着它解）；曲线采样单一事实来源
   `render::curve_lut`（pub，GUI 曲线编辑器直接画它）。
