@@ -278,7 +278,19 @@ provider (the `claude` CLI documents `low, medium, high, xhigh, max`;
 OpenAI-compatible endpoints take the first three), so the Settings pickers offer
 the right list beside a free-text field, and an endpoint that does not know the
 tier is automatically retried without it. Blank means "send no such parameter",
-which is the only correct request for a model that does not reason.
+which is the only correct request for a model that does not reason. On
+`/responses` the tier and the liveness summary stream ride inside one
+`reasoning` object, and the retry drops whichever child the endpoint **named**:
+a refused tier costs the tier, not the progress stream that keeps a long
+reasoning phase from looking like a stall.
+
+The model lists beside those pickers are suggestions too. They are whatever the
+endpoint's own `/models` returned, minus the ids recognisable as something else
+(audio, embeddings, rerankers, image generators, the two legacy
+completion-only models). A name can only rule things OUT, so appearing in the
+list is not a promise that a model can read the proposer's image — a wrong pick
+fails loudly, and unbilled, on the first call, and the free-text field beside
+the list is there for everything the filter has never heard of.
 
 ## Honest scope
 

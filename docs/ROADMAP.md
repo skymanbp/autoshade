@@ -398,6 +398,55 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   - 门：clippy 0；测试 377 全绿（`comm` 对 AS 基线累计 0 删 6 增）；i18n 九门 0；
     字体门 786/786。
 
+  **BA 复审闭合之二（同日，Codex 推理协商／模型过滤／测试质量 xhigh 只读复审；
+  前三次死于 harness 10 分钟前台等待天花板，照本轮 L13 旧例改 `--background`
+  提交后 11m57s 回执）**：5 发现，回执已按要求给出最上游成因并归并为 A/B/C/D
+  四组；亲证后合成三次系统性改动。
+
+  - **ROOT A（1 MEDIUM + 1 LOW 测试，同源）：归因按命名空间，而非按旋钮。**
+    根因在 `error_blames_param` 的点号子级规则（`mod.rs:621`）：`/responses` 上
+    tier 与 liveness summary 是同一个 `reasoning` 对象的两个孩子，父级判据对
+    两者同时为真，而 summary 分支在前——端点明说 `param:"reasoning.effort"`
+    时，它丢掉端点从未抱怨的进度流、把端点抱怨的 tier 原样重发，第三个 POST
+    才到位。修法：新增 `blamed_child`（父与子分开问），端点**点名**的孩子进
+    自己的分支；只有**裸** `reasoning` 才算真歧义，那里仍是 summary 先让——
+    它是我们自己的把戏，tier 是用户的明示选择。
+  - **ROOT C（LOW）：一次逻辑验证有两个互不通气的状态机。**
+    能力认知原是 `post_ai_json` 的局部布尔，随一次调用消亡；而 temperature 钉
+    在它**外面**协商，重试从零开始，把刚被拒的 effort/stream 再报一遍——每条
+    拒绝多花一个 POST 学第二遍（一次 verify 最坏 6 个，tier 出现前是 4）。
+    修法：`Refused{summary,effort,stream}` 改为**调用方**的值，
+    `post_ai_json_with` 收 `&mut Refused`，`post_ai_json` 退化为传
+    `Refused::default()` 的包装（其余四个调用点零改动），openai_verify 的两次
+    尝试共用一份。**"2xx 之后绝不重发"的计费不变量本身复审判 CLEAN**。
+  - **ROOT B（MEDIUM）：名字过滤只能剔除它认得的东西，而它按大小写敏感匹配
+    原始 id。** `Qwen/Qwen2-Audio-7B-Instruct` 里的 `Audio` 躲过小写 `audio`，
+    而注释与测试都宣称排除项"vendor-wide 有效"——实现恰好在**放宽过滤所服务
+    的那批第三方 id**（厂商大小写格式）上失效。修法：两个 id 判据统一折叠
+    大小写；模态排除之外新增一组**端点族**排除（`babbage-002`/`davinci-002`
+    两个只服务 `/completions` 的旧基座，精确 id）；文档与断言口径改回它真能
+    决定的事——"是否**上架**"，不是"是否具备视觉能力"。
+    **与复审的一处分歧（亲证后不采纳）**：回执把 `Llama-3.3-70B-Instruct` 记为
+    误报（纯文本、无视觉）。但分析角色的验证器**从不发图**（`openai_verify.rs`
+    模块头「Text-only … never the image」），纯文本 chat 模型在该角色下是正确
+    候选；按视觉能力过滤反而误伤另一个角色。保留为正例并在测试里写明理由。
+  - **ROOT D（LOW）：测试边界落在协商包装之下。** 旧测试直接驱动
+    `verify_command_with` 与 `cli_rejected_effort`，于是"`verify` 是否真把配置
+    的 tier 传下去""重试是否存在"两条都看不见。修法：新增 `refusing_stand_in`
+    桩（像 clap 那样 exit 2 + `unexpected argument`，**追加**记录每次 argv），
+    新测试走 `verify` 真产线、跑两个真子进程。顺带修 `stand_in` 的 sh 分支：
+    `printf '%%s '`（Rust `format!` 不处理 `%`，到 sh 是字面 `%%s`）从来只写出
+    "%s %s"，argv 值根本没被记录——非 Windows 上读该文件的断言全是空转。
+  - 三条新测试逐条**反向变异亲证**（改回缺陷 → 对应断言红、且只红对应那条）：
+    第二次 POST 体退化为 `{"reasoning":{"effort":"high"},"stream":true}`；第三次
+    POST 体又带回 `reasoning_effort:"high"`；`--effort` 永传 `None` 时只 spawn
+    一次。
+  - **覆盖缺口（登记，未闭合）**：回执自陈 (a)(b)(e) 未跑到。(a)(b) 已由前一次
+    信任面复审判 CLEAN；**(e) GUI 目录失效／`fetching` 标志与重绘泵／首开自动
+    拉取能否熬过 `load_settings_form` 重建，至今无任何独立复审**。
+  - 门：clippy 0；测试 380 lib + 5 CLI + 55 GUI 全绿（`comm` 对上一提交
+    0 删 3 增）；i18n 九门 0；字体门 786/786；密钥扫描空。
+
 - **第十二轮·阶段 1–3 全清：在册 15 簇归零 + Codex 簇群复审闭合（2026-08-11，
   未发版；计划见下方「第十二轮计划」）**
 

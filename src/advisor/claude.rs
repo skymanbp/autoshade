@@ -358,10 +358,65 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let p = dir.join("claude.sh");
+            // `%s`, not `%%s`: Rust's format! leaves `%` alone, so the doubled
+            // form reached sh as a literal `%%s` and printf wrote "%s %s %s"
+            // — the argv VALUES were never recorded, and every assertion
+            // reading this file was vacuous on non-Windows.
             let body = format!(
-                "#!/bin/sh\nprintf '%%s ' \"$@\" > \"{argv}\"\ncat > \"{prompt}\"\ncat \"{env}\"\n",
+                "#!/bin/sh\nprintf '%s ' \"$@\" > \"{argv}\"\ncat > \"{prompt}\"\ncat \"{env}\"\n",
                 argv = dir.join("argv.txt").display(),
                 prompt = dir.join("prompt.txt").display(),
+                env = env_file.display(),
+            );
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_string_lossy().into_owned()
+        }
+    }
+
+    /// A stand-in "claude" that REFUSES `--effort` the way clap does — exit 2
+    /// with `unexpected argument` on stderr — and answers normally without it.
+    /// It APPENDS each invocation's argv, so one file holds the whole
+    /// negotiation: what the first spawn was given, and what the second was.
+    fn refusing_stand_in(dir: &std::path::Path, envelope: &str) -> String {
+        let env_file = dir.join("envelope.json");
+        std::fs::write(&env_file, envelope).unwrap();
+        let argv = dir.join("argv.txt");
+        #[cfg(windows)]
+        {
+            let p = dir.join("claude.bat");
+            let body = format!(
+                "@echo off\r\n\
+                 echo %* >> \"{argv}\"\r\n\
+                 findstr \"^\" > nul\r\n\
+                 echo %* | findstr /C:\"--effort\" > nul\r\n\
+                 if %ERRORLEVEL%==0 goto refuse\r\n\
+                 type \"{env}\"\r\n\
+                 goto :eof\r\n\
+                 :refuse\r\n\
+                 echo error: unexpected argument '--effort' found 1>&2\r\n\
+                 exit /b 2\r\n",
+                argv = argv.display(),
+                env = env_file.display(),
+            );
+            std::fs::write(&p, body).unwrap();
+            p.to_string_lossy().into_owned()
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("claude.sh");
+            let body = format!(
+                "#!/bin/sh\n\
+                 printf '%s ' \"$@\" >> \"{argv}\"\n\
+                 printf '\\n' >> \"{argv}\"\n\
+                 cat > /dev/null\n\
+                 case \" $* \" in\n\
+                 *\" --effort \"*) echo \"error: unexpected argument '--effort' found\" >&2; \
+                 exit 2 ;;\n\
+                 esac\n\
+                 cat \"{env}\"\n",
+                argv = argv.display(),
                 env = env_file.display(),
             );
             std::fs::write(&p, body).unwrap();
@@ -577,6 +632,43 @@ mod tests {
         };
         assert!(!cli_rejected_effort(&unrelated), "an unrelated failure must not re-run the call");
         assert!(!cli_rejected_effort(&AdvisorError::ClaudeError("--effort".into())));
+        // What this test CANNOT see: it drives the builder and the matcher
+        // directly, so it stays green whether `verify` ever passes the
+        // configured tier and whether the retry exists at all. That claim is
+        // pinned at the production seam below, over two real child processes.
+    }
+
+    /// The negotiation at its PRODUCTION seam: a `claude` that refuses
+    /// `--effort` the way clap does must still return a verdict, from a second
+    /// spawn that drops the tier and nothing else. Two real child processes,
+    /// one recorded argv file — the only boundary at which "the configured
+    /// tier reached the child" and "it re-spawned exactly once" are
+    /// observable at all.
+    #[test]
+    fn a_cli_that_refuses_the_effort_flag_still_verifies_on_a_second_spawn() {
+        let dir = tdir("effort-refused");
+        let provider = ClaudeProvider {
+            bin: refusing_stand_in(&dir, ACCEPT_ENVELOPE),
+            model: "test-model".into(),
+            effort: Some("xhigh".into()),
+        };
+        let verdict = provider
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .expect("an unknown --effort degrades to a run without it");
+        assert!(matches!(verdict.decision, Decision::Accept));
+        let argv = std::fs::read_to_string(dir.join("argv.txt")).unwrap_or_default();
+        let runs: Vec<&str> = argv.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        assert_eq!(runs.len(), 2, "exactly two spawns — one refused, one plain: {argv}");
+        assert!(
+            runs[0].contains("--effort xhigh"),
+            "the CONFIGURED tier is what reaches the first child: {argv}"
+        );
+        assert!(!runs[1].contains("--effort"), "the retry drops the tier: {argv}");
+        assert!(
+            runs[1].contains("--model test-model"),
+            "…and drops nothing else with it: {argv}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// L14#3: the isolation contract is the argv itself, so the test pins

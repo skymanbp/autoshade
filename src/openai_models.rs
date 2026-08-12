@@ -87,12 +87,13 @@ pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
 }
 
 /// True if `id` looks like an image-generation model (gpt-image-*, *image*).
+/// Case-FOLDED, like every other id test here: `Qwen/Qwen-Image` names the
+/// same model as `qwen-image`.
 pub fn is_image_model(id: &str) -> bool {
-    id.contains("image")
+    id.to_ascii_lowercase().contains("image")
 }
 
-/// True if `id` looks like a text/vision chat model (the proposer/verifier
-/// roles), excluding the modality-specific variants that cannot do vision-chat.
+/// True if `id` may be OFFERED as a chat model — the proposer/verifier roles.
 ///
 /// EXCLUSION, not an allowlist. This used to require an OpenAI-branded prefix
 /// (`gpt*`, `chatgpt*`, `o<digit>`), which quietly made "fetch the models this
@@ -101,15 +102,36 @@ pub fn is_image_model(id: &str) -> bool {
 /// LM Studio, vLLM, Qwen, DeepSeek — was filtered to nothing and the picker
 /// silently fell back to two hardcoded ids. The base URL is configurable
 /// precisely so those endpoints work, so the classifier must not re-hardcode
-/// the vendor. False positives are cheap here: the picker is a suggestion list
-/// with a free-text field beside it, and a wrong pick fails loudly on the
-/// first call.
+/// the vendor.
+///
+/// What a name CAN and CANNOT decide, since an exclusion list only removes
+/// what it recognises:
+/// - It must actually recognise it. The match is case-FOLDED because the ids
+///   this relaxation exists to admit are vendor-formatted, and the canonical
+///   `Qwen/Qwen2-Audio-7B-Instruct` sailed straight past a lowercase `audio`
+///   test — the exclusions claimed to work vendor-wide and did not.
+/// - "Offered" is not "vision-capable", and nothing in an id proves it is:
+///   the picker is a suggestion list beside a free-text field, and a wrong
+///   pick fails loudly — and unbilled, on a 400-class refusal — at the first
+///   call. Filtering down to vision models would also be wrong for the OTHER
+///   role: the analysis verifier never sends the image (`openai_verify.rs`),
+///   so a text-only chat model is a correct pick there.
 pub fn is_chat_model(id: &str) -> bool {
-    let bad = [
+    let id = id.to_ascii_lowercase();
+    // A different MODALITY: these serve another kind of call entirely.
+    let other_modality = [
         "audio", "realtime", "transcribe", "tts", "whisper", "embedding", "moderation", "rerank",
         "dall-e", "sora", "video", "speech", "guard",
     ];
-    !id.is_empty() && !is_image_model(id) && !bad.iter().any(|b| id.contains(b))
+    // A different ENDPOINT FAMILY: OpenAI's two surviving legacy base models
+    // answer `/completions` only, so a chat or responses call is refused
+    // outright. Exact ids — a substring test on `davinci` would also strike
+    // third-party ids that merely mention it.
+    let completion_only = ["babbage-002", "davinci-002"];
+    !id.is_empty()
+        && !is_image_model(&id)
+        && !other_modality.iter().any(|b| id.contains(b))
+        && !completion_only.contains(&id.as_str())
 }
 
 #[cfg(test)]
@@ -140,14 +162,34 @@ mod tests {
             "claude-opus-4-6",          // a Codex/Claude bridge
             "qwen2.5-vl-72b-instruct",  // vLLM / LM Studio
             "deepseek-chat",
+            // Text-only, and correct to offer: the ANALYSIS verifier judges
+            // the recipe from numbers and never sends the image.
             "llama-3.3-70b-instruct",
             "mistral-large-latest",
         ] {
             assert!(is_chat_model(id), "{id} disappeared from the picker");
         }
-        // …while the modality exclusions keep doing their job vendor-wide.
+        // …while the exclusions keep doing their job vendor-wide — which they
+        // only do when the match is case-FOLDED. These are the canonical
+        // upstream spellings, not the lowercase ones a test author reaches
+        // for; the first exclusion list matched raw bytes and let every one
+        // of them through.
+        for id in [
+            "Qwen/Qwen2-Audio-7B-Instruct",
+            "openai/whisper-large-v3",
+            "BAAI/bge-reranker-v2-m3",
+            "Meta-Llama-Guard-2-8B",
+        ] {
+            assert!(!is_chat_model(id), "{id} must not be offered as a chat model");
+        }
+        assert!(is_image_model("Qwen/Qwen-Image"), "…and the image side folds case too");
         for id in ["qwen-audio-turbo", "bge-reranker-v2", "dall-e-3", "sora-2", "llama-guard-3"] {
-            assert!(!is_chat_model(id), "{id} cannot answer a vision-chat call");
+            assert!(!is_chat_model(id), "{id} must not be offered as a chat model");
+        }
+        // Not a modality — a different ENDPOINT: the two legacy base models
+        // answer /completions only, so a chat call to them is refused.
+        for id in ["babbage-002", "davinci-002"] {
+            assert!(!is_chat_model(id), "{id} is a completion-only model");
         }
         assert!(!is_chat_model(""), "an empty id is not a model");
     }

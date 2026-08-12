@@ -608,19 +608,44 @@ pub(crate) enum SseFamily {
 /// images/edits stall precedent). `AUTOSHOP_HTTP_TIMEOUT_SECS` overrides.
 pub(crate) const STREAM_STALL_FLOOR_SECS: u64 = 600;
 
+/// The endpoint's STRUCTURED blame, when it gave one: `error.param` as a
+/// string. `None` covers both "no such field" and an explicit JSON null — the
+/// shape an endpoint sends when it cannot pin the failure on one parameter.
+fn structured_param(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.get("param")?.as_str().map(str::to_owned))
+}
+
 /// Does this HTTP error body blame the named request parameter? Structured
 /// `error.param` wins when present (exact, or a dotted child like
 /// `reasoning.summary`); when absent — or JSON null — only a QUOTED mention
 /// of the name counts: a bare substring match would let a proxy's
 /// "upstream error" blame `stream`.
+///
+/// This answers for a whole NAMESPACE and is therefore deliberately imprecise
+/// about which child is meant. A caller that sends two children of one object
+/// must ask [`blamed_child`] which one the endpoint actually named before
+/// acting on this — otherwise whichever branch is written first silently
+/// claims its sibling's rejections.
 pub(crate) fn error_blames_param(body: &str, name: &str) -> bool {
-    let param = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("error")?.get("param")?.as_str().map(str::to_owned));
-    match param.as_deref() {
+    match structured_param(body).as_deref() {
         Some(p) => p == name || p.starts_with(&format!("{name}.")),
         None => body.contains(&format!("'{name}'")) || body.contains(&format!("\"{name}\"")),
     }
+}
+
+/// WHICH child of `parent` the endpoint named, if it named one:
+/// `{"param":"reasoning.effort"}` under `"reasoning"` → `Some("effort")`.
+///
+/// `None` is every ambiguous case — the bare parent, some other parameter, or
+/// no structured attribution at all — so it reads as "the endpoint did not
+/// say", never as "not this child".
+fn blamed_child(body: &str, parent: &str) -> Option<String> {
+    structured_param(body)?
+        .strip_prefix(&format!("{parent}."))
+        .filter(|c| !c.is_empty())
+        .map(str::to_owned)
 }
 
 /// POST a JSON body to an OpenAI-compatible AI endpoint, STREAMING-FIRST.
@@ -644,7 +669,8 @@ pub(crate) fn error_blames_param(body: &str, name: &str) -> bool {
 /// stream, `/chat/completions` as a top-level `reasoning_effort`.
 ///
 /// Negotiation (each flag drops at most once, on a 400-class status whose
-/// error actually blames that parameter — see [`error_blames_param`]):
+/// error actually blames that parameter — see [`error_blames_param`] and,
+/// for the two knobs that share the `reasoning` object, [`blamed_child`]):
 /// the effort tier (an endpoint or model that has no such notion) → retry
 /// without it; `reasoning` (models without summaries) → retry streaming
 /// without it; `stream` (thin OpenAI-compatible bridges) → retry ONCE as a
@@ -659,14 +685,49 @@ pub(crate) fn post_ai_json(
     family: SseFamily,
     effort: Option<&str>,
 ) -> Result<serde_json::Value, AdvisorError> {
-    let mut use_stream = true;
+    post_ai_json_with(url, key, body, budget_secs, family, effort, &mut Refused::default())
+}
+
+/// What ONE logical call has LEARNED this endpoint will not accept.
+///
+/// Refusals, not intentions: what a given attempt SENDS is derived from the
+/// family, the caller's own body and the user's choice; this remembers only
+/// what came back 400. It is the CALLER's value because a caller with a retry
+/// of its own — `openai_verify` drops the temperature pin and calls again —
+/// is still ONE logical verification. With the knowledge scoped to a single
+/// [`post_ai_json`] call that second attempt re-offered every knob the
+/// endpoint had already refused, paying one extra POST per refusal to learn
+/// the same thing twice.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Refused {
+    summary: bool,
+    effort: bool,
+    stream: bool,
+}
+
+/// [`post_ai_json`] for a caller that will retry at its OWN level: the
+/// capability knowledge is carried in and out instead of being rebuilt from
+/// nothing, so one logical call negotiates once. See [`Refused`].
+pub(crate) fn post_ai_json_with(
+    url: &str,
+    key: &str,
+    body: serde_json::Value,
+    budget_secs: u64,
+    family: SseFamily,
+    effort: Option<&str>,
+    refused: &mut Refused,
+) -> Result<serde_json::Value, AdvisorError> {
     // A caller that built its own `reasoning` object owns it completely —
     // neither knob is grafted on top of a hand-written one.
     let caller_owns_reasoning = body.get("reasoning").is_some();
-    let mut use_summary = matches!(family, SseFamily::Responses) && !caller_owns_reasoning;
-    let mut use_effort = effort.is_some() && !caller_owns_reasoning;
 
     loop {
+        // Derived fresh each attempt: what this call WOULD send, minus
+        // whatever this endpoint has already refused.
+        let use_stream = !refused.stream;
+        let use_summary =
+            matches!(family, SseFamily::Responses) && !caller_owns_reasoning && !refused.summary;
+        let use_effort = effort.is_some() && !caller_owns_reasoning && !refused.effort;
         // Rebuild from the caller's body each attempt — dropping a negotiated
         // flag must not leave the other attempt's keys behind.
         let mut attempt = body.clone();
@@ -769,30 +830,41 @@ pub(crate) fn post_ai_json(
                 // auth or quota body that happens to mention a parameter must
                 // not trigger a re-post.
                 let negotiable = matches!(code, 400 | 404 | 422);
-                if negotiable && use_stream && use_summary && error_blames_param(&b, "reasoning") {
+                // Attribution is per KNOB, not per NAMESPACE. On /responses
+                // the effort tier and the liveness summary are two children of
+                // ONE `reasoning` object, so a parent-level test claims BOTH —
+                // and the summary arm, being first, used to consume an
+                // explicit `param: "reasoning.effort"`: it dropped the stream
+                // the endpoint had not complained about, re-sent the tier it
+                // HAD complained about, and needed a third POST to reach what
+                // two would have done. Whichever child the endpoint NAMES wins
+                // its own arm.
+                let child = blamed_child(&b, "reasoning");
+                let names_effort =
+                    child.as_deref() == Some("effort") || error_blames_param(&b, "reasoning_effort");
+                // Only a BARE `reasoning` is genuinely ambiguous. There the
+                // summary still yields first — it is our own liveness trick,
+                // while the tier is the user's explicit choice — and the arm
+                // below then catches an endpoint with no effort notion at all.
+                let names_parent = child.is_none() && error_blames_param(&b, "reasoning");
+                if negotiable
+                    && use_stream
+                    && use_summary
+                    && (child.as_deref() == Some("summary") || names_parent)
+                {
                     eprintln!(
                         "  note: endpoint rejected the reasoning-summary stream — retrying \
                          without it (silent reasoning phases then count against the stall budget)"
                     );
-                    use_summary = false;
+                    refused.summary = true;
                     continue;
                 }
-                // The effort tier goes SECOND: on /responses both knobs live
-                // under `reasoning`, so an endpoint that reports the parent
-                // rather than the child (`reasoning` instead of
-                // `reasoning.effort`) is ambiguous — dropping the summary
-                // first preserves the pre-effort behaviour, and this arm then
-                // catches an endpoint that has no effort notion at all.
-                if negotiable
-                    && use_effort
-                    && (error_blames_param(&b, "reasoning_effort")
-                        || error_blames_param(&b, "reasoning"))
-                {
+                if negotiable && use_effort && (names_effort || names_parent) {
                     eprintln!(
                         "  note: endpoint rejected the reasoning-effort tier — retrying without \
                          it (the provider's own default applies)"
                     );
-                    use_effort = false;
+                    refused.effort = true;
                     continue;
                 }
                 if negotiable && use_stream && error_blames_param(&b, "stream") {
@@ -800,7 +872,7 @@ pub(crate) fn post_ai_json(
                         "  note: endpoint rejected streaming — retrying as one blocking call \
                          ({budget_secs}s deadline)"
                     );
-                    use_stream = false;
+                    refused.stream = true;
                     continue;
                 }
                 return Err(AdvisorError::Http {
@@ -1435,7 +1507,7 @@ mod tests {
     /// exhausted — an unexpected extra POST fails its connection loudly
     /// instead of hanging. Bind failure panics with the OS error: a sandbox
     /// that forbids loopback must fail these tests, never skip them.
-    fn stub_endpoint(
+    pub(in crate::advisor) fn stub_endpoint(
         script: Vec<(u16, &'static str, String)>,
     ) -> (
         String,
@@ -1474,7 +1546,7 @@ mod tests {
     /// The script must be fully CONSUMED — fewer POSTs than scripted is as
     /// wrong as more. Bounded (the join_bounded philosophy): a stub thread
     /// still parked in recv() fails the test, never hangs the suite.
-    fn join_stub(handle: std::thread::JoinHandle<()>) {
+    pub(in crate::advisor) fn join_stub(handle: std::thread::JoinHandle<()>) {
         let grace = std::time::Instant::now();
         while !handle.is_finished() && grace.elapsed() < std::time::Duration::from_secs(2) {
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1545,6 +1617,73 @@ mod tests {
         assert!(first.get("reasoning").is_none(), "that is the RESPONSES spelling: {first}");
         assert!(second.get("reasoning_effort").is_none(), "the dropped tier stays dropped: {second}");
         assert_eq!(second["model"], "m", "…and nothing else was lost with it: {second}");
+    }
+
+    /// A refusal that NAMES a child drops that child, not its sibling.
+    ///
+    /// The two `/responses` knobs share one `reasoning` object, so the
+    /// parent-level "does this error blame `reasoning`?" test is true for
+    /// either — and the summary arm, being first, answered for both. The cost
+    /// was paid twice over: an extra POST, and the loss of the liveness stream
+    /// on a call the endpoint had never complained about, which is exactly the
+    /// stream that keeps a long reasoning phase from looking like a stall.
+    #[test]
+    fn a_named_child_refusal_drops_that_child_and_not_its_sibling() {
+        let (url, seen, handle) = stub_endpoint(vec![
+            (
+                400,
+                "application/json",
+                r#"{"error":{"param":"reasoning.effort","message":"unsupported"}}"#.into(),
+            ),
+            (200, "application/json", r#"{"ok":true}"#.into()),
+        ]);
+        let _ = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            Some("high"),
+        )
+        .expect("dropping the named child succeeds");
+        join_stub(handle);
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2, "the named knob drops in ONE renegotiation: {bodies:?}");
+        let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert!(
+            second["reasoning"].get("effort").is_none(),
+            "the child the endpoint named is gone: {second}"
+        );
+        assert_eq!(
+            second["reasoning"]["summary"], "auto",
+            "…and the sibling it never blamed still proves liveness: {second}"
+        );
+
+        // A BARE `reasoning` is genuinely ambiguous, and there the order is a
+        // deliberate choice, not an accident: our own liveness trick yields
+        // before the tier the user asked for.
+        let (url, seen, handle) = stub_endpoint(vec![
+            (
+                400,
+                "application/json",
+                r#"{"error":{"param":"reasoning","message":"unsupported"}}"#.into(),
+            ),
+            (200, "application/json", r#"{"ok":true}"#.into()),
+        ]);
+        let _ = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            Some("high"),
+        )
+        .expect("the ambiguous parent drops the summary first");
+        join_stub(handle);
+        let bodies = seen.lock().unwrap().clone();
+        let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert_eq!(second["reasoning"]["effort"], "high", "the user's tier survives: {second}");
+        assert!(second["reasoning"].get("summary").is_none(), "the summary yielded: {second}");
     }
 
     /// No tier configured ⇒ no such parameter on the wire at all. A model
