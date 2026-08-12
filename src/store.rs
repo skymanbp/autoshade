@@ -100,9 +100,39 @@ fn with_develop_lock_in<T, E>(
 where
     E: From<io::Error>,
 {
-    let dev = develop_dir_in(root, src);
-    std::fs::create_dir_all(&dev).map_err(E::from)?;
-    with_path_lock(dev.join(".develop.lock"), mode, f)
+    // A session that fell back to the LEXICAL key (lock contention, or a
+    // failed adoption — both deliberately stable for the session) can hold a
+    // dir a concurrent process has since adopted away: every write after
+    // that would land in the frozen alias backup and never be seen again.
+    // The superseded marker is only trustworthy INSIDE the lock (its writer
+    // holds this same lock), so probe it here and re-resolve once — the
+    // canonical dir is never superseded, so one retry terminates.
+    let mut f = Some(f);
+    for _ in 0..2 {
+        let dev = develop_dir_in(root, src);
+        std::fs::create_dir_all(&dev).map_err(E::from)?;
+        enum Gate<R> {
+            Ran(R),
+            Superseded,
+        }
+        let ran: Result<Gate<Result<T, E>>, io::Error> =
+            with_path_lock(dev.join(".develop.lock"), mode, || {
+                if dev.join("superseded-by.txt").exists() {
+                    return Ok(Gate::Superseded);
+                }
+                let body = f.take().expect("the develop-lock body runs once");
+                Ok(Gate::Ran(body()))
+            });
+        match ran {
+            Ok(Gate::Ran(out)) => return out,
+            Ok(Gate::Superseded) => forget_resolved_key(root, src),
+            Err(e) => return Err(E::from(e)),
+        }
+    }
+    Err(E::from(io::Error::other(
+        "this photo's develop directory is marked superseded by an adoption and re-resolving \
+         did not converge - remove its superseded-by.txt by hand to proceed",
+    )))
 }
 
 /// The shared engine of [`with_develop_lock`] and [`with_settings_lock`]: run
@@ -700,29 +730,47 @@ fn stash_alias_note(src_abs: &Path, note: AliasNote) {
     alias_notes().lock().unwrap().insert(src_abs.to_path_buf(), note);
 }
 
+/// Per-process memo of resolved develop keys — (root, absolute photo path) →
+/// key. The stability contract of [`identity_of`]: an entry drops only when
+/// a locked touch finds its dir superseded by a concurrent adoption
+/// ([`with_develop_lock_in`]).
+#[allow(clippy::type_complexity)]
+fn resolved_keys() -> &'static std::sync::Mutex<std::collections::HashMap<(PathBuf, PathBuf), String>>
+{
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(PathBuf, PathBuf), String>>,
+    > = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn forget_resolved_key(root: &Path, src: &Path) {
+    let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
+    resolved_keys().lock().unwrap().remove(&(root.to_path_buf(), abs));
+}
+
 /// Which key this photo's develop lives under IN THIS ROOT — the canonical
 /// key, after a one-time adoption of anything a pre-canonical build saved
 /// under the lexical key. Memoized per (root, photo) for the process
 /// lifetime (the same stability contract as [`identity_of`]).
 fn resolve_key_in(root: &Path, src: &Path) -> String {
-    use std::sync::{Mutex, OnceLock};
     let ck = photo_key(src);
     let lk = photo_key_lexical(src);
     if ck == lk {
-        // The common case (plain local path, true casing): zero probes,
-        // zero behaviour change.
+        // The common case (plain local path, true casing) — but an ALIAS
+        // session's crashed adoption may have left this very dir half-copied
+        // behind its marker, and only the ck≠lk path below would resume it.
+        // One memoized probe per (root, key) keeps the steady state at a
+        // single exists() per photo per process.
+        resume_orphan_adoption_once(root, &ck);
         return ck;
     }
     let abs = std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf());
-    static MEMO: OnceLock<Mutex<std::collections::HashMap<(PathBuf, PathBuf), String>>> =
-        OnceLock::new();
-    let memo = MEMO.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    if let Some(hit) = memo.lock().unwrap().get(&(root.to_path_buf(), abs.clone())) {
+    if let Some(hit) = resolved_keys().lock().unwrap().get(&(root.to_path_buf(), abs.clone())) {
         return hit.clone();
     }
     match adopt_or_choose(root, &abs, &ck, &lk) {
         Some(key) => {
-            let mut m = memo.lock().unwrap();
+            let mut m = resolved_keys().lock().unwrap();
             const MEMO_CAP: usize = 50_000;
             if m.len() < MEMO_CAP {
                 m.entry((root.to_path_buf(), abs)).or_insert_with(|| key.clone());
@@ -734,6 +782,64 @@ fn resolve_key_in(root: &Path, src: &Path) -> String {
         // retries the resolution instead of freezing the fallback.
         None => lk,
     }
+}
+
+/// The fast-path half of crash resumption: a canonical-spelling session
+/// finds `adopting-from.txt` left by an ALIAS session that crashed
+/// mid-adoption, and finishes the copy from the source the marker records —
+/// without this the half-copied dir is served as if it were complete.
+/// WouldBlock is not memoized (the next touch retries); any other failure is
+/// disclosed and memoized — a stable, disclosed degradation beats re-probing
+/// a broken source on every touch.
+fn resume_orphan_adoption_once(root: &Path, ck: &str) {
+    use std::sync::{Mutex, OnceLock};
+    static CHECKED: OnceLock<Mutex<std::collections::HashSet<(PathBuf, String)>>> =
+        OnceLock::new();
+    let checked = CHECKED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    if checked.lock().unwrap().contains(&(root.to_path_buf(), ck.to_string())) {
+        return;
+    }
+    let cd = root.join("develops").join(ck);
+    if !cd.join("adopting-from.txt").exists() {
+        checked.lock().unwrap().insert((root.to_path_buf(), ck.to_string()));
+        return;
+    }
+    match resume_marked_adoption(&cd) {
+        Ok(()) => {
+            eprintln!(
+                "⚠ finished a crashed adoption into {} (left by an aliased path spelling)",
+                cd.display()
+            );
+            checked.lock().unwrap().insert((root.to_path_buf(), ck.to_string()));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(e) => {
+            eprintln!(
+                "⚠ a crashed adoption into {} could not be finished ({e}) — files may be \
+                 missing there until its adopting-from.txt source becomes readable",
+                cd.display()
+            );
+            checked.lock().unwrap().insert((root.to_path_buf(), ck.to_string()));
+        }
+    }
+}
+
+/// Finish a marker-fenced adoption whose source is read from the marker
+/// itself — a resume must copy from the dir the CRASHED attempt was copying,
+/// never from whatever spelling the current session happens to hold: with
+/// three spellings in play, mixing the two merges two generations into one
+/// dir.
+fn resume_marked_adoption(cd: &Path) -> std::io::Result<()> {
+    let recorded = std::fs::read_to_string(cd.join("adopting-from.txt"))?;
+    let source = PathBuf::from(recorded.trim());
+    if source.as_os_str().is_empty() {
+        return Err(std::io::Error::other("adopting-from.txt names no source"));
+    }
+    with_path_lock(source.join(".develop.lock"), DevelopLockMode::NoWait, || {
+        with_path_lock(cd.join(".develop.lock"), DevelopLockMode::NoWait, || {
+            adopt_files(cd, &source)
+        })
+    })
 }
 
 /// Names that are per-dir machinery, never a develop's content — excluded
@@ -764,6 +870,24 @@ fn adopt_or_choose(root: &Path, abs: &Path, ck: &str, lk: &str) -> Option<String
         return Some(ck.to_string());
     }
     let resume = cd.join("adopting-from.txt").exists();
+    // A resumed adoption copies from the source the MARKER records, never
+    // from this session's spelling: with three spellings in play, copying
+    // from the current one would mix two generations into one dir.
+    let source = if resume {
+        match std::fs::read_to_string(cd.join("adopting-from.txt")) {
+            Ok(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
+            _ => {
+                eprintln!(
+                    "⚠ {} holds an adoption marker whose source cannot be read — this session \
+                     keys the photo by its path spelling and the resume retries later",
+                    cd.display()
+                );
+                return Some(lk.to_string());
+            }
+        }
+    } else {
+        ld.clone()
+    };
     if !resume {
         if !contentful(&ld) {
             // Fresh photo (or only lock litter): the canonical key, no copy.
@@ -817,36 +941,79 @@ fn adopt_or_choose(root: &Path, abs: &Path, ck: &str, lk: &str) -> Option<String
         }
     }
     // Adopt (or resume a crashed adoption), under BOTH dir locks in a fixed
-    // lexical→canonical order (total and process-independent, so two
-    // processes cannot deadlock; two processes adopting concurrently copy
-    // the same source bytes no-clobber and converge). with_path_lock
+    // source→canonical order (total and process-independent, so two
+    // processes cannot deadlock; concurrent adopters are fully serialized by
+    // the two locks and re-validate before copying). with_path_lock
     // directly — with_develop_lock would re-derive the key and recurse into
     // this very function. NoWait on both: this can run on the UI thread
     // (badge fill), and a held lock postpones, never hangs.
-    let adopted: std::io::Result<()> = (|| {
+    enum AdoptOutcome {
+        Copied,
+        AlreadyAdopted,
+        Collision,
+    }
+    let adopted: std::io::Result<AdoptOutcome> = (|| {
         std::fs::create_dir_all(&cd)?; // the lock file needs its dir
-        with_path_lock(ld.join(".develop.lock"), DevelopLockMode::NoWait, || {
+        with_path_lock(source.join(".develop.lock"), DevelopLockMode::NoWait, || {
             with_path_lock(cd.join(".develop.lock"), DevelopLockMode::NoWait, || {
-                adopt_files(&cd, &ld)
+                // The pre-lock probes raced every other process: re-validate
+                // the decision they fed now that both locks are held, and
+                // only then copy.
+                if source.join("superseded-by.txt").exists() {
+                    // A concurrent adopter finished first — converge on its
+                    // result instead of copying over it.
+                    return Ok(AdoptOutcome::AlreadyAdopted);
+                }
+                if !cd.join("adopting-from.txt").exists() && contentful(&cd) {
+                    // cd gained real content between probe and lock: a
+                    // GENUINE collision now — copying would franken-merge
+                    // two develops.
+                    return Ok(AdoptOutcome::Collision);
+                }
+                adopt_files(&cd, &source)?;
+                Ok(AdoptOutcome::Copied)
             })
         })
     })();
     match adopted {
-        Ok(()) => {
-            stash_alias_note(abs, AliasNote::Adopted { from: ld.clone() });
+        Ok(AdoptOutcome::Copied) => {
+            stash_alias_note(abs, AliasNote::Adopted { from: source.clone() });
             eprintln!(
                 "⚠ adopted the develop saved under {} into {} (the photo resolves there)",
-                ld.display(),
+                source.display(),
                 cd.display()
             );
             Some(ck.to_string())
         }
+        Ok(AdoptOutcome::AlreadyAdopted) => Some(ck.to_string()),
+        Ok(AdoptOutcome::Collision) => {
+            let marker = cd.join("aliased-develops.txt");
+            if !marker.exists() {
+                let _ = durable_write(
+                    &marker,
+                    format!("a second develop for this photo exists at:\n{}\n", source.display())
+                        .as_bytes(),
+                );
+                eprintln!(
+                    "⚠ {} has a second saved develop at {} from an older path spelling — it was NOT merged",
+                    abs.display(),
+                    source.display()
+                );
+                stash_alias_note(abs, AliasNote::SecondDevelop { at: source.clone() });
+            }
+            Some(ck.to_string())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
         Err(e) => {
+            // Memoized by the caller ON PURPOSE: a stable lexical session
+            // beats a key that flaps between spellings, and the one harmful
+            // case — this lexical dir later superseded by a concurrent
+            // adopter — is caught inside the develop lock, which probes the
+            // marker and re-resolves.
             eprintln!(
                 "⚠ adopting the develop at {} into {} failed ({e}) — this session keys the \
                  photo by its path spelling and the adoption retries later",
-                ld.display(),
+                source.display(),
                 cd.display()
             );
             Some(lk.to_string())
@@ -856,19 +1023,28 @@ fn adopt_or_choose(root: &Path, abs: &Path, ck: &str, lk: &str) -> Option<String
 
 /// The copy half of adoption, marker-fenced like every other multi-file
 /// mutation in this store: `adopting-from.txt` lands durably FIRST, the
-/// files copy no-clobber (idempotent — a crashed adoption resumes, and
-/// resumed copies come from the same source bytes), the completion
-/// breadcrumbs land, and only then is the in-flight marker consumed. The
-/// alias dir is left INTACT as a frozen backup with a `superseded-by.txt`
-/// pointer — adoption copies, it never deletes.
-fn adopt_files(cd: &Path, ld: &Path) -> std::io::Result<()> {
+/// files copy, the completion breadcrumbs land, and only then is the
+/// in-flight marker consumed. While the marker fences the destination the
+/// destination has NO authority, so copies are SOURCE-WINS: a crashed
+/// earlier attempt may have frozen older source bytes there, and no-clobber
+/// would keep those over edits the session made under the lexical key after
+/// the failure. Concurrent adopters run serialized under both dir locks and
+/// copy the same source bytes, so replacement still converges. The source
+/// dir is left INTACT as a frozen backup with a `superseded-by.txt` pointer
+/// — adoption copies, it never deletes.
+fn adopt_files(cd: &Path, source: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(cd)?;
     durable_write(
         &cd.join("adopting-from.txt"),
-        format!("{}\n", ld.display()).as_bytes(),
+        format!("{}\n", source.display()).as_bytes(),
     )?;
     let copy_dir = |from: &Path, to: &Path| -> std::io::Result<()> {
-        for e in std::fs::read_dir(from)?.flatten() {
+        for e in std::fs::read_dir(from)? {
+            // A swallowed enumeration error is a file that never adopts: the
+            // completion breadcrumbs + supersede marker would freeze it
+            // invisible in the frozen backup forever — so it fails the
+            // attempt whole and lands in the caller's retry arm instead.
+            let e = e?;
             let name = e.file_name();
             let name_s = name.to_string_lossy();
             if adoption_skips(&name_s) {
@@ -878,8 +1054,9 @@ fn adopt_files(cd: &Path, ld: &Path) -> std::io::Result<()> {
             if src.is_dir() {
                 if name_s == ".legacy-suppressed" {
                     std::fs::create_dir_all(to.join(&name))?;
-                    for c in std::fs::read_dir(&src)?.flatten() {
-                        let _ = move_file_no_clobber(&c.path(), &to.join(&name).join(c.file_name()))?;
+                    for c in std::fs::read_dir(&src)? {
+                        let c = c?;
+                        copy_file_replace(&c.path(), &to.join(&name).join(c.file_name()))?;
                     }
                 } else {
                     eprintln!(
@@ -889,19 +1066,32 @@ fn adopt_files(cd: &Path, ld: &Path) -> std::io::Result<()> {
                 }
                 continue;
             }
-            let _ = move_file_no_clobber(&src, &to.join(&name))?;
+            copy_file_replace(&src, &to.join(&name))?;
         }
         Ok(())
     };
-    copy_dir(ld, cd)?;
-    durable_write(&cd.join("adopted-from.txt"), format!("{}\n", ld.display()).as_bytes())?;
+    copy_dir(source, cd)?;
+    durable_write(&cd.join("adopted-from.txt"), format!("{}\n", source.display()).as_bytes())?;
     durable_write(
-        &ld.join("superseded-by.txt"),
+        &source.join("superseded-by.txt"),
         format!("{}\n", cd.display()).as_bytes(),
     )?;
     let _ = std::fs::remove_file(cd.join("adopting-from.txt"));
     settle_consumed_marker(&cd.join("adopting-from.txt"));
     Ok(())
+}
+
+/// Stage-and-replace copy for adoption members (see [`adopt_files`] — the
+/// destination is marker-fenced and has no authority while this runs).
+fn copy_file_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let tmp = sibling_tmp(to);
+    if let Err(e) = std::fs::copy(from, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    durable_replace(&tmp, to).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// This photo's develop directory (not created here).
@@ -1395,8 +1585,25 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
         // create_dir, not create_dir_all: a leftover `.commit` was resolved
         // above, so an existing directory here is a real error, not residue.
         std::fs::create_dir(&cdir)?;
+        // The stage dir's OWN record in the develop dir must be down before
+        // COMMIT can promise a generation: without this (unix), a crash
+        // after the marker rename could evaporate the whole `.commit` entry
+        // and leave the promised generation with no roll-forward. The
+        // finish_parent below syncs the entries INSIDE cdir, not this one.
+        durable_os::finish_parent(&cdir)?;
         let mut sums = std::collections::BTreeMap::new();
         let mut stage = |name: &str, bytes: &[u8]| -> std::io::Result<()> {
+            // The recovery reader caps members at MAX_STORE_JSON — a member
+            // staged above it would commit fine and then BRICK the photo on
+            // the first crash recovery (refused as unreadable). Refuse the
+            // save instead, citing the same constant the reader enforces.
+            if bytes.len() as u64 > MAX_STORE_JSON {
+                return Err(std::io::Error::other(format!(
+                    "{name} is {} bytes, above the {MAX_STORE_JSON}-byte store limit a crash \
+                     recovery could read back — the save is refused whole",
+                    bytes.len()
+                )));
+            }
             write_staged(&cdir.join(name), bytes)?;
             sums.insert(name.to_string(), format!("{:016x}", fnv1a64(bytes)));
             Ok(())
@@ -1451,9 +1658,24 @@ fn commit_develop_unlocked(src: &Path, commit: DevelopCommit) -> std::io::Result
     }
     // Consumed. A failure here only means the (idempotent) replay runs once
     // more on the next touch and consumes it then.
-    let _ = std::fs::remove_dir_all(&cdir);
+    let _ = consume_commit_stage(&cdir);
     settle_consumed_marker(&cdir);
     Ok(())
+}
+
+/// Consume a RESOLVED `.commit` stage: the COMMIT marker dies FIRST — by
+/// contract, not by remove_dir_all's unspecified order — so a partial
+/// cleanup (an AV scanner holding a member open) leaves an UNMARKED stage
+/// the next recovery quietly discards. COMMIT surviving beside missing
+/// members would instead be refused by the recovery reader, bricking every
+/// subsequent touch of the photo until someone deletes it by hand.
+fn consume_commit_stage(cdir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(cdir.join("COMMIT")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::remove_dir_all(cdir)
 }
 
 /// A borrowed [`CommitMember`], shared by the live apply and the recovery
@@ -1591,7 +1813,7 @@ fn resolve_pending_commit_unlocked(src: &Path) -> std::io::Result<()> {
         _ => MemberRef::Keep,
     };
     apply_commit_members(src, recipe_ref, pixels_ref, variants_ref)?;
-    std::fs::remove_dir_all(&cdir)?;
+    consume_commit_stage(&cdir)?;
     settle_consumed_marker(&cdir);
     Ok(())
 }
@@ -1878,10 +2100,26 @@ fn resolve_pending_clear_unlocked(src: &Path) -> std::io::Result<()> {
         // backup gates refuse rather than overwrite it.
         return Err(e);
     }
-    if mark_develop_cleared(src).is_ok() {
-        let _ = std::fs::remove_file(clear_pending(src));
-        settle_consumed_marker(&clear_pending(src));
+    // The clear marker is DESTRUCTIVE on replay: a marker that survives a
+    // "successful" resolution eats whatever save lands after it, on the next
+    // recovery (the batch-S trap, reachable through this failure path). So
+    // failing to stamp or to consume it must fail the resolution — callers
+    // then refuse to stage a new generation on top of it.
+    mark_develop_cleared(src)?;
+    match std::fs::remove_file(clear_pending(src)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "the completed develop clear could not consume its marker ({e}) — saving \
+                     is refused until it can, or until the marker is removed by hand"
+                ),
+            ));
+        }
     }
+    settle_consumed_marker(&clear_pending(src));
     Ok(())
 }
 
@@ -1917,8 +2155,25 @@ fn recover_orphan_baks_unlocked(src: &Path) -> std::io::Result<()> {
         (pixel_source_path(src), dev.join("pixels.json.bak")),
         (variants_path(src), dev.join("variants.json.bak")),
     ] {
-        if live.exists() || !bak.exists() {
+        if !bak.exists() {
             continue;
+        }
+        match std::fs::metadata(&live) {
+            // A ZERO-BYTE live beside a surviving .bak is a dead CLAIM, not
+            // a save: on the no-hard-link path, publish_no_clobber claims
+            // the live name with an empty create_new before its
+            // write-through replace, and a crash inside that window leaves
+            // exactly this state. No JSON member is ever legitimately empty,
+            // and no publisher can be mid-claim here — they all hold this
+            // lock. Left alone, the claim blocks the restore (AlreadyExists)
+            // and the NEXT save retires the empty file onto the .bak,
+            // destroying the only survivor. Clear the claim and restore.
+            Ok(m) if m.len() == 0 => {
+                let _ = std::fs::remove_file(&live);
+                let _ = durable_os::finish_parent(&live);
+            }
+            Ok(_) => continue,
+            Err(_) => {} // absent — the publish below decides the rest
         }
         // NOT a direct rename: fs::rename REPLACES an existing destination
         // (verified empirically — see next_tmp_seq), so the old exists-check
@@ -4156,6 +4411,248 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
+
+    /// L02-18: the double-crash window — a crashed publish left the .bak,
+    /// and the RESTORE of that .bak crashed between its create_new claim and
+    /// its write-through replace, leaving a zero-byte live file beside the
+    /// only real survivor.
+    #[test]
+    fn a_zero_byte_live_claim_yields_to_the_surviving_bak() {
+        let dir = std::env::temp_dir().join("autoshop-store-test-zerobyte-live");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_zerobyte.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        std::fs::write(dev.join("recipe.json.bak"), b"{\"survivor\":true}").unwrap();
+        std::fs::write(recipe_target(&raw), b"").unwrap();
+
+        recover_orphan_baks(&raw).unwrap();
+
+        assert_eq!(
+            std::fs::read(recipe_target(&raw)).unwrap(),
+            b"{\"survivor\":true}",
+            "a zero-byte claim is a dead publish, not a save — the .bak must come back live"
+        );
+        assert!(!dev.join("recipe.json.bak").exists(), "the restored survivor consumed its .bak");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L02-6 + L02-8: a resume copies from the source the MARKER records
+    /// (not the current session's spelling), and while the marker fences the
+    /// destination its bytes have no authority — a frozen half-copy from the
+    /// crashed attempt is REPLACED, not kept by no-clobber.
+    #[test]
+    fn a_resumed_adoption_copies_from_the_marker_recorded_source() {
+        let root = std::env::temp_dir().join("autoshop-store-test-adopt-resume");
+        let _ = std::fs::remove_dir_all(&root);
+        let cd = root.join("develops").join("photo-ck");
+        let ld = root.join("develops").join("photo-lk");
+        let old = root.join("develops").join("photo-old");
+        for d in [&cd, &ld, &old] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(cd.join("adopting-from.txt"), format!("{}\n", old.display())).unwrap();
+        std::fs::write(cd.join("recipe.json"), b"stale-frozen-copy").unwrap();
+        std::fs::write(old.join("recipe.json"), b"newest-under-old").unwrap();
+        std::fs::write(old.join("pixels.json"), b"pixels-under-old").unwrap();
+        // The CURRENT spelling holds a decoy: a resume that copies "from the
+        // current spelling" would import it and franken-merge generations.
+        std::fs::write(ld.join("recipe.json"), b"decoy-current-spelling").unwrap();
+
+        let key = adopt_or_choose(&root, Path::new("unused-abs"), "photo-ck", "photo-lk");
+        assert_eq!(key.as_deref(), Some("photo-ck"));
+        assert_eq!(
+            std::fs::read(cd.join("recipe.json")).unwrap(),
+            b"newest-under-old",
+            "the resume copies from the marker's source and REPLACES the frozen half-copy"
+        );
+        assert_eq!(std::fs::read(cd.join("pixels.json")).unwrap(), b"pixels-under-old");
+        assert!(!cd.join("adopting-from.txt").exists(), "the finished resume consumed its marker");
+        assert!(old.join("superseded-by.txt").exists(), "the true source is marked superseded");
+        assert!(
+            !ld.join("superseded-by.txt").exists(),
+            "the current spelling was NOT the source and keeps its develop untouched"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// L02-4: a canonical-spelling session (ck == lk) finds the marker an
+    /// alias session's crashed adoption left behind, and finishes the copy —
+    /// before the fix the fast path returned with zero probes and served the
+    /// half-copied dir as if complete.
+    #[test]
+    fn a_canonical_session_finishes_an_alias_sessions_crashed_adoption() {
+        let root = std::env::temp_dir().join("autoshop-store-test-orphan-resume");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = std::env::temp_dir().join("autoshop-store-test-orphan-resume-photos");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_orphan_resume.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let ck = photo_key(&raw);
+        assert_eq!(ck, photo_key_lexical(&raw), "a plain true-cased path keys canonically");
+        let cd = root.join("develops").join(&ck);
+        let old = root.join("develops").join("old-spelling");
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("recipe.json"), b"alias-session-bytes").unwrap();
+        std::fs::write(cd.join("adopting-from.txt"), format!("{}\n", old.display())).unwrap();
+
+        let key = resolve_key_in(&root, &raw);
+        assert_eq!(key, ck);
+        assert_eq!(
+            std::fs::read(cd.join("recipe.json")).unwrap(),
+            b"alias-session-bytes",
+            "the fast path probed, found the crashed adoption and finished the copy"
+        );
+        assert!(!cd.join("adopting-from.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L02-5: the superseded marker is probed INSIDE the develop lock — a
+    /// touch of a dir a concurrent adoption froze must refuse (and
+    /// re-resolve) rather than run its body against the frozen backup.
+    #[test]
+    fn a_develop_dir_marked_superseded_refuses_the_locked_touch() {
+        let root = std::env::temp_dir().join("autoshop-store-test-superseded-probe");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = std::env::temp_dir().join("autoshop-store-test-superseded-photos");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_superseded_probe.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir_in(&root, &raw);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("superseded-by.txt"), b"elsewhere\n").unwrap();
+
+        let mut ran = false;
+        let out = with_develop_lock_in(&root, &raw, DevelopLockMode::Wait, || {
+            ran = true;
+            Ok::<_, std::io::Error>(())
+        });
+        assert!(out.is_err(), "a superseded dir must refuse the touch, not absorb the write");
+        assert!(!ran, "no body may run against a frozen alias backup");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L02-5, the healing half: a session whose MEMOIZED key points at a dir
+    /// a concurrent process adopted away drops the stale entry inside the
+    /// lock and re-resolves onto the canonical dir — instead of writing the
+    /// whole session's edits into the frozen backup.
+    #[cfg(windows)]
+    #[test]
+    fn a_superseded_memo_entry_is_dropped_and_the_touch_lands_canonically() {
+        let dir = canonical_temp("superseded-heal");
+        let target = dir.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.join("alias");
+        make_junction(&link, &target);
+        let photo = target.join("_superseded_heal.arw");
+        std::fs::write(&photo, b"raw").unwrap();
+        let via_alias = link.join("_superseded_heal.arw");
+
+        let root = store_root();
+        let lk = photo_key_lexical(&via_alias);
+        let ck = photo_key(&via_alias);
+        assert_ne!(lk, ck, "the junction spelling must key lexically");
+        let ld = root.join("develops").join(&lk);
+        let cd = root.join("develops").join(&ck);
+        let _ = std::fs::remove_dir_all(&ld);
+        let _ = std::fs::remove_dir_all(&cd);
+        std::fs::create_dir_all(&ld).unwrap();
+        std::fs::create_dir_all(&cd).unwrap();
+        // A concurrent process adopted the lexical dir away…
+        std::fs::write(ld.join("superseded-by.txt"), format!("{}\n", cd.display())).unwrap();
+        // …while THIS session still holds the lexical key memoized (the
+        // stable fallback of an earlier failed adoption).
+        let abs = std::path::absolute(&via_alias).unwrap();
+        resolved_keys().lock().unwrap().insert((root.clone(), abs.clone()), lk.clone());
+
+        let mut saw = None;
+        with_develop_lock(&via_alias, DevelopLockMode::Wait, || {
+            saw = Some(develop_dir(&via_alias));
+            Ok::<_, std::io::Error>(())
+        })
+        .unwrap();
+        assert_eq!(
+            saw.as_deref(),
+            Some(cd.as_path()),
+            "the locked touch re-resolved onto the canonical dir, not the frozen backup"
+        );
+
+        resolved_keys().lock().unwrap().remove(&(root.clone(), abs));
+        let _ = std::fs::remove_dir_all(&ld);
+        let _ = std::fs::remove_dir_all(&cd);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L02-12: the commit stage refuses any member the recovery reader could
+    /// not read back — committing it would work today and brick the photo on
+    /// the first crash recovery.
+    #[test]
+    fn a_staged_member_above_the_recovery_cap_refuses_the_save_whole() {
+        let (dir, raw, dev) = commit_fixture("stage-cap");
+        let big = vec![b' '; MAX_STORE_JSON as usize + 1];
+        let err = commit_develop(
+            &raw,
+            DevelopCommit {
+                recipe: Some(big),
+                pixels: CommitMember::Keep,
+                variants: CommitMember::Keep,
+            },
+        )
+        .expect_err("a member the recovery reader cannot read back must not commit");
+        assert!(err.to_string().contains("store limit"), "the refusal names the cap: {err}");
+        assert!(!dev.join(".commit").exists(), "the refused stage was discarded whole");
+        assert!(!recipe_target(&raw).exists(), "nothing was applied");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// L02-15: a clear marker that cannot be consumed must FAIL the
+    /// resolution — reported success with the marker still on disk replays
+    /// the clear over whatever save lands next (the batch-S trap through the
+    /// failure path).
+    #[test]
+    #[cfg(windows)]
+    fn a_clear_marker_that_cannot_be_consumed_fails_the_resolution() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let dir = std::env::temp_dir().join("autoshop-store-test-clear-consume");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_clear_consume.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("clear.pending"), b"develop clear in progress\n").unwrap();
+
+        // An exclusive handle denies the marker's deletion (share_mode 0).
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dev.join("clear.pending"))
+            .unwrap();
+        recover_orphan_baks(&raw)
+            .expect_err("a marker that survives resolution must fail it, not report success");
+        drop(hold);
+
+        // With the handle gone the same touch completes and consumes it.
+        recover_orphan_baks(&raw).unwrap();
+        assert!(!dev.join("clear.pending").exists(), "the retried resolution consumed the marker");
+        assert!(dev.join("cleared.txt").exists(), "the clear finished with its stamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
     /// One temp-dir photo + develop-dir fixture for the commit tests, with a
     /// non-empty master raster and helpers to build staged generations.
     fn commit_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -5406,8 +5903,9 @@ mod tests {
     }
 
     /// C1/F10: a develop saved by a pre-canonical build under the alias
-    /// spelling is ADOPTED into the canonical dir — copied no-clobber, the
-    /// alias dir left intact with a superseded pointer, the note surfaced.
+    /// spelling is ADOPTED into the canonical dir — copied source-wins into
+    /// the fresh canonical dir, the alias dir left intact with a superseded
+    /// pointer, the note surfaced.
     #[cfg(windows)]
     #[test]
     fn an_alias_develop_dir_is_adopted_without_clobbering() {
