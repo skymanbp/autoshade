@@ -25,7 +25,7 @@ use std::sync::OnceLock;
 /// The UI language. `En` is both the default and the skeleton (see module docs).
 /// Persisted in `Prefs` (eframe storage); a save from an older build that
 /// predates this field decodes to `En` via `#[serde(default)]`.
-#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Lang {
     #[default]
     En,
@@ -1034,9 +1034,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       left it.",
         " 注：{label} 区占原图 {s}% 而占目标图 {t}%——两者构图不同，整体分布残差停留在全局拟合的水平。"),
     (" Zoned {label} correction dropped: zone residual {before} → {after} \
-      (needs ≤ {ratio}% of the original, or ≤ {floor} outright) with \
-      frame-global drift {drift} (tolerance {tol}).",
-        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或直接 ≤ {floor}），全画面漂移 {drift}（容差 {tol}）。"),
+      (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
+      gain) with frame-global drift {drift} (tolerance {tol}).",
+        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或 ≤ {floor} 同时增益 ≥ {gain}%），全画面漂移 {drift}（容差 {tol}）。"),
     (" The {label} zone already matches the target (zone residual \
       {before}) — no correction needed.",
         " {label} 区已与目标匹配（区残差 {before}）——无需校正。"),

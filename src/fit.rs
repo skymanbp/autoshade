@@ -94,13 +94,16 @@ pub(crate) const P_CLIP: f32 = 0.002;
 /// pair — reads 0.0050 (share 1.12×), the identity / canyon fixtures read
 /// ≈ 0 (matched members) and the synthetic uniform-inflation fixture reads
 /// < 0.0075. The 0.015 ceiling thus has real pairs on BOTH flanks: 3.0×
-/// clear below (0.0050), 1.4× above (0.021). All archive numbers are the
-/// embedded-preview domain (`decode` output vs reimagine target) — the
-/// same camera-look source the CLI `match` feeds this gate; the GUI's
-/// composed-calibration domain only APPROXIMATES that preview (base curve
-/// plus lens profile plus as-shot WB), and its sole measured anchor is
-/// the 0.021 of _DSC9608 — the archive table is unmeasured there,
-/// disclosed.
+/// clear below (0.0050), 1.4× above (0.021). The archive numbers above are
+/// the embedded-preview domain (`decode` output vs reimagine target — the
+/// camera-look source the CLI `match` feeds this gate); the GUI's
+/// composed-calibration domain was measured separately for all five real
+/// pairs (R19, the repro test prints it per pair) and each verdict lands
+/// on the same side of the ceiling in both domains — composed readings:
+/// _DSC9608 × re2 0.024, _DSC9621 × re 0.043, × re2 0.033, × re4 0.036
+/// (fall-back side), × re3 0.0131 (keep side, a 1.15× margin against the
+/// preview domain's 3.0×). The haze fixture is a recipe-render pair with
+/// no RAW, so a composed domain does not exist for it.
 const NEUTRAL_MISPREDICTION_MAX: f32 = 0.015;
 /// Evidence floor for the SHARED class inside
 /// [`neutral_gate_misprediction`] — the same absolute floor the per-side
@@ -217,11 +220,13 @@ const ROT_SHARE: f32 = 0.05;
 const ROT_VISIBLE_BEFORE: f32 = 0.05;
 /// See [`ROT_VISIBLE_BEFORE`]: the after-side visibility floor — just above
 /// the measured pass-through band (≤ 0.082), 3.8× under H17's 0.34, and
-/// deliberately NOT higher: every step up widens the census's new blind
-/// band. Residual, disclosed: rotations inside `cc ∈ [0.03, 0.05) × wc ∈
-/// [0.04, 0.09)` — a faint tint re-hued into another faint tint — are now
-/// exempt with no fixture patrolling the band; if a real pair ever wrecks
-/// a region at those chroma levels, this pair of floors is the suspect.
+/// deliberately NOT higher: every step up widens the exempt band. Rotations
+/// inside `cc ∈ [0.03, 0.05) × wc ∈ [0.04, 0.09)` — a faint tint re-hued
+/// into another faint tint, invisible on BOTH ends — are exempt by design,
+/// and the band's exact borders are pinned by the
+/// `the_pass_through_exemption_borders_are_patrolled` fixture; if a real
+/// pair ever wrecks a region at those chroma levels, this pair of floors
+/// is the suspect.
 const ROT_VISIBLE_AFTER: f32 = 0.09;
 /// The BEFORE side of the rotation census needs only a MEASURABLE hue, not a
 /// visible tint: requiring [`VETO_TINT_CHROMA`] on both sides let the curves
@@ -232,9 +237,11 @@ const ROT_VISIBLE_AFTER: f32 = 0.09;
 /// testifies" level) by the haze regression itself: at 0.015 the haze
 /// correction's legitimately-restored faint pixels measured a 0.0414 census
 /// share — 0.83× the firing threshold, margin gone — because hue is
-/// genuinely unstable that close to neutral. Residual, disclosed: a region
-/// under 0.03 chroma stays rotation-blind (colourising near-neutrals is
-/// also what a corrective cast legitimately does — the haze pair).
+/// genuinely unstable that close to neutral. Below 0.03 chroma the census
+/// abstains BY DESIGN, not by omission: colourising near-neutrals is
+/// exactly what a corrective cast legitimately does (the haze pair), and
+/// at the measured 0.015 level a rotation verdict is demonstrably noise
+/// convicting that feature (the 0.83× margin collapse above).
 const ROT_HUE_MEASURABLE_CHROMA: f32 = 0.03;
 
 /// The fit outcome: the recipe plus the distribution error (mean |Δ| over luma
@@ -717,9 +724,9 @@ fn residual_tone_curve(recipe: &EditRecipe, tone_map: &impl Fn(f32) -> f32) -> V
     // which also means a flat plateau's interior is no longer sampled by
     // `max_dev` (the old fixed xs could land mid-plateau): deliberate, a
     // many-to-one plateau is beyond any input-side curve's reach anyway.
-    // Cost side, disclosed: 21-u8 spacing doubles the density of u8-rounded
-    // control points, ~±0.5/255 of quantisation ripple against the ~10/255
-    // of chord sag removed.
+    // The trade's cost side: 21-u8 spacing doubles the density of u8-rounded
+    // control points, ~±0.5/255 of quantisation ripple bought against the
+    // ~10/255 of chord sag removed — a 20:1 win.
     const LEVELS: usize = 13;
     let xs = (0..LEVELS).map(|i| {
         let o = i as f32 / (LEVELS - 1) as f32;
@@ -1014,12 +1021,15 @@ fn is_neutralish(p: &[f32; 3]) -> bool {
 /// when misregistration slides the misprediction metric toward 0 (its
 /// fail-open direction) — while the misprediction gate catches membership
 /// churn the ratio cannot see (_DSC9621 × reimagine-4: share 1.51×,
-/// misprediction 0.034 — only this gate fires). Known residual, accepted:
-/// a perfectly uniform >1.75× inflation would fall back benignly (synthetic
-/// only; both live fallback solves measured better than their gated arms).
-/// Gate order: cheap counts and shares first, the misprediction pass (a
-/// full-frame scan plus four CDFs) last, so under-evidenced pairs never
-/// pay for it.
+/// misprediction 0.034 — only this gate fires). A >1.75× share asymmetry
+/// falls back UNCONDITIONALLY, by design: a low misprediction reading must
+/// never override it, because misregistration fakes exactly that reading
+/// (the fail-open direction), and the fallback itself is the safe arm —
+/// on the two live pairs whose evidence failed a gate, the fallback solve
+/// measured better than the gated one both times (a benign uniform >1.75×
+/// inflation remains synthetic-only; no real pair has produced one). Gate order: cheap counts and shares first, the
+/// misprediction pass (a full-frame scan plus four CDFs) last, so
+/// under-evidenced pairs never pay for it.
 fn tone_cdf_pair(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> (Vec<f32>, Vec<f32>) {
     let s_n: Vec<f32> = sp.iter().filter(|p| is_neutralish(p)).map(luma601).collect();
     let t_n: Vec<f32> = tp.iter().filter(|p| is_neutralish(p)).map(luma601).collect();
@@ -1073,7 +1083,7 @@ fn enough_evidence(n: usize, total: usize) -> bool {
 /// explicit decision rather than an emergent prefix artifact, and so does
 /// a shared class too small to clear the same evidence floor the sides
 /// must clear.
-fn neutral_gate_misprediction(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> f32 {
+pub(crate) fn neutral_gate_misprediction(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> f32 {
     let n = sp.len().min(tp.len());
     // 2% ≈ several rows of a 384-edge thumb: beyond aspect rounding, the
     // pairs come from different geometry and co-membership is meaningless.

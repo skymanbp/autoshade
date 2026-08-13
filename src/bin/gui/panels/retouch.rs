@@ -613,14 +613,54 @@ impl AutoshopApp {
                 // (it used to silently borrow the Direction field at the top
                 // of the panel — a prompt and its button belong together).
                 ui.horizontal_wrapped(|ui| {
+                    // The prompt field's width reserve follows the BUTTON'S
+                    // localized label, measured — the old fixed 130 px was
+                    // one pixel SHORT of the English "✨ Generate image"
+                    // (131 px at Button style + padding; the zh label needs
+                    // only 103), so the button's text wrapped into two
+                    // lines, twice the height of every neighbour (R19 user
+                    // report). Extend-mode is the belt to the measured
+                    // braces: the button can never wrap internally again —
+                    // which is also why the row math must be EXACT, frame
+                    // margins included: with Extend, any surplus stops
+                    // being absorbed by a wrap and instead widens the
+                    // auto-fitting side panel by that surplus EVERY frame
+                    // (probed: +8 px/frame runaway when the TextEdit's own
+                    // frame margin was left out of the reserve). The margin
+                    // is therefore pinned HERE and handed to the widget, so
+                    // the arithmetic and the widget can never disagree.
+                    const TE_MARGIN: egui::Margin = egui::Margin::symmetric(4.0, 2.0);
+                    let btn_label = tr(lang, "✨ Generate image");
+                    let btn_w = ui
+                        .painter()
+                        .layout_no_wrap(
+                            btn_label.to_owned(),
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            ui.visuals().text_color(),
+                        )
+                        .size()
+                        .x
+                        + 2.0 * ui.spacing().button_padding.x;
+                    let field_w = (ui.available_width()
+                        - btn_w
+                        - ui.spacing().item_spacing.x
+                        - TE_MARGIN.sum().x)
+                        .max(80.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.reimagine_prompt)
-                            .desired_width((ui.available_width() - 130.0).max(80.0))
+                            .margin(TE_MARGIN)
+                            .desired_width(field_w)
                             .hint_text(tr(lang, "style to repaint toward — e.g. golden-hour glow, moody film look")),
                     );
                     ui.add_enabled_ui(!self.busy, |ui| {
-                        if ui
-                            .button(tr(lang, "✨ Generate image"))
+                        let resp = ui.add(
+                            egui::Button::new(btn_label).wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                        #[cfg(test)]
+                        {
+                            self.reimagine_btn_rect = Some(resp.rect);
+                        }
+                        if resp
                             .on_hover_text(tr(lang,
                                 "Repaint the whole image with gpt-image, styled by the prompt on the left \
                                  (empty = a neutral finished develop). Repainted pixels = not faithful; the \

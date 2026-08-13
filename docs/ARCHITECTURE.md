@@ -1,6 +1,11 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.26.0 — R17+R18: the reverse-fit's tone
+> Status: **implemented** (v0.26.1 — R19: every remaining recorded item
+> closed — the zone skip line and acceptance floor are split so nothing
+> fixable is declined untried, the misprediction gate's anchors are
+> measured in BOTH solve domains for all five real pairs, and the
+> Generate button's row math is exact (measured label + owned margins,
+> one-line by fixture). v0.26.0 — R17+R18: the reverse-fit's tone
 > evidence polices its own identification (a misprediction gate falls the
 > solve back to full-pixel CDFs when "grey" stops naming the same pixels
 > on both sides, with real-pair anchors on both flanks of its ceiling),
@@ -20,7 +25,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 440 library + 7 CLI + 72 GUI tests pass in both build configurations.
+> 441 library + 7 CLI + 73 GUI tests pass in both build configurations.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -490,12 +495,15 @@ piecewise-linear chords sag ~10/255. `--zoned` ([`src/fit_zoned.rs`](../src/fit_
 local correction on top of the global fit via the segmentation sidecar; the
 XMP carries the global fit only, since classic sidecars cannot hold raster
 masks. Each zone's correction is judged zone-locally by a two-arm gate
-(v0.26.0): halve the zone error, or land it at/below an absolute matched
-floor (0.02 of linear-mean error) with a real gain — and a zone already at
-that floor (with its mean-luma EV gap inside a quarter stop, because the
-floor lives in scale-dependent linear light) is left alone with an honest
-"already matches" note instead of being dialled, regressed, and reported as
-a dropped improvement. The GUI's **反推 / Reverse-fit** action drives the
+(v0.26.1): halve the zone error, or land it at/below an absolute matched
+floor (0.02 of linear-mean error, brightness within a quarter stop — the
+floor lives in scale-dependent linear light, so the EV companion rides
+both absolute yardsticks) with a real ≥20% gain. A zone already inside the
+observed matched DOMAIN (≤0.012, same EV companion) is left alone with an
+honest "already matches" note instead of being dialled, regressed, and
+reported as a dropped improvement; zones between the two yardsticks are
+always attempted — the skip line and the acceptance floor are split
+constants precisely so nothing fixable is declined untried. The GUI's **反推 / Reverse-fit** action drives the
 same two entry points (`fit_recipe`, `fit_recipe_zoned`) and lands the
 result as an editable variant.
 

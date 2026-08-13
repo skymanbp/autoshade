@@ -111,8 +111,8 @@ pub mod keys {
          left it.";
     pub const ZONE_DROPPED: &str =
         " Zoned {label} correction dropped: zone residual {before} → {after} \
-         (needs ≤ {ratio}% of the original, or ≤ {floor} outright) with \
-         frame-global drift {drift} (tolerance {tol}).";
+         (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
+         gain) with frame-global drift {drift} (tolerance {tol}).";
     pub const ZONE_ALREADY_MATCHED: &str =
         " The {label} zone already matches the target (zone residual \
          {before}) — no correction needed.";

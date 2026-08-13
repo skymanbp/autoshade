@@ -3270,6 +3270,54 @@
     /// 距离"). Headless frame over the REAL variant_strip + REAL theme
     /// style + the REAL panel height constant; the three test seams record
     /// what actually laid out.
+    /// R19: the ✨ Generate button renders ONE line tall in both languages,
+    /// and the row's width arithmetic is exact — two distinct failure modes,
+    /// both real: the old fixed 130 px reserve was 1 px short of the
+    /// English label, wrapping the button's text into a two-line button
+    /// (the user report); and the first fix omitted the TextEdit's own
+    /// 8 px frame margin, which — with the button in Extend mode — stopped
+    /// being absorbed by wrapping and instead widened the auto-fitting
+    /// side panel by 8 px EVERY frame (probed during review). Three frames
+    /// pin both: a stable panel width and a one-line button.
+    #[test]
+    fn the_generate_button_stays_one_line_and_the_panel_stays_put() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut widths = Vec::new();
+            for _ in 0..3 {
+                let _ = ctx.run(input(), |ctx| {
+                    let r = egui::SidePanel::left("controls")
+                        .default_width(320.0)
+                        .show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| app.retouch_panel(ui));
+                        });
+                    // the panel's rendered width, the runaway's witness
+                    widths.push(r.response.rect.width());
+                });
+            }
+            assert!(
+                (widths[0] - widths[2]).abs() < 0.5,
+                "{lang:?}: the side panel must not grow across frames: {widths:?}"
+            );
+            let btn = app.reimagine_btn_rect.expect("the button records its rect (test seam)");
+            let one_line = ctx.style().spacing.interact_size.y;
+            assert!(
+                btn.height() <= one_line + 1.0,
+                "{lang:?}: the Generate button must be one line tall ({} vs {one_line})",
+                btn.height()
+            );
+        }
+    }
+
     #[test]
     fn the_variant_card_gets_equal_air_above_and_below() {
         let mk = |kind: crate::model::VariantKind| crate::model::Variant {

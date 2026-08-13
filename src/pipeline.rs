@@ -2820,6 +2820,19 @@ mod tests {
             if old.recipe.red_curve.is_empty() { "withheld/empty" } else { "attached" },
         );
         let fit_base = calibration_recipe(fit_calibration(&raw));
+        // The tone gate's misprediction reading in THIS (composed) domain —
+        // the anchor table at `NEUTRAL_MISPREDICTION_MAX` was measured in
+        // the embedded-preview domain; this prints the composed-domain
+        // counterpart per pair so both domains stay measured.
+        {
+            let edge = crate::fit::ANALYZE_EDGE;
+            let s_base = crate::render::develop_preview(&neutral.thumbnail(edge, edge), &fit_base);
+            let m = crate::fit::neutral_gate_misprediction(
+                &crate::fit::pixels_of(&s_base),
+                &crate::fit::pixels_of(&target.thumbnail(edge, edge)),
+            );
+            eprintln!("composed-domain misprediction: {m:.4}");
+        }
         let new = crate::fit::fit_recipe_from(&neutral, &target, &fit_base);
         eprintln!(
             "NEW (composed calibration): err {:.4} -> {:.4}, ev {:+.2}, sat {:+.1}, cast {}, base {} pts",

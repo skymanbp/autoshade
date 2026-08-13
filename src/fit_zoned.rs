@@ -62,27 +62,31 @@ const ZONE_ACCEPT_RATIO: f32 = 0.5;
 /// R17-era complaint: a zone that was ALREADY matched (sky 0.012 on the
 /// murk-era pair) was "corrected", barely moved, and reported "dropped:
 /// needs ≤ 50%" — reading like a discarded improvement when there was
-/// nothing to improve. This floor is that yardstick, anchored on the live
-/// pairs: corrections that genuinely work land at 0.007–0.015 (this pair's
-/// sky 0.076 → 0.007 post-R17; golden-sky 0.507 → 0.015), while the
-/// observed already-matched zones read 0.009–0.012 and every attempt at
-/// them regressed (land 0.009 → 0.029 post-R17). At/below it a zone is
-/// left alone WITH AN HONEST NOTE, and a correction that LANDS at/below it
-/// is accepted even when the relative arm alone would refuse (started
-/// close, ended matched). Residual, disclosed: zones reading in
-/// (0.012, 0.02] are declined an attempt the anchors suggest could reach
-/// 0.007 — revisit the floor if a real pair ever shows a visible gap the
-/// skip refuses to close.
+/// nothing to improve. Two absolute yardsticks fix that, SPLIT on purpose
+/// (R19 — one shared number either skipped fixable zones or dialled
+/// matched ones): corrections that genuinely work LAND at 0.007–0.015
+/// (this pair's sky 0.076 → 0.007; golden-sky 0.507 → 0.015), so this
+/// figure — just above that landing range — is the ACCEPTANCE floor: a
+/// correction ending at/below it with a real gain is accepted even when
+/// the relative arm alone would refuse (started close, ended matched).
 const ZONE_MATCHED_ERR: f32 = 0.02;
-/// `zone_err` lives in LINEAR light, so an absolute floor alone means
-/// different things at different zone levels — 0.02 of linear mean is a
-/// twentieth of a stop on a bright sky but well over a full stop in deep
-/// shadow (sRGB ≈ 0.12 vs 0.20 zones score zone_err ≈ 0.020 while sitting
-/// 1.3 EV apart; that zone must be FITTED, not declared matched). The
-/// matched skip therefore ALSO requires the zones' mean-luma EV gap to sit
-/// inside this quarter stop — below it a large-area brightness delta stops
-/// reading as a different look; the relative acceptance arm needs no such
-/// companion because ratios are scale-free.
+/// …while the observed already-matched zones read 0.009–0.012 and every
+/// attempt at them regressed (land 0.009 → 0.029 on the live pair), so
+/// THIS figure — the ceiling of that observed matched domain — is the
+/// SKIP line: at/below it the zone is left alone with an honest "already
+/// matches" note. Zones between the two figures are attempted and judged
+/// by [`zone_accepts`]; nothing is declined untried above the matched
+/// domain.
+const ZONE_SKIP_ERR: f32 = 0.012;
+/// `zone_err` lives in LINEAR light, so an absolute line alone means
+/// different things at different zone levels — 0.012 of linear mean is a
+/// hundredth of a stop on a bright sky but most of a stop in deep shadow
+/// (sRGB ≈ 0.12 vs 0.173 zones score zone_err ≈ 0.012 while sitting
+/// 0.9 EV apart; that zone must be FITTED, not declared matched). Both
+/// absolute yardsticks therefore carry this quarter-stop EV companion —
+/// the skip line refuses to declare such a zone matched, and the
+/// acceptance floor refuses to call such a landing matched; the relative
+/// acceptance arm needs no companion because ratios are scale-free.
 const ZONE_MATCHED_EV: f32 = 0.25;
 /// The floor-landing acceptance arm must still MOVE the zone — without a
 /// minimum gain, a hairline 0.0201 → 0.0200 "landing" would buy the full
@@ -99,12 +103,22 @@ const ZONE_FLOOR_MIN_GAIN: f32 = 0.8;
 const ZONE_GLOBAL_REGRESSION_TOL: f32 = 0.02;
 
 /// The zone-local acceptance predicate: halve the zone error, or land it in
-/// matched territory with a real gain (see [`ZONE_ACCEPT_RATIO`],
-/// [`ZONE_MATCHED_ERR`] and [`ZONE_FLOOR_MIN_GAIN`]). Pure so the regimes
-/// are unit-testable without an end-to-end fit.
-fn zone_accepts(zone_before: f32, zone_after: f32) -> bool {
+/// matched territory — brightness included — with a real gain (see
+/// [`ZONE_ACCEPT_RATIO`], [`ZONE_MATCHED_ERR`], [`ZONE_MATCHED_EV`] and
+/// [`ZONE_FLOOR_MIN_GAIN`]). Pure so the regimes are unit-testable without
+/// an end-to-end fit.
+fn zone_accepts(zone_before: f32, zone_after: f32, ev_gap_after: f32) -> bool {
     zone_after <= zone_before * ZONE_ACCEPT_RATIO
-        || (zone_after <= ZONE_MATCHED_ERR && zone_after <= ZONE_FLOOR_MIN_GAIN * zone_before)
+        || (zone_after <= ZONE_MATCHED_ERR
+            && ev_gap_after <= ZONE_MATCHED_EV
+            && zone_after <= ZONE_FLOOR_MIN_GAIN * zone_before)
+}
+
+/// The skip decision, pure for the same reason: a zone at/below the
+/// observed matched domain — brightness included — is left alone with the
+/// honest note instead of being dialled.
+fn zone_skips(zone_before: f32, ev_gap: f32) -> bool {
+    zone_before <= ZONE_SKIP_ERR && ev_gap <= ZONE_MATCHED_EV
 }
 
 /// Mask-weighted first moments of one zone.
@@ -487,10 +501,10 @@ fn attach_one_zone(
     // observed attempts regress (land 0.009 → 0.029 on the live pair), and
     // the old outcome message ("dropped: needs ≤ 50%") read as a discarded
     // improvement. Say what is true instead: there is nothing to correct.
-    // The EV companion keeps the linear-light floor honest in dark zones
-    // (see [`ZONE_MATCHED_EV`]).
+    // The EV companion keeps the linear-light skip line honest in dark
+    // zones (see [`ZONE_MATCHED_EV`]).
     let ev_gap = (mt.luma_lin.max(1e-6) / ms.luma_lin.max(1e-6)).log2().abs();
-    if zone_before <= ZONE_MATCHED_ERR && ev_gap <= ZONE_MATCHED_EV {
+    if zone_skips(zone_before, ev_gap) {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
@@ -565,8 +579,10 @@ fn attach_one_zone(
     }
     let zoned_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
     let zoned_err = fit::look_err(&zoned_px, tgt_px);
-    let zone_after = zone_err(&zone_moments(&zoned_px, sw), &mt);
-    if zone_accepts(zone_before, zone_after)
+    let m_after = zone_moments(&zoned_px, sw);
+    let zone_after = zone_err(&m_after, &mt);
+    let ev_after = (mt.luma_lin.max(1e-6) / m_after.luma_lin.max(1e-6)).log2().abs();
+    if zone_accepts(zone_before, zone_after, ev_after)
         && zoned_err <= report.err_after + ZONE_GLOBAL_REGRESSION_TOL
     {
         let m = report.recipe.masks.last().expect("zone mask just pushed");
@@ -623,6 +639,7 @@ fn attach_one_zone(
                     ("after", format!("{zone_after:.3}")),
                     ("ratio", format!("{:.0}", ZONE_ACCEPT_RATIO * 100.0)),
                     ("floor", format!("{ZONE_MATCHED_ERR:.3}")),
+                    ("gain", format!("{:.0}", (1.0 - ZONE_FLOOR_MIN_GAIN) * 100.0)),
                     ("drift", format!("{:+.3}", zoned_err - report.err_after)),
                     ("tol", format!("{ZONE_GLOBAL_REGRESSION_TOL:+.3}")),
                 ],
@@ -872,12 +889,30 @@ mod tests {
     /// above the floor at sub-50% (0.040 → 0.025).
     #[test]
     fn the_zone_gate_halves_or_lands_matched() {
-        assert!(zone_accepts(0.076, 0.007), "a real halving must pass");
-        assert!(zone_accepts(0.500, 0.200), "the relative arm alone must pass");
-        assert!(zone_accepts(0.035, 0.018), "landing under the matched floor must pass");
-        assert!(!zone_accepts(0.021, 0.0205), "a hairline move must not buy the drift budget");
-        assert!(!zone_accepts(0.507, 0.280), "a large remaining error must refuse");
-        assert!(!zone_accepts(0.040, 0.025), "sub-50% above the floor must refuse");
+        assert!(zone_accepts(0.076, 0.007, 0.1), "a real halving must pass");
+        assert!(zone_accepts(0.500, 0.200, 0.9), "the relative arm alone must pass");
+        assert!(zone_accepts(0.035, 0.018, 0.1), "landing under the matched floor must pass");
+        // The (skip, floor] band is ATTEMPTED, not declined (R19): a zone
+        // starting between 0.012 and 0.02 can still earn its correction.
+        assert!(zone_accepts(0.016, 0.010, 0.1), "the between-yardsticks band must stay winnable");
+        assert!(!zone_accepts(0.021, 0.0205, 0.1), "a hairline move must not buy the drift budget");
+        assert!(!zone_accepts(0.507, 0.280, 0.1), "a large remaining error must refuse");
+        assert!(!zone_accepts(0.040, 0.025, 0.1), "sub-50% above the floor must refuse");
+        // The floor arm calls a landing "matched" only when its BRIGHTNESS
+        // matches too — a dark zone can score 0.018 while a stop away.
+        assert!(!zone_accepts(0.035, 0.018, 0.9), "an EV-far landing is not matched");
+    }
+
+    /// R19: the SKIP/floor split itself, pinned — setting the skip back to
+    /// the acceptance floor would silently re-decline the (0.012, 0.02]
+    /// band untried (the regression this split exists to prevent).
+    #[test]
+    fn the_skip_line_sits_below_the_acceptance_floor() {
+        assert!(zone_skips(0.009, 0.1), "the observed matched domain skips");
+        assert!(zone_skips(0.012, 0.1), "the domain ceiling itself skips");
+        assert!(!zone_skips(0.0121, 0.1), "just above the ceiling is attempted");
+        assert!(!zone_skips(0.016, 0.1), "the between-yardsticks band is attempted");
+        assert!(!zone_skips(0.009, 0.5), "a matched score a stop apart is attempted");
     }
 
     /// R18: a zone that already matches the target is LEFT ALONE with an
