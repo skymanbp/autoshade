@@ -58,6 +58,38 @@ const ZONE_SAT_LIMIT: f32 = 60.0;
 /// only read as damage. A frame-global gate therefore vetoes exactly the
 /// correction this module exists to make.
 const ZONE_ACCEPT_RATIO: f32 = 0.5;
+/// The relative gate above has no absolute yardstick, and that produced the
+/// R17-era complaint: a zone that was ALREADY matched (sky 0.012 on the
+/// murk-era pair) was "corrected", barely moved, and reported "dropped:
+/// needs ≤ 50%" — reading like a discarded improvement when there was
+/// nothing to improve. This floor is that yardstick, anchored on the live
+/// pairs: corrections that genuinely work land at 0.007–0.015 (this pair's
+/// sky 0.076 → 0.007 post-R17; golden-sky 0.507 → 0.015), while the
+/// observed already-matched zones read 0.009–0.012 and every attempt at
+/// them regressed (land 0.009 → 0.029 post-R17). At/below it a zone is
+/// left alone WITH AN HONEST NOTE, and a correction that LANDS at/below it
+/// is accepted even when the relative arm alone would refuse (started
+/// close, ended matched). Residual, disclosed: zones reading in
+/// (0.012, 0.02] are declined an attempt the anchors suggest could reach
+/// 0.007 — revisit the floor if a real pair ever shows a visible gap the
+/// skip refuses to close.
+const ZONE_MATCHED_ERR: f32 = 0.02;
+/// `zone_err` lives in LINEAR light, so an absolute floor alone means
+/// different things at different zone levels — 0.02 of linear mean is a
+/// twentieth of a stop on a bright sky but well over a full stop in deep
+/// shadow (sRGB ≈ 0.12 vs 0.20 zones score zone_err ≈ 0.020 while sitting
+/// 1.3 EV apart; that zone must be FITTED, not declared matched). The
+/// matched skip therefore ALSO requires the zones' mean-luma EV gap to sit
+/// inside this quarter stop — below it a large-area brightness delta stops
+/// reading as a different look; the relative acceptance arm needs no such
+/// companion because ratios are scale-free.
+const ZONE_MATCHED_EV: f32 = 0.25;
+/// The floor-landing acceptance arm must still MOVE the zone — without a
+/// minimum gain, a hairline 0.0201 → 0.0200 "landing" would buy the full
+/// [`ZONE_GLOBAL_REGRESSION_TOL`] drift budget (200× the zone gain) and
+/// overwrite `err_after` with the worse frame number. One fifth of the
+/// starting error is the smallest move worth a mask.
+const ZONE_FLOOR_MIN_GAIN: f32 = 0.8;
 /// Insurance bound: the mask cannot touch pixels outside its raster (engine
 /// guarantee, pinned by the rocks-bit-equal test), so the only frame-global
 /// drift a correct zone repaint can cause is metric-visible band migration
@@ -65,6 +97,15 @@ const ZONE_ACCEPT_RATIO: f32 = 0.5;
 /// real pair) but refuse anything larger — a big global regression means the
 /// mask is NOT the region we thought it was.
 const ZONE_GLOBAL_REGRESSION_TOL: f32 = 0.02;
+
+/// The zone-local acceptance predicate: halve the zone error, or land it in
+/// matched territory with a real gain (see [`ZONE_ACCEPT_RATIO`],
+/// [`ZONE_MATCHED_ERR`] and [`ZONE_FLOOR_MIN_GAIN`]). Pure so the regimes
+/// are unit-testable without an end-to-end fit.
+fn zone_accepts(zone_before: f32, zone_after: f32) -> bool {
+    zone_after <= zone_before * ZONE_ACCEPT_RATIO
+        || (zone_after <= ZONE_MATCHED_ERR && zone_after <= ZONE_FLOOR_MIN_GAIN * zone_before)
+}
 
 /// Mask-weighted first moments of one zone.
 pub(crate) struct ZoneMoments {
@@ -441,6 +482,25 @@ fn attach_one_zone(
         );
         return false;
     }
+    let zone_before = zone_err(&ms, &mt);
+    // Already-matched zone: attempting a fit would be dialling noise — the
+    // observed attempts regress (land 0.009 → 0.029 on the live pair), and
+    // the old outcome message ("dropped: needs ≤ 50%") read as a discarded
+    // improvement. Say what is true instead: there is nothing to correct.
+    // The EV companion keeps the linear-light floor honest in dark zones
+    // (see [`ZONE_MATCHED_EV`]).
+    let ev_gap = (mt.luma_lin.max(1e-6) / ms.luma_lin.max(1e-6)).log2().abs();
+    if zone_before <= ZONE_MATCHED_ERR && ev_gap <= ZONE_MATCHED_EV {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_ALREADY_MATCHED,
+                vec![("label", label.to_string()), ("before", format!("{zone_before:.3}"))],
+            ),
+        );
+        return false;
+    }
     let d = fit_zone_dials(&ms, &mt);
     let round1 = |v: f32| (v * 10.0).round() / 10.0;
     let round2 = |v: f32| (v * 100.0).round() / 100.0;
@@ -505,9 +565,8 @@ fn attach_one_zone(
     }
     let zoned_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
     let zoned_err = fit::look_err(&zoned_px, tgt_px);
-    let zone_before = zone_err(&ms, &mt);
     let zone_after = zone_err(&zone_moments(&zoned_px, sw), &mt);
-    if zone_after <= zone_before * ZONE_ACCEPT_RATIO
+    if zone_accepts(zone_before, zone_after)
         && zoned_err <= report.err_after + ZONE_GLOBAL_REGRESSION_TOL
     {
         let m = report.recipe.masks.last().expect("zone mask just pushed");
@@ -563,6 +622,7 @@ fn attach_one_zone(
                     ("before", format!("{zone_before:.3}")),
                     ("after", format!("{zone_after:.3}")),
                     ("ratio", format!("{:.0}", ZONE_ACCEPT_RATIO * 100.0)),
+                    ("floor", format!("{ZONE_MATCHED_ERR:.3}")),
                     ("drift", format!("{:+.3}", zoned_err - report.err_after)),
                     ("tol", format!("{ZONE_GLOBAL_REGRESSION_TOL:+.3}")),
                 ],
@@ -800,6 +860,55 @@ mod tests {
     /// Process-unique, in the temp dir, and no ./out litter left behind.
     fn fixture_mask_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("autoshop-{name}-{}.png", std::process::id()))
+    }
+
+    /// R18: the acceptance predicate's regimes, pinned on the live numbers.
+    /// Halving accepts (0.076 → 0.007) — and the relative arm must carry
+    /// that verdict ALONE above the floor (0.500 → 0.200), so deleting it
+    /// fails here. The floor arm accepts a sub-50% correction that lands
+    /// matched with a real gain (0.035 → 0.018) but refuses a hairline
+    /// move that would only buy the drift budget (0.021 → 0.0205). Neither
+    /// arm rescues a correction that stays high (0.507 → 0.280) or lands
+    /// above the floor at sub-50% (0.040 → 0.025).
+    #[test]
+    fn the_zone_gate_halves_or_lands_matched() {
+        assert!(zone_accepts(0.076, 0.007), "a real halving must pass");
+        assert!(zone_accepts(0.500, 0.200), "the relative arm alone must pass");
+        assert!(zone_accepts(0.035, 0.018), "landing under the matched floor must pass");
+        assert!(!zone_accepts(0.021, 0.0205), "a hairline move must not buy the drift budget");
+        assert!(!zone_accepts(0.507, 0.280), "a large remaining error must refuse");
+        assert!(!zone_accepts(0.040, 0.025), "sub-50% above the floor must refuse");
+    }
+
+    /// R18: a zone that already matches the target is LEFT ALONE with an
+    /// honest note — not "corrected", not reported as a dropped
+    /// improvement (the murk-era pair's sky read 0.012, got dialled, and
+    /// the "dropped: needs ≤ 50%" outcome line was mistaken for a
+    /// discarded win three rounds running). Identical frames: both zones
+    /// match, nothing attaches, the raster is reclaimed.
+    #[test]
+    fn an_already_matched_zone_is_left_alone_and_says_so() {
+        let (src, _tgt, sky_mask) = zoned_pair();
+        let mask_path = fixture_mask_path("zoned-matched-mask");
+        sky_mask.save(&mask_path).unwrap();
+        let mut report = fit::fit_recipe(&src, &src);
+        attach_zones(&src, &src, &mut report, &sky_mask, &sky_mask, &mask_path);
+        assert!(
+            report.recipe.masks.is_empty(),
+            "nothing to correct on an identical pair: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            report.recipe.rationale.contains("already matches the target"),
+            "the honest note must replace the misleading drop line: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            !report.recipe.rationale.contains("correction dropped"),
+            "no drop line on a matched zone: {}",
+            report.recipe.rationale
+        );
+        assert!(!mask_path.exists(), "no zone kept the raster — it must be reclaimed");
     }
 
     #[test]

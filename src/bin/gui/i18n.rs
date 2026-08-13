@@ -1034,9 +1034,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       left it.",
         " 注：{label} 区占原图 {s}% 而占目标图 {t}%——两者构图不同，整体分布残差停留在全局拟合的水平。"),
     (" Zoned {label} correction dropped: zone residual {before} → {after} \
-      (needs ≤ {ratio}% of the original) with frame-global drift \
-      {drift} (tolerance {tol}).",
-        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%），全画面漂移 {drift}（容差 {tol}）。"),
+      (needs ≤ {ratio}% of the original, or ≤ {floor} outright) with \
+      frame-global drift {drift} (tolerance {tol}).",
+        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或直接 ≤ {floor}），全画面漂移 {drift}（容差 {tol}）。"),
+    (" The {label} zone already matches the target (zone residual \
+      {before}) — no correction needed.",
+        " {label} 区已与目标匹配（区残差 {before}）——无需校正。"),
     (" [revision round {round} failed ({e}) — keeping the previous verified proposal]",
         " [第 {round} 轮修订失败（{e}）——保留上一轮已验证的提案]"),
     (" [verification of revision round {round} failed ({e}) — keeping the previous \

@@ -1,15 +1,17 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (R17, in tree post-v0.25.0 — the reverse-fit's
-> tone evidence polices its own identification: a misprediction gate falls
-> the solve back to full-pixel CDFs when "grey" stops naming the same
-> pixels on both sides, residual-curve knots follow the LUT's output
-> spacing, and the rotation census exempts sub-visible cast-inversion
-> pass-through (§4.8). v0.25.0 composed the photo's calibration into the
-> closed-loop solve: every candidate render is the canvas's one-pass
-> `user(base(x))`, the residual numbers describe exactly what the user
-> sees (pinned to 1e-6 by a unit test), and v0.24.0's two-pass seed with
-> its clamp-order gap is retired). The full decode →
+> Status: **implemented** (v0.26.0 — R17+R18: the reverse-fit's tone
+> evidence polices its own identification (a misprediction gate falls the
+> solve back to full-pixel CDFs when "grey" stops naming the same pixels
+> on both sides, with real-pair anchors on both flanks of its ceiling),
+> residual-curve knots follow the LUT's output spacing, the rotation
+> census exempts sub-visible cast-inversion pass-through, and the zoned
+> gate gains an absolute matched floor with an EV companion — an
+> already-matched zone is left alone and says so (§4.8). v0.25.0 composed
+> the photo's calibration into the closed-loop solve: every candidate
+> render is the canvas's one-pass `user(base(x))`, the residual numbers
+> describe exactly what the user sees (pinned to 1e-6 by a unit test)).
+> The full decode →
 > advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
@@ -18,7 +20,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 437 library + 7 CLI + 72 GUI tests pass in both build configurations.
+> 440 library + 7 CLI + 72 GUI tests pass in both build configurations.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -464,7 +466,7 @@ block.
 
 The tone stage's evidence prefers NEAR-NEUTRAL pixels (saturated ones carry
 chroma-clipped luma), which rests on an identification assumption — "grey"
-must name the same pixels on both sides. Since R17 (post-v0.25.0) that assumption
+must name the same pixels on both sides. Since v0.26.0 (R17) that assumption
 is policed by three conditions in `tone_cdf_pair`: per-side sample floors, the
 1.75× share-ratio ceiling, and a **misprediction gate**
 (`neutral_gate_misprediction`) that scores the gated evidence map against the
@@ -472,7 +474,10 @@ shared class's own empirical pairing — the one exception to the
 statistics-only rule, and a deliberate one: it reads coarse CO-MEMBERSHIP at
 equal thumbnail index (same-frame pairs on the same 384-edge grid) as a
 diagnostic, never as pixel evidence, and it fails OPEN — under broken
-registration the metric slides toward 0 and the older gates stand alone.
+registration the metric slides toward 0 and the older gates stand alone (the
+share ratio is alignment-free, which is why both detectors stay: measured on
+the archive, one real pair is caught only by the misprediction gate and the
+misaligned class only by the share gate).
 Any condition failing falls the solve back to full-pixel CDFs on both sides.
 This is what un-murked the live pair the share gate had waved through (its
 target re-hued a quarter of the source's neutral class — the pale sky — into
@@ -484,8 +489,15 @@ and a steep camera base compresses fixed-x samples into 38-u8 gaps whose
 piecewise-linear chords sag ~10/255. `--zoned` ([`src/fit_zoned.rs`](../src/fit_zoned.rs)) adds a sky-to-sky
 local correction on top of the global fit via the segmentation sidecar; the
 XMP carries the global fit only, since classic sidecars cannot hold raster
-masks. The GUI's **反推 / Reverse-fit** action drives the same two entry points
-(`fit_recipe`, `fit_recipe_zoned`) and lands the result as an editable variant.
+masks. Each zone's correction is judged zone-locally by a two-arm gate
+(v0.26.0): halve the zone error, or land it at/below an absolute matched
+floor (0.02 of linear-mean error) with a real gain — and a zone already at
+that floor (with its mean-luma EV gap inside a quarter stop, because the
+floor lives in scale-dependent linear light) is left alone with an honest
+"already matches" note instead of being dialled, regressed, and reported as
+a dropped improvement. The GUI's **反推 / Reverse-fit** action drives the
+same two entry points (`fit_recipe`, `fit_recipe_zoned`) and lands the
+result as an editable variant.
 
 Since v0.25.0 the GUI drives both entry points through a **composed
 calibration base** (`fit_recipe_from` / `fit_recipe_zoned_from` with

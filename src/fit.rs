@@ -82,16 +82,25 @@ pub(crate) const P_CLIP: f32 = 0.002;
 /// Anchors, all measured. Fall-back side: _DSC9608 × reimagine reads 0.021
 /// (the pale sky, luma q50 ≈ 197/255, re-hued vivid blue out of the class;
 /// share ratio 1.29× sailed under the 1.75× gate; the shipped map missed
-/// the shared class by −22/255 right in the murk band) and the haze
-/// fixture reads 0.126 (its blue cast tints the clean side's dark greys out
-/// of the class — under the R17 dense residual knots the gated solve
-/// faithfully implements that broken map and collapses to a do-no-harm
-/// reset, while the fallback lands 0.0892 → 0.0229). Keep side: identity /
-/// canyon read ≈ 0 (matched members) and the synthetic uniform-inflation
-/// fixture reads < 0.0075. CALIBRATION DEBT, recorded honestly: the
-/// nearest harmful anchor (0.021) sits only 1.4× above the ceiling, and no
-/// REAL benign pair has been measured near it — the keep-side margin rests
-/// on synthetic fixtures until a live gated pair is captured.
+/// the shared class by −22/255 right in the murk band); the archived
+/// _DSC9621 pairs read 0.074 (× reimagine, the golden sky — share 2.65×,
+/// both gates fire), 0.034 (× reimagine-4 — share 1.51×, UNDER the share
+/// gate: this detector is the only defence) and 0.024 (× reimagine-2,
+/// share 1.92×); the haze fixture reads 0.126 (its blue cast tints the
+/// clean side's dark greys out of the class — under the R17 dense residual
+/// knots the gated solve faithfully implements that broken map and
+/// collapses to a do-no-harm reset, while the fallback lands
+/// 0.0892 → 0.0229). Keep side: _DSC9621 × reimagine-3 — a REAL benign
+/// pair — reads 0.0050 (share 1.12×), the identity / canyon fixtures read
+/// ≈ 0 (matched members) and the synthetic uniform-inflation fixture reads
+/// < 0.0075. The 0.015 ceiling thus has real pairs on BOTH flanks: 3.0×
+/// clear below (0.0050), 1.4× above (0.021). All archive numbers are the
+/// embedded-preview domain (`decode` output vs reimagine target) — the
+/// same camera-look source the CLI `match` feeds this gate; the GUI's
+/// composed-calibration domain only APPROXIMATES that preview (base curve
+/// plus lens profile plus as-shot WB), and its sole measured anchor is
+/// the 0.021 of _DSC9608 — the archive table is unmeasured there,
+/// disclosed.
 const NEUTRAL_MISPREDICTION_MAX: f32 = 0.015;
 /// Evidence floor for the SHARED class inside
 /// [`neutral_gate_misprediction`] — the same absolute floor the per-side
@@ -1000,8 +1009,16 @@ fn is_neutralish(p: &[f32; 3]) -> bool {
 /// matched-population regressions (identity / roundtrip / violet canyon
 /// ≈ 1.0×) while catching the golden-sky asymmetry (2.0×); the
 /// misprediction ceiling is anchored in [`NEUTRAL_MISPREDICTION_MAX`]'s
-/// doc. Gate order: cheap counts and shares first, the misprediction pass
-/// (a full-frame scan plus four CDFs) last, so under-evidenced pairs never
+/// doc. The two detectors are COMPLEMENTARY, not redundant (R18, measured
+/// on the archive): the share ratio is alignment-free — it still works
+/// when misregistration slides the misprediction metric toward 0 (its
+/// fail-open direction) — while the misprediction gate catches membership
+/// churn the ratio cannot see (_DSC9621 × reimagine-4: share 1.51×,
+/// misprediction 0.034 — only this gate fires). Known residual, accepted:
+/// a perfectly uniform >1.75× inflation would fall back benignly (synthetic
+/// only; both live fallback solves measured better than their gated arms).
+/// Gate order: cheap counts and shares first, the misprediction pass (a
+/// full-frame scan plus four CDFs) last, so under-evidenced pairs never
 /// pay for it.
 fn tone_cdf_pair(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> (Vec<f32>, Vec<f32>) {
     let s_n: Vec<f32> = sp.iter().filter(|p| is_neutralish(p)).map(luma601).collect();
@@ -2094,6 +2111,26 @@ mod tests {
         // 0.0134 (0.27× ROT_SHARE) and would fail here; at 75° it measures
         // ≈ 0.0001.
         assert!(s3 < 0.1 * ROT_SHARE, "margin eroded: haze share {s3:.4} (measured ≈ 0)");
+    }
+
+    /// R18: the pass-through exemption's exact borders, patrolled (the R17
+    /// disclosure left the band unmonitored). A rotation invisible on both
+    /// ends (cc < 0.05 ∧ wc < 0.09) is exempt; crossing EITHER visibility
+    /// floor puts it straight back in the census. If a real pair ever
+    /// wrecks a region inside the exempt band, ROT_VISIBLE_* is the
+    /// suspect (see the const doc).
+    #[test]
+    fn the_pass_through_exemption_borders_are_patrolled() {
+        let share = |c: [f32; 3], w: [f32; 3]| rehued_share(&vec![c; 100], &vec![w; 100]);
+        // Inside the blind band: a faint blue (cc 0.045) flipped ~174° to a
+        // faint warm (wc 0.085) — pass-through, exempt.
+        assert_eq!(share([0.655, 0.68, 0.70], [0.735, 0.68, 0.65]), 0.0);
+        // After side crosses 0.09: the same faint blue painted a VISIBLE
+        // warm — back in the census.
+        assert!(share([0.655, 0.68, 0.70], [0.745, 0.68, 0.65]) > 0.99);
+        // Before side crosses 0.05: a visible tint re-hued — counted even
+        // though the destination stays faint.
+        assert!(share([0.645, 0.68, 0.70], [0.70, 0.68, 0.65]) > 0.99);
     }
 
     #[test]
