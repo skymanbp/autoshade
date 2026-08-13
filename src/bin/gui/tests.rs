@@ -3329,5 +3329,17 @@
                 "[{label}] the card column has no breathing room ({top:.1} px) — \
                  it outgrew VARIANT_STRIP_H"
             );
+            // R16: the PAINTED title centers on the measured card column —
+            // the title rect comes from variant_strip's own cursor math, the
+            // card rect from egui's real layout; agreeing centers proves the
+            // two geometries cohere (they diverged by ~29 px when the title
+            // was a row child centered on egui's 26 px seed).
+            let title =
+                app.strip_title_rect.expect("the strip records its painted title (test seam)");
+            let dy = title.center().y - card.center().y;
+            assert!(
+                dy.abs() <= 1.0,
+                "[{label}] the Variants title sits {dy:.1} px off the card column's center"
+            );
         }
     }

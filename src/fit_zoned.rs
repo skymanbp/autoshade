@@ -245,7 +245,22 @@ pub fn fit_recipe_zoned(
     seg: &SegmentOpts,
     mask_path: &Path,
 ) -> FitReport {
-    let mut report = fit::fit_recipe(src, target);
+    fit_recipe_zoned_from(src, target, seg, mask_path, &crate::recipe::EditRecipe::default())
+}
+
+/// [`fit_recipe_zoned`] with a calibration-only base composed into the
+/// solve — see [`fit::fit_recipe_from`]. The zone passes need no changes
+/// of their own: every zone statistic is measured on a render of the
+/// CURRENT recipe (which carries the base from the start), so the zones
+/// already live in the canvas's one-pass domain.
+pub fn fit_recipe_zoned_from(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    seg: &SegmentOpts,
+    mask_path: &Path,
+    base: &crate::recipe::EditRecipe,
+) -> FitReport {
+    let mut report = fit::fit_recipe_from(src, target, base);
     match segment_both(src, target, seg, mask_path) {
         Ok((src_mask, tgt_mask)) => {
             attach_zones(src, target, &mut report, &src_mask, &tgt_mask, mask_path);

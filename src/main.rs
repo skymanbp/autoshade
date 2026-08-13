@@ -814,11 +814,12 @@ fn match_cmd(
     // base and the render disagreed with the fit's own numbers. The lens
     // profile and the as-shot WB anchor ride the same snapshot (the fitted
     // recipe was built from EditRecipe::default and silently dropped both).
-    // The GUI 反推 worker shares this stamp — and goes one step further by
-    // SOLVING from the engine's own calibration render
-    // (`pipeline::fit_calibration_seed`); the CLI keeps the embedded-preview
-    // source on purpose (`preview_only` needs no demosaic, and this
-    // command's contract was validated on it).
+    // The GUI 反推 worker goes one step further: it COMPOSES the calibration
+    // into the solve itself (`fit_recipe_from` + `pipeline::calibration_recipe`,
+    // v0.25.0), so its deliverable carries the calibration with no stamp. The
+    // CLI keeps the embedded-preview source + this post-stamp on purpose
+    // (`preview_only` needs no demosaic, and this command's contract was
+    // validated on it).
     let cal = pipeline::fit_calibration(raw);
     pipeline::stamp_fit_calibration(&mut rep.recipe, cal);
     println!(

@@ -260,6 +260,8 @@ pub(crate) struct AutoshopApp {
     pub(crate) strip_thumb_rect: Option<egui::Rect>,  // test seam: first variant card's thumb rect
     #[cfg(test)]
     pub(crate) strip_card_rect: Option<egui::Rect>,   // test seam: first variant card's column rect
+    #[cfg(test)]
+    pub(crate) strip_title_rect: Option<egui::Rect>,  // test seam: the painted "Variants" title rect
     // --- batch recipe copy / paste ---
     pub(crate) multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     pub(crate) copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1447,6 +1449,8 @@ impl Default for AutoshopApp {
             strip_thumb_rect: None,
             #[cfg(test)]
             strip_card_rect: None,
+            #[cfg(test)]
+            strip_title_rect: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,

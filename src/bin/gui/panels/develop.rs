@@ -229,18 +229,44 @@ impl AutoshopApp {
         // LAYOUT INVARIANT (probed, R14+R15): egui places the scroll area
         // centered by its 26 px DECLARED seed against the row's height at
         // placement time, then grows content DOWNWARD — (current−26)/2 of
-        // offset. Keeping every child before the scroll area ≤ 26 px tall
-        // makes that offset exactly 0, which is what the geometry test pins.
-        // (Both Align::Center forms re-broke it: whole-row centering gave
-        // 37/−21, fixed-height card_h gave 29/−29, a taller title wrapper
-        // gave 11.8/−3.8 — all matching the formula.) The title/divider
-        // therefore stay on the seed row — their ~29 px offset from the card
-        // center is a KNOWN cosmetic nit; centering them needs absolute
-        // positioning (ui.put), not worth the machinery here.
+        // offset. Keeping every child before the scroll area at ZERO height
+        // (pure horizontal spacing) pins that offset at exactly 0, which the
+        // geometry test asserts. (Every cross-align variant re-broke it,
+        // measured 37/29/11.8 px — all equal to (row_height−26)/2.) The
+        // title and divider therefore do not participate in layout at all
+        // (R16): they are PAINTED at rects computed from the same knowns as
+        // the pad — the one way to center them on the card column without
+        // re-breaking the row.
+        let row_top = ui.cursor().top();
+        let strip_left = ui.max_rect().left();
+        let title_galley = ui.painter().layout_no_wrap(
+            tr(lang, "Variants").to_owned(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            ui.visuals().strong_text_color(),
+        );
+        let title_w = title_galley.size().x;
+        let title_pos = egui::pos2(
+            strip_left + SPACE_SM,
+            row_top + (card_h - title_galley.size().y) / 2.0,
+        );
+        #[cfg(test)]
+        {
+            self.strip_title_rect =
+                Some(egui::Rect::from_min_size(title_pos, title_galley.size()));
+        }
+        ui.painter().galley(title_pos, title_galley, ui.visuals().strong_text_color());
+        // The divider, at full card height — the stock separator filled the
+        // 26 px seed, a stub over the card's top third.
+        let sep_x = strip_left + SPACE_SM + title_w + SPACE_SM + 3.0;
+        ui.painter().vline(
+            sep_x,
+            egui::Rangef::new(row_top, row_top + card_h),
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        );
         ui.horizontal(|ui| {
-            ui.add_space(SPACE_SM);
-            ui.label(egui::RichText::new(tr(lang, "Variants")).strong());
-            ui.separator();
+            // Horizontal footprint of the PAINTED title + divider: width
+            // only, zero height (the invariant above).
+            ui.add_space(SPACE_SM + title_w + SPACE_SM + 6.0 + SPACE_SM);
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for i in 0..self.variants.len() {

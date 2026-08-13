@@ -197,9 +197,42 @@ pub struct FitReport {
 /// Fit an [`EditRecipe`] mapping `src` (untouched preview) onto the look of
 /// `target` (a rendition of the same frame). Deterministic, no network.
 pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
+    fit_recipe_from(src, target, &EditRecipe::default())
+}
+
+/// [`fit_recipe`] with the photo's CALIBRATION composed into the solve
+/// (R16). `base` is a calibration-only recipe — base curve, lens profile,
+/// as-shot anchors, NO user edits: the returned recipe STARTS from it, so
+/// every closed-loop candidate render develops source → candidate in the
+/// same one-pass `user(base(x))` the canvas uses (the v0.24.0 two-pass
+/// seed's clamp-order gap is gone by construction, and the residual
+/// numbers describe exactly the render the user sees). Statistics are
+/// measured against the BASE render, so the bounded stages solve only the
+/// base-look → target delta; the tone stage solves its sliders in the
+/// user domain (their input IS the base output) and the residual curve in
+/// the full-LUT domain via the base LUT. With a default `base` this is
+/// bit-for-bit the old fit.
+pub fn fit_recipe_from(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &EditRecipe,
+) -> FitReport {
+    // CALLER CONTRACT: `base` must be calibration-only (build it with
+    // `pipeline::calibration_recipe`, or pass the default). A base smuggling
+    // user edits (curves/masks/sliders) breaks the residual algebra AND the
+    // reset arm's `err_after = err_before` identity — debug-checked here;
+    // release trusts the two in-crate callers, both correct by construction.
+    debug_assert!(
+        base.tone_curve.is_empty() && base.masks.is_empty() && base.red_curve.is_empty(),
+        "the fit base must be a calibration-only recipe"
+    );
     let s_img = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
     let t_img = target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-    let sp = pixels_of(&s_img);
+    // The base render IS the reference domain: err_before is "calibration
+    // look vs target" and every statistic below describes the delta the
+    // solve must close. All-default base ⇒ this is the raw thumbnail.
+    let s_base = render::develop_preview(&s_img, base);
+    let sp = pixels_of(&s_base);
     let tp = pixels_of(&t_img);
     let err_before = look_err(&sp, &tp);
 
@@ -218,11 +251,15 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
             &mut notes,
             crate::rationale::Note::plain(crate::rationale::keys::FIT_DEGENERATE),
         );
-        let recipe = EditRecipe { rationale, ..Default::default() };
+        // The refusal still carries the calibration: a degenerate pair must
+        // not strip the camera look off the deliverable. Clamped like the
+        // success path — the persisted JSON stays canonical (review R16 #2).
+        let mut recipe = EditRecipe { rationale, ..base.clone() };
+        recipe.clamp();
         return FitReport { recipe, err_before, err_after: err_before, notes };
     }
 
-    let mut recipe = EditRecipe::default();
+    let mut recipe = base.clone();
 
     // --- 1) tone: exposure scan × linear solve on the engine's knot basis ----
     // Tone evidence comes from NEAR-NEUTRAL pixels: saturated pixels clip
@@ -240,7 +277,19 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
     recipe.blacks = round1(sliders[4] * 100.0);
 
     // --- 2) residual master curve (composed on top of the sliders) -----------
-    recipe.tone_curve = residual_tone_curve(&recipe, &tone_map);
+    // Domain care (R16): the sliders solved in the USER domain (their input
+    // is the base curve's output — `tone_map` above maps base-render luma to
+    // target luma), but `residual_tone_curve` samples the recipe's FULL LUT,
+    // whose input is the NEUTRAL domain. Rebase the map through the base
+    // LUT: full(x) = user_map(base(x)). An EMPTY base curve skips the rebase
+    // outright — build_tone_lut's sRGB↔linear round trip is only ~1e-7 from
+    // identity, but skipping keeps the default-base wrapper literally
+    // bit-for-bit the old fit (review R16 #3).
+    let base_lut = render::build_tone_lut(base);
+    let full_map = |x: f32| {
+        if base.base_curve.is_empty() { tone_map(x) } else { tone_map(render::sample_lut(&base_lut, x)) }
+    };
+    recipe.tone_curve = residual_tone_curve(&recipe, &full_map);
 
     // --- 3) global saturation, secant-refined through the real engine --------
     // Saturation stays BEFORE the cast curves: channel CDFs of a desaturated
@@ -388,8 +437,13 @@ pub fn fit_recipe(src: &DynamicImage, target: &DynamicImage) -> FitReport {
     // and add the quantisation budget once.
     const FIT_QUANT: f32 = 1.2e-3;
     if err_after > err_before * 1.25 + FIT_QUANT {
-        recipe = EditRecipe::default();
-        err_after = look_err(&pixels_of(&render::develop_preview(&s_img, &recipe)), &tp);
+        // Reset to the BASE, not to a bare default (R16): "do no harm" means
+        // degrading to the calibration look the canvas would show with no
+        // fit at all — a bare default would re-introduce the dark neutral
+        // the base exists to avoid. By definition that render IS the
+        // err_before measurement, so no re-render is needed.
+        recipe = base.clone();
+        err_after = err_before;
         fit_regressed = true;
     }
 
