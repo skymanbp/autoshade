@@ -1,12 +1,15 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.25.0 — the reverse-fit COMPOSES the photo's
-> calibration into its own closed-loop solve (§4.8): every candidate
-> render is the canvas's one-pass `user(base(x))`, the residual numbers
-> describe exactly what the user sees (pinned to 1e-6 by a unit test),
-> and v0.24.0's two-pass seed with its clamp-order gap is retired;
-> the strip title/divider are painted at computed rects, centered on the
-> card column). The full decode →
+> Status: **implemented** (R17, in tree post-v0.25.0 — the reverse-fit's
+> tone evidence polices its own identification: a misprediction gate falls
+> the solve back to full-pixel CDFs when "grey" stops naming the same
+> pixels on both sides, residual-curve knots follow the LUT's output
+> spacing, and the rotation census exempts sub-visible cast-inversion
+> pass-through (§4.8). v0.25.0 composed the photo's calibration into the
+> closed-loop solve: every candidate render is the canvas's one-pass
+> `user(base(x))`, the residual numbers describe exactly what the user
+> sees (pinned to 1e-6 by a unit test), and v0.24.0's two-pass seed with
+> its clamp-order gap is retired). The full decode →
 > advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
@@ -15,7 +18,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 432 library + 7 CLI + 72 GUI tests pass in both build configurations.
+> 437 library + 7 CLI + 72 GUI tests pass in both build configurations.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -457,7 +460,28 @@ mean-chroma ratio, secant-refined through real renders and closed with a
 do-no-harm check; then per-channel CDF residuals as red/green/blue curves,
 admitted only through three vetoes (aggregate error, foreign-hue, rotation
 budget) — each veto is a specific real-photo failure recorded at its const
-block. `--zoned` ([`src/fit_zoned.rs`](../src/fit_zoned.rs)) adds a sky-to-sky
+block.
+
+The tone stage's evidence prefers NEAR-NEUTRAL pixels (saturated ones carry
+chroma-clipped luma), which rests on an identification assumption — "grey"
+must name the same pixels on both sides. Since R17 (post-v0.25.0) that assumption
+is policed by three conditions in `tone_cdf_pair`: per-side sample floors, the
+1.75× share-ratio ceiling, and a **misprediction gate**
+(`neutral_gate_misprediction`) that scores the gated evidence map against the
+shared class's own empirical pairing — the one exception to the
+statistics-only rule, and a deliberate one: it reads coarse CO-MEMBERSHIP at
+equal thumbnail index (same-frame pairs on the same 384-edge grid) as a
+diagnostic, never as pixel evidence, and it fails OPEN — under broken
+registration the metric slides toward 0 and the older gates stand alone.
+Any condition failing falls the solve back to full-pixel CDFs on both sides.
+This is what un-murked the live pair the share gate had waved through (its
+target re-hued a quarter of the source's neutral class — the pale sky — into
+vivid blue; the gated map then darkened every upper-mid by up to 22/255 while
+the scalar claimed victory). The residual tone curve places its knots
+uniformly in the LUT's OUTPUT domain (inverted through the LUT) rather than
+uniformly in raw input, because the curve's input axis is the engine's output
+and a steep camera base compresses fixed-x samples into 38-u8 gaps whose
+piecewise-linear chords sag ~10/255. `--zoned` ([`src/fit_zoned.rs`](../src/fit_zoned.rs)) adds a sky-to-sky
 local correction on top of the global fit via the segmentation sidecar; the
 XMP carries the global fit only, since classic sidecars cannot hold raster
 masks. The GUI's **反推 / Reverse-fit** action drives the same two entry points
@@ -492,12 +516,16 @@ and that command's contract was validated on it.
 One deliberate asymmetry: the fit does **not** apply
 `render::limit_tone_sliders` to its proposal, even though the engine applies it
 when rendering. The solve is a linear inversion of the knot model, and the
-acceptance test downstream is a knife edge — on the hazy-to-clean fixture the
-solved recipe is only 3 % better than neutral (0.08625 against 0.08918), so a
-0.34 % nudge to the sliders pushed it over `err_before`, tripped the saturation
-do-no-harm loop, and ended at 0.1286, far worse than doing nothing. The fit
-does not need to predict the limiter, because it scores candidates by
-**rendering** them: it already measures whatever the engine actually does.
+acceptance test downstream is a knife edge — on the hazy-to-clean fixture as
+it stood pre-R17 (gated evidence, sparse residual knots) the solved recipe was
+only 3 % better than neutral (0.08625 against 0.08918), so a 0.34 % nudge to
+the sliders pushed it over `err_before`, tripped the saturation do-no-harm
+loop, and ended at 0.1286, far worse than doing nothing. (R17's evidence
+fallback moved that fixture to 0.0892 → 0.0229; the historical figures stay
+because the knife-edge geometry, not the exact numbers, is why the asymmetry
+exists.) The fit does not need to predict the limiter, because it scores
+candidates by **rendering** them: it already measures whatever the engine
+actually does.
 
 ### 4.9 What the local web server refuses
 

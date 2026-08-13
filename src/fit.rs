@@ -72,6 +72,34 @@ const HIST_BINS: usize = 1024;
 /// Quantile clip for CDF inversion — the extreme tails of a generative render
 /// are noise (a few blown/crushed pixels would otherwise own the end knots).
 pub(crate) const P_CLIP: f32 = 0.002;
+/// Ceiling on the gated tone evidence's MISPREDICTION of its own identified
+/// population (see [`neutral_gate_misprediction`]) before the assumption is
+/// declared dead and the solve falls back to full-pixel CDFs. Membership
+/// counts and one-sided CDF-shift proxies were both tried and both mis-rank
+/// the live pairs (each fires HARDER on the haze pair than on the pair that
+/// actually shipped a murky fit), so the gate is judged by the harm itself:
+/// how far its map misses the pixels it claims to identify, in luma units.
+/// Anchors, all measured. Fall-back side: _DSC9608 × reimagine reads 0.021
+/// (the pale sky, luma q50 ≈ 197/255, re-hued vivid blue out of the class;
+/// share ratio 1.29× sailed under the 1.75× gate; the shipped map missed
+/// the shared class by −22/255 right in the murk band) and the haze
+/// fixture reads 0.126 (its blue cast tints the clean side's dark greys out
+/// of the class — under the R17 dense residual knots the gated solve
+/// faithfully implements that broken map and collapses to a do-no-harm
+/// reset, while the fallback lands 0.0892 → 0.0229). Keep side: identity /
+/// canyon read ≈ 0 (matched members) and the synthetic uniform-inflation
+/// fixture reads < 0.0075. CALIBRATION DEBT, recorded honestly: the
+/// nearest harmful anchor (0.021) sits only 1.4× above the ceiling, and no
+/// REAL benign pair has been measured near it — the keep-side margin rests
+/// on synthetic fixtures until a live gated pair is captured.
+const NEUTRAL_MISPREDICTION_MAX: f32 = 0.015;
+/// Evidence floor for the SHARED class inside
+/// [`neutral_gate_misprediction`] — the same absolute floor the per-side
+/// `enough` bar uses (512 px), plus the same 5%-of-frame scaling, applied
+/// to the one population the identification assumption is actually about.
+/// Below it there is no identified population to score and the metric
+/// reports infinite (fall back).
+const NEUTRAL_SHARED_MIN: usize = 512;
 /// Cast-curve acceptance: the fitted per-channel curves must cut the hue-aware
 /// look error to ≤ this fraction of the without-curves error, else they are
 /// rejected as a content mismatch masquerading as a cast (see the stage-4
@@ -166,6 +194,26 @@ const ROT_DEG: f32 = 75.0;
 /// Frame share of re-hued pixels that constitutes a REGION (same region-vs-
 /// speckle logic as [`VETO_CREATED_SHARE`]; the live wrecks measure 12.5%).
 const ROT_SHARE: f32 = 0.05;
+/// A rotation only counts as a re-hue when it is VISIBLE on at least one
+/// end: before-chroma ≥ this (a tinted pixel moved) or after-chroma ≥
+/// [`ROT_VISIBLE_AFTER`] (a faint pixel painted vivid — the H17 class). A
+/// cast INVERSION passing through neutral flips the hue of a sub-visible
+/// tint into another sub-visible tint — measured on the haze pair after the
+/// R17 tone-evidence fallback strengthened its correction: 4.5% of the
+/// frame, before-chroma < 0.05 to the last pixel, after-chroma ≤ 0.082 —
+/// an invisible "rotation" on both ends that ate the veto's whole margin
+/// while wrecking nothing. The real wrecks stay above the exemption on the
+/// end that matters: H17 paints 0.34 after-chroma from a 0.035 tint; the
+/// canyon rotations start from ≥ 0.05 before-chroma.
+const ROT_VISIBLE_BEFORE: f32 = 0.05;
+/// See [`ROT_VISIBLE_BEFORE`]: the after-side visibility floor — just above
+/// the measured pass-through band (≤ 0.082), 3.8× under H17's 0.34, and
+/// deliberately NOT higher: every step up widens the census's new blind
+/// band. Residual, disclosed: rotations inside `cc ∈ [0.03, 0.05) × wc ∈
+/// [0.04, 0.09)` — a faint tint re-hued into another faint tint — are now
+/// exempt with no fixture patrolling the band; if a real pair ever wrecks
+/// a region at those chroma levels, this pair of floors is the suspect.
+const ROT_VISIBLE_AFTER: f32 = 0.09;
 /// The BEFORE side of the rotation census needs only a MEASURABLE hue, not a
 /// visible tint: requiring [`VETO_TINT_CHROMA`] on both sides let the curves
 /// rotate a region whose chroma sat just UNDER that gate (a barely-blue sky
@@ -590,11 +638,15 @@ pub(crate) fn fit_tone_sliders(tone_map: &impl Fn(f32) -> f32) -> (f32, [f32; 5]
     // slider vector that would flatten a tonal band, and the engine applies it
     // at render time — but applying it to the PROPOSAL as well perturbs this
     // least-squares solve, and the acceptance test downstream is a knife edge:
-    // on the hazy-to-clean fixture the solve is only 3 % better than neutral
+    // on the hazy-to-clean fixture as it stood pre-R17 (gated evidence,
+    // sparse residual knots) the solve was only 3 % better than neutral
     // (0.08625 against 0.08918), so a 0.34 % nudge to the sliders pushed it
     // over `err_before`, tripped the saturation do-no-harm loop, and ended at
-    // 0.1286 — far worse than doing nothing. The fit does not need to predict
-    // the limiter anyway: it scores candidates by RENDERING them
+    // 0.1286 — far worse than doing nothing. (R17's evidence fallback moved
+    // that fixture to 0.0892 → 0.0229; the numbers above are kept as the
+    // historical record of WHY the asymmetry exists — the knife-edge
+    // geometry, not the exact figures, is the reason.) The fit does not need
+    // to predict the limiter anyway: it scores candidates by RENDERING them
     // (`develop_preview` below), so it already measures whatever the engine
     // actually does.
     (best.0, best.1)
@@ -642,11 +694,33 @@ fn solve5(mut a: [[f64; 5]; 5], mut b: [f64; 5]) -> [f64; 5] {
 fn residual_tone_curve(recipe: &EditRecipe, tone_map: &impl Fn(f32) -> f32) -> Vec<CurvePoint> {
     debug_assert!(recipe.tone_curve.is_empty(), "fit the residual before setting a curve");
     let lut = render::build_tone_lut(recipe);
-    const XS: [f32; 9] = [0.0, 0.10, 0.25, 0.40, 0.50, 0.66, 0.82, 0.92, 1.0];
+    // Knot placement (R17): uniform in the LUT's OUTPUT domain, inverted
+    // back through the LUT — the curve's input axis IS the engine's output
+    // (`sx` below), so sampling uniform in raw x inherits the base curve's
+    // compression. On the real camera base the old fixed 9 xs left a single
+    // 38-u8 input gap right across the band holding the frame's tonal mass,
+    // and the curve's PIECEWISE-LINEAR rendering (`render::curve_lut` →
+    // `interp` — not the monotone cubic the knot spline uses) chords
+    // ~10/255 below the concave desired map inside it (measured, _DSC9608
+    // × reimagine). 13 output levels bound the inter-knot input gap to
+    // ~21 u8 wherever the LUT moves; where it is flat the levels collapse
+    // onto one x and the `prev_in` dedup keeps the point list minimal —
+    // which also means a flat plateau's interior is no longer sampled by
+    // `max_dev` (the old fixed xs could land mid-plateau): deliberate, a
+    // many-to-one plateau is beyond any input-side curve's reach anyway.
+    // Cost side, disclosed: 21-u8 spacing doubles the density of u8-rounded
+    // control points, ~±0.5/255 of quantisation ripple against the ~10/255
+    // of chord sag removed.
+    const LEVELS: usize = 13;
+    let xs = (0..LEVELS).map(|i| {
+        let o = i as f32 / (LEVELS - 1) as f32;
+        let idx = lut.partition_point(|&v| v < o).min(lut.len() - 1);
+        idx as f32 / (lut.len() - 1) as f32
+    });
     let mut max_dev = 0.0f32;
-    let mut pts: Vec<CurvePoint> = Vec::with_capacity(XS.len());
+    let mut pts: Vec<CurvePoint> = Vec::with_capacity(LEVELS);
     let (mut prev_in, mut prev_out) = (-1i32, 0i32);
-    for &x in &XS {
+    for x in xs {
         let sx = render::sample_lut(&lut, x); // engine output before the residual curve
         let y = tone_map(x).clamp(0.0, 1.0); // desired output
         max_dev = max_dev.max((y - sx).abs());
@@ -813,11 +887,14 @@ fn cast_paints_foreign_hues(cur: &[[f32; 3]], with_px: &[[f32; 3]], tp: &[[f32; 
 
 /// Frame share of RE-HUED pixels: a MEASURABLE hue before (chroma ≥
 /// [`ROT_HUE_MEASURABLE_CHROMA`]), a visible tint after (chroma ≥
-/// [`VETO_TINT_CHROMA`]), landing ≥ [`ROT_DEG`] of circular hue away.
-/// Pixel-aligned: `cur`/`with_px` render the SAME source, so per-pixel hue
-/// movement is exact. De-tinting (end chroma under the gate) is exempt —
-/// removing colour is what a corrective cast does. Exposed separately from
-/// the boolean gate so the pin test measures the same census the gate uses.
+/// [`VETO_TINT_CHROMA`]), landing ≥ [`ROT_DEG`] of circular hue away — and
+/// VISIBLE on at least one end (see [`ROT_VISIBLE_BEFORE`]): a sub-visible
+/// tint flipped into another sub-visible tint is cast-inversion
+/// pass-through, not a re-hue. Pixel-aligned: `cur`/`with_px` render the
+/// SAME source, so per-pixel hue movement is exact. De-tinting (end chroma
+/// under the gate) is exempt — removing colour is what a corrective cast
+/// does. Exposed separately from the boolean gate so the pin test measures
+/// the same census the gate uses.
 fn rehued_share(cur: &[[f32; 3]], with_px: &[[f32; 3]]) -> f32 {
     let mut cnt = 0usize;
     for (c, w) in cur.iter().zip(with_px) {
@@ -825,6 +902,9 @@ fn rehued_share(cur: &[[f32; 3]], with_px: &[[f32; 3]]) -> f32 {
         let wc = w[0].max(w[1]).max(w[2]) - w[0].min(w[1]).min(w[2]);
         if cc < ROT_HUE_MEASURABLE_CHROMA || wc < VETO_TINT_CHROMA {
             continue;
+        }
+        if cc < ROT_VISIBLE_BEFORE && wc < ROT_VISIBLE_AFTER {
+            continue; // invisible on both ends: pass-through, not a re-hue
         }
         let h0 = render::rgb_to_hsl(c[0], c[1], c[2]).0 * 360.0;
         let h1 = render::rgb_to_hsl(w[0], w[1], w[2]).0 * 360.0;
@@ -881,7 +961,8 @@ fn luma_cdf(px: &[[f32; 3]]) -> Vec<f32> {
     cdf_from_values(px.iter().map(luma601), px.len())
 }
 
-/// Near-neutral gate shared by the tone and cast evidence. Gated on HSV
+/// Near-neutral gate for the TONE evidence (the cast catch-all fits on
+/// ungated per-channel CDFs — see `residual_channel_curve`). Gated on HSV
 /// saturation ((max−min)/max), which is INVARIANT under pure luminance
 /// scaling — so the same pixels qualify in the source and in its tone-mapped
 /// target (an absolute-chroma gate is not: dark colours slip under it in the
@@ -896,31 +977,127 @@ fn is_neutralish(p: &[f32; 3]) -> bool {
 /// Tone-evidence CDF pair. Near-neutral gating only carries clean evidence
 /// when the SAME population is neutral on BOTH sides — the tone map is
 /// quantile-to-quantile, so the gate is an identification assumption about
-/// pixel correspondence, not a per-image preference. Two observed breakages:
-/// a side's neutral sample is too small (< 5% or < 512 px — noise), or the
-/// neutral SHARES diverge, meaning the target re-hued (or de-hued) part of
-/// the population — golden-sky pair, 2026-07-09: the source's pale sky is
-/// neutralish ((max−min)/max ≈ 0.12), the target's vivid gold one is not
-/// (≈ 0.37), and an asymmetric gate mapped the sky's luma cluster across a
-/// ramp it doesn't belong to, distorting the whole tone solve. Either way
-/// the assumption is dead: fall back to full-pixel CDFs on BOTH sides
-/// (deciding per side, as the original code did, can even compare a
-/// neutral-gated CDF against a full one). 1.75× keeps the matched-population
-/// regressions (identity / roundtrip / violet canyon ≈ 1.0×) while catching
-/// the golden-sky asymmetry (2.0×).
+/// pixel correspondence, not a per-image preference. Three observed
+/// breakages: a side's neutral sample is too small (< 5% or < 512 px —
+/// noise); the neutral SHARES diverge, meaning the target re-hued (or
+/// de-hued) part of the population — golden-sky pair, 2026-07-09: the
+/// source's pale sky is neutralish ((max−min)/max ≈ 0.12), the target's
+/// vivid gold one is not (≈ 0.37), and an asymmetric gate mapped the sky's
+/// luma cluster across a ramp it doesn't belong to, distorting the whole
+/// tone solve; or the shares stay COMPARABLE while a luma-CONCENTRATED band
+/// churns out of one side's class — _DSC9608 × reimagine, 2026-08-12: the
+/// target re-hued 24% of the base's neutral class (the pale sky, base-luma
+/// q50 ≈ 197/255, → vivid blue), the share ratio read a passing 1.29×, and
+/// the base's bright grey ranks paired against target ranks the sky no
+/// longer belongs to — every upper-mid darkened and the render shipped
+/// murky. Shares are a SIZE proxy, blind to composition (and the haze pair
+/// proves one-sided CDF-shift proxies rank harm no better), so the gate is
+/// judged by the harm itself: [`neutral_gate_misprediction`] scores the
+/// gated evidence map against the shared class's own observable pairing.
+/// Either way the assumption is dead: fall back to full-pixel CDFs on BOTH
+/// sides (deciding per side, as the original code did, can even compare a
+/// neutral-gated CDF against a full one). 1.75× keeps the
+/// matched-population regressions (identity / roundtrip / violet canyon
+/// ≈ 1.0×) while catching the golden-sky asymmetry (2.0×); the
+/// misprediction ceiling is anchored in [`NEUTRAL_MISPREDICTION_MAX`]'s
+/// doc. Gate order: cheap counts and shares first, the misprediction pass
+/// (a full-frame scan plus four CDFs) last, so under-evidenced pairs never
+/// pay for it.
 fn tone_cdf_pair(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> (Vec<f32>, Vec<f32>) {
     let s_n: Vec<f32> = sp.iter().filter(|p| is_neutralish(p)).map(luma601).collect();
     let t_n: Vec<f32> = tp.iter().filter(|p| is_neutralish(p)).map(luma601).collect();
-    let enough = |n: usize, total: usize| -> bool { n >= (total / 20).max(512) };
     let share_s = s_n.len() as f32 / sp.len().max(1) as f32;
     let share_t = t_n.len() as f32 / tp.len().max(1) as f32;
-    let comparable = share_s.max(share_t) <= 1.75 * share_s.min(share_t);
-    if enough(s_n.len(), sp.len()) && enough(t_n.len(), tp.len()) && comparable {
+    let gated = enough_evidence(s_n.len(), sp.len())
+        && enough_evidence(t_n.len(), tp.len())
+        && share_s.max(share_t) <= 1.75 * share_s.min(share_t)
+        && neutral_gate_misprediction(sp, tp) <= NEUTRAL_MISPREDICTION_MAX;
+    if gated {
         let (ns, nt) = (s_n.len(), t_n.len());
         (cdf_from_values(s_n.into_iter(), ns), cdf_from_values(t_n.into_iter(), nt))
     } else {
         (luma_cdf(sp), luma_cdf(tp))
     }
+}
+
+/// The tone-evidence sample floor: at least 5% of the frame and never fewer
+/// than 512 px. Shared between the per-side gate and the shared-class floor
+/// inside [`neutral_gate_misprediction`], so "enough to trust" means one
+/// thing.
+fn enough_evidence(n: usize, total: usize) -> bool {
+    n >= (total / 20).max(NEUTRAL_SHARED_MIN)
+}
+
+/// How badly the gated tone evidence MISPREDICTS the population it claims
+/// to identify. The SHARED class — pixels neutral at the same position on
+/// both sides — is the one population whose (source-luma, target-luma)
+/// pairing is observable without any modelling: under a monotone tone map,
+/// its own quantiles ARE the map. So build the production evidence map
+/// exactly as the tone solve would (each side's whole neutral class,
+/// quantile-paired) and score it against the shared class's empirical map:
+/// mean |Δ| over the 21 look_err quantiles. Asymmetric members that merely
+/// inflate a class along the shared luma ramp leave the pairing intact
+/// (the synthetic uniform-inflation fixture reads < 0.0075); members that
+/// churn in a luma-concentrated band bend the ranks and the misprediction
+/// shows it directly — this is the murk, measured at its source.
+///
+/// POSITIONAL-CORRESPONDENCE ASSUMPTION, stated plainly because the rest of
+/// this module deliberately avoids one (a generative target is not
+/// pixel-aligned): co-membership at equal row-major index is read as "same
+/// coarse region", which holds for same-frame pairs on the shared 384-edge
+/// thumbnail grid and degrades with misregistration. The failure direction
+/// is OPEN: under broken alignment target-membership decorrelates from
+/// source-membership, the shared class becomes an unbiased thinning of both
+/// sides, and the metric slides toward 0 — the gate is KEPT, not dropped,
+/// and this detector goes vacuous (its sensitivity is proportional to
+/// registration quality; the older share/size gates still stand in front
+/// of it). Grids that disagree by more than aspect rounding (~a row) are
+/// not comparable at all — that case returns infinite (fall back) as an
+/// explicit decision rather than an emergent prefix artifact, and so does
+/// a shared class too small to clear the same evidence floor the sides
+/// must clear.
+fn neutral_gate_misprediction(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> f32 {
+    let n = sp.len().min(tp.len());
+    // 2% ≈ several rows of a 384-edge thumb: beyond aspect rounding, the
+    // pairs come from different geometry and co-membership is meaningless.
+    if sp.len().abs_diff(tp.len()) > n / 50 {
+        return f32::INFINITY;
+    }
+    let (mut s_all, mut t_all) = (Vec::with_capacity(n / 2), Vec::with_capacity(n / 2));
+    let (mut sh_s, mut sh_t) = (Vec::with_capacity(n / 2), Vec::with_capacity(n / 2));
+    for i in 0..n {
+        let (a, b) = (is_neutralish(&sp[i]), is_neutralish(&tp[i]));
+        if a {
+            s_all.push(luma601(&sp[i]));
+        }
+        if b {
+            t_all.push(luma601(&tp[i]));
+        }
+        if a && b {
+            sh_s.push(luma601(&sp[i]));
+            sh_t.push(luma601(&tp[i]));
+        }
+    }
+    if !enough_evidence(sh_s.len(), n) {
+        return f32::INFINITY;
+    }
+    let (ns, nt, nsh) = (s_all.len(), t_all.len(), sh_s.len());
+    let s_cdf = cdf_from_values(s_all.into_iter(), ns);
+    let t_cdf = cdf_from_values(t_all.into_iter(), nt);
+    let sh_s_cdf = cdf_from_values(sh_s.into_iter(), nsh);
+    let sh_t_cdf = cdf_from_values(sh_t.into_iter(), nsh);
+    let mut acc = 0.0f32;
+    let mut cnt = 0.0f32;
+    for i in 0..=20 {
+        let p = (i as f32 / 20.0).clamp(P_CLIP, 1.0 - P_CLIP);
+        let x = quantile(&sh_s_cdf, p);
+        // The same formula the tone solve uses for its map (see `tone_map`).
+        let predicted = quantile(&t_cdf, cdf_at(&s_cdf, x).clamp(P_CLIP, 1.0 - P_CLIP));
+        let actual = quantile(&sh_t_cdf, p);
+        acc += (predicted - actual).abs();
+        cnt += 1.0;
+    }
+    acc / cnt
 }
 
 fn channel_cdf(px: &[[f32; 3]], ch: usize) -> Vec<f32> {
@@ -1319,6 +1496,187 @@ mod tests {
             }
         }
         DynamicImage::ImageRgb8(img)
+    }
+
+    /// R17: the _DSC9608 × reimagine murk, distilled — the target re-hues a
+    /// luma-CONCENTRATED bright band out of the source's neutral class. The
+    /// share ratio stays under 1.75× (the old gate passed and the murky fit
+    /// shipped), but the leavers bend the source evidence CDF far past the
+    /// contamination ceiling; the solve must fall back to full-pixel CDFs.
+    #[test]
+    fn a_rehued_bright_grey_band_falls_back_to_full_cdfs() {
+        let n = 64 * 64;
+        let mut sp: Vec<[f32; 3]> = Vec::with_capacity(n);
+        let mut tp: Vec<[f32; 3]> = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f32 / n as f32;
+            if t < 0.4 {
+                let l = 0.30 + 0.5 * t; // mid grey, neutral on BOTH sides
+                sp.push([l, l, l]);
+                tp.push([l, l, l]);
+            } else if t < 0.6 {
+                let l = 0.75 + 0.5 * (t - 0.4); // bright grey → re-hued vivid blue
+                sp.push([l, l, l]);
+                tp.push([0.3 * l, 0.5 * l, l]);
+            } else {
+                let l = 0.2 + 0.5 * t; // chromatic on both sides
+                sp.push([l, 0.6 * l, 0.3 * l]);
+                tp.push([l, 0.6 * l, 0.3 * l]);
+            }
+        }
+        // Premise: this is the case the SHARE gate cannot see (0.6 vs 0.4 =
+        // 1.5×, under 1.75×) — only the contamination measure convicts it.
+        let s_share = sp.iter().filter(|p| is_neutralish(p)).count() as f32 / n as f32;
+        let t_share = tp.iter().filter(|p| is_neutralish(p)).count() as f32 / n as f32;
+        assert!(
+            s_share.max(t_share) <= 1.75 * s_share.min(t_share),
+            "premise broken: the share gate would already catch this ({s_share} vs {t_share})"
+        );
+        let c = neutral_gate_misprediction(&sp, &tp);
+        assert!(
+            c > 2.0 * NEUTRAL_MISPREDICTION_MAX,
+            "the concentrated band must contaminate with margin: {c}"
+        );
+        let (s_cdf, t_cdf) = tone_cdf_pair(&sp, &tp);
+        assert_eq!(s_cdf, luma_cdf(&sp), "source side must fall back to the full CDF");
+        assert_eq!(t_cdf, luma_cdf(&tp), "target side must fall back to the full CDF");
+    }
+
+    /// R17 counterpart #1: benign one-sided inflation keeps the gate. The
+    /// source's extra neutrals (a uniform desaturation — the haze-pair
+    /// geometry) span the same luma ramp as the shared class, so the
+    /// evidence CDF barely moves even though a sixth of the frame is
+    /// neutral on the source side only.
+    #[test]
+    fn a_uniformly_inflated_neutral_class_keeps_the_gate() {
+        let n = 64 * 64;
+        let mut sp: Vec<[f32; 3]> = Vec::with_capacity(n);
+        let mut tp: Vec<[f32; 3]> = Vec::with_capacity(n);
+        for i in 0..n {
+            let l = 0.2 + 0.6 * (i as f32 / n as f32);
+            match i % 6 {
+                0 => {
+                    sp.push([l, l, l]); // neutral in the source only…
+                    tp.push([l, 0.8 * l, 0.6 * l]); // …chromatic in the target
+                }
+                1..=3 => {
+                    sp.push([l, l, l]); // the shared class
+                    tp.push([l, l, l]);
+                }
+                _ => {
+                    sp.push([l, 0.6 * l, 0.3 * l]); // chromatic on both sides
+                    tp.push([l, 0.6 * l, 0.3 * l]);
+                }
+            }
+        }
+        let c = neutral_gate_misprediction(&sp, &tp);
+        assert!(
+            c < 0.5 * NEUTRAL_MISPREDICTION_MAX,
+            "uniform inflation must stay clear of the ceiling: {c}"
+        );
+        let (s_cdf, _) = tone_cdf_pair(&sp, &tp);
+        assert_ne!(s_cdf, luma_cdf(&sp), "the benign pair must stay neutral-gated");
+    }
+
+    /// R17 anchor on the LIVE haze pair: its neutral identification is
+    /// genuinely broken — the haze recipe's blue cast tints the clean
+    /// frame's dark greys OUT of the source-side class while the global
+    /// desaturation pulls colours IN, and the gated evidence map misses the
+    /// shared class by 0.13 mean luma (measured; worst at the dark ranks).
+    /// The misprediction gate must fall back to full-pixel CDFs — and the
+    /// fit, now solving on honest evidence, must land far below its
+    /// starting error (0.0892 -> 0.0229 measured; the GATED solve under the
+    /// R17 dense residual knots collapses to a do-no-harm reset, because
+    /// faithful sampling faithfully implements a broken map).
+    #[test]
+    fn the_haze_pairs_broken_identification_falls_back_and_still_fits() {
+        let clean = synth();
+        let mut haze = EditRecipe {
+            exposure_ev: -0.3,
+            contrast: -45.0,
+            blacks: 40.0,
+            saturation: -40.0,
+            blue_curve: vec![
+                CurvePoint { input: 0, output: 25 },
+                CurvePoint { input: 128, output: 132 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            ..Default::default()
+        };
+        haze.clamp();
+        let base = render::develop_preview(&clean, &haze);
+        let sp = pixels_of(&base.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+        let tp = pixels_of(&clean.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+        let m = neutral_gate_misprediction(&sp, &tp);
+        assert!(
+            m > NEUTRAL_MISPREDICTION_MAX,
+            "premise broken: the haze pair's neutral evidence reads clean ({m:.4})"
+        );
+        let rep = fit_recipe(&base, &clean);
+        // Measured 0.0892 -> 0.0229 (0.26×); 0.35× keeps real margin without
+        // letting the win quietly rot.
+        assert!(
+            rep.err_after < 0.35 * rep.err_before,
+            "the fallback solve must still close most of the gap ({:.4} -> {:.4})",
+            rep.err_before,
+            rep.err_after
+        );
+    }
+
+    /// R17 counterpart #2: matched populations read ZERO contamination. The
+    /// canyon pair's neutral members (ramp + pale sky) are IDENTICAL on
+    /// both sides, and the returned CDFs stay neutral-gated (≠ the
+    /// full-pixel CDFs, which include the rocks).
+    #[test]
+    fn matched_neutral_members_keep_the_gate() {
+        let sp = pixels_of(&canyon(false).thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+        let tp = pixels_of(&canyon(true).thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+        let c = neutral_gate_misprediction(&sp, &tp);
+        assert!(
+            c < 0.5 * NEUTRAL_MISPREDICTION_MAX,
+            "premise broken: the canyon pair's neutral members diverged ({c})"
+        );
+        let (s_cdf, _) = tone_cdf_pair(&sp, &tp);
+        assert_ne!(s_cdf, luma_cdf(&sp), "the canyon pair must stay neutral-gated");
+    }
+
+    /// R17: residual-curve knots follow the LUT's OUTPUT spacing. On a steep
+    /// camera base the old fixed-x placement left a 38-u8 input gap right
+    /// across the band holding a real frame's tonal mass, and the curve's
+    /// piecewise-linear rendering chorded ~10/255 below the promised map
+    /// inside it. The base curve here is the _DSC9608 camera calibration
+    /// verbatim.
+    #[test]
+    fn residual_knots_stay_dense_in_the_curve_input_space() {
+        let recipe = EditRecipe {
+            base_curve: vec![
+                [0.0, 0.0],
+                [0.22091886, 0.25904202],
+                [0.23851417, 0.29325512],
+                [0.25317693, 0.32551318],
+                [0.28152493, 0.38514173],
+                [0.34115347, 0.49266863],
+                [0.39687195, 0.6060606],
+                [0.42033234, 0.6539589],
+                [0.4848485, 0.74486804],
+                [0.51808405, 0.77614856],
+                [0.5474096, 0.8005865],
+                [0.60117304, 0.8445748],
+                [1.0, 1.0],
+            ],
+            ..EditRecipe::default()
+        };
+        let curve = residual_tone_curve(&recipe, &|x: f32| (0.9 * x + 0.02).clamp(0.0, 1.0));
+        assert!(curve.len() >= 8, "a nontrivial map earns a dense curve: {} pts", curve.len());
+        for w in curve.windows(2) {
+            let gap = w[1].input as i32 - w[0].input as i32;
+            assert!(
+                gap <= 32,
+                "knot gap {gap} u8 between inputs {} and {} — interpolation sag territory",
+                w[0].input,
+                w[1].input
+            );
+        }
     }
 
     /// The veto's discriminator, pinned on both live cases: it must NOT fire
