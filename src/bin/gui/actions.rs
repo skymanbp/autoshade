@@ -18,6 +18,7 @@ impl AutoshopApp {
             app.last_export_dir = prefs.last_export_dir.clone();
             app.save_denoise = prefs.save_denoise;
             app.zoned_fit = prefs.zoned_fit;
+            app.fit_ai_judge = prefs.fit_ai_judge;
             app.view_mode = prefs.view_mode;
             app.exp_long_edge = prefs.exp_long_edge;
             app.exp_sharpen = prefs.exp_sharpen.clamp(0.0, 100.0);
@@ -2053,6 +2054,10 @@ impl AutoshopApp {
                     guidance.as_deref(),
                     base.as_ref(),
                     style,
+                    // Interactive single-photo analyze: the visual closed
+                    // loop IS the R20 strengthening (cost disclosed in the
+                    // button's hover text; batch surfaces pass false).
+                    true,
                 );
                 Msg::Analyzed(epoch, Box::new(res))
             },
@@ -2078,13 +2083,20 @@ impl AutoshopApp {
         }
         let src_path = self.src_path.clone();
         let zoned = self.zoned_fit;
+        let ai_judge = self.fit_ai_judge;
         let lang = self.lang;
         self.busy = true;
-        self.status = if zoned {
-            tr(lang, "Reverse-fitting… (statistical fit + sky segmentation; first run downloads the model)").into()
+        let mut running = if zoned {
+            tr(lang, "Reverse-fitting… (statistical fit + sky segmentation; first run downloads the model)").to_string()
         } else {
-            tr(lang, "Reverse-fitting… (statistical fit, local compute)").into()
+            tr(lang, "Reverse-fitting… (statistical fit, local compute)").to_string()
         };
+        if ai_judge {
+            // The review runs AFTER the local fit and is a network call — the
+            // busy line must own that extra wait up front.
+            running.push_str(tr(lang, " · then AI review (vision call)"));
+        }
+        self.status = running;
         self.spawn_worker(
             move || {
                 let res = (|| -> anyhow::Result<FitOutcome> {
@@ -2239,6 +2251,55 @@ impl AutoshopApp {
                         );
                         if let Err(e) = persist {
                             status.push(FitNote::NotPersistedLock(e.to_string()));
+                        }
+                    }
+                    // R20 opt-in AI review (LLM-as-a-judge): the vision model
+                    // scores how faithfully the fitted render matches the
+                    // target look. AFTER the persist on purpose — the review
+                    // is informational and must never gate, delay or fail the
+                    // fit's landing; every failure degrades to a status note.
+                    // Domain: rep.recipe renders from the source NEUTRAL
+                    // (source_preview — the room the composed fit solved in),
+                    // so that render vs the target is exactly the pair the
+                    // fit's own residual measures.
+                    if ai_judge {
+                        // detail:high tiles at 512 px — a 1024 edge gives the
+                        // judge 4 tiles per frame, enough to read a grade.
+                        const JUDGE_EDGE: u32 = 1024;
+                        let cfg = autoshop::config::Config::load();
+                        let enc = |img: &image::DynamicImage| -> anyhow::Result<Vec<u8>> {
+                            let mut j = Vec::new();
+                            img.write_to(
+                                &mut std::io::Cursor::new(&mut j),
+                                image::ImageFormat::Jpeg,
+                            )?;
+                            Ok(j)
+                        };
+                        let fitted = autoshop::render::develop_preview(
+                            &base.thumbnail(JUDGE_EDGE, JUDGE_EDGE),
+                            &rep.recipe,
+                        );
+                        let pair = enc(&target.thumbnail(JUDGE_EDGE, JUDGE_EDGE))
+                            .and_then(|t| Ok((t, enc(&fitted)?)));
+                        match pair {
+                            Ok((t_jpeg, f_jpeg)) => match autoshop::advisor::judge_pair(
+                                &cfg,
+                                autoshop::advisor::JudgeImages {
+                                    reference: &t_jpeg,
+                                    candidate: &f_jpeg,
+                                },
+                                autoshop::advisor::JudgeTask::FitMatch,
+                                None,
+                            ) {
+                                Ok(j) => status.push(FitNote::AiReview {
+                                    score: j.score,
+                                    critique: j.critique,
+                                }),
+                                Err(e) => {
+                                    status.push(FitNote::AiReviewFailed(e.to_string()));
+                                }
+                            },
+                            Err(e) => status.push(FitNote::AiReviewFailed(e.to_string())),
                         }
                     }
                     Ok(FitOutcome {

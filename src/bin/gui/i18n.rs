@@ -194,6 +194,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("📝 Extract style prompt", "📝 提取风格提示词"),
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and saves ./out/<stem>.style.txt.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入 Reimagine 提示词（可直接给别的照片重绘用）并存 ./out/<stem>.style.txt。"),
+    ("AI review", "AI 打分"),
+    ("After the fit, show the target and the fitted render to the vision model and have it SCORE the match (0-100) with a short critique — LLM as a judge. One paid vision call per fit (needs the image API key); the fit itself stays local and free. The score lands in the status line below. No cancel: like the fit itself, the app stays busy until the review returns.",
+        "反推后把 目标图/拟合渲染 交给 vision 模型打分：0-100 匹配度 + 说明（LLM as a judge）。每次反推一次 vision API 费（需图像 API 密钥）；反推本身仍为本地免费。得分显示在下方状态行。无法取消：与反推本身一样，打分返回前 app 保持忙碌。"),
     ("After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP (the full-resolution way).",
         "生成后可「反推配方」把观感变成滑杆+XMP（全分辨率的正道）。"),
     ("Paint mask", "涂抹蒙版"),
@@ -704,6 +707,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "反推完成：look 残差 {before}→{after} · 已建「反推」变体（可编辑/导 XMP/出全分辨率）"),
     (" · includes sky-zone correction (adjustable in the mask panel; XMP carries the global part only)",
         " · 含天空分区校正（蒙版面板可调；XMP 只带全局部分）"),
+    (" · then AI review (vision call)", " · 拟合后 AI 打分（vision 调用）"),
+    (" · AI review: match {score}/100 — {critique}",
+        " · AI 打分：匹配 {score}/100——{critique}"),
+    (" · AI review unavailable ({err}) — the fit itself already landed",
+        " · AI 打分不可用（{err}）——反推本身已完成"),
     ("Reverse-fit failed", "反推失败"),
     ("Style prompt extracted → filled into the Reimagine prompt (also saved ./out/<stem>.style.txt)",
         "风格提示词已提取 → 已填入 Reimagine 提示词（同时存 ./out/<stem>.style.txt）"),
@@ -802,8 +810,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── UX batch (toolbar slim-down · AI section · Export section · tools) ──
     ("AI", "AI"),
     ("AI Analyze", "AI 分析"),
-    ("AI proposes a recipe from scratch (GPT proposal + validation), written into the sliders — undoable. Uses the Direction above; Style steers it.",
-        "AI 从零提案配方（GPT 提案+验证），直接写入滑杆——可撤销。读上方「方向」文本；风格滑杆一同生效。"),
+    ("AI proposes a recipe from scratch (GPT proposal + validation + a visual review: the result is RENDERED and judged by the vision model, which may buy one guided revision — extra vision cost per run), written into the sliders — undoable. Uses the Direction above; Style steers it.",
+        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订——每次多一点 vision 费），直接写入滑杆——可撤销。读上方「方向」文本；风格滑杆一同生效。"),
     ("Direction", "方向"),
     ("Free-text direction for AI Analyze — e.g. warmer and moodier",
         "给 AI 分析的自由文字方向——如「更暖、更有氛围」"),
@@ -1045,6 +1053,24 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [verification of revision round {round} failed ({e}) — keeping the previous \
       verified proposal]",
         " [第 {round} 轮修订的验证失败（{e}）——保留上一轮已验证的提案]"),
+    // ── R20 visual judge closed loop (pipeline.rs) ───────────────────────────
+    (" [AI visual review: {score}/100 — {critique}]",
+        " [AI 视觉复查：{score}/100——{critique}]"),
+    (" [AI visual review: {score1}/100 first; a guided revision re-scored \
+      {score2}/100 and was adopted — {critique}]",
+        " [AI 视觉复查：首次 {score1}/100；按其提示修订后复查 {score2}/100，已采用——{critique}]"),
+    (" [AI visual review: {score1}/100 — {critique}; the guided revision \
+      re-scored lower ({score2}/100) and was discarded (do-no-harm)]",
+        " [AI 视觉复查：{score1}/100——{critique}；提示修订后得分更低（{score2}/100），已弃用（do-no-harm）]"),
+    (" [AI visual review: {score}/100 — {critique}; the guided revision \
+      round failed ({e}) — keeping the reviewed develop]",
+        " [AI 视觉复查：{score}/100——{critique}；提示修订轮失败（{e}）——保留已复查的提案]"),
+    (" [AI visual review: {score}/100 — {critique}; the guided revision \
+      could not be re-judged ({e}) and was discarded (do-no-harm)]",
+        " [AI 视觉复查：{score}/100——{critique}；修订结果无法复查（{e}），已弃用（do-no-harm）]"),
+    (" [AI visual review unavailable ({e}) — the develop was not visually \
+      checked]",
+        " [AI 视觉复查不可用（{e}）——本次显影未经视觉检查]"),
     (" [style distillation then pulled the global sliders toward this user's past \
       edits (effective strength {pct}%) — final values can differ from the \
       derivation above]",

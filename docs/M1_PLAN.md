@@ -47,7 +47,7 @@ Rationale:
 
 ## 2. Unified `Advisor` trait — final Rust signature + module layout
 
-The trait must match the architecture's two roles ([docs/ARCHITECTURE.md:54-72](../docs/ARCHITECTURE.md)): **GPT vision → `propose`**, **Claude data-only → `verify`**. I align the method names with the ARCHITECTURE.md sketch (`propose`/`verify`) rather than Report 3's `image_to_recipe`/`verify` names, because the doc is the project contract.
+The trait must match the architecture's two roles ([docs/ARCHITECTURE.md:54-72](../docs/ARCHITECTURE.md)): **GPT vision → `propose`**, **Claude data-only → `verify`**. I align the method names with the ARCHITECTURE.md sketch (`propose`/`verify`) rather than Report 3's `image_to_recipe`/`verify` names, because the doc is the project contract. *(Correction, v0.26.2: the shipped framework later grew a third, trait-external role — the R20 visual judge, `advisor::judge` — see ARCHITECTURE §3; the two-role trait itself is unchanged.)*
 
 **Async on tokio, `#[async_trait]` for `dyn` object-safety** [verified: reqwest async runs on tokio; async fn in traits is stable since Rust 1.75 but **not dyn-compatible** — `async_trait` desugars to `Pin<Box<dyn Future>>` to restore object safety, https://blog.rust-lang.org/2023/12/28/Rust-1.75.0/ + https://docs.rs/async-trait/]. Claude side shells out via `tokio::process::Command` [verified: docs.rs tokio process].
 

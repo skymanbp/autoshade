@@ -46,6 +46,9 @@ enum Command {
     },
     /// Decode a RAW, ask the AI advisor to propose an edit, have Claude verify
     /// it, and write the recipe JSON + a Lightroom .xmp sidecar (no render).
+    /// R20: also runs the visual closed loop — the proposal is RENDERED and
+    /// judged by the vision model, which may buy ONE guided revision (extra
+    /// vision cost per run; batch/eval skip this).
     Analyze {
         /// Path to the RAW file.
         raw: PathBuf,
@@ -187,6 +190,12 @@ enum Command {
         /// model (./out/<stem>.style.txt; needs OPENAI_API_KEY).
         #[arg(long)]
         style_prompt: bool,
+        /// R20: after the fit, have the vision model SCORE how faithfully the
+        /// fitted render matches the target look (0-100 + critique — LLM as a
+        /// judge). One paid vision call; needs OPENAI_API_KEY. Informational:
+        /// a review failure never fails the fit.
+        #[arg(long)]
+        ai_judge: bool,
         /// Named recipe JSON artifact for `apply` (default:
         /// ./out/<stem>.matched.json). The canonical recipe.json in this
         /// photo's develop store — what the GUI and web restore — is ALWAYS
@@ -280,8 +289,8 @@ fn main() -> Result<()> {
             require_image_key(&cfg, "reimagine")?;
             generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, &out)
         }
-        Command::Match { raw, target, render, zoned, style_prompt, out } => {
-            match_cmd(&raw, &target, render, zoned, style_prompt, out)
+        Command::Match { raw, target, render, zoned, style_prompt, ai_judge, out } => {
+            match_cmd(&raw, &target, render, zoned, style_prompt, ai_judge, out)
         }
         Command::Retouch { raw, mask, prompt, quality, full_res, out } => {
             let cfg = Config::load();
@@ -450,9 +459,12 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
         pipeline::preflight_out(o, raw)?;
     }
     // CLI analyze always proposes from the original (base = None); the refine /
-    // "adjust current edit" path is a web-UI affordance.
+    // "adjust current edit" path is a web-UI affordance. judge = true: an
+    // explicitly invoked single-photo analyze gets the visual closed loop
+    // (batch passes false — spend never multiplies silently).
     let style = style.unwrap_or(cfg.style_strength);
-    let (recipe, verdict, _notes) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
+    let (recipe, verdict, _notes) =
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style, true)?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
@@ -632,7 +644,10 @@ fn auto_cmd(
     image::ImageFormat::from_path(&out)
         .with_context(|| format!("unsupported output format {}", out.display()))?;
     let style = style.unwrap_or(cfg.style_strength);
-    let (recipe, verdict, _notes) = produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style)?;
+    // judge = true: `auto` is the explicit one-shot develop of ONE photo —
+    // same interactive class as analyze (batch passes false).
+    let (recipe, verdict, _notes) =
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style, true)?;
     let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
@@ -764,6 +779,7 @@ fn match_cmd(
     render_full: bool,
     zoned: bool,
     style_prompt: bool,
+    ai_judge: bool,
     out: Option<PathBuf>,
 ) -> Result<()> {
     // BEFORE any fitting/segmentation is paid for: `-o` naming the photo's
@@ -820,12 +836,49 @@ fn match_cmd(
     // CLI keeps the embedded-preview source + this post-stamp on purpose
     // (`preview_only` needs no demosaic, and this command's contract was
     // validated on it).
+    // R20 opt-in AI review (LLM-as-a-judge), rendered PRE-stamp on purpose:
+    // this fit solved its deltas ON the embedded preview (the base look is in
+    // those pixels), so the judge must see develop_preview(preview, deltas) —
+    // after the calibration stamp below the same render would apply the base
+    // curve a second time. Informational: a failure warns, never errs.
+    let judged = if ai_judge {
+        const JUDGE_EDGE: u32 = 1024; // detail:high tiles at 512 px — 4 tiles read a grade
+        let cfg = Config::load();
+        let enc = |img: &image::DynamicImage| -> Result<Vec<u8>> {
+            let mut j = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut j), image::ImageFormat::Jpeg)?;
+            Ok(j)
+        };
+        let fitted = autoshop::render::develop_preview(
+            &src.thumbnail(JUDGE_EDGE, JUDGE_EDGE),
+            &rep.recipe,
+        );
+        Some(enc(&tgt.thumbnail(JUDGE_EDGE, JUDGE_EDGE)).and_then(|t| {
+            let f = enc(&fitted)?;
+            Ok(autoshop::advisor::judge_pair(
+                &cfg,
+                autoshop::advisor::JudgeImages { reference: &t, candidate: &f },
+                autoshop::advisor::JudgeTask::FitMatch,
+                None,
+            )?)
+        }))
+    } else {
+        None
+    };
     let cal = pipeline::fit_calibration(raw);
     pipeline::stamp_fit_calibration(&mut rep.recipe, cal);
     println!(
         "  look error {:.3} → {:.3}  (0 = identical distributions; masks/local edits are not recoverable)",
         rep.err_before, rep.err_after
     );
+    match judged {
+        Some(Ok(j)) => println!(
+            "  AI review: match {:.0}/100 ({:?}) — {}",
+            j.score, j.decision, j.critique
+        ),
+        Some(Err(e)) => eprintln!("  ⚠ AI review unavailable ({e:#}) — the fit itself stands"),
+        None => {}
+    }
     println!("--- fitted recipe ---");
     println!("{}", serde_json::to_string_pretty(&rep.recipe)?);
 
@@ -1141,7 +1194,11 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
 
 fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Verdict> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
-    let (recipe, verdict, _notes) = produce_recipe(raw, cfg, false, None, None, cfg.style_strength)?;
+    // judge = false: a library-sized batch must never silently multiply the
+    // paid vision calls — the closed loop is for the interactive surfaces
+    // (review R20-M2).
+    let (recipe, verdict, _notes) =
+        produce_recipe(raw, cfg, false, None, None, cfg.style_strength, false)?;
     // A non-Accept verdict may not auto-save (user decision). In a headless
     // batch that means NO sidecars and NO deliverable: the photo stays
     // pending, the caller's summary names it, and a re-run re-attempts it —

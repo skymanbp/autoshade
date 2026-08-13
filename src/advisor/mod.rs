@@ -13,13 +13,17 @@
 
 mod claude;
 mod heuristic;
+mod judge;
 mod openai;
 mod openai_verify;
 
 pub use claude::ClaudeProvider;
 pub use heuristic::HeuristicProposer;
+pub use judge::{judge_pair, JudgeImages, JudgeTask, Judgement};
 pub use openai::{describe_style, OpenAiProvider};
 pub use openai_verify::OpenAiVerifier;
+
+pub(crate) use openai::extract_output_text;
 
 use crate::decode::{Histogram, Meta};
 use crate::recipe::EditRecipe;
@@ -1052,17 +1056,44 @@ fn assemble_sse(
 }
 
 /// Compact, prompt-friendly histogram summary (the full 4×256 bins are too
-/// large and noisy to put in a prompt). Reports clipping, mean luma, and a
-/// 16-bucket luma distribution as percentages.
+/// large and noisy to put in a prompt). Reports clipping, mean luma, luma
+/// quantiles, per-channel means, and a 16-bucket luma distribution as
+/// percentages.
+///
+/// The quantiles and channel means are the R20 evidence upgrade: the 16
+/// buckets show only the distribution's SHAPE, so both prompt consumers (the
+/// proposer placing black/white points, the data-only verifier checking
+/// them) worked without the exact anchor levels — and neither had ANY colour
+/// evidence at all, so a global cast was invisible to the verifier by
+/// construction. `mean_rgb` closes that: matched means ⇒ neutral overall,
+/// a channel sitting clearly above the others names the cast's direction.
 pub fn hist_summary(h: &Histogram) -> String {
     let total: u64 = h.luma.iter().map(|&v| v as u64).sum::<u64>().max(1);
-    let weighted: u64 = h
-        .luma
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| i as u64 * v as u64)
-        .sum();
-    let mean = weighted as f32 / total as f32;
+    let mean_of = |hist: &[u32]| -> f32 {
+        let t: u64 = hist.iter().map(|&v| v as u64).sum::<u64>().max(1);
+        let weighted: u64 = hist.iter().enumerate().map(|(i, &v)| i as u64 * v as u64).sum();
+        weighted as f32 / t as f32
+    };
+    let mean = mean_of(&h.luma);
+
+    // Level (0..=255) below which fraction `q` of the pixels sit — the
+    // empirical CDF inverse, same convention as fit.rs's tone evidence.
+    // An all-zero histogram reports 0, agreeing with its mean of 0 — the
+    // fall-through used to report 255 beside mean_luma=0, contradictory
+    // evidence in the degenerate case (review R20-N4).
+    let quantile = |q: f32| -> usize {
+        let want = ((q * total as f32).ceil() as u64).clamp(1, total);
+        let mut acc = 0u64;
+        for (i, &v) in h.luma.iter().enumerate() {
+            acc += v as u64;
+            if acc >= want {
+                return i;
+            }
+        }
+        0
+    };
+    let qs: Vec<String> =
+        [0.05, 0.25, 0.50, 0.75, 0.95].iter().map(|&q| quantile(q).to_string()).collect();
 
     // 256 -> 16 buckets, each as % of pixels.
     let mut buckets = [0u64; 16];
@@ -1075,7 +1106,13 @@ pub fn hist_summary(h: &Histogram) -> String {
         .collect();
 
     format!(
-        "mean_luma={mean:.0}/255, clip_black={:.2}%, clip_white={:.2}%, luma_16buckets_pct=[{}]",
+        "mean_luma={mean:.0}/255, luma_q5_q25_q50_q75_q95=[{}], mean_rgb=[{:.0},{:.0},{:.0}] \
+         (matched means = neutral; a high channel names the cast), clip_black={:.2}%, \
+         clip_white={:.2}%, luma_16buckets_pct=[{}]",
+        qs.join(","),
+        mean_of(&h.r),
+        mean_of(&h.g),
+        mean_of(&h.b),
         h.clip_black_pct,
         h.clip_white_pct,
         dist.join(","),
@@ -1527,6 +1564,37 @@ Final answer: {"decision":"accept","reasons":[]}"#;
         )
         .expect("a slowly delivered content line keeps the stream alive");
         assert!(got.is_some(), "the event arrived");
+    }
+
+    /// R20 evidence upgrade: the summary carries exact luma anchor levels
+    /// (empirical CDF inverse) and per-channel means (cast evidence) — both
+    /// prompt consumers previously saw only bucket shape and no colour.
+    #[test]
+    fn hist_summary_reports_quantile_anchors_and_channel_means() {
+        let mut h = Histogram {
+            luma: vec![0; 256],
+            r: vec![0; 256],
+            g: vec![0; 256],
+            b: vec![0; 256],
+            clip_black_pct: 1.25,
+            clip_white_pct: 0.5,
+            sample_pixels: 300,
+        };
+        // Three equal spikes: 100 px at 10, 100 at 100, 100 at 200.
+        h.luma[10] = 100;
+        h.luma[100] = 100;
+        h.luma[200] = 100;
+        // A warm cast: R sits above G above B.
+        h.r[120] = 300;
+        h.g[100] = 300;
+        h.b[80] = 300;
+        let s = hist_summary(&h);
+        assert!(
+            s.contains("luma_q5_q25_q50_q75_q95=[10,10,100,200,200]"),
+            "quantiles are the empirical CDF inverse: {s}"
+        );
+        assert!(s.contains("mean_rgb=[120,100,80]"), "channel means name the cast: {s}");
+        assert!(s.contains("clip_black=1.25%"), "{s}");
     }
 
     #[test]

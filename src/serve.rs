@@ -1743,8 +1743,12 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // user's unsaved lens toggles — pre-stripping here made every web Refine
     // revert them to the saved profile.
     let refine_base = req.base.clone();
+    // judge = true: the web Analyze is the same interactive single-photo
+    // surface as the GUI button — the visual closed loop is part of it
+    // (batch surfaces pass false; the rationale disclosed in the response
+    // carries the judge's score and any revision).
     let (recipe, verdict, _notes) =
-        pipeline::produce_recipe(&raw, &cfg, false, guidance, refine_base.as_ref(), style)?;
+        pipeline::produce_recipe(&raw, &cfg, false, guidance, refine_base.as_ref(), style, true)?;
     // A non-Accept verdict may not auto-save (user decision): the verifier
     // itself judged the result not ready, so the develop on disk stays
     // untouched and the browser gets the proposal back as an UNSAVED edit —

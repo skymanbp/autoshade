@@ -1,6 +1,17 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.26.1 — R19: every remaining recorded item
+> Status: **implemented** (v0.26.2 — R20: the VISUAL JUDGE role closes the
+> first pixel-level loop on AI output (`advisor::judge`, §3): interactive
+> analyze renders the verified proposal and has the vision model score it
+> — a low score buys ONE guided revision, adopted only if it re-judges at
+> least as high (do-no-harm; batch/eval skip the paid loop); the
+> reverse-fit gains an opt-in AI review (GUI checkbox / `match
+> --ai-judge`) scoring target-vs-fitted match 0-100; the judge sits at
+> the END of the look-mutation chain (post style-distillation, WB anchor
+> from the one hoisted calibration snapshot, refine masks carried into
+> the render clone) so the judged render IS the delivered look; the
+> histogram evidence now carries luma quantiles + per-channel means.
+> v0.26.1 — R19: every remaining recorded item
 > closed — the zone skip line and acceptance floor are split so nothing
 > fixable is declined untried, the misprediction gate's anchors are
 > measured in BOTH solve domains for all five real pairs, and the
@@ -25,7 +36,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 441 library + 7 CLI + 73 GUI tests pass in both build configurations.
+> 449 library + 7 CLI + 73 GUI tests pass in both build configurations.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -296,9 +307,16 @@ this trait.)
 |------|------------------|--------------|-----|
 | **Image advisor** (图像) | OpenAI-compatible vision over HTTP (default `gpt-5.5`); Settings offers **API** (a real key) or **OAuth** (a local Codex bridge fronting a ChatGPT subscription) | **yes** (preview) | Look at the photo → emit an `EditRecipe`. The `claude` CLI has no image input in print mode, so this role never uses the claude OAuth path. |
 | **Analyst / verifier** (分析) | **OAuth** (`claude` CLI, default model `opus`) **or** API (OpenAI-compatible chat) | **no** (data only) | Reason over EXIF/histogram; **acceptance-verify** the recipe (ranges sane? consistent with metadata & intent? confidence adequate?) and flag/veto bad recipes. |
+| **Visual judge** (R20, `advisor::judge` — reuses the image role's endpoint/key, not a third credential) | same OpenAI-compatible vision endpoint as the image role | **yes** (reference + candidate renders) | Score a RESULT against a reference (strict-schema `{score, decision, critique, hint}`). Two consumers: the analyze closed loop (proposal rendered → judged → one guided revision, adopted only on a ≥ re-score) and the reverse-fit's opt-in AI review (target vs fitted render, informational). |
 
 > The verifier judges at the **data level** — recipe + histogram/clipping stats +
-> the advisor's rationale — *without* re-doing vision.
+> the advisor's rationale — *without* re-doing vision. The R20 judge is the
+> complementary eye: it sees only PIXELS (two JPEG renders), runs at the END
+> of the look-mutation chain (post style-distillation, WB-anchored by the one
+> hoisted calibration snapshot, refine masks carried into the render clone),
+> and every adopt/keep/failure branch discloses through the rationale. It is
+> a paid vision call, so it is an explicit caller decision: interactive
+> analyze surfaces pass `judge = true`; `batch` and `eval` pass `false`.
 
 Sketch (final shape):
 

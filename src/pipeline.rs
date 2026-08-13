@@ -29,6 +29,7 @@ pub fn produce_recipe(
     guidance: Option<&str>,
     base: Option<&EditRecipe>,
     style_strength: f32,
+    judge: bool,
 ) -> Result<(EditRecipe, Verdict, Vec<crate::rationale::Note>)> {
     // The third element (L12#2B): every DETERMINISTIC rationale fragment this
     // call appended, as typed notes rendering the rationale string's SUFFIX
@@ -323,6 +324,270 @@ pub fn produce_recipe(
             ),
         );
     }
+    // Base look calibration, ONE snapshot for every consumer below (the
+    // single-read rule, now serving TWO consumers): the saved recipe is read
+    // once; the visual judge's render clone and the deliverable stamp both
+    // consume the same values, so they can never disagree across a
+    // concurrent writer's retire/publish window.
+    let cal_saved = saved_recipe_snapshot(raw);
+    let (anchor_k, anchor_tint) = match &cal_saved {
+        // Same saved-first rule as the stamp below (a legacy save keeps
+        // None -> the 5500 K anchor -> byte-identical rendering of its
+        // tuned Kelvin).
+        Some(saved) => (saved.as_shot_k, saved.as_shot_tint),
+        None => fresh_as_shot_wb(raw),
+    };
+
+    // R20: the visual CLOSED LOOP — the first eye ever laid on the result.
+    // The proposer emits numbers blind (it never sees what they render to)
+    // and the verifier judges data-only by contract, so a plausible-but-off
+    // develop sailed through both. Render the verified proposal and put it
+    // in front of the vision model as a JUDGE; on a revise verdict run ONE
+    // guided round, adopted only when the re-judge scores at least as high
+    // (do-no-harm — the fit's own rule applied here). Every branch discloses
+    // through the rationale; a judge failure degrades, never errors.
+    //
+    // Placed at the END of the look-mutation chain on purpose (review R20:
+    // M1+S1+S2 shared this one upstream cause — the judge used to sit in
+    // the middle): the style distillation has already landed, the WB anchor
+    // is the hoisted one the deliverable will carry (temperature_k is
+    // ABSOLUTE Kelvin against it — an unanchored clone rendered a tungsten
+    // shot's correction as identity), and a refine's bitmap masks are
+    // carried into the render clone. The judged render IS the look the user
+    // receives; only the calibration stamp below remains, and the clone
+    // deliberately excludes it — the embedded preview already CONTAINS the
+    // base look and lens corrections, so the clone keeps base_curve empty
+    // and lens_profile default (the refine-strip rule) while carrying the
+    // real WB anchor.
+    //
+    // COST: paid vision calls (1 judge; +1 propose, +1 verify, +1 judge
+    // when a revision is bought). `judge` is therefore an explicit caller
+    // decision: interactive analyze passes true (this closed loop IS the
+    // R20 strengthening); batch and eval pass false — a 500-photo batch
+    // must not silently multiply spend, and eval measures the RAW proposal
+    // (review R20-M2/M3).
+    if judge && can_revise {
+        let judge_view = |r: &EditRecipe| -> EditRecipe {
+            let mut v = r.clone();
+            if let Some(b) = base {
+                // A refine's bitmap masks are part of the look under
+                // judgement (the response schema cannot return them; the
+                // deliverable gets them re-attached below) — without this
+                // the judge saw the user's sky mask missing and bought a
+                // revision to fix what was already fixed (review R20-S1).
+                carry_over_unrepresentable(&mut v, b, None);
+            }
+            v.base_curve = Vec::new();
+            v.lens_profile = Default::default();
+            v.as_shot_k = anchor_k;
+            v.as_shot_tint = anchor_tint;
+            v
+        };
+        let judge_of = |r: &EditRecipe| -> Result<crate::advisor::Judgement, crate::advisor::AdvisorError> {
+            let rendered = crate::render::develop_preview(&preview_img, &judge_view(r));
+            let mut jpeg = Vec::new();
+            rendered
+                .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+                .map_err(|e| {
+                    crate::advisor::AdvisorError::Io(std::io::Error::other(format!(
+                        "encode judge render JPEG: {e}"
+                    )))
+                })?;
+            crate::advisor::judge_pair(
+                cfg,
+                crate::advisor::JudgeImages { reference: &preview.jpeg, candidate: &jpeg },
+                crate::advisor::JudgeTask::Develop,
+                // Oversize context is OMITTED, not truncated: a cut JSON is
+                // a malformed blob to the judge (review R20-N5); judge_pair's
+                // own 16 KiB bound stays as the backstop.
+                serde_json::to_string(r)
+                    .ok()
+                    .filter(|s| s.len() <= 16 * 1024)
+                    .as_deref(),
+            )
+        };
+        match judge_of(&recipe) {
+            Err(e) => {
+                crate::rationale::push_note(
+                    &mut recipe.rationale,
+                    &mut det_notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::JUDGE_UNAVAILABLE,
+                        vec![("e", e.to_string())],
+                    ),
+                );
+            }
+            Ok(j1) => {
+                if verbose {
+                    println!(
+                        "judge    : {:.0}/100 {:?} — {}",
+                        j1.score, j1.decision, j1.critique
+                    );
+                }
+                let score1 = format!("{:.0}", j1.score);
+                // An Accept's hint (if any) is advice, not a request — only a
+                // revise/reject verdict WITH an instruction buys the round.
+                let hint = j1
+                    .hint
+                    .as_deref()
+                    .filter(|_| j1.decision != Decision::Accept);
+                match hint {
+                    None => {
+                        crate::rationale::push_note(
+                            &mut recipe.rationale,
+                            &mut det_notes,
+                            crate::rationale::Note::new(
+                                crate::rationale::keys::JUDGE_SCORE,
+                                vec![
+                                    ("score", score1.clone()),
+                                    ("critique", j1.critique.clone()),
+                                ],
+                            ),
+                        );
+                    }
+                    Some(h) => {
+                        // Short prefix: the whole hint is bounded at 1024 in
+                        // the proposer, so every prefix byte comes out of the
+                        // judge's own instruction (review R20-N2).
+                        let h = format!("visual judge (it SAW your previous render): {h}");
+                        if verbose {
+                            println!("judge    : guided revision (hint: {h})");
+                        }
+                        let mut candidate_distilled = false;
+                        match visual_review_round(
+                            &h,
+                            &recipe,
+                            |h| {
+                                let mut r = openai
+                                    .propose(&preview, meta, hist, ref_str, guidance, Some(h))?;
+                                // The candidate walks the SAME look chain the
+                                // original walked (style distillation above)
+                                // — otherwise adopting it would silently
+                                // undo the user's style pull (review R20-S2).
+                                if let Some((_, targets)) = &style {
+                                    let pre = r.clone();
+                                    crate::style::blend_toward(
+                                        &mut r,
+                                        targets,
+                                        style_strength.clamp(0.0, 1.0) * 0.6,
+                                    );
+                                    r.clamp();
+                                    candidate_distilled = r != pre;
+                                }
+                                Ok(r)
+                            },
+                            |r| verifier.verify(r, meta, hist),
+                            judge_of,
+                            j1.score,
+                        ) {
+                            VisualRound::Adopted { recipe: r2, verdict: v2, second } => {
+                                recipe = *r2;
+                                // Fresh model prose — the notes described the
+                                // DISCARDED recipe's tail (the suffix contract).
+                                det_notes.clear();
+                                verdict = v2;
+                                if verbose {
+                                    println!(
+                                        "judge    : re-scored {:.0}/100 — adopted",
+                                        second.score
+                                    );
+                                }
+                                crate::rationale::push_note(
+                                    &mut recipe.rationale,
+                                    &mut det_notes,
+                                    crate::rationale::Note::new(
+                                        crate::rationale::keys::JUDGE_ADOPTED,
+                                        vec![
+                                            ("score1", score1),
+                                            ("score2", format!("{:.0}", second.score)),
+                                            ("critique", second.critique.clone()),
+                                        ],
+                                    ),
+                                );
+                                if candidate_distilled {
+                                    crate::rationale::push_note(
+                                        &mut recipe.rationale,
+                                        &mut det_notes,
+                                        crate::rationale::Note::new(
+                                            crate::rationale::keys::STYLE_DISTILLED,
+                                            vec![(
+                                                "pct",
+                                                format!(
+                                                    "{:.0}",
+                                                    style_strength.clamp(0.0, 1.0) * 0.6 * 100.0
+                                                ),
+                                            )],
+                                        ),
+                                    );
+                                }
+                            }
+                            VisualRound::Unchanged => {
+                                crate::rationale::push_note(
+                                    &mut recipe.rationale,
+                                    &mut det_notes,
+                                    crate::rationale::Note::new(
+                                        crate::rationale::keys::JUDGE_UNCHANGED,
+                                        vec![
+                                            ("score", score1),
+                                            ("critique", j1.critique.clone()),
+                                        ],
+                                    ),
+                                );
+                            }
+                            VisualRound::KeptLower { second_score } => {
+                                if verbose {
+                                    println!(
+                                        "judge    : re-scored {second_score:.0}/100 — lower, revision discarded"
+                                    );
+                                }
+                                crate::rationale::push_note(
+                                    &mut recipe.rationale,
+                                    &mut det_notes,
+                                    crate::rationale::Note::new(
+                                        crate::rationale::keys::JUDGE_KEPT,
+                                        vec![
+                                            ("score1", score1),
+                                            ("critique", j1.critique.clone()),
+                                            ("score2", format!("{second_score:.0}")),
+                                        ],
+                                    ),
+                                );
+                            }
+                            VisualRound::RoundFailed { e } => {
+                                crate::rationale::push_note(
+                                    &mut recipe.rationale,
+                                    &mut det_notes,
+                                    crate::rationale::Note::new(
+                                        crate::rationale::keys::JUDGE_ROUND_FAILED,
+                                        vec![
+                                            ("score", score1),
+                                            ("critique", j1.critique.clone()),
+                                            ("e", e),
+                                        ],
+                                    ),
+                                );
+                            }
+                            VisualRound::RejudgeFailed { e } => {
+                                crate::rationale::push_note(
+                                    &mut recipe.rationale,
+                                    &mut det_notes,
+                                    crate::rationale::Note::new(
+                                        crate::rationale::keys::JUDGE_REJUDGE_FAILED,
+                                        vec![
+                                            ("score", score1),
+                                            ("critique", j1.critique.clone()),
+                                            ("e", e),
+                                        ],
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Base look, stamped in ONE place for every surface: the proposal and the
     // verification above both ran over the camera's embedded preview — the
     // very base the curve approximates — so the AI's JSON round-trip never
@@ -331,11 +596,7 @@ pub fn produce_recipe(
     // Without this, a CLI-written analyze recipe carried an empty curve and
     // the open-time "recipe.json keeps its saved curve" rule then pinned the
     // dark pre-base-look rendering onto that photo forever.
-    // ONE read of the saved recipe for BOTH calibration fields: two separate
-    // reads could straddle a concurrent writer's retire/publish window (GUI
-    // and web are separate processes) and stamp a curve from the saved recipe
-    // beside a lens profile from the fresh fallback.
-    match saved_recipe_snapshot(raw) {
+    match cal_saved {
         Some(saved) => {
             // The era stamp travels WITH the curve (the paste rule): the
             // proposer's recipe is era-2 by Default — or whatever integer the
@@ -346,11 +607,6 @@ pub fn produce_recipe(
             recipe.version = saved.version;
             recipe.base_curve = saved.base_curve;
             recipe.lens_profile = saved.lens_profile;
-            // The as-shot WB anchor is the third calibration half — same
-            // saved-first rule (a legacy save keeps None → the 5500 K anchor
-            // → byte-identical rendering of its tuned Kelvin).
-            recipe.as_shot_k = saved.as_shot_k;
-            recipe.as_shot_tint = saved.as_shot_tint;
         }
         None => {
             // A fresh estimate by THIS build's sampler — and the stamp is
@@ -359,11 +615,13 @@ pub fn produce_recipe(
             recipe.version = crate::recipe::CALIB_ERA;
             recipe.base_curve = photo_base_knots(raw);
             recipe.lens_profile = fresh_lens_profile(raw);
-            let (ask, ast) = fresh_as_shot_wb(raw);
-            recipe.as_shot_k = ask;
-            recipe.as_shot_tint = ast;
         }
     }
+    // The as-shot WB anchor is the third calibration half — same saved-first
+    // rule, via the ONE hoisted snapshot (the judge above rendered against
+    // these very values, so the anchor it scored is the anchor delivered).
+    recipe.as_shot_k = anchor_k;
+    recipe.as_shot_tint = anchor_tint;
     // REFINE means "adjust MY edit", so it must not delete work the model was
     // never able to return. The strict response schema
     // (advisor::openai::edit_recipe_schema) can express only LINEAR and RADIAL
@@ -377,6 +635,74 @@ pub fn produce_recipe(
         carry_over_unrepresentable(&mut recipe, b, Some(&mut det_notes));
     }
     Ok((recipe, verdict, det_notes))
+}
+
+/// Outcome of one judge-guided visual revision round (R20 closed loop).
+pub(crate) enum VisualRound {
+    /// The revision re-scored at least as high — it replaces the recipe,
+    /// and `verdict` is the data verifier's fresh word on it.
+    Adopted {
+        recipe: Box<EditRecipe>,
+        verdict: Verdict,
+        second: crate::advisor::Judgement,
+    },
+    /// The revision came back with IDENTICAL settings — nothing to verify or
+    /// re-judge (two paid calls saved), and no "was adopted" claim for a
+    /// recipe that never changed (review R20-S3).
+    Unchanged,
+    /// The revision re-scored LOWER — discarded (do-no-harm).
+    KeptLower { second_score: f32 },
+    /// Propose or verify failed — nothing to compare, keep the reviewed recipe.
+    RoundFailed { e: String },
+    /// The revision exists but could not be re-judged — an UNCOMPARED swap
+    /// would gamble the reviewed recipe on it, so it is discarded.
+    RejudgeFailed { e: String },
+}
+
+/// ONE guided revision, adopt-or-keep. Factored over closures so the
+/// contract — a revision must re-judge AT LEAST AS HIGH to replace the
+/// reviewed recipe, an identical revision short-circuits, and every failure
+/// keeps the reviewed recipe — is testable without a network (the three
+/// steps are remote in production).
+pub(crate) fn visual_review_round(
+    hint: &str,
+    current: &EditRecipe,
+    propose: impl FnOnce(&str) -> Result<EditRecipe, crate::advisor::AdvisorError>,
+    verify: impl FnOnce(&EditRecipe) -> Result<Verdict, crate::advisor::AdvisorError>,
+    judge: impl FnOnce(&EditRecipe) -> Result<crate::advisor::Judgement, crate::advisor::AdvisorError>,
+    first_score: f32,
+) -> VisualRound {
+    let revised = match propose(hint) {
+        Ok(r) => r,
+        Err(e) => return VisualRound::RoundFailed { e: e.to_string() },
+    };
+    // SETTINGS equality, not struct equality: the model's prose (rationale,
+    // confidence) differs every call, so raw == would never fire — the no-op
+    // being caught is "same sliders/curves/masks", the render-identical case.
+    let strip = |r: &EditRecipe| {
+        let mut c = r.clone();
+        c.rationale = String::new();
+        c.confidence = 0.0;
+        c
+    };
+    if strip(&revised) == strip(current) {
+        return VisualRound::Unchanged;
+    }
+    let v2 = match verify(&revised) {
+        Ok(v) => v,
+        Err(e) => return VisualRound::RoundFailed { e: e.to_string() },
+    };
+    match judge(&revised) {
+        // >= not >: at EQUAL scores the revision wins because the judge asked
+        // for it — the hint was followed and nothing was lost.
+        Ok(second) if second.score >= first_score => VisualRound::Adopted {
+            recipe: Box::new(revised),
+            verdict: v2,
+            second,
+        },
+        Ok(second) => VisualRound::KeptLower { second_score: second.score },
+        Err(e) => VisualRound::RejudgeFailed { e: e.to_string() },
+    }
 }
 
 /// Re-attach what the AI's response schema CANNOT express, from the refine
@@ -1319,6 +1645,110 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod visual_round_tests {
+    use super::*;
+    use crate::advisor::{AdvisorError, Decision, Judgement};
+
+    fn j(score: f32) -> Judgement {
+        Judgement { score, decision: Decision::Revise, critique: "c".into(), hint: None }
+    }
+
+    fn accept() -> Verdict {
+        Verdict { decision: Decision::Accept, reasons: vec![], revised_hint: None }
+    }
+
+    /// The adopt-or-keep contract: ≥ adopts (equality included — the judge
+    /// asked for the round), < keeps, and EVERY failure keeps the reviewed
+    /// recipe — a revision that cannot be compared must never replace it.
+    #[test]
+    fn a_revision_replaces_the_recipe_only_when_the_rejudge_holds_the_score() {
+        let cur = EditRecipe::default();
+        let revised = || {
+            Ok(EditRecipe { exposure_ev: 1.25, ..Default::default() })
+        };
+        // Higher re-score adopts, and carries the fresh verdict.
+        match visual_review_round("h", &cur, |_| revised(), |_| Ok(accept()), |_| Ok(j(80.0)), 70.0)
+        {
+            VisualRound::Adopted { recipe, second, .. } => {
+                assert_eq!(recipe.exposure_ev, 1.25, "the REVISED recipe rides out");
+                assert_eq!(second.score, 80.0);
+            }
+            _ => panic!("a higher re-score adopts"),
+        }
+        // EQUAL re-score adopts too: the hint was followed, nothing was lost.
+        assert!(matches!(
+            visual_review_round("h", &cur, |_| revised(), |_| Ok(accept()), |_| Ok(j(70.0)), 70.0),
+            VisualRound::Adopted { .. }
+        ));
+        // Lower re-score keeps (do-no-harm), reporting the losing score.
+        assert!(matches!(
+            visual_review_round("h", &cur, |_| revised(), |_| Ok(accept()), |_| Ok(j(69.9)), 70.0),
+            VisualRound::KeptLower { second_score } if second_score == 69.9
+        ));
+        // The hint the judge wrote is what the proposer receives.
+        let mut got = String::new();
+        let _ = visual_review_round(
+            "lift shadows",
+            &cur,
+            |h| {
+                got = h.to_string();
+                revised()
+            },
+            |_| Ok(accept()),
+            |_| Ok(j(90.0)),
+            70.0,
+        );
+        assert_eq!(got, "lift shadows");
+    }
+
+    /// R20-S3: a revision whose SETTINGS are identical short-circuits —
+    /// prose differences (rationale/confidence) must not defeat the check,
+    /// and neither verify nor re-judge may be paid for a no-op.
+    #[test]
+    fn an_identical_revision_short_circuits_without_paying_for_more_calls() {
+        let cur = EditRecipe { exposure_ev: 0.5, rationale: "original prose".into(), ..Default::default() };
+        let same_settings = EditRecipe {
+            exposure_ev: 0.5,
+            rationale: "fresh prose, same sliders".into(),
+            confidence: 0.9,
+            ..Default::default()
+        };
+        let out = visual_review_round(
+            "h",
+            &cur,
+            |_| Ok(same_settings),
+            |_| panic!("verify must not be paid for a no-op revision"),
+            |_| panic!("re-judge must not be paid for a no-op revision"),
+            70.0,
+        );
+        assert!(matches!(out, VisualRound::Unchanged));
+    }
+
+    #[test]
+    fn every_failure_keeps_the_reviewed_recipe() {
+        let cur = EditRecipe::default();
+        // Distinct settings, so the no-op short-circuit never masks the
+        // failure arms under test.
+        let changed = || Ok(EditRecipe { exposure_ev: 0.5, ..Default::default() });
+        let boom = || AdvisorError::Transport("boom".into());
+        assert!(matches!(
+            visual_review_round("h", &cur, |_| Err(boom()), |_| Ok(accept()), |_| Ok(j(99.0)), 70.0),
+            VisualRound::RoundFailed { .. }
+        ));
+        assert!(matches!(
+            visual_review_round("h", &cur, |_| changed(), |_| Err(boom()), |_| Ok(j(99.0)), 70.0),
+            VisualRound::RoundFailed { .. }
+        ));
+        // A revision that cannot be RE-JUDGED is discarded, not gambled on —
+        // its own arm, so the disclosure can say the revision existed.
+        assert!(matches!(
+            visual_review_round("h", &cur, |_| changed(), |_| Ok(accept()), |_| Err(boom()), 70.0),
+            VisualRound::RejudgeFailed { .. }
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2970,6 +3400,7 @@ mod tests {
             None,
             None,
             0.0,
+            false,
         )
         .expect_err("no analysis key + api provider must refuse up front")
         .to_string();

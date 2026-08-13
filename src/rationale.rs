@@ -138,6 +138,28 @@ pub mod keys {
          duplicated) — your masks were kept unchanged and the model's mask edits were \
          discarded";
 
+    // --- visual judge closed loop (pipeline.rs, R20) ---------------------
+    pub const JUDGE_SCORE: &str =
+        " [AI visual review: {score}/100 — {critique}]";
+    pub const JUDGE_ADOPTED: &str =
+        " [AI visual review: {score1}/100 first; a guided revision re-scored \
+         {score2}/100 and was adopted — {critique}]";
+    pub const JUDGE_KEPT: &str =
+        " [AI visual review: {score1}/100 — {critique}; the guided revision \
+         re-scored lower ({score2}/100) and was discarded (do-no-harm)]";
+    pub const JUDGE_UNCHANGED: &str =
+        " [AI visual review: {score}/100 — {critique}; the guided revision \
+         returned the same recipe — keeping it]";
+    pub const JUDGE_ROUND_FAILED: &str =
+        " [AI visual review: {score}/100 — {critique}; the guided revision \
+         round failed ({e}) — keeping the reviewed develop]";
+    pub const JUDGE_REJUDGE_FAILED: &str =
+        " [AI visual review: {score}/100 — {critique}; the guided revision \
+         could not be re-judged ({e}) and was discarded (do-no-harm)]";
+    pub const JUDGE_UNAVAILABLE: &str =
+        " [AI visual review unavailable ({e}) — the develop was not visually \
+         checked]";
+
     // --- heuristic baseline (advisor/heuristic.rs) ----------------------
     pub const HEURISTIC_UNAVAILABLE: &str =
         "Heuristic baseline (AI vision unavailable (untrusted provider diagnostic): {e}). \

@@ -455,8 +455,10 @@ impl AutoshopApp {
                     if why(ui
                         .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
                         .on_hover_text(tr(lang,
-                            "AI proposes a recipe from scratch (GPT proposal + validation), written into \
-                             the sliders — undoable. Uses the Direction above; Style steers it.",
+                            "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
+                             review: the result is RENDERED and judged by the vision model, which may \
+                             buy one guided revision — extra vision cost per run), written into the \
+                             sliders — undoable. Uses the Direction above; Style steers it.",
                         )))
                         .clicked()
                     {

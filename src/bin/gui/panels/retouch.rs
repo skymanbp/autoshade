@@ -686,8 +686,8 @@ impl AutoshopApp {
                             .small(),
                     );
                 }
-                ui.add_enabled_ui(!self.busy && can_fit, |ui| {
-                    ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!self.busy && can_fit, |ui| {
                         if ui
                             .button(tr(lang, "🎛 Reverse-fit recipe → sliders/XMP"))
                             .on_hover_text(tr(lang,
@@ -710,6 +710,21 @@ impl AutoshopApp {
                         {
                             self.start_style_prompt();
                         }
+                    });
+                    // R20 opt-in LLM-as-a-judge. OUTSIDE the can_fit gate: the
+                    // toggle is a persisted PREFERENCE, not a fit-time verb —
+                    // gating it on can_fit locked a setting behind having a
+                    // generated variant active (review R20-N1). Only busy
+                    // disables it.
+                    ui.add_enabled_ui(!self.busy, |ui| {
+                        ui.checkbox(&mut self.fit_ai_judge, tr(lang, "AI review"))
+                            .on_hover_text(tr(lang,
+                                "After the fit, show the target and the fitted render to the vision model and \
+                                 have it SCORE the match (0-100) with a short critique — LLM as a judge. One \
+                                 paid vision call per fit (needs the image API key); the fit itself stays \
+                                 local and free. The score lands in the status line below. No cancel: like \
+                                 the fit itself, the app stays busy until the review returns.",
+                            ));
                     });
                 });
                 ui.label(

@@ -2120,6 +2120,18 @@ impl AutoshopApp {
                 " · NOT persisted: the develop store could not be locked ({err}) — Ctrl+S to save explicitly",
                 &[("err", e)],
             ),
+            // R20 opt-in AI review. The critique is model English by the
+            // rationale contract (args ride verbatim, like {err} text).
+            FitNote::AiReview { score, critique } => trf(
+                lang,
+                " · AI review: match {score}/100 — {critique}",
+                &[("score", &format!("{score:.0}")), ("critique", critique)],
+            ),
+            FitNote::AiReviewFailed(e) => trf(
+                lang,
+                " · AI review unavailable ({err}) — the fit itself already landed",
+                &[("err", e)],
+            ),
         }
     }
 

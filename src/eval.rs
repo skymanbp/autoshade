@@ -283,9 +283,13 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         let xmp_text = crate::store::read_sidecar(&raw.with_extension("xmp"))
             .with_context(|| format!("read user xmp for {}", raw.display()))?;
         let user = parse_user_xmp(&xmp_text);
-        // style_strength = 0: eval measures the raw AI proposal vs your edits, so
-        // it must NOT pull toward your historical style (that would bias the gap).
-        let (ai, _verdict, _notes) = match pipeline::produce_recipe(raw, &cfg, false, None, None, 0.0) {
+        // style_strength = 0 AND judge = false: eval measures the RAW AI
+        // proposal vs your edits, so it must NOT pull toward your historical
+        // style and must NOT let the visual closed loop revise the proposal
+        // (either would bias the gap — and the judge is a paid vision call
+        // per photo, unasked-for in a measurement run).
+        let (ai, _verdict, _notes) =
+            match pipeline::produce_recipe(raw, &cfg, false, None, None, 0.0, false) {
             Ok(v) => v,
             Err(e) => {
                 println!("FAILED: {e}");

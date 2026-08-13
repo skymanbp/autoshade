@@ -323,6 +323,46 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **v0.26.2 RELEASED（2026-08-13，第二十轮=视觉评审角色：AI 检测闭环 +
+  反推 AI 打分）** — 用户令"①加强 AI 检测（AI 出 XMP 那个）效果；②反推加
+  LLM-as-a-judge 式 AI 评审、做成按钮可选；③路线图全清、debug 全过、全量
+  文档、发 v0.26.2"。**共同最上游缺口=AI 产出从无像素级回看**（提案盲出、
+  收验只看数据、反推只报统计残差）→ 一个共用**视觉评审角色**
+  `advisor::judge`（新文件）：双图（reference/candidate）入、严格 schema
+  `{score,decision,critique,hint}` 出，store:false、评分钳 0..100、非有限
+  拒绝、critique/hint 1024B 有界脱敏；`JudgeImages` 具名字段防形参对调
+  （Opus S6 类型级修法）。**①检测闭环**（pipeline `produce_recipe`）：验证
+  后的提案经 `develop_preview` 渲染 → 评审打分；revise+hint 时**引导修订一
+  轮**（`visual_review_round` 纯函数：再评分 ≥ 原分才采纳=do-no-harm、同
+  设置修订短路不再付费、任何失败保留已评配方），六个分支全走 rationale
+  新键（JUDGE_SCORE/ADOPTED/UNCHANGED/KEPT/ROUND_FAILED/REJUDGE_FAILED/
+  UNAVAILABLE，en/zh 成对）；证据升级 `hist_summary` 加亮度五分位+RGB 通道
+  均值（提案与收验双方首次拿到锚点级+偏色证据）。**评审位于外观变异链末
+  端**（Opus M1+S1+S2 同源折入：风格蒸馏上移到评审前、WB 锚取自唯一提升
+  快照——temperature_k 是相对锚点的绝对开尔文，无锚克隆把钨丝灯校正渲染
+  成恒等；refine 位图蒙版经同一 carry_over 挂入渲染克隆），渲染克隆按
+  refine-strip 规则不带 base_curve/lens（嵌入预览像素已含）。**判费=显式
+  调用方决策**（Opus M2/M3）：`judge: bool` 参数——GUI/web/CLI analyze/
+  auto=true（工具提示+CLI 帮助披露加价），batch/eval=false（500 张批处理
+  不得静默翻倍开销；eval 量的是裸提案）。**②反推 AI 打分**：GUI 复选框
+  「AI review / AI 打分」（Prefs 持久化默认关=付费自选；置于 can_fit 门外
+  ——偏好不是动词，Opus N1）+ CLI `match --ai-judge`；评审渲染域=各自求解
+  域（GUI=源中性×复合配方；CLI=印章前嵌入预览域，后盖章会双重应用基线
+  曲线）、持久化锁外执行、任何失败降级为状态注记（FitNote::AiReview/
+  AiReviewFailed）；无取消与反推本身同构、工具提示如实披露（Opus S5 定
+  案）。其余折入：S3=同设置修订不得谎称"已采纳"（strip 掉 prose 比较）+
+  提示来源改"automated reviewer"（不再冒名 verifier、untrusted 栅栏保留）；
+  S4=评审提示词声明渲染不含裁剪/矫正只判影调色彩；N2=提示前缀缩短（1024B
+  预算全留给评审自己的话）；N4=全零直方图分位报 0 与均值一致；N5=超 16KiB
+  配方上下文整体省略不截断（截断=喂坏 JSON）；N6=fit 侧不带 decision 有
+  据（分数即结论，阈值钉在提示词里）。**字形纪律**：新 zh 词条全部用成品
+  字体 cmap 并集逐字验证（付/短/简/英/买 五次撞门全改写），子集免再生成，
+  803/803。门：**449 lib（+8：judge 桩 4/闭环纯函数 3/hist 分位 1）+7 CLI
+  +73 GUI、clippy 0、audit_i18n 0、字体覆盖过**。Opus 5 反审 **SHIP-WITH-
+  FIXES：3 must-fix + 7 should-fix + 6 nit 全折入**（N3=超长批评触发整段
+  英文回退为既定契约内行为，不改）。**在册可行动项=0，登记披露=0**。
+  （发布戳见下：tag/资产字节验证在发版后补记。）
+
 - **v0.26.1 RELEASED（2026-08-13，第十九轮=登记项实修清零 + Generate 按钮
   一行化）** — 用户令"把所有问题直接清完（不再披露/在册）+ AI 生成按钮改
   一行高"。①**分区拒试段清零**：SKIP 线与接受地板**拆分**（fit_zoned.rs

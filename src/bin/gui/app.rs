@@ -124,6 +124,7 @@ pub(crate) struct AutoshopApp {
     // --- settings / denoise ---
     pub(crate) save_denoise: bool,     // run SCUNet AI denoise before the full-res render
     pub(crate) zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
+    pub(crate) fit_ai_judge: bool,     // 反推 then asks the vision model to SCORE the match (paid, opt-in)
     pub(crate) show_settings: bool,    // the Settings window is open
     pub(crate) show_shortcuts: bool,   // the keyboard cheat-sheet window is open (F1 / ? / ⌨)
     // Tab hides both side panels (the LR grammar) for an edge-to-edge canvas.
@@ -1366,6 +1367,8 @@ impl Default for AutoshopApp {
             redo_stack: Vec::new(),
             save_denoise: false,
             zoned_fit: true,
+            // Paid opt-in (a vision call per fit) — mirror Prefs::default.
+            fit_ai_judge: false,
             show_settings: false,
             show_shortcuts: false,
             panels_hidden: false,
@@ -1715,6 +1718,7 @@ impl eframe::App for AutoshopApp {
                 last_export_dir: self.last_export_dir.clone(),
                 save_denoise: self.save_denoise,
                 zoned_fit: self.zoned_fit,
+                fit_ai_judge: self.fit_ai_judge,
                 view_mode: self.view_mode,
                 exp_long_edge: self.exp_long_edge,
                 exp_sharpen: self.exp_sharpen,

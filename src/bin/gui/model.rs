@@ -128,6 +128,7 @@ pub(crate) struct Prefs {
     pub(crate) last_export_dir: Option<PathBuf>,
     pub(crate) save_denoise: bool,
     pub(crate) zoned_fit: bool,
+    pub(crate) fit_ai_judge: bool,
     pub(crate) view_mode: ViewMode,
     pub(crate) exp_long_edge: u32,
     pub(crate) exp_sharpen: f32,
@@ -153,6 +154,9 @@ impl Default for Prefs {
             // Zoned sky reverse-fit ON by default: it degrades gracefully to
             // the plain global fit when segmentation is unavailable.
             zoned_fit: true,
+            // AI review of the fit OFF by default: it is a PAID vision call
+            // per fit — spending is the user's opt-in, never a default.
+            fit_ai_judge: false,
             view_mode: ViewMode::SideBySide,
             exp_long_edge: 0,
             exp_sharpen: 0.0,
@@ -431,6 +435,16 @@ pub(crate) enum FitNote {
     NotPersistedBackup(String),
     /// The develop store lock could not be taken.
     NotPersistedLock(String),
+    /// R20 opt-in AI review: the vision judge scored how faithfully the
+    /// fitted render matches the target look. Critique is model English
+    /// (the rationale contract — args ride verbatim, like error text).
+    /// The judgement's accept/revise decision is deliberately NOT carried:
+    /// the prompt pins its thresholds to the score (accept = 85+), so the
+    /// score already says it — a second word would just need translating.
+    AiReview { score: f32, critique: String },
+    /// The AI review call failed — the fit itself already landed; this is
+    /// the informational layer degrading, never the fit erroring.
+    AiReviewFailed(String),
 }
 
 /// The reverse-fit result: recipe + errors + typed notes. `persisted` is
