@@ -323,6 +323,30 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **v0.25.0 RELEASED（2026-08-12，第十六轮=已知项全清）** — tag v0.25.0 →
+  4131bbe；assets 字节验证与本地构建精确相等：cli `297a9e3b…` =
+  28 208 038 B、gui `3528f5ce…` = 37 376 913 B。①**标定复合进求解闭环**
+  （R16 主项）：`fit_recipe_from`/`fit_recipe_zoned_from` + 
+  `pipeline::calibration_recipe`——recipe 从标定基起步，闭环候选渲染全部=画布
+  单程 user(base(x))；滑杆在用户域解（其输入即基曲线输出）、残差曲线经基 LUT
+  重定域（空基跳过重定域保 default 包装 bit-for-bit）；退化拒绝与 do-no-harm
+  终端回退均落**标定观感**（err_after=err_before 恒等式）；v0.24.0 两趟式种子
+  （fit_calibration_seed/seed_from_calibration）删除，其 scale_chroma 钳位次序
+  gap（饱和 fixture 实测至 ~18.7/255）构造性归零——**"报告残差==画布显影链复算"
+  以 1e-6 相等入测**（几何重采样在模型外，先在既有、二阶）。真实对：复合式
+  0.0947→0.0433（此数即画布真残差；v0.24.0 的 0.0378 量在画布从不渲染的域，
+  跨机制不可比）。②**版本条标题/分隔线居中已治**：painter 绝对绘制（零布局
+  参与，26px 桩不变式保持 0 偏移），几何测试断言 title 与卡列中心 ±1px。
+  ③**零区 EV-增益错配全读证伪**（在案项了结）：矩量 EV 仅归一化增益（三通道
+  同除标量、比例不变），CDF 色调解跑在已上增益的渲染上、亮度闭环吸收——非 bug。
+  ④CLI match 保留内嵌预览+后盖戳契约（preview_only 免 demosaic，已验证）。
+  Opus 5 复审 SHIP（域代数逐段确认），must-fix（main.rs 陈注/台账悬空指针）
+  与加固（退化臂 clamp、caller contract、空基跳过、措辞软化）全数折入。门：
+  432 lib + 7 CLI + 72 GUI、clippy 0。**在册可行动项=0**。备注：advisor 存根
+  测 only_a_capability_status… 全套负载下一次偶发（单跑+复跑绿，未触其代码），
+  再现则查；零区分割输入=中性显影（v0.23.x 历史常态，v0.24.0 曾短暂为种子
+  渲染——语义分割对此不敏感，后续真实 zoned 反推可实测覆盖）。
+
 - **v0.24.0 RELEASED（2026-08-12，第十五轮=反推暗闷根修）** — tag v0.24.0 →
   71f9783；assets 字节验证与本地构建精确相等：cli `cf4d51ff…` =
   28 280 676 B、gui `578d8c71…` = 37 450 271 B。**根因（用户 18:38 XMP 复现
@@ -343,10 +367,9 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   431 lib（+stamp 全字段/种子开合/两域等价钉），门 431+7+72、clippy 0。附：
   egui 版本条**布局不变式**探针钉死（滚动区按 26px 声明桩相对行当前高度居
   中再下长，偏移=(行高−26)/2；v0.23.5 等距成立恰因 26−26=0）——标题/分隔线
-  的 ~29px 偏心为**已知装饰性小瑕疵**（要治需 ui.put 绝对定位）。**在册可
-  行动项=1（第十六轮候选）：把标定复合进求解闭环**（fit_recipe 内部渲染带
-  基曲线，钳位次序 gap 从构造上归零并让残差数字精确描述画布；届时两域测试
-  改为严格等价断言）。复审顺手项已折入：calibration_is_neutral 复用
+  的 ~29px 偏心为~~已知装饰性小瑕疵~~（v0.25.0 已治：painter 绝对绘制）。
+  ~~在册可行动项=1（第十六轮候选）：把标定复合进求解闭环~~——**已于 v0.25.0
+  第十六轮闭合（见首条）**。复审顺手项已折入：calibration_is_neutral 复用
   vignette_active/geometry_active、fit_calibration 直接分支快照免双 demosaic、
   actions.rs Before 注释陈账修正、err_before 语义换代（=标定渲染 vs 靶，跨
   版本不可比）在此登记。
@@ -2804,10 +2827,11 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
      分位数均值合并；近恒等→空）。`build_tone_lut` 把它复合在用户色调**之下**
      （final(x)=user(base(x))，LR 的 profile-then-sliders 次序）。**旧存档
      缺字段→空曲线→逐字节按旧样渲染**（硬契约）；~~fit 产物有意不带曲线（自洽
-     完整解）~~——该契约 v0.24.0 作废（R15）：中性起解烧光模型容量是反推暗闷的
-     根因，fit 现从标定渲染起解并把标定盖进产物（pipeline::fit_calibration_seed
-     / stamp_fit_calibration，「当前状态」v0.24.0 条）；is_noop/●判定（新
-     `dirty_vs`）忽略曲线——校准非编辑。
+     完整解）~~——该契约 v0.24.0 作废（R15）、v0.25.0 定形（R16）：中性起解烧光
+     模型容量是反推暗闷的根因，fit 现把标定**复合进求解闭环**（fit_recipe_from
+     + pipeline::calibration_recipe，产物按构造携带标定；CLI match 保留内嵌
+     预览+后盖戳契约 stamp_fit_calibration——「当前状态」v0.25.0/v0.24.0 条）；
+     is_noop/●判定（新 `dirty_vs`）忽略曲线——校准非编辑。
   2. **盖戳权威 = pipeline::produce_recipe**（saved-first：有 recipe.json 用
      其曲线原样含 legacy 空，否则 photo_base_knots 新估计）——GUI/web/CLI 三端
      同一权威；GUI 开照（新照+仅 XMP 恢复盖戳，recipe.json 原样）、web 404/
