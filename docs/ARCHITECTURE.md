@@ -1,9 +1,11 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.23.5 — a GUI patch on v0.23.4: the variant
-> strip's card column now centers with equal air above and below, pinned by
-> a headless geometry regression test; v0.23.4 signed the parody app icon
-> with a small "skymanbp's" wordmark on frames ≥ 64px). The full decode →
+> Status: **implemented** (v0.24.0 — the reverse-fit solves from a
+> CALIBRATION SEED and stamps that calibration into its deliverable
+> (§4.8): fitting from the raw neutral burned the bounded model on
+> re-deriving the camera look, which is what made fitted variants render
+> murky-dark; v0.23.5 fixed the variant strip's vertical geometry, pinned
+> by a headless test). The full decode →
 > advise → verify → render
 > pipeline ships across TWO front-ends — a native desktop GUI (`autoshop-gui`,
 > egui/eframe, which links this library in-process) and the local web UI
@@ -12,7 +14,7 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 428 library + 7 CLI + 72 GUI tests pass in both build configurations.
+> 431 library + 7 CLI + 72 GUI tests pass in both build configurations.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -459,6 +461,28 @@ local correction on top of the global fit via the segmentation sidecar; the
 XMP carries the global fit only, since classic sidecars cannot hold raster
 masks. The GUI's **反推 / Reverse-fit** action drives the same two entry points
 (`fit_recipe`, `fit_recipe_zoned`) and lands the result as an editable variant.
+
+Since v0.24.0 both surfaces solve from a **calibration seed**
+(`pipeline::fit_calibration_seed`): the source is developed once through the
+photo's calibration — base curve, lens profile, as-shot WB anchors, from a
+saved-first authority that falls through to a fresh estimate when the saved
+calibration is all-neutral (`pipeline::fit_calibration`; an earlier
+UNSTAMPED fit recipe would otherwise poison the authority with its empty
+curve) — the solve runs on that camera-look render, and the SAME calibration
+is stamped into the deliverable (`pipeline::stamp_fit_calibration`, one
+helper shared with the CLI). Fitting from the raw neutral spent the bounded
+model (the ±60 saturation cap, the hue-rotation budget, the slider ranges)
+re-deriving the 0.6–1.4 EV camera look before the actual grade got a say —
+measured on a real pair, the neutral-source solve pegged saturation and had
+its cast curves vetoed, while the seeded solve reached a lower residual with
+capacity to spare. The seeded solve domain and the canvas's one-pass
+`user(base(x))` render agree up to `scale_chroma`'s per-channel clamp
+ORDER — quantisation-level on near-grey content, growing with saturation
+under a strongly negative fitted EV (fixtures measure ~6–19/255 mean, with
+per-pixel peaks past 100 codes; the canvas then clips LESS than the solve
+saw — never worse). Both regimes and the double-base failure case are
+pinned by a unit test; composing the base into the solve's own closed-loop
+renders is the registered follow-up.
 
 One deliberate asymmetry: the fit does **not** apply
 `render::limit_tone_sliders` to its proposal, even though the engine applies it
