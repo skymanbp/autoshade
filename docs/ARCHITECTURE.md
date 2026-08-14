@@ -1,6 +1,18 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.26.2 — R20: the VISUAL JUDGE role closes the
+> Status: **implemented** (v0.27.0 — R21: deleted version snapshots STAY
+> deleted. One root cause, three resurrection arms: the backup gate's only
+> "already preserved" dedup witness was the deletable snapshot itself,
+> `claim_version` re-issued a freed number (max+1) so the reborn snapshot
+> wore the deleted label, and the legacy `./out` migration re-published a
+> deleted `v<N>` from the retained legacy file on every open. One
+> mechanism closes all three: a delete registers its number + content
+> fingerprints (raw bytes / structure + raster bytes / xmp) in the
+> develop's permanent `.deleted-versions.json` — numbers are never
+> re-issued, the gate stops AUTO-preserving explicitly discarded content
+> (a discard record, not a recovery copy; explicit 「＋ Save as version」
+> stays ungated), and the migration skips burned numbers (§4.4/store).
+> v0.26.2 — R20: the VISUAL JUDGE role closes the
 > first pixel-level loop on AI output (`advisor::judge`, §3): interactive
 > analyze renders the verified proposal and has the vision model score it
 > — a low score buys ONE guided revision, adopted only if it re-judges at
@@ -420,7 +432,11 @@ $HOME/.local/share/autoshop>/develops/<stem>-<hash of the absolute
 path>/<stem>.xmp` — see `store::store_root_with_trust`, and the trust bullet in
 §3 for why the shared-temp last resort is labelled rather than
 trusted), alongside `recipe.json` (the authoritative develop
-state), version snapshots, mask rasters, `pixels.json` (the baked pixel-master
+state), version snapshots (a deleted snapshot registers its number + content
+fingerprints in the develop's permanent `.deleted-versions.json`: the number
+is never re-issued and the backup gate stops auto-preserving the discarded
+content — a discard record, not a recovery copy), mask rasters, `pixels.json`
+(the baked pixel-master
 link) and, since v0.22.0, `variants.json` — the GUI's variant strip
 (background variants' kind/recipe/raster origin + the active card's
 three-valued kind), which is what lets a 「反推 Reverse-fit」 or 「AI 生成」

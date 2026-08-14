@@ -446,12 +446,20 @@ fn per_user_data_dir() -> Option<PathBuf> {
 }
 
 /// FNV-1a 64-bit. Deliberately hand-rolled: `DefaultHasher` is NOT stable
-/// across Rust releases, and this hash names PERSISTENT directories — a
-/// changed hash would orphan every existing develop on a toolchain bump.
+/// across Rust releases, and this hash names PERSISTENT directories (and
+/// fingerprints the deleted-version registry) — a changed hash would orphan
+/// every existing develop on a toolchain bump.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// The incremental fold behind [`fnv1a64`], for streaming callers
+/// (`file_fnv1a64` hashes rasters chunk-wise in bounded memory).
+fn fnv1a64_update(h: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(h, |h, b| (h ^ u64::from(*b)).wrapping_mul(FNV_PRIME))
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    bytes.iter().fold(OFFSET, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME))
+    fnv1a64_update(FNV_OFFSET, bytes)
 }
 
 /// Stable per-photo key: `<stem>-<16 hex>` from the photo's IDENTITY
@@ -3201,6 +3209,15 @@ pub fn relativize_mask_paths(r: &mut EditRecipe, base: &Path) {
 /// `Err` = an existing save COULD NOT be snapshotted — the caller must then
 /// leave it untouched, because overwriting without the promised backup is
 /// exactly the silent destruction this function exists to prevent.
+///
+/// ONE deliberate exception to that promise (user decision 2026-08-13):
+/// content whose version snapshot the user explicitly DELETED answers
+/// `Ok(None)` too — the caller's write then replaces it with no surviving
+/// copy. Deleting a snapshot means "stop preserving this"; without the
+/// exception the very next gated write re-created the deleted version
+/// verbatim. The match is fingerprint-exact (bytes, or structure + raster
+/// bytes — see [`DeletedVersions`]), and an explicit 「＋ Save as version」
+/// remains ungated.
 pub fn backup_saved_develop(
     src: &Path,
     incoming: Option<&EditRecipe>,
@@ -3309,6 +3326,17 @@ fn backup_store_half_unlocked(
         }
     }
     let dev = develop_dir(src);
+    // Content the user explicitly DISCARDED is not re-preserved (the
+    // deleted-version registry, 2026-08-13): the gate's only "already
+    // preserved" witness used to be the deletable snapshot itself, so a
+    // gate run whose existing save matched a just-deleted version
+    // re-created it — same content, freshly claimed number — on the very
+    // next programmatic write. NB this Ok(None) means the caller's write
+    // then replaces the save with NO surviving copy — the delete said so
+    // (see the [`DeletedVersions`] contract and the gate doc above).
+    if discarded_recipe_matches(&dev, &text, parsed.as_ref()) {
+        return Ok(None);
+    }
     // Atomically RESERVED number (see claim_version): the old list+1 pick
     // let two processes select the same n and silently replace each other's
     // snapshot; the claim also embeds the vMAX refusal.
@@ -3379,17 +3407,29 @@ pub fn claim_version(src: &Path) -> std::io::Result<(u32, PathBuf)> {
     // have recovery delete the brand-new snapshot. Best-effort: a number
     // whose marker cannot be cleared is skipped below, never claimed.
     let _ = recover_pending_version_deletes_unlocked(src);
+    // The floor counts BURNED numbers too — the registry high-water mark,
+    // not just live snapshots: a deleted version's number is never
+    // re-issued (user decision 2026-08-13). The GUI lists versions by bare
+    // `v<n>`, so a recycled label made the next gate snapshot read as "the
+    // delete didn't work". A corrupt registry refuses the claim LOUDLY —
+    // silently re-issuing a possibly-burned number is the very bug this
+    // floor removes.
     let mut last = list_versions(src).last().copied();
+    let reg = read_deleted_versions(&develop_dir(src))?;
+    if reg.hwm > 0 && last.is_none_or(|l| l < reg.hwm) {
+        last = Some(reg.hwm);
+    }
     loop {
         if last == Some(u32::MAX) {
             return Err(std::io::Error::other(
-                "version namespace exhausted (a v4294967295 snapshot exists)",
+                "version namespace exhausted (a v4294967295 snapshot exists or existed)",
             ));
         }
         let n = last.unwrap_or(0).saturating_add(1);
         let dst = version_target(src, n);
         if deleting_marker(src, n).exists() {
-            // A marker that survived a failed resume owns this number.
+            // A marker that survived a failed resume owns this number (its
+            // registry entry lands when the resume finally succeeds).
             last = Some(n);
             continue;
         }
@@ -3462,6 +3502,14 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
             // An unreadable snapshot cannot prove preservation — preserve anew.
             Err(_) => break,
         }
+    }
+    // The deleted-version registry (2026-08-13): sidecar bytes the user
+    // explicitly discarded from the version list are not re-preserved. The
+    // live witness above IS the deletable `v<n>.<stem>.xmp` — deleting the
+    // version deleted the proof, and the next gated write resurrected the
+    // snapshot byte-for-byte under a freshly recycled number.
+    if discarded_xmp_matches(&dev, &text) {
+        return Ok(None);
     }
     let mut derived = crate::xmp::xmp_to_recipe(&text);
     // A6 disclosure: numbers the import cannot read become silent neutrals
@@ -3579,6 +3627,10 @@ pub fn rollback_frozen_rasters(dev: &Path, n: u32) {
 }
 
 /// Delete snapshot `n`: its recipe file plus any `v<n>.*` frozen rasters.
+/// Registers the number and content fingerprints in the develop's
+/// `.deleted-versions.json` first — the number is never re-issued and the
+/// backup gate stops auto-preserving the discarded content (see
+/// [`DeletedVersions`]).
 pub fn delete_version(src: &Path, n: u32) -> std::io::Result<()> {
     with_develop_lock(src, DevelopLockMode::Wait, || delete_version_unlocked(src, n))
 }
@@ -3591,6 +3643,265 @@ fn deleting_marker(src: &Path, n: u32) -> PathBuf {
     develop_dir(src).join(format!(".deleting.v{n}"))
 }
 
+/// The version-delete REGISTRY (user decision 2026-08-13): one
+/// `.deleted-versions.json` per develop dir recording every deleted
+/// snapshot — its number and its content FINGERPRINTS (fnv1a64 hex), never
+/// the payload. Two duties:
+///
+/// * `hwm` is the claim floor: a deleted number is never re-issued — the
+///   GUI lists versions by bare `v<n>`, so a recycled label made the next
+///   gate snapshot read as "the delete didn't work";
+/// * the fingerprints let the backup gate keep recognising content the
+///   user explicitly discarded: its only "already preserved" dedup witness
+///   used to be the deletable snapshot itself, so the next gated
+///   programmatic write (analyze persist / reverse-fit / paste / CLI /
+///   serve / legacy migration) re-preserved the very content the user had
+///   just deleted.
+///
+/// This is a DISCARD record, not a recovery copy: the deleted snapshot's
+/// bytes — recipe, frozen rasters, xmp witness (a Lightroom sidecar's only
+/// preserved spelling included) — are really gone, and deleting a version
+/// frees its space. An explicit 「＋ Save as version」 still saves anything:
+/// the fingerprints gate only AUTOMATIC preservation. Every fingerprint
+/// fails toward preservation — an unreadable registry, a hash the current
+/// schema no longer reproduces, or an unprovable raster set each mean
+/// "preserve anew", never "suppress".
+///
+/// The dot name keeps the file outside the `v<N>.` namespace the sweep
+/// removes and `list_versions` parses; `adoption_skips` does not match it,
+/// so adoption carries it (and its SYNCHRONIZE pass cannot strand a
+/// destination-only copy the source has since grown); `clear_develop`'s
+/// explicit file list leaves it standing exactly like the versions
+/// themselves.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct DeletedVersions {
+    /// Highest number ever burned by a delete (live snapshots are counted
+    /// separately at claim time).
+    #[serde(default)]
+    hwm: u32,
+    #[serde(default)]
+    deleted: Vec<DeletedVersion>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DeletedVersion {
+    n: u32,
+    /// fnv1a64 (hex) of the snapshot recipe's raw bytes — the arm that
+    /// catches the gate's unparsable-copy snapshots byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recipe_raw: Option<String>,
+    /// fnv1a64 (hex) of the parsed recipe re-serialized compactly with its
+    /// `v<n>.` frozen raster prefixes stripped back to bare names — the
+    /// structural arm (schema drift changes this hash: fail-open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recipe_norm: Option<String>,
+    /// Combined fnv1a64 (hex) over the sorted (bare name, raster-bytes
+    /// fnv1a64) pairs of the in-dev rasters the snapshot referenced. Equal
+    /// recipe structure alone is NOT proof (a released claim can re-mint a
+    /// name with different bytes; adoption replaces rasters in place), so
+    /// the bytes join the fingerprint. Absent = unprovable at delete time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rasters: Option<String>,
+    /// fnv1a64 (hex) of the version's `v<n>.<stem>.xmp` witness bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    xmp: Option<String>,
+}
+
+fn deleted_versions_path(dev: &Path) -> PathBuf {
+    dev.join(".deleted-versions.json")
+}
+
+/// NotFound → empty registry; unreadable/corrupt → Err. The WRITER
+/// (`register_deleted_version`) and the claim floor propagate that Err —
+/// the store's "unreadable ≠ absent" refusal, loud — while the gate and
+/// migration PROBES treat it as no-match instead: their fail direction is
+/// "preserve / migrate anew", and the claim right behind them reports the
+/// same corruption loudly.
+fn read_deleted_versions(dev: &Path) -> std::io::Result<DeletedVersions> {
+    match read_text_capped(&deleted_versions_path(dev), MAX_STORE_JSON) {
+        Ok(t) => serde_json::from_str(&t).map_err(|e| {
+            std::io::Error::other(format!(
+                "the deleted-version registry {} is unreadable ({e}) — repair or remove it by hand",
+                deleted_versions_path(dev).display()
+            ))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DeletedVersions::default()),
+        Err(e) => Err(e),
+    }
+}
+
+fn hex64(h: u64) -> String {
+    format!("{h:016x}")
+}
+
+/// Strip v<n>'s frozen raster prefixes back to the bare live names.
+fn strip_frozen_raster_prefix(r: &mut EditRecipe, n: u32) {
+    let frozen = format!("v{n}.");
+    for m in r.masks.iter_mut() {
+        for path in m.bitmap_paths_mut() {
+            if let Some(bare) = path.strip_prefix(frozen.as_str()) {
+                *path = bare.to_string();
+            }
+        }
+    }
+}
+
+/// The structural fingerprint: compact re-serialization of the parsed
+/// recipe. None = unserializable — fail toward preservation.
+fn recipe_struct_hash(r: &EditRecipe) -> Option<String> {
+    serde_json::to_string(r).ok().map(|j| hex64(fnv1a64(j.as_bytes())))
+}
+
+/// Streaming file hash — bounded memory whatever the raster size. None on
+/// any read failure (missing file included).
+fn file_fnv1a64(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut h = FNV_OFFSET;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => return Some(h),
+            Ok(k) => h = fnv1a64_update(h, &buf[..k]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Fingerprint of the raster BYTES a (bare-named) recipe references inside
+/// `dev` — the same bare-or-absolute-inside-dev name rule
+/// [`snapshot_rasters`] freezes by; anything else (legacy `out/…`
+/// relatives) is identified by its reference string alone, which the
+/// struct hash already covers. `frozen_n` reads each name's `v<n>.<name>`
+/// frozen copy instead of the live file (the delete side). Some(base) for
+/// a recipe with no such references; None the moment ONE referenced raster
+/// cannot be read — an unprovable set must fail toward preservation.
+fn raster_set_hash(r: &EditRecipe, dev: &Path, frozen_n: Option<u32>) -> Option<String> {
+    let mut pairs: Vec<(String, u64)> = Vec::new();
+    let mut clone = r.clone();
+    for m in clone.masks.iter_mut() {
+        for path in m.bitmap_paths_mut() {
+            let p = Path::new(path.as_str());
+            let name = if p.is_absolute() {
+                (p.parent() == Some(dev)).then(|| p.file_name()).flatten()
+            } else if p.parent().is_none_or(|x| x.as_os_str().is_empty()) {
+                p.file_name()
+            } else {
+                None
+            };
+            let Some(name) = name.and_then(|x| x.to_str()) else { continue };
+            let file = match frozen_n {
+                Some(n) => dev.join(format!("v{n}.{name}")),
+                None => dev.join(name),
+            };
+            pairs.push((name.to_string(), file_fnv1a64(&file)?));
+        }
+    }
+    pairs.sort();
+    let mut h = FNV_OFFSET;
+    for (name, fh) in &pairs {
+        h = fnv1a64_update(h, name.as_bytes());
+        h = fnv1a64_update(h, &fh.to_le_bytes());
+    }
+    Some(hex64(h))
+}
+
+/// Record v<n> as deleted — burn its number and fingerprint its content —
+/// BEFORE the sweep destroys the sources. A read-modify-write of the
+/// registry under the develop lock every caller already holds; idempotent
+/// by number (a resume keeps the crashed attempt's richer entry).
+/// `must_exist` mirrors [`sweep_version_unlocked`]: a fresh delete
+/// propagates a missing recipe as its stale-list NotFound, while a RESUME
+/// (or a pre-registry `.deleting.v<n>` marker) burns the number with no
+/// fingerprints — half-swept content cannot be fingerprinted, only kept
+/// unclaimable. An UNREADABLE snapshot burns fingerprint-less the same
+/// way: refusing the user's delete over a fingerprint we cannot take
+/// would make a corrupt version undeletable.
+fn register_deleted_version(src: &Path, n: u32, must_exist: bool) -> std::io::Result<()> {
+    let dev = develop_dir(src);
+    let mut reg = read_deleted_versions(&dev)?;
+    let known = reg.deleted.iter().any(|e| e.n == n);
+    if known && reg.hwm >= n {
+        return Ok(());
+    }
+    if !known {
+        let mut entry = DeletedVersion {
+            n,
+            recipe_raw: None,
+            recipe_norm: None,
+            rasters: None,
+            xmp: None,
+        };
+        match read_text_capped(&version_target(src, n), MAX_STORE_JSON) {
+            Ok(text) => {
+                entry.recipe_raw = Some(hex64(fnv1a64(text.as_bytes())));
+                if let Ok(mut bare) = serde_json::from_str::<EditRecipe>(&text) {
+                    strip_frozen_raster_prefix(&mut bare, n);
+                    entry.recipe_norm = recipe_struct_hash(&bare);
+                    entry.rasters = raster_set_hash(&bare, &dev, Some(n));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if must_exist {
+                    return Err(e);
+                }
+            }
+            Err(_) => {}
+        }
+        let stem = crate::pipeline::stem(src);
+        entry.xmp = file_fnv1a64(&dev.join(format!("v{n}.{stem}.xmp"))).map(hex64);
+        reg.deleted.push(entry);
+    }
+    reg.hwm = reg.hwm.max(n);
+    let json = serde_json::to_string_pretty(&reg).map_err(std::io::Error::other)?;
+    durable_write(&deleted_versions_path(&dev), json.as_bytes())
+}
+
+/// Was this very save explicitly discarded by a version delete? Raw-bytes
+/// arm first (the unparsable-copy snapshots), then the structural arm —
+/// which additionally requires the referenced raster BYTES to match: equal
+/// references alone are not proof the pixels are the ones the user
+/// discarded. Registry unreadable → false (preserve anew; the claim right
+/// behind this probe reports the same corruption loudly).
+fn discarded_recipe_matches(dev: &Path, text: &str, parsed: Option<&EditRecipe>) -> bool {
+    let Ok(reg) = read_deleted_versions(dev) else { return false };
+    if reg.deleted.is_empty() {
+        return false;
+    }
+    let raw = hex64(fnv1a64(text.as_bytes()));
+    if reg.deleted.iter().any(|e| e.recipe_raw.as_deref() == Some(raw.as_str())) {
+        return true;
+    }
+    let Some(parsed) = parsed else { return false };
+    let Some(norm) = recipe_struct_hash(parsed) else { return false };
+    // The live raster hash is computed at most ONCE, and only after a
+    // structural hit (reading raster bytes on every gated write would tax
+    // the common no-match path).
+    let mut live_rasters: Option<Option<String>> = None;
+    for e in &reg.deleted {
+        if e.recipe_norm.as_deref() != Some(norm.as_str()) {
+            continue;
+        }
+        let Some(stone) = e.rasters.as_deref() else { continue };
+        let live = live_rasters
+            .get_or_insert_with(|| raster_set_hash(parsed, dev, None))
+            .as_deref();
+        if live == Some(stone) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The xmp arm of the discard probe: sidecar bytes the user discarded with
+/// a version are not re-preserved from a file that still spells them.
+fn discarded_xmp_matches(dev: &Path, text: &str) -> bool {
+    let Ok(reg) = read_deleted_versions(dev) else { return false };
+    let h = hex64(fnv1a64(text.as_bytes()));
+    reg.deleted.iter().any(|e| e.xmp.as_deref() == Some(h.as_str()))
+}
+
 fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
     // TRANSACTION MARKER FIRST (L03): a kill mid-sweep used to leave a
     // half-version — recipe alive with rasters gone (listed, loadable,
@@ -3599,6 +3910,11 @@ fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
     // number silently recyclable). The marker records the intent durably;
     // the sweep resumes at the next claim or locked recovery touch.
     durable_write(&deleting_marker(src, n), format!("deleting v{n}\n").as_bytes())?;
+    // REGISTRY SECOND, while the fingerprint sources still exist — the
+    // sweep destroys the very bytes the gate needs to keep recognising as
+    // "explicitly discarded". A failure leaves the marker: the version
+    // stays unlisted and recovery retries the whole tail.
+    register_deleted_version(src, n, true)?;
     sweep_version_unlocked(src, n, true)?;
     let _ = std::fs::remove_file(deleting_marker(src, n));
     settle_consumed_marker(&deleting_marker(src, n));
@@ -3686,7 +4002,13 @@ fn recover_pending_version_deletes_unlocked(src: &Path) -> std::io::Result<()> {
     }
     let mut failure: Option<std::io::Error> = None;
     for n in pending {
-        match sweep_version_unlocked(src, n, false) {
+        // Burn the number BEFORE finishing the sweep (idempotent; a resume
+        // whose recipe already fell registers fingerprint-less — the number
+        // stays burned even with the content gone, and a pre-registry
+        // marker gets its entry here too).
+        match register_deleted_version(src, n, false)
+            .and_then(|()| sweep_version_unlocked(src, n, false))
+        {
             Ok(()) => {
                 let _ = std::fs::remove_file(deleting_marker(src, n));
                 settle_consumed_marker(&deleting_marker(src, n));
@@ -4270,10 +4592,27 @@ fn migrate_legacy_jobs(
         let _ = durable_write(&marker, format!("{}\n", abs_src.display()).as_bytes());
     }
 
+    // Version snapshots the user DELETED are not re-migrated (adversarial
+    // review HIGH-1 — the third resurrection arm): legacy bytes are
+    // RETAINED by design, so "central v<N> missing" is ambiguous between
+    // "never migrated" and "deleted after migration", and the exists-check
+    // below re-published a deleted version on every open. The registry
+    // disambiguates; unreadable → migrate as before (fail-open — the claim
+    // and delete paths report that corruption loudly).
+    let burned = read_deleted_versions(&dev).unwrap_or_default();
     let mut moved = false;
     let mut failed = false;
     for (from, to_name, is_recipe) in jobs {
         let to = dev.join(&to_name);
+        if let Some(n) = to_name
+            .strip_prefix("v")
+            .and_then(|rest| rest.strip_suffix(".recipe.json"))
+            .and_then(|digits| digits.parse::<u32>().ok())
+            && (burned.deleted.iter().any(|e| e.n == n)
+                || dev.join(format!(".deleting.v{n}")).exists())
+        {
+            continue;
+        }
         if to.exists() {
             // The central copy is the post-migration truth — never clobber it
             // with an older legacy file. The legacy file stays for the read
@@ -4445,12 +4784,13 @@ mod tests {
         assert_ne!(plain, photo_key(Path::new(r"D:\other\DSC001.NEF")));
     }
 
-    /// L03: a killed version delete hides the half-version from the list,
-    /// resumes at the next claim, and releases the number only once the
-    /// sweep truly finished — so a resumed sweep can never eat a fresh
-    /// snapshot that took a recycled number.
+    /// L03: a killed version delete hides the half-version from the list and
+    /// resumes at the next claim — and the number is BURNED for good (the
+    /// 2026-08-13 tombstone contract), so a resumed sweep can never eat a
+    /// fresh snapshot and a recycled label can never impersonate a deleted
+    /// version.
     #[test]
-    fn a_killed_version_delete_resumes_before_its_number_is_reused() {
+    fn a_killed_version_delete_resumes_and_its_number_stays_burned() {
         let dir = std::env::temp_dir().join("autoshop-store-test-vdel-marker");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -4472,11 +4812,14 @@ mod tests {
         let (n, claimed) = claim_version(&raw).unwrap();
         assert!(!dev.join("v2.mask-sky.png").exists(), "the claim resumed the sweep first");
         assert!(!dev.join(".deleting.v2").exists(), "the finished sweep consumed its marker");
+        let reg = read_deleted_versions(&dev).unwrap();
+        assert_eq!(reg.hwm, 2, "the resumed delete burned its number in the registry");
+        assert!(reg.deleted.iter().any(|e| e.n == 2));
         assert_eq!(
-            n, 2,
-            "a number is recycled only AFTER its delete truly finished — with the marker gone that is safe"
+            n, 3,
+            "a deleted number is never re-issued — the claim moves past the burned v2"
         );
-        assert!(claimed.exists(), "the claim file holds the recycled slot");
+        assert!(claimed.exists(), "the claim file holds the fresh slot");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
@@ -6038,6 +6381,33 @@ mod tests {
         // Idempotent: a second call finds nothing legacy and reports
         // (nothing moved, nothing failed).
         assert_eq!(migrate_legacy_in(&root, Path::new("out"), &src), (false, false));
+
+        // HIGH-1 (the third resurrection arm): a version the user DELETED
+        // stays deleted across the next migrate scan — the retained legacy
+        // v2 file must not re-publish it. Simulated at file level (the
+        // delete API keys off the global store root, this fixture off a
+        // temp root): central v2 swept, its delete registered.
+        std::fs::remove_file(dev.join("v2.recipe.json")).unwrap();
+        let reg = DeletedVersions {
+            hwm: 2,
+            deleted: vec![DeletedVersion {
+                n: 2,
+                recipe_raw: None,
+                recipe_norm: None,
+                rasters: None,
+                xmp: None,
+            }],
+        };
+        std::fs::write(
+            deleted_versions_path(&dev),
+            serde_json::to_string_pretty(&reg).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(migrate_legacy_in(&root, Path::new("out"), &src), (false, false));
+        assert!(
+            !dev.join("v2.recipe.json").exists(),
+            "a deleted version is not re-migrated from the retained legacy file"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6481,6 +6851,21 @@ mod tests {
         delete_version(&src, 1).unwrap();
         assert!(!version_target(&src, 1).exists());
         assert!(!dev.join("v1.mask-zone-sky.png").exists());
+        // The discard fingerprint includes the raster BYTES (NIT-9): the
+        // deleted v1 froze the OLD pixels, the live raster now holds NEW —
+        // structurally equal is NOT the discarded content, so the gate
+        // still preserves it, under a fresh number, never the burned v1.
+        assert_eq!(backup_saved_develop(&src, None).unwrap(), Some(2));
+        assert_eq!(list_versions(&src), vec![2]);
+        // Deleting THAT snapshot (whose frozen raster == the live bytes)
+        // tombstones the save for real: no auto re-preservation...
+        delete_version(&src, 2).unwrap();
+        assert_eq!(backup_saved_develop(&src, None).unwrap(), None);
+        assert_eq!(list_versions(&src), Vec::<u32>::new());
+        // ...while the EXPLICIT save path stays ungated — the claim works
+        // and moves past both burned numbers.
+        let (n, _) = claim_version(&src).unwrap();
+        assert_eq!(n, 3, "explicit 「＋ Save as version」 is never blocked by the registry");
         let _ = std::fs::remove_dir_all(&dev);
     }
 
