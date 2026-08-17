@@ -1356,6 +1356,36 @@ mod tests {
 
     use super::*;
 
+    /// `match --target` names a FINISHED photo, so the CLI hands it to the
+    /// baked decoder. When the user points it at a RAW instead (an easy
+    /// mistake — both live in the same folder), the refusal must SAY that,
+    /// before the fit is paid for. Before the decode gate this surfaced as
+    /// "The image format could not be determined", which reads like a corrupt
+    /// file rather than the wrong kind of file.
+    #[test]
+    fn match_refuses_a_raw_target_readably() {
+        let dir = std::env::temp_dir().join(format!("autoshop-match-rawtgt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The SOURCE is a baked photo so the run reaches the target load at
+        // all (a real decode, no API, no writes).
+        let src = dir.join("source.png");
+        image::RgbImage::from_pixel(8, 6, image::Rgb([120, 120, 120])).save(&src).unwrap();
+        let target = dir.join("reference.ARW");
+        std::fs::write(&target, b"not really a raw").unwrap();
+
+        let e = format!(
+            "{:#}",
+            match_cmd(&src, &target, false, false, false, false, None)
+                .expect_err("a RAW target must refuse")
+        );
+        assert!(
+            e.contains("RAW") && e.contains("reference.ARW"),
+            "the refusal must name the file and what is wrong with it: {e}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     #[cfg(windows)]
     fn same_path_folds_case_of_an_absent_leaf() {

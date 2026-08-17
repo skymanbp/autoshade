@@ -405,3 +405,98 @@ pub(crate) fn extract_output_text(v: &Value) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recipe::LocalAdjustment;
+    use std::collections::BTreeSet;
+
+    /// Recipe fields the ENGINE owns, which the advisor schema deliberately
+    /// never asks the model for: the as-shot WB anchor and the camera base
+    /// curve are stamped per photo, and the in-camera lens profile comes from
+    /// the RAW's own metadata. `pipeline::carry_over_unrepresentable` re-attaches
+    /// them after every refine.
+    const ENGINE_ONLY: &[&str] = &[
+        "as_shot_k",
+        "as_shot_tint",
+        "base_curve",
+        "lens_profile",
+        // R23-1 将把 lens 三项带「未表态」表达进 schema 后从白名单移除
+        // (a bare `required` entry would let a proposal silently reset a
+        // hand-dialled correction — see the plan's Refine-overwrite trap).
+        "lens_vignette",
+        "lens_vignette_mid",
+        "lens_distortion",
+    ];
+
+    /// The same class of fields on a local adjustment: extra mask components,
+    /// the eye toggle, the zoned fit's linear-light gains and the semantic
+    /// role. The schema cannot express them, so `carry_over_unrepresentable`
+    /// carries them (its `schema_loses` predicate names the identical set —
+    /// see `pipeline.rs`, "it carries no components, enabled toggle, radial
+    /// angle, colour gains or mask role").
+    ///
+    /// `components`/`color_gains`/`role` are PERMANENT engine-only (explicit
+    /// design markers in recipe.rs). `enabled` is TEMPORARY like the lens trio
+    /// above — R23-1 puts it into the schema (with the same carry-over update)
+    /// and removes it from this whitelist, so this test goes red on that round
+    /// by design.
+    const LOCAL_ENGINE_ONLY: &[&str] = &["components", "enabled", "color_gains", "role"];
+
+    /// Serialised top-level keys of a value, as a set.
+    fn serde_keys(v: &Value) -> BTreeSet<String> {
+        v.as_object().expect("struct serialises to an object").keys().cloned().collect()
+    }
+
+    /// The `required` array of a strict-mode object schema, as a set.
+    fn required_keys(schema: &Value) -> BTreeSet<String> {
+        schema["required"]
+            .as_array()
+            .expect("strict schema lists every property in `required`")
+            .iter()
+            .map(|k| k.as_str().expect("required entries are strings").to_string())
+            .collect()
+    }
+
+    /// Compare two key sets BOTH ways and report the difference itself — a
+    /// count check passes on a rename, and "the schema is one short" never
+    /// says which field the model can no longer set.
+    fn assert_same(what: &str, serde: &BTreeSet<String>, schema: &BTreeSet<String>) {
+        let missing: Vec<&str> = serde.difference(schema).map(String::as_str).collect();
+        let extra: Vec<&str> = schema.difference(serde).map(String::as_str).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "{what}: schema↔recipe drift — in the recipe but not in the schema \
+(the model can never set these): {missing:?}; in the schema but not in the recipe \
+(a strict-mode request the deserialize will reject): {extra:?}",
+        );
+    }
+
+    /// The schema is a HAND-WRITTEN mirror of `recipe.rs` (two of them: the
+    /// recipe and the nested local adjustment). A field added to the recipe
+    /// without its schema line is invisible to the AI forever — silently, with
+    /// no compiler help — so pin both mirrors to the serde shape.
+    #[test]
+    fn schema_mirrors_the_recipe_shape() {
+        let schema = edit_recipe_schema();
+
+        let mut recipe = serde_keys(&serde_json::to_value(EditRecipe::default()).unwrap());
+        for k in ENGINE_ONLY {
+            assert!(recipe.remove(*k), "ENGINE_ONLY lists `{k}`, which the recipe no longer has");
+        }
+        assert_same("EditRecipe", &recipe, &required_keys(&schema));
+
+        // Reach the local-adjustment mirror THROUGH the top-level schema: an
+        // orphaned second copy would pass a test that rebuilt it directly.
+        let local_schema = &schema["properties"]["masks"]["items"];
+        let mut local = serde_keys(&serde_json::to_value(LocalAdjustment::default()).unwrap());
+        for k in LOCAL_ENGINE_ONLY {
+            assert!(
+                local.remove(*k),
+                "LOCAL_ENGINE_ONLY lists `{k}`, which LocalAdjustment no longer has"
+            );
+        }
+        assert_same("LocalAdjustment", &local, &required_keys(local_schema));
+    }
+}

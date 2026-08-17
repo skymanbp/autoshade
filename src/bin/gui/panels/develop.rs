@@ -1043,21 +1043,28 @@ impl AutoshopApp {
             }
             // --- AI segmentation → bitmap masks (gap batch A②) ---------------
             ui.horizontal(|ui| {
-                let can_seg = !self.busy && self.base_preview.is_some();
+                // CAPABILITY, not just state: without the python sidecar on
+                // disk these two can only fail, so the button says so up front
+                // instead of spending the click on a "not found at …" toast.
+                let has_helper = segment_helper_available();
+                let can_seg = !self.busy && self.base_preview.is_some() && has_helper;
+                let missing = tr(lang,
+                    "this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
+                );
                 if ui
                     .add_enabled(can_seg, egui::Button::new(tr(lang, "🤖 AI select subject")))
-                    .on_hover_text(tr(lang,
+                    .on_hover_text(if has_helper { tr(lang,
                         "U²-Net salient-subject segmentation → bitmap mask (python sidecar: pip install rembg; first run auto-downloads the model to ~/.u2net)",
-                    ))
+                    ) } else { missing })
                     .clicked()
                 {
                     self.start_segment("subject", "Subject");
                 }
                 if ui
                     .add_enabled(can_seg, egui::Button::new(tr(lang, "☁ AI select sky")))
-                    .on_hover_text(tr(lang,
+                    .on_hover_text(if has_helper { tr(lang,
                         "SegFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~14MB model)",
-                    ))
+                    ) } else { missing })
                     .clicked()
                 {
                     self.start_segment("sky", "Sky");

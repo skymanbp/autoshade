@@ -376,6 +376,17 @@ histogram with clipping stats, and EXIF (camera/lens/ISO/shutter/aperture/
 as-shot WB). Baked sources (PNG/TIFF/JPEG) skip this and load directly via the
 `image` crate with neutral metadata.
 
+**One dispatch, enforced at the gate (R22).** "A RAW" has a single definition
+app-wide (`decode::is_raw`), and the two ways into pixels are separate by
+construction: a RAW must be demosaiced by the develop engine, a baked raster is
+decoded by the `image` crate. `decode::load_image` therefore **refuses a RAW by
+name** instead of failing later as an unrecognised format, and any consumer that
+may hold either kind asks `render::source_pixels(path, cap)` — the one two-armed
+branch (RAW → neutral `render_to_image` at `cap`; baked → `load_image`,
+thumbnailed to `cap` and only ever DOWN). A lib test patrols the remaining
+`load_image` call sites so a new consumer cannot re-copy the branch: hand-copying
+it is what silently broke full-resolution AI mask refine in v0.22.
+
 ### 4.2 Vision advisor — image processing (M1)
 
 A vision-capable OpenAI model receives the preview + metadata and returns an

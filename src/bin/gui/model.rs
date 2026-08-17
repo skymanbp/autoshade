@@ -383,12 +383,8 @@ pub(crate) enum Msg {
     /// AI segmentation finished: (mask display name, grayscale raster path)
     /// — attached to the recipe as a `MaskGeometry::Bitmap` local mask.
     Segmented(anyhow::Result<(String, PathBuf)>),
-    /// Full-res mask refine finished: (the initiating mask index, the stored
-    /// raster reference the job started from, the refined raster's path).
-    /// Landing validates index AND reference together — the list may have
-    /// changed mid-flight, and a bare path search could repoint the WRONG
-    /// mask when two masks legitimately reference one raster (Codex R9-1).
-    MaskRefined(anyhow::Result<(usize, String, PathBuf)>),
+    /// Full-res mask refine finished — see [`MaskRefineOutcome`].
+    MaskRefined(anyhow::Result<MaskRefineOutcome>),
     /// Batch render advanced: `done` of `total` photos finished (ok or err).
     BatchProgress { done: usize, total: usize },
     /// Reverse-fit finished — see [`FitOutcome`]: FACTS, not prose, so the
@@ -413,6 +409,24 @@ pub(crate) enum Msg {
     /// A batch recipe paste finished — counts and per-photo details,
     /// rendered at landing (L12#4).
     Pasted(anyhow::Result<PasteOutcome>),
+}
+
+/// What the full-resolution mask refine did — FACTS, not prose (L12#4, the
+/// same rule [`FitOutcome`] follows): the worker runs for as long as a 61 MP
+/// develop takes, so the sentence is composed at LANDING in the language live
+/// then, never with the language captured at spawn.
+pub(crate) enum MaskRefineOutcome {
+    /// (the initiating mask index, the stored raster reference the job started
+    /// from, the refined raster's path). Landing validates index AND reference
+    /// together — the list may have changed mid-flight, and a bare path search
+    /// could repoint the WRONG mask when two masks legitimately reference one
+    /// raster (Codex R9-1).
+    Refined(usize, String, PathBuf),
+    /// The guide's own resolution would make a raster past the mask-raster
+    /// budget (`render::mask_raster_fits_budget`) — one no later open or export
+    /// could ever load. Refused with NOTHING written; the dimensions ride along
+    /// because the refusal has to say which source it is talking about.
+    OverBudget { w: u32, h: u32 },
 }
 
 /// One reverse-fit landing fact (L12#4): the worker records WHAT happened

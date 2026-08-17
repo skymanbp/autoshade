@@ -1743,9 +1743,21 @@ impl AutoshopApp {
 
     /// `Msg::MaskRefined` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_mask_refined(&mut self, lang: Lang, res: anyhow::Result<(usize, String, PathBuf)>) {
+    fn on_mask_refined(&mut self, lang: Lang, res: anyhow::Result<MaskRefineOutcome>) {
                 match res {
-                    Ok((idx, stored_ref, out)) => {
+                    Ok(MaskRefineOutcome::OverBudget { w, h }) => {
+                        // Nothing was written (masks.rs refuses before the
+                        // claim): the mask keeps the raster it had.
+                        self.busy = false;
+                        let t = trf(
+                            lang,
+                            "this source is {w}×{h} — a full-resolution refined mask would exceed the mask budget and could never be read back",
+                            &[("w", &w.to_string()), ("h", &h.to_string())],
+                        );
+                        self.toast(ToastKind::Error, t.clone());
+                        self.status = t;
+                    }
+                    Ok(MaskRefineOutcome::Refined(idx, stored_ref, out)) => {
                         // Index + stored reference validated TOGETHER: the
                         // strip may have been edited while the worker decoded
                         // the full-res source, and a bare path search could

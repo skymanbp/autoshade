@@ -294,6 +294,11 @@ fn develop_peak_bytes(
 /// Also applies the EXIF orientation: phone/Lightroom JPEGs store rotation as
 /// metadata the decoder does NOT apply — imported photos rendered sideways
 /// (the RAW path already orients via the sensor metadata).
+///
+/// BAKED ONLY: a camera RAW is REFUSED here (see [`load_image_gated`]) — it has
+/// no `image`-crate decoder, so the honest gate is a named error, not a probe
+/// failure. Callers that may hold either kind of source want the one dispatch,
+/// [`crate::render::source_pixels`].
 pub fn load_image(path: &Path) -> Result<DynamicImage> {
     load_image_gated(path, false)
 }
@@ -312,6 +317,20 @@ pub fn load_image_for_develop(path: &Path) -> Result<DynamicImage> {
 
 fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     use image::ImageDecoder as _;
+    // The "RAW → develop engine / baked → here" dispatch, enforced at the
+    // GATE instead of trusting every caller to hand-copy an `is_raw` branch.
+    // A missed branch used to reach `ImageReader` with a .ARW and surface as
+    // an unrelated format/probe error (v0.22's mask-refine worker: "The image
+    // format could not be determined" for a photo the app had just developed
+    // on screen) — the class this refuses by name, wherever it happens.
+    if is_raw(path) {
+        anyhow::bail!(
+            "{} is a camera RAW — this path reads BAKED rasters (PNG/TIFF/JPEG) only. \
+             Develop it through render::render_to_image / render::source_pixels (or \
+             decode::decode_any for the sensor data)",
+            path.display()
+        );
+    }
     let mut reader = image::ImageReader::open(path)
         .with_context(|| format!("open image {}", path.display()))?;
     let mut limits = image::Limits::default();
@@ -968,6 +987,45 @@ mod tests {
     }
 
     use super::*;
+
+    /// The baked-only gate: `load_image` must refuse a camera RAW BY NAME, at
+    /// the door, before any decoder is asked.
+    ///
+    /// This is the v0.22 mask-refine bug's root: the GUI worker handed a .ARW
+    /// to `load_image`, whose `ImageReader` has no RAW decoder, so the user saw
+    /// "The image format could not be determined" for a photo the app was
+    /// developing on screen at that moment. A named refusal (and the pointer to
+    /// the develop entry points) is what makes the next missed dispatch
+    /// diagnosable in one read of the toast.
+    #[test]
+    fn load_image_refuses_a_camera_raw_by_name() {
+        let dir = std::env::temp_dir().join(format!("autoshop-load-raw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Every RAW extension the app claims, upper and lower case — one
+        // predicate app-wide (`is_raw`), so the gate must not care which.
+        for name in ["a.arw", "b.ARW", "c.dng", "d.NEF", "e.cr3", "f.raf", "g.rw2", "h.orf"] {
+            let p = dir.join(name);
+            // Real bytes on disk: the refusal must come from the EXTENSION, not
+            // from a missing file or an unparseable header.
+            std::fs::write(&p, b"not really a raw").unwrap();
+            for (what, e) in [
+                ("load_image", load_image(&p).unwrap_err()),
+                ("load_image_for_develop", load_image_for_develop(&p).unwrap_err()),
+            ] {
+                let e = format!("{e:#}");
+                assert!(
+                    e.contains("RAW") && e.contains("render_to_image"),
+                    "{what}({name}) must name the RAW and the way out: {e}"
+                );
+            }
+        }
+        // A baked raster still loads through the very same gate.
+        let png = dir.join("baked.png");
+        image::RgbImage::from_pixel(4, 3, image::Rgb([9, 9, 9])).save(&png).unwrap();
+        assert_eq!(load_image(&png).unwrap().dimensions(), (4, 3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `preview_only` and `embedded_preview` share `camera_rendition` and
     /// differ in EXACTLY two ways. Both differences are load-bearing and

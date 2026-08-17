@@ -827,24 +827,16 @@ fn develop_base(raw: &Path) -> Result<Arc<DynamicImage>> {
     static BUILD: Mutex<()> = Mutex::new(());
     let _serialised = BUILD.lock().unwrap_or_else(|p| p.into_inner());
     cached_base(CACHE.get_or_init(Default::default), 4, raw, || {
-        let full = if decode::is_raw(raw) {
-            // Develop AT the preview edge (the cap runs before tone/geometry)
-            // — the old full-sensor develop existed only to be thumbnailed.
-            render::render_to_image(raw, &EditRecipe::default(), None, Some(PREVIEW_EDGE))?
-        } else {
-            decode::load_image(raw)?
-        };
-        // `thumbnail` (not `resize`) for the big downscale, like the GUI — and
-        // only ever DOWN: a source already under the edge is left alone, since
-        // its own pixels beat any upsample and the browser scales the <img>
-        // anyway. Store 8-bit: `develop_preview` and the JPEG encode both work in
+        // ONE dispatch for both source kinds (`render::source_pixels`): a RAW
+        // develops AT the preview edge (the cap runs before tone/geometry — the
+        // old full-sensor develop existed only to be thumbnailed), a baked
+        // source is decoded and `thumbnail`ed to the same edge, only ever DOWN
+        // (a source already under it keeps its own pixels; the browser scales
+        // the <img> anyway).
+        let fitted = render::source_pixels(raw, Some(PREVIEW_EDGE))?;
+        // Store 8-bit: `develop_preview` and the JPEG encode both work in
         // 8-bit, so keeping the 16-bit buffer would only double the cache and
         // re-convert on every gesture.
-        let fitted = if full.width().max(full.height()) > PREVIEW_EDGE {
-            full.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE)
-        } else {
-            full
-        };
         Ok(DynamicImage::ImageRgb8(fitted.to_rgb8()))
     })
 }

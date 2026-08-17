@@ -275,32 +275,63 @@ impl AutoshopApp {
         }
     }
 
-    /// Refine mask `i`'s raster to FULL resolution: decode the full-res
-    /// source in a worker, guided-filter the raster against it
+    /// Refine mask `i`'s raster to FULL resolution: build the full-res GUIDE
+    /// pixels in a worker, guided-filter the raster against them
     /// (render::refine_mask_guided), save under a fresh claim. The result is
     /// matched back by the stored raster reference — the strip may have
     /// changed while the worker ran.
+    ///
+    /// TWO paths, deliberately not one: the guide is the ACTIVE VARIANT's
+    /// pixel source (`active_source_path` — a retouched/generated variant
+    /// refines against the pixels on screen, not the negative underneath),
+    /// while the output raster is claimed against `src_path` so it lands in
+    /// THIS photo's develop directory (`store::raster_target` homes a claim by
+    /// source; a variant-homed claim would split this photo's rasters away
+    /// from its version snapshots and its deleted-version registry).
+    /// The guide goes through `render::source_pixels`, the one raw-vs-baked
+    /// dispatch — this worker fed a .ARW straight to `decode::load_image`
+    /// since v0.22, which is the "AI mask refine failed" report.
     pub(crate) fn start_mask_refine(&mut self, i: usize) {
         if self.busy {
             return;
         }
         let Some(src) = self.src_path.clone() else { return };
+        let Some(guide_src) = self.active_source_path() else { return };
         let Some(MaskGeometry::Bitmap { path }) =
             self.recipe.masks.get(i).map(|m| m.mask.clone())
         else {
             return;
         };
-        let lang = self.lang;
         self.busy = true;
-        self.status = tr(lang, "Refining the mask to full resolution (decoding the full-size source) …").into();
+        self.status =
+            tr(self.lang, "Refining the mask to full resolution (decoding the full-size source) …")
+                .into();
         let stored_ref = path.clone();
         self.spawn_worker(
             move || {
-                let res = (|| {
+                let res = (|| -> anyhow::Result<MaskRefineOutcome> {
                     let mask = autoshop::render::open_mask_bounded(std::path::Path::new(&path))
                         .map_err(|e| anyhow::anyhow!("load mask raster {path}: {e}"))?
                         .to_luma8();
-                    let full = autoshop::decode::load_image(&src)?;
+                    // The same process-wide permit the master/thumb decodes
+                    // take: this arm is a FULL-resolution develop or decode by
+                    // definition (no cap — full-resolution edges are the whole
+                    // point of refining), so it always counts as a big one.
+                    let _big_permit = big_decode_gate().lock().unwrap_or_else(|p| p.into_inner());
+                    let full = autoshop::render::source_pixels(&guide_src, None)?;
+                    // BEFORE the filter and before any claim: a refined raster
+                    // is written at the GUIDE's resolution, and one past the
+                    // mask budget could never be read back (`open_mask_bounded`
+                    // refuses it) — the mask would go silently inert at the
+                    // next open and at export. Refuse here, with nothing
+                    // written, instead of at delivery time. A typed fact, not a
+                    // sentence: the landing does the wording (L12#4).
+                    if !autoshop::render::mask_raster_fits_budget(full.width(), full.height()) {
+                        return Ok(MaskRefineOutcome::OverBudget {
+                            w: full.width(),
+                            h: full.height(),
+                        });
+                    }
                     let long = full.width().max(full.height());
                     let refined = autoshop::render::refine_mask_guided(
                         &mask,
@@ -312,7 +343,7 @@ impl AutoshopApp {
                     refined.save(&out)?;
                     // Same L03 rule as the brush writer: durable first.
                     autoshop::store::durable_adopt(&out)?;
-                    Ok((i, stored_ref, out))
+                    Ok(MaskRefineOutcome::Refined(i, stored_ref, out))
                 })();
                 Msg::MaskRefined(res)
             },

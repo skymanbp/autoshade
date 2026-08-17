@@ -55,6 +55,33 @@ fn transfer_luts() -> &'static ([f32; LUT_N], [f32; LUT_N]) {
     })
 }
 
+/// The ONE raw-vs-baked dispatch for "give me this source's pixels, neutrally".
+///
+/// A camera RAW has no `image`-crate decoder and a baked raster has no
+/// demosaic, so every consumer of *source pixels* needs the same two-armed
+/// branch — and it was hand-copied at six call sites, one of which (the GUI's
+/// v0.22 mask-refine worker) simply forgot it and fed a .ARW to
+/// [`crate::decode::load_image`]. This is that branch, once: RAW →
+/// [`render_to_image`] with a NEUTRAL recipe (the engine's own develop, never
+/// the camera's baked 8-bit preview — see `retouch::heal`); baked →
+/// `decode::load_image` (which applies the EXIF orientation).
+///
+/// `cap` bounds the LONG EDGE. The RAW arm develops AT that edge (the cap runs
+/// before tone/geometry, so a preview-size caller never pays a 61 MP develop);
+/// a baked source is thumbnailed to it and only ever DOWN — plain `thumbnail`
+/// UPSCALES a smaller source, which would inflate a small image instead of
+/// bounding a large one. `None` = the source's own full resolution.
+pub fn source_pixels(path: &Path, cap: Option<u32>) -> Result<DynamicImage> {
+    if crate::decode::is_raw(path) {
+        return render_to_image(path, &EditRecipe::default(), None, cap);
+    }
+    let img = crate::decode::load_image(path)?;
+    match cap {
+        Some(edge) if img.width().max(img.height()) > edge => Ok(img.thumbnail(edge, edge)),
+        _ => Ok(img),
+    }
+}
+
 /// Develop `raw_path` and apply `recipe`, returning the finished image. When
 /// `denoise` is set, the demosaiced buffer is AI-denoised (via the Python
 /// sidecar) before any tonal/colour work — i.e. denoise-before-sharpen.
@@ -1873,8 +1900,17 @@ pub fn mask_from_memory_bounded(bytes: &[u8]) -> anyhow::Result<image::DynamicIm
     Ok(image::load_from_memory(bytes)?)
 }
 
+/// Would a mask raster of these dimensions ever be loadable again? The same
+/// worst-case footprint [`check_mask_dims`] gates READS with, exposed so a
+/// WRITER can refuse first: a full-resolution refine on a source past the
+/// budget would otherwise publish a raster every later open/export silently
+/// drops (the GUI's mask-refine precheck).
+pub fn mask_raster_fits_budget(w: u32, h: u32) -> bool {
+    (w as usize).saturating_mul(h as usize).saturating_mul(4) <= MASK_RASTER_BUDGET_BYTES
+}
+
 fn check_mask_dims(w: u32, h: u32, what: &str) -> anyhow::Result<()> {
-    if (w as usize).saturating_mul(h as usize).saturating_mul(4) > MASK_RASTER_BUDGET_BYTES {
+    if !mask_raster_fits_budget(w, h) {
         anyhow::bail!(
             "{what} is {w}x{h} — its decoded footprint exceeds the \
              {MASK_RASTER_BUDGET_BYTES}-byte mask budget"
@@ -4305,6 +4341,118 @@ pub fn apply_lens_geometry(
 
 #[cfg(test)]
 mod tests {
+
+    /// [`source_pixels`] is the ONE raw-vs-baked dispatch, so both arms and the
+    /// cap contract are pinned here.
+    ///
+    /// The RAW arm cannot be exercised end-to-end without a real sensor file
+    /// (the repo carries no RAW fixture), but the DISPATCH can: a .ARW must
+    /// reach the develop engine — proven by the failure it produces being the
+    /// raw decoder's, never `load_image`'s "is a camera RAW" refusal. That
+    /// refusal appearing here would mean the gate had sent a RAW down the baked
+    /// arm, which is exactly the v0.22 mask-refine bug.
+    #[test]
+    fn the_source_dispatch_sends_each_kind_down_its_own_arm() {
+        let dir = std::env::temp_dir().join(format!("autoshop-source-px-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let raw = dir.join("fake.arw");
+        std::fs::write(&raw, b"not really a raw").unwrap();
+        let e = format!("{:#}", source_pixels(&raw, None).unwrap_err());
+        assert!(
+            !e.contains("is a camera RAW"),
+            "a RAW must be DEVELOPED, not sent to the baked decoder: {e}"
+        );
+
+        // Baked arm: full resolution when uncapped...
+        let big = dir.join("big.png");
+        image::RgbImage::from_fn(400, 200, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, 7]))
+            .save(&big)
+            .unwrap();
+        assert_eq!(source_pixels(&big, None).unwrap().dimensions(), (400, 200));
+        // ...bounded by the cap's LONG edge, aspect kept...
+        assert_eq!(source_pixels(&big, Some(100)).unwrap().dimensions(), (100, 50));
+        // ...and NEVER upsampled: `thumbnail` alone inflates a small source,
+        // which would hand a heal/denoise/refine consumer invented pixels (and
+        // save them as the delivered master).
+        let small = dir.join("small.png");
+        image::RgbImage::from_pixel(64, 48, image::Rgb([3, 4, 5])).save(&small).unwrap();
+        assert_eq!(source_pixels(&small, Some(2048)).unwrap().dimensions(), (64, 48));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Patrol (the `find_raws_accepts_every_raw_format_the_app_can_decode`
+    /// pattern: ONE predicate, app-wide): every remaining `decode::load_image`
+    /// call site is a place where the source is BAKED by construction. A new
+    /// consumer of *source* pixels must go through [`source_pixels`] instead —
+    /// the whole point of having one dispatch — so a new file appearing here
+    /// fails the build rather than shipping the next missed branch.
+    ///
+    /// Lexical on purpose: the drift this catches is someone typing
+    /// `load_image` in a new worker, which no type can prevent (both arms
+    /// return `DynamicImage`).
+    #[test]
+    fn no_new_file_hand_rolls_the_baked_decode() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).expect("source dir listable") {
+                let p = e.expect("dir entry").path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        assert!(files.len() >= 20, "only {} source files walked — the patrol is broken", files.len());
+
+        let mut callers: Vec<String> = Vec::new();
+        let mut hits = 0usize;
+        for p in &files {
+            let text = std::fs::read_to_string(p).expect("source readable");
+            // Comment lines carry the DOC references (`[`decode::load_image`]`),
+            // which are exactly what this patrol must not count.
+            let calls = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .filter(|l| l.contains("load_image"))
+                .count();
+            if calls > 0 {
+                hits += calls;
+                callers.push(
+                    p.strip_prefix(&src)
+                        .unwrap_or(p)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+        callers.sort();
+        assert!(hits >= 20, "only {hits} lexical hits — the extractor is broken");
+        // Sorted; each entry is a place whose path is BAKED by construction.
+        let allowed = [
+            // GUI: variant-origin masters, ./out retouch results and the
+            // reverse-fit target (a finished photo — a RAW is refused by name).
+            "bin/gui/actions.rs",
+            "bin/gui/panels/retouch.rs",
+            "bin/gui/workers.rs",
+            // The gate itself: definition + its own tests.
+            "decode.rs",
+            // CLI `match` target, same contract as the GUI's.
+            "main.rs",
+            "pipeline.rs", // its reverse-fit test's target
+            "render.rs",   // source_pixels' own baked arm + the export develop arm
+            "serve.rs",    // ./out retouch masters the web UI just wrote
+        ];
+        assert_eq!(
+            callers, allowed,
+            "a NEW file decodes source pixels by hand — route it through render::source_pixels \
+             (or, if the path really is baked by construction, add it here on purpose)"
+        );
+    }
 
     /// L01-6: two active vignette stages compose into ONE clamped pass — the
     /// per-pass clamp made mathematically inverse corrections irreversible on

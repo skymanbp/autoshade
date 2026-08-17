@@ -407,52 +407,35 @@ pub fn denoise_active(
     full_res: bool,
     out: &Path,
 ) -> Result<()> {
-    if crate::decode::is_raw(input) {
-        if full_res {
-            crate::render::render_to_file(
-                input,
-                &crate::recipe::EditRecipe::default(),
-                out,
-                Some(opts),
-                None,
-            )?;
-            return Ok(());
-        }
-        // Working copy developed AT ≤2048 (not full-res then thumbnailed):
-        // the cap runs before tone/geometry, skipping the 61 MP transients.
-        let img = crate::render::render_to_image(
+    if crate::decode::is_raw(input) && full_res {
+        // The only arm that needs no pixels in memory: the full-res develop
+        // denoises INSIDE the engine and writes `out` itself (16-bit).
+        crate::render::render_to_file(
             input,
             &crate::recipe::EditRecipe::default(),
+            out,
+            Some(opts),
             None,
-            Some(2048),
         )?;
-        let tmp = temp_path("autoshop_denoise_base")?;
-        if let Err(e) = img.save(&tmp) {
-            // A failed save can still have created a partial file — don't
-            // leak it into the temp dir.
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("write denoise input {}", tmp.display()));
-        }
-        let res = denoise_file(opts, &tmp, out);
-        let _ = std::fs::remove_file(&tmp);
-        res
-    } else {
-        // Baked sources go through load_image, NOT straight to the sidecar:
-        // cv2 ignores EXIF orientation (and imwrite drops the tag), so a
-        // portrait phone JPEG came back as a permanently sideways master.
-        // load_image applies the orientation; the working copy also honours
-        // the same full-or-≤2048 contract as the RAW arm.
-        let img = crate::decode::load_image(input)?;
-        let img = if full_res { img } else { img.thumbnail(2048, 2048) };
-        let tmp = temp_path("autoshop_denoise_base")?;
-        if let Err(e) = img.save(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("write denoise input {}", tmp.display()));
-        }
-        let res = denoise_file(opts, &tmp, out);
-        let _ = std::fs::remove_file(&tmp);
-        res
+        return Ok(());
     }
+    // Everything else takes the ONE source dispatch (`render::source_pixels`):
+    // a RAW working copy is developed AT ≤2048 (not full-res then thumbnailed
+    // — the cap runs before tone/geometry, skipping the 61 MP transients), and
+    // a baked source is decoded rather than handed straight to the sidecar
+    // because cv2 ignores EXIF orientation (and imwrite drops the tag), so a
+    // portrait phone JPEG came back as a permanently sideways master.
+    let img = crate::render::source_pixels(input, (!full_res).then_some(2048))?;
+    let tmp = temp_path("autoshop_denoise_base")?;
+    if let Err(e) = img.save(&tmp) {
+        // A failed save can still have created a partial file — don't leak it
+        // into the temp dir.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("write denoise input {}", tmp.display()));
+    }
+    let res = denoise_file(opts, &tmp, out);
+    let _ = std::fs::remove_file(&tmp);
+    res
 }
 
 fn run_sidecar(opts: &DenoiseOpts, input: &Path, output: &Path) -> Result<()> {

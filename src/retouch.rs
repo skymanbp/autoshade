@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::Config;
-use crate::decode;
 
 /// Runtime-only shape of one painted component. The pixels are bit-packed
 /// relative to the component's own bounding box, while the mask dimensions
@@ -674,24 +673,18 @@ pub fn heal(
     full_res: bool,
     out: &Path,
 ) -> Result<HealReport> {
-    let is_raw = decode::is_raw(src_path);
     // FIRST, before decode and before the BILLED auto-detect call (Codex
     // AL F2: the L09#1 preflight covered analyze/auto/reimagine/retouch,
     // but heal paid for detect_spots and then failed on a directory -o at
     // save time). No-op for GUI/web (unique_out prepared the path).
     crate::pipeline::preflight_out(out, src_path)?;
-    let base = if is_raw {
-        // Preview mode develops AT ≤2048 (cap before tone/geometry) instead
-        // of developing 61 MP and thumbnailing the result.
-        let cap = if full_res { None } else { Some(2048) };
-        crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None, cap)?
-    } else {
-        // Same full-or-≤2048 contract as the RAW arm: the flag used to be
-        // ignored for baked sources, so a "preview mode" heal still processed
-        // (and saved) an entire high-resolution TIFF/JPEG.
-        let img = decode::load_image(src_path)?;
-        if full_res { img } else { img.thumbnail(2048, 2048) }
-    };
+    // ONE dispatch for both source kinds (`render::source_pixels`): preview
+    // mode develops a RAW AT ≤2048 (cap before tone/geometry) instead of
+    // developing 61 MP and thumbnailing the result, and bounds a baked source
+    // by the same contract — the flag used to be ignored for baked sources, so
+    // a "preview mode" heal still processed (and saved) an entire
+    // high-resolution TIFF/JPEG.
+    let base = crate::render::source_pixels(src_path, (!full_res).then_some(2048))?;
     let (w, h) = (base.width(), base.height());
 
     let mut spots: Vec<HealSpot> = Vec::new();
@@ -898,23 +891,16 @@ pub fn clone_stamp(
     full_res: bool,
     out: &Path,
 ) -> Result<HealReport> {
-    let is_raw = decode::is_raw(src_path);
     // FIRST, before the decode — the exact preflight `heal` runs (L09-9
     // made it symmetric): a bad `out` must refuse before minutes of
     // full-res base work, and an `out` that would overwrite the library —
     // clone_stamp(photo.arw, …, out = photo.arw) replaces a RAW with PNG
     // bytes — is refused by the same guard. No-op for the GUI (unique_out).
     crate::pipeline::preflight_out(out, src_path)?;
-    // Same base contract as `heal`: the engine's OWN neutral develop (full or
-    // ≤2048px), never the camera's baked preview — see the heal doc comment.
-    let base = if is_raw {
-        let cap = if full_res { None } else { Some(2048) };
-        crate::render::render_to_image(src_path, &crate::recipe::EditRecipe::default(), None, cap)?
-    } else {
-        // full-or-≤2048 for baked sources too (see heal).
-        let img = decode::load_image(src_path)?;
-        if full_res { img } else { img.thumbnail(2048, 2048) }
-    };
+    // Same base contract as `heal`, through the same one dispatch: the engine's
+    // OWN neutral develop (full or ≤2048px), never the camera's baked preview —
+    // see the heal doc comment.
+    let base = crate::render::source_pixels(src_path, (!full_res).then_some(2048))?;
     let (w, h) = (base.width(), base.height());
 
     let m = crate::render::open_mask_bounded(mask_path)

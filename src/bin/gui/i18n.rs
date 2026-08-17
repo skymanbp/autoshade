@@ -342,6 +342,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("☁ AI select sky", "☁ AI 选天空"),
     ("SegFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~14MB model)",
         "SegFormer-ADE20K 天空分割 → 位图蒙版（python sidecar：pip install transformers；首次运行自动下载约 14MB 模型）"),
+    ("this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
+        "本版本未随发布包分发 python 边车——请从项目目录运行 Autoshop，或用 AUTOSHOP_SEGMENT_SCRIPT 指向 python/segment.py"),
 
     // ── Develop · selected-mask controls ─────────────────────────────────────
     ("Name", "名称"),
@@ -970,6 +972,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "AI 结果选中了它的蒙版——另一蒙版上的笔刷会话已结束，未固化的涂抹已丢弃"),
     ("Refining the mask to full resolution (decoding the full-size source) …",
         "正在将蒙版精修到全分辨率（解码全尺寸原图）……"),
+    ("this source is {w}×{h} — a full-resolution refined mask would exceed the mask budget and could never be read back",
+        "该原图为 {w}×{h}——全分辨率精修蒙版会超出蒙版预算，之后无法读回"),
     ("mask refined to full resolution — boundaries now follow the source's own edges",
         "蒙版已精修到全分辨率——边界现贴合原图自身边缘"),
     ("the mask changed while refining — the result was saved at {path} but not applied",
@@ -1062,6 +1066,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [AI visual review: {score1}/100 — {critique}; the guided revision \
       re-scored lower ({score2}/100) and was discarded (do-no-harm)]",
         " [AI 视觉复查：{score1}/100——{critique}；提示修订后得分更低（{score2}/100），已弃用（do-no-harm）]"),
+    (" [AI visual review: {score}/100 — {critique}; the guided revision \
+      returned the same recipe — keeping it]",
+        " [AI 视觉复查：{score}/100——{critique}；提示修订返回了相同配方，已保留]"),
     (" [AI visual review: {score}/100 — {critique}; the guided revision \
       round failed ({e}) — keeping the reviewed develop]",
         " [AI 视觉复查：{score}/100——{critique}；提示修订轮失败（{e}）——保留已复查的提案]"),

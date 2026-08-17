@@ -104,7 +104,12 @@ impl AutoshopApp {
     /// A worker failed: status line + a lingering error toast, unbusy. A single
     /// status line is too easy to miss for a failed export or API call.
     pub(crate) fn fail(&mut self, what: &str, e: impl std::fmt::Display) {
-        let text = format!("{what}: {e}");
+        // `{e:#}`, not `{e}`: anyhow's alternate Display prints the WHOLE
+        // chain ("mask refine failed: open image X: The image format could not
+        // be determined" instead of just the outermost line). Every `.context`
+        // this app attaches — the file, the stage, the cause — was being
+        // dropped exactly where the user needed it, in the toast.
+        let text = format!("{what}: {e:#}");
         self.status = text.clone();
         self.toast(ToastKind::Error, text);
         self.busy = false;

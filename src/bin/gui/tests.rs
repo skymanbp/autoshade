@@ -1650,6 +1650,55 @@
         assert!(app.mask_brush.is_some(), "the selected row keeps its session");
     }
 
+    /// R22 #2: the full-resolution mask refine refuses a source whose own
+    /// resolution would put the refined raster past the mask-raster budget —
+    /// and the refusal is a TYPED fact worded at LANDING (L12#4), not a
+    /// sentence the worker built with a stale language.
+    ///
+    /// The mask must come out of it UNCHANGED: nothing was written, so the row
+    /// still points at the raster it pointed at before, and busy is released.
+    #[test]
+    fn an_over_budget_refine_refuses_with_the_dimensions_and_keeps_the_mask() {
+        let ctx = egui::Context::default();
+        let mut app = AutoshopApp {
+            busy: true,
+            recipe: EditRecipe {
+                masks: vec![autoshop::recipe::LocalAdjustment {
+                    mask: MaskGeometry::Bitmap { path: "mask-1.png".into() },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // The gate's own arithmetic decides what "over budget" is — pin the
+        // dimensions against it instead of hard-coding a pixel count that a
+        // budget change would silently make meaningless.
+        assert!(
+            !autoshop::render::mask_raster_fits_budget(12_000, 9_000),
+            "fixture: 108 MP must be over the mask budget"
+        );
+        app.tx
+            .send(Msg::MaskRefined(Ok(MaskRefineOutcome::OverBudget { w: 12_000, h: 9_000 })))
+            .unwrap();
+        app.poll_workers(&ctx);
+
+        assert!(!app.busy, "the refusal releases the worker gate");
+        assert!(
+            matches!(&app.recipe.masks[0].mask, MaskGeometry::Bitmap { path } if path == "mask-1.png"),
+            "nothing was written, so the mask keeps its own raster"
+        );
+        assert!(
+            app.status.contains("12000") && app.status.contains("9000"),
+            "the refusal names the source it is talking about: {}",
+            app.status
+        );
+        assert!(
+            app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)),
+            "a refusal the user did not ask for is a toast, not just a status line"
+        );
+    }
+
     /// L06#4: a recipe edit made while the retouch worker runs survives as
     /// its OWN undo step — committing only AFTER the plate swap folded it
     /// into the pixel step, so one Ctrl+Z reverted both and the slider move

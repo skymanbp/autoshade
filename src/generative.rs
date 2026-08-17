@@ -250,14 +250,12 @@ pub fn retouch(
     // the up-to-1.8 GB composite. See reimagine.
     pipeline::preflight_out(out, raw_path)?;
     let raw = decode::is_raw(raw_path);
-    let base = if raw {
-        // Preview mode develops AT ≤2048 (the cap runs before tone/geometry)
-        // instead of developing 61 MP and thumbnailing the result.
-        let cap = if full_res { None } else { Some(2048) };
-        crate::render::render_to_image(raw_path, &crate::recipe::EditRecipe::default(), None, cap)?
-    } else {
-        decode::load_image(raw_path)?
-    };
+    // ONE dispatch for both source kinds (`render::source_pixels`). The cap is
+    // RAW-only here: preview mode develops a RAW AT ≤2048 (the cap runs before
+    // tone/geometry) instead of developing 61 MP and thumbnailing the result,
+    // while a baked source is composited at its OWN resolution either way (the
+    // doc above) — capping it would shrink the delivered master.
+    let base = crate::render::source_pixels(raw_path, (raw && !full_res).then_some(2048))?;
     let (bw, bh) = base.dimensions();
     // A generative tile larger than the base is pointless (it only gets downscaled
     // back onto it) — cap the flexible budget at the base's own pixel count.

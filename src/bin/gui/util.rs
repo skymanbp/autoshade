@@ -798,10 +798,27 @@ pub(crate) fn stamp_line_gray(g: &mut image::GrayImage, a: (f32, f32), b: (f32, 
 }
 
 /// One process-wide permit serialising >24 MP baked-raster thumbnail decodes
-/// (see request_thumb). RAW thumbs never take it.
+/// (see request_thumb) and the full-resolution mask-refine guide. RAW thumbs
+/// never take it.
 pub(crate) fn big_decode_gate() -> &'static std::sync::Mutex<()> {
     static GATE: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     GATE.get_or_init(Default::default)
+}
+
+/// Is the Python segmentation sidecar actually present in THIS install?
+///
+/// The release packages carry no `python/` directory, so on a downloaded build
+/// 「🤖 AI select subject」/「☁ AI select sky」 could only ever fail — the button
+/// looked available and spent the click on a "sidecar not found at …" toast.
+/// Resolved ONCE: `config::bundled_helper` searches the executable's directory
+/// and its ancestors (never the cwd), and the env override is read at launch,
+/// so the answer cannot change under a running process.
+pub(crate) fn segment_helper_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        let cfg = autoshop::config::Config::load();
+        std::path::Path::new(&cfg.segment_script).exists()
+    })
 }
 
 /// Where the persistent 160px thumbnail for `src` lives, or `None` when the
