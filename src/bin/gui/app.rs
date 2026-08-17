@@ -265,6 +265,12 @@ pub(crate) struct AutoshopApp {
     pub(crate) strip_title_rect: Option<egui::Rect>,  // test seam: the painted "Variants" title rect
     #[cfg(test)]
     pub(crate) reimagine_btn_rect: Option<egui::Rect>, // test seam: the ✨ Generate button's rect
+    #[cfg(test)]
+    pub(crate) gallery_slot_rect: Option<egui::Rect>, // test seam: first drawn gallery thumb's SLOT
+    #[cfg(test)]
+    pub(crate) gallery_thumb_rect: Option<egui::Rect>, // test seam: … and the image drawn inside it
+    #[cfg(test)]
+    pub(crate) brush_slider_rect: Option<egui::Rect>, // test seam: the last Brush size slider's rect
     // --- batch recipe copy / paste ---
     pub(crate) multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     pub(crate) copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1458,6 +1464,12 @@ impl Default for AutoshopApp {
             strip_title_rect: None,
             #[cfg(test)]
             reimagine_btn_rect: None,
+            #[cfg(test)]
+            gallery_slot_rect: None,
+            #[cfg(test)]
+            gallery_thumb_rect: None,
+            #[cfg(test)]
+            brush_slider_rect: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,

@@ -19,9 +19,30 @@ impl AutoshopApp {
         max: f32,
         default: f32,
     ) -> bool {
+        Self::slider_hinted(ui, lang, label, value, min, max, default, "")
+    }
+
+    /// [`slider`] plus ONE disclosure line at the head of its tooltip — for a
+    /// control whose value is SHARED with another panel, where the tooltip is
+    /// the only place that fact can be told. (`slider` returns `bool`, not a
+    /// `Response`, so a caller cannot chain its own `on_hover_text`; a second
+    /// tooltip on a wrapper rect would just stack two bubbles over one
+    /// widget.) The brush radius is the case: one number behind the mask
+    /// brush AND Fill / Heal / Stamp.
+    #[allow(clippy::too_many_arguments)] // `slider` + the one extra tooltip line
+    pub(crate) fn slider_hinted(
+        ui: &mut egui::Ui,
+        lang: Lang,
+        label: &str,
+        value: &mut f32,
+        min: f32,
+        max: f32,
+        default: f32,
+        hint: &str,
+    ) -> bool {
         let feel =
             if max - min >= 20.0 { SliderFeel::Int } else { SliderFeel::Frac };
-        Self::slider_impl(ui, lang, label, value, min, max, default, feel)
+        Self::slider_impl(ui, lang, label, value, min, max, default, feel, hint)
     }
 
     /// A 0..=1-stored fraction shown on Lightroom's 0..100 track (Amount,
@@ -58,7 +79,7 @@ impl AutoshopApp {
         max: f32,
         default: f32,
     ) -> bool {
-        Self::slider_impl(ui, lang, label, value, min, max, default, SliderFeel::Fine)
+        Self::slider_impl(ui, lang, label, value, min, max, default, SliderFeel::Fine, "")
     }
 
     /// Log-scaled variant for values whose useful band is a small fraction of
@@ -74,10 +95,10 @@ impl AutoshopApp {
         max: f32,
         default: f32,
     ) -> bool {
-        Self::slider_impl(ui, lang, label, value, min, max, default, SliderFeel::LogK)
+        Self::slider_impl(ui, lang, label, value, min, max, default, SliderFeel::LogK, "")
     }
 
-    #[allow(clippy::too_many_arguments)] // private impl detail shared by three thin public shapes
+    #[allow(clippy::too_many_arguments)] // private impl detail shared by four thin public shapes
     pub(crate) fn slider_impl(
         ui: &mut egui::Ui,
         lang: Lang,
@@ -87,6 +108,9 @@ impl AutoshopApp {
         max: f32,
         default: f32,
         feel: SliderFeel,
+        // Prepended to the shared tooltip; "" for every ordinary slider. See
+        // `slider_hinted` — the ONE tooltip is the point, not two stacked.
+        hint: &str,
     ) -> bool {
         let range = max - min;
         // (drag snap, ↑/↓ nudge, shown decimals) per feel class. Frac's snap
@@ -105,6 +129,12 @@ impl AutoshopApp {
             SliderFeel::Frac => (0.01, (range / 100.0).max(0.01), 2),
             SliderFeel::LogK => (1.0, ((*value).abs() * 0.01).max(1.0).round(), 0),
         };
+        let grammar = tr(lang, "double-click / right-click resets · hover + ↑/↓ nudges (Shift ×10)");
+        let tip = if hint.is_empty() {
+            grammar.to_string()
+        } else {
+            format!("{hint}\n{grammar}")
+        };
         let resp = ui
             .add(
                 egui::Slider::new(value, min..=max)
@@ -113,7 +143,7 @@ impl AutoshopApp {
                     .fixed_decimals(decimals)
                     .text(label),
             )
-            .on_hover_text(tr(lang, "double-click / right-click resets · hover + ↑/↓ nudges (Shift ×10)"));
+            .on_hover_text(tip);
         // Right-click = reset too (阶段5 手感): the double-click twin — LR
         // muscle memory, and reachable without the precise double timing.
         if (resp.double_clicked() || resp.secondary_clicked()) && *value != default {
@@ -219,8 +249,11 @@ impl AutoshopApp {
         // up front — thumb + item gap + label row (egui rows are at least
         // interact_size.y tall) — so the pad is exact and the geometry test
         // asserts the air above equals the air below.
-        const THUMB_H: f32 = 52.0;
-        let card_h = THUMB_H + ui.spacing().item_spacing.y + ui.spacing().interact_size.y;
+        // Named STRIP_ to stay clear of model.rs's gallery THUMB_H (40.0),
+        // which this local used to SHADOW inside variant_strip — one glob
+        // import away from a silent geometry swap in either direction.
+        const STRIP_THUMB_H: f32 = 52.0;
+        let card_h = STRIP_THUMB_H + ui.spacing().item_spacing.y + ui.spacing().interact_size.y;
         #[cfg(test)]
         {
             self.strip_row_rect = Some(ui.max_rect());
@@ -277,7 +310,7 @@ impl AutoshopApp {
                             // variant has been developed once).
                             let resp = if let Some(t) = &self.variants[i].thumb {
                                 let s = t.size_vec2();
-                                let h = THUMB_H;
+                                let h = STRIP_THUMB_H;
                                 let w = (s.x / s.y.max(1.0) * h).clamp(30.0, 104.0);
                                 let (rect, resp) =
                                     ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
@@ -313,7 +346,7 @@ impl AutoshopApp {
                                 }
                                 resp
                             } else {
-                                ui.add_sized([64.0, THUMB_H], egui::Button::new("…"))
+                                ui.add_sized([64.0, STRIP_THUMB_H], egui::Button::new("…"))
                             };
                             #[cfg(test)]
                             if i == 0 {
@@ -1011,7 +1044,7 @@ impl AutoshopApp {
                 let brush_armed = matches!(self.mask_brush, Some((None, _)));
                 if ui
                     .selectable_label(brush_armed, tr(lang, "🖌 Brush"))
-                    .on_hover_text(tr(lang, "Paint a free-form mask ([ ] = brush size); 「Apply」 bakes it into a new mask"))
+                    .on_hover_text(tr(lang, "Paint a free-form mask (drag the 「Brush size」 slider, or press [ / ]); 「Apply」 bakes it into a new mask"))
                     .clicked()
                 {
                     if brush_armed {
@@ -1040,6 +1073,12 @@ impl AutoshopApp {
                         self.disarm_tools();
                     }
                 });
+                // #9: the radius belongs AT THE TOOL. This is the same
+                // `self.brush` the Retouch panel's slider drives (and the
+                // `[` / `]` keys) — one session block covers both arms, the
+                // 「＋ Brush」 above and 「🖌 Edit raster」 down in the mask row.
+                // Outside the row closure: that closure holds `&mut self`.
+                self.brush_size_slider(ui);
             }
             // --- AI segmentation → bitmap masks (gap batch A②) ---------------
             ui.horizontal(|ui| {

@@ -592,6 +592,48 @@ impl AutoshopApp {
         );
     }
 
+    /// The brush-radius slider, rendered wherever a brush is actually IN USE
+    /// (#9). There is exactly ONE radius in the app — `self.brush`, also
+    /// driven by the `[` / `]` keys (see the shortcut in app.rs) — and until
+    /// R22 its only slider lived in the Retouch panel, beside Fill / Heal /
+    /// Stamp. The mask brush, which starts from Develop → Local Masks and
+    /// paints in its own session, had no size control at its own site at all:
+    /// the widget stayed with its historical host instead of following the
+    /// tool. Both renders bind this same field on purpose (two live sliders
+    /// over one value is house precedent — global and per-mask Exposure), so
+    /// the tooltip discloses the sharing rather than pretending there are two
+    /// brushes.
+    pub(crate) fn brush_size_slider(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        // The band the slider occupies, read off the layout cursor before and
+        // after — a wrapper (scope/horizontal) would be one more thing that
+        // can move the geometry the width tests pin. Test seam only.
+        #[cfg(test)]
+        let before = ui.cursor();
+        // The radius is live tool state, never a recipe field: no dirty flag,
+        // no redevelop — hence the discarded `changed`.
+        Self::slider_hinted(
+            ui,
+            lang,
+            tr(lang, "Brush size"),
+            &mut self.brush,
+            4.0,
+            80.0,
+            30.0,
+            tr(lang, "One radius for every brush: the mask brush and the Fill / Heal / Stamp brush are the same size ([ / ] move it too)"),
+        );
+        #[cfg(test)]
+        {
+            // x from the Ui's USED region (cursor().max.x can be infinite in an
+            // unbounded layout), y from the cursor the slider just advanced.
+            let used = ui.min_rect();
+            self.brush_slider_rect = Some(egui::Rect::from_min_max(
+                egui::pos2(used.left(), before.top()),
+                egui::pos2(used.right(), ui.cursor().top()),
+            ));
+        }
+    }
+
     pub(crate) fn retouch_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
         ui.separator();
@@ -742,12 +784,11 @@ impl AutoshopApp {
             let r = ui
                 .checkbox(&mut self.paint_mode, tr(lang, "Paint mask"))
                 .on_hover_text(tr(lang, "Brush over the area; box-select is paused while on. Shared by Fill and Heal."));
-            if r.changed() && self.paint_mode {
-                // Mutual exclusion lives in ONE place now (disarm_tools) —
-                // this site's own hand copy once drifted and made a ticked
-                // brush completely inert (dispatch tries the others first).
-                self.disarm_tools();
-                self.paint_mode = true; // re-arm after the sweep
+            if r.changed() {
+                // Both directions: arm (sweep the other tools) or un-arm
+                // (end a live mask-brush session instead of orphaning it).
+                // See paint_mode_toggled in actions.rs.
+                self.paint_mode_toggled();
             }
             if ui
                 .button(tr(lang, "Clear brush"))
@@ -757,7 +798,7 @@ impl AutoshopApp {
                 self.clear_mask();
             }
         });
-        Self::slider(ui, lang, tr(lang, "Brush size"), &mut self.brush, 4.0, 80.0, 30.0);
+        self.brush_size_slider(ui);
 
         egui::CollapsingHeader::new(tr(lang, "Generative Fill"))
             .id_salt("sec_fill")

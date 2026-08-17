@@ -120,6 +120,11 @@ impl AutoshopApp {
         let mut to_request: Vec<usize> = Vec::new();
         let mut visible: std::ops::Range<usize> = 0..0;
 
+        // Geometry of the first drawn thumbnail this frame (slot, image) —
+        // recorded through a local because the row closure below borrows
+        // `self`'s fields piecemeal and cannot touch `self` itself.
+        #[cfg(test)]
+        let mut thumb_geom: Option<(egui::Rect, egui::Rect)> = None;
         let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
         if let Some(i) = self.gallery_scroll_to.take() {
             // Keyboard navigation moved the selection: jump the viewport so the
@@ -151,13 +156,50 @@ impl AutoshopApp {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 if let Some(t) = thumbs.get(&i) {
-                                    ui.add(
-                                        egui::Image::new(SizedTexture::new(
-                                            t.id(),
-                                            egui::vec2(THUMB_W, THUMB_H),
-                                        ))
-                                        .rounding(RADIUS_SM),
+                                    // CONSTANT SLOT + aspect-preserving inset
+                                    // (#17). The old code handed egui a
+                                    // SizedTexture claiming the texture WAS
+                                    // THUMB_W × THUMB_H; a Texture source is
+                                    // drawn at ImageFit::Exact, so that lie
+                                    // squashed every portrait into the same
+                                    // 1.4:1 landscape box (the decode-side
+                                    // orientation chain was never at fault).
+                                    // The slot stays fixed — byte-identical to
+                                    // the placeholder branch below — because it
+                                    // is what keeps the filename column aligned
+                                    // down the whole list; a portrait gets a
+                                    // ~27 × 40 letterboxed inset inside it.
+                                    let (slot, _) = ui.allocate_exact_size(
+                                        egui::vec2(THUMB_W, THUMB_H),
+                                        egui::Sense::hover(),
                                     );
+                                    // Thumbnails decode to THUMB_EDGE (160 px)
+                                    // long edge, so the scale is ≤ 0.35 here and
+                                    // fit_in's 4× upscale cap never bites.
+                                    let draw = fit_in(t.size_vec2(), THUMB_W, THUMB_H);
+                                    let rect = egui::Rect::from_center_size(slot.center(), draw);
+                                    // painter().image() has no rounding, and the
+                                    // rounded corners are the gallery's look —
+                                    // so this is egui's own paint_texture_at
+                                    // shape (widgets/image.rs), inlined.
+                                    ui.painter().add(egui::epaint::RectShape {
+                                        rect,
+                                        rounding: RADIUS_SM.into(),
+                                        fill: egui::Color32::WHITE, // tint: the texture unmodified
+                                        stroke: egui::Stroke::NONE,
+                                        blur_width: 0.0,
+                                        fill_texture_id: t.id(),
+                                        uv: egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                    });
+                                    #[cfg(test)]
+                                    {
+                                        if thumb_geom.is_none() {
+                                            thumb_geom = Some((slot, rect));
+                                        }
+                                    }
                                 } else {
                                     let (rect, _) = ui.allocate_exact_size(
                                         egui::vec2(THUMB_W, THUMB_H),
@@ -220,6 +262,13 @@ impl AutoshopApp {
                 }
             });
 
+        #[cfg(test)]
+        {
+            if let Some((slot, draw)) = thumb_geom {
+                self.gallery_slot_rect = Some(slot);
+                self.gallery_thumb_rect = Some(draw);
+            }
+        }
         for i in to_request {
             self.request_thumb(i);
         }

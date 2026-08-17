@@ -931,11 +931,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("shape added to this mask — drag its knobs to adjust; the shape list is under the mask's row",
         "形状已加入此蒙版——拖拽手柄可调整；形状列表在蒙版行下方"),
     ("🖌 Brush", "🖌 笔刷"),
-    ("Paint a free-form mask ([ ] = brush size); 「Apply」 bakes it into a new mask",
-        "涂抹绘制自由形状蒙版（[ ] 调整笔刷大小）；「应用」后生成新蒙版"),
+    ("Paint a free-form mask (drag the 「Brush size」 slider, or press [ / ]); 「Apply」 bakes it into a new mask",
+        "涂抹绘制自由形状蒙版（拖动下方「笔刷大小」滑杆，或按 [ / ]）；「应用」后生成新蒙版"),
     ("⌫ Erase", "⌫ 擦除"),
     ("Strokes remove from the selection instead of adding",
         "笔画从选区中移除而非添加"),
+    // R22-3 (#9): the mask-brush session grew its own Brush size slider, and
+    // both sliders drive the one `self.brush` — the tooltip says so.
+    ("One radius for every brush: the mask brush and the Fill / Heal / Stamp brush are the same size ([ / ] move it too)",
+        "所有画笔共用一个半径：蒙版画笔与填充 / 修复 / 图章的笔刷是同一个大小（[ / ] 也能调）"),
     ("✓ Apply", "✓ 应用"),
     ("🖌 Edit raster", "🖌 编辑栅格"),
     ("Brush-edit this mask: paint adds, 「Erase」 removes, 「Apply」 bakes",

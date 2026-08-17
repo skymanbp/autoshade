@@ -3440,3 +3440,172 @@
             );
         }
     }
+
+    /// #17 (user report after the v0.27 trial): a PORTRAIT photo's gallery
+    /// thumbnail was squashed into the same 1.4:1 landscape box as everything
+    /// else. The orientation chain (decode's EXIF transpose, render's
+    /// rotation) was never at fault — the panel handed egui a
+    /// `SizedTexture::new(id, (THUMB_W, THUMB_H))`, i.e. a LIE about the
+    /// texture's own size, and a Texture image source is drawn at
+    /// `ImageFit::Exact`. The fix keeps the SLOT constant (that is what keeps
+    /// the filename column aligned) and insets the image at its true aspect.
+    /// Restoring the lie (`let draw = egui::vec2(THUMB_W, THUMB_H)`) fails the
+    /// aspect assertion for the portrait case.
+    #[test]
+    fn a_gallery_thumb_keeps_its_aspect_inside_a_constant_slot() {
+        for (tw, th, tag) in [(40u32, 60u32, "portrait 2:3"), (60, 40, "landscape 3:2")] {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let mut app = AutoshopApp::default();
+            let tex = ctx.load_texture(
+                "r22_thumb",
+                egui::ColorImage::new([tw as usize, th as usize], egui::Color32::GRAY),
+                egui::TextureOptions::LINEAR,
+            );
+            // One row, its texture already resident: the loaded branch.
+            app.gallery = vec![PathBuf::from("r22-thumb-geometry.arw")];
+            app.gallery_dir = Some(PathBuf::from("."));
+            app.thumbs.insert(0, tex);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::SidePanel::left("library")
+                    .default_width(260.0)
+                    .show(ctx, |ui| app.gallery_panel(ui));
+            });
+            let slot = app.gallery_slot_rect.expect("the gallery records its thumb slot (test seam)");
+            let draw = app.gallery_thumb_rect.expect("the gallery records the drawn image (test seam)");
+            eprintln!("gallery thumb [{tag}]: slot={slot:?} draw={draw:?}");
+            // ① the image is drawn at the TEXTURE's aspect ratio
+            let want = tw as f32 / th as f32;
+            let got = draw.width() / draw.height();
+            assert!(
+                (got - want).abs() <= 0.02,
+                "[{tag}] the thumbnail is drawn at {got:.3}:1, not the texture's {want:.3}:1 \
+                 — a portrait squashed into the landscape slot again"
+            );
+            // ② the SLOT is the constant one the placeholder branch allocates
+            assert!(
+                (slot.width() - THUMB_W).abs() < 0.01 && (slot.height() - THUMB_H).abs() < 0.01,
+                "[{tag}] the row slot must stay a constant {THUMB_W}×{THUMB_H} (the filename \
+                 column's alignment depends on it): {slot:?}"
+            );
+            // ③ letterboxed INSIDE that slot, centred in it
+            assert!(
+                slot.contains_rect(draw),
+                "[{tag}] the drawn image {draw:?} escapes its slot {slot:?}"
+            );
+            let d = draw.center() - slot.center();
+            assert!(
+                d.x.abs() <= 0.5 && d.y.abs() <= 0.5,
+                "[{tag}] the inset is off-centre by ({:.2}, {:.2}) px",
+                d.x,
+                d.y
+            );
+        }
+    }
+
+    /// #9 (user report after the v0.27 trial): "画笔大小的滑杆不见了". It was
+    /// never deleted — the app's ONE brush radius (`self.brush`) had its only
+    /// slider in the Retouch panel, next to Fill / Heal / Stamp, while the
+    /// mask brush is armed from Develop → Local Masks and paints in a session
+    /// whose row carried ⌫ / ✓ / ✕ and nothing else. So the control existed in
+    /// a panel the user was not in. This renders the REAL develop_panel with a
+    /// live session (the previous width test only ever drove retouch_panel —
+    /// develop_panel had zero frame coverage) and pins two things:
+    ///   ① the Brush size slider is present in that frame — deleting the
+    ///      `self.brush_size_slider(ui)` call in the session block fails here;
+    ///   ② the side panel's width does not grow across frames — the +8 px per
+    ///      frame runaway of v0.26.1 happened in this very side panel, and this
+    ///      change adds a widget to it.
+    #[test]
+    fn the_mask_brush_session_carries_the_brush_size_slider() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            // A plate is what start_mask_brush sizes its buffers against.
+            app.base_preview = Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(64, 96)));
+            app.start_mask_brush(None);
+            assert!(app.mask_brush.is_some(), "{lang:?}: the brush session armed");
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut widths = Vec::new();
+            for frame in 0..3 {
+                app.brush_slider_rect = None; // this frame's evidence only
+                let _ = ctx.run(input(), |ctx| {
+                    // Local Masks is a collapsed section by default; opening
+                    // every collapsible is egui's own test hook for exactly
+                    // this (CollapsingState::openness).
+                    ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                    let r = egui::SidePanel::left("controls")
+                        .default_width(320.0)
+                        .show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
+                        });
+                    widths.push(r.response.rect.width());
+                });
+                let s = app.brush_slider_rect.unwrap_or_else(|| {
+                    panic!(
+                        "{lang:?} frame {frame}: no Brush size slider in the mask-brush \
+                         session — the radius control is back in another panel"
+                    )
+                });
+                assert!(
+                    s.height() >= ctx.style().spacing.interact_size.y - 1.0
+                        && s.width().is_finite()
+                        && s.width() > 0.0,
+                    "{lang:?} frame {frame}: the slider occupied {s:?} — it did not lay out"
+                );
+            }
+            assert!(
+                (widths[0] - widths[2]).abs() < 0.5,
+                "{lang:?}: the controls panel must not grow across frames: {widths:?}"
+            );
+        }
+    }
+
+    /// R22-3, same段 as #9: the 「Paint mask」 checkbox writes `paint_mode`
+    /// directly, and a live MASK-brush session paints through that same flag.
+    /// Un-ticking it therefore produced an ORPHAN session — brush inert, but
+    /// the ⌫ / ✓ Apply / ✕ Cancel row still on screen with a buffer 「Apply」
+    /// would happily bake. Un-ticking must take the session's own teardown.
+    /// (Deleting the `else` arm of paint_mode_toggled fails phase 2.)
+    #[test]
+    fn un_ticking_paint_mask_ends_the_brush_session_instead_of_orphaning_it() {
+        // Phase 1: ticking still sweeps the other canvas tools and stays armed.
+        let mut app = AutoshopApp {
+            base_preview: Some(std::sync::Arc::new(image::DynamicImage::new_rgb8(32, 48))),
+            crop_mode: true,
+            clone_mode: true,
+            paint_mode: true,
+            ..Default::default()
+        };
+        app.paint_mode_toggled();
+        assert!(app.paint_mode, "ticking must survive the mutual-exclusion sweep");
+        assert!(!app.crop_mode && !app.clone_mode, "the other tools are disarmed");
+        // Phase 2: a live session + the box un-ticked = a cancel, not an orphan.
+        app.start_mask_brush(None);
+        assert!(
+            app.mask_brush.is_some() && app.mask_brush_gray.is_some() && app.paint_mode,
+            "sanity: the session is live and painting through paint_mode"
+        );
+        app.paint_mode = false; // what the checkbox itself just wrote
+        app.paint_mode_toggled();
+        assert!(
+            app.mask_brush.is_none(),
+            "the session outlived its own paint flag — its Apply row would bake stale weights"
+        );
+        assert!(app.mask_brush_gray.is_none(), "the weight buffer goes with it");
+        assert!(!app.paint_mode, "and the flag stays off");
+    }

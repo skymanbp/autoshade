@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use egui::load::SizedTexture;
 
 // NOTE: `MaskRole` is addressed only by method here (`m.role.en_name()` in the
 // mask row), never named as a type, so it is intentionally NOT imported — the
