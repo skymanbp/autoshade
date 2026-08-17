@@ -329,6 +329,9 @@ pub struct Thinking {
     /// One sentence: the model's own verdict on its answer, against the
     /// TARGET STRENGTH it was given.
     pub self_critique: String,
+    /// At most [`PIXEL_TOOLS_MAX`] suggestions for the app's PIXEL tools —
+    /// the ones no recipe field can express. Empty is the normal answer.
+    pub pixel_tools: Vec<PixelToolSuggestion>,
 }
 
 /// One line of a [`Thinking::tool_plan`]: a control family, whether this
@@ -339,6 +342,94 @@ pub struct ToolStep {
     pub control: String,
     pub used: bool,
     pub why: String,
+}
+
+/// The PIXEL tools this app has that no [`EditRecipe`] field can reach — the
+/// gap feedback #12 named ("the model has no way to say 'this needs healing'").
+///
+/// A closed enum, not free text: it is the schema's own `enum`, so a suggestion
+/// can only ever name a tool that exists, and [`PixelTool::parse`] is the same
+/// list on the way back in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelTool {
+    Heal,
+    GenerativeFill,
+    Denoise,
+    SelectSubject,
+    SelectSky,
+    CloneStamp,
+    Reimagine,
+}
+
+impl PixelTool {
+    /// Wire spelling ↔ variant, one list for the schema enum and the parser.
+    pub const ALL: [(&'static str, PixelTool); 7] = [
+        ("Heal", PixelTool::Heal),
+        ("GenerativeFill", PixelTool::GenerativeFill),
+        ("Denoise", PixelTool::Denoise),
+        ("SelectSubject", PixelTool::SelectSubject),
+        ("SelectSky", PixelTool::SelectSky),
+        ("CloneStamp", PixelTool::CloneStamp),
+        ("Reimagine", PixelTool::Reimagine),
+    ];
+
+    pub fn parse(s: &str) -> Option<PixelTool> {
+        Self::ALL.iter().find(|(n, _)| *n == s).map(|(_, t)| *t)
+    }
+
+    pub fn wire(self) -> &'static str {
+        Self::ALL.iter().find(|(_, t)| *t == self).map(|(n, _)| *n).unwrap_or("")
+    }
+}
+
+/// One pixel-tool SUGGESTION: the tool, and the model's one clause of why.
+///
+/// Advice, never an action. R20 settled that a paid, destructive operation is
+/// the explicit caller's decision, so this channel carries words to the
+/// photographer — no button wired to a generative call, no parameters implied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PixelToolSuggestion {
+    pub tool: PixelTool,
+    pub why: String,
+}
+
+/// Bound on suggestions kept (the schema asks for at most 3; this is the
+/// parser's own ceiling on a model that ignores it).
+pub const PIXEL_TOOLS_MAX: usize = 3;
+
+/// Which of the three manual LENS controls the model actually STATED a value
+/// for in this response — the "no opinion" half of R23-1b.
+///
+/// The three fields entered the strict schema as `["number","null"]`, and null
+/// is a real answer: it means "the photographer's own lens correction stands",
+/// which is what `pipeline::carry_over_unrepresentable` used to assume
+/// UNCONDITIONALLY (it overwrote all three from the refine base, so a model
+/// opinion could never survive a Refine). Without this flag the schema addition
+/// would have been either a no-op on that path or a silent loss of a
+/// hand-dialled correction — the trap the plan calls out.
+///
+/// `Default` = nothing stated, which is the honest answer for every proposal
+/// that did not come from the strict schema (the heuristic baseline, a bridge
+/// that dropped the keys).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LensOpinion {
+    pub vignette: bool,
+    pub vignette_mid: bool,
+    pub distortion: bool,
+}
+
+/// One proposal, with everything the call produced BESIDES the recipe (R23-1b).
+///
+/// A struct rather than a widening tuple for [`ProposeContext`]'s own reason: a
+/// new output must not be droppable by a call site that still compiles.
+#[derive(Debug)]
+pub struct Proposal {
+    pub recipe: EditRecipe,
+    /// The structured working, when thinking mode was asked for and the reply
+    /// carried an envelope.
+    pub thinking: Option<Thinking>,
+    /// Which manual lens controls this response actually spoke about.
+    pub lens: LensOpinion,
 }
 
 /// Per-field bound on the thinking prose (each field is specified as ONE

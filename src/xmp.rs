@@ -299,8 +299,9 @@ pub fn describe_mask_losses(losses: &[MaskLoss]) -> Option<String> {
 /// is built from — one loop, so the XML and the claim about it cannot drift.
 /// Local sliders convert UI scale → ACR local scale:
 /// exposure stops ÷4, every other slider ÷100 (verified against the user's real
-/// sidecar; see docs/V2_PLAN.md §2a). All 26 `Local*` fields are emitted (unused
-/// = 0) as Lightroom expects the full block.
+/// sidecar; see docs/V2_PLAN.md §2a). All 26 `Local*` fields are emitted (the
+/// ones this engine has no model for as 0) as Lightroom expects the full block
+/// — `LocalHue` and `LocalSharpness` joined the carried set in R23-1b.
 fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
     let mut losses: Vec<MaskLoss> = Vec::new();
     if r.masks.is_empty() {
@@ -358,8 +359,8 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
       <rdf:Description\n\
        crs:What=\"Correction\" crs:CorrectionAmount=\"{amount}\" crs:CorrectionActive=\"true\"\n\
        crs:CorrectionName=\"{name}\" crs:CorrectionSyncID=\"{corr_id}\"\n\
-       crs:LocalExposure=\"0\" crs:LocalHue=\"0\" crs:LocalSaturation=\"{sat}\"\n\
-       crs:LocalContrast=\"0\" crs:LocalClarity=\"0\" crs:LocalSharpness=\"0\"\n\
+       crs:LocalExposure=\"0\" crs:LocalHue=\"{hue}\" crs:LocalSaturation=\"{sat}\"\n\
+       crs:LocalContrast=\"0\" crs:LocalClarity=\"0\" crs:LocalSharpness=\"{sharp}\"\n\
        crs:LocalBrightness=\"0\" crs:LocalToningHue=\"0\" crs:LocalToningSaturation=\"0\"\n\
        crs:LocalExposure2012=\"{exp}\" crs:LocalContrast2012=\"{con}\"\n\
        crs:LocalHighlights2012=\"{hi}\" crs:LocalShadows2012=\"{sh}\"\n\
@@ -385,6 +386,19 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
 
             corr_id = corr_id,
             sat = local_fmt(m.saturation / 100.0),
+            // R23-1b: two keys the writer emitted as a literal "0" from the
+            // first sidecar on. They take the writer's UNIVERSAL local scale
+            // (slider ÷ 100 — the one every non-2012 key here uses, verified on
+            // the user's own sidecar for `LocalSaturation`/`LocalTexture`), and
+            // `parse_one_correction` reads them back through the same ×100, so
+            // OUR round-trip is exact. What no reference sidecar in this repo
+            // can settle is Lightroom's own numeric scale for these two: every
+            // sample carries "0" (docs/V2_PLAN.md §2a's reference block
+            // included), so the ÷100 rests on the family pattern, not on a
+            // measured non-zero. Both are re-rendered by Lightroom from its own
+            // model in any case, like `manual_vignette_lut` and local texture.
+            hue = local_fmt(m.hue / 100.0),
+            sharp = local_fmt(m.sharpness / 100.0),
             exp = local_fmt(m.exposure_ev / 4.0),
             con = local_fmt(m.contrast / 100.0),
             hi = local_fmt(m.highlights / 100.0),
@@ -2252,12 +2266,16 @@ fn correction_values_are_supported(seg: &str) -> bool {
         "LocalGrain",
         "LocalCurveRefineSaturation",
     ];
-    const INERT_LOCAL: [&str; 11] = [
+    // The pre-2012 process-version twins (`LocalExposure` beside
+    // `LocalExposure2012`, …) plus the bands this engine has no model for.
+    // `LocalHue`/`LocalSharpness` LEFT this list in R23-1b: they have no
+    // `*2012` twin, they are read back by `parse_one_correction`, and the
+    // writer now emits the recipe's own values — a correction carrying them
+    // is fully supported, not a partial import.
+    const INERT_LOCAL: [&str; 9] = [
         "LocalExposure",
-        "LocalHue",
         "LocalContrast",
         "LocalClarity",
-        "LocalSharpness",
         "LocalBrightness",
         "LocalToningHue",
         "LocalToningSaturation",
@@ -2285,7 +2303,9 @@ fn correction_values_are_supported(seg: &str) -> bool {
         "LocalClarity2012",
         "LocalDehaze",
         "LocalTexture",
+        "LocalSharpness",
         "LocalSaturation",
+        "LocalHue",
         "LocalTemperature",
         "LocalTint",
     ] {
@@ -2572,7 +2592,9 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         clarity: q100("LocalClarity2012"),
         dehaze: q100("LocalDehaze"),
         texture: q100("LocalTexture"),
+        sharpness: q100("LocalSharpness"),
         saturation: q100("LocalSaturation"),
+        hue: q100("LocalHue"),
         temperature: q100("LocalTemperature"),
         tint: q100("LocalTint"),
         noise_reduction: q100("LocalLuminanceNoise"),
@@ -4120,7 +4142,16 @@ mod tests {
                     clarity: 40.0,
                     dehaze: 5.0,
                     texture: 15.0,
+                    // R23-1b: two keys the writer used to emit as a literal
+                    // "0". They ride the same ÷100 ↔ ×100 pair as their
+                    // neighbours, and a sidecar carrying them must still import
+                    // as FULLY supported — `correction_values_are_supported`
+                    // demanded 0 for both until this round, so a non-zero one
+                    // would have downgraded the whole correction to Partial and
+                    // this equality would fail on every other field too.
+                    sharpness: -45.0,
                     saturation: 20.0,
+                    hue: 35.0,
                     temperature: 25.0,
                     tint: -10.0,
                     noise_reduction: 30.0,

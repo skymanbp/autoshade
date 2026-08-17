@@ -297,12 +297,17 @@ order with Lightroom's Add / Subtract / Intersect grammar
 (`MaskComponent`/`MaskCombine`, rendered by `render::combined_mask_weight`),
 an `enabled` eye toggle (a lossless mute — engine, coverage overlay, export
 gate and XMP writer all skip a disabled mask consistently), and an optional
-Range Mask refinement. Components, the radial `angle`, `color_gains` and
-`role` are **engine-only**: the classic-ACR XMP projection carries the base
-geometry alone (crs `MaskBlendMode`/`Angle` semantics have no verified
-reference sidecar — the roundness rule: never reshape Lightroom masks on a
-guess). Bitmap rasters are immutable once referenced: every raster edit
-(brush add/erase, feather, expand/contract, the full-resolution guided
+Range Mask refinement. Its sliders mirror the global ones plus three that
+exist only per mask: `texture`, a SIGNED `sharpness` (positive sharpens,
+negative softens — ACR's local band, R23-1b) and `hue`, a rotation of every
+colour under the mask (R23-1b; the global mixer moves one band across the
+whole frame instead). Components, `color_gains` and `role` are **engine-only**;
+the radial `angle` is rendered, GUI-editable and AI-settable but is dropped by
+the classic-ACR XMP projection, which carries the base geometry alone (crs
+`MaskBlendMode`/`Angle` semantics have no verified reference sidecar — the
+roundness rule: never reshape Lightroom masks on a guess; the writer discloses
+each such loss). Bitmap rasters are immutable once referenced: every raster
+edit (brush add/erase, feather, expand/contract, the full-resolution guided
 refine) bakes a freshly claimed file and repoints the recipe.
 
 ## 3. The unified AI provider framework (统一 API 框架)
@@ -339,6 +344,17 @@ this trait.)
 > set. `EditRecipe` is still the data contract; the registry is what keeps the AI
 > side and the measuring side from silently falling behind it (a field added to
 > the recipe without a registry row does not compile).
+>
+> R23-1b emptied the registry's engine-only column of everything that was merely
+> *staged*: the three manual lens controls entered the schema as
+> `["number","null"]`, where **null means "no opinion"** and 0 means "clear the
+> photographer's correction" — a distinction `pipeline::carry_over_unrepresentable`
+> now honours (it used to overwrite all three unconditionally, which would have
+> made the schema addition a no-op on the Refine path). What is left engine-only
+> is permanent: the engine's own per-photo measurement (`as_shot_k`/`as_shot_tint`,
+> `base_curve`, the lens-profile block) and mask state with no ACR spelling
+> (`components`, `color_gains`, `role`, plus the `enabled` eye toggle, whose only
+> possible model answers are "discarded" or "mute the user's mask").
 
 ### 3.1 The grade-strength axis — one dial, six gates (R23-3)
 

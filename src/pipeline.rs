@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::advisor::{
-    Advisor, ClaudeProvider, Decision, HeuristicProposer, OpenAiProvider, OpenAiVerifier, Preview,
-    Verdict,
+    Advisor, ClaudeProvider, Decision, HeuristicProposer, LensOpinion, OpenAiProvider,
+    OpenAiVerifier, Preview, Verdict,
 };
 use crate::config::Config;
 use crate::decode;
@@ -324,14 +324,20 @@ pub fn produce_recipe(
     // replaces `recipe` wholesale replaces this with it — a plan describing a
     // discarded candidate is worse than none.
     let mut thinking: Option<crate::advisor::Thinking> = None;
+    // …and which manual lens controls THAT proposal spoke about (R23-1b),
+    // tracked the same way and for the same reason: `carry_over_unrepresentable`
+    // must not re-impose the base's lens values over an opinion the surviving
+    // recipe actually stated. Nothing stated = the historical behaviour.
+    let mut lens_opinion = LensOpinion::default();
     let (mut recipe, can_revise) = if cfg.openai_api_key.is_some() {
         if verbose {
             println!("proposer : OpenAI ({})", cfg.openai_model);
         }
         match openai.propose_planned(&preview, meta, hist, &propose_ctx) {
-            Ok((r, t)) => {
-                thinking = t;
-                (r, true)
+            Ok(p) => {
+                thinking = p.thinking;
+                lens_opinion = p.lens;
+                (p.recipe, true)
             }
             Err(e) if base.is_some() => {
                 // REFINE means "adjust MY edit": the heuristic fallback
@@ -411,7 +417,7 @@ pub fn produce_recipe(
         // the loop stopped in the rationale, the one channel all three surfaces
         // show (the windowed GUI has no console for the CLI's stderr). A
         // FIRST-round failure still errors: there is no good pair to keep.
-        let (revised, revised_thinking) = match openai.propose_planned(
+        let revised = match openai.propose_planned(
             &preview,
             meta,
             hist,
@@ -430,14 +436,15 @@ pub fn produce_recipe(
                 break;
             }
         };
-        match verifier.verify(&revised, meta, hist, &intent) {
+        match verifier.verify(&revised.recipe, meta, hist, &intent) {
             Ok(v) => {
-                recipe = revised;
+                recipe = revised.recipe;
                 // Fresh model prose — the notes described the DISCARDED
                 // recipe's tail, so they reset with it (the suffix contract).
                 det_notes.clear();
                 // …and the working travels with the proposal it explains.
-                thinking = revised_thinking;
+                thinking = revised.thinking;
+                lens_opinion = revised.lens;
                 verdict = v;
             }
             Err(e) => {
@@ -556,7 +563,7 @@ pub fn produce_recipe(
     // thinking at a committed strength (10 with images, 14 frames) — the
     // numbers the GUI tooltip and `--deep`'s help quote.
     if judge && can_revise {
-        let judge_view = |r: &EditRecipe| -> EditRecipe {
+        let judge_view = |r: &EditRecipe, lens: LensOpinion| -> EditRecipe {
             let mut v = r.clone();
             if let Some(b) = base {
                 // A refine's bitmap masks are part of the look under
@@ -564,7 +571,11 @@ pub fn produce_recipe(
                 // deliverable gets them re-attached below) — without this
                 // the judge saw the user's sky mask missing and bought a
                 // revision to fix what was already fixed (review R20-S1).
-                carry_over_unrepresentable(&mut v, b, None);
+                // The lens opinion rides along for the same reason: the judge
+                // must score the frame the deliverable will BE, and since
+                // R23-1b those two differ whenever the model stated a lens
+                // value (it would otherwise be judged with the base's).
+                carry_over_unrepresentable(&mut v, b, lens, None);
             }
             v.base_curve = Vec::new();
             v.lens_profile = Default::default();
@@ -572,8 +583,10 @@ pub fn produce_recipe(
             v.as_shot_tint = anchor_tint;
             v
         };
-        let judge_of = |r: &EditRecipe| -> Result<crate::advisor::Judgement, crate::advisor::AdvisorError> {
-            let rendered = crate::render::develop_preview(&preview_img, &judge_view(r));
+        let judge_of = |r: &EditRecipe,
+                        lens: LensOpinion|
+         -> Result<crate::advisor::Judgement, crate::advisor::AdvisorError> {
+            let rendered = crate::render::develop_preview(&preview_img, &judge_view(r, lens));
             let mut jpeg = Vec::new();
             rendered
                 .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
@@ -612,7 +625,15 @@ pub fn produce_recipe(
         // byte-identical to the old inline pushes (nothing is ever dropped
         // there).
         let mut log: Vec<crate::rationale::Note> = Vec::new();
-        match judge_of(&recipe) {
+        // The CANDIDATE's lens opinion, written by the propose closure and read
+        // by the judge closure inside the same `visual_review_round` call. A
+        // `Cell` because those two closures are alive together (one `FnMut`, one
+        // `Fn`) and a plain `&mut` capture in the first would forbid the read in
+        // the second; `LensOpinion` is `Copy`, so this is a plain slot, not
+        // shared mutability of anything the round can observe out of order — the
+        // round always proposes before it judges.
+        let candidate_lens = std::cell::Cell::new(LensOpinion::default());
+        match judge_of(&recipe, lens_opinion) {
             Err(e) => {
                 log.push(crate::rationale::Note::new(
                     crate::rationale::keys::JUDGE_UNAVAILABLE,
@@ -658,7 +679,7 @@ pub fn produce_recipe(
                         &h,
                         &recipe,
                         |h| {
-                            let (mut r, t) = openai.propose_planned(
+                            let p = openai.propose_planned(
                                 &preview,
                                 meta,
                                 hist,
@@ -667,7 +688,9 @@ pub fn produce_recipe(
                                     ..propose_ctx
                                 },
                             )?;
-                            candidate_thinking = t;
+                            let mut r = p.recipe;
+                            candidate_thinking = p.thinking;
+                            candidate_lens.set(p.lens);
                             // The candidate walks the SAME look chain the
                             // original walked (style distillation above)
                             // — otherwise adopting it would silently
@@ -685,7 +708,10 @@ pub fn produce_recipe(
                             Ok(r)
                         },
                         |r| verifier.verify(r, meta, hist, &intent),
-                        judge_of,
+                        // The candidate's own opinion: `visual_review_round`
+                        // judges only the recipe its propose closure just
+                        // returned (`judge(&revised)`), never the held one.
+                        |r| judge_of(r, candidate_lens.get()),
                         current.score,
                     );
                     rounds_done += 1;
@@ -697,6 +723,7 @@ pub fn produce_recipe(
                             det_notes.clear();
                             // …and the working travels with its proposal.
                             thinking = candidate_thinking;
+                            lens_opinion = candidate_lens.get();
                             verdict = v2;
                             if verbose {
                                 println!(
@@ -832,6 +859,35 @@ pub fn produce_recipe(
                 );
             }
         }
+        // R23-1b: the PIXEL-tool suggestions, on the SAME channel and bounded
+        // the same way (≤3 entries, each `why` already capped at the trust
+        // boundary). One line, because that is all this is: the model naming
+        // work the develop cannot do. Nothing is executed and no parameters are
+        // implied — a button here would read as "the AI has this configured",
+        // and R20 settled that a paid, destructive operation is the explicit
+        // caller's decision.
+        if !t.pixel_tools.is_empty() {
+            let tools = t
+                .pixel_tools
+                .iter()
+                .map(|s| {
+                    if s.why.is_empty() {
+                        s.tool.wire().to_string()
+                    } else {
+                        format!("{} ({})", s.tool.wire(), s.why)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut det_notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::PIXEL_TOOLS,
+                    vec![("tools", tools)],
+                ),
+            );
+        }
         if verbose && !t.tool_plan.is_empty() {
             println!("plan     : the model's tool plan for this photo");
             for step in &t.tool_plan {
@@ -919,14 +975,15 @@ pub fn produce_recipe(
     // REFINE means "adjust MY edit", so it must not delete work the model was
     // never able to return. The strict response schema
     // (advisor::catalogue::edit_recipe_schema) can express only LINEAR and RADIAL
-    // primary geometry; it carries no components, enabled toggle, radial angle,
-    // colour gains or mask role, and it carries none of the
-    // manual lens fields — so a round-trip silently dropped every bitmap mask
-    // (AI-selected sky/subject, painted, reverse-fit zones) with its recolour
-    // gains, plus any manual lens correction. The result then auto-saves.
-    // Carry those back from the base the user actually had.
+    // primary geometry; it carries no components, no enabled toggle, no colour
+    // gains and no mask role — so a round-trip silently dropped every bitmap
+    // mask (AI-selected sky/subject, painted, reverse-fit zones) with its
+    // recolour gains. The result then auto-saves. Carry those back from the base
+    // the user actually had — and, for the three manual lens fields the schema
+    // DOES carry since R23-1b, keep the photographer's value only where this
+    // proposal said nothing about them.
     if let Some(b) = base {
-        carry_over_unrepresentable(&mut recipe, b, Some(&mut det_notes));
+        carry_over_unrepresentable(&mut recipe, b, lens_opinion, Some(&mut det_notes));
     }
     Ok((recipe, verdict, det_notes))
 }
@@ -1123,19 +1180,30 @@ pub(crate) fn visual_review_round(
 /// base the photographer actually had.
 ///
 /// `advisor::catalogue::edit_recipe_schema` can encode only LINEAR and RADIAL
-/// primary geometry; it carries no components, enabled toggle, radial angle,
-/// colour gains or mask role, and it carries none of the
-/// manual lens fields. That loss list is now the `engine_only` column of
-/// `advisor::catalogue::LOCAL_CONTROLS` / `RECIPE_CONTROLS` plus the two
-/// geometry shapes the schema omits — re-checked at R23-1 (the field set did
-/// not change; only the schema's module did). A missing bitmap mask in the response therefore
-/// carries NO intent — the model had no way to return one — yet the refined
-/// recipe auto-saves, so every AI-selected sky/subject mask, painted mask,
-/// reverse-fit zone (with its recolour gains) and hand-dialled lens
-/// correction silently disappeared the moment the user clicked Refine.
+/// primary geometry; it carries no components, no enabled toggle, no colour
+/// gains and no mask role. That loss list is the `engine_only` column of
+/// `advisor::catalogue::LOCAL_CONTROLS` / `RECIPE_CONTROLS` plus the Bitmap
+/// geometry the schema omits — re-checked at R23-1b, which SHRANK it: the
+/// radial `angle` and the three manual lens fields are in the schema now, so
+/// neither is carried blindly any more (the lens trio is settled by `lens`
+/// below, and a rotated ellipse is simply returned). A missing bitmap mask in
+/// the response carries NO intent — the model had no way to return one — yet
+/// the refined recipe auto-saves, so every AI-selected sky/subject mask,
+/// painted mask and reverse-fit zone (with its recolour gains) silently
+/// disappeared the moment the user clicked Refine.
+///
+/// `lens` is the model's OPINION on the three manual lens controls (R23-1b).
+/// The overwrite below used to be unconditional, with a sound reason at the
+/// time — the model never saw those fields, so its zeros meant nothing. Now
+/// that it can state them, an unconditional overwrite would make the schema
+/// addition a no-op on exactly the path (Refine) where a lens correction is
+/// most likely to exist. `LensOpinion::default()` (nothing stated) reproduces
+/// the historical behaviour exactly, which is what every non-schema proposal
+/// passes.
 pub(crate) fn carry_over_unrepresentable(
     recipe: &mut EditRecipe,
     base: &EditRecipe,
+    lens: LensOpinion,
     notes: Option<&mut Vec<crate::rationale::Note>>,
 ) {
     use crate::recipe::{MaskGeometry, MaskRole};
@@ -1144,7 +1212,6 @@ pub(crate) fn carry_over_unrepresentable(
         matches!(&m.mask, MaskGeometry::Bitmap { .. })
             || !m.components.is_empty()
             || !m.enabled
-            || matches!(&m.mask, MaskGeometry::Radial { angle, .. } if *angle != 0.0)
             || m.color_gains.is_some()
             || m.role != MaskRole::Custom
     };
@@ -1163,20 +1230,12 @@ pub(crate) fn carry_over_unrepresentable(
 
         if base_name_is_unique && returned_matches.len() == 1 {
             let refined = &mut recipe.masks[returned_matches[0]];
-            match (&original.mask, &mut refined.mask) {
-                (MaskGeometry::Bitmap { .. }, returned) => {
-                    *returned = original.mask.clone();
-                }
-                (
-                    MaskGeometry::Radial { angle: base_angle, .. },
-                    MaskGeometry::Radial { angle: returned_angle, .. },
-                ) => {
-                    *returned_angle = *base_angle;
-                }
-                (MaskGeometry::Radial { angle, .. }, returned) if *angle != 0.0 => {
-                    *returned = original.mask.clone();
-                }
-                _ => {}
+            // Only the raster geometry is un-returnable now: the model can
+            // state a radial `angle` (R23-1b), so a rotated ellipse it sends
+            // back IS its answer and re-imposing the base's rotation would
+            // ignore it.
+            if matches!(&original.mask, MaskGeometry::Bitmap { .. }) {
+                refined.mask = original.mask.clone();
             }
             refined.components = original.components.clone();
             refined.enabled = original.enabled;
@@ -1222,11 +1281,21 @@ pub(crate) fn carry_over_unrepresentable(
             recipe.masks.extend(proposed);
         }
     }
-    // Manual lens corrections are geometry the photographer dialled in and the
-    // model never saw; defaulting them silently re-warped the frame.
-    recipe.lens_distortion = base.lens_distortion;
-    recipe.lens_vignette = base.lens_vignette;
-    recipe.lens_vignette_mid = base.lens_vignette_mid;
+    // Manual lens corrections are geometry the photographer dialled in, and a
+    // response that says NOTHING about them (null, or a proposer with no such
+    // field at all) must not re-warp the frame by defaulting them. A response
+    // that DOES state one is answering the question it was asked — the
+    // catalogue tells it null means "no opinion" and 0 means "zero it" — so
+    // that value stands.
+    if !lens.distortion {
+        recipe.lens_distortion = base.lens_distortion;
+    }
+    if !lens.vignette {
+        recipe.lens_vignette = base.lens_vignette;
+    }
+    if !lens.vignette_mid {
+        recipe.lens_vignette_mid = base.lens_vignette_mid;
+    }
     // The lens PROFILE (with the user's toggles) rides too — but only when
     // the base actually carries one: a refine caller that still pre-strips
     // it to Default is sending a sentinel, never "the user turned everything
@@ -2455,8 +2524,10 @@ mod guard_tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base, None);
+        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
         assert_eq!(proposed.masks.len(), 2, "the bitmap mask must survive Refine");
+        // (the lens assertions below are the SILENT half of this test: with no
+        // opinion stated, every manual correction is still carried back)
         let MaskGeometry::Bitmap { path } = &proposed.masks[0].mask else {
             panic!("the carried mask must come first, got {:?}", proposed.masks[0].mask)
         };
@@ -2474,11 +2545,99 @@ mod guard_tests {
         let mut stamped = EditRecipe::default();
         stamped.lens_profile.vignette = vec![1.0, 0.9];
         stamped.lens_profile.vignette_on = true;
-        carry_over_unrepresentable(&mut stamped, &EditRecipe::default(), None);
+        carry_over_unrepresentable(&mut stamped, &EditRecipe::default(), LensOpinion::default(), None);
         assert!(stamped.lens_profile.vignette_on, "sentinel base leaves the stamp alone");
         assert!(!stamped.lens_profile.vignette.is_empty());
         // The model's own proposal is still there, after the carried one.
         assert!(matches!(proposed.masks[1].mask, MaskGeometry::Linear { .. }));
+    }
+
+    /// R23-1b: the lens trio is IN the strict schema now, so the carry-over
+    /// stopped being unconditional — and both halves of that have to hold at
+    /// once, which is exactly what made the change a trap.
+    ///
+    /// A silent overwrite (the old code) makes the schema addition a no-op on
+    /// the Refine path: the model states a correction and it is discarded
+    /// before the recipe is saved. Dropping the overwrite entirely re-opens the
+    /// bug it was written for: the model says nothing (null, or no such field
+    /// at all) and the photographer's hand-dialled correction defaults to 0,
+    /// silently re-warping the frame.
+    #[test]
+    fn a_refine_keeps_the_lens_values_the_model_did_not_speak_about() {
+        let base = EditRecipe {
+            lens_distortion: -8.0,
+            lens_vignette: 30.0,
+            lens_vignette_mid: 40.0,
+            ..Default::default()
+        };
+        // The model answered on distortion only; the two vignette fields came
+        // back null, which `take_lens_opinion` turned into the engine defaults.
+        let stated = LensOpinion { distortion: true, vignette: false, vignette_mid: false };
+        let mut proposed =
+            EditRecipe { lens_distortion: 12.0, lens_vignette: 0.0, lens_vignette_mid: 50.0, ..Default::default() };
+        carry_over_unrepresentable(&mut proposed, &base, stated, None);
+        assert_eq!(proposed.lens_distortion, 12.0, "a STATED correction is the model's answer");
+        assert_eq!(proposed.lens_vignette, 30.0, "an unstated one keeps the photographer's");
+        assert_eq!(proposed.lens_vignette_mid, 40.0);
+
+        // The zero that MEANS zero: the model stated 0, which the catalogue
+        // tells it is "clear the manual correction". Indistinguishable from a
+        // null without the opinion flag — this is why the flag exists.
+        let mut clearing = EditRecipe::default();
+        carry_over_unrepresentable(
+            &mut clearing,
+            &base,
+            LensOpinion { distortion: true, vignette: true, vignette_mid: true },
+            None,
+        );
+        assert_eq!(
+            (clearing.lens_distortion, clearing.lens_vignette, clearing.lens_vignette_mid),
+            (0.0, 0.0, 50.0),
+            "an explicit zero must not be read as 'no opinion'"
+        );
+    }
+
+    /// R23-1b: a RADIAL mask's rotation entered the schema, so a refine must
+    /// return the model's angle instead of having the base's re-imposed on it —
+    /// and an angle is no longer a reason to treat the mask as state-bearing
+    /// (which used to drag its whole geometry back).
+    #[test]
+    fn a_refine_takes_the_models_radial_rotation() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let radial = |angle: f32, top: f32| MaskGeometry::Radial {
+            top,
+            left: 0.2,
+            bottom: 0.8,
+            right: 0.8,
+            feather: 0.5,
+            roundness: 0.0,
+            flipped: false,
+            angle,
+        };
+        let base = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject".into(),
+                mask: radial(15.0, 0.2),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // The model rotated it further AND moved the top edge.
+        let mut proposed = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject".into(),
+                mask: radial(-40.0, 0.35),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        assert_eq!(
+            proposed.masks[0].mask,
+            radial(-40.0, 0.35),
+            "the rotation is the model's to set now — the whole geometry is its answer"
+        );
+        assert_eq!(proposed.masks.len(), 1, "a rotated ellipse is not 'unrepresentable' any more");
     }
 
     #[test]
@@ -3731,7 +3890,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base, None);
+        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
         assert!(!proposed.masks[0].enabled);
         assert_eq!(proposed.masks[0].components, vec![component]);
         assert_eq!(
@@ -3762,7 +3921,7 @@ mod tests {
             ..Default::default()
         };
         let mut refined = expected.clone();
-        carry_over_unrepresentable(&mut refined, &plain_base, None);
+        carry_over_unrepresentable(&mut refined, &plain_base, LensOpinion::default(), None);
         assert_eq!(refined, expected, "plain masks still take the model response exactly");
     }
 
@@ -3805,7 +3964,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base, None);
+        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
         assert_eq!(
             proposed.masks, base.masks,
             "identity lost ⇒ the base masks stand, the response's mask edits are discarded"

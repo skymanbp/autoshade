@@ -1775,9 +1775,36 @@ impl AutoshopApp {
                 changed |= Self::slider(ui, lang, tr(lang, "Texture"), &mut m.texture, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Clarity"), &mut m.clarity, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Dehaze"), &mut m.dehaze, -100.0, 100.0, 0.0);
+                // R23-1b. SIGNED, unlike the global 0..150 Sharpening: this is
+                // ACR's local band, and its negative half (soften) is what
+                // throws a background back — the tooltip says so, because the
+                // two controls share a name and not a range.
+                changed |= Self::slider_hinted(
+                    ui,
+                    lang,
+                    tr(lang, "Sharpness"),
+                    &mut m.sharpness,
+                    -100.0,
+                    100.0,
+                    0.0,
+                    tr(lang, "Sharpens inside the mask when positive and SOFTENS when negative (the global 「Sharpening」 has no negative half). Same radius as the global one."),
+                );
                 changed |= Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut m.noise_reduction, 0.0, 100.0, 0.0);
                 group(ui, tr(lang, "Color"));
                 changed |= Self::slider(ui, lang, tr(lang, "Saturation"), &mut m.saturation, -100.0, 100.0, 0.0);
+                // R23-1b: a hue ROTATION of everything the mask covers — the
+                // one colour move the global 8-band mixer cannot make, because
+                // that one acts on a band everywhere in the frame.
+                changed |= Self::slider_hinted(
+                    ui,
+                    lang,
+                    tr(lang, "Hue shift"),
+                    &mut m.hue,
+                    -100.0,
+                    100.0,
+                    0.0,
+                    tr(lang, "Rotates every colour inside the mask (±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame."),
+                );
                 // Engine-rendered since batch #2-B (render.rs apply_masks
                 // mirrors the global WB model inside the mask) — live in the
                 // preview like the tone sliders above. The ±100 pair is a

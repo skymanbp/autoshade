@@ -20,8 +20,9 @@ use crate::recipe::{EditRecipe, HSL_BANDS};
 
 use super::catalogue::{self, edit_recipe_schema};
 use super::{
-    hist_summary, strip_code_fence, Advisor, AdvisorError, BoundedUntrustedText, Preview,
-    ProposeContext, Thinking, ToolStep, THINK_FIELD_MAX_BYTES, TOOL_PLAN_MAX,
+    hist_summary, strip_code_fence, Advisor, AdvisorError, BoundedUntrustedText, LensOpinion,
+    PixelTool, PixelToolSuggestion, Preview, Proposal, ProposeContext, Thinking, ToolStep,
+    PIXEL_TOOLS_MAX, THINK_FIELD_MAX_BYTES, TOOL_PLAN_MAX,
 };
 use crate::recipe::{GradeStrength, StrengthTier};
 
@@ -248,6 +249,19 @@ state (components, toggles, colour gains) the schema does not carry, and your ma
 discarded wholesale in favour of the original masks.  ",
     );
     instruction.push_str(&catalogue::prompt_catalogue());
+    // R23-1b: the three manual lens controls entered the catalogue above, and
+    // they are the one group where the NEUTRAL value is not the safe answer.
+    // They are optical corrections for this lens, applied in linear light
+    // before any tonal work and independent of the crop — a photographer may
+    // have dialled one in by hand, and 0 would silently undo it.
+    instruction.push_str(
+        "MANUAL LENS CORRECTIONS (`lens_vignette`, `lens_vignette_mid`, `lens_distortion`) are \
+PHYSICAL corrections for this lens — falloff and geometry — NOT mood tools: the vignette one is a \
+radial gain in linear light before any tonal work and does not follow the crop, so it is not the \
+way to darken a corner (use a radial mask for that). Return NULL for all three unless you can SEE \
+an optical defect to correct: null means \"I have no opinion\" and keeps whatever the photographer \
+dialled in, while 0 is an explicit instruction to ZERO their manual correction.  ",
+    );
     // R23-4: the thinking envelope's own instructions — the response SHAPE
     // changes with it, so the two must be switched by the same flag or the
     // model is asked for a plan it has nowhere to put (or given a schema it
@@ -414,7 +428,7 @@ impl OpenAiProvider {
         meta: &Meta,
         hist: &Histogram,
         ctx: &ProposeContext,
-    ) -> Result<(EditRecipe, Option<Thinking>), AdvisorError> {
+    ) -> Result<Proposal, AdvisorError> {
         let key = self
             .api_key
             .as_ref()
@@ -462,6 +476,12 @@ impl OpenAiProvider {
             .think
             .then(|| take_thinking(&mut parsed, key))
             .flatten();
+        // R23-1b: the three manual lens controls arrive as `["number","null"]`,
+        // and null is an ANSWER ("no opinion"), not a missing field. Lift it out
+        // here — before the recipe parse, whose `f32` fields have no null — so
+        // the pipeline can tell "leave the photographer's correction alone" from
+        // "zero it".
+        let lens = take_lens_opinion(&mut parsed);
         let repaired = repair_hsl_axis_lengths(&mut parsed);
         let mut recipe: EditRecipe = serde_json::from_value(parsed)?;
         super::project_remote_recipe_text(&mut recipe, &[key]);
@@ -492,7 +512,41 @@ impl OpenAiProvider {
         // GATE 2: the same axis that shaped the prompt shapes the soft caps, or
         // a bolder proposal is compressed straight back to the old ceiling here.
         recipe.temper(ctx.strength);
-        Ok((recipe, thinking))
+        Ok(Proposal { recipe, thinking, lens })
+    }
+}
+
+/// Read the three manual lens controls' "did the model state one?" answer and
+/// normalise the nulls away, so the recipe parse behind this sees the shape it
+/// has always seen.
+///
+/// A key that is `null` (or absent — a bridge that dropped it) is REMOVED, so
+/// `EditRecipe`'s container-level `#[serde(default)]` fills the engine's own
+/// neutral (0 / 50 / 0). The pipeline then either keeps that neutral (a fresh
+/// analyze) or re-attaches the photographer's value (a refine) —
+/// `carry_over_unrepresentable`, driven by the flags returned here.
+fn take_lens_opinion(v: &mut Value) -> LensOpinion {
+    let Some(obj) = v.as_object_mut() else { return LensOpinion::default() };
+    let mut stated = |key: &str| -> bool {
+        match obj.get(key) {
+            Some(Value::Null) | None => {
+                obj.remove(key);
+                false
+            }
+            // A non-number (a string "30") is not a stated value either: the
+            // recipe parse would fail the WHOLE paid proposal on it, so it is
+            // dropped to the neutral like a null.
+            Some(x) if !x.is_number() => {
+                obj.remove(key);
+                false
+            }
+            Some(_) => true,
+        }
+    };
+    LensOpinion {
+        vignette: stated("lens_vignette"),
+        vignette_mid: stated("lens_vignette_mid"),
+        distortion: stated("lens_distortion"),
     }
 }
 
@@ -508,7 +562,7 @@ impl Advisor for OpenAiProvider {
         hist: &Histogram,
         ctx: &ProposeContext,
     ) -> Result<EditRecipe, AdvisorError> {
-        self.propose_planned(img, meta, hist, ctx).map(|(r, _)| r)
+        self.propose_planned(img, meta, hist, ctx).map(|p| p.recipe)
     }
 }
 
@@ -547,11 +601,32 @@ fn take_thinking(v: &mut Value, key: &str) -> Option<Thinking> {
                 .collect()
         })
         .unwrap_or_default();
+    // R23-1b: at most three, and a tool NAME that is not one of ours is
+    // dropped rather than shown — the enum is the contract, and a suggestion
+    // the app cannot act on is worse than none.
+    let pixel_tools = obj
+        .get("pixel_tool_suggestions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|s| {
+                    let tool = PixelTool::parse(s.get("tool").and_then(Value::as_str)?.trim())?;
+                    Some(PixelToolSuggestion {
+                        tool,
+                        why: bounded(s.get("why"), THINK_FIELD_MAX_BYTES),
+                    })
+                })
+                .take(PIXEL_TOOLS_MAX)
+                .collect()
+        })
+        .unwrap_or_default();
     let thinking = Thinking {
         scene: bounded(obj.get("scene"), THINK_FIELD_MAX_BYTES),
         tool_plan,
         intended_look: bounded(obj.get("intended_look"), THINK_FIELD_MAX_BYTES),
         self_critique: bounded(obj.get("self_critique"), THINK_FIELD_MAX_BYTES),
+        pixel_tools,
     };
     *v = recipe;
     Some(thinking)
@@ -970,6 +1045,73 @@ mod tests {
         );
     }
 
+    /// R23-1b: the three manual lens controls are in the strict schema now, as
+    /// `["number","null"]` — and null is an ANSWER, not a missing field.
+    ///
+    /// Two things break without the parse layer this pins, both of them
+    /// expensive: `EditRecipe`'s lens fields are plain `f32`, so a null would
+    /// fail the whole paid proposal's deserialize; and a null that merely
+    /// deserialized to 0 would be indistinguishable from "zero the
+    /// photographer's correction", which is what
+    /// `carry_over_unrepresentable` exists to prevent.
+    #[test]
+    fn a_null_lens_field_is_no_opinion_and_a_number_is_one() {
+        // The schema-shaped reply: one stated, two nulls.
+        let reply = serde_json::json!({
+            "output": [{ "content": [{ "type": "output_text", "text":
+                "{\"exposure_ev\":0.2,\"lens_distortion\":30.0,\"lens_vignette\":null,\
+                  \"lens_vignette_mid\":null}" }] }]
+        })
+        .to_string();
+        let (url, seen, handle) = stub_endpoint(vec![(200, "application/json", reply)]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        let out = p
+            .propose_planned(
+                &Preview { jpeg: b"J".to_vec() },
+                &meta_fixture(),
+                &hist_fixture(),
+                &ProposeContext::default(),
+            )
+            .expect("a null lens field must not fail the whole paid proposal");
+        join_stub(handle);
+        assert_eq!(
+            out.lens,
+            LensOpinion { vignette: false, vignette_mid: false, distortion: true },
+            "only the field the model actually stated counts as an opinion"
+        );
+        assert_eq!(out.recipe.lens_distortion, 30.0, "a stated value is the model's answer");
+        assert_eq!(out.recipe.lens_vignette, 0.0);
+        assert_eq!(
+            out.recipe.lens_vignette_mid, 50.0,
+            "a null is REMOVED, so the recipe's own default (50, not 0) stands"
+        );
+
+        // The wire half: the schema offers the null, and the prompt explains
+        // what it means — a nullable field the model is not told about comes
+        // back as 0 every time.
+        let body: Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+        let props = &body["text"]["format"]["schema"]["properties"];
+        for f in ["lens_vignette", "lens_vignette_mid", "lens_distortion"] {
+            assert_eq!(props[f]["type"], serde_json::json!(["number", "null"]), "{f}");
+        }
+        let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("null means \"I have no opinion\"")
+                && text.contains("0 is an explicit instruction to ZERO"),
+            "the prompt must separate 'no opinion' from 'zero it': {text}"
+        );
+        assert!(
+            text.contains("NOT mood tools"),
+            "…and must not let the vignette read as a creative corner darkening"
+        );
+
+        // A non-schema answer (a bridge that dropped the keys, or answered a
+        // string) states nothing — the historical behaviour, exactly.
+        let mut v = serde_json::json!({"lens_vignette": "30"});
+        assert_eq!(take_lens_opinion(&mut v), LensOpinion::default());
+        assert!(v.get("lens_vignette").is_none(), "an unparseable value is dropped, not kept");
+    }
+
     /// R23-4 (feedback #13), the half that protects everyone who did NOT ask
     /// for it: with `think: false` the request is the shipped one — same schema
     /// OBJECT, same schema NAME, no thinking instructions in the prompt, and
@@ -1039,6 +1181,16 @@ mod tests {
             "intended_look": "warm, committed, with a real black point",
             "recipe": {"exposure_ev": 0.4, "rationale": "lifted the shadows"},
             "self_critique": format!("Could go further on contrast. {long}"),
+            // R23-1b: the sixth field. One valid suggestion, one tool name that
+            // is not ours (dropped, not shown), and enough entries to prove the
+            // ≤3 bound is the parser's and not the schema's alone.
+            "pixel_tool_suggestions": [
+                {"tool": "Heal", "why": format!("two sensor spots in the sky. {long}")},
+                {"tool": "Rotoscope", "why": "not a tool this app has"},
+                {"tool": "Denoise", "why": "ISO 6400 shadows"},
+                {"tool": "SelectSky", "why": "the gradient spills onto the ridge"},
+                {"tool": "Reimagine", "why": "a fourth kept entry would exceed the cap"},
+            ],
         })
         .to_string();
         let reply = serde_json::json!({
@@ -1047,7 +1199,7 @@ mod tests {
         .to_string();
         let (url, seen, handle) = stub_endpoint(vec![(200, "application/json", reply)]);
         let p = OpenAiProvider::new(&cfg_for(&url));
-        let (recipe, thinking) = p
+        let super::Proposal { recipe, thinking, .. } = p
             .propose_planned(
                 &Preview { jpeg: b"TARGETJPEG".to_vec() },
                 &meta_fixture(),
@@ -1071,7 +1223,14 @@ mod tests {
                 .iter()
                 .map(|v| v.as_str().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["scene", "tool_plan", "intended_look", "recipe", "self_critique"],
+            vec![
+                "scene",
+                "tool_plan",
+                "intended_look",
+                "recipe",
+                "self_critique",
+                "pixel_tool_suggestions"
+            ],
         );
         assert_eq!(body["store"], false, "the photo-exfiltration rule is not a mode");
         let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
@@ -1093,6 +1252,22 @@ mod tests {
         assert_eq!(t.tool_plan[0].control, "tone");
         assert!(t.tool_plan[0].used && !t.tool_plan[1].used);
         assert_eq!(t.tool_plan[1].why, "the palette is already clean");
+        // R23-1b: the pixel-tool suggestions — enum-checked (the unknown name
+        // vanished), bounded in COUNT and in each clause's length.
+        assert_eq!(
+            t.pixel_tools.iter().map(|s| s.tool).collect::<Vec<_>>(),
+            vec![
+                crate::advisor::PixelTool::Heal,
+                crate::advisor::PixelTool::Denoise,
+                crate::advisor::PixelTool::SelectSky
+            ],
+            "an unknown tool name is dropped, and the list stops at PIXEL_TOOLS_MAX"
+        );
+        assert!(t.pixel_tools[0].why.starts_with("two sensor spots in the sky."));
+        assert!(
+            t.pixel_tools[0].why.len() <= crate::advisor::THINK_FIELD_MAX_BYTES,
+            "a suggestion's clause is model prose on its way to the same capped rationale"
+        );
 
         // Fail-open: a bridge that ignored the schema and answered a BARE
         // recipe still yields the develop — the working is the bonus.
@@ -1103,7 +1278,7 @@ mod tests {
         .to_string();
         let (url, _seen, handle) = stub_endpoint(vec![(200, "application/json", bare)]);
         let p = OpenAiProvider::new(&cfg_for(&url));
-        let (recipe, thinking) = p
+        let super::Proposal { recipe, thinking, .. } = p
             .propose_planned(
                 &Preview { jpeg: b"J".to_vec() },
                 &meta_fixture(),

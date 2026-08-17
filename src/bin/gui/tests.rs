@@ -4072,18 +4072,20 @@
             }
             shapes.iter().for_each(|c| walk(&c.shape, out));
         }
-        for (lang, group, recolour, hint) in [
+        for (lang, group, recolour, hint, new_sliders) in [
             (
                 crate::i18n::Lang::En,
                 "Tone",
                 "carries reverse-fit recolour (not exported to XMP)",
                 "Select a mask above to edit its adjustments",
+                ["Sharpness", "Hue shift"],
             ),
             (
                 crate::i18n::Lang::Zh,
                 "明暗",
                 "含反推重上色（不写入 XMP）",
                 "选中上面任一蒙版即可编辑它的调整",
+                ["局部锐化", "色相旋转"],
             ),
         ] {
             let ctx = egui::Context::default();
@@ -4138,6 +4140,15 @@
                 "{lang:?}: the 「More (XMP/Lightroom only)」 fold is back — those three \
                  sliders render in the engine now"
             );
+            // R23-1b: the two controls the recipe grew this round. A field that
+            // renders, exports and is offered to the AI but has no slider is
+            // reachable only by the model — the user cannot answer it.
+            for label in new_sliders {
+                assert!(
+                    seen.iter().any(|t| t == label),
+                    "{lang:?}: the mask panel has no {label:?} slider: {seen:?}"
+                );
+            }
             // ② nothing selected (one click on the selected row): the hint.
             app.sel_mask = None;
             let seen = frame(&mut app);

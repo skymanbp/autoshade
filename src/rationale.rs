@@ -215,6 +215,15 @@ pub mod keys {
     pub const THINK_LOOK: &str = " [deep thinking — the look it aimed for: {look}]";
     pub const THINK_CRITIQUE: &str =
         " [deep thinking — its own critique against your strength target: {critique}]";
+    /// R23-1b: the PIXEL tools the model thinks this photo needs — advice
+    /// only, and named as such. No develop control can express them, so this
+    /// note is the whole channel: the app never runs one on the model's say-so
+    /// (several are paid and destructive — R20's "the fee is the explicit
+    /// caller's decision"). `{tools}` is our own joined list of enum names +
+    /// bounded model clauses.
+    pub const PIXEL_TOOLS: &str =
+        " [it also suggests the pixel tools (nothing was run — these are for you to \
+         choose): {tools}]";
 
     // --- heuristic baseline (advisor/heuristic.rs) ----------------------
     pub const HEURISTIC_UNAVAILABLE: &str =

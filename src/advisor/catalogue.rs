@@ -43,7 +43,17 @@ use crate::recipe::{
 pub enum Shape {
     /// A plain `number`.
     Number,
-    /// `["number","null"]` — null is the control's "no opinion" / as-shot state.
+    /// `["number","null"]` — null is the control's "no opinion" state.
+    ///
+    /// Where that null LANDS differs by control, on purpose: `temperature_k`
+    /// carries it all the way into the recipe (`Option<f32>`, "keep as-shot"),
+    /// while the three manual LENS fields are plain `f32` the engine always
+    /// renders — their null lives only in the advisor's parse layer
+    /// (`openai::take_lens_opinion`), where it means "the photographer's own
+    /// value stands" and 0 means "zero it". Adding an Option to the recipe
+    /// instead would put a fourth spelling of "unset" into `recipe.json`, the
+    /// XMP writer and R21's fingerprint for a value the renderer must always
+    /// have (R23-1b).
     NullableNumber,
     /// An `integer` (the schema-era stamp).
     Integer,
@@ -146,11 +156,14 @@ pub struct Control {
     pub neutral: &'static str,
     /// ENGINE-ONLY: the advisor schema never asks the model for it, and
     /// `pipeline::carry_over_unrepresentable` re-attaches it after a refine.
-    /// Some of these are permanent design markers (`components`,
-    /// `color_gains`, `role`, the stamped calibration) and some are staged
-    /// work (the lens trio and `enabled` need an "I have no opinion"
-    /// expression before they can enter the schema — see the plan's
-    /// Refine-overwrite trap).
+    ///
+    /// Since R23-1b every remaining one is a PERMANENT design marker, not
+    /// staged work: the stamped calibration (`as_shot_k`, `as_shot_tint`,
+    /// `base_curve`, `lens_profile`) is the engine's own measurement of this
+    /// photo, and `components` / `color_gains` / `role` are mask state with no
+    /// classic-ACR spelling (recipe.rs states the first as an explicit design
+    /// decision). `enabled` stays here for a reason of its own — see
+    /// [`LOCAL_CONTROLS`]' row for it.
     pub engine_only: bool,
     pub crs: CrsKey,
     /// One line for the model: what this control does.
@@ -364,32 +377,35 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
     },
     Control {
         name: "lens_vignette",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = zero the photographer's own value)",
+        engine_only: false,
         crs: CrsKey::Attr("VignetteAmount"),
         purpose: "manual LENS vignette compensation — a radial gain in LINEAR light before any \
-                  tonal work (a falloff correction, NOT a creative corner darkening)",
+                  tonal work (a falloff correction, NOT a creative corner darkening); null means \
+                  you have NO opinion and the photographer's own value stands",
     },
     Control {
         name: "lens_vignette_mid",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((0.0, 100.0)),
-        neutral: "50",
-        engine_only: true,
+        neutral: "null = no opinion (the engine's own neutral is 50)",
+        engine_only: false,
         crs: CrsKey::Attr("VignetteMidpoint"),
-        purpose: "where the vignette compensation lands (lower reaches toward the centre)",
+        purpose: "where the vignette compensation lands (lower reaches toward the centre); null \
+                  means no opinion",
     },
     Control {
         name: "lens_distortion",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = zero the photographer's own value)",
+        engine_only: false,
         crs: CrsKey::Attr("LensManualDistortionAmount"),
         purpose: "manual geometric distortion correction (positive straightens BARREL, negative \
-                  PINCUSHION)",
+                  PINCUSHION); null means you have NO opinion and the photographer's own value \
+                  stands",
     },
     Control {
         name: "straighten_deg",
@@ -501,7 +517,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
 /// schema mirror. Its field set is NOT a subset of the global one (`texture`
 /// exists only here; `temperature` is a relative shift, not Kelvin), which is
 /// exactly why the drift had two independent surfaces.
-pub const LOCAL_CONTROLS: [Control; 22] = [
+pub const LOCAL_CONTROLS: [Control; 24] = [
     Control {
         name: "mask",
         shape: Shape::MaskGeometry,
@@ -511,8 +527,10 @@ pub const LOCAL_CONTROLS: [Control; 22] = [
         crs: CrsKey::Family("CorrectionMasks/Mask"),
         purpose: "WHERE this adjustment applies: kind=linear (zero_* = the no-effect edge, \
                   full_* = the full-effect edge, in 0..1 frame coords) for skies/horizons, or \
-                  kind=radial (top/left/bottom/right + feather 0..1, roundness 0..1, flipped) \
-                  for subjects and vignettes",
+                  kind=radial (top/left/bottom/right + feather 0..1, roundness 0..1, flipped, \
+                  and angle in DEGREES counter-clockwise about the ellipse centre, 0 = \
+                  axis-aligned — rotate it to follow an oblique subject) for subjects and \
+                  vignettes",
     },
     Control {
         name: "components",
@@ -533,6 +551,22 @@ pub const LOCAL_CONTROLS: [Control; 22] = [
         crs: CrsKey::None,
         purpose: "the per-mask eye toggle (mutes the mask without destroying its tuned Amount)",
     },
+    // WHY `enabled` STAYS ENGINE-ONLY (R23-1b, weighed and declined).
+    //
+    // Every value the model could put in this field is either discarded or
+    // meaningless, while one of them is destructive:
+    //   * a NEW mask — `LocalAdjustment::default()` is already `enabled: true`,
+    //     and a model that authors a mask it immediately mutes has authored
+    //     nothing. Zero gain.
+    //   * an EXISTING mask — the photographer's mute is theirs. A muted mask is
+    //     already "state-bearing" for `carry_over_unrepresentable`
+    //     (`schema_loses` tests `!m.enabled`), so a refine restores it by name;
+    //     letting the model set the field instead would hand it the power to
+    //     silence a mask the user deliberately kept, and any guard that stops it
+    //     (restore the user's value for every name-matched mask) makes the
+    //     field's value discarded anyway.
+    // Deleting a mask, the request this field might look like it serves, is
+    // already expressible: the model omits it from `masks`.
     Control {
         name: "range",
         shape: Shape::NullableRangeMask,
@@ -656,6 +690,17 @@ pub const LOCAL_CONTROLS: [Control; 22] = [
                   only per mask, there is no global Texture",
     },
     Control {
+        name: "sharpness",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalSharpness"),
+        purpose: "local capture sharpening at the same radius as the global `sharpening` — but on \
+                  ACR's own LOCAL scale, where the band is SIGNED: positive sharpens, NEGATIVE \
+                  SOFTENS (blurs) inside the mask, which is how a background is thrown back",
+    },
+    Control {
         name: "saturation",
         shape: Shape::Number,
         range: Some((-100.0, 100.0)),
@@ -663,6 +708,17 @@ pub const LOCAL_CONTROLS: [Control; 22] = [
         engine_only: false,
         crs: CrsKey::Family("LocalSaturation"),
         purpose: "local saturation",
+    },
+    Control {
+        name: "hue",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalHue"),
+        purpose: "local HUE ROTATION of every colour inside the mask (±100 = ±30°, the same scale \
+                  as the global mixer's hue axis) — for turning one region's colour without \
+                  touching the same colour elsewhere in the frame",
     },
     Control {
         name: "temperature",
@@ -725,9 +781,18 @@ pub const LOCAL_CONTROLS: [Control; 22] = [
 /// variants the AI may author; each is strict (all props required,
 /// `additionalProperties:false`). `Bitmap` is deliberately ABSENT: a raster
 /// mask is a file the engine writes (AI segmentation, painting), never
-/// something a text response can name, and `Radial::angle` is absent for the
-/// same reason it is absent from the XMP (our own field, unverified against
-/// `crs:Angle`).
+/// something a text response can name.
+///
+/// `Radial::angle` IS here since R23-1b. Its absence used to be justified by
+/// the XMP omission ("our own field, unverified against `crs:Angle`"), but the
+/// two questions are separate: the sidecar omits the rotation because mapping
+/// it onto `crs:Angle` would rotate Lightroom's masks on a guess (and
+/// `xmp::MaskLossReason::Rotation` discloses that projection loss), while THIS
+/// schema is the engine's own contract — `render::mask_weight` rotates the
+/// ellipse by exactly this field, the GUI edits it, and `recipe.json`
+/// round-trips it. Withholding it meant an oblique subject could only ever get
+/// an axis-aligned ellipse from the model, and every refine of a rotated mask
+/// had to be repaired by `carry_over_unrepresentable`.
 fn mask_geometry_schema() -> Value {
     let num = || json!({"type": "number"});
     json!({
@@ -737,10 +802,12 @@ fn mask_geometry_schema() -> Value {
              "properties": {"kind": {"type": "string", "enum": ["linear"]},
                 "zero_x": num(), "zero_y": num(), "full_x": num(), "full_y": num()}},
             {"type": "object", "additionalProperties": false,
-             "required": ["kind","top","left","bottom","right","feather","roundness","flipped"],
+             "required": ["kind","top","left","bottom","right","feather","roundness","flipped",
+                "angle"],
              "properties": {"kind": {"type": "string", "enum": ["radial"]},
                 "top": num(), "left": num(), "bottom": num(), "right": num(),
-                "feather": num(), "roundness": num(), "flipped": {"type": "boolean"}}}
+                "feather": num(), "roundness": num(), "flipped": {"type": "boolean"},
+                "angle": num()}}
         ]
     })
 }
@@ -871,8 +938,8 @@ pub struct Family {
     pub members: &'static [&'static str],
 }
 
-/// The 9 families the AI-visible global controls partition into.
-pub const CONTROL_FAMILIES: [Family; 9] = [
+/// The 10 families the AI-visible global controls partition into.
+pub const CONTROL_FAMILIES: [Family; 10] = [
     Family {
         name: "tone",
         covers: "exposure, contrast and the four tonal bands (highlights / shadows / whites / blacks)",
@@ -914,6 +981,12 @@ pub const CONTROL_FAMILIES: [Family; 9] = [
         members: &["straighten_deg", "crop"],
     },
     Family {
+        name: "lens",
+        covers: "the manual optical corrections — vignette falloff and geometric distortion \
+                 (physical fixes, not mood; leave them null unless you SEE a defect)",
+        members: &["lens_vignette", "lens_vignette_mid", "lens_distortion"],
+    },
+    Family {
         name: "masks",
         covers: "local (masked) adjustments — dodging, burning, holding a sky back",
         members: &["masks"],
@@ -925,9 +998,10 @@ pub const CONTROL_FAMILIES: [Family; 9] = [
 /// is a deliberate edit here rather than a silent hole in the partition.
 pub const NOT_A_TOOL: [&str; 3] = ["version", "rationale", "confidence"];
 
-/// The five-field THINKING ENVELOPE (R23-4): the model states what it sees,
-/// which tool families it will use and why, and the look it is aiming for
-/// BEFORE it writes the numbers — then critiques its own answer after.
+/// The THINKING ENVELOPE (R23-4, six fields since R23-1b): the model states
+/// what it sees, which tool families it will use and why, and the look it is
+/// aiming for BEFORE it writes the numbers — then critiques its own answer
+/// after, and may point at the PIXEL tools no develop control can reach.
 ///
 /// `recipe` is the SAME [`edit_recipe_schema`] the default path sends, nested
 /// verbatim: the thinking fields are not develop controls and must never enter
@@ -949,10 +1023,17 @@ pub const NOT_A_TOOL: [&str; 3] = ["version", "rationale", "confidence"];
 pub fn think_envelope_schema() -> Value {
     let families: Vec<Value> =
         CONTROL_FAMILIES.iter().map(|f| Value::String(f.name.to_string())).collect();
+    let tools: Vec<Value> = crate::advisor::PixelTool::ALL
+        .iter()
+        .map(|(n, _)| Value::String((*n).to_string()))
+        .collect();
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["scene", "tool_plan", "intended_look", "recipe", "self_critique"],
+        "required": [
+            "scene", "tool_plan", "intended_look", "recipe", "self_critique",
+            "pixel_tool_suggestions"
+        ],
         "properties": {
             "scene": {"type": "string"},
             "tool_plan": {"type": "array", "items": {
@@ -967,7 +1048,23 @@ pub fn think_envelope_schema() -> Value {
             }},
             "intended_look": {"type": "string"},
             "recipe": edit_recipe_schema(),
-            "self_critique": {"type": "string"}
+            "self_critique": {"type": "string"},
+            // The PIXEL tools, which no recipe field can reach (R23-1b). Last
+            // on purpose: it is an aside about work the develop cannot do, and
+            // the four thinking fields around the recipe are the ones whose
+            // order carries the "think first" claim. Strict mode has no
+            // optional property — every property must be `required` — so the
+            // "nothing to suggest" answer is an EMPTY ARRAY, which the prompt
+            // states and which is the common case.
+            "pixel_tool_suggestions": {"type": "array", "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["tool", "why"],
+                "properties": {
+                    "tool": {"type": "string", "enum": Value::Array(tools)},
+                    "why": {"type": "string"}
+                }
+            }}
         }
     })
 }
@@ -975,6 +1072,12 @@ pub fn think_envelope_schema() -> Value {
 /// The prompt half of the envelope: what each field means, in the order the
 /// response must take. Generated from [`CONTROL_FAMILIES`] so the plan's
 /// candidate list can never advertise a family the schema's enum rejects.
+///
+/// The ORDER SENTENCE below is the one line that must be re-read whenever the
+/// envelope grows a field — R23-1b added `pixel_tool_suggestions` to the schema
+/// and this sentence still listed five, which asks the model for a shape
+/// nothing described. `the_think_envelope_nests_the_recipe_schema_unchanged`
+/// now parses this very sentence against the schema's `required` array.
 pub fn think_prompt() -> String {
     let list: String = CONTROL_FAMILIES
         .iter()
@@ -982,7 +1085,8 @@ pub fn think_prompt() -> String {
         .collect();
     format!(
         "THINK FIRST, THEN ANSWER. Your reply is an ENVELOPE whose keys must be emitted in \
-THIS ORDER: `scene`, `tool_plan`, `intended_look`, `recipe`, `self_critique`. Write the first \
+THIS ORDER: `scene`, `tool_plan`, `intended_look`, `recipe`, `self_critique`, \
+`pixel_tool_suggestions`. Write the first \
 three BEFORE the numbers — they are your working, not a summary of it.\n\
   1. `scene` — ONE sentence on what this photograph is and what its light is doing.\n\
   2. `tool_plan` — ONE entry for EACH tool family below, in this order, with `use` true or \
@@ -996,7 +1100,20 @@ explicitly rather than by omission.\n\
 value.\n\
   5. `self_critique` — ONE sentence judging your own answer against the TARGET STRENGTH \
 above: is this a finished photograph at that strength, or did you play it safe? Name the \
-weakest part.\n"
+weakest part.\n\
+  6. `pixel_tool_suggestions` — AT MOST 3 entries, and `[]` (empty) is the normal answer. \
+These are the app's PIXEL tools, which NO develop control can reach: {tools}. Name one only \
+when this photograph visibly needs it (a sensor spot or a distracting object → Heal / \
+CloneStamp / GenerativeFill; heavy noise a slider cannot fix → Denoise; a selection the \
+gradient masks above cannot draw → SelectSubject / SelectSky; a re-imagined frame → \
+Reimagine), with ONE clause of `why`. You are ADVISING the photographer, not running these \
+tools: nothing here is executed, several cost money, and the develop you return must stand on \
+its own without them.\n",
+        tools = crate::advisor::PixelTool::ALL
+            .iter()
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>()
+            .join(" / "),
     )
 }
 
@@ -1189,7 +1306,9 @@ pub fn local_value<'a>(m: &'a LocalAdjustment, name: &str) -> Option<LocalValue<
         clarity,
         dehaze,
         texture,
+        sharpness,
         saturation,
+        hue,
         temperature,
         tint,
         noise_reduction,
@@ -1213,7 +1332,9 @@ pub fn local_value<'a>(m: &'a LocalAdjustment, name: &str) -> Option<LocalValue<
         "clarity" => LocalValue::Num(*clarity),
         "dehaze" => LocalValue::Num(*dehaze),
         "texture" => LocalValue::Num(*texture),
+        "sharpness" => LocalValue::Num(*sharpness),
         "saturation" => LocalValue::Num(*saturation),
+        "hue" => LocalValue::Num(*hue),
         "temperature" => LocalValue::Num(*temperature),
         "tint" => LocalValue::Num(*tint),
         "noise_reduction" => LocalValue::Num(*noise_reduction),
@@ -1505,20 +1626,15 @@ mod tests {
                 assert!(c.shape.schema().is_some(), "{} is in the schema with no shape", c.name);
             }
         }
-        // The staged set, spelled out so flipping one is a deliberate edit
-        // with a test to update (the lens trio and `enabled` need an
-        // "I have no opinion" expression first — see `Control::engine_only`).
+        // The engine-only set, spelled out so flipping one is a deliberate
+        // edit with a test to update. R23-1b emptied it of STAGED work: what
+        // is left is the engine's own per-photo measurement (the four global
+        // rows) and mask state with no ACR spelling. The lens trio left this
+        // list when `Shape::NullableNumber` gave it an "I have no opinion"
+        // expression and `carry_over_unrepresentable` learned to honour it.
         assert_eq!(
             names(&RECIPE_CONTROLS, Some(true)).into_iter().collect::<Vec<_>>(),
-            vec![
-                "as_shot_k",
-                "as_shot_tint",
-                "base_curve",
-                "lens_distortion",
-                "lens_profile",
-                "lens_vignette",
-                "lens_vignette_mid",
-            ]
+            vec!["as_shot_k", "as_shot_tint", "base_curve", "lens_profile"]
         );
         assert_eq!(
             names(&LOCAL_CONTROLS, Some(true)).into_iter().collect::<Vec<_>>(),
@@ -1706,19 +1822,63 @@ mod tests {
         );
         assert_eq!(
             env["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>(),
-            vec!["scene", "tool_plan", "intended_look", "recipe", "self_critique"],
+            vec![
+                "scene",
+                "tool_plan",
+                "intended_look",
+                "recipe",
+                "self_critique",
+                "pixel_tool_suggestions"
+            ],
             "the required array is the declared thinking ORDER (see the fn's note on \
              generation order — the probe test measures reality)"
         );
         assert_eq!(env["additionalProperties"], false, "strict mode");
+        // R23-1b: the pixel-tool enum IS `PixelTool::ALL`, so a suggestion can
+        // only ever name a tool this app has (the parser reads the same list).
+        assert_eq!(
+            env["properties"]["pixel_tool_suggestions"]["items"]["properties"]["tool"]["enum"]
+                .as_array()
+                .expect("the tool field is an enum")
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            crate::advisor::PixelTool::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>()
+        );
         // The thinking fields are NOT registry rows — the recipe's own key set
         // is untouched by the envelope.
         let recipe_keys = required_keys(&edit_recipe_schema());
-        for f in ["scene", "tool_plan", "intended_look", "self_critique"] {
+        for f in [
+            "scene",
+            "tool_plan",
+            "intended_look",
+            "self_critique",
+            "pixel_tool_suggestions",
+        ] {
             assert!(
                 !recipe_keys.contains(f),
                 "{f} reached the RECIPE schema — it would land in recipe.json and the XMP"
             );
+        }
+        // The PROMPT's ORDER SENTENCE states the same field list, in the same
+        // order. Checked against that SENTENCE, not the whole prompt: every
+        // field is also described in its own numbered paragraph below, so a
+        // whole-prompt `contains` passes while the sentence that actually tells
+        // the model the response SHAPE names one fewer — which is exactly the
+        // state R23-1b's sixth field first landed in.
+        let prompt = think_prompt();
+        let sentence = prompt
+            .split_once("THIS ORDER:")
+            .and_then(|(_, rest)| rest.split_once('.'))
+            .map(|(s, _)| s.to_string())
+            .expect("the think prompt opens by naming the envelope's field order");
+        let mut at = 0usize;
+        for f in env["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()) {
+            let needle = format!("`{f}`");
+            let found = sentence[at..]
+                .find(&needle)
+                .unwrap_or_else(|| panic!("the order sentence omits (or misorders) `{f}`: {sentence}"));
+            at += found + needle.len();
         }
     }
 }

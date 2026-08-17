@@ -1442,9 +1442,10 @@ fn dehaze_px(px: &[f32; 3], a: f32, s: f32, dec: &[f32], enc: &[f32]) -> [f32; 3
 /// Per mask, in pass order: local **dehaze** → the fused local **WB**
 /// (temperature/tint — the same [`wb_gains`] model as the global stage, see
 /// [`local_temp_to_kelvin`]) + **tone** (exposure/contrast/highlights/shadows/
-/// whites/blacks) + **saturation** pass → local **clarity** → local **texture**
-/// → local **noise reduction** (smooth luma toward its neighbourhood, inside
-/// the mask — for "this region is noisy" requests).
+/// whites/blacks) + **saturation** + **hue** pass → local **clarity** → local
+/// **texture** → local **sharpness** → local **noise reduction** (smooth luma
+/// toward its neighbourhood, inside the mask — for "this region is noisy"
+/// requests).
 ///
 /// Clarity/dehaze/texture are ENGINE-RENDERED since R22 (they were XMP-only
 /// before, so a mask that moved only those three appeared to do nothing in-app
@@ -1610,7 +1611,14 @@ fn apply_masks(
             && m.whites == 0.0
             && m.blacks == 0.0
             && m.saturation == 0.0
+            && m.hue == 0.0
             && colour_luts.is_none();
+        // ±100 → ±30°, the same scale `apply_hsl` gives the mixer's hue axis —
+        // one meaning for "hue 40" wherever the user sets it. No chroma gate
+        // here (the mixer needs one because its per-BAND weights are
+        // ill-conditioned on near-greys; a uniform rotation has no band to pick
+        // and `hsl_to_rgb` returns an achromatic pixel unchanged).
+        let hue_turns = m.hue / 100.0 * (30.0 / 360.0);
 
         // --- tone + saturation pass (rows independent → parallel) ---
         if !tone_identity {
@@ -1645,7 +1653,16 @@ fn apply_masks(
                 let l_old = luma601(&t);
                 let l_new = sample_lut(&lut, l_old);
                 scale_chroma(&mut t, l_old, l_new);
-                let t = apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0);
+                let mut t = apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0);
+                // Local hue rotation, LAST in the fused transform: it turns the
+                // colour this mask's WB/tone/saturation stages produced, which
+                // is the order the sliders read in (Temp shift → Saturation →
+                // Hue). Blended by the same single weight as the rest.
+                if hue_turns != 0.0 {
+                    let (hh, ss, ll) = rgb_to_hsl(t[0], t[1], t[2]);
+                    let (r2, g2, b2) = hsl_to_rgb((hh + hue_turns).rem_euclid(1.0), ss, ll);
+                    t = [r2, g2, b2];
+                }
                 for c in 0..3 {
                     out_px[c] = p[c] * (1.0 - wgt) + t[c] * wgt;
                 }
@@ -1687,6 +1704,22 @@ fn apply_masks(
             // raw slider value, so Lightroom re-renders it with its own model.
             let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
             unsharp_luma_weighted(data, w, h, radius, m.texture / 100.0, false, spatial_weight);
+        }
+        if m.sharpness != 0.0 {
+            // The GLOBAL sharpening stage's own radius model (stage 5,
+            // docs/V2_PLAN.md §4c: σ = clamp(0.0008·min(w,h), 0.7, 2.0)) — not
+            // a third calibration. One slider value therefore means the same
+            // structure globally and inside a mask, and the same at 1280 px
+            // preview as at 61 MP.
+            //
+            // SIGNED, unlike the global stage (which is 0..150): ACR's local
+            // Sharpness band runs -100..100 and the negative half is the point
+            // — `unsharp_luma_weighted` with a negative amount subtracts the
+            // detail plane, which softens. That is how a background is thrown
+            // back without touching the subject.
+            let sigma = (0.0008 * w.min(h) as f32).clamp(0.7, 2.0);
+            let radius = (sigma.round() as usize).max(1);
+            unsharp_luma_weighted(data, w, h, radius, m.sharpness / 100.0, false, spatial_weight);
         }
 
         // --- local noise reduction pass (only where the mask covers) ---
@@ -1987,7 +2020,9 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
         || m.clarity != 0.0
         || m.dehaze != 0.0
         || m.texture != 0.0
+        || m.sharpness != 0.0
         || m.saturation != 0.0
+        || m.hue != 0.0
         || m.temperature != 0.0
         || m.tint != 0.0
         || m.noise_reduction != 0.0
@@ -7814,9 +7849,123 @@ mod tests {
             ("clarity", LocalAdjustment { clarity: 50.0, ..Default::default() }),
             ("dehaze", LocalAdjustment { dehaze: -30.0, ..Default::default() }),
             ("texture", LocalAdjustment { texture: 15.0, ..Default::default() }),
+            // R23-1b: the same rule for the two new local controls — a
+            // hue-only or sharpness-only bitmap mask must load its raster and
+            // read as active, or it renders nothing for the same reason.
+            ("hue", LocalAdjustment { hue: 40.0, ..Default::default() }),
+            ("sharpness", LocalAdjustment { sharpness: -60.0, ..Default::default() }),
         ] {
             assert!(engine_active(&m), "local {name} alone must count as active");
         }
+    }
+
+    /// R23-1b: the two controls the XMP writer emitted as a literal `"0"` from
+    /// the first sidecar on. Both must actually MOVE PIXELS, inside the mask
+    /// only — a slider that exports but does not render is the #15a/#10B defect
+    /// R22 fixed for clarity/dehaze/texture, reintroduced.
+    #[test]
+    fn local_hue_rotates_and_local_sharpness_signs_both_ways_inside_the_mask() {
+        // A saturated red left half / right half, so a hue rotation is
+        // measurable as a channel swing and the mask edge is unambiguous.
+        let (w, h) = (16usize, 4usize);
+        let base: Vec<[f32; 3]> = (0..w * h).map(|_| [0.80, 0.25, 0.20]).collect();
+        // Covers the LEFT half only (the linear ramp reaches full at x=0).
+        let left_half = MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.0, full_y: 0.0 };
+        let run = |m: LocalAdjustment| -> Vec<[f32; 3]> {
+            let mut out = base.clone();
+            apply_masks(
+                &mut out,
+                w,
+                h,
+                &EditRecipe { masks: vec![m], ..Default::default() },
+                &MaskRasterSnapshot::default(),
+            );
+            out
+        };
+
+        // HUE: +100 is +30°, so red → orange (green rises, blue barely moves).
+        let hue = run(LocalAdjustment {
+            mask: left_half.clone(),
+            amount: 1.0,
+            hue: 100.0,
+            ..Default::default()
+        });
+        assert!(
+            hue[0][1] > base[0][1] + 0.05,
+            "a +30° rotation must swing red toward orange: {:?} → {:?}",
+            base[0],
+            hue[0]
+        );
+        let right = w - 1;
+        assert_eq!(hue[right], base[right], "the uncovered half must not rotate");
+        // …and the rotation is a rotation: -100 goes the other way (toward
+        // magenta — blue rises), not "less of the same".
+        let back = run(LocalAdjustment {
+            mask: left_half.clone(),
+            amount: 1.0,
+            hue: -100.0,
+            ..Default::default()
+        });
+        assert!(back[0][2] > base[0][2] + 0.02, "-30° must swing the other way: {:?}", back[0]);
+
+        // SHARPNESS: signed. A flat patch has no detail to sharpen, so measure
+        // on an edge — the frame's own left column against its neighbour after
+        // a step is introduced.
+        let (mut edged, ew, eh) = detail_frame();
+        let flat = edged.clone();
+        apply_masks(
+            &mut edged,
+            ew,
+            eh,
+            &EditRecipe {
+                masks: vec![LocalAdjustment {
+                    mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.0, full_y: 0.0 },
+                    amount: 1.0,
+                    sharpness: 100.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            &MaskRasterSnapshot::default(),
+        );
+        let energy = |d: &[[f32; 3]], lo: usize, hi: usize| -> f32 {
+            let mut e = 0.0;
+            for y in 0..eh {
+                for x in lo..hi.saturating_sub(1) {
+                    e += (luma601(&d[y * ew + x + 1]) - luma601(&d[y * ew + x])).abs();
+                }
+            }
+            e
+        };
+        assert!(
+            energy(&edged, 0, ew / 4) > energy(&flat, 0, ew / 4) * 1.01,
+            "positive local sharpness must RAISE edge energy inside the mask"
+        );
+        assert!(
+            (energy(&edged, 3 * ew / 4, ew) - energy(&flat, 3 * ew / 4, ew)).abs() < 1e-4,
+            "…and leave the uncovered side alone"
+        );
+        // The negative half is the point of the signed band: it SOFTENS.
+        let mut softened = flat.clone();
+        apply_masks(
+            &mut softened,
+            ew,
+            eh,
+            &EditRecipe {
+                masks: vec![LocalAdjustment {
+                    mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.0, full_y: 0.0 },
+                    amount: 1.0,
+                    sharpness: -100.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            &MaskRasterSnapshot::default(),
+        );
+        assert!(
+            energy(&softened, 0, ew / 4) < energy(&flat, 0, ew / 4) * 0.99,
+            "negative local sharpness must LOWER edge energy (this is the blur half)"
+        );
     }
 
     /// Deterministic mid-tone frame with fine and coarse structure — enough

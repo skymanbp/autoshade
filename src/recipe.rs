@@ -467,7 +467,21 @@ pub struct LocalAdjustment {
     /// (Adobe's model is not published) — Lightroom re-renders from the raw
     /// slider value in the XMP.
     pub texture: f32,
+    /// Local capture sharpening → `crs:LocalSharpness`, -100..=100 and SIGNED
+    /// (ACR's local Sharpness band): positive sharpens, negative SOFTENS. The
+    /// radius is the global `sharpening` stage's own σ model, so "Sharpness 40"
+    /// means the same structure globally and inside a mask. Added in R23-1b —
+    /// the writer emitted a literal `"0"` for this key from the first sidecar
+    /// on, so a photographer could soften a background in Lightroom but never
+    /// in this app.
+    pub sharpness: f32,
     pub saturation: f32,
+    /// Local HUE ROTATION → `crs:LocalHue`, -100..=100 mapped to ±30° (the
+    /// same scale as the global 8-band mixer's hue axis, `render::apply_hsl`).
+    /// Rotates every hue inside the mask instead of one band across the whole
+    /// frame — the one shape of colour move a global mixer cannot make. Added
+    /// in R23-1b beside `sharpness`, for the same reason.
+    pub hue: f32,
     /// Relative warm/cool shift (NOT Kelvin) → `crs:LocalTemperature`.
     pub temperature: f32,
     pub tint: f32,
@@ -514,7 +528,9 @@ impl Default for LocalAdjustment {
             clarity: 0.0,
             dehaze: 0.0,
             texture: 0.0,
+            sharpness: 0.0,
             saturation: 0.0,
+            hue: 0.0,
             temperature: 0.0,
             tint: 0.0,
             noise_reduction: 0.0,
@@ -1050,7 +1066,8 @@ impl EditRecipe {
             for v in [
                 &mut m.contrast, &mut m.highlights, &mut m.shadows, &mut m.whites,
                 &mut m.blacks, &mut m.clarity, &mut m.dehaze, &mut m.texture,
-                &mut m.saturation, &mut m.temperature, &mut m.tint,
+                &mut m.sharpness, &mut m.saturation, &mut m.hue,
+                &mut m.temperature, &mut m.tint,
             ] {
                 *v = c(*v, -100.0, 100.0);
             }
@@ -1793,6 +1810,50 @@ mod tests {
         assert_eq!(recipe.contrast, 100.0);
         assert_eq!(recipe.exposure_ev, -5.0);
         assert_eq!(recipe.lens_distortion, -100.0);
+    }
+
+    /// R23-1b, the T4 schema-change policy in one test: what the two new
+    /// `LocalAdjustment` fields do and do NOT change on disk.
+    ///
+    /// BACKWARD (must keep working): a `recipe.json` written before this round
+    /// has neither key, and the container-level `#[serde(default)]` fills the
+    /// engine's neutral — every archived develop still loads and renders as it
+    /// did.
+    ///
+    /// BLAST RADIUS (the fingerprint consequence): the keys appear in EVERY
+    /// serialization of a mask-bearing recipe, because `EditRecipe` has no
+    /// `skip_serializing_if` anywhere. That moves the compact re-serialization
+    /// R21's deleted-version registry hashes (`store::recipe_struct_hash`), so a
+    /// version deleted by an older build no longer matches structurally and is
+    /// preserved anew under a FRESH number — fail-open, exactly as that arm's
+    /// contract says ("schema drift changes this hash"). The number itself is
+    /// never reissued (the `hwm` arm is untouched by any schema change), which
+    /// is what `tests/repro_deleted_version_resurrection.rs` pins.
+    ///
+    /// A recipe with NO masks is unaffected in both directions — the drift is
+    /// bounded to mask-bearing develops, and this test states that bound rather
+    /// than leaving the release note to guess it.
+    #[test]
+    fn the_new_local_fields_default_in_and_only_widen_a_mask_bearing_recipe() {
+        // An OLD file: every key this round added is absent.
+        let old = r#"{"version":2,"masks":[{"mask":{"kind":"linear","zero_x":0.5,
+            "zero_y":0.0,"full_x":0.5,"full_y":0.4},"name":"sky","exposure_ev":-0.4}]}"#;
+        let back: EditRecipe = serde_json::from_str(old).expect("an old recipe.json still loads");
+        assert_eq!(back.masks[0].hue, 0.0);
+        assert_eq!(back.masks[0].sharpness, 0.0);
+        assert_eq!(back.masks[0].exposure_ev, -0.4, "…with its own values intact");
+
+        // A maskless recipe's bytes cannot have moved: the new fields live on
+        // `LocalAdjustment`, which such a recipe never serializes.
+        // (`"hue":` alone would match the global mixer's own axis, which is an
+        // ARRAY — the local one is a scalar, hence the `:0.0`.)
+        let bare = serde_json::to_string(&EditRecipe::default()).unwrap();
+        assert!(!bare.contains("\"hue\":0.0"), "no mask ⇒ no new key: {bare}");
+        assert!(!bare.contains("\"sharpness\""), "no mask ⇒ no new key: {bare}");
+        // A mask-bearing one always carries them, zero or not (no
+        // skip_serializing_if) — the drift is real and total on this side.
+        let with_mask = serde_json::to_string(&back).unwrap();
+        assert!(with_mask.contains("\"hue\":0.0") && with_mask.contains("\"sharpness\":0.0"));
     }
 
     #[test]

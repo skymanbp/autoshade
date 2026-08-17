@@ -119,9 +119,11 @@ impl Row {
 /// shapes expand into their per-band / per-wheel cells.
 ///
 /// Engine-only rows are excluded on purpose — the AI cannot set them, so
-/// scoring it against them would measure a schema gap, not a taste gap. When
-/// the lens trio enters the schema (R23-1 stage 2) it enters the ruler here in
-/// the same edit.
+/// scoring it against them would measure a schema gap, not a taste gap. The
+/// lens trio entered the schema in R23-1b and therefore entered the ruler in
+/// the same edit, exactly as this note promised: three more rows
+/// (`VignetteAmount` / `VignetteMidpoint` / `LensManualDistortionAmount`),
+/// derived, with no hand-kept list to update.
 fn rows() -> Vec<Row> {
     let mut out = Vec::new();
     for c in RECIPE_CONTROLS.iter().filter(|c| !c.engine_only) {
@@ -795,8 +797,18 @@ mod tests {
             }
         }
         // Engine-only controls stay OUT: the AI cannot set them, so scoring it
-        // against them would measure the schema gap, not the taste gap.
-        assert!(!metric("lens_vignette"), "an engine-only control must not be scored");
+        // against them would measure the schema gap, not the taste gap. (Read
+        // off the registry, not a name — R23-1b moved the lens trio to the
+        // AI-visible side and this assertion had to move with it or be a lie.)
+        for c in RECIPE_CONTROLS.iter().filter(|c| c.engine_only) {
+            assert!(!metric(c.name), "{} is engine-only and must not be scored", c.name);
+        }
+        // …and the trio that CROSSED that line is measured now: the ruler was
+        // blind to the manual lens corrections for exactly as long as the
+        // schema was.
+        for m in ["lens_vignette", "lens_vignette_mid", "lens_distortion"] {
+            assert!(metric(m), "{m} is in the schema now and must be scored");
+        }
         // The two families expand (24 + 14) — the blind spot #12 reported.
         assert_eq!(ruler.iter().filter(|r| r.metric.starts_with("hsl.")).count(), 24);
         assert_eq!(ruler.iter().filter(|r| r.metric.starts_with("color_grade.")).count(), 14);

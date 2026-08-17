@@ -287,6 +287,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Detail", "细节 · Detail"),
     ("Sharpening", "锐化"),
     ("Noise Reduction", "降噪"),
+    // R23-1b: the two new PER-MASK sliders. Distinct labels from the global
+    // 「锐化」/「色相」 on purpose — these are the local, signed/rotating forms,
+    // and the tooltips carry the difference.
+    ("Sharpness", "局部锐化"),
+    ("Sharpens inside the mask when positive and SOFTENS when negative (the global 「Sharpening」 has no negative half). Same radius as the global one.",
+        "正值在蒙版内锐化，负值柔化（全局「锐化」没有负值一半）。半径与全局一致。"),
+    ("Hue shift", "色相旋转"),
+    ("Rotates every colour inside the mask (±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame.",
+        "旋转蒙版内的所有颜色（±100 = ±30°）——不同于全局颜色混合器：那个是把某一色段在整幅画面上移动。"),
 
     // ── Develop · Color Mixer (HSL) + Grading ────────────────────────────────
     ("Color Mixer (HSL)", "颜色混合器 · HSL"),
@@ -1234,6 +1243,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " [深度思考——它想要的成片效果：{look}]"),
     (" [deep thinking — its own critique against your strength target: {critique}]",
         " [深度思考——它对照你的强度目标做的自查：{critique}]"),
+    // ── R23-1b: the pixel-tool suggestions (advice only, nothing was run) ────
+    (" [it also suggests the pixel tools (nothing was run — these are for you to \
+      choose): {tools}]",
+        " [它还建议用这些像素工具（未运行任何操作——是否使用由你决定）：{tools}]"),
     (" [style distillation then pulled the global sliders toward this user's past \
       edits (effective strength {pct}%) — final values can differ from the \
       derivation above]",
