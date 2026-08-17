@@ -3741,7 +3741,27 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   **WB(temp/tint)+color_gains → tone → saturation → NR**（#2-B 起；WB 镜像
   全局 `wb_gains` 模型、mired 映射 `local_temp_to_kelvin`；`color_gains`
   是分区反推的重着色增益，引擎专用），clarity/dehaze/texture 仍仅进 XMP
-  （GUI 已如实分组：Temp/Tint 移入实时区）。
+  （GUI 已如实分组：Temp/Tint 移入实时区）。**（R22 起已上引擎**——此句
+  记录的是 #2-B 当时状态；现行通道链见下条 R22-4）
+- **R22-4（#15a/#10B）蒙版 clarity/dehaze/texture 上引擎**：`apply_masks`
+  现行通道顺序 = **dehaze → 融合 WB+tone+sat → clarity → texture → NR**，
+  每条各自 `!= 0.0` 门控（此前「只调这三项」的蒙版三重落空：不渲染、
+  `engine_active` 判不活、栅格预算加载器连位图都不载）。dehaze 复用全局
+  同一模型（`apply_dehaze` 拆出 `dehaze_airlight` + `dehaze_px`，拆分前后
+  golden 位级一致），airlight 每帧只估一次且取自全局显影后的画面 ⇒ 蒙版
+  叠放顺序不改变雾模型；clarity/texture = `unsharp_luma_weighted`（把权重
+  乘到亮度差上，与「整幅滤波再按权混合」严格等价，故只需两个 f32 平面而
+  非 RGB 副本，61MP 省 ~732MB），clarity 半径同全局（0.02·短边，地板 8px、
+  midtone 加权），texture = 0.005·短边地板 2px、无 midtone 加权且**是我们
+  自己的标定**（引擎无全局 Texture 可对齐、Adobe 模型未公开，同
+  `manual_vignette_lut` 的诚实口径）。**两处与全局链的残差如实登记**（局部
+  WB/tone/sat 是一次融合混合，拆开会改变所有既有部分权重蒙版的输出）：
+  局部 Temp/Tint 落在局部 dehaze 之后；局部 saturation 落在 clarity/texture
+  之前。`engine_active` 同批加三项，两个消费点（GUI ● 与栅格预算 filter）
+  行为自动同变。**行为变更**：既有带这三项的旧 develop 会重渲染出新观感
+  （用户已批），judge 视觉评审看到的像素随之变化 ⇒ 分数基线移动（R23
+  强度轴验收前无需重标）。GUI「More (XMP/Lightroom only)」折叠头文案属
+  包 4（LR 三组化）。
 - 分区反推 `fit_zoned.rs`：`fit_recipe_zoned`（CLI `match --zoned` /
   GUI `zoned_fit` Pref）= 全局 fit → 天空分割×2 → 天空+地景（同栅格反相）
   双分区 → 每区 zone_err 矩裁判（帧全局 look_err 只作 ±0.02 漂移保险——

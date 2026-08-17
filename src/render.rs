@@ -11,9 +11,11 @@
 //! HONEST SCOPE: these ops are tasteful **approximations**, not bit-exact
 //! Lightroom — clarity/sharpening are luma unsharp masks, noise reduction is a
 //! bilateral-lite, dehaze is a pointwise scattering inversion (see
-//! [`apply_dehaze`]). NOT applied here: LOCAL-mask clarity/dehaze/texture
-//! (deferred — the XMP→Lightroom path renders those, see [`apply_masks`];
-//! local temperature/tint ARE engine-rendered since batch #2-B).
+//! [`apply_dehaze`]). LOCAL-mask clarity/dehaze/texture ARE engine-rendered
+//! since R22 (local temperature/tint since batch #2-B) — see [`apply_masks`]
+//! for the pass order and the two documented residues vs the global chain.
+//! Local `texture` has no global counterpart to align with, so its radius is
+//! our own calibration.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -1322,17 +1324,38 @@ fn apply_radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32]
 ///
 /// Negative `amount` adds a uniform veil toward the airlight (`ω ≡ 1`, the
 /// exact inverse family): a convex blend, mathematically clip-free.
+///
+/// Split into [`dehaze_airlight`] (the frame-level estimate) and [`dehaze_px`]
+/// (the per-pixel affine map) so the MASKED dehaze in [`apply_masks`] can
+/// share the exact same two halves — one model, two call sites, no second
+/// implementation to drift. The split is a pure factoring: test
+/// `dehaze_split_is_bit_identical_to_the_pre_split_golden` pins the output
+/// bit-for-bit against values captured before it.
 fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
     let s = amount.clamp(-100.0, 100.0) / 100.0;
     if s.abs() < 1e-4 {
         return;
     }
-    /// Full-slider strength: at +100 a pure-airlight pixel reaches t = T_MIN.
-    const K: f32 = 0.75;
-    /// Transmission floor — caps amplification at 1/T_MIN ≈ 3.3× so deep
-    /// shadows darken decisively but cannot explode to noise.
-    const T_MIN: f32 = 0.30;
+    let a = dehaze_airlight(data, w);
+    let (dec, enc) = transfer_luts();
+    data.par_iter_mut().for_each(|px| {
+        *px = dehaze_px(px, a, s, dec, enc);
+    });
+}
 
+/// Full-slider dehaze strength: at +100 a pure-airlight pixel reaches
+/// `t = DEHAZE_T_MIN`.
+const DEHAZE_K: f32 = 0.75;
+/// Dehaze transmission floor — caps amplification at 1/T_MIN ≈ 3.3× so deep
+/// shadows darken decisively but cannot explode to noise.
+const DEHAZE_T_MIN: f32 = 0.30;
+
+/// Estimate the airlight `A` for [`apply_dehaze`] / [`dehaze_px`]: P99 of the
+/// linear min-channel, clamped away from black. Depends ONLY on the frame it
+/// is handed — no slider value reaches it, which is what keeps the haze model
+/// from re-estimating itself when the user drags Exposure (and, in
+/// [`apply_masks`], what makes the estimate independent of mask stacking).
+fn dehaze_airlight(data: &[[f32; 3]], w: usize) -> f32 {
     // Airlight: histogram of the linear min-channel over ≤ ~262k strided
     // samples (resolution-stable), P99, clamped away from black so a frame
     // with no bright region cannot produce a degenerate divisor.
@@ -1377,43 +1400,82 @@ fn apply_dehaze(data: &mut [[f32; 3]], w: usize, amount: f32) {
             break;
         }
     }
-    let a = (a_bin as f32 / 1023.0).clamp(0.10, 1.0);
+    (a_bin as f32 / 1023.0).clamp(0.10, 1.0)
+}
 
-    // Per-pixel loop: 6 powf/px replaced by the shared transfer LUTs (the
-    // airlight histogram above keeps the exact powf — see transfer_luts), and
-    // pixels are independent so the pass is parallel.
-    let (dec, enc) = transfer_luts();
-    data.par_iter_mut().for_each(|px| {
-        let lin = [sample_lut(dec, px[0]), sample_lut(dec, px[1]), sample_lut(dec, px[2])];
-        let out = if s > 0.0 {
-            let w = (lin[0].min(lin[1]).min(lin[2]) / a).clamp(0.0, 1.0);
-            let t = (1.0 - K * s * w).max(T_MIN);
-            let b = a * (1.0 - t);
-            [(lin[0] - b) / t, (lin[1] - b) / t, (lin[2] - b) / t]
-        } else {
-            let v = K * (-s);
-            [
-                lin[0] * (1.0 - v) + a * v,
-                lin[1] * (1.0 - v) + a * v,
-                lin[2] * (1.0 - v) + a * v,
-            ]
-        };
-        for (c, o) in px.iter_mut().zip(out) {
-            *c = sample_lut(enc, o.clamp(0.0, 1.0));
-        }
-    });
+/// One pixel through the dehaze affine map: `a` = airlight from
+/// [`dehaze_airlight`], `s` = signed slider strength (`amount/100`, already
+/// clamped), `dec`/`enc` = the shared transfer LUTs.
+///
+/// 6 powf/px are replaced by those LUTs (the airlight histogram keeps the exact
+/// powf — see `transfer_luts`); pixels are independent, so both callers run the
+/// map in parallel.
+#[inline]
+fn dehaze_px(px: &[f32; 3], a: f32, s: f32, dec: &[f32], enc: &[f32]) -> [f32; 3] {
+    let lin = [sample_lut(dec, px[0]), sample_lut(dec, px[1]), sample_lut(dec, px[2])];
+    let out = if s > 0.0 {
+        let w = (lin[0].min(lin[1]).min(lin[2]) / a).clamp(0.0, 1.0);
+        let t = (1.0 - DEHAZE_K * s * w).max(DEHAZE_T_MIN);
+        let b = a * (1.0 - t);
+        [(lin[0] - b) / t, (lin[1] - b) / t, (lin[2] - b) / t]
+    } else {
+        let v = DEHAZE_K * (-s);
+        [
+            lin[0] * (1.0 - v) + a * v,
+            lin[1] * (1.0 - v) + a * v,
+            lin[2] * (1.0 - v) + a * v,
+        ]
+    };
+    [
+        sample_lut(enc, out[0].clamp(0.0, 1.0)),
+        sample_lut(enc, out[1].clamp(0.0, 1.0)),
+        sample_lut(enc, out[2].clamp(0.0, 1.0)),
+    ]
 }
 
 /// Apply each local masked adjustment: blend the masked region toward a locally
-/// re-adjusted version, weighted by the gradient mask × amount. Applies local
-/// white balance (temperature/tint — the same [`wb_gains`] model as the global
-/// stage, see [`local_temp_to_kelvin`]), then local tone (exposure/contrast/
-/// highlights/shadows/whites/blacks) + saturation — WB → tone → sat, mirroring
-/// the global pipeline order — then local **noise reduction** (smooth luma
-/// toward its neighbourhood, inside the mask — for "this region is noisy"
-/// requests). Local clarity/dehaze/texture are deferred (the XMP→Lightroom
-/// path renders those). Mask coords are normalised so this works at any
-/// resolution.
+/// re-adjusted version, weighted by the gradient mask × amount. Mask coords are
+/// normalised so this works at any resolution.
+///
+/// Per mask, in pass order: local **dehaze** → the fused local **WB**
+/// (temperature/tint — the same [`wb_gains`] model as the global stage, see
+/// [`local_temp_to_kelvin`]) + **tone** (exposure/contrast/highlights/shadows/
+/// whites/blacks) + **saturation** pass → local **clarity** → local **texture**
+/// → local **noise reduction** (smooth luma toward its neighbourhood, inside
+/// the mask — for "this region is noisy" requests).
+///
+/// Clarity/dehaze/texture are ENGINE-RENDERED since R22 (they were XMP-only
+/// before, so a mask that moved only those three appeared to do nothing in-app
+/// — user feedback #15a/#10B; recipes saved before R22 that carry them now
+/// re-render with the local effect applied, which the user signed off on).
+/// Clarity and texture are unsharp masks at two different radii
+/// ([`unsharp_luma_weighted`], weighted by the mask instead of blending against
+/// an RGB copy); dehaze reuses the exact global pair
+/// [`dehaze_airlight`] + [`dehaze_px`].
+///
+/// **Pass order vs the global chain** (WB → dehaze → tone → … → clarity →
+/// saturation → NR): the local WB/tone/saturation stages are ONE fused
+/// single-weight blend, and splitting them apart to interleave the spatial ops
+/// would change the output of every existing partial-weight mask (for `0 < w <
+/// 1`, one blend of the composed transform ≠ three chained blends). So the two
+/// achievable orderings are kept and the residue is documented: dehaze runs
+/// BEFORE the fused pass — preserving the two properties the global order
+/// exists for (the monotone pinned-white tone LUT cannot blow what dehaze
+/// protected, and saturation stays downstream so the user can trim dehaze's
+/// chroma restoration) at the cost of local Temp/Tint landing after local
+/// dehaze rather than before it; clarity/texture run after the fused pass, so
+/// local saturation precedes them (globally clarity precedes saturation).
+/// Both residues are second-order: local Temp/Tint is a relative nudge on a
+/// frame that was already globally white-balanced before the airlight was
+/// estimated, and clarity/texture scale luma while saturation moves chroma.
+///
+/// **Memory** (full-resolution export, 61 MP → 244 MB per f32 plane): the
+/// spatial passes each hold one luma plane + one blurred plane and run
+/// SEQUENTIALLY, dropping both before the next starts, so the resident
+/// increment is the same two planes (~488 MB) the local NR pass has always
+/// cost — not three passes' worth. `blur_plane` transiently holds two more of
+/// its own, the existing global-clarity/NR peak. The `!= 0.0` gate on each
+/// pass means a mask that does not use an op allocates nothing for it.
 fn apply_masks(
     data: &mut [[f32; 3]],
     w: usize,
@@ -1424,6 +1486,18 @@ fn apply_masks(
     if w == 0 || h == 0 {
         return; // both passes below chunk by w; rayon asserts chunk_size != 0
     }
+    // Airlight for every masked dehaze in this frame, estimated ONCE and only
+    // when some mask actually asks for dehaze (the estimate is a full-frame
+    // histogram — a real cost at 61 MP). Estimating it here, from the frame as
+    // the global develop left it, is what makes it independent of MASK STACKING
+    // ORDER: reordering or toggling masks cannot re-estimate the haze, exactly
+    // as dragging Exposure cannot re-estimate the global one. A per-mask
+    // estimate would also make two masks disagree about the same sky.
+    let dehaze_a = r
+        .masks
+        .iter()
+        .any(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && m.dehaze != 0.0)
+        .then(|| dehaze_airlight(data, w));
     for m in &r.masks {
         // The eye toggle: a disabled mask renders nothing at any Amount —
         // the lossless mute (recipe.rs `LocalAdjustment::enabled`).
@@ -1488,10 +1562,45 @@ fn apply_masks(
             wgt * amount
         };
 
+        // --- local dehaze pass (runs FIRST — see the pass-order note on this
+        //     function for why, and for the two residues vs the global chain) ---
+        // The airlight is the frame-level one estimated above; only the affine
+        // map is per-pixel, so this is the same model as the global stage with
+        // the mask weight blending the two ends. `|s| < 1e-4` mirrors
+        // `apply_dehaze`'s own floor, so a hair-off-zero slider costs no pass.
+        let dehaze_s = m.dehaze.clamp(-100.0, 100.0) / 100.0;
+        if dehaze_s.abs() >= 1e-4
+            && let Some(a) = dehaze_a
+        {
+            let (dec, enc) = transfer_luts();
+            data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                for (x, out_px) in row.iter_mut().enumerate() {
+                    let mut wgt = weight_at(x, y);
+                    if wgt <= 0.001 {
+                        continue;
+                    }
+                    let p = *out_px;
+                    // Range Mask intersection, same convention as the tone pass.
+                    if let Some(rm) = &m.range {
+                        wgt *= range_weight(rm, &p);
+                        if wgt <= 0.001 {
+                            continue;
+                        }
+                    }
+                    let t = dehaze_px(&p, a, dehaze_s, dec, enc);
+                    for c in 0..3 {
+                        out_px[c] = p[c] * (1.0 - wgt) + t[c] * wgt;
+                    }
+                }
+            });
+        }
+
         // An adjustment whose tone/sat/colour stages are ALL identity blends
         // each pixel with itself — skip the full-frame scan (a real cost at
-        // 61 MP for an NR-only or freshly parked mask); the NR pass below
-        // still runs on its own gate.
+        // 61 MP for an NR-only or freshly parked mask); the clarity, texture
+        // and NR passes below each still run on their own `!= 0.0` gate, so a
+        // mask that moves ONLY one of those reaches it (before R22 a
+        // clarity-only mask fell through every gate and rendered nothing).
         let tone_identity = m.exposure_ev == 0.0
             && m.contrast == 0.0
             && m.highlights == 0.0
@@ -1540,6 +1649,42 @@ fn apply_masks(
                 }
             }
         });
+        }
+
+        // --- local clarity / texture (SPATIAL: full-frame luma plane → blur →
+        //     detail weighted by the mask, exactly like the NR pass below) ---
+        //     Neither can ride the per-pixel loop above: a spatial operator
+        //     needs neighbours, and that loop is a pure per-pixel LUT.
+        let spatial_weight = |x: usize, y: usize, px: &[f32; 3]| -> f32 {
+            let mut wgt = weight_at(x, y);
+            // Range Mask intersection, same convention as the tone pass — the
+            // pixel state here already carries this mask's own tone move (the
+            // same documented drift the NR pass notes).
+            if wgt > 0.001
+                && let Some(rm) = &m.range
+            {
+                wgt *= range_weight(rm, px);
+            }
+            wgt
+        };
+        if m.clarity != 0.0 {
+            // The global clarity radius model, verbatim (render.rs stage 3):
+            // large-radius midtone-masked local contrast, 2% of the short edge
+            // floored at 8 px so a preview and a 61 MP export mean the same
+            // thing by "Clarity 30".
+            let radius = ((0.02 * w.min(h) as f32).round() as usize).max(8);
+            unsharp_luma_weighted(data, w, h, radius, m.clarity / 100.0, true, spatial_weight);
+        }
+        if m.texture != 0.0 {
+            // Texture = the same unsharp operator at a SMALL radius and with no
+            // midtone mask, so it works fine detail across the whole tonal
+            // range where clarity works midtone volume. There is no global
+            // Texture stage to align with and Adobe's model is proprietary, so
+            // 0.5% of the short edge (floored at 2 px) is OUR calibration — the
+            // same honesty stance as `manual_vignette_lut`: the XMP carries the
+            // raw slider value, so Lightroom re-renders it with its own model.
+            let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
+            unsharp_luma_weighted(data, w, h, radius, m.texture / 100.0, false, spatial_weight);
         }
 
         // --- local noise reduction pass (only where the mask covers) ---
@@ -1819,12 +1964,17 @@ fn refine_mask_guided_tiled(
     out
 }
 
-/// The ENGINE's own activity rule for one local adjustment (mirrors
-/// `apply_masks`): identity tone/sat + no local WB/recolour + no local NR
-/// renders nothing even with a healthy raster — local clarity/dehaze/texture
-/// are XMP-only. Shared by the export gate (`unreadable_mask_rasters`) and
-/// the GUI's mask-list activity marker, so the dot the user sees IS the rule
-/// the render applies.
+/// The ENGINE's own activity rule for one local adjustment: does
+/// [`apply_masks`] have anything to do for it? Every `!= 0.0` gate inside that
+/// function is mirrored here — identity tone/sat + no local WB/recolour + no
+/// local dehaze/clarity/texture/NR renders nothing even with a healthy raster.
+///
+/// Two consumers depend on it and must never disagree with the render: the
+/// GUI's mask-list activity marker (so the ● the user sees IS the rule the
+/// render applies) and `load_mask_raster_snapshot_with_budget`, which spends
+/// the raster budget only on masks that will actually render. Adding the
+/// clarity/dehaze/texture terms in R22 fixed both at once: a clarity-only
+/// bitmap mask used to read "parked" AND have its raster left unloaded.
 pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
     m.exposure_ev != 0.0
         || m.contrast != 0.0
@@ -1832,6 +1982,9 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
         || m.shadows != 0.0
         || m.whites != 0.0
         || m.blacks != 0.0
+        || m.clarity != 0.0
+        || m.dehaze != 0.0
+        || m.texture != 0.0
         || m.saturation != 0.0
         || m.temperature != 0.0
         || m.tint != 0.0
@@ -2280,14 +2433,54 @@ fn scale_chroma(px: &mut [f32; 3], l_old: f32, l_new: f32) {
 /// Unsharp mask on luminance (chroma-preserving). `amount` scales the detail;
 /// `midtone` weights the effect toward midtones (for clarity).
 fn unsharp_luma(data: &mut [[f32; 3]], w: usize, h: usize, radius: usize, amount: f32, midtone: bool) {
+    unsharp_luma_weighted(data, w, h, radius, amount, midtone, |_, _, _| 1.0);
+}
+
+/// [`unsharp_luma`] with a per-pixel weight — the LOCAL-mask form (clarity /
+/// texture inside a mask). `weight(x, y, px)` receives the pixel as it stands
+/// when the pass reaches it, so the caller can fold a Range Mask into the
+/// geometric coverage; weights ≤ 0.001 skip the pixel untouched.
+///
+/// **The weighting is EXACT, not an approximation.** `unsharp_luma` scales a
+/// pixel's RGB by `k = new_l/l` (`scale_chroma`), so the filtered pixel is
+/// `p·k`. Mixing the original and the filtered result by weight `w` gives
+/// `p·(1−w) + p·k·w = p·(1 + w(k−1))`, i.e. the pixel scaled by the
+/// weight-interpolated ratio `1 + w(k−1)`. Attenuating the LUMA DIFFERENCE by
+/// `w` before `scale_chroma` produces `new_l' = l + w·(new_l − l)`, whose ratio
+/// is `k' = new_l'/l = 1 + w(k−1)` — the same number. So "weight the detail"
+/// and "filter the whole frame, then blend by weight" are the same operation,
+/// and this needs only the two f32 planes the filter already builds instead of
+/// a full RGB copy of the frame to blend against (~732 MB at 61 MP).
+/// (Exactness holds up to the two clamps `scale_chroma` and the `new_l` clamp
+/// apply; at `w = 1` the arithmetic is bit-identical to `unsharp_luma` — test
+/// `unsharp_weighted_at_weight_one_is_bit_identical`.)
+fn unsharp_luma_weighted(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    radius: usize,
+    amount: f32,
+    midtone: bool,
+    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
+) {
+    if w == 0 || h == 0 {
+        return; // par_chunks_mut(0) asserts; a 0-dim frame has no pixels anyway
+    }
     let luma: Vec<f32> = data.par_iter().map(luma601).collect();
     let blurred = blur_plane(&luma, w, h, radius);
-    data.par_iter_mut().enumerate().for_each(|(i, px)| {
-        let l = luma[i];
-        let detail = l - blurred[i];
-        let m = if midtone { 1.0 - (2.0 * l - 1.0).powi(2) } else { 1.0 };
-        let new_l = (l + amount * detail * m).clamp(0.0, 1.0);
-        scale_chroma(px, l, new_l);
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let wgt = weight(x, y, px);
+            if wgt <= 0.001 {
+                continue;
+            }
+            let i = y * w + x;
+            let l = luma[i];
+            let detail = l - blurred[i];
+            let m = if midtone { 1.0 - (2.0 * l - 1.0).powi(2) } else { 1.0 };
+            let new_l = (l + amount * detail * m * wgt).clamp(0.0, 1.0);
+            scale_chroma(px, l, new_l);
+        }
     });
 }
 
@@ -7243,6 +7436,321 @@ mod tests {
                 "{name}: airlight phase-locked to the pattern: {pa} vs {pb}"
             );
         }
+    }
+
+    /// Deterministic synthetic frame for the dehaze golden: a hazy sky band
+    /// over a colourful ground, generated by pure integer arithmetic so the
+    /// bytes are identical on every platform and compiler.
+    fn dehaze_golden_frame() -> (Vec<[f32; 3]>, usize, usize) {
+        let (w, h) = (16usize, 8usize);
+        let mut data = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let u = x as f32 / (w - 1) as f32;
+                let v = y as f32 / (h - 1) as f32;
+                // Top rows: bright, low-contrast veil (the airlight source).
+                // Bottom rows: saturated ground with a horizontal ramp.
+                data.push(if y < 3 {
+                    [0.62 + 0.30 * u, 0.66 + 0.28 * u, 0.74 + 0.24 * u]
+                } else {
+                    [0.10 + 0.70 * u, (0.08 + 0.55 * u) * (1.0 - 0.3 * v), 0.06 + 0.40 * u * v]
+                });
+            }
+        }
+        (data, w, h)
+    }
+
+    /// FNV-1a over the raw IEEE-754 bits of every channel — a one-`u64`
+    /// witness that pins the output BIT-exactly (a 0.5-ULP drift changes it).
+    fn frame_bits_fnv64(data: &[[f32; 3]]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for px in data {
+            for c in px {
+                for b in c.to_bits().to_le_bytes() {
+                    hash ^= b as u64;
+                    hash = hash.wrapping_mul(0x100_0000_01b3);
+                }
+            }
+        }
+        hash
+    }
+
+    #[test]
+    fn dehaze_split_is_bit_identical_to_the_pre_split_golden() {
+        // R22 split `apply_dehaze` into `dehaze_airlight` + `dehaze_px` so the
+        // MASKED dehaze could reuse the exact same model. These two hashes were
+        // captured from the PRE-split implementation on this frame; the split is
+        // a refactor only if they still hold bit-for-bit (the tone/chroma
+        // assertions in the tests above would survive a 1-ULP drift, this will
+        // not). Golden: 2026-08-17, before the split landed.
+        for (amount, want) in [(60.0f32, 0xb0ae_c36c_5a0d_6123u64), (-40.0, 0x74e8_603b_e639_28e7)]
+        {
+            let (mut data, w, _) = dehaze_golden_frame();
+            apply_dehaze(&mut data, w, amount);
+            assert_eq!(
+                frame_bits_fnv64(&data),
+                want,
+                "dehaze {amount} drifted from the pre-split golden; px0 = {:?}",
+                data[0]
+            );
+        }
+    }
+
+    #[test]
+    fn unsharp_weighted_at_weight_one_is_bit_identical() {
+        // `unsharp_luma` now DELEGATES to `unsharp_luma_weighted` with a
+        // constant-1 weight, so comparing the two functions would be circular.
+        // The reference here is the original formula written out longhand: the
+        // weighted form adds `* wgt`, and float multiplication by exactly 1.0
+        // is exact, so weight 1 must reproduce it to the bit.
+        let (data, w, h) = detail_frame();
+        for (radius, amount, midtone) in [(8usize, 0.5f32, true), (2, -0.35, false)] {
+            let mut reference = data.clone();
+            {
+                let luma: Vec<f32> = reference.iter().map(luma601).collect();
+                let blurred = blur_plane(&luma, w, h, radius);
+                for (i, px) in reference.iter_mut().enumerate() {
+                    let l = luma[i];
+                    let detail = l - blurred[i];
+                    let m = if midtone { 1.0 - (2.0 * l - 1.0).powi(2) } else { 1.0 };
+                    let new_l = (l + amount * detail * m).clamp(0.0, 1.0);
+                    scale_chroma(px, l, new_l);
+                }
+            }
+            let mut weighted = data.clone();
+            unsharp_luma_weighted(&mut weighted, w, h, radius, amount, midtone, |_, _, _| 1.0);
+            assert_eq!(
+                frame_bits_fnv64(&reference),
+                frame_bits_fnv64(&weighted),
+                "radius {radius} amount {amount} midtone {midtone}: weight-1 must be bit-identical"
+            );
+            assert_ne!(
+                frame_bits_fnv64(&data),
+                frame_bits_fnv64(&weighted),
+                "the probe frame must actually be sharpened, or the test proves nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn mask_clarity_at_full_coverage_equals_global_clarity() {
+        // The #15a/#10B fix, pinned at its strongest: a Linear mask whose zero
+        // and full points COINCIDE carries weight 1 everywhere (mask_weight's
+        // len2 < 1e-9 arm), so at Amount 1 a local Clarity +50 must render
+        // EXACTLY what the global Clarity +50 stage renders — same radius model
+        // (2% of the short edge, floored at 8 px), same midtone mask, same
+        // operator. Bit-exact, measured: 0 differing channels of 9216.
+        // Before R22 the local path rendered NOTHING at all.
+        let (data, w, h) = detail_frame();
+        let mut global = data.clone();
+        apply_develop(&mut global, w, h, &EditRecipe { clarity: 50.0, ..Default::default() });
+        let mut local = data.clone();
+        apply_develop(
+            &mut local,
+            w,
+            h,
+            &EditRecipe {
+                masks: vec![LocalAdjustment {
+                    mask: MaskGeometry::Linear {
+                        zero_x: 0.5,
+                        zero_y: 0.5,
+                        full_x: 0.5,
+                        full_y: 0.5,
+                    },
+                    amount: 1.0,
+                    clarity: 50.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        assert_ne!(
+            frame_bits_fnv64(&data),
+            frame_bits_fnv64(&global),
+            "global clarity must move this frame, or the comparison is vacuous"
+        );
+        assert_eq!(
+            frame_bits_fnv64(&global),
+            frame_bits_fnv64(&local),
+            "full-coverage local clarity must equal global clarity bit-for-bit"
+        );
+    }
+
+    #[test]
+    fn mask_texture_at_full_coverage_equals_the_unweighted_operator() {
+        // Texture has NO global counterpart to compare against (EditRecipe has
+        // no `texture` field — only LocalAdjustment does), so the reference is
+        // the bare operator at texture's own calibration: small radius
+        // (0.5% of the short edge, floored at 2 px) and NO midtone mask.
+        // Bit-exact, measured: 0 differing channels of 9216.
+        let (data, w, h) = detail_frame();
+        let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
+        assert_eq!(radius, 2, "the 48px short edge must land on the 2px floor");
+        let mut reference = data.clone();
+        unsharp_luma(&mut reference, w, h, radius, 0.5, false);
+        let mut local = data.clone();
+        apply_develop(
+            &mut local,
+            w,
+            h,
+            &EditRecipe {
+                masks: vec![LocalAdjustment {
+                    mask: MaskGeometry::Linear {
+                        zero_x: 0.5,
+                        zero_y: 0.5,
+                        full_x: 0.5,
+                        full_y: 0.5,
+                    },
+                    amount: 1.0,
+                    texture: 50.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        assert_ne!(
+            frame_bits_fnv64(&data),
+            frame_bits_fnv64(&reference),
+            "the reference operator must move this frame, or the comparison is vacuous"
+        );
+        assert_eq!(
+            frame_bits_fnv64(&reference),
+            frame_bits_fnv64(&local),
+            "full-coverage local texture must equal the unweighted operator bit-for-bit"
+        );
+    }
+
+    #[test]
+    fn mask_texture_halo_is_narrower_than_mask_clarity_halo() {
+        // The two radii are the whole reason both sliders exist: clarity is
+        // midtone VOLUME at a large radius, texture is fine DETAIL at a small
+        // one. On a 128×64 step edge that is 8 px vs 2 px of box radius, and
+        // three box passes spread each to ≈3×. Measured: 20 px vs 6 px of
+        // half-width. Swapping the two radius formulas fails this.
+        let (w, h) = (128usize, 64usize);
+        let edge: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                // 0.35/0.65 keeps both plateaus well inside the midtone mask,
+                // which would zero clarity's effect at 0.0 and 1.0.
+                let v = if i % w < w / 2 { 0.35f32 } else { 0.65 };
+                [v, v, v]
+            })
+            .collect();
+        let halo_of = |m: LocalAdjustment| -> usize {
+            let mut out = edge.clone();
+            apply_develop(&mut out, w, h, &EditRecipe { masks: vec![m], ..Default::default() });
+            let row = (h / 2) * w;
+            (0..w)
+                .filter(|x| (out[row + x][0] - edge[row + x][0]).abs() > 1e-3)
+                .map(|x| x.abs_diff(w / 2))
+                .max()
+                .unwrap_or(0)
+        };
+        let full = MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 };
+        let clarity = halo_of(LocalAdjustment {
+            mask: full.clone(),
+            amount: 1.0,
+            clarity: 60.0,
+            ..Default::default()
+        });
+        let texture = halo_of(LocalAdjustment {
+            mask: full,
+            amount: 1.0,
+            texture: 60.0,
+            ..Default::default()
+        });
+        assert!(texture >= 2, "texture must actually reach the edge: {texture}");
+        assert!(
+            texture * 2 < clarity,
+            "texture halo ({texture}px) must be far narrower than clarity's ({clarity}px)"
+        );
+    }
+
+    #[test]
+    fn mask_dehaze_renders_only_inside_the_mask() {
+        // A left-half Linear mask (weight 1 at nx=0, ramping to 0 at nx=0.5 and
+        // clamped past it) with Dehaze +100: every column left of the midpoint
+        // must move, every column at or right of it must be BYTE-identical —
+        // the local dehaze may not leak the frame-wide airlight inversion
+        // outside its coverage. Measured: columns 0..=31 changed, 32..=63 not.
+        let (w, h) = (64usize, 16usize);
+        let base: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                // A hazy, low-contrast, slightly blue ramp — the case dehaze is for.
+                let u = (i % w) as f32 / (w - 1) as f32;
+                [0.30 + 0.5 * u, 0.34 + 0.45 * u, 0.42 + 0.40 * u]
+            })
+            .collect();
+        let mut out = base.clone();
+        apply_develop(
+            &mut out,
+            w,
+            h,
+            &EditRecipe {
+                masks: vec![LocalAdjustment {
+                    mask: MaskGeometry::Linear {
+                        zero_x: 0.5,
+                        zero_y: 0.0,
+                        full_x: 0.0,
+                        full_y: 0.0,
+                    },
+                    amount: 1.0,
+                    dehaze: 100.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let changed = (0..3).any(|c| out[i][c].to_bits() != base[i][c].to_bits());
+                if x >= w / 2 {
+                    assert!(
+                        !changed,
+                        "uncovered column {x} moved: {:?} → {:?}",
+                        base[i], out[i]
+                    );
+                } else {
+                    assert!(changed, "covered column {x} did not move: {:?}", base[i]);
+                }
+            }
+        }
+        // Positive dehaze deepens tone: the fully-covered edge must darken.
+        assert!(out[0][0] < base[0][0] - 0.05, "dehazed pixel must darken: {:?}", out[0]);
+    }
+
+    #[test]
+    fn engine_active_counts_local_clarity_dehaze_texture() {
+        // The activity rule feeds the GUI's ● marker AND the mask-raster budget
+        // loader. Before R22 a clarity-only mask read "parked" and its bitmap
+        // was never loaded — so even after the engine learned to render it, the
+        // raster would have been missing. All three must count.
+        assert!(!engine_active(&LocalAdjustment::default()), "a bare mask is inert");
+        for (name, m) in [
+            ("clarity", LocalAdjustment { clarity: 50.0, ..Default::default() }),
+            ("dehaze", LocalAdjustment { dehaze: -30.0, ..Default::default() }),
+            ("texture", LocalAdjustment { texture: 15.0, ..Default::default() }),
+        ] {
+            assert!(engine_active(&m), "local {name} alone must count as active");
+        }
+    }
+
+    /// Deterministic mid-tone frame with fine and coarse structure — enough
+    /// detail for an unsharp mask to bite, no values near 0 or 1 where the
+    /// midtone weight or the clamps would mask a real difference.
+    fn detail_frame() -> (Vec<[f32; 3]>, usize, usize) {
+        let (w, h) = (64usize, 48usize);
+        let mut data = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let coarse = if (x / 8 + y / 8) % 2 == 0 { 0.08 } else { -0.08 };
+                let fine = if (x + y) % 2 == 0 { 0.03 } else { -0.03 };
+                let base = 0.45 + coarse + fine;
+                data.push([base, base * 0.95 + 0.02, base * 0.9 + 0.04]);
+            }
+        }
+        (data, w, h)
     }
 
     #[test]

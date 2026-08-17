@@ -419,9 +419,23 @@ lens-profile vignette → manual vignette → **dehaze in linear light** (before
 tonal work, so the airlight estimate cannot move when Exposure is dragged) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the tone curve and
 the per-photo camera base curve composed into one table) → per-channel RGB
-curves → 8-band HSL → colour grading → saturation/vibrance → local adjustments
-(linear/radial/bitmap masks, each with its own tone, colour and noise
-reduction).
+curves → 8-band HSL → colour grading → clarity → saturation/vibrance → noise
+reduction → sharpening → local adjustments (linear/radial/bitmap masks).
+
+Each mask runs its own sub-chain, in this order: **dehaze** → the fused
+**WB + tone + saturation** blend → **clarity** → **texture** → **noise
+reduction**. Clarity/dehaze/texture became engine-rendered in R22 (feedback
+#15a/#10B — until then they were carried, exported to XMP and drawn only by
+Lightroom, so a mask that moved only those three did nothing in-app; recipes
+saved before R22 re-render with the local effect, which the user signed off on).
+Local dehaze shares the global haze model, with the airlight estimated once per
+frame so mask order cannot change it; clarity and texture are the same
+mask-weighted unsharp operator at a large midtone-masked radius and a small
+plain one. Two deliberate residues vs the global order are documented at
+`render::apply_masks`: local Temp/Tint lands after local dehaze, and local
+saturation before local clarity/texture — splitting the fused WB/tone/saturation
+blend to fix either would change the output of every existing partial-weight
+mask.
 
 Export adds the colour-space encode (sRGB / Adobe RGB / Display P3 / ProPhoto,
 with a wide-gamut develop path), an optional long-edge resize (Lanczos3, never

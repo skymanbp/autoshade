@@ -452,8 +452,20 @@ pub struct LocalAdjustment {
     pub shadows: f32,
     pub whites: f32,
     pub blacks: f32,
+    /// Local midtone local-contrast → `crs:LocalClarity2012`. ENGINE-RENDERED
+    /// since R22 (before that these three were carried and exported but never
+    /// drawn, so a mask that moved only them did nothing in-app — user feedback
+    /// #15a/#10B); see `render::apply_masks` for the pass order.
     pub clarity: f32,
+    /// Local atmospheric-veil removal → `crs:LocalDehaze`. Shares the global
+    /// haze model (`render::dehaze_airlight` + `dehaze_px`); the airlight is
+    /// estimated once per frame, so mask order cannot change it.
     pub dehaze: f32,
+    /// Local fine-detail contrast → `crs:LocalTexture`. Rendered as a
+    /// small-radius unsharp mask; unlike clarity there is no global Texture
+    /// stage to align its radius with, so the scaling is our own calibration
+    /// (Adobe's model is not published) — Lightroom re-renders from the raw
+    /// slider value in the XMP.
     pub texture: f32,
     pub saturation: f32,
     /// Relative warm/cool shift (NOT Kelvin) → `crs:LocalTemperature`.
