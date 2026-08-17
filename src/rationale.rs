@@ -138,6 +138,19 @@ pub mod keys {
          duplicated) — your masks were kept unchanged and the model's mask edits were \
          discarded";
 
+    // --- the vision proposer's own repairs (advisor/openai.rs) -----------
+    /// R23-1: OpenAI strict mode cannot bound an array's LENGTH, so a
+    /// miscounted `hsl` axis used to fail the whole recipe deserialize and
+    /// throw away a paid high-detail vision call. The axis is repaired and
+    /// the repair disclosed. (Written by the provider, which has no notes
+    /// vec of its own — so this one renders as English in the rationale's
+    /// PROSE prefix until `propose` grows a notes channel; the zh pair is
+    /// registered so the localized rendering lands the moment it does.)
+    pub const HSL_AXIS_LENGTH_REPAIRED: &str =
+        " [the proposal's 8-band colour mixer arrived with the wrong number of values \
+         ({axes}) — the missing bands were read as neutral 0 and any extra ones dropped, \
+         so the rest of the proposal was kept]";
+
     // --- visual judge closed loop (pipeline.rs, R20) ---------------------
     pub const JUDGE_SCORE: &str =
         " [AI visual review: {score}/100 — {critique}]";

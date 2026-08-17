@@ -45,6 +45,17 @@ const MAX_STYLE_EXEMPLARS: usize = 50_000;
 /// silently wrong style reference in a PAID prompt) or a sort panic.
 const MAX_FEATURE_ABS: f32 = 1e3;
 
+/// Slider keys the reference block shows, as `(crs attribute, label)`.
+///
+/// A CURATED SUBSET of `advisor::catalogue::RECIPE_CONTROLS`, not a derivation
+/// of it (R23-1): the index learns a per-key MEAN across retrieved exemplars,
+/// and that only says something for the tone/colour sliders a photographer
+/// applies habitually. The registry-consistency test below pins every
+/// attribute spelling and field name here to the registry, so a renamed
+/// control cannot leave this table pointing at a key nothing writes; the
+/// colour FAMILIES are carried as summary statistics instead (see
+/// [`StyleExemplar::families`]), because averaging 38 per-band keys across
+/// four exemplars is mush.
 const REF_KEYS: [(&str, &str); 12] = [
     ("Exposure2012", "exposure"),
     ("Contrast2012", "contrast"),
@@ -165,6 +176,18 @@ pub struct StyleExemplar {
     /// back to stem exclusion, over-exclusion being the safe direction.
     #[serde(default)]
     pub path: Option<String>,
+    /// How hard this user pushes the colour FAMILIES the flat `settings` map
+    /// cannot carry — the HSL mixer, the grade wheels, the per-channel curves
+    /// (R23-1, feedback #12: the reference block was blind to all three, so
+    /// the AI had no signal about a photographer who shapes colour per band).
+    /// Summary statistics, not the 38 keys — see [`crate::eval::FamilySummary`].
+    ///
+    /// `#[serde(default)]` keeps every pre-R23 index loadable, and it is an
+    /// ADDED field only: no existing key changes meaning, so the index version
+    /// deliberately does NOT bump (a bump forces every user to rebuild an hour-
+    /// long index for a field that degrades to "no summary line").
+    #[serde(default)]
+    pub families: Option<crate::eval::FamilySummary>,
 }
 
 /// Is this exemplar the QUERY photo itself? Path identity when the exemplar
@@ -197,6 +220,7 @@ fn exemplar_is_finite(e: &StyleExemplar) -> bool {
     e.feat.iter().all(|v| v.is_finite() && v.abs() <= MAX_FEATURE_ABS)
         && e.settings.values().all(|v| v.is_finite())
         && e.curve.is_none_or(|c| c.iter().all(|v| v.is_finite()))
+        && e.families.is_none_or(|f| f.is_finite())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -264,6 +288,7 @@ impl StyleIndex {
                                         settings: read_settings(&xmp),
                                         curve: crate::eval::user_curve_shape(&xmp)
                                             .map(|(b, s)| [b, s]),
+                                        families: crate::eval::user_family_summary(&xmp),
                                     };
                                     if exemplar_is_finite(&ex) {
                                         Some(ex)
@@ -483,6 +508,13 @@ impl StyleIndex {
                 // when both curve outputs remain in 0..=255.
                 curve[1] = curve[1].clamp(-382.0, 128.0);
             }
+
+            // The family summary reaches the prompt like everything else here,
+            // so it gets the same door treatment (means bounded to 0..100, the
+            // curve count to 3).
+            if let Some(families) = &mut exemplar.families {
+                families.clamp();
+            }
         }
 
         Ok(idx)
@@ -556,22 +588,50 @@ impl StyleIndex {
         } else {
             String::new()
         };
+        // The colour FAMILIES, as the same kind of averaged habit (R23-1). Only
+        // over exemplars that carry a summary: a pre-R23 index has none, and an
+        // all-neutral sidecar records none, so a zero here would be a claim we
+        // did not measure.
+        let fams: Vec<crate::eval::FamilySummary> = ex.iter().filter_map(|e| e.families).collect();
+        let family_note = if fams.is_empty() {
+            String::new()
+        } else {
+            let n = fams.len() as f32;
+            let mean = |f: fn(&crate::eval::FamilySummary) -> f32| {
+                fams.iter().map(f).sum::<f32>() / n
+            };
+            format!(
+                "  THEIR TYPICAL COLOUR SHAPING ({} of {} similar shots): HSL mixer mean |hue| \
+{:.0}, |sat| {:.0}, |lum| {:.0} across the 8 bands; colour-grade strongest wheel saturation \
+{:.0}, mean |wheel lum| {:.0}; per-channel RGB curves on {:.1} of 3 channels — match this LEVEL \
+of colour shaping, do not exceed it.",
+                fams.len(),
+                ex.len(),
+                mean(|f| f.hsl[0]),
+                mean(|f| f.hsl[1]),
+                mean(|f| f.hsl[2]),
+                mean(|f| f.grade[0]),
+                mean(|f| f.grade[1]),
+                mean(|f| f.rgb_curves as f32),
+            )
+        };
         Some(format!(
             "STYLE REFERENCE — how this user edited SIMILAR past shots (for consistency with their \
-taste; reference, do NOT copy verbatim, the scene differs): {}{}",
+taste; reference, do NOT copy verbatim, the scene differs): {}{}{}",
             lines.join("  |  "),
-            curve_note
+            curve_note,
+            family_note
         ))
     }
 }
 
-/// Mean of the retrieved exemplars' slider settings, keyed by the matching
-/// [`EditRecipe`] field name. This is the "distill toward my historical style"
-/// target — applied as a *gentle, capped* pull by [`blend_toward`], never a full
-/// override (per the user's "use as reference, not a target" decision).
-pub fn style_targets(ex: &[&StyleExemplar]) -> BTreeMap<&'static str, f32> {
-    // (xmp settings label from REF_KEYS) → (EditRecipe field name)
-    const MAP: [(&str, &str); 12] = [
+/// `(the settings label from [`REF_KEYS`]) → (the `EditRecipe` field name)`.
+///
+/// A named function since R23-1 so the registry-consistency test can read it:
+/// this and `REF_KEYS` were two independent hand-kept lists, and nothing tied
+/// either of them to the control they name.
+const fn style_targets_map() -> [(&'static str, &'static str); 12] {
+    [
         ("exposure", "exposure_ev"),
         ("contrast", "contrast"),
         ("highlights", "highlights"),
@@ -584,9 +644,16 @@ pub fn style_targets(ex: &[&StyleExemplar]) -> BTreeMap<&'static str, f32> {
         ("tint", "tint"),
         ("saturation", "saturation"),
         ("dehaze", "dehaze"),
-    ];
+    ]
+}
+
+/// Mean of the retrieved exemplars' slider settings, keyed by the matching
+/// [`EditRecipe`] field name. This is the "distill toward my historical style"
+/// target — applied as a *gentle, capped* pull by [`blend_toward`], never a full
+/// override (per the user's "use as reference, not a target" decision).
+pub fn style_targets(ex: &[&StyleExemplar]) -> BTreeMap<&'static str, f32> {
     let mut out = BTreeMap::new();
-    for (label, field) in MAP {
+    for (label, field) in style_targets_map() {
         let vals: Vec<f32> = ex.iter().filter_map(|e| e.settings.get(label).copied()).collect();
         if !vals.is_empty() {
             out.insert(field, vals.iter().sum::<f32>() / vals.len() as f32);
@@ -703,6 +770,7 @@ mod tests {
             ]),
             curve: Some([5.0, 12.0]),
             path: None,
+            families: None,
         };
         let (a, b) = (mk(0.4, 20.0, 10.0), mk(0.6, 40.0, 30.0));
         let targets = style_targets(&[&a, &b]);
@@ -741,6 +809,7 @@ mod tests {
         let mk = |stem: &str, path: Option<&str>| StyleExemplar {
             stem: stem.into(),
             path: path.map(str::to_string),
+            families: None,
             feat: vec![0.0; NDIM],
             tag: "t".into(),
             settings: BTreeMap::new(),
@@ -766,6 +835,7 @@ mod tests {
         let mut e = StyleExemplar {
             stem: "x".into(),
             path: None,
+            families: None,
             feat: vec![0.0; NDIM],
             tag: "t".into(),
             settings: BTreeMap::new(),
@@ -787,6 +857,7 @@ mod tests {
             settings: BTreeMap::from([("contrast".to_string(), 15.0)]),
             curve: Some([6.0, 20.0]),
             path: None,
+            families: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -798,6 +869,122 @@ mod tests {
         let r = idx.render_reference(&[&ex]).unwrap();
         assert!(r.contains("TYPICAL MASTER TONE CURVE"), "{r}");
         assert!(r.contains("S-strength +20"), "{r}");
+    }
+
+    /// R23-1: the reference block's key set is a curated SUBSET of the control
+    /// registry, and every spelling in it must still be the registry's own — a
+    /// renamed control would otherwise leave this table reading a `crs` key
+    /// nothing writes (silently learning nothing) or mapping onto a recipe
+    /// field `blend_toward` no longer has.
+    #[test]
+    fn ref_keys_and_map_agree_with_the_control_registry() {
+        use crate::advisor::catalogue::{global_control, RECIPE_CONTROLS};
+        // MAP's field names are the registry's field names…
+        let map = style_targets_map();
+        for (label, field) in map {
+            let c = global_control(field)
+                .unwrap_or_else(|| panic!("MAP maps `{label}` onto `{field}`, not a control"));
+            assert!(!c.engine_only, "`{field}` is engine-only — the AI cannot be pulled toward it");
+            // …and each label's crs attribute is that control's own attribute.
+            let (key, _) = REF_KEYS
+                .iter()
+                .find(|(_, l)| l == &label)
+                .unwrap_or_else(|| panic!("MAP label `{label}` has no REF_KEYS row"));
+            assert_eq!(
+                c.crs.attr(),
+                Some(*key),
+                "`{field}`: REF_KEYS reads crs:{key}, the registry says {:?}",
+                c.crs
+            );
+        }
+        // The two tables are the same size and cover the same labels (they were
+        // two independent hand-kept lists — the drift #12 reported).
+        assert_eq!(map.len(), REF_KEYS.len());
+        for (_, label) in REF_KEYS {
+            assert!(map.iter().any(|(l, _)| *l == label), "REF_KEYS label `{label}` is unmapped");
+        }
+        // The families are deliberately NOT in REF_KEYS (per-band means are
+        // mush) — they ride as summary statistics instead.
+        for c in RECIPE_CONTROLS.iter() {
+            if matches!(c.name, "hsl" | "color_grade") {
+                assert!(
+                    !REF_KEYS.iter().any(|(k, _)| Some(*k) == c.crs.attr()),
+                    "{} must not be a flat REF_KEYS row",
+                    c.name
+                );
+            }
+        }
+    }
+
+    /// The family summary is an ADDED optional field: a pre-R23 index (no
+    /// `families` key at all) still loads, out-of-band values are bounded at
+    /// the door, and the reference block only claims a habit it measured.
+    #[test]
+    fn family_summaries_are_optional_bounded_and_surfaced() {
+        let path =
+            std::env::temp_dir().join(format!("autoshop-style-fam-{}.json", std::process::id()));
+        // A LEGACY index file, written verbatim without the new key.
+        let legacy = format!(
+            "{{\"version\":{CURRENT_INDEX_VERSION},\"mean\":{m},\"std\":{s},\"exemplars\":[{{\
+             \"stem\":\"photo\",\"feat\":{m},\"tag\":\"wide/mid/midday/landscape\",\
+             \"settings\":{{}}}}]}}",
+            m = serde_json::to_string(&vec![0.0f32; NDIM]).unwrap(),
+            s = serde_json::to_string(&vec![1.0f32; NDIM]).unwrap(),
+        );
+        std::fs::write(&path, &legacy).unwrap();
+        let loaded = StyleIndex::load(&path).expect("a pre-R23 index still loads");
+        assert_eq!(loaded.exemplars[0].families, None, "and contributes no summary");
+
+        // Out-of-band summary values are clamped at the door (they reach a paid
+        // prompt), and a non-finite one is refused outright.
+        let mut idx = loaded;
+        idx.exemplars[0].families = Some(crate::eval::FamilySummary {
+            hsl: [500.0, -3.0, 20.0],
+            grade: [900.0, 10.0],
+            rgb_curves: 9,
+        });
+        std::fs::write(&path, serde_json::to_string(&idx).unwrap()).unwrap();
+        let bounded = StyleIndex::load(&path).unwrap().exemplars[0].families.unwrap();
+        assert_eq!(bounded.hsl, [100.0, 0.0, 20.0]);
+        assert_eq!(bounded.grade, [100.0, 10.0]);
+        assert_eq!(bounded.rgb_curves, 3);
+        idx.exemplars[0].families =
+            Some(crate::eval::FamilySummary { hsl: [f32::NAN, 0.0, 0.0], ..Default::default() });
+        assert!(!exemplar_is_finite(&idx.exemplars[0]), "a NaN summary is refused");
+        let _ = std::fs::remove_file(&path);
+
+        // The reference block reports the measured habit, and says over how
+        // many of the retrieved shots it was measured.
+        let mk = |families| StyleExemplar {
+            stem: "x".into(),
+            feat: vec![0.0; NDIM],
+            tag: "wide/mid/midday/landscape".into(),
+            settings: BTreeMap::from([("contrast".to_string(), 15.0)]),
+            curve: None,
+            path: None,
+            families,
+        };
+        let with = mk(Some(crate::eval::FamilySummary {
+            hsl: [2.0, 18.0, 6.0],
+            grade: [20.0, 4.0],
+            rgb_curves: 2,
+        }));
+        let without = mk(None);
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![],
+            source_dir: None,
+        };
+        let r = idx.render_reference(&[&with, &without]).unwrap();
+        assert!(r.contains("THEIR TYPICAL COLOUR SHAPING (1 of 2 similar shots)"), "{r}");
+        assert!(r.contains("|sat| 18"), "{r}");
+        assert!(r.contains("strongest wheel saturation 20"), "{r}");
+        assert!(r.contains("on 2.0 of 3 channels"), "{r}");
+        // No summary anywhere = no claim.
+        let plain = idx.render_reference(&[&without]).unwrap();
+        assert!(!plain.contains("COLOUR SHAPING"), "{plain}");
     }
 
     #[test]
@@ -822,6 +1009,7 @@ mod tests {
                 settings: BTreeMap::new(),
                 curve: Some([0.0, 0.0]),
                 path: None,
+                families: None,
             }],
             source_dir: None,
         };
@@ -884,6 +1072,7 @@ mod tests {
                 settings: BTreeMap::new(),
                 curve: Some([0.0, 0.0]),
                 path: None,
+                families: None,
             }],
             source_dir: None,
         };
@@ -926,6 +1115,7 @@ mod tests {
             settings: BTreeMap::new(),
             curve: None,
             path: None,
+            families: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -985,6 +1175,7 @@ mod tests {
             settings: BTreeMap::new(),
             curve: None,
             path: None,
+            families: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,

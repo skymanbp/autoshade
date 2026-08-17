@@ -143,15 +143,45 @@ pub fn produce_recipe(
 
     let (meta, hist) = (&meta, &histogram);
 
+    // The WB anchor, ONE read for all THREE of its consumers (the single-read
+    // rule): the PROPOSER's prompt, the visual judge's render clone and the
+    // deliverable stamp consume the same values, so they can never disagree
+    // across a concurrent writer's retire/publish window.
+    //
+    // Read HERE, above the propose call, since R23-1: `temperature_k` is an
+    // ABSOLUTE Kelvin target and `tint` a shift RELATIVE to the same anchor, so
+    // the prompt must state the anchor the deliverable will actually carry
+    // (feedback #12) — a second, fresher read at the prompt would re-decode the
+    // RAW and could quote the model a different anchor than the render uses.
+    // The base-look snapshot deliberately stays where it was (below, after the
+    // AI chain): it has ONE consumer, the deliverable stamp, so reading it late
+    // keeps it as fresh as it has always been instead of widening its staleness
+    // window across minutes of network calls for no gain.
+    let (anchor_k, anchor_tint) = match saved_recipe_snapshot(raw) {
+        // Saved-first, like the base-look stamp below (a legacy save keeps
+        // None -> the 5500 K anchor -> byte-identical rendering of its
+        // tuned Kelvin).
+        Some(saved) => (saved.as_shot_k, saved.as_shot_tint),
+        None => fresh_as_shot_wb(raw),
+    };
+
     // GPT vision when a key is set; on failure (quota/network) warn and fall back
     // to the heuristic so we still produce a recipe (disclosure, not masking).
     let openai = OpenAiProvider::new(cfg);
+    // The per-call inputs every propose in this function shares (the revision
+    // rounds differ only in `hint`).
+    let propose_ctx = crate::advisor::ProposeContext {
+        reference: ref_str,
+        guidance,
+        hint: None,
+        as_shot_k: anchor_k,
+    };
     let mut det_notes: Vec<crate::rationale::Note> = Vec::new();
     let (mut recipe, can_revise) = if cfg.openai_api_key.is_some() {
         if verbose {
             println!("proposer : OpenAI ({})", cfg.openai_model);
         }
-        match openai.propose(&preview, meta, hist, ref_str, guidance, None) {
+        match openai.propose(&preview, meta, hist, &propose_ctx) {
             Ok(r) => (r, true),
             Err(e) if base.is_some() => {
                 // REFINE means "adjust MY edit": the heuristic fallback
@@ -231,7 +261,12 @@ pub fn produce_recipe(
         // the loop stopped in the rationale, the one channel all three surfaces
         // show (the windowed GUI has no console for the CLI's stderr). A
         // FIRST-round failure still errors: there is no good pair to keep.
-        let revised = match openai.propose(&preview, meta, hist, ref_str, guidance, Some(&hint)) {
+        let revised = match openai.propose(
+            &preview,
+            meta,
+            hist,
+            &crate::advisor::ProposeContext { hint: Some(&hint), ..propose_ctx },
+        ) {
             Ok(r) => r,
             Err(e) => {
                 crate::rationale::push_note(
@@ -324,20 +359,6 @@ pub fn produce_recipe(
             ),
         );
     }
-    // Base look calibration, ONE snapshot for every consumer below (the
-    // single-read rule, now serving TWO consumers): the saved recipe is read
-    // once; the visual judge's render clone and the deliverable stamp both
-    // consume the same values, so they can never disagree across a
-    // concurrent writer's retire/publish window.
-    let cal_saved = saved_recipe_snapshot(raw);
-    let (anchor_k, anchor_tint) = match &cal_saved {
-        // Same saved-first rule as the stamp below (a legacy save keeps
-        // None -> the 5500 K anchor -> byte-identical rendering of its
-        // tuned Kelvin).
-        Some(saved) => (saved.as_shot_k, saved.as_shot_tint),
-        None => fresh_as_shot_wb(raw),
-    };
-
     // R20: the visual CLOSED LOOP — the first eye ever laid on the result.
     // The proposer emits numbers blind (it never sees what they render to)
     // and the verifier judges data-only by contract, so a plausible-but-off
@@ -458,8 +479,15 @@ pub fn produce_recipe(
                             &h,
                             &recipe,
                             |h| {
-                                let mut r = openai
-                                    .propose(&preview, meta, hist, ref_str, guidance, Some(h))?;
+                                let mut r = openai.propose(
+                                    &preview,
+                                    meta,
+                                    hist,
+                                    &crate::advisor::ProposeContext {
+                                        hint: Some(h),
+                                        ..propose_ctx
+                                    },
+                                )?;
                                 // The candidate walks the SAME look chain the
                                 // original walked (style distillation above)
                                 // — otherwise adopting it would silently
@@ -596,7 +624,11 @@ pub fn produce_recipe(
     // Without this, a CLI-written analyze recipe carried an empty curve and
     // the open-time "recipe.json keeps its saved curve" rule then pinned the
     // dark pre-base-look rendering onto that photo forever.
-    match cal_saved {
+    //
+    // Its OWN read of the saved recipe (the WB anchor above took an earlier one
+    // because the prompt needed it): this stamp is the snapshot's only consumer,
+    // so it stays as late — and as fresh — as it has always been.
+    match saved_recipe_snapshot(raw) {
         Some(saved) => {
             // The era stamp travels WITH the curve (the paste rule): the
             // proposer's recipe is era-2 by Default — or whatever integer the
@@ -618,13 +650,14 @@ pub fn produce_recipe(
         }
     }
     // The as-shot WB anchor is the third calibration half — same saved-first
-    // rule, via the ONE hoisted snapshot (the judge above rendered against
-    // these very values, so the anchor it scored is the anchor delivered).
+    // rule, via the ONE early snapshot (the prompt named these very values and
+    // the judge above rendered against them, so the anchor the model was told,
+    // the anchor it was scored on and the anchor delivered are all one).
     recipe.as_shot_k = anchor_k;
     recipe.as_shot_tint = anchor_tint;
     // REFINE means "adjust MY edit", so it must not delete work the model was
     // never able to return. The strict response schema
-    // (advisor::openai::edit_recipe_schema) can express only LINEAR and RADIAL
+    // (advisor::catalogue::edit_recipe_schema) can express only LINEAR and RADIAL
     // primary geometry; it carries no components, enabled toggle, radial angle,
     // colour gains or mask role, and it carries none of the
     // manual lens fields — so a round-trip silently dropped every bitmap mask
@@ -708,10 +741,13 @@ pub(crate) fn visual_review_round(
 /// Re-attach what the AI's response schema CANNOT express, from the refine
 /// base the photographer actually had.
 ///
-/// `advisor::openai::edit_recipe_schema` can encode only LINEAR and RADIAL
+/// `advisor::catalogue::edit_recipe_schema` can encode only LINEAR and RADIAL
 /// primary geometry; it carries no components, enabled toggle, radial angle,
 /// colour gains or mask role, and it carries none of the
-/// manual lens fields. A missing bitmap mask in the response therefore
+/// manual lens fields. That loss list is now the `engine_only` column of
+/// `advisor::catalogue::LOCAL_CONTROLS` / `RECIPE_CONTROLS` plus the two
+/// geometry shapes the schema omits — re-checked at R23-1 (the field set did
+/// not change; only the schema's module did). A missing bitmap mask in the response therefore
 /// carries NO intent — the model had no way to return one — yet the refined
 /// recipe auto-saves, so every AI-selected sky/subject mask, painted mask,
 /// reverse-fit zone (with its recolour gains) and hand-dialled lens

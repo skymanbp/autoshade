@@ -11,6 +11,7 @@
 //! avoid the cost/complexity of an async runtime + `async_trait`. Concurrency
 //! (batch, or parallel GPT/Claude) can move this to async later if needed.
 
+pub mod catalogue;
 mod claude;
 mod heuristic;
 mod judge;
@@ -243,23 +244,49 @@ pub enum AdvisorError {
     Unsupported(&'static str),
 }
 
+/// Everything besides the image, its metadata and its histogram that shapes
+/// ONE `propose` call.
+///
+/// A struct, not more parameters: the six-argument form was already at
+/// clippy's argument ceiling, and R23 adds more per-call intent (the grade
+/// strength axis, the thinking mode) to the same call. Grouping them also
+/// means a new input cannot be silently dropped by a call site that still
+/// compiles — every caller names the fields it sets.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProposeContext<'a> {
+    /// The retrieved style reference (UNTRUSTED index data — the provider
+    /// fences it).
+    pub reference: Option<&'a str>,
+    /// The photographer's own direction for this develop, or the refine
+    /// envelope carrying their current edit.
+    pub guidance: Option<&'a str>,
+    /// The verifier's / visual judge's revision instruction on a later round
+    /// (UNTRUSTED model text — the provider fences it).
+    pub hint: Option<&'a str>,
+    /// The photo's as-shot white balance in ABSOLUTE Kelvin, the anchor
+    /// `temperature_k` is measured against (`None` = unknown, the engine's
+    /// 5500 K fallback). The prompt states it because the model otherwise has
+    /// no way to tell a warming target from a cooling one — and because
+    /// `tint` is a RELATIVE shift from this same anchor, the two semantics
+    /// only make sense as a pair (feedback #12).
+    pub as_shot_k: Option<f32>,
+}
+
 /// One AI advisor. A provider implements the role(s) it serves; the unserved
 /// role returns [`AdvisorError::Unsupported`] rather than panicking, so a single
 /// registry can hold mixed providers.
 pub trait Advisor {
     fn name(&self) -> &'static str;
 
-    /// Image role: preview + features → recipe. `hint` carries the verifier's
-    /// revision instruction on a second round (ignored by providers that can't
-    /// use it).
+    /// Image role: preview + features → recipe. [`ProposeContext`] carries the
+    /// style reference, the user's direction, the reviewer's revision hint and
+    /// the photo's WB anchor (each ignored by providers that can't use it).
     fn propose(
         &self,
         _img: &Preview,
         _meta: &Meta,
         _hist: &Histogram,
-        _reference: Option<&str>,
-        _guidance: Option<&str>,
-        _hint: Option<&str>,
+        _ctx: &ProposeContext,
     ) -> Result<EditRecipe, AdvisorError> {
         Err(AdvisorError::Unsupported(self.name()))
     }

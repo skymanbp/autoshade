@@ -1148,6 +1148,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [verification of revision round {round} failed ({e}) — keeping the previous \
       verified proposal]",
         " [第 {round} 轮修订的验证失败（{e}）——保留上一轮已验证的提案]"),
+    // ── R23-1: the vision proposer's own HSL-length repair (openai.rs) ───────
+    (" [the proposal's 8-band colour mixer arrived with the wrong number of values \
+      ({axes}) — the missing bands were read as neutral 0 and any extra ones dropped, \
+      so the rest of the proposal was kept]",
+        " [提案的 8 段色彩混合器数值个数不对（{axes}）——少掉的色段按中性 0 读取，多出的已丢弃，提案其余部分保留]"),
     // ── R20 visual judge closed loop (pipeline.rs) ───────────────────────────
     (" [AI visual review: {score}/100 — {critique}]",
         " [AI 视觉复查：{score}/100——{critique}]"),

@@ -9,7 +9,7 @@
 use crate::decode::{Histogram, Meta};
 use crate::recipe::EditRecipe;
 
-use super::{Advisor, AdvisorError, Preview};
+use super::{Advisor, AdvisorError, Preview, ProposeContext};
 
 #[derive(Default)]
 pub struct HeuristicProposer {
@@ -32,9 +32,7 @@ impl Advisor for HeuristicProposer {
         _img: &Preview,
         _meta: &Meta,
         hist: &Histogram,
-        _reference: Option<&str>,
-        _guidance: Option<&str>,
-        _hint: Option<&str>,
+        _ctx: &ProposeContext,
     ) -> Result<EditRecipe, AdvisorError> {
         self.propose_noted(hist).map(|(r, _)| r)
     }
@@ -153,7 +151,7 @@ mod tests {
             as_shot_wb_coeffs: [1.0; 4],
         };
         let r = HeuristicProposer::default()
-            .propose(&Preview { jpeg: Vec::new() }, &meta, &hist, None, None, None)
+            .propose(&Preview { jpeg: Vec::new() }, &meta, &hist, &ProposeContext::default())
             .unwrap();
         assert_eq!(r.highlights, -60.0, "temper soft-cap expectation drifted");
         assert!(

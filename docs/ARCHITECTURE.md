@@ -286,10 +286,10 @@ never writes a develop (see §4.3).
 
 Run `cargo run -- recipe-schema` to print a default `EditRecipe` **instance**
 (useful for seeing the field set and defaults). It is not the advisor's output
-contract: that is a JSON Schema built in `src/advisor/`, and it deliberately
-excludes the engine-only fields the recipe carries for calibration
-(`base_curve`, `as_shot_k`/`as_shot_tint`, the lens-profile block) — an advisor
-must never emit those.
+contract: that is a JSON Schema **generated from the control registry**
+(`advisor::catalogue`, §3), and it deliberately excludes the engine-only fields
+the recipe carries for calibration (`base_curve`, `as_shot_k`/`as_shot_tint`,
+the lens-profile block) — an advisor must never emit those.
 
 Local masks (`LocalAdjustment`, v0.22): base geometry (linear / rotatable
 radial / bitmap raster) + optional extra **shape components** composed in
@@ -329,6 +329,16 @@ this trait.)
 > and every adopt/keep/failure branch discloses through the rationale. It is
 > a paid vision call, so it is an explicit caller decision: interactive
 > analyze surfaces pass `judge = true`; `batch` and `eval` pass `false`.
+
+> **The control registry is the single source of the AI contract** (R23-1,
+> [`src/advisor/catalogue.rs`](../src/advisor/catalogue.rs)): `RECIPE_CONTROLS` /
+> `LOCAL_CONTROLS` list every develop control with its range, neutral value,
+> engine-only flag, `crs` key and one-line purpose, and everything downstream is
+> DERIVED from them — the strict response schema (both mirrors), the proposer
+> prompt's control catalogue, the eval ruler and the style index's reference key
+> set. `EditRecipe` is still the data contract; the registry is what keeps the AI
+> side and the measuring side from silently falling behind it (a field added to
+> the recipe without a registry row does not compile).
 
 Sketch (final shape):
 

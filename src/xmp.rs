@@ -719,7 +719,11 @@ fn insert_crs_description(existing: &str, r: &EditRecipe) -> Option<(String, Vec
 /// merge. Must cover every key `owned_attrs` can EVER emit, including the
 /// conditional ones (a cleared vignette must disappear from a merged
 /// document, not linger at its old value).
-fn owned_attr_keys() -> Vec<String> {
+///
+/// `pub(crate)` since R23-1: the control registry's tests assert that every
+/// attribute the AI/eval ruler reads is one this writer can write, so a
+/// misspelled key in the ruler cannot silently measure nothing.
+pub(crate) fn owned_attr_keys() -> Vec<String> {
     let mut keys: Vec<String> = [
         "Version",
         "ProcessVersion",

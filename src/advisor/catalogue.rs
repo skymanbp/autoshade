@@ -1,0 +1,1481 @@
+//! `RECIPE_CONTROLS` — the ONE registry of the develop controls the AI
+//! contract carries (user feedback #12, R23-1).
+//!
+//! Before this table the [`EditRecipe`] was the de-facto source and every
+//! downstream copy was hand-transcribed from it, with a single comment
+//! ("Mirrors `src/recipe.rs` — keep in sync") as the only constraint: the
+//! advisor's strict JSON schema (twice — the recipe and the nested local
+//! adjustment), the proposer prompt's prose, the eval harness's comparison
+//! table and its report order, and the style index's `REF_KEYS`/`MAP` pair.
+//! A control added to the recipe therefore reached the renderer, the XMP
+//! writer and the GUI while staying INVISIBLE to the AI and to every ruler
+//! that measures the AI — silently, forever.
+//!
+//! So the registry is the source now, and it is enforced from two sides:
+//!
+//!   * **the compiler** — [`global_value`] and [`local_value`] destructure
+//!     `EditRecipe` / `LocalAdjustment` with NO `..` rest pattern and consume
+//!     every binding in a `match`, so a new field is a build error (an
+//!     un-destructured field breaks the pattern; a destructured-but-unmapped
+//!     one is an `unused_variables` deny) until its row exists here.
+//!     [`color_grade_value`] and [`hsl_value`] do the same for the two nested
+//!     objects the schema spells out field by field.
+//!   * **the tests** — the registry, the serde key set and the strict
+//!     schema's `required` array are compared THREE ways (both mirrors), and
+//!     every numeric row's stated range is re-derived from
+//!     `EditRecipe::clamp` itself, so the range the model is told can never
+//!     be a range the engine does not enforce.
+//!
+//! Consumers: [`edit_recipe_schema`] (the advisor's strict response schema),
+//! [`prompt_catalogue`] (the proposer prompt's control list), `eval.rs` (the
+//! comparison ruler) and `style.rs` (the reference key set, asserted against
+//! this table).
+
+use serde_json::{json, Value};
+
+use crate::recipe::{
+    ColorGrade, Crop, CurvePoint, EditRecipe, Hsl, HSL_BANDS, LensProfile, LocalAdjustment,
+};
+
+/// The JSON shape one control takes in the advisor's strict response schema —
+/// or, for the engine-only carriers, the shape it has in `recipe.json` alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// A plain `number`.
+    Number,
+    /// `["number","null"]` — null is the control's "no opinion" / as-shot state.
+    NullableNumber,
+    /// An `integer` (the schema-era stamp).
+    Integer,
+    /// A `boolean`.
+    Bool,
+    /// A `string`.
+    Text,
+    /// An array of `{input,output}` curve points, both 0..255.
+    Curve,
+    /// The 8-band HSL mixer object (three arrays of 8 numbers).
+    Hsl,
+    /// The 3-wheel + global colour-grade object (14 flat numbers).
+    ColorGrade,
+    /// The normalised crop rectangle, or null for "keep the whole frame".
+    NullableCrop,
+    /// An array of local adjustments (the nested schema mirror).
+    Masks,
+    /// A mask geometry: the linear/radial tagged union.
+    MaskGeometry,
+    /// A Range-Mask refinement (luminance/colour tagged union), or null.
+    NullableRangeMask,
+    /// A structure only the engine reads: base-curve knots, the in-camera lens
+    /// profile, extra mask components, linear-light colour gains, the mask
+    /// role. These have no schema spelling at all — [`Shape::schema`] answers
+    /// `None`, which is why every carrier row is also `engine_only`.
+    EngineCarrier,
+}
+
+impl Shape {
+    /// The strict-mode JSON-schema property for this shape, or `None` for the
+    /// engine-only carriers (which the schema must never ask for).
+    pub fn schema(self) -> Option<Value> {
+        let num = || json!({"type": "number"});
+        Some(match self {
+            Shape::Number => num(),
+            Shape::NullableNumber => json!({"type": ["number", "null"]}),
+            Shape::Integer => json!({"type": "integer"}),
+            Shape::Bool => json!({"type": "boolean"}),
+            Shape::Text => json!({"type": "string"}),
+            Shape::Curve => curve_arr(),
+            Shape::Hsl => hsl_schema(),
+            Shape::ColorGrade => color_grade_schema(),
+            Shape::NullableCrop => crop_schema(),
+            Shape::Masks => json!({"type": "array", "items": local_adjustment_schema()}),
+            Shape::MaskGeometry => mask_geometry_schema(),
+            Shape::NullableRangeMask => range_mask_schema(),
+            Shape::EngineCarrier => return None,
+        })
+    }
+
+    /// Is this shape a single number the eval harness / the range-honesty test
+    /// can read and write through one JSON field?
+    pub fn is_scalar(self) -> bool {
+        matches!(self, Shape::Number | Shape::NullableNumber)
+    }
+}
+
+/// Where a control lands in a Lightroom / Camera Raw sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrsKey {
+    /// Exactly ONE `crs:` attribute on the sidecar's own `rdf:Description` —
+    /// readable with `xmp::crs_f32`, which is what makes a control measurable
+    /// against the user's real edits (the eval ruler is derived from these).
+    Attr(&'static str),
+    /// A FAMILY of keys (per band / wheel / channel), or a key that lives on a
+    /// nested element rather than the Description's attributes. The descriptor
+    /// is documentation — the exact spellings live in `xmp.rs`, and the
+    /// per-band/per-wheel expansions this module needs are
+    /// [`hsl_expansion`] and [`COLOR_GRADE_CRS`].
+    Family(&'static str),
+    /// No classic-ACR counterpart: engine calibration, or app-internal
+    /// provenance (rationale/confidence).
+    None,
+}
+
+impl CrsKey {
+    /// The single attribute spelling, for the consumers that read one key.
+    pub fn attr(self) -> Option<&'static str> {
+        match self {
+            CrsKey::Attr(k) => Some(k),
+            _ => None,
+        }
+    }
+}
+
+/// One develop control: what it is called on the wire, what shape and band it
+/// takes, whether the AI may set it, where it lands in an XMP, and the one
+/// line the model is told about it.
+#[derive(Debug, Clone, Copy)]
+pub struct Control {
+    /// The serde field name — the SAME string in `recipe.json`, in the strict
+    /// schema and in the eval report.
+    pub name: &'static str,
+    pub shape: Shape,
+    /// The documented legal band, exactly what `EditRecipe::clamp` enforces
+    /// (`None` for the non-scalar shapes). Pinned by
+    /// `stated_ranges_are_the_ranges_clamp_enforces`.
+    pub range: Option<(f32, f32)>,
+    /// The neutral / default value, spelled for the prompt.
+    pub neutral: &'static str,
+    /// ENGINE-ONLY: the advisor schema never asks the model for it, and
+    /// `pipeline::carry_over_unrepresentable` re-attaches it after a refine.
+    /// Some of these are permanent design markers (`components`,
+    /// `color_gains`, `role`, the stamped calibration) and some are staged
+    /// work (the lens trio and `enabled` need an "I have no opinion"
+    /// expression before they can enter the schema — see the plan's
+    /// Refine-overwrite trap).
+    pub engine_only: bool,
+    pub crs: CrsKey,
+    /// One line for the model: what this control does.
+    pub purpose: &'static str,
+}
+
+impl Control {
+    /// `(-100..100, neutral 0)` — the range/neutral parenthetical the prompt
+    /// catalogue prints. Integers and structures print their shape instead of
+    /// a numeric band.
+    pub fn spec(&self) -> String {
+        match self.range {
+            Some((lo, hi)) => format!("{}..{}, neutral {}", trim_num(lo), trim_num(hi), self.neutral),
+            None => format!("neutral {}", self.neutral),
+        }
+    }
+}
+
+/// `-100` not `-100.0`, `0.65` still `0.65` — the prompt reads like Lightroom's
+/// own labels.
+fn trim_num(v: f32) -> String {
+    if v.fract() == 0.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v}")
+    }
+}
+
+/// Every field of [`EditRecipe`], in DECLARATION order — which is also the
+/// order the strict schema's `required` array takes, so the generated schema
+/// is byte-identical to the hand-written mirror it replaced.
+pub const RECIPE_CONTROLS: [Control; 33] = [
+    Control {
+        name: "version",
+        shape: Shape::Integer,
+        range: None,
+        neutral: "2",
+        engine_only: false,
+        crs: CrsKey::None,
+        purpose: "schema + calibration-era stamp; return 2",
+    },
+    Control {
+        name: "exposure_ev",
+        shape: Shape::Number,
+        range: Some((-5.0, 5.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Exposure2012"),
+        purpose: "global exposure in stops (EV)",
+    },
+    Control {
+        name: "contrast",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Contrast2012"),
+        purpose: "global contrast about the midtone",
+    },
+    Control {
+        name: "highlights",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Highlights2012"),
+        purpose: "recover (negative) or open up (positive) the BRIGHT tones",
+    },
+    Control {
+        name: "shadows",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Shadows2012"),
+        purpose: "lift (positive) or deepen (negative) the DARK tones",
+    },
+    Control {
+        name: "whites",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Whites2012"),
+        purpose: "the WHITE point — how bright the brightest tones sit",
+    },
+    Control {
+        name: "blacks",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Blacks2012"),
+        purpose: "the BLACK point — how deep the darkest tones sit",
+    },
+    Control {
+        name: "temperature_k",
+        shape: Shape::NullableNumber,
+        range: Some((2000.0, 40000.0)),
+        neutral: "null = keep as-shot",
+        engine_only: false,
+        crs: CrsKey::Attr("Temperature"),
+        purpose: "white balance as an ABSOLUTE colour temperature in Kelvin (a TARGET, not a \
+                  shift): lower = cooler/bluer result, higher = warmer. null keeps the camera's \
+                  as-shot WB",
+    },
+    Control {
+        name: "tint",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Tint"),
+        purpose: "green (negative) / magenta (positive) shift RELATIVE to the as-shot white \
+                  balance — unlike temperature_k this one is a delta, not an absolute value",
+    },
+    Control {
+        name: "as_shot_k",
+        shape: Shape::NullableNumber,
+        range: Some((2000.0, 40000.0)),
+        neutral: "null = unknown",
+        engine_only: true,
+        crs: CrsKey::None,
+        purpose: "the camera's OWN white balance in absolute Kelvin, stamped per photo by the \
+                  engine — the anchor temperature_k is measured against",
+    },
+    Control {
+        name: "as_shot_tint",
+        shape: Shape::NullableNumber,
+        range: Some((-100.0, 100.0)),
+        neutral: "null = unknown",
+        engine_only: true,
+        crs: CrsKey::None,
+        purpose: "the as-shot green/magenta companion of as_shot_k (display + XMP honesty only)",
+    },
+    Control {
+        name: "vibrance",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Vibrance"),
+        purpose: "saturation that protects the already-saturated colours",
+    },
+    Control {
+        name: "saturation",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Saturation"),
+        purpose: "uniform saturation of every colour",
+    },
+    Control {
+        name: "clarity",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Clarity2012"),
+        purpose: "midtone local contrast / punch",
+    },
+    Control {
+        name: "dehaze",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Dehaze"),
+        purpose: "atmospheric haze removal (negative ADDS haze)",
+    },
+    Control {
+        name: "hsl",
+        shape: Shape::Hsl,
+        range: None,
+        neutral: "every band 0",
+        engine_only: false,
+        crs: CrsKey::Family("{Hue,Saturation,Luminance}Adjustment<Band> (8 bands)"),
+        purpose: "the 8-band colour mixer: `hue`, `saturation` and `luminance` are each an array \
+                  of EXACTLY 8 numbers (-100..100) in the FIXED band order red, orange, yellow, \
+                  green, aqua, blue, purple, magenta",
+    },
+    Control {
+        name: "color_grade",
+        shape: Shape::ColorGrade,
+        range: None,
+        neutral: "every wheel 0, blending 50",
+        engine_only: false,
+        crs: CrsKey::Family("SplitToning* + ColorGrade*"),
+        purpose: "3-wheel + global colour grading: per region (shadow/midtone/highlight/global) a \
+                  `*_hue` 0..360, `*_sat` 0..100 and `*_lum` -100..100, plus `blending` 0..100 \
+                  (region overlap) and `balance` -100..100 (shadow/highlight split)",
+    },
+    Control {
+        name: "sharpening",
+        shape: Shape::Number,
+        range: Some((0.0, 150.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Sharpness"),
+        purpose: "capture sharpening amount (0..150 here; a sidecar's 0..100 Sharpness × 1.5)",
+    },
+    Control {
+        name: "noise_reduction",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("LuminanceSmoothing"),
+        purpose: "global luminance noise reduction",
+    },
+    Control {
+        name: "lens_vignette",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("VignetteAmount"),
+        purpose: "manual LENS vignette compensation — a radial gain in LINEAR light before any \
+                  tonal work (a falloff correction, NOT a creative corner darkening)",
+    },
+    Control {
+        name: "lens_vignette_mid",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "50",
+        engine_only: true,
+        crs: CrsKey::Attr("VignetteMidpoint"),
+        purpose: "where the vignette compensation lands (lower reaches toward the centre)",
+    },
+    Control {
+        name: "lens_distortion",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("LensManualDistortionAmount"),
+        purpose: "manual geometric distortion correction (positive straightens BARREL, negative \
+                  PINCUSHION)",
+    },
+    Control {
+        name: "straighten_deg",
+        shape: Shape::Number,
+        range: Some((-45.0, 45.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("CropAngle"),
+        purpose: "clockwise straighten angle in degrees, for a tilted horizon",
+    },
+    Control {
+        name: "crop",
+        shape: Shape::NullableCrop,
+        range: None,
+        neutral: "null = the whole frame",
+        engine_only: false,
+        crs: CrsKey::Family("HasCrop + Crop{Left,Top,Right,Bottom}"),
+        purpose: "the kept rectangle in normalised 0..1 frame coordinates; null keeps the full frame",
+    },
+    Control {
+        name: "tone_curve",
+        shape: Shape::Curve,
+        range: None,
+        neutral: "empty = identity",
+        engine_only: false,
+        crs: CrsKey::Family("ToneCurvePV2012"),
+        purpose: "master tone curve as {input,output} points, both 0..255 — the free-form \
+                  alternative to the Contrast slider",
+    },
+    Control {
+        name: "red_curve",
+        shape: Shape::Curve,
+        range: None,
+        neutral: "empty = identity",
+        engine_only: false,
+        crs: CrsKey::Family("ToneCurvePV2012Red"),
+        purpose: "per-channel RED curve (same point form as tone_curve) for a deliberate colour \
+                  cast in specific tones",
+    },
+    Control {
+        name: "green_curve",
+        shape: Shape::Curve,
+        range: None,
+        neutral: "empty = identity",
+        engine_only: false,
+        crs: CrsKey::Family("ToneCurvePV2012Green"),
+        purpose: "per-channel GREEN curve",
+    },
+    Control {
+        name: "blue_curve",
+        shape: Shape::Curve,
+        range: None,
+        neutral: "empty = identity",
+        engine_only: false,
+        crs: CrsKey::Family("ToneCurvePV2012Blue"),
+        purpose: "per-channel BLUE curve",
+    },
+    Control {
+        name: "base_curve",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = no base look",
+        engine_only: true,
+        crs: CrsKey::None,
+        purpose: "camera-matched base-look knots estimated per photo by the engine (calibration, \
+                  never exported to XMP)",
+    },
+    Control {
+        name: "lens_profile",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = every component off",
+        engine_only: true,
+        crs: CrsKey::None,
+        purpose: "the in-camera lens profile read from the RAW's own metadata (calibration, never \
+                  exported to XMP)",
+    },
+    Control {
+        name: "masks",
+        shape: Shape::Masks,
+        range: None,
+        neutral: "empty = global only",
+        engine_only: false,
+        crs: CrsKey::Family("MaskGroupBasedCorrections"),
+        purpose: "local (masked) adjustments — one entry per mask, controls listed below",
+    },
+    Control {
+        name: "rationale",
+        shape: Shape::Text,
+        range: None,
+        neutral: "\"\"",
+        engine_only: false,
+        crs: CrsKey::None,
+        purpose: "one or two sentences explaining these choices, for the photographer to \
+                  sanity-check",
+    },
+    Control {
+        name: "confidence",
+        shape: Shape::Number,
+        range: Some((0.0, 1.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::None,
+        purpose: "your own confidence in this develop, 0..1",
+    },
+];
+
+/// Every field of [`LocalAdjustment`], in DECLARATION order — the nested
+/// schema mirror. Its field set is NOT a subset of the global one (`texture`
+/// exists only here; `temperature` is a relative shift, not Kelvin), which is
+/// exactly why the drift had two independent surfaces.
+pub const LOCAL_CONTROLS: [Control; 22] = [
+    Control {
+        name: "mask",
+        shape: Shape::MaskGeometry,
+        range: None,
+        neutral: "a linear gradient",
+        engine_only: false,
+        crs: CrsKey::Family("CorrectionMasks/Mask"),
+        purpose: "WHERE this adjustment applies: kind=linear (zero_* = the no-effect edge, \
+                  full_* = the full-effect edge, in 0..1 frame coords) for skies/horizons, or \
+                  kind=radial (top/left/bottom/right + feather 0..1, roundness 0..1, flipped) \
+                  for subjects and vignettes",
+    },
+    Control {
+        name: "components",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = the base geometry alone",
+        engine_only: true,
+        crs: CrsKey::None,
+        purpose: "extra Add/Subtract/Intersect shapes composed onto `mask` — engine-only by \
+                  design: keep an existing mask's `name` byte-exact and they are preserved for you",
+    },
+    Control {
+        name: "enabled",
+        shape: Shape::Bool,
+        range: None,
+        neutral: "true",
+        engine_only: true,
+        crs: CrsKey::None,
+        purpose: "the per-mask eye toggle (mutes the mask without destroying its tuned Amount)",
+    },
+    Control {
+        name: "range",
+        shape: Shape::NullableRangeMask,
+        range: None,
+        neutral: "null = pure geometry",
+        engine_only: false,
+        crs: CrsKey::Family("CorrectionMasks/Mask/RangeMask"),
+        purpose: "optional Range-Mask refinement INTERSECTED with the geometry: \
+                  {kind:\"luminance\", lo_outer<=lo<=hi<=hi_outer in 0..1} keeps only that \
+                  brightness band, {kind:\"color\", r,g,b 0..1 reference, amount 0..1 tolerance, \
+                  px,py sample point} keeps only similar colours",
+    },
+    Control {
+        name: "name",
+        shape: Shape::Text,
+        range: None,
+        neutral: "\"\"",
+        engine_only: false,
+        crs: CrsKey::Family("CorrectionName + MaskName"),
+        purpose: "the mask's IDENTITY, not decoration — when refining an edit that already has \
+                  masks, return each existing name byte-exact or your mask edits are discarded",
+    },
+    Control {
+        name: "amount",
+        shape: Shape::Number,
+        range: Some((0.0, 1.0)),
+        neutral: "1",
+        engine_only: false,
+        crs: CrsKey::Family("CorrectionAmount"),
+        purpose: "master opacity of this mask's whole adjustment",
+    },
+    Control {
+        name: "inverted",
+        shape: Shape::Bool,
+        range: None,
+        neutral: "false",
+        engine_only: false,
+        crs: CrsKey::Family("MaskInverted"),
+        purpose: "invert the mask region",
+    },
+    Control {
+        name: "exposure_ev",
+        shape: Shape::Number,
+        range: Some((-5.0, 5.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalExposure2012"),
+        purpose: "local exposure in stops",
+    },
+    Control {
+        name: "contrast",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalContrast2012"),
+        purpose: "local contrast",
+    },
+    Control {
+        name: "highlights",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalHighlights2012"),
+        purpose: "local highlights",
+    },
+    Control {
+        name: "shadows",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalShadows2012"),
+        purpose: "local shadows",
+    },
+    Control {
+        name: "whites",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalWhites2012"),
+        purpose: "local white point",
+    },
+    Control {
+        name: "blacks",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalBlacks2012"),
+        purpose: "local black point",
+    },
+    Control {
+        name: "clarity",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalClarity2012"),
+        purpose: "local midtone contrast",
+    },
+    Control {
+        name: "dehaze",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalDehaze"),
+        purpose: "local haze removal",
+    },
+    Control {
+        name: "texture",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalTexture"),
+        purpose: "local FINE-detail contrast (smaller radius than clarity) — this control exists \
+                  only per mask, there is no global Texture",
+    },
+    Control {
+        name: "saturation",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalSaturation"),
+        purpose: "local saturation",
+    },
+    Control {
+        name: "temperature",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalTemperature"),
+        purpose: "local warm/cool shift — a RELATIVE ±100 shift, NOT Kelvin (the global \
+                  temperature_k is the only absolute one)",
+    },
+    Control {
+        name: "tint",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalTint"),
+        purpose: "local green/magenta shift",
+    },
+    Control {
+        name: "noise_reduction",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalLuminanceNoise"),
+        purpose: "local luminance noise reduction — for a \"this region is noisy\" request",
+    },
+    Control {
+        name: "color_gains",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "null = neutral",
+        engine_only: true,
+        crs: CrsKey::None,
+        purpose: "per-channel LINEAR-light gains for zone recolouring, written by the reverse-fit \
+                  (engine-only: no classic-ACR counterpart exists)",
+    },
+    Control {
+        name: "role",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "custom",
+        engine_only: true,
+        crs: CrsKey::None,
+        purpose: "which semantic zone produced this mask (engine-only stable identity)",
+    },
+];
+
+// ── the nested object shapes ────────────────────────────────────────────────
+// These spell out types the recipe composes (Hsl, ColorGrade, Crop,
+// CurvePoint, MaskGeometry, RangeMask) rather than fields of the recipe
+// itself, so they stay shape definitions instead of registry rows. Their
+// field sets are pinned to serde in this module's tests, and
+// `color_grade_value` / `hsl_value` give the two field-bearing ones the same
+// exhaustive-destructure treatment the top-level structs get.
+
+/// MaskGeometry tagged enum (`#[serde(tag="kind")]`) → anyOf of the two
+/// variants the AI may author; each is strict (all props required,
+/// `additionalProperties:false`). `Bitmap` is deliberately ABSENT: a raster
+/// mask is a file the engine writes (AI segmentation, painting), never
+/// something a text response can name, and `Radial::angle` is absent for the
+/// same reason it is absent from the XMP (our own field, unverified against
+/// `crs:Angle`).
+fn mask_geometry_schema() -> Value {
+    let num = || json!({"type": "number"});
+    json!({
+        "anyOf": [
+            {"type": "object", "additionalProperties": false,
+             "required": ["kind","zero_x","zero_y","full_x","full_y"],
+             "properties": {"kind": {"type": "string", "enum": ["linear"]},
+                "zero_x": num(), "zero_y": num(), "full_x": num(), "full_y": num()}},
+            {"type": "object", "additionalProperties": false,
+             "required": ["kind","top","left","bottom","right","feather","roundness","flipped"],
+             "properties": {"kind": {"type": "string", "enum": ["radial"]},
+                "top": num(), "left": num(), "bottom": num(), "right": num(),
+                "feather": num(), "roundness": num(), "flipped": {"type": "boolean"}}}
+        ]
+    })
+}
+
+/// RangeMask tagged enum (`#[serde(tag="kind")]`) → anyOf of the two variants
+/// + null (strict mode requires the field to be PRESENT, so "no range" = null).
+fn range_mask_schema() -> Value {
+    let num = || json!({"type": "number"});
+    json!({
+        "anyOf": [
+            {"type": "object", "additionalProperties": false,
+             "required": ["kind","lo_outer","lo","hi","hi_outer"],
+             "properties": {"kind": {"type": "string", "enum": ["luminance"]},
+                "lo_outer": num(), "lo": num(), "hi": num(), "hi_outer": num()}},
+            {"type": "object", "additionalProperties": false,
+             "required": ["kind","r","g","b","amount","px","py"],
+             "properties": {"kind": {"type": "string", "enum": ["color"]},
+                "r": num(), "g": num(), "b": num(), "amount": num(),
+                "px": num(), "py": num()}},
+            {"type": "null"}
+        ]
+    })
+}
+
+/// HSL: three numeric arrays (red..magenta). Length is pinned at 8 by
+/// `recipe::Hsl`'s `[f32;8]` at DESERIALIZE time; OpenAI strict mode cannot
+/// pin array length (minItems/maxItems are unsupported and 400 the request),
+/// so the proposer prompt enforces "exactly 8, in band order" — and
+/// `openai::repair_hsl_axis_lengths` repairs a miscounted axis instead of
+/// throwing the whole paid proposal away.
+fn hsl_schema() -> Value {
+    let hsl_axis = || json!({"type": "array", "items": {"type": "number"}});
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["hue", "saturation", "luminance"],
+        "properties": {"hue": hsl_axis(), "saturation": hsl_axis(), "luminance": hsl_axis()}
+    })
+}
+
+/// Colour grading wheels (flat scalar object), per `recipe::ColorGrade`.
+fn color_grade_schema() -> Value {
+    let num = || json!({"type": "number"});
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["shadow_hue","shadow_sat","shadow_lum","midtone_hue","midtone_sat","midtone_lum",
+            "highlight_hue","highlight_sat","highlight_lum","global_hue","global_sat","global_lum",
+            "blending","balance"],
+        "properties": {
+            "shadow_hue": num(), "shadow_sat": num(), "shadow_lum": num(),
+            "midtone_hue": num(), "midtone_sat": num(), "midtone_lum": num(),
+            "highlight_hue": num(), "highlight_sat": num(), "highlight_lum": num(),
+            "global_hue": num(), "global_sat": num(), "global_lum": num(),
+            "blending": num(), "balance": num()
+        }
+    })
+}
+
+fn crop_schema() -> Value {
+    let num = || json!({"type": "number"});
+    json!({"type": ["object","null"], "additionalProperties": false,
+        "required": ["left","top","right","bottom"],
+        "properties": {"left": num(), "top": num(), "right": num(), "bottom": num()}})
+}
+
+/// An array of `{input,output}` curve points (master + the three RGB
+/// channels). The integers are bounded to 0..255 (`recipe::CurvePoint` is u8)
+/// so the model can't emit an out-of-range value that fails the whole-recipe
+/// deserialize.
+fn curve_arr() -> Value {
+    let int255 = || json!({"type": "integer", "minimum": 0, "maximum": 255});
+    json!({"type": "array", "items": {"type": "object",
+        "additionalProperties": false, "required": ["input", "output"],
+        "properties": {"input": int255(), "output": int255()}}})
+}
+
+/// Build one strict-mode object schema from a registry: every AI-visible row
+/// becomes a property AND a `required` entry (OpenAI strict mode requires
+/// both), engine-only rows appear nowhere.
+fn strict_object(controls: &[Control]) -> Value {
+    let mut required = Vec::new();
+    let mut properties = serde_json::Map::new();
+    for c in controls.iter().filter(|c| !c.engine_only) {
+        let prop = c.shape.schema().unwrap_or_else(|| {
+            // Unreachable by construction (every EngineCarrier row is
+            // engine_only, pinned by `engine_carriers_never_reach_the_schema`)
+            // — but a future row that got the pair wrong would otherwise emit
+            // a property-less `required` entry, which 400s the request with a
+            // schema error instead of naming the mistake.
+            panic!("control `{}` is in the schema but has no schema shape", c.name)
+        });
+        required.push(Value::String(c.name.to_string()));
+        properties.insert(c.name.to_string(), prop);
+    }
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": Value::Array(required),
+        "properties": Value::Object(properties),
+    })
+}
+
+/// The nested local-adjustment mirror, derived from [`LOCAL_CONTROLS`].
+fn local_adjustment_schema() -> Value {
+    strict_object(&LOCAL_CONTROLS)
+}
+
+/// JSON Schema for [`EditRecipe`] in OpenAI strict mode: every property listed
+/// in `required`, `additionalProperties:false`, optionals expressed as
+/// nullable — DERIVED from [`RECIPE_CONTROLS`] (R23-1), so a new recipe field
+/// can no longer be invisible to the AI.
+pub fn edit_recipe_schema() -> Value {
+    strict_object(&RECIPE_CONTROLS)
+}
+
+/// The proposer prompt's control list: name, band, neutral value and the one
+/// line of purpose, for every control the model may set. Generated, so the
+/// prompt can never advertise a control the schema rejects (or omit one it
+/// accepts) — the prompt's own blind spot before R23-1 (it never mentioned
+/// white balance, dehaze, sharpening, crop or straighten at all).
+pub fn prompt_catalogue() -> String {
+    let render = |controls: &[Control]| -> String {
+        controls
+            .iter()
+            .filter(|c| !c.engine_only)
+            .map(|c| format!("  • {} ({}) — {}\n", c.name, c.spec(), c.purpose))
+            .collect::<String>()
+    };
+    format!(
+        "CONTROL CATALOGUE — the COMPLETE set of controls you may return, each with the range it \
+accepts (ranges are SAFETY bounds, not targets), its neutral value, and what it is for. Leave a \
+control at its neutral value when the photograph does not call for it; anything not listed here \
+you cannot set.\nGLOBAL:\n{}PER MASK (one object per entry of `masks`; the slider scales match \
+the globals):\n{}",
+        render(&RECIPE_CONTROLS),
+        render(&LOCAL_CONTROLS),
+    )
+}
+
+// ── typed value access (the compiler-enforced coverage) ─────────────────────
+
+/// One control's value read off a recipe — the shape-preserving view the eval
+/// ruler and the tests read through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GlobalValue<'a> {
+    Num(f32),
+    OptNum(Option<f32>),
+    Int(u32),
+    Text(&'a str),
+    Curve(&'a [CurvePoint]),
+    Hsl(&'a Hsl),
+    Grade(&'a ColorGrade),
+    Crop(Option<&'a Crop>),
+    Masks(&'a [LocalAdjustment]),
+    Knots(&'a [[f32; 2]]),
+    Lens(&'a LensProfile),
+}
+
+impl GlobalValue<'_> {
+    /// The value as a single number, for the scalar consumers (`None` for the
+    /// structured shapes and for an unset nullable).
+    pub fn scalar(&self) -> Option<f32> {
+        match self {
+            GlobalValue::Num(v) => Some(*v),
+            GlobalValue::OptNum(v) => *v,
+            _ => None,
+        }
+    }
+}
+
+/// The value of the named [`RECIPE_CONTROLS`] row in `r`, or `None` for a name
+/// that is not a control.
+///
+/// **This is one of the two compiler tripwires this module exists for.** The
+/// `let EditRecipe { .. }` below has NO rest pattern, so a new recipe field
+/// fails to compile here; and because every binding is consumed by a match
+/// arm, a field that IS destructured but never mapped fails as an
+/// `unused_variables` deny. Either way the build stops until the registry
+/// gains the row.
+pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>> {
+    let EditRecipe {
+        version,
+        exposure_ev,
+        contrast,
+        highlights,
+        shadows,
+        whites,
+        blacks,
+        temperature_k,
+        tint,
+        as_shot_k,
+        as_shot_tint,
+        vibrance,
+        saturation,
+        clarity,
+        dehaze,
+        hsl,
+        color_grade,
+        sharpening,
+        noise_reduction,
+        lens_vignette,
+        lens_vignette_mid,
+        lens_distortion,
+        straighten_deg,
+        crop,
+        tone_curve,
+        red_curve,
+        green_curve,
+        blue_curve,
+        base_curve,
+        lens_profile,
+        masks,
+        rationale,
+        confidence,
+    } = r;
+    Some(match name {
+        "version" => GlobalValue::Int(*version),
+        "exposure_ev" => GlobalValue::Num(*exposure_ev),
+        "contrast" => GlobalValue::Num(*contrast),
+        "highlights" => GlobalValue::Num(*highlights),
+        "shadows" => GlobalValue::Num(*shadows),
+        "whites" => GlobalValue::Num(*whites),
+        "blacks" => GlobalValue::Num(*blacks),
+        "temperature_k" => GlobalValue::OptNum(*temperature_k),
+        "tint" => GlobalValue::Num(*tint),
+        "as_shot_k" => GlobalValue::OptNum(*as_shot_k),
+        "as_shot_tint" => GlobalValue::OptNum(*as_shot_tint),
+        "vibrance" => GlobalValue::Num(*vibrance),
+        "saturation" => GlobalValue::Num(*saturation),
+        "clarity" => GlobalValue::Num(*clarity),
+        "dehaze" => GlobalValue::Num(*dehaze),
+        "hsl" => GlobalValue::Hsl(hsl),
+        "color_grade" => GlobalValue::Grade(color_grade),
+        "sharpening" => GlobalValue::Num(*sharpening),
+        "noise_reduction" => GlobalValue::Num(*noise_reduction),
+        "lens_vignette" => GlobalValue::Num(*lens_vignette),
+        "lens_vignette_mid" => GlobalValue::Num(*lens_vignette_mid),
+        "lens_distortion" => GlobalValue::Num(*lens_distortion),
+        "straighten_deg" => GlobalValue::Num(*straighten_deg),
+        "crop" => GlobalValue::Crop(crop.as_ref()),
+        "tone_curve" => GlobalValue::Curve(tone_curve),
+        "red_curve" => GlobalValue::Curve(red_curve),
+        "green_curve" => GlobalValue::Curve(green_curve),
+        "blue_curve" => GlobalValue::Curve(blue_curve),
+        "base_curve" => GlobalValue::Knots(base_curve),
+        "lens_profile" => GlobalValue::Lens(lens_profile),
+        "masks" => GlobalValue::Masks(masks),
+        "rationale" => GlobalValue::Text(rationale),
+        "confidence" => GlobalValue::Num(*confidence),
+        _ => return None,
+    })
+}
+
+/// The local-adjustment counterpart of [`GlobalValue`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LocalValue<'a> {
+    Num(f32),
+    OptGains(Option<[f32; 3]>),
+    Bool(bool),
+    Text(&'a str),
+    Geometry(&'a crate::recipe::MaskGeometry),
+    Components(&'a [crate::recipe::MaskComponent]),
+    Range(Option<&'a crate::recipe::RangeMask>),
+    Role(crate::recipe::MaskRole),
+}
+
+impl LocalValue<'_> {
+    pub fn scalar(&self) -> Option<f32> {
+        match self {
+            LocalValue::Num(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+/// The value of the named [`LOCAL_CONTROLS`] row in `m` — the second compiler
+/// tripwire (see [`global_value`]); `LocalAdjustment` is destructured with no
+/// rest pattern and every binding consumed.
+pub fn local_value<'a>(m: &'a LocalAdjustment, name: &str) -> Option<LocalValue<'a>> {
+    let LocalAdjustment {
+        mask,
+        components,
+        enabled,
+        range,
+        name: label,
+        amount,
+        inverted,
+        exposure_ev,
+        contrast,
+        highlights,
+        shadows,
+        whites,
+        blacks,
+        clarity,
+        dehaze,
+        texture,
+        saturation,
+        temperature,
+        tint,
+        noise_reduction,
+        color_gains,
+        role,
+    } = m;
+    Some(match name {
+        "mask" => LocalValue::Geometry(mask),
+        "components" => LocalValue::Components(components),
+        "enabled" => LocalValue::Bool(*enabled),
+        "range" => LocalValue::Range(range.as_ref()),
+        "name" => LocalValue::Text(label),
+        "amount" => LocalValue::Num(*amount),
+        "inverted" => LocalValue::Bool(*inverted),
+        "exposure_ev" => LocalValue::Num(*exposure_ev),
+        "contrast" => LocalValue::Num(*contrast),
+        "highlights" => LocalValue::Num(*highlights),
+        "shadows" => LocalValue::Num(*shadows),
+        "whites" => LocalValue::Num(*whites),
+        "blacks" => LocalValue::Num(*blacks),
+        "clarity" => LocalValue::Num(*clarity),
+        "dehaze" => LocalValue::Num(*dehaze),
+        "texture" => LocalValue::Num(*texture),
+        "saturation" => LocalValue::Num(*saturation),
+        "temperature" => LocalValue::Num(*temperature),
+        "tint" => LocalValue::Num(*tint),
+        "noise_reduction" => LocalValue::Num(*noise_reduction),
+        "color_gains" => LocalValue::OptGains(*color_gains),
+        "role" => LocalValue::Role(*role),
+        _ => return None,
+    })
+}
+
+// ── family expansions (the per-band / per-wheel rulers) ─────────────────────
+
+/// The three HSL axes: the recipe's array name, and the `crs` attribute stem
+/// each band spelling is built on (`SaturationAdjustmentBlue`, …).
+pub const HSL_AXES: [(&str, &str); 3] = [
+    ("hue", "HueAdjustment"),
+    ("saturation", "SaturationAdjustment"),
+    ("luminance", "LuminanceAdjustment"),
+];
+
+/// One band of one HSL axis, as a measurable field.
+#[derive(Debug, Clone)]
+pub struct HslField {
+    /// Report/metric name, e.g. `hsl.saturation.blue`.
+    pub metric: String,
+    /// The ACR attribute, e.g. `SaturationAdjustmentBlue`.
+    pub crs: String,
+    /// Index into [`HSL_AXES`].
+    pub axis: usize,
+    /// Index into `recipe::HSL_BANDS`.
+    pub band: usize,
+}
+
+/// The 24 attributes the 8-band mixer occupies — the expansion the registry's
+/// `CrsKey::Family` stands for. Pinned against `xmp::owned_attr_keys` (the
+/// writer's own universe) by this module's tests, so the ruler can only ever
+/// read keys we also write.
+pub fn hsl_expansion() -> Vec<HslField> {
+    let mut out = Vec::with_capacity(24);
+    for (axis, (axis_name, stem)) in HSL_AXES.iter().enumerate() {
+        for (band, band_name) in HSL_BANDS.iter().enumerate() {
+            out.push(HslField {
+                metric: format!("hsl.{axis_name}.{}", band_name.to_lowercase()),
+                crs: format!("{stem}{band_name}"),
+                axis,
+                band,
+            });
+        }
+    }
+    out
+}
+
+/// One HSL cell by (axis, band) index — the exhaustive-destructure tripwire
+/// for `recipe::Hsl` (a fourth axis stops the build here).
+pub fn hsl_value(h: &Hsl, axis: usize, band: usize) -> Option<f32> {
+    let Hsl { hue, saturation, luminance } = h;
+    let arr = match axis {
+        0 => hue,
+        1 => saturation,
+        2 => luminance,
+        _ => return None,
+    };
+    arr.get(band).copied()
+}
+
+/// The 14 colour-grade fields paired with their ACR attributes. ACR's own
+/// convention (verified against the user's sidecars): shadow/highlight hue+sat
+/// round-trip through the legacy `SplitToning*` keys, everything else through
+/// `ColorGrade*`.
+pub const COLOR_GRADE_CRS: [(&str, &str); 14] = [
+    ("shadow_hue", "SplitToningShadowHue"),
+    ("shadow_sat", "SplitToningShadowSaturation"),
+    ("shadow_lum", "ColorGradeShadowLum"),
+    ("midtone_hue", "ColorGradeMidtoneHue"),
+    ("midtone_sat", "ColorGradeMidtoneSat"),
+    ("midtone_lum", "ColorGradeMidtoneLum"),
+    ("highlight_hue", "SplitToningHighlightHue"),
+    ("highlight_sat", "SplitToningHighlightSaturation"),
+    ("highlight_lum", "ColorGradeHighlightLum"),
+    ("global_hue", "ColorGradeGlobalHue"),
+    ("global_sat", "ColorGradeGlobalSat"),
+    ("global_lum", "ColorGradeGlobalLum"),
+    ("blending", "ColorGradeBlending"),
+    ("balance", "SplitToningBalance"),
+];
+
+/// One colour-grade wheel field by name — the exhaustive-destructure tripwire
+/// for `recipe::ColorGrade` (a fifth wheel stops the build here).
+pub fn color_grade_value(cg: &ColorGrade, field: &str) -> Option<f32> {
+    let ColorGrade {
+        shadow_hue,
+        shadow_sat,
+        shadow_lum,
+        midtone_hue,
+        midtone_sat,
+        midtone_lum,
+        highlight_hue,
+        highlight_sat,
+        highlight_lum,
+        global_hue,
+        global_sat,
+        global_lum,
+        blending,
+        balance,
+    } = cg;
+    Some(match field {
+        "shadow_hue" => *shadow_hue,
+        "shadow_sat" => *shadow_sat,
+        "shadow_lum" => *shadow_lum,
+        "midtone_hue" => *midtone_hue,
+        "midtone_sat" => *midtone_sat,
+        "midtone_lum" => *midtone_lum,
+        "highlight_hue" => *highlight_hue,
+        "highlight_sat" => *highlight_sat,
+        "highlight_lum" => *highlight_lum,
+        "global_hue" => *global_hue,
+        "global_sat" => *global_sat,
+        "global_lum" => *global_lum,
+        "blending" => *blending,
+        "balance" => *balance,
+        _ => return None,
+    })
+}
+
+/// The registry row for a global control name.
+pub fn global_control(name: &str) -> Option<&'static Control> {
+    RECIPE_CONTROLS.iter().find(|c| c.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Serialised top-level keys of a value, as a set.
+    fn serde_keys(v: &Value) -> BTreeSet<String> {
+        v.as_object().expect("struct serialises to an object").keys().cloned().collect()
+    }
+
+    /// The `required` array of a strict-mode object schema, as a set.
+    fn required_keys(schema: &Value) -> BTreeSet<String> {
+        schema["required"]
+            .as_array()
+            .expect("strict schema lists every property in `required`")
+            .iter()
+            .map(|k| k.as_str().expect("required entries are strings").to_string())
+            .collect()
+    }
+
+    /// Compare two key sets BOTH ways and report the difference itself — a
+    /// count check passes on a rename, and "the schema is one short" never
+    /// says which field the model can no longer set.
+    fn assert_same(what: &str, left: (&str, &BTreeSet<String>), right: (&str, &BTreeSet<String>)) {
+        let missing: Vec<&str> = left.1.difference(right.1).map(String::as_str).collect();
+        let extra: Vec<&str> = right.1.difference(left.1).map(String::as_str).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "{what}: in {} but not in {}: {missing:?}; in {} but not in {}: {extra:?}",
+            left.0,
+            right.0,
+            right.0,
+            left.0,
+        );
+    }
+
+    fn names(controls: &[Control], engine_only: Option<bool>) -> BTreeSet<String> {
+        controls
+            .iter()
+            .filter(|c| engine_only.is_none_or(|e| c.engine_only == e))
+            .map(|c| c.name.to_string())
+            .collect()
+    }
+
+    /// R22-0a, widened to the THREE-way form R23-1 needs: the registry, the
+    /// serde shape and the strict schema's `required` array must agree, on
+    /// both mirrors.
+    ///
+    ///   registry (all rows)      == serde keys        → no field escapes the table
+    ///   registry (AI-visible)    == schema required   → the schema IS the table
+    ///
+    /// A field added to the recipe without its row is a build error in
+    /// `global_value`/`local_value` before it ever reaches this test; this
+    /// pins the other two edges, which no pattern can enforce.
+    #[test]
+    fn registry_serde_and_schema_agree_on_both_mirrors() {
+        let schema = edit_recipe_schema();
+        let recipe = serde_keys(&serde_json::to_value(EditRecipe::default()).unwrap());
+        assert_same(
+            "EditRecipe",
+            ("the registry", &names(&RECIPE_CONTROLS, None)),
+            ("the recipe's serde shape", &recipe),
+        );
+        assert_same(
+            "EditRecipe",
+            ("the registry's AI-visible rows", &names(&RECIPE_CONTROLS, Some(false))),
+            ("the schema's `required`", &required_keys(&schema)),
+        );
+
+        // Reach the local-adjustment mirror THROUGH the top-level schema: an
+        // orphaned second copy would pass a test that rebuilt it directly.
+        let local_schema = &schema["properties"]["masks"]["items"];
+        let local = serde_keys(&serde_json::to_value(LocalAdjustment::default()).unwrap());
+        assert_same(
+            "LocalAdjustment",
+            ("the registry", &names(&LOCAL_CONTROLS, None)),
+            ("the adjustment's serde shape", &local),
+        );
+        assert_same(
+            "LocalAdjustment",
+            ("the registry's AI-visible rows", &names(&LOCAL_CONTROLS, Some(false))),
+            ("the nested schema's `required`", &required_keys(local_schema)),
+        );
+
+        // Order, not just membership: `required` follows declaration order, so
+        // the generated schema stays byte-identical to the hand-written mirror
+        // it replaced (a reordering is harmless to the API but would make the
+        // R23-1 diff impossible to verify).
+        let ai_order: Vec<&str> = RECIPE_CONTROLS
+            .iter()
+            .filter(|c| !c.engine_only)
+            .map(|c| c.name)
+            .collect();
+        let schema_order: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(ai_order, schema_order, "required order follows the registry order");
+    }
+
+    /// The registry's stated bands ARE the bands `EditRecipe::clamp` enforces
+    /// — re-derived from clamp itself rather than trusted, because these are
+    /// the numbers the prompt catalogue tells the model, and a range the
+    /// engine does not honour is a lie in a paid request.
+    #[test]
+    fn stated_ranges_are_the_ranges_clamp_enforces() {
+        for c in RECIPE_CONTROLS.iter().filter(|c| c.shape.is_scalar()) {
+            let (lo, hi) = c.range.unwrap_or_else(|| panic!("{} has no stated range", c.name));
+            // A full span OUTSIDE each end (not a multiple of the bound: for a
+            // 2000..40000 band, `lo * 10` lands INSIDE the range).
+            let span = hi - lo;
+            for (probe, want) in [(hi + span + 1.0, hi), (lo - span - 1.0, lo)] {
+                let json = format!("{{\"{}\": {probe}}}", c.name);
+                let mut r: EditRecipe = serde_json::from_str(&json)
+                    .unwrap_or_else(|e| panic!("{} probe {probe} did not deserialize: {e}", c.name));
+                r.clamp();
+                let got = global_value(&r, c.name).and_then(|v| v.scalar());
+                assert_eq!(
+                    got,
+                    Some(want),
+                    "{}: the registry states {lo}..{hi}, but clamp() maps {probe} to {got:?}",
+                    c.name
+                );
+            }
+        }
+        // The local mirror, through a one-mask recipe (clamp walks masks).
+        for c in LOCAL_CONTROLS.iter().filter(|c| c.shape.is_scalar()) {
+            let (lo, hi) = c.range.unwrap_or_else(|| panic!("{} has no stated range", c.name));
+            // A full span OUTSIDE each end (not a multiple of the bound: for a
+            // 2000..40000 band, `lo * 10` lands INSIDE the range).
+            let span = hi - lo;
+            for (probe, want) in [(hi + span + 1.0, hi), (lo - span - 1.0, lo)] {
+                let json = format!("{{\"masks\": [{{\"{}\": {probe}}}]}}", c.name);
+                let mut r: EditRecipe = serde_json::from_str(&json)
+                    .unwrap_or_else(|e| panic!("{} probe {probe} did not deserialize: {e}", c.name));
+                r.clamp();
+                let got = r.masks.first().and_then(|m| local_value(m, c.name)).and_then(|v| v.scalar());
+                assert_eq!(
+                    got,
+                    Some(want),
+                    "mask {}: the registry states {lo}..{hi}, but clamp() maps {probe} to {got:?}",
+                    c.name
+                );
+            }
+        }
+    }
+
+    /// Every engine-only row is a row the schema cannot express OR one staged
+    /// for a later round — but in BOTH cases it must be absent from the
+    /// schema, and every carrier shape must be engine-only (a carrier in the
+    /// schema would panic in `strict_object`).
+    #[test]
+    fn engine_carriers_never_reach_the_schema() {
+        for c in RECIPE_CONTROLS.iter().chain(LOCAL_CONTROLS.iter()) {
+            if c.shape == Shape::EngineCarrier {
+                assert!(c.engine_only, "{} is a carrier shape but not engine_only", c.name);
+            }
+            if !c.engine_only {
+                assert!(c.shape.schema().is_some(), "{} is in the schema with no shape", c.name);
+            }
+        }
+        // The staged set, spelled out so flipping one is a deliberate edit
+        // with a test to update (the lens trio and `enabled` need an
+        // "I have no opinion" expression first — see `Control::engine_only`).
+        assert_eq!(
+            names(&RECIPE_CONTROLS, Some(true)).into_iter().collect::<Vec<_>>(),
+            vec![
+                "as_shot_k",
+                "as_shot_tint",
+                "base_curve",
+                "lens_distortion",
+                "lens_profile",
+                "lens_vignette",
+                "lens_vignette_mid",
+            ]
+        );
+        assert_eq!(
+            names(&LOCAL_CONTROLS, Some(true)).into_iter().collect::<Vec<_>>(),
+            vec!["color_gains", "components", "enabled", "role"]
+        );
+    }
+
+    /// The nested object shapes the registry composes are pinned to serde the
+    /// same way the two top-level mirrors are (no pattern can watch them:
+    /// they are shape definitions, not registry rows).
+    #[test]
+    fn nested_object_shapes_match_their_serde_keys() {
+        let hsl = serde_keys(&serde_json::to_value(Hsl::default()).unwrap());
+        assert_same("Hsl", ("serde", &hsl), ("the schema", &required_keys(&hsl_schema())));
+        assert_same(
+            "Hsl",
+            ("serde", &hsl),
+            ("HSL_AXES", &HSL_AXES.iter().map(|(a, _)| a.to_string()).collect()),
+        );
+
+        let grade = serde_keys(&serde_json::to_value(ColorGrade::default()).unwrap());
+        assert_same(
+            "ColorGrade",
+            ("serde", &grade),
+            ("the schema", &required_keys(&color_grade_schema())),
+        );
+        assert_same(
+            "ColorGrade",
+            ("serde", &grade),
+            ("COLOR_GRADE_CRS", &COLOR_GRADE_CRS.iter().map(|(f, _)| f.to_string()).collect()),
+        );
+
+        let crop = serde_keys(
+            &serde_json::to_value(Crop { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0 }).unwrap(),
+        );
+        assert_same("Crop", ("serde", &crop), ("the schema", &required_keys(&crop_schema())));
+
+        let point = serde_keys(&serde_json::to_value(CurvePoint { input: 0, output: 0 }).unwrap());
+        assert_same(
+            "CurvePoint",
+            ("serde", &point),
+            ("the schema", &required_keys(&curve_arr()["items"])),
+        );
+
+        // Every colour-grade field resolves through the destructuring reader
+        // (a renamed wheel field would break the build there, but a MISSING
+        // match arm for a new one is what this catches at test time).
+        for (field, _) in COLOR_GRADE_CRS {
+            assert!(
+                color_grade_value(&ColorGrade::default(), field).is_some(),
+                "colour-grade field {field} has no reader"
+            );
+        }
+    }
+
+    /// The ruler may only read keys the writer can write: every attribute the
+    /// registry and its family expansions name must be in `xmp`'s own owned-key
+    /// universe. Without this, an eval row could measure the user against a
+    /// key spelling that exists nowhere in the app (silently scoring 0).
+    #[test]
+    fn every_crs_attribute_is_one_the_xmp_writer_owns() {
+        let owned: BTreeSet<String> = crate::xmp::owned_attr_keys().into_iter().collect();
+        for c in RECIPE_CONTROLS.iter() {
+            if let Some(k) = c.crs.attr() {
+                assert!(owned.contains(k), "{}: crs:{k} is not a key the writer owns", c.name);
+            }
+        }
+        for f in hsl_expansion() {
+            assert!(owned.contains(&f.crs), "{}: crs:{} is not owned", f.metric, f.crs);
+        }
+        for (field, key) in COLOR_GRADE_CRS {
+            assert!(owned.contains(key), "color_grade.{field}: crs:{key} is not owned");
+        }
+        // The expansion covers all 24 cells and each resolves to a value.
+        let ex = hsl_expansion();
+        assert_eq!(ex.len(), 24);
+        for f in &ex {
+            assert!(hsl_value(&Hsl::default(), f.axis, f.band).is_some(), "{} unreadable", f.metric);
+        }
+    }
+
+    /// The generated prompt section names every AI-visible control and no
+    /// engine-only one — the blind spot #12 reported (white balance, dehaze,
+    /// sharpening, crop and straighten were absent from the prompt entirely).
+    #[test]
+    fn prompt_catalogue_lists_every_ai_visible_control() {
+        let text = prompt_catalogue();
+        for c in RECIPE_CONTROLS.iter().chain(LOCAL_CONTROLS.iter()) {
+            let bullet = format!("• {} (", c.name);
+            if c.engine_only {
+                // `name`/`tint`/`saturation`… exist on both mirrors, so only
+                // the names unique to the engine-only set can be asserted absent.
+                let shared = LOCAL_CONTROLS
+                    .iter()
+                    .chain(RECIPE_CONTROLS.iter())
+                    .any(|o| o.name == c.name && !o.engine_only);
+                assert!(
+                    shared || !text.contains(&bullet),
+                    "{} is engine-only but the prompt advertises it",
+                    c.name
+                );
+            } else {
+                assert!(text.contains(&bullet), "{} is missing from the prompt catalogue", c.name);
+                assert!(text.contains(c.purpose), "{}'s purpose line is missing", c.name);
+            }
+        }
+        // The two white-balance semantics are a PAIR (#12): absolute Kelvin
+        // and a relative tint. Naming only one leaves the model treating the
+        // other as absolute too.
+        assert!(text.contains("ABSOLUTE colour temperature in Kelvin"), "{text}");
+        assert!(text.contains("RELATIVE to the as-shot white balance"), "{text}");
+    }
+}
