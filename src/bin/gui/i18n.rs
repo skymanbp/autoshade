@@ -205,11 +205,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Generative Fill", "生成填充 · Generative Fill"),
     ("what belongs there, e.g. remove the trash can, extend the sky",
         "那里该有什么，例如：移除垃圾桶、延展天空"),
-    ("Full-res", "全分辨率"),
+    // R22 #16: one 「Full-res」 key served FOUR checkboxes in three panels (fill
+    // here, heal + clone below, denoise in Develop · Detail) with three different
+    // gates — RAW-only for fill, both source types for the rest. Each label now
+    // names its verb, so a single retired key becomes four.
+    ("Full-res fill", "全分辨率填充"),
     ("Composite onto the full-sensor develop (slow, RAW only)", "合成到全分辨率显影上（慢，仅 RAW）"),
     // L09#4: heal honours --full-res on baked sources too (since b4c6c30);
     // "RAW only" was fill's semantics, copied and never re-synced. The new
     // text names the omission consequence the old one hid.
+    ("Full-res heal", "全分辨率修复"),
     ("Heal at full resolution (slow; without it a baked image is saved at 2048px)",
         "在全分辨率上修复（慢；不勾选时烘焙图会按 2048px 保存为母版）"),
     ("gpt-image render quality — higher looks better and costs more per image",
@@ -231,6 +236,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Stamp: Alt+click to set the source → brush the target area → 「⎘ Clone painted area」",
         "图章：Alt+点击取源点 → 画笔涂目标区 → 「⎘ 克隆已涂区域」"),
     ("⎘ Clone painted area", "⎘ 克隆已涂区域"),
+    ("Full-res clone", "全分辨率克隆图章"),
     ("Clone at full resolution (slow; without it a baked image is saved at 2048px)",
         "全分辨率克隆（慢；不开启时烘焙图像按 2048px 保存）"),
     ("Photoshop-style clone stamp: Alt+click to sample a source (cross marker), brush the area to cover, and pixels are carried over as-is from the source (feathered edges, no tone matching). Local compute, saves a ./out pixel master.",
@@ -349,9 +355,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Name", "名称"),
     ("↻ Redraw", "↻ 重画"),
     ("Re-drag this mask's area on the image", "在图上重新拖拽这个蒙版的范围"),
-    ("Overlay", "叠加"),
-    ("Show this mask's actual coverage as a red semi-transparent overlay (geometry × range × strength, shortcut O)",
-        "用红色半透明显示这个蒙版的实际作用范围（几何×范围×强度，快捷键 O）"),
+    // R22 #16: was 「Overlay」/「叠加」, sitting between 「↻ Redraw」 and the ⬆/⬇
+    // order buttons — a row of per-mask verbs, so the label read as per-mask
+    // state. The flag is the O key's ONE view switch (canvas.rs
+    // refresh_mask_overlay draws whichever mask is hovered-or-selected), and the
+    // EN label now matches the F1 sheet's wording for that key.
+    ("Show mask overlay", "显示蒙版叠加"),
+    ("One view switch shared by every mask (shortcut O): shows the hovered-or-selected mask's actual coverage as a red semi-transparent overlay (geometry × range × strength)",
+        "所有蒙版共用的一个显示开关（快捷键 O）：用红色半透明显示当前悬停或选中蒙版的实际作用范围（几何×范围×强度）"),
     ("Move up (renders earlier)", "上移（更早渲染）"),
     ("Move down (renders later)", "下移（更晚渲染）"),
     ("Invert", "反转"),
@@ -470,8 +481,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("sRGB (universal)", "sRGB（通用）"),
     ("Display P3 (wide-gamut screens)", "Display P3（广色域屏）"),
     ("Adobe RGB (print)", "Adobe RGB（印刷）"),
-    ("AI Denoise", "AI 降噪"),
-    ("🤖 AI Denoise", "🤖 AI 降噪"),
+    ("AI Denoise", "AI 降噪"), // the export_summary chip, not a control label
+    // R22 #16: was 「🤖 AI Denoise」 — byte-identical to the Detail section's
+    // active verb once both wore the 🤖 prefix. 「on export」 / 「now」 is the real
+    // difference (this one waits for a full-resolution delivery; that one bakes
+    // the current variant immediately). ZH deliberately keeps this block's 降噪
+    // (shared with the 「Noise Reduction」 slider and the render status line) and
+    // the on-canvas block's 去噪 — the two words separate the two timings for a
+    // ZH reader exactly as 「on export」/「now」 do for an EN one.
+    ("🤖 AI Denoise on export", "🤖 导出时 AI 降噪"),
     // R22-7 retired 「Download…」 and its hover: the button was start_render_to
     // with a dialog-supplied path, which is now the Destination setting's
     // 「Ask every time」 value and the split button's ▾ half.
@@ -718,7 +736,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Cloned {n} spot(s) → {path}", "克隆 {n} 处 → {path}"),
 
     // ── Active AI denoise (on-canvas, Detail section) ────────────────────────
+    // 「now」 vs the Export section's 「on export」 (R22 #16): two TIMINGS of one
+    // SCUNet denoiser, which the shared 🤖 prefix alone could not tell apart.
+    // ZH keeps this block's 去噪 and the export block's 降噪 — see the note at
+    // the export-settings entries.
     ("🤖 AI Denoise now", "🤖 立即 AI 去噪"),
+    ("Full-res denoise", "全分辨率去噪"),
     ("Run the SCUNet GPU sidecar on this variant's pixels and show the result on canvas (undoable — bakes a clean base into the current variant; the develop sliders keep applying on top; first run downloads the model)",
         "对当前变体的像素跑 SCUNet GPU 边车，结果直接上画布（可撤销——干净基图烘焙进当前变体；显影滑杆继续在其上生效；首次运行会下载模型）"),
     ("Denoise at full resolution (the full-sensor develop for a RAW, the image itself for a baked source; slow) — off = a ≤2048px working copy for a quick on-canvas result",

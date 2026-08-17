@@ -213,7 +213,7 @@ impl Default for Prefs {
         // key missing from an older save degrades to exactly the app default.
         Self {
             gallery_dir: None,
-            style_strength: 0.30,
+            style_strength: STYLE_STRENGTH_DEFAULT,
             save_jpeg: false,
             exp_format: 0,
             exp_dest: 0, // ./out — the CLI/batch shape, unchanged for old prefs
@@ -238,10 +238,24 @@ impl Default for Prefs {
     }
 }
 
+/// Where the personal-style strength starts, what its slider's double-click /
+/// right-click reset lands on, and the baseline the AI section's ● compares
+/// against ([`AutoshopApp::ai_section_active`]). ONE definition on purpose
+/// (R22 #16): the number was a bare `0.30` in BOTH `Default` impls, so
+/// "the user moved it" was a statement no predicate could make without adding a
+/// third copy to drift from the other two.
+pub(crate) const STYLE_STRENGTH_DEFAULT: f32 = 0.30;
+
 pub(crate) const PREVIEW_EDGE: u32 = 1280; // working preview size for fast live develop
 
 pub(crate) const THUMB_EDGE: u32 = 160; // decoded gallery-thumbnail long edge
 
+// The GALLERY's thumbnail geometry: decode budget (THUMB_EDGE) → drawn slot
+// (THUMB_W × THUMB_H) → row height, one pipeline, which is why these four sit
+// together rather than in theme.rs beside the cross-surface spacing/width
+// SCALES. The variant strip's own thumb height is a different surface with its
+// own arithmetic and lives at its one consumer (`STRIP_THUMB_H` in
+// panels/develop.rs::variant_strip, which names this constant back).
 pub(crate) const THUMB_W: f32 = 56.0; // displayed thumbnail size in the gallery
 
 pub(crate) const THUMB_H: f32 = 40.0;

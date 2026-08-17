@@ -34,10 +34,31 @@ impl AutoshopApp {
     /// here would have re-opened exactly that hole. `busy` alone must NOT gate:
     /// a 600 s analyze keeps the panel live (each verb has its own `ready`
     /// gate) — only the open transition freezes it.
+    /// Does the AI area carry state worth a ● on its collapsed header?
+    ///
+    /// Written next to the panel it describes, and enumerating that panel's OWN
+    /// field set in reading order: the verdict `ai_analysis` prints, the
+    /// Direction it consumes, and the Style strength that steers both verbs.
+    /// Style was the drift this predicate exists to close (R22 #16) — it is the
+    /// one AI input with a NON-ZERO default, so the honest test is "moved off
+    /// [`STYLE_STRENGTH_DEFAULT`]", and comparing against the same constant the
+    /// slider resets to means the dot and the reset can never disagree.
+    ///
+    /// Deliberately NOT in the set: `reimagine_prompt`, `fit_ai_judge`,
+    /// `zoned_fit`. Those belong to the two collapsed sub-areas and are
+    /// persisted PREFERENCES of paid verbs (`zoned_fit` even defaults to true),
+    /// so folding them in would light the dot on a fresh launch — the false
+    /// positive the ● exists to avoid.
+    pub(crate) fn ai_section_active(&self) -> bool {
+        self.verdict.is_some()
+            || !self.guidance.is_empty()
+            || self.style_strength != STYLE_STRENGTH_DEFAULT
+    }
+
     pub(crate) fn ai_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
         // Open whenever there's a verdict to show; the inputs are always present.
-        let ai_active = self.verdict.is_some() || !self.guidance.is_empty();
+        let ai_active = self.ai_section_active();
         let editable = !self.open_in_flight;
         // The gate wraps the WHOLE area, header included — exactly how
         // develop_panel wraps its sections, so the two read the same mid-open
@@ -197,14 +218,24 @@ impl AutoshopApp {
                 self.start_analyze(true);
             }
             ui.separator();
-            ui.label(tr(lang, "Style")).on_hover_text(
+            // #16: the ONE slider in the app that never went through the
+            // panel's own helper — a bare `egui::Slider` with `show_value(false)`
+            // and a hand-rolled "30%" label beside it, so it alone had no
+            // double-click / right-click reset and no hover ↑/↓ nudge, and its
+            // 0..1 storage was shown on a scale nothing else in the UI uses.
+            // `slider_pct_hinted` puts it on the same 0..100 track as every
+            // other stored fraction (Amount, feathers, tolerance), resets to the
+            // shared default, and keeps the explanation as the tooltip's first
+            // line instead of on a separate label.
+            Self::slider_pct_hinted(
+                ui,
+                lang,
+                tr(lang, "Style"),
+                &mut self.style_strength,
+                1.0,
+                STYLE_STRENGTH_DEFAULT,
                 tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
             );
-            ui.add(egui::Slider::new(&mut self.style_strength, 0.0..=1.0).show_value(false))
-                .on_hover_text(
-                    tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
-                );
-            ui.label(format!("{:.0}%", self.style_strength * 100.0));
         });
     }
 

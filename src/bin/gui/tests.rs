@@ -4086,3 +4086,184 @@
             );
         }
     }
+
+    /// Every text one frame drew, nested `Shape::Vec` included — the way to read
+    /// a `CollapsingHeader`'s own label (and therefore its ● or lack of one)
+    /// without a seam per section.
+    fn drawn_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// A tall frame: egui culls shapes outside the visible clip rect, and the
+    /// lower sections sit below a full screen of siblings.
+    fn tall_frame(app: &mut AutoshopApp, f: impl Fn(&mut AutoshopApp, &mut egui::Ui)) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 20_000.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            ctx.memory_mut(|m| m.set_everything_is_visible(true));
+            egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| f(app, ui));
+            });
+        });
+        drawn_texts(&out.shapes)
+    }
+
+    /// R22 #16a: the AI section's ● read `verdict.is_some() || !guidance.
+    /// is_empty()` — a field set one item short of the panel's own inputs. The
+    /// Style strength steers every AI proposal, is PERSISTED across launches, and
+    /// was invisible the moment the section was collapsed.
+    ///
+    /// Pins the wiring first: the app default, the pref default and the slider's
+    /// reset target must be ONE constant, or "the user moved it" is not a
+    /// decidable question and this dot cannot exist. Then the rendered header —
+    /// a predicate nobody reads is not a dot.
+    #[test]
+    fn the_ai_section_dot_follows_the_style_strength_it_used_to_miss() {
+        assert_eq!(
+            AutoshopApp::default().style_strength, STYLE_STRENGTH_DEFAULT,
+            "the app must start at the shared default"
+        );
+        assert_eq!(
+            Prefs::default().style_strength, STYLE_STRENGTH_DEFAULT,
+            "a pref key missing from an older save must degrade to the SAME number \
+             — otherwise every upgraded install starts with a lit dot"
+        );
+        let mut app = AutoshopApp::default();
+        assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
+        app.style_strength = 0.85;
+        assert!(app.ai_section_active(), "a moved Style slider IS AI state");
+        app.style_strength = STYLE_STRENGTH_DEFAULT;
+        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
+        // The two pre-existing members still count (no regression in closing the gap).
+        app.guidance = "warmer and moodier".into();
+        assert!(app.ai_section_active(), "a typed Direction still flags");
+        app.guidance.clear();
+        app.verdict = Some((autoshop::advisor::Decision::Accept, vec!["ok".into()]));
+        assert!(app.ai_section_active(), "a verdict still flags");
+        // …and the header really carries it.
+        let mut app = AutoshopApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "AI"),
+            "the AI header was not drawn at all — this test proves nothing: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|t| t == "AI  ●"),
+            "a fresh app must not light the AI dot: {seen:?}"
+        );
+        app.style_strength = 0.85;
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "AI  ●"),
+            "a moved Style slider must light the collapsed header's ●: {seen:?}"
+        );
+    }
+
+    /// R22 #16d: the Local Masks header's ● was `n_masks > 0` while every ROW
+    /// dot below it used the engine's own rule. So a list of muted or parked
+    /// masks — no adjustment set, or the eye off — claimed an active local
+    /// adjustment, and when the claim WAS true it only repeated the count the
+    /// header already prints. Both now read `util::mask_active`.
+    #[test]
+    fn the_local_masks_dot_matches_its_row_dots() {
+        let parked = |name: &str| autoshop::recipe::LocalAdjustment {
+            mask: autoshop::recipe::MaskGeometry::Radial {
+                top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
+                feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
+            },
+            name: name.into(),
+            ..Default::default()
+        };
+        let mut app = AutoshopApp::default();
+        app.recipe.masks = vec![parked("one"), parked("two")];
+        assert!(
+            !app.masks_section_active(),
+            "two masks with every adjustment at neutral do nothing — no ●"
+        );
+        let seen = tall_frame(&mut app, |a, ui| {
+            a.develop_panel(ui);
+        });
+        assert!(
+            seen.iter().any(|t| t == "Local Masks (2)"),
+            "the header (with its count) was not drawn — this test proves nothing: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|t| t == "Local Masks (2)  ●"),
+            "parked masks must not claim an active local adjustment: {seen:?}"
+        );
+        // One real adjustment on mask 2 ⇒ the row dot lights, so the header must.
+        app.recipe.masks[1].exposure_ev = 0.6;
+        assert!(mask_active(&app.recipe.masks[1]), "premise: the row dot lights here");
+        assert!(app.masks_section_active(), "the header must agree with the row");
+        let seen = tall_frame(&mut app, |a, ui| {
+            a.develop_panel(ui);
+        });
+        assert!(
+            seen.iter().any(|t| t == "Local Masks (2)  ●"),
+            "a working mask must light the section header: {seen:?}"
+        );
+        // The EYE is half the rule: muting the only working mask parks the list.
+        app.recipe.masks[1].enabled = false;
+        assert!(!mask_active(&app.recipe.masks[1]), "premise: the row reads muted");
+        assert!(
+            !app.masks_section_active(),
+            "a muted mask renders nothing, whatever its sliders say"
+        );
+    }
+
+    /// R22 #16h (verification, no behaviour change): the export-side MaskLoss
+    /// disclosure rides `toast()`, so repeating the SAME save must not stack
+    /// copies — the dedup refreshes the live toast and moves it to the BACK of
+    /// the 5-deep ring, which is also what stops a repeat from evicting the
+    /// other four. Pinned because the release note describes this behaviour.
+    #[test]
+    fn an_identical_toast_refreshes_instead_of_stacking() {
+        let loss = "the Lightroom sidecar dropped 2 bitmap masks";
+        let mut app = AutoshopApp::default();
+        app.toast(ToastKind::Error, loss);
+        for i in 0..4 {
+            app.toast(ToastKind::Success, format!("saved {i}"));
+        }
+        assert_eq!(app.toasts.len(), 5, "the ring is exactly full");
+        // Ctrl+S three more times on the same photo: byte-identical disclosure.
+        for _ in 0..3 {
+            app.toast(ToastKind::Error, loss);
+        }
+        assert_eq!(
+            app.toasts.len(), 5,
+            "three refreshes must not grow the ring — stacking would have evicted \
+             the four successes one by one"
+        );
+        assert_eq!(
+            app.toasts.iter().filter(|t| t.text == loss).count(), 1,
+            "one live copy of one disclosure"
+        );
+        assert_eq!(
+            app.toasts.last().expect("non-empty").text, loss,
+            "the refresh moves it to the BACK, so the ring evicts it LAST — \
+             refreshing in place left the error first in line for eviction"
+        );
+        // The KIND is part of the identity: a success saying the same words is a
+        // different toast (different colour, different TTL).
+        app.toast(ToastKind::Success, loss);
+        assert_eq!(
+            app.toasts.iter().filter(|t| t.text == loss).count(), 2,
+            "dedup keys on (text, kind), not text alone"
+        );
+    }

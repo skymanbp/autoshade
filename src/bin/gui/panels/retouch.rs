@@ -704,7 +704,12 @@ impl AutoshopApp {
                     let src_is_raw = self
                         .active_source_path()
                         .is_some_and(|p| autoshop::decode::is_raw(&p));
-                    ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.fill_fullres, tr(lang, "Full-res")))
+                    // Each 「Full-res」 names its verb (R22 #16): fill / heal /
+                    // clone / denoise had four identically-labelled checkboxes
+                    // across three panels, and this is the only one still gated
+                    // RAW-only — a distinction its label could not carry while it
+                    // was a twin of the other three.
+                    ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.fill_fullres, tr(lang, "Full-res fill")))
                         .on_hover_text(tr(lang, "Composite onto the full-sensor develop (slow, RAW only)"));
                     ui.add_enabled_ui(!self.busy, |ui| {
                         if ui
@@ -755,7 +760,7 @@ impl AutoshopApp {
                     // types since b4c6c30, but the RAW-only gate left a
                     // 61 MP baked TIFF no way to opt out of the 2048px
                     // downsample the unchecked path bakes into the master.
-                    ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res"))
+                    ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res heal"))
                         .on_hover_text(tr(lang, "Heal at full resolution (slow; without it a baked image is saved at 2048px)"));
                 });
                 ui.label(
@@ -793,7 +798,7 @@ impl AutoshopApp {
                     // Enabled for BAKED sources too — clone_stamp honours
                     // the flag on both source types (retouch.rs), the same
                     // rule as Heal beside it (L15-7).
-                    ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res"))
+                    ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res clone"))
                         .on_hover_text(tr(lang, "Clone at full resolution (slow; without it a baked image is saved at 2048px)"));
                     ui.add_enabled_ui(!self.busy && self.clone_mode, |ui| {
                         if ui

@@ -59,9 +59,36 @@ impl AutoshopApp {
         max: f32,
         default: f32,
     ) -> bool {
+        Self::slider_pct_hinted(ui, lang, label, value, max, default, "")
+    }
+
+    /// [`slider_pct`] plus ONE disclosure line at the head of its tooltip — the
+    /// percent-track twin of [`slider_hinted`], same reason (the helpers return
+    /// `bool`, so a caller cannot chain its own `on_hover_text`). For a fraction
+    /// slider whose meaning cannot be read off its label: the AI 「Style」
+    /// strength, which has to say what it leans on and that 0 means "ignore my
+    /// habits" (R22 #16 — it was a bare `egui::Slider` carrying that sentence
+    /// itself, which is exactly why it had no reset gesture and no ↑/↓ nudge).
+    pub(crate) fn slider_pct_hinted(
+        ui: &mut egui::Ui,
+        lang: Lang,
+        label: &str,
+        value: &mut f32,
+        max: f32,
+        default: f32,
+        hint: &str,
+    ) -> bool {
         let mut disp = *value * 100.0;
-        let changed =
-            Self::slider(ui, lang, label, &mut disp, 0.0, max * 100.0, default * 100.0);
+        let changed = Self::slider_hinted(
+            ui,
+            lang,
+            label,
+            &mut disp,
+            0.0,
+            max * 100.0,
+            default * 100.0,
+            hint,
+        );
         if changed {
             *value = disp / 100.0;
         }
@@ -699,7 +726,11 @@ impl AutoshopApp {
                     // types (denoise_active), and the RAW-only gate left a
                     // high-res baked TIFF no way to opt out of the ≤2048px
                     // working copy.
-                    ui.checkbox(&mut self.denoise_fullres, tr(lang, "Full-res"))
+                    // The label names its VERB (R22 #16): four different
+                    // checkboxes in three panels all said just 「Full-res」, so a
+                    // support answer ("tick Full-res") pointed at four controls
+                    // with different gates and different costs.
+                    ui.checkbox(&mut self.denoise_fullres, tr(lang, "Full-res denoise"))
                         .on_hover_text(tr(lang,
                             "Denoise at full resolution (the full-sensor develop for a RAW, the image itself for a \
                              baked source; slow) — off = a ≤2048px working copy for a quick on-canvas result",
@@ -717,6 +748,16 @@ impl AutoshopApp {
 
         // --- 镜头校正: in-camera profile + manual corrections -----------------
         ui.add_space(SPACE_MD);
+        // Field set: the section's two manual sliders + the in-camera profile's
+        // two rendered components. `lens_vignette_mid` is the deliberate
+        // omission (R22 #16 re-checked it): the engine builds the manual falloff
+        // LUT only when the AMOUNT is non-zero — `(r.lens_vignette !=
+        // 0.0).then(|| manual_vignette_lut(…))`, render.rs — and the XMP carries
+        // VignetteMidpoint under the same zero amount, so a moved Midpoint alone
+        // changes no pixel in the preview, the export or Lightroom. Whenever it
+        // DOES matter, `lens_vignette != 0.0` has already lit the dot; listing
+        // it could therefore only add a ● over a section that renders
+        // identically. Same rule as `exp_quality` in dev_export.
         let lens_active = self.recipe.lens_vignette != 0.0
             || self.recipe.lens_distortion != 0.0
             || self.recipe.lens_profile.vignette_active()
@@ -882,6 +923,15 @@ impl AutoshopApp {
         changed
     }
 
+    /// Does the Local Masks header earn its ●? Exactly the rule the mask ROWS
+    /// below use — [`mask_active`], the engine's own non-neutrality test plus the
+    /// eye — applied over the list. The header used to carry `n_masks > 0`
+    /// instead (R22 #16), which lit the dot for a list of muted or parked masks
+    /// and said nothing the「Local Masks ({n})」count did not already say.
+    pub(crate) fn masks_section_active(&self) -> bool {
+        self.recipe.masks.iter().any(mask_active)
+    }
+
     /// One develop-panel section — body extracted verbatim from
     /// develop_panel (round-12 decomposition; spacing included).
     fn dev_masks(&mut self, ui: &mut egui::Ui) -> bool {
@@ -900,7 +950,7 @@ impl AutoshopApp {
         let n_masks_s = n_masks.to_string();
         egui::CollapsingHeader::new(section_title(
             &trf(lang, "Local Masks ({n})", &[("n", &n_masks_s)]),
-            n_masks > 0,
+            self.masks_section_active(),
         ))
         .id_salt("sec_local")
         .default_open(false)
@@ -1050,10 +1100,13 @@ impl AutoshopApp {
                             tr(self.lang, "mask")
                         };
                         // The activity dot IS the engine's own rule
-                        // (render::engine_active): a parked mask looks parked,
-                        // a working one shows ● — a 64-row list where the two
-                        // were indistinguishable was a real navigation cost.
-                        let active = m.enabled && autoshop::render::engine_active(m);
+                        // (util::mask_active → render::engine_active): a parked
+                        // mask looks parked, a working one shows ● — a 64-row
+                        // list where the two were indistinguishable was a real
+                        // navigation cost. The SECTION header reads the same
+                        // helper over the whole list (masks_section_active), so
+                        // the two dots cannot drift apart again (R22 #16).
+                        let active = mask_active(m);
                         let enabled = m.enabled;
                         // L08: a dead raster renders INERT (the engine skips
                         // it with a stderr-only warning) while this row still
@@ -1258,9 +1311,18 @@ impl AutoshopApp {
                             }
                         }
                     }
+                    // ONE view switch, not a property of this row (R22 #16): it
+                    // is the same flag the O key toggles, and
+                    // `refresh_mask_overlay` (canvas.rs) always draws whichever
+                    // mask is hovered-or-selected. Sitting in the selected-mask
+                    // row is right — that IS the mask it draws — but 「Overlay」
+                    // beside 「↻ Redraw」 and the ⬆/⬇ order buttons read as
+                    // per-mask state that would be remembered per mask. The
+                    // label now says what it is, in the same words the F1 sheet
+                    // uses for the O key ("Toggle mask overlay").
                     if ui
-                        .checkbox(&mut self.show_mask_overlay, tr(lang, "Overlay"))
-                        .on_hover_text(tr(lang, "Show this mask's actual coverage as a red semi-transparent overlay (geometry × range × strength, shortcut O)"))
+                        .checkbox(&mut self.show_mask_overlay, tr(lang, "Show mask overlay"))
+                        .on_hover_text(tr(lang, "One view switch shared by every mask (shortcut O): shows the hovered-or-selected mask's actual coverage as a red semi-transparent overlay (geometry × range × strength)"))
                         .changed()
                     {
                         self.overlay_stale = true;
@@ -1892,6 +1954,14 @@ impl AutoshopApp {
         // delivery, these are Export-dialog contents, not toolbar chrome. The
         // toolbar keeps the ACTIONS; their hover echoes this section's state.
         ui.add_space(SPACE_MD);
+        // Field set: every setting this section owns EXCEPT `exp_quality` — the
+        // deliberate omission (R22 #16 re-checked it after `exp_dest` joined in
+        // R22-7). Quality reaches exactly one encoder (`jpeg_quality`,
+        // export.rs), which is why `export_summary` prints "q95" only for JPEG;
+        // and any format that consumes it is by definition `!= Tiff16`, so it has
+        // already lit the dot. Listing quality could therefore only flag a TIFF
+        // delivery whose bytes are identical either way. Same rule as
+        // `lens_vignette_mid` in dev_lens.
         let export_active = self.exp_format != ExportFormat::Tiff16
             || self.exp_long_edge != 0
             || self.exp_sharpen != 0.0
@@ -1975,7 +2045,14 @@ impl AutoshopApp {
                             }
                         });
                 });
-                ui.checkbox(&mut self.save_denoise, tr(lang, "🤖 AI Denoise")).on_hover_text(
+                // 「on export」 completes the pair the 🤖 prefix alone could not
+                // separate (R22 #16): this checkbox and the Detail section's
+                // 「🤖 AI Denoise now」 are two TIMINGS of one denoiser — this one
+                // runs inside every full-resolution delivery and touches no
+                // pixel until then, that one bakes a clean base into the current
+                // variant immediately. Same-named twins in two panels made the
+                // difference invisible until an export took minutes.
+                ui.checkbox(&mut self.save_denoise, tr(lang, "🤖 AI Denoise on export")).on_hover_text(
                     ai_xref(lang, tr(lang, "SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.")),
                 );
                 ui.label(

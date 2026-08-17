@@ -1381,7 +1381,11 @@ impl Default for AutoshopApp {
             disclosed_scripts: HashSet::new(),
             rationale: String::new(),
             rationale_notes: Vec::new(),
-            style_strength: 0.30,
+            // ONE definition, shared with Prefs::default, the slider's reset
+            // target and the AI section's ● baseline (R22 #16) — see
+            // model::STYLE_STRENGTH_DEFAULT for why the literal cannot live in
+            // two Default impls.
+            style_strength: STYLE_STRENGTH_DEFAULT,
             hsl_tab: 0,
             grade_region: 0,
             guidance: String::new(),

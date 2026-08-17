@@ -251,12 +251,30 @@ pub(crate) fn prompt_field(ui: &mut egui::Ui, buf: &mut String, hint: &str) -> e
 
 /// Section header text with an activity dot when the section holds non-neutral
 /// values — a collapsed active adjustment must never be invisible.
+///
+/// The `active` predicates themselves live beside the sections they describe
+/// (`panels/develop.rs`, `panels/ai.rs`) so each one can be read against the
+/// field set it covers; two of them are named methods
+/// ([`AutoshopApp::ai_section_active`], [`AutoshopApp::masks_section_active`])
+/// because a header and something else must agree on the answer.
 pub(crate) fn section_title(base: &str, active: bool) -> String {
     if active {
         format!("{base}  ●")
     } else {
         base.to_string()
     }
+}
+
+/// "This mask is doing something": the ENGINE's own non-neutrality rule plus the
+/// eye (a muted mask renders nothing whatever its sliders say).
+///
+/// ONE owner for two readers (R22 #16). The mask ROW has shown this dot since
+/// L06, but the Local Masks header showed its own `n_masks > 0` — which claimed
+/// activity for a list of parked or muted masks, and only ever repeated the
+/// count the header already prints. Two hand-written predicates for one question
+/// is the drift; this is the deduplication.
+pub(crate) fn mask_active(m: &autoshop::recipe::LocalAdjustment) -> bool {
+    m.enabled && autoshop::render::engine_active(m)
 }
 
 /// The export-side lossy-projection disclosure (M6a), in the UI language: ONE
