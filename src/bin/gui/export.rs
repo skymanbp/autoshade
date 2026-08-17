@@ -743,7 +743,7 @@ impl AutoshopApp {
                 self.pixels_on_disk = origin;
                 let mut s = if raw {
                     match autoshop::pipeline::write_xmp(&path, &self.recipe) {
-                        Ok((p, merge_note)) => {
+                        Ok((p, merge_note, losses)) => {
                             // A sidecar we could not MERGE was regenerated, and
                             // that drops the user's Lightroom-only properties.
                             // Saying only "saved" is how that loss stayed
@@ -751,15 +751,26 @@ impl AutoshopApp {
                             if let Some(m) = &merge_note {
                                 self.toast(ToastKind::Error, m.clone());
                             }
+                            // M6a: the projection's own lossy edges — assembled
+                            // from what the WRITER just skipped/degraded, so the
+                            // counts describe this very file. Empty ⇒ silent.
+                            let mask_note = mask_loss_line(lang, &losses);
+                            if let Some(m) = &mask_note {
+                                self.toast(ToastKind::Error, m.clone());
+                            }
                             let base = trf(
                                 lang,
                                 "XMP + recipe saved → {path}",
                                 &[("path", &p.display().to_string())],
                             );
-                            match merge_note {
+                            let mut s = match merge_note {
                                 Some(m) => format!("{base} — ⚠ {m}"),
                                 None => base,
+                            };
+                            if let Some(m) = mask_note {
+                                s.push_str(&format!(" — ⚠ {m}"));
                             }
+                            s
                         }
                         Err(e) => {
                             let t = trf(
@@ -963,13 +974,25 @@ impl AutoshopApp {
                                 // Recipe-write-decides: an XMP failure after
                                 // the recipe landed is a partial success —
                                 // reopening restores the paste regardless.
+                                // The third member (the M6a mask-loss list) is
+                                // deliberately dropped HERE: `xmp_notes` is
+                                // rendered under one fixed sentence about
+                                // regenerated-not-merged sidecars, so folding
+                                // another kind of loss into it would mislabel
+                                // both. A foreign target has had its bitmap
+                                // masks stripped (and said so) before this
+                                // worker started; the remaining per-target
+                                // losses reach stderr from write_xmp_doc. A
+                                // per-target UI list of them needs its own
+                                // PasteOutcome member — R23 work, not a
+                                // mislabelled fold into this one.
                                 match autoshop::pipeline::write_xmp(path, &r) {
-                                    Ok((_, None)) => {}
+                                    Ok((_, None, _)) => {}
                                     // Regenerated-not-merged loses LR-only
                                     // properties — collected for the paste
                                     // summary (stderr already heard it in
                                     // write_xmp_doc).
-                                    Ok((_, Some(m))) => xmp_notes.push(format!(
+                                    Ok((_, Some(m), _)) => xmp_notes.push(format!(
                                         "{}: {m}",
                                         autoshop::pipeline::stem(path)
                                     )),

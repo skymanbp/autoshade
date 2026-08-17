@@ -3609,3 +3609,160 @@
         assert!(app.mask_brush_gray.is_none(), "the weight buffer goes with it");
         assert!(!app.paint_mode, "and the flag stays off");
     }
+
+    /// M6a: the save status line the user actually reads. The projection's
+    /// losses were disclosed on the IMPORT side four times over and on the
+    /// EXPORT side never — a sidecar quietly missing two AI masks looked like
+    /// a clean "XMP + recipe saved". The counts here come from the writer's
+    /// own verdicts (`xmp::mask_export_losses`); this pins that every category
+    /// reaches the UI, in both languages, and that a faithful save says
+    /// NOTHING (an unconditional line would train the user to ignore it).
+    #[test]
+    fn the_save_line_names_every_projection_loss_and_stays_quiet_otherwise() {
+        use autoshop::xmp::{MaskLoss, MaskLossReason as R};
+        let loss = |name: &str, reason: R| MaskLoss { name: name.into(), reason };
+        let losses = vec![
+            loss("sky", R::Bitmap),
+            loss("subject", R::Bitmap),
+            loss("parked", R::Disabled),
+            loss("combo", R::ComponentsFlattened),
+            loss("gold", R::Rotation),
+            loss("gold", R::Recolour),
+        ];
+        for (lang, want) in [
+            (
+                crate::i18n::Lang::En,
+                [
+                    "bitmap masks ×2",
+                    "muted masks ×1",
+                    "shape components flattened ×1",
+                    "radial rotation ×1",
+                    "recolour gains ×1",
+                ],
+            ),
+            (
+                crate::i18n::Lang::Zh,
+                [
+                    "位图蒙版 ×2",
+                    "已静音蒙版 ×1",
+                    "形状组件已压平 ×1",
+                    "径向旋转未带走 ×1",
+                    "重上色增益未带走 ×1",
+                ],
+            ),
+        ] {
+            let line = mask_loss_line(lang, &losses)
+                .unwrap_or_else(|| panic!("{lang:?}: losses must produce a line"));
+            for fragment in want {
+                assert!(line.contains(fragment), "{lang:?}: {fragment:?} missing from {line}");
+            }
+            // The categories are joined, not overwritten: five fragments, five
+            // separators-worth of one sentence.
+            assert_eq!(line.matches('×').count(), 5, "{lang:?}: every category kept: {line}");
+            assert!(mask_loss_line(lang, &[]).is_none(), "{lang:?}: a faithful save is silent");
+            // One category alone must not drag the others' labels in.
+            let one = mask_loss_line(lang, &[loss("sky", R::Bitmap)]).expect("one loss, one line");
+            assert_eq!(one.matches('×').count(), 1, "{lang:?}: only the live category: {one}");
+        }
+    }
+
+    /// R22-5 (#10): the selected mask's adjustments, in Lightroom's three
+    /// groups, with the 「More (XMP/Lightroom only)」 fold GONE — R22-3 put
+    /// clarity/dehaze/texture on the engine, so that title had become false
+    /// while still hiding three working sliders one level down. Renders the
+    /// real develop_panel and pins the group caption, the recolour disclosure
+    /// (a mask carrying gains no sidecar can express), and the
+    /// masks-but-none-selected hint (one click on a selected row lands there,
+    /// and it used to show a list with no controls and no explanation).
+    #[test]
+    fn the_mask_panel_groups_its_sliders_and_says_what_is_engine_only() {
+        // Every text the frame drew (nested Shape::Vec included).
+        fn texts(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<String>) {
+            fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+                match s {
+                    egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            shapes.iter().for_each(|c| walk(&c.shape, out));
+        }
+        for (lang, group, recolour, hint) in [
+            (
+                crate::i18n::Lang::En,
+                "Tone",
+                "carries reverse-fit recolour (not exported to XMP)",
+                "Select a mask above to edit its adjustments",
+            ),
+            (
+                crate::i18n::Lang::Zh,
+                "明暗",
+                "含反推重上色（不写入 XMP）",
+                "选中上面任一蒙版即可编辑它的调整",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            app.recipe.masks = vec![
+                autoshop::recipe::LocalAdjustment {
+                    mask: autoshop::recipe::MaskGeometry::Radial {
+                        top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
+                        feather: 0.5, roundness: 0.0, flipped: false, angle: 15.0,
+                    },
+                    color_gains: Some([1.3, 1.0, 0.7]),
+                    name: "gold".into(),
+                    ..Default::default()
+                },
+                autoshop::recipe::LocalAdjustment { name: "grad".into(), ..Default::default() },
+            ];
+            // TALL on purpose: egui culls shapes outside the visible clip
+            // rect, and Local Masks sits below a full screen of sections — a
+            // 900 px window drew nothing of it to inspect.
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 20_000.0),
+                )),
+                ..Default::default()
+            };
+            let frame = |app: &mut AutoshopApp| -> Vec<String> {
+                let mut seen = Vec::new();
+                let out = ctx.run(input(), |ctx| {
+                    ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                    egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
+                    });
+                });
+                texts(&out.shapes, &mut seen);
+                seen
+            };
+            // ① a mask selected: the group captions and the engine-only note.
+            app.sel_mask = Some(0);
+            let seen = frame(&mut app);
+            assert!(
+                seen.iter().any(|t| t == group),
+                "{lang:?}: no {group:?} group caption over the mask's tone sliders: {seen:?}"
+            );
+            assert!(
+                seen.iter().any(|t| t == recolour),
+                "{lang:?}: a mask with color_gains must say the XMP will not carry them"
+            );
+            assert!(
+                !seen.iter().any(|t| t.contains("XMP/Lightroom only")),
+                "{lang:?}: the 「More (XMP/Lightroom only)」 fold is back — those three \
+                 sliders render in the engine now"
+            );
+            // ② nothing selected (one click on the selected row): the hint.
+            app.sel_mask = None;
+            let seen = frame(&mut app);
+            assert!(
+                seen.iter().any(|t| t == hint),
+                "{lang:?}: masks exist but none is selected — the panel must say so"
+            );
+            assert!(
+                !seen.iter().any(|t| t == recolour),
+                "{lang:?}: no selection ⇒ no per-mask detail"
+            );
+        }
+    }

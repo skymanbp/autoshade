@@ -1859,12 +1859,17 @@ impl AutoshopApp {
                 // must not abort the remaining photos or refuse to quit over a
                 // develop that IS durably saved.
                 if autoshop::decode::is_raw(p) && !generated {
+                    // The M6a mask-loss list is dropped HERE for the same
+                    // reason as in the batch paste: `xmp_warns` renders under
+                    // one fixed "projection(s) failed" sentence, which a
+                    // lossy-but-successful projection is not. stderr carries
+                    // the per-photo line from write_xmp_doc.
                     match autoshop::pipeline::write_xmp(p, &disk) {
-                        Ok((_, None)) => {}
+                        Ok((_, None, _)) => {}
                         // A regenerated (unmerged) sidecar loses LR-only
                         // properties — Save-all's warning list is exactly
                         // where that belongs (round-12 disclosure threading).
-                        Ok((_, Some(n))) => {
+                        Ok((_, Some(n), _)) => {
                             xmp_warns.push(format!("{}: {n}", autoshop::pipeline::stem(p)));
                         }
                         Err(e) => {
@@ -2249,8 +2254,14 @@ impl AutoshopApp {
                                     // already-persisted fit into an error —
                                     // reopening WOULD restore it, so the UI
                                     // must agree that it saved.
+                                    // The M6a list is dropped HERE: the zoned
+                                    // fit's own rationale already states that
+                                    // its corrections are bitmap masks the
+                                    // Lightroom sidecar cannot carry (the
+                                    // ZONE_ATTACHED note), so a second copy
+                                    // would say it twice for the same masks.
                                     match autoshop::pipeline::write_xmp(p, &rep.recipe) {
-                                        Ok((x, merge_note)) => {
+                                        Ok((x, merge_note, _)) => {
                                             status.push(FitNote::XmpWritten(x));
                                             // Regenerated-not-merged: same
                                             // disclosure as Ctrl+S.

@@ -3760,8 +3760,22 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   之前。`engine_active` 同批加三项，两个消费点（GUI ● 与栅格预算 filter）
   行为自动同变。**行为变更**：既有带这三项的旧 develop 会重渲染出新观感
   （用户已批），judge 视觉评审看到的像素随之变化 ⇒ 分数基线移动（R23
-  强度轴验收前无需重标）。GUI「More (XMP/Lightroom only)」折叠头文案属
-  包 4（LR 三组化）。
+  强度轴验收前无需重标）。GUI「More (XMP/Lightroom only)」折叠头**已在包 4
+  删除**：三根滑杆并回主列表，选中蒙版的调整按 Lightroom 三组分组
+  （Tone/Detail/Color 弱小标题）＋「有蒙版未选中」补提示＋Temp/Tint shift
+  语义 tooltip（等效开尔文取自 `render::local_temp_to_kelvin` 本体，GUI 不
+  重抄数字）＋`color_gains` 弱提示与「↺ 清除」。
+- **M6a 导出侧有损披露（包 4）**：写侧 `masks_xml` 边发 XML 边产出
+  `Vec<MaskLoss>{name, reason}`（`Bitmap`/`Disabled` 跳过 ＋
+  `ComponentsFlattened`/`Rotation`/`Recolour` 降级；**每蒙版只出一条跳过
+  判据**，静音的位图蒙版不双计），`xmp::mask_export_losses` 是唯一来源、
+  `describe_mask_losses` 是唯一英文文案；清单经 `pipeline::write_xmp` /
+  `write_xmp_at` 返回值第三位穿到每个落点（GUI 保存与 Analyze 落点渲染本地
+  化 toast＋状态行、serve 两条响应各按既有 `warning`/`\n⚠` 惯例并入、CLI 走
+  `write_xmp_doc` 一处 stderr）。此前 `unsupported_corrections` 四个调用点
+  全在 import 方向，export 方向零披露。批量粘贴/Save-all/分区反推三处刻意
+  只吃 stderr（各自的既有文案是「失败」或「已由 rationale 说过」，混入会
+  误标）。
 - 分区反推 `fit_zoned.rs`：`fit_recipe_zoned`（CLI `match --zoned` /
   GUI `zoned_fit` Pref）= 全局 fit → 天空分割×2 → 天空+地景（同栅格反相）
   双分区 → 每区 zone_err 矩裁判（帧全局 look_err 只作 ±0.02 漂移保险——

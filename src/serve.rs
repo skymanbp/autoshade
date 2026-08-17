@@ -1785,10 +1785,19 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             body["revision"] = json!(crate::store::develop_revision(&raw));
             if decode::is_raw(&raw) {
                 match pipeline::write_xmp(&raw, &recipe) {
-                    Ok((_, None)) => {}
-                    // Regenerated-not-merged rides the same reply — the
-                    // cross-surface disclosure rule.
-                    Ok((_, Some(m))) => body["warning"] = json!(m),
+                    // Two independent disclosures share the one `warning`
+                    // field (the existing shape — no new API): the merge note
+                    // and, since M6a, what the mask PROJECTION itself could
+                    // not carry. Joined, never overwritten: whichever one wrote
+                    // first used to be the only one the tab ever saw.
+                    Ok((_, merge_note, losses)) => {
+                        let mut warns: Vec<String> = Vec::new();
+                        warns.extend(merge_note);
+                        warns.extend(crate::xmp::describe_mask_losses(&losses));
+                        if !warns.is_empty() {
+                            body["warning"] = json!(warns.join("; "));
+                        }
+                    }
                     Err(e) => {
                         body["warning"] = json!(format!(
                             "saved, but the Lightroom XMP projection failed: {e:#}"
@@ -2470,11 +2479,17 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // A regenerated (rather than merged) sidecar is a LOSS of the user's
         // Lightroom-only properties, so it rides the same reply as the path —
         // reporting a bare success here is what made the loss silent.
-        Ok((path, merge_note)) => {
+        Ok((path, merge_note, losses)) => {
             let merge_note = merge_note.map(|m| format!("\n⚠ {m}")).unwrap_or_default();
+            // M6a export-side disclosure, in the SAME "\n⚠ …" note shape the
+            // merge loss already uses (the reply is plain text; a new field
+            // would be a new API the tab does not read).
+            let mask_note = crate::xmp::describe_mask_losses(&losses)
+                .map(|m| format!("\n⚠ {m}"))
+                .unwrap_or_default();
             Ok(with_revision(
                 text_response(&format!(
-                    "{}{save_note}{master_note}{merge_note}",
+                    "{}{save_note}{master_note}{merge_note}{mask_note}",
                     path.display()
                 )),
                 crate::store::develop_revision(&raw).as_deref(),

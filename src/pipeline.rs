@@ -1358,14 +1358,21 @@ pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
     None
 }
 
-/// Write the develop's XMP projection: the published path PLUS the note when
-/// the merge could not be performed and the sidecar was REGENERATED instead —
-/// see [`write_xmp_doc`] for why that is a loss worth telling the user about.
-/// Every caller receives the note (round-12 disclosure threading): the old
+/// Write the develop's XMP projection: the published path, the note when
+/// the merge could not be performed and the sidecar was REGENERATED instead
+/// (see [`write_xmp_doc`] for why that is a loss worth telling the user
+/// about), and the per-mask list of what the projection itself could not
+/// carry (M6a — bitmap/muted masks skipped, extra shapes flattened, radial
+/// rotation and recolour gains dropped; [`xmp::mask_export_losses`]).
+/// Every caller receives both (round-12 disclosure threading): the old
 /// note-dropping `write_xmp` wrapper was how five of seven surfaces stayed
-/// silent. stderr already hears every note via `write_xmp_doc`; UI surfaces
-/// route what they are handed here.
-pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<(PathBuf, Option<String>)> {
+/// silent, so the values ride the RETURN TYPE where a surface has to look at
+/// them. stderr already hears both via `write_xmp_doc`; UI surfaces route
+/// what they are handed here.
+pub fn write_xmp(
+    raw: &Path,
+    recipe: &EditRecipe,
+) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
     use crate::store::SidecarRead;
     let target = xmp_target(raw);
     // MERGE, never regenerate over Lightroom's work (A11): the base is the
@@ -1426,7 +1433,10 @@ pub fn write_xmp(raw: &Path, recipe: &EditRecipe) -> Result<(PathBuf, Option<Str
 /// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
 /// `-o`: the two halves of one develop must stay in the same folder, or the
 /// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
-pub fn write_xmp_at(out: PathBuf, recipe: &EditRecipe) -> Result<(PathBuf, Option<String>)> {
+pub fn write_xmp_at(
+    out: PathBuf,
+    recipe: &EditRecipe,
+) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
     use crate::store::SidecarRead;
     let mut notes: Vec<String> = Vec::new();
     let base = match crate::store::read_sidecar_checked(&out) {
@@ -1461,7 +1471,7 @@ fn write_xmp_doc(
     recipe: &EditRecipe,
     merge_base: Option<(PathBuf, String)>,
     mut notes: Vec<String>,
-) -> Result<(PathBuf, Option<String>)> {
+) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
     ensure_parent(&out)?;
     // The same floor `write_recipe` stands on, for the same reason: this is a
     // persistence boundary, the string caps exist because `rationale` is
@@ -1513,6 +1523,18 @@ fn write_xmp_doc(
         eprintln!("⚠ {msg}");
         msg
     });
+    // M6a: the projection's OWN lossy edges (bitmap/muted masks skipped, extra
+    // shapes flattened, rotation + recolour dropped) — judged by the writer
+    // (`xmp::mask_export_losses`) on the CLAMPED recipe, i.e. exactly the
+    // masks the document below carries. The import direction had four
+    // disclosure sites and the export direction had none; this is that half.
+    // stderr covers every CLI path from here — one line, one place — the same
+    // deal the merge note above has; UI/web surfaces localise the structured
+    // list they get back.
+    let mask_losses = xmp::mask_export_losses(recipe);
+    if let Some(m) = xmp::describe_mask_losses(&mask_losses) {
+        eprintln!("⚠ {m}");
+    }
     let doc = merged.unwrap_or_else(|| xmp::recipe_to_xmp(recipe));
     // Stage + rename, never truncate in place: `fs::write` opens the LIVE
     // sidecar with O_TRUNC, so a full disk, an interruption or a competing
@@ -1521,7 +1543,7 @@ fn write_xmp_doc(
     // replace it. (fs::rename replaces the destination on every platform.)
     crate::store::durable_write(&out, doc.as_bytes())
         .with_context(|| format!("publish xmp {}", out.display()))?;
-    Ok((out, note))
+    Ok((out, note, mask_losses))
 }
 
 /// Where the .xmp for `raw` goes — the photo's central develop dir (see
@@ -1870,7 +1892,7 @@ mod guard_tests {
         )
         .unwrap();
         let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
-        let (out, _) = write_xmp(&raw, &r).unwrap();
+        let (out, _, _) = write_xmp(&raw, &r).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("crs:Texture=\"+21\""), "LR-only property survives the save");
         assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
@@ -1927,13 +1949,64 @@ mod guard_tests {
             exposure_ev: 0.4,
             ..Default::default()
         });
-        let (out, note) = write_xmp(&raw, &r).unwrap();
+        let (out, note, _) = write_xmp(&raw, &r).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("Mask/CircularGradient"), "the develop's mask is published");
         assert!(!text.contains("Mask/Brush"), "the foreign block is not resurrected");
         assert!(text.contains("crs:Texture=\"+21\""), "LR-only globals still survive");
         let note = note.expect("the replaced block must be disclosed");
         assert!(note.contains("mask correction(s)"), "the note names the loss: {note}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// M6a end-to-end: the WRITE path hands its per-mask projection losses back
+    /// to the caller, judged on the CLAMPED recipe it actually published. Every
+    /// surface (GUI status line, web reply, CLI stderr) renders THIS list, so a
+    /// boundary that dropped it would put every export-side disclosure back to
+    /// the silence it was built to end — and no test of the writer alone would
+    /// notice.
+    #[test]
+    fn the_write_path_hands_back_what_the_projection_could_not_carry() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let dir = std::env::temp_dir().join("autoshop-pipe-xmp-masklosses");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_pipe_masklosses.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        let r = EditRecipe {
+            masks: vec![
+                LocalAdjustment {
+                    mask: MaskGeometry::Bitmap { path: "out/sky.png".into() },
+                    name: "sky".into(),
+                    exposure_ev: -0.5,
+                    ..Default::default()
+                },
+                // Exportable: nothing about it may reach the list.
+                LocalAdjustment { name: "grad".into(), exposure_ev: 0.4, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let (out, _, losses) = write_xmp(&raw, &r).unwrap();
+        assert_eq!(
+            losses,
+            vec![xmp::MaskLoss { name: "sky".into(), reason: xmp::MaskLossReason::Bitmap }],
+            "the write path must report the raster mask it skipped, and only that"
+        );
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            text.matches("crs:What=\"Correction\"").count(),
+            1,
+            "…which is what the published document says too"
+        );
+        // A faithful projection reports an EMPTY list (not a missing one): the
+        // surfaces stay silent on that, and an always-non-empty list would make
+        // every clean save shout.
+        let clean = EditRecipe { masks: vec![r.masks[1].clone()], ..Default::default() };
+        let (_, _, none) = write_xmp(&raw, &clean).unwrap();
+        assert!(none.is_empty(), "an exportable develop loses nothing: {none:?}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }
@@ -2008,7 +2081,7 @@ mod guard_tests {
              crs:Texture=\"+21\"></rdf:Description>\n",
         )
         .unwrap();
-        let (out, note) = write_xmp(&raw, &r).unwrap();
+        let (out, note, _) = write_xmp(&raw, &r).unwrap();
         assert!(note.is_none(), "a merge that worked has nothing to disclose: {note:?}");
         assert!(std::fs::read_to_string(&out).unwrap().contains("crs:Texture=\"+21\""));
 
@@ -2022,7 +2095,7 @@ mod guard_tests {
              crs:Texture=\"+21\">\n",
         )
         .unwrap();
-        let (out, note) = write_xmp(&raw, &r).unwrap();
+        let (out, note, _) = write_xmp(&raw, &r).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
         assert!(!text.contains("crs:Texture"), "…by regenerating, so the LR property is gone");
@@ -2055,11 +2128,11 @@ mod guard_tests {
         let dev = crate::store::develop_dir(&raw);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::write(dir.join("_pipe_note_blank.xmp"), b"").unwrap();
-        let (_, note) = write_xmp(&raw, &r).unwrap();
+        let (_, note, _) = write_xmp(&raw, &r).unwrap();
         assert!(note.is_none(), "an empty sidecar carries nothing to disclose: {note:?}");
         // Whitespace-only is the same emptiness.
         std::fs::write(dir.join("_pipe_note_blank.xmp"), b"  \n\t\n").unwrap();
-        let (_, note) = write_xmp(&raw, &r).unwrap();
+        let (_, note, _) = write_xmp(&raw, &r).unwrap();
         assert!(note.is_none(), "whitespace is not a merge base: {note:?}");
         let _ = std::fs::remove_dir_all(&dev);
 
@@ -2074,7 +2147,7 @@ mod guard_tests {
             "<rdf:Description rdf:about=\"\" xmlns:crs=\"c\" crs:Texture=\"+21\">\n",
         )
         .unwrap();
-        let (_, note) = write_xmp(&png, &r).unwrap();
+        let (_, note, _) = write_xmp(&png, &r).unwrap();
         assert!(note.is_none(), "a baked photo's neighbour .xmp is not read: {note:?}");
         let _ = std::fs::remove_dir_all(&dev_png);
 
@@ -2096,7 +2169,7 @@ mod guard_tests {
              xmp:Rating=\"5\" xmp:Label=\"Green\"></rdf:Description>\n \
              </rdf:RDF>\n</x:xmpmeta>\n";
         std::fs::write(&lr2, ratings).unwrap();
-        let (out2, note) = write_xmp(&raw2, &r).unwrap();
+        let (out2, note, _) = write_xmp(&raw2, &r).unwrap();
         assert!(note.is_none(), "a foreign sidecar we CAN merge has no loss to report: {note:?}");
         let merged = std::fs::read_to_string(&out2).unwrap();
         assert!(merged.contains("xmp:Rating=\"5\""), "the user's rating survives: {merged}");
@@ -2109,7 +2182,7 @@ mod guard_tests {
         );
         // Saving AGAIN must not stack a second Description: the merged store
         // copy now carries crs, so the ordinary merge path takes over.
-        let (out2b, note) = write_xmp(&raw2, &r).unwrap();
+        let (out2b, note, _) = write_xmp(&raw2, &r).unwrap();
         let again = std::fs::read_to_string(&out2b).unwrap();
         assert!(note.is_none(), "the second save has nothing to disclose either: {note:?}");
         assert_eq!(again.matches("crs:Exposure2012=").count(), 1, "one settings block, not two");
@@ -2141,7 +2214,7 @@ mod guard_tests {
                 ),
             )
             .unwrap();
-            let (out4, _) = write_xmp(&raw4, &r).unwrap();
+            let (out4, _, _) = write_xmp(&raw4, &r).unwrap();
             let t = std::fs::read_to_string(&out4).unwrap();
             let settings = t.find("crs:Exposure2012").expect("our settings landed somewhere");
             let real_root = t.rfind("<rdf:RDF").expect("the real root survives");
@@ -2167,7 +2240,7 @@ mod guard_tests {
              crs:Texture=\"+21\">\n",
         )
         .unwrap();
-        let (_, note) = write_xmp(&raw3, &r).unwrap();
+        let (_, note, _) = write_xmp(&raw3, &r).unwrap();
         let note = note.expect("an unaccountable base is a real loss");
         assert!(
             note.contains(&lr3.display().to_string()),
@@ -2206,7 +2279,7 @@ mod guard_tests {
         )
         .unwrap();
         let r1 = EditRecipe { exposure_ev: 0.5, ..Default::default() };
-        let (_, note) = write_xmp(&raw, &r1).unwrap();
+        let (_, note, _) = write_xmp(&raw, &r1).unwrap();
         assert!(note.is_none(), "the mergeable base has nothing to disclose: {note:?}");
 
         // The sidecar balloons past the cap (Lightroom AI masks, or hostile).
@@ -2218,7 +2291,7 @@ mod guard_tests {
         std::fs::write(&lr, &big).unwrap();
 
         let r2 = EditRecipe { exposure_ev: 0.75, ..Default::default() };
-        let (out, note) = write_xmp(&raw, &r2).unwrap();
+        let (out, note, _) = write_xmp(&raw, &r2).unwrap();
         // The fallback itself is CORRECT — the previous projection carries
         // forward what the first merge preserved, and the save must succeed.
         let text = std::fs::read_to_string(&out).unwrap();

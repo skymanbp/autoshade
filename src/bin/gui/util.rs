@@ -183,6 +183,44 @@ pub(crate) fn section_title(base: &str, active: bool) -> String {
     }
 }
 
+/// The export-side lossy-projection disclosure (M6a), in the UI language: ONE
+/// line naming what the Lightroom sidecar just written does NOT carry, with a
+/// count per category. The verdicts come from the WRITER itself
+/// (`xmp::mask_export_losses`, threaded out of `pipeline::write_xmp`) — this
+/// only counts and translates them, so the projection rules live in exactly
+/// one place and the message can never describe a file that wasn't written.
+///
+/// `None` for a faithful projection: a save that lost nothing must not
+/// interrupt (the four import-side disclosures follow the same rule).
+pub(crate) fn mask_loss_line(lang: Lang, losses: &[autoshop::xmp::MaskLoss]) -> Option<String> {
+    use autoshop::xmp::MaskLossReason as R;
+    if losses.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    // Fixed order (skips before degradations), and a literal key per arm so
+    // the i18n audit sees every one of them.
+    for reason in [R::Bitmap, R::Disabled, R::ComponentsFlattened, R::Rotation, R::Recolour] {
+        let n = losses.iter().filter(|l| l.reason == reason).count();
+        if n == 0 {
+            continue;
+        }
+        let n = n.to_string();
+        parts.push(match reason {
+            R::Bitmap => trf(lang, "bitmap masks ×{n}", &[("n", &n)]),
+            R::Disabled => trf(lang, "muted masks ×{n}", &[("n", &n)]),
+            R::ComponentsFlattened => trf(lang, "shape components flattened ×{n}", &[("n", &n)]),
+            R::Rotation => trf(lang, "radial rotation ×{n}", &[("n", &n)]),
+            R::Recolour => trf(lang, "recolour gains ×{n}", &[("n", &n)]),
+        });
+    }
+    Some(trf(
+        lang,
+        "the Lightroom XMP does not carry: {list} (recipe.json keeps all of it)",
+        &[("list", &parts.join(" · "))],
+    ))
+}
+
 /// The recipe field behind a curve-editor channel index.
 pub(crate) fn curve_points(recipe: &EditRecipe, ch: usize) -> &Vec<CurvePoint> {
     match ch {

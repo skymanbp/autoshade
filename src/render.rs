@@ -2652,7 +2652,11 @@ pub(crate) fn wb_gains(as_shot_k: f32, target_k: f32, tint: f32) -> [f32; 3] {
 /// local-temp model is proprietary — this is our documented approximation
 /// (same stance as [`apply_vignette`]); the XMP carries the raw slider value,
 /// so Lightroom re-renders with its own model.
-pub(crate) fn local_temp_to_kelvin(t: f32) -> f32 {
+// `pub`, not `pub(crate)`: the mask panel's Temp-shift tooltip states the
+// equivalent Kelvin for the value on the slider, and it must be THIS
+// function's answer — a number retyped into the GUI would drift the moment
+// the anchor or the mired scale moves.
+pub fn local_temp_to_kelvin(t: f32) -> f32 {
     const ANCHOR_K: f32 = 5500.0;
     const MIRED_FULL_SCALE: f32 = 80.0;
     let mired = 1e6 / ANCHOR_K - (t.clamp(-100.0, 100.0) / 100.0) * MIRED_FULL_SCALE;

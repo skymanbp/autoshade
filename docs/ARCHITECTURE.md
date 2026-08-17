@@ -472,6 +472,18 @@ the RAW is READ on open — the newer intent wins — and never overwritten (mas
 corrections it carries that classic import can't represent — brush / AI /
 depth — are counted and disclosed, not silently dropped).
 
+The **export** direction is disclosed the same way (M6a). Classic ACR XMP
+cannot express everything the engine renders, so the writer names what it left
+behind while it emits: raster (bitmap) and muted masks are skipped whole, extra
+Add/Subtract/Intersect shapes flatten to the base geometry, a rotated radial
+exports unrotated, and per-channel recolour gains do not travel. `xmp::
+mask_export_losses` (the writer's own per-mask verdicts — one loop, so the
+claim cannot drift from the file) rides `pipeline::write_xmp`'s return value to
+every surface: the GUI localises it into the save status line and a toast, the
+web reply carries it in the note it already had, and stderr gets one line from
+`write_xmp_doc` for the CLI. `recipe.json` remains the lossless sidecar, which
+is what the disclosure says.
+
 ### 4.6 Style / eval harness (M4)
 
 The user's **finished edits** are ground truth. If they're Lightroom XMP/develop

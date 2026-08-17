@@ -192,32 +192,159 @@ fn range_mask_xml(range: &Option<RangeMask>, sync_id: &str) -> String {
     }
 }
 
+/// Why one mask does not reach a classic ACR sidecar intact. Produced by the
+/// WRITER itself, one verdict per mask per defect ([`masks_xml`]) — so no
+/// consumer has to re-derive the projection rules, and a disclosure can never
+/// claim something different from what was actually emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MaskLossReason {
+    /// Raster geometry: classic XMP has no encoding for it, so the WHOLE
+    /// correction is skipped ([`mask_geom_xml`] returns `None`).
+    Bitmap,
+    /// The eye toggle is off — the correction is skipped rather than exported
+    /// as an active edit the app does not render.
+    Disabled,
+    /// The mask carries extra Add/Subtract/Intersect shapes; only the base
+    /// geometry is projected (the render composes them all).
+    ComponentsFlattened,
+    /// A rotated radial exports as its UNROTATED ellipse (`crs:Angle`
+    /// semantics unverified — see [`mask_geom_xml`]).
+    Rotation,
+    /// Per-channel recolour gains (`color_gains`) are engine-only: classic ACR
+    /// has no counterpart, so the sidecar renders without them.
+    Recolour,
+}
+
+impl MaskLossReason {
+    /// English label for the prose channel (CLI stderr / web reply). The GUI
+    /// renders the same variants in the UI language instead.
+    pub fn en(self) -> &'static str {
+        match self {
+            MaskLossReason::Bitmap => "bitmap mask(s) skipped",
+            MaskLossReason::Disabled => "muted mask(s) skipped",
+            MaskLossReason::ComponentsFlattened => "extra shape component(s) flattened",
+            MaskLossReason::Rotation => "radial rotation dropped",
+            MaskLossReason::Recolour => "recolour gains dropped",
+        }
+    }
+}
+
+/// One mask defect the XMP projection could not carry. A single mask can
+/// appear more than once (a rotated radial with components and recolour gains
+/// loses three separate things).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskLoss {
+    /// The name the sidecar uses for this correction (`crs:CorrectionName`):
+    /// the user's own label when set, else the generated `Autoshop <n>`.
+    pub name: String,
+    pub reason: MaskLossReason,
+}
+
+/// The masks `r` cannot project into a classic ACR sidecar, exactly as the
+/// writer judges them while emitting the XML (see [`masks_xml`]) — the ONE
+/// source for every surface's export-side disclosure. Empty = a faithful
+/// projection.
+pub fn mask_export_losses(r: &EditRecipe) -> Vec<MaskLoss> {
+    masks_xml(r).1
+}
+
+/// One English sentence naming what the sidecar left behind, or `None` when
+/// nothing was lost. Groups by reason in [`MaskLossReason`] order and names
+/// the masks, so the line is actionable ("which of my 12 masks?").
+pub fn describe_mask_losses(losses: &[MaskLoss]) -> Option<String> {
+    if losses.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for reason in [
+        MaskLossReason::Bitmap,
+        MaskLossReason::Disabled,
+        MaskLossReason::ComponentsFlattened,
+        MaskLossReason::Rotation,
+        MaskLossReason::Recolour,
+    ] {
+        let names: Vec<&str> = losses
+            .iter()
+            .filter(|l| l.reason == reason)
+            .map(|l| l.name.as_str())
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        // Names are already length-capped by `EditRecipe::clamp`, but a
+        // 64-mask recipe would still make an unreadable line — the count is
+        // the fact, the first few names are the pointer.
+        let shown = names.len().min(4);
+        let more = names.len() - shown;
+        let list = names[..shown].join(", ");
+        let tail = if more > 0 { format!(", +{more} more") } else { String::new() };
+        parts.push(format!("{} {} ({list}{tail})", names.len(), reason.en()));
+    }
+    Some(format!(
+        "the Lightroom XMP does not carry: {} — recipe.json keeps all of it",
+        parts.join("; ")
+    ))
+}
+
 /// Build the `<crs:MaskGroupBasedCorrections>` child element (empty string when
-/// there are no masks). Local sliders convert UI scale → ACR local scale:
+/// there are no masks) PLUS the per-mask loss list the export-side disclosure
+/// is built from — one loop, so the XML and the claim about it cannot drift.
+/// Local sliders convert UI scale → ACR local scale:
 /// exposure stops ÷4, every other slider ÷100 (verified against the user's real
 /// sidecar; see docs/V2_PLAN.md §2a). All 26 `Local*` fields are emitted (unused
 /// = 0) as Lightroom expects the full block.
-fn masks_xml(r: &EditRecipe) -> String {
+fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
+    let mut losses: Vec<MaskLoss> = Vec::new();
     if r.masks.is_empty() {
-        return String::new();
+        return (String::new(), losses);
     }
     let mut items = String::new();
     for (i, m) in r.masks.iter().enumerate() {
+        // The name goes first: it identifies this mask in the loss list even
+        // on the arms that never reach the emit below.
+        let name = if m.name.is_empty() { format!("Autoshop {}", i + 1) } else { m.name.clone() };
         // The eye toggle: a disabled mask applies nothing, so projecting it
         // as an active correction would make Lightroom render an edit the
         // app does not. Skipped like a Bitmap mask (lossy projection —
         // recipe.json keeps it; re-enable is one click). The alternative,
         // crs:CorrectionActive="false", is unverified against a real
         // sidecar, and the writer's "true" above is a fixed literal.
+        //
+        // ONE skip verdict per mask, in control-flow order: a muted bitmap
+        // mask is skipped BECAUSE it is muted, and claiming both would
+        // inflate every count the disclosure prints.
         if !m.enabled {
+            losses.push(MaskLoss { name, reason: MaskLossReason::Disabled });
             continue;
         }
-        let name = if m.name.is_empty() { format!("Autoshop {}", i + 1) } else { m.name.clone() };
         let corr_id = guid(&format!("corr-{i}-{name}"));
         let mask_id = guid(&format!("mask-{i}-{name}"));
         // Raster (bitmap) masks have no classic-XMP encoding — skip this
         // correction; the deterministic render still applies it (§A tradeoff).
-        let Some((what, geom)) = mask_geom_xml(&m.mask) else { continue };
+        let Some((what, geom)) = mask_geom_xml(&m.mask) else {
+            losses.push(MaskLoss { name, reason: MaskLossReason::Bitmap });
+            continue;
+        };
+        // DEGRADATIONS (the correction IS emitted, just not whole) — each is
+        // read off the same field the emitter above ignores, so adding a
+        // projection later deletes its entry here in the same edit.
+        if !m.components.is_empty() {
+            losses.push(MaskLoss {
+                name: name.clone(),
+                reason: MaskLossReason::ComponentsFlattened,
+            });
+        }
+        if let MaskGeometry::Radial { angle, .. } = m.mask
+            && angle != 0.0
+        {
+            losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::Rotation });
+        }
+        // Neutral gains change nothing, so they are no loss — the same
+        // is-it-actually-doing-anything test `render::engine_active` applies
+        // (and what `EditRecipe::clamp` collapses to `None` anyway).
+        if m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0]) {
+            losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::Recolour });
+        }
         items.push_str(&format!(
             "     <rdf:li>\n\
       <rdf:Description\n\
@@ -273,10 +400,13 @@ fn masks_xml(r: &EditRecipe) -> String {
     }
     // All masks may have been raster-skipped — no empty wrapper block then.
     if items.is_empty() {
-        return String::new();
+        return (String::new(), losses);
     }
-    format!(
-        "\n   <crs:MaskGroupBasedCorrections>\n    <rdf:Seq>\n{items}    </rdf:Seq>\n   </crs:MaskGroupBasedCorrections>"
+    (
+        format!(
+            "\n   <crs:MaskGroupBasedCorrections>\n    <rdf:Seq>\n{items}    </rdf:Seq>\n   </crs:MaskGroupBasedCorrections>"
+        ),
+        losses,
     )
 }
 
@@ -444,7 +574,10 @@ fn owned_children(r: &EditRecipe, include_masks: bool) -> String {
         curve_elem("ToneCurvePV2012Red", &r.red_curve),
         curve_elem("ToneCurvePV2012Green", &r.green_curve),
         curve_elem("ToneCurvePV2012Blue", &r.blue_curve),
-        if include_masks { masks_xml(r) } else { String::new() },
+        // The loss list rides `mask_export_losses` to the surfaces instead of
+        // this string builder: both callers of `owned_children` (the fresh
+        // writer and the merge splicer) only want the document text.
+        if include_masks { masks_xml(r).0 } else { String::new() },
 
 
     )
@@ -3170,6 +3303,114 @@ mod tests {
             ..Default::default()
         };
         assert!(!recipe_to_xmp(&all_bitmap).contains("MaskGroupBasedCorrections"));
+    }
+
+    /// M6a: the export direction had FOUR silent losses (raster masks skipped,
+    /// muted masks skipped, extra shapes flattened, radial rotation +
+    /// recolour gains dropped) against four import-side disclosures and zero
+    /// export-side ones. The writer now names them while it emits, and the
+    /// assertion is a SET comparison, not a count: a rule that fires on the
+    /// wrong mask, or twice on one mask, is exactly the bug a count hides.
+    #[test]
+    fn the_writer_names_every_mask_the_sidecar_cannot_carry() {
+        use crate::recipe::{MaskCombine, MaskComponent};
+        let radial = |angle: f32| MaskGeometry::Radial {
+            top: 0.3,
+            left: 0.35,
+            bottom: 0.7,
+            right: 0.65,
+            feather: 0.5,
+            roundness: 0.0,
+            flipped: false,
+            angle,
+        };
+        let component = MaskComponent {
+            geometry: MaskGeometry::Linear { zero_x: 0.1, zero_y: 0.1, full_x: 0.9, full_y: 0.9 },
+            mode: MaskCombine::Subtract,
+        };
+        let r = EditRecipe {
+            masks: vec![
+                // Raster geometry: the whole correction goes.
+                LocalAdjustment {
+                    mask: MaskGeometry::Bitmap { path: "out/sky.png".into() },
+                    name: "sky".into(),
+                    ..Default::default()
+                },
+                // Muted — and loaded with every degradation as well: the eye
+                // is why it is skipped, so it must produce exactly ONE verdict
+                // (this arm is what stops the counts from double-billing).
+                LocalAdjustment {
+                    mask: radial(30.0),
+                    components: vec![component.clone()],
+                    color_gains: Some([1.4, 1.0, 0.6]),
+                    enabled: false,
+                    name: "parked".into(),
+                    ..Default::default()
+                },
+                // Emitted, but only as its base shape.
+                LocalAdjustment {
+                    components: vec![component.clone(), component.clone()],
+                    name: "combo".into(),
+                    ..Default::default()
+                },
+                // Emitted as an UNROTATED ellipse, without the recolour.
+                LocalAdjustment {
+                    mask: radial(-12.0),
+                    color_gains: Some([1.2, 0.95, 0.7]),
+                    name: "gold".into(),
+                    ..Default::default()
+                },
+                // Nothing lost: an unrotated radial, no components, neutral
+                // gains (which are no recolour at all).
+                LocalAdjustment {
+                    mask: radial(0.0),
+                    color_gains: Some([1.0, 1.0, 1.0]),
+                    name: "clean".into(),
+                    ..Default::default()
+                },
+                // Unnamed masks are identified by the name the SIDECAR would
+                // have used, not by "".
+                LocalAdjustment { mask: MaskGeometry::Bitmap { path: "out/x.png".into() }, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let mut got: Vec<(String, MaskLossReason)> =
+            mask_export_losses(&r).into_iter().map(|l| (l.name, l.reason)).collect();
+        got.sort();
+        let mut want = vec![
+            ("sky".to_string(), MaskLossReason::Bitmap),
+            ("parked".to_string(), MaskLossReason::Disabled),
+            ("combo".to_string(), MaskLossReason::ComponentsFlattened),
+            ("gold".to_string(), MaskLossReason::Rotation),
+            ("gold".to_string(), MaskLossReason::Recolour),
+            ("Autoshop 6".to_string(), MaskLossReason::Bitmap),
+        ];
+        want.sort();
+        assert_eq!(got, want, "the loss set must name mask AND reason exactly once each");
+        // The prose channel (CLI stderr / web reply) covers every category and
+        // counts them; "combo" flattened TWO components but is ONE loss.
+        let line = describe_mask_losses(&mask_export_losses(&r)).expect("losses ⇒ a line");
+        for expect in [
+            "2 bitmap mask(s) skipped (sky, Autoshop 6)",
+            "1 muted mask(s) skipped (parked)",
+            "1 extra shape component(s) flattened (combo)",
+            "1 radial rotation dropped (gold)",
+            "1 recolour gains dropped (gold)",
+        ] {
+            assert!(line.contains(expect), "the line must state {expect:?}: {line}");
+        }
+        // …and the emitted document agrees with the claim: four masks, one
+        // skipped as raster, one as muted, and no leaked raster path.
+        let doc = recipe_to_xmp(&r);
+        assert_eq!(doc.matches("crs:What=\"Correction\"").count(), 3, "3 of 6 project");
+        assert!(!doc.contains("sky.png"), "no raster path in a sidecar");
+
+        // Nothing lossy ⇒ nothing said, on both channels (a faithful save
+        // must not be interrupted).
+        let faithful = EditRecipe { masks: vec![r.masks[4].clone()], ..Default::default() };
+        assert!(mask_export_losses(&faithful).is_empty(), "an exportable mask loses nothing");
+        assert!(describe_mask_losses(&[]).is_none(), "an empty list has nothing to say");
+        assert!(mask_export_losses(&EditRecipe::default()).is_empty(), "no masks, no losses");
     }
 
     #[test]

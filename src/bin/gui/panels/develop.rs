@@ -1795,33 +1795,100 @@ impl AutoshopApp {
                 if changed {
                     self.overlay_stale = true;
                 }
+                // Lightroom's own three groups for a mask's adjustments (user
+                // decision 8 of the 17-feedback triage): Tone / Detail /
+                // Color, weak captions in the Color-Grading "All regions"
+                // style. Twelve sliders in one unbroken column is what the
+                // grouping replaces — the same reason the global panel is
+                // sectioned. `Tone` is our own caption for LR's "Light" group:
+                // the key "Light" already means the light THEME.
+                let group = |ui: &mut egui::Ui, title: &str| {
+                    ui.add_space(SPACE_XS);
+                    ui.separator();
+                    ui.label(egui::RichText::new(title).weak().small());
+                };
+                group(ui, tr(lang, "Tone"));
                 changed |= Self::slider(ui, lang, tr(lang, "Exposure"), &mut m.exposure_ev, -5.0, 5.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Contrast"), &mut m.contrast, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Highlights"), &mut m.highlights, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Shadows"), &mut m.shadows, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Whites"), &mut m.whites, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Blacks"), &mut m.blacks, -100.0, 100.0, 0.0);
+                // Texture / Clarity / Dehaze come out of the old
+                // 「More (XMP/Lightroom only)」 fold: R22-3 put all three ON the
+                // engine (render::apply_masks), so that title became a lie and
+                // the fold merely hid three working sliders one level deep.
+                group(ui, tr(lang, "Detail"));
+                changed |= Self::slider(ui, lang, tr(lang, "Texture"), &mut m.texture, -100.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Clarity"), &mut m.clarity, -100.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Dehaze"), &mut m.dehaze, -100.0, 100.0, 0.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut m.noise_reduction, 0.0, 100.0, 0.0);
+                group(ui, tr(lang, "Color"));
                 changed |= Self::slider(ui, lang, tr(lang, "Saturation"), &mut m.saturation, -100.0, 100.0, 0.0);
                 // Engine-rendered since batch #2-B (render.rs apply_masks
                 // mirrors the global WB model inside the mask) — live in the
-                // preview like the tone sliders above.
-                changed |= Self::slider(ui, lang, tr(lang, "Temp shift"), &mut m.temperature, -100.0, 100.0, 0.0);
-                changed |= Self::slider(ui, lang, tr(lang, "Tint shift"), &mut m.tint, -100.0, 100.0, 0.0);
-                changed |= Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut m.noise_reduction, 0.0, 100.0, 0.0);
-                // These serialise to the XMP but the in-app preview doesn't
-                // render them yet (documented engine scope) — honest label.
-                egui::CollapsingHeader::new(tr(lang, "More (XMP/Lightroom only)"))
-                    .id_salt("sec_local_xmp")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        let m = &mut self.recipe.masks[i];
-                        changed |= Self::slider(ui, lang, tr(lang, "Clarity"), &mut m.clarity, -100.0, 100.0, 0.0);
-                        changed |= Self::slider(ui, lang, tr(lang, "Dehaze"), &mut m.dehaze, -100.0, 100.0, 0.0);
-                        changed |= Self::slider(ui, lang, tr(lang, "Texture"), &mut m.texture, -100.0, 100.0, 0.0);
+                // preview like the tone sliders above. The ±100 pair is a
+                // RELATIVE gel around a fixed anchor, a different axis from
+                // the global 「Temp (K)」 absolute Kelvin — two controls named
+                // "temp" that answer different questions, so the tooltip
+                // carries the engine's OWN conversion (render::
+                // local_temp_to_kelvin, not a number retyped here) for the
+                // value currently on the slider.
+                let temp_k = format!(
+                    "{:.0}",
+                    autoshop::render::local_temp_to_kelvin(m.temperature)
+                );
+                let temp_hint = trf(
+                    lang,
+                    "A RELATIVE warm/cool shift (±100) around a fixed 5500 K anchor, not absolute Kelvin: this value renders like ≈ {k} K. The global 「Temp (K)」 is absolute and anchored at this photo's as-shot value — a different axis.",
+                    &[("k", &temp_k)],
+                );
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Temp shift"), &mut m.temperature, -100.0, 100.0, 0.0, &temp_hint);
+                changed |= Self::slider_hinted(
+                    ui,
+                    lang,
+                    tr(lang, "Tint shift"),
+                    &mut m.tint,
+                    -100.0,
+                    100.0,
+                    0.0,
+                    tr(lang, "A RELATIVE green/magenta shift (±100) inside the mask — positive goes magenta. Unlike the global 「Tint」 it is not solved against the photo's as-shot tint."),
+                );
+                // Reverse-fit recolour gains: per-channel linear gains no
+                // classic-ACR key can express (recipe.rs `color_gains`), so
+                // they render in-app and vanish from the sidecar. Not a
+                // slider — a disclosure plus the one action that makes sense
+                // on a value the user never typed.
+                if m.color_gains.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(tr(lang, "carries reverse-fit recolour (not exported to XMP)"))
+                                .weak()
+                                .small(),
+                        );
+                        if ui
+                            .small_button(tr(lang, "↺ Clear"))
+                            .on_hover_text(tr(lang, "Drop this mask's per-channel recolour gains (one Ctrl+Z to undo)"))
+                            .clicked()
+                        {
+                            m.color_gains = None;
+                            changed = true;
+                        }
                     });
+                }
             } else if n_masks == 0 {
                 ui.label(
                     egui::RichText::new(tr(lang, "Lightroom-style local adjustments: add a gradient to darken the sky, a radial to brighten the subject. AI Analyze also writes to this list."))
+                        .weak()
+                        .small(),
+                );
+            } else {
+                // Masks exist, none is selected — one click on the selected
+                // row (it toggles) lands here, and the section then showed a
+                // list with no adjustments under it and no reason why.
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new(tr(lang, "Select a mask above to edit its adjustments"))
                         .weak()
                         .small(),
                 );

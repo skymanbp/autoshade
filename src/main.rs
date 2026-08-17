@@ -530,8 +530,10 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
             write_xmp(raw, &recipe)
         };
         match projected {
-            // The merge note (if any) already went to stderr in write_xmp_doc.
-            Ok((p, _)) => println!("xmp    -> {}", p.display()),
+            // The merge note AND the mask-projection loss line (if any)
+            // already went to stderr in write_xmp_doc — one place, so no CLI
+            // command can print a different (or no) version of them.
+            Ok((p, _, _)) => println!("xmp    -> {}", p.display()),
             Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
         }
         if redirected {
@@ -733,7 +735,8 @@ fn auto_cmd(
     } else {
         // Written under the lock above; only SAID here, in the old order.
         match xmp_result {
-            Some(Ok((xmp_path, _))) => println!("xmp    -> {}", xmp_path.display()),
+            // Notes + mask-loss line: stderr, from write_xmp_doc (as above).
+            Some(Ok((xmp_path, _, _))) => println!("xmp    -> {}", xmp_path.display()),
             Some(Err(e)) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
             None => println!("(baked source — recipe.json only, no XMP)"),
         }
@@ -951,7 +954,8 @@ fn match_cmd(
     if decode::is_raw(raw) {
         // Warning, not failure: the recipe above already committed.
         match write_xmp(raw, &rep.recipe) {
-            Ok((xmp_path, _)) => {
+            // Notes + mask-loss line: stderr, from write_xmp_doc (as above).
+            Ok((xmp_path, _, _)) => {
                 let s = stem(raw);
                 println!("xmp    -> {} (copy {s}.xmp beside {s}.ARW for Lightroom)", xmp_path.display());
             }

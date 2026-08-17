@@ -1571,13 +1571,22 @@ impl AutoshopApp {
                                             };
                                             if autoshop::decode::is_raw(&p) {
                                                 match autoshop::pipeline::write_xmp(&p, &stamped) {
-                                                    Ok((_, None)) => {}
-                                                    // Regenerated-not-merged:
-                                                    // same disclosure as
-                                                    // Ctrl+S (toast + status).
-                                                    Ok((_, Some(m))) => {
-                                                        self.toast(ToastKind::Error, m.clone());
-                                                        s = format!("{s} — ⚠ {m}");
+                                                    // Regenerated-not-merged AND
+                                                    // the M6a projection losses:
+                                                    // same disclosure as Ctrl+S
+                                                    // (toast + status). Analyze
+                                                    // is where AI bitmap masks
+                                                    // arrive, so this landing
+                                                    // needs the export-side line
+                                                    // as much as the save does.
+                                                    Ok((_, merge_note, losses)) => {
+                                                        for m in merge_note
+                                                            .into_iter()
+                                                            .chain(mask_loss_line(lang, &losses))
+                                                        {
+                                                            self.toast(ToastKind::Error, m.clone());
+                                                            s = format!("{s} — ⚠ {m}");
+                                                        }
                                                     }
                                                     Err(e) => {
                                                         let t = trf(

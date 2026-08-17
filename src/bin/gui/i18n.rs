@@ -372,10 +372,21 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "在图上点击要选取的颜色（亮暗不同的同色也会被选中；再点一次此按钮取消取样）"),
     ("Tolerance", "容差 Tolerance"),
     ("Amount", "强度"),
-    ("More (XMP/Lightroom only)", "更多 · More（仅 XMP/Lightroom 生效）"),
     ("Texture", "纹理"),
     ("Lightroom-style local adjustments: add a gradient to darken the sky, a radial to brighten the subject. AI Analyze also writes to this list.",
         "像 Lightroom 的局部调整：加一个渐变压暗天空、径向提亮主体。AI Analyze 也会写到同一列表。"),
+    // R22-5 (#10): the selected mask's sliders in Lightroom's three groups.
+    // 「Detail」/「Color」 reuse the panel-section entries above.
+    ("Tone", "明暗"),
+    ("Select a mask above to edit its adjustments", "选中上面任一蒙版即可编辑它的调整"),
+    ("A RELATIVE warm/cool shift (±100) around a fixed 5500 K anchor, not absolute Kelvin: this value renders like ≈ {k} K. The global 「Temp (K)」 is absolute and anchored at this photo's as-shot value — a different axis.",
+        "相对冷暖偏移（±100），以固定 5500 K 为基准，不是绝对色温：当前值渲染起来约等于 {k} K。全局「色温 (K)」是绝对值、以本张照片的拍摄色温为基准——两者不是同一条轴。"),
+    ("A RELATIVE green/magenta shift (±100) inside the mask — positive goes magenta. Unlike the global 「Tint」 it is not solved against the photo's as-shot tint.",
+        "蒙版内的相对绿/洋红偏移（±100），正值偏洋红。它不像全局「色调」那样按拍摄色调解算。"),
+    ("carries reverse-fit recolour (not exported to XMP)", "含反推重上色（不写入 XMP）"),
+    ("↺ Clear", "↺ 清除"),
+    ("Drop this mask's per-channel recolour gains (one Ctrl+Z to undo)",
+        "清除这个蒙版的分通道重上色增益（一步 Ctrl+Z 可撤销）"),
 
     // ── Develop · Versions ───────────────────────────────────────────────────
     ("Versions ({n})", "版本 · Versions ({n})"),
@@ -565,6 +576,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "配方已保存 → {path}（XMP 仅适用于 RAW）"),
     ("recipe saved — but the Lightroom XMP failed: {err}",
         "配方已保存 — 但 Lightroom XMP 写入失败：{err}"),
+    // M6a export-side lossy-projection disclosure (util::mask_loss_line): the
+    // counts come from the writer's own per-mask verdicts, so these are pure
+    // labels — an empty list prints nothing at all.
+    ("the Lightroom XMP does not carry: {list} (recipe.json keeps all of it)",
+        "Lightroom XMP 不会带走：{list}（recipe.json 全部保留）"),
+    ("bitmap masks ×{n}", "位图蒙版 ×{n}"),
+    ("muted masks ×{n}", "已静音蒙版 ×{n}"),
+    ("shape components flattened ×{n}", "形状组件已压平 ×{n}"),
+    ("radial rotation ×{n}", "径向旋转未带走 ×{n}"),
+    ("recolour gains ×{n}", "重上色增益未带走 ×{n}"),
     ("could not clear the saved edits: {err}", "无法清除已保存的编辑：{err}"),
     ("save postponed: this photo is being changed by another Autoshop process ({err}); your canvas remains unsaved — retry",
         "保存已推迟：另一个 Autoshop 进程正在修改这张照片（{err}）；画布上的编辑尚未保存 — 请稍后重试"),
