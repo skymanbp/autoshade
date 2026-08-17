@@ -14,6 +14,7 @@ impl AutoshopApp {
             cc.storage.and_then(|s| eframe::get_value::<Prefs>(s, eframe::APP_KEY))
         {
             app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
+            app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
             app.send_style_ref_image = prefs.send_style_ref_image;
             // Only a folder that still EXISTS is prefilled: a picker opened at
             // a deleted path lands wherever the OS decides (the same rule the
@@ -2149,9 +2150,13 @@ impl AutoshopApp {
         // whether the nearest past photo goes along as a second image. Read
         // HERE, on the UI thread, so the worker cannot pick up a toggle the
         // user flipped after starting the call.
-        let style = autoshop::pipeline::StyleRequest {
-            strength: self.style_strength,
+        let req = autoshop::pipeline::GradeRequest {
+            style: self.style_strength,
             send_reference_image: self.send_style_ref_image,
+            // R23-3: the OTHER axis — how committed the grade should be. Read
+            // here for the same reason, and separate from `style` on purpose
+            // (「像不像我」 vs 「下手多重」).
+            strength: autoshop::recipe::GradeStrength::new(self.grade_strength),
         };
         // Free-text direction ("warmer, moodier") steers the proposal; with
         // `refine` (its own button now — no pre-armed checkbox), the AI
@@ -2198,7 +2203,7 @@ impl AutoshopApp {
                     false,
                     guidance.as_deref(),
                     base.as_ref(),
-                    style,
+                    req,
                     // Interactive single-photo analyze: the visual closed
                     // loop IS the R20 strengthening (cost disclosed in the
                     // button's hover text; batch surfaces pass false).
@@ -2441,6 +2446,9 @@ impl AutoshopApp {
                                     candidate: &f_jpeg,
                                 },
                                 autoshop::advisor::JudgeTask::FitMatch,
+                                None,
+                                // FitMatch scores a MATCH between two renders —
+                                // the strength axis has no bearing on it (R23-3).
                                 None,
                             ) {
                                 Ok(j) => status.push(FitNote::AiReview {

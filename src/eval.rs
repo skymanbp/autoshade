@@ -501,7 +501,13 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
                 false,
                 None,
                 None,
-                pipeline::StyleRequest::default(),
+                // The CALIBRATION point, named: eval is the measurement
+                // baseline R23-5's wider ruler is calibrated against, so it must
+                // not drift when the product default moves (R23-3).
+                pipeline::GradeRequest {
+                    strength: crate::recipe::GradeStrength::calibrated(),
+                    ..Default::default()
+                },
                 false,
             ) {
             Ok(v) => v,

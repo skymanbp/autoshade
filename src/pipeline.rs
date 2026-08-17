@@ -13,30 +13,47 @@ use crate::advisor::{
 };
 use crate::config::Config;
 use crate::decode;
-use crate::recipe::EditRecipe;
+use crate::recipe::{EditRecipe, GradeStrength};
 use crate::xmp;
 
-/// What ONE develop asks of the personal style library (R23-2).
+/// The TASTE dials one develop is asked for — the two independent axes plus the
+/// style library's opt-in second image.
 ///
-/// A struct rather than two more parameters: `produce_recipe` was already at
-/// clippy's argument ceiling, and these two travel together by nature — the
-/// image switch is meaningless at strength 0, and both are answered by the
-/// same retrieval.
+/// A struct rather than three more parameters: `produce_recipe` was already at
+/// clippy's argument ceiling. It carries both axes because both are per-develop
+/// user intent, but they are deliberately SEPARATE fields with separate names:
+///   * [`style`](Self::style) = "how much like MY past edits" — mean-regression
+///     toward the user's own habits (R23-2);
+///   * [`strength`](Self::strength) = "how hard to push" — how committed the
+///     grade is (R23-3).
+///
+/// They used to be ONE thing by accident: a non-zero Style injected a reference
+/// block that said "do NOT exceed it", so asking for more personal style bought
+/// more restraint and the app had no way to ask for less restraint at all
+/// (feedback #5).
+///
+/// Renamed from `StyleRequest` in R23-3: the field it was named after is now one
+/// of three, and the old name would have read as "the strength in here is the
+/// style strength" at every call site.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct StyleRequest {
+pub struct GradeRequest {
     /// 0..1 — how far the proposal leans on the user's past edits (the GUI's
-    /// Style slider, `--style` on the CLI). 0 disables retrieval entirely.
-    pub strength: f32,
+    /// 「Style」 slider, `--style` on the CLI). 0 disables retrieval entirely.
+    pub style: f32,
     /// Also SHOW the model the single most similar past photo, as a second
     /// input image. Opt-in and off by default: it is an extra image on every
     /// call of a paid analysis (the GUI's checkbox discloses the cost).
     pub send_reference_image: bool,
+    /// How COMMITTED the grade should be (the GUI's 「Strength」 slider,
+    /// `--strength` on the CLI). Defaults to [`GradeStrength::DEFAULT`].
+    pub strength: GradeStrength,
 }
 
-impl StyleRequest {
-    /// Text reference only — the shape every non-GUI surface uses.
-    pub fn strength(strength: f32) -> Self {
-        Self { strength, send_reference_image: false }
+impl GradeRequest {
+    /// Text reference only, at the shipped grade strength — the shape every
+    /// non-GUI surface uses unless it says otherwise.
+    pub fn with_style(style: f32) -> Self {
+        Self { style, ..Self::default() }
     }
 }
 
@@ -88,7 +105,7 @@ pub fn produce_recipe(
     verbose: bool,
     guidance: Option<&str>,
     base: Option<&EditRecipe>,
-    style: StyleRequest,
+    req: GradeRequest,
     judge: bool,
 ) -> Result<(EditRecipe, Verdict, Vec<crate::rationale::Note>)> {
     // The third element (L12#2B): every DETERMINISTIC rationale fragment this
@@ -109,6 +126,14 @@ pub fn produce_recipe(
     }
     // decode_any: a camera RAW, or an already-baked PNG/TIFF/JPEG (PNG-source mode).
     let decoded = decode::decode_any(raw)?;
+
+    // The photographer's OWN words, captured BEFORE the Refine envelope below
+    // shadows `guidance` with a whole EditRecipe JSON. Gates 3 and 4 (verifier,
+    // visual judge) want the intent, not the recipe they are already reading.
+    let user_direction = guidance;
+    // The intent every downstream reviewer in this function shares (R23-3).
+    let intent =
+        crate::advisor::GradeIntent { strength: req.strength, direction: user_direction };
 
     // Refine mode: when `base` (the user's CURRENT edit) is given, fold it into
     // the direction so GPT adjusts that edit rather than proposing from scratch.
@@ -154,7 +179,7 @@ pub fn produce_recipe(
     // `style::load_effective` owns the central-then-legacy walk for every
     // surface (R23-2) — this used to be a third hand-written copy of it.
     let mut style_err: Option<String> = None;
-    let style_ix = match (style.strength > 0.0).then(crate::style::load_effective) {
+    let style_ix = match (req.style > 0.0).then(crate::style::load_effective) {
         Some(crate::style::EffectiveIndex::Loaded(ix, _)) => Some(ix),
         Some(crate::style::EffectiveIndex::Unusable { err, .. }) => {
             // Surfaced ONCE on stderr: the original `.ok()` swallowed the
@@ -180,7 +205,10 @@ pub fn produce_recipe(
     let retrieved = style_ix.as_ref().map(|ix| {
         let ex = ix.retrieve(&meta, &histogram, crate::style::RETRIEVE_K, raw);
         StyleRetrieval {
-            reference: ix.render_reference(&ex),
+            // GATE 5: the reference block's own "do not exceed it" clauses are
+            // templated on the STRENGTH axis, not on the style dial that
+            // retrieved them.
+            reference: ix.render_reference(&ex, req.strength),
             targets: crate::style::style_targets(&ex),
             stems: crate::style::neighbour_stems(&ex),
             // The nearest shot's own file, for the opt-in reference IMAGE. A
@@ -192,7 +220,7 @@ pub fn produce_recipe(
     let reference: Option<String> = retrieved.as_ref().and_then(|r| r.reference.clone());
     let ref_str = reference.as_deref();
     if verbose && ref_str.is_some() {
-        println!("style    : reference from similar past edits (strength {:.0}%)", style.strength * 100.0);
+        println!("style    : reference from similar past edits (strength {:.0}%)", req.style * 100.0);
     }
     // R23-2 opt-in: SHOW the model the nearest past photo, not just its
     // numbers. Fail-open in every arm — a missing or unreadable reference must
@@ -201,7 +229,7 @@ pub fn produce_recipe(
     let mut ref_preview: Option<Preview> = None;
     let mut ref_image_stem: Option<String> = None;
     let mut ref_image_err: Option<String> = None;
-    if style.send_reference_image
+    if req.send_reference_image
         && let Some(r) = &retrieved
     {
         match &r.nearest {
@@ -267,6 +295,8 @@ pub fn produce_recipe(
         // struct): a reference the first call saw and the revision did not
         // would make the two rounds answer different questions.
         reference_image: ref_preview.as_ref(),
+        // GATE 1 (prompt) + GATE 2 (`temper`, inside the provider).
+        strength: req.strength,
     };
     let mut det_notes: Vec<crate::rationale::Note> = Vec::new();
     let (mut recipe, can_revise) = if cfg.openai_api_key.is_some() {
@@ -291,7 +321,7 @@ pub fn produce_recipe(
                 // invisible in the windowed GUI, so the recipe's rationale is
                 // the only place the user can learn why the AI didn't run.
                 let heuristic = HeuristicProposer { fallback_reason: Some(e.to_string()) };
-                let (r, note) = heuristic.propose_noted(hist)?;
+                let (r, note) = heuristic.propose_noted(hist, req.strength)?;
                 det_notes.push(note);
                 (r, false)
             }
@@ -314,7 +344,7 @@ pub fn produce_recipe(
             println!("proposer : heuristic baseline (set OPENAI_API_KEY to use GPT vision)");
         }
         let heuristic = HeuristicProposer::default();
-        let (r, note) = heuristic.propose_noted(hist)?;
+        let (r, note) = heuristic.propose_noted(hist, req.strength)?;
         det_notes.push(note);
         (r, false)
     };
@@ -330,7 +360,7 @@ pub fn produce_recipe(
         let who = if cfg.analysis_is_api() { "OpenAI-API" } else { "Claude (OAuth)" };
         println!("verifier : {who} ({})", cfg.analysis_model);
     }
-    let mut verdict = verifier.verify(&recipe, meta, hist)?;
+    let mut verdict = verifier.verify(&recipe, meta, hist, &intent)?;
 
     // Bounded verify→revise loop (only if GPT actually produced the recipe). With
     // the now-symmetric verifier — which pushes a too-flat edit to commit AND a
@@ -372,7 +402,7 @@ pub fn produce_recipe(
                 break;
             }
         };
-        match verifier.verify(&revised, meta, hist) {
+        match verifier.verify(&revised, meta, hist, &intent) {
             Ok(v) => {
                 recipe = revised;
                 // Fresh model prose — the notes described the DISCARDED
@@ -397,9 +427,20 @@ pub fn produce_recipe(
     // Distill toward the user's historical style: a gentle, capped pull of the
     // global sliders toward similar past edits. Capped at 60% so even max
     // strength never fully overrides the AI's scene-specific proposal.
+    //
+    // DELIBERATELY NOT on the grade-strength axis (R23-3, GATE 5's other half):
+    // this 0.6 cap bounds MEAN REGRESSION — how far the proposal is dragged
+    // toward the arithmetic mean of `style::style_targets` — and its whole job is
+    // to keep the AI's scene-specific reading from being averaged away. Coupling
+    // it to strength would mean "push harder" silently became "look MORE like my
+    // average past edit", which is the opposite direction on the other axis and
+    // exactly the entanglement this round exists to undo. What strength changes
+    // is the WORDING the model reads about the reference
+    // (`style::render_reference`), never the blend arithmetic; the Style slider
+    // keeps sole ownership of that number.
     if let Some(r) = &retrieved {
         let pre_blend = recipe.clone();
-        crate::style::blend_toward(&mut recipe, &r.targets, style.strength.clamp(0.0, 1.0) * 0.6);
+        crate::style::blend_toward(&mut recipe, &r.targets, req.style.clamp(0.0, 1.0) * 0.6);
         recipe.clamp();
         // The blend mutates the recipe AFTER the rationale was written and
         // AFTER the verdict above. When it actually changed something (a pull
@@ -416,14 +457,14 @@ pub fn produce_recipe(
                 &mut det_notes,
                 crate::rationale::Note::new(
                     crate::rationale::keys::STYLE_DISTILLED,
-                    vec![("pct", format!("{:.0}", style.strength.clamp(0.0, 1.0) * 0.6 * 100.0))],
+                    vec![("pct", format!("{:.0}", req.style.clamp(0.0, 1.0) * 0.6 * 100.0))],
                 ),
             );
             // Degrade like the revision loop above: a transient verifier
             // failure at this LAST step used to error out the whole call,
             // discarding the paid, already-verified proposal. Keep the pair
             // and disclose which recipe the verdict describes.
-            match verifier.verify(&recipe, meta, hist) {
+            match verifier.verify(&recipe, meta, hist, &intent) {
                 Ok(v) => verdict = v,
                 Err(e) => {
                     crate::rationale::push_note(
@@ -508,6 +549,10 @@ pub fn produce_recipe(
                     .ok()
                     .filter(|s| s.len() <= 16 * 1024)
                     .as_deref(),
+                // GATE 4: the judge can BUY a revision, so a rubric that does
+                // not know the target strength does not merely mis-report — it
+                // re-timid-ifies the develop the user asked to push.
+                Some(intent),
             )
         };
         match judge_of(&recipe) {
@@ -580,14 +625,14 @@ pub fn produce_recipe(
                                     crate::style::blend_toward(
                                         &mut r,
                                         &sr.targets,
-                                        style.strength.clamp(0.0, 1.0) * 0.6,
+                                        req.style.clamp(0.0, 1.0) * 0.6,
                                     );
                                     r.clamp();
                                     candidate_distilled = r != pre;
                                 }
                                 Ok(r)
                             },
-                            |r| verifier.verify(r, meta, hist),
+                            |r| verifier.verify(r, meta, hist, &intent),
                             judge_of,
                             j1.score,
                         ) {
@@ -625,7 +670,7 @@ pub fn produce_recipe(
                                                 "pct",
                                                 format!(
                                                     "{:.0}",
-                                                    style.strength.clamp(0.0, 1.0) * 0.6 * 100.0
+                                                    req.style.clamp(0.0, 1.0) * 0.6 * 100.0
                                                 ),
                                             )],
                                         ),
@@ -727,7 +772,7 @@ pub fn produce_recipe(
             ),
         );
     }
-    if let Some(note) = style_gap_note(style.strength, ref_str, style_err.as_deref()) {
+    if let Some(note) = style_gap_note(req.style, ref_str, style_err.as_deref()) {
         crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
     }
 
@@ -3738,7 +3783,7 @@ mod tests {
             false,
             None,
             None,
-            StyleRequest::default(),
+            GradeRequest::default(),
             false,
         )
         .expect_err("no analysis key + api provider must refuse up front")

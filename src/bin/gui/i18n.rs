@@ -466,6 +466,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)",
         "个人风格强度：AI 提案向你过往 XMP 编辑习惯靠拢的程度（0 = 不参考）"),
 
+    // ── AI panel · the grade STRENGTH axis (R23-3, feedback #5) ──────────────
+    ("Strength", "强度"),
+    ("How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is the calibrated baseline every AI guardrail was tuned at (the behaviour of earlier releases); the default 65% (double-click to reset) leans a little further; above 70% the AI is told to commit to a look. The clipping and white-point safeguards never widen with it.",
+        "AI 下手有多重 —— 与「风格」是两条不同的轴：风格问「有多接近你过往的习惯」，强度问「出手多重」。50% 是所有 AI 参数标定的基准点（也就是此前各版本的行为）；默认 65%（双击复位到这里）比基准更进一点；高于 70% 会要求 AI 对每个控件都表态，不再默认留白。高光与黑位的安全边界永不随强度放宽。"),
+
     // ── AI panel · style reference library (R23-2, feedback #6) ──────────────
     ("⚠ no library", "⚠ 未建库"),
     ("This slider does nothing until a style reference library is built — the section just below builds one.",

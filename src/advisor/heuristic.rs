@@ -32,9 +32,9 @@ impl Advisor for HeuristicProposer {
         _img: &Preview,
         _meta: &Meta,
         hist: &Histogram,
-        _ctx: &ProposeContext,
+        ctx: &ProposeContext,
     ) -> Result<EditRecipe, AdvisorError> {
-        self.propose_noted(hist).map(|(r, _)| r)
+        self.propose_noted(hist, ctx.strength).map(|(r, _)| r)
     }
 }
 
@@ -47,6 +47,7 @@ impl HeuristicProposer {
     pub fn propose_noted(
         &self,
         hist: &Histogram,
+        strength: crate::recipe::GradeStrength,
     ) -> Result<(EditRecipe, crate::rationale::Note), AdvisorError> {
         let total: u64 = hist.luma.iter().map(|&v| v as u64).sum::<u64>().max(1);
         let weighted: u64 = hist
@@ -86,7 +87,15 @@ impl HeuristicProposer {
 
         r.confidence = 0.4;
         r.clamp();
-        r.temper(); // same taste guardrail as the AI path
+        // GATE 6 of the strength axis (R23-3): the same guardrail as the AI path,
+        // now on the same dial as the AI path. The baseline's own presence values
+        // (contrast 8 / vibrance 8 / clarity 4) sit far below every soft-cap knee,
+        // so the dial reaches this recipe only through the histogram-driven
+        // recovery above — a heavily clipped frame drives Highlights to −70 and
+        // Shadows to +60, where the knee decides the final number. Threading it
+        // anyway is the point: a fallback that tastes different from the AI path
+        // at the same dial setting is its own reported bug.
+        r.temper(strength);
 
         // Rationale formatted AFTER clamp+temper: both can move the very
         // numbers it quotes (temper soft-caps recovery strength), and a
@@ -150,14 +159,46 @@ mod tests {
             height: 0,
             as_shot_wb_coeffs: [1.0; 4],
         };
-        let r = HeuristicProposer::default()
-            .propose(&Preview { jpeg: Vec::new() }, &meta, &hist, &ProposeContext::default())
-            .unwrap();
-        assert_eq!(r.highlights, -60.0, "temper soft-cap expectation drifted");
+        let at = |s: crate::recipe::GradeStrength| {
+            HeuristicProposer::default()
+                .propose(
+                    &Preview { jpeg: Vec::new() },
+                    &meta,
+                    &hist,
+                    &ProposeContext { strength: s, ..Default::default() },
+                )
+                .unwrap()
+        };
+        let calib = at(crate::recipe::GradeStrength::calibrated());
+        assert_eq!(calib.highlights, -60.0, "temper soft-cap expectation drifted");
         assert!(
-            r.rationale.contains("highlights -60"),
+            calib.rationale.contains("highlights -60"),
             "rationale must quote the tempered value: {}",
-            r.rationale
+            calib.rationale
+        );
+
+        // GATE 6 of the strength axis (R23-3): the no-AI fallback rides the SAME
+        // dial as the AI path, so the same histogram must produce a bolder
+        // recovery at a higher strength — and the rationale must still quote the
+        // number the recipe actually carries, which is the property above.
+        let bold = at(crate::recipe::GradeStrength::new(0.9));
+        assert!(
+            bold.highlights < calib.highlights,
+            "gate 6 is not wired: strength 0.9 recovered no harder than 0.5 ({} vs {})",
+            bold.highlights, calib.highlights
+        );
+        assert!(
+            bold.rationale.contains(&format!("highlights {:.0}", bold.highlights)),
+            "rationale must quote the tempered value at every strength: {}",
+            bold.rationale
+        );
+        // …and the DEFAULT (0.65) sits strictly between them: the shipped
+        // behaviour is braver than the calibration point by construction.
+        let def = at(crate::recipe::GradeStrength::default());
+        assert!(
+            bold.highlights < def.highlights && def.highlights < calib.highlights,
+            "the default must sit between calibrated and bold: {} < {} < {}",
+            bold.highlights, def.highlights, calib.highlights
         );
     }
 }

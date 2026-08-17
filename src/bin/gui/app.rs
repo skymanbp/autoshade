@@ -41,6 +41,13 @@ pub(crate) struct AutoshopApp {
     /// shows instead. Cleared wherever `rationale` is reloaded from disk.
     pub(crate) rationale_notes: Vec<autoshop::rationale::Note>,
     pub(crate) style_strength: f32,
+    /// R23-3, feedback #5 ("the AI is too timid"): how COMMITTED the grade
+    /// should be, 0..1. A SEPARATE axis from `style_strength` — that one asks
+    /// how much like the user's own past edits, this one how hard to push — and
+    /// keeping them apart is the point of the round. Persisted; stored as the
+    /// raw fraction and handed to `GradeStrength::new` at the call site, which
+    /// owns the clamp.
+    pub(crate) grade_strength: f32,
     /// R23-2, feedback #6: also SHOW the vision model the nearest past photo,
     /// not only its numbers. Persisted, and OFF by default — it puts a second
     /// image on every call of a paid analysis (the checkbox says so).
@@ -1407,6 +1414,10 @@ impl Default for AutoshopApp {
             // model::STYLE_STRENGTH_DEFAULT for why the literal cannot live in
             // two Default impls.
             style_strength: STYLE_STRENGTH_DEFAULT,
+            // 0.65 — braver than the 0.5 calibration point, by user decision
+            // (2026-08-17 ⑦). Same one-definition rule as above: the constant is
+            // the lib's own `GradeStrength::DEFAULT`.
+            grade_strength: GRADE_STRENGTH_DEFAULT,
             // OFF: an extra image on a paid call is the user's opt-in, never a
             // default (the same rule `fit_ai_judge` follows).
             send_style_ref_image: false,
@@ -1787,6 +1798,7 @@ impl eframe::App for AutoshopApp {
             &Prefs {
                 gallery_dir: self.gallery_dir.clone(),
                 style_strength: self.style_strength,
+                grade_strength: self.grade_strength,
                 send_style_ref_image: self.send_style_ref_image,
                 style_src_dir: self.style_src_dir.clone(),
                 // Both written: exp_format is the truth, save_jpeg keeps a

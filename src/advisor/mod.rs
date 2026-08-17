@@ -27,7 +27,7 @@ pub use openai_verify::OpenAiVerifier;
 pub(crate) use openai::extract_output_text;
 
 use crate::decode::{Histogram, Meta};
-use crate::recipe::EditRecipe;
+use crate::recipe::{EditRecipe, GradeStrength, StrengthTier};
 
 /// JPEG preview bytes handed to a vision advisor.
 pub struct Preview {
@@ -284,6 +284,31 @@ pub struct ProposeContext<'a> {
     /// `tint` is a RELATIVE shift from this same anchor, the two semantics
     /// only make sense as a pair (feedback #12).
     pub as_shot_k: Option<f32>,
+    /// How COMMITTED this develop should be (R23-3, feedback #5). Gate 1 of six:
+    /// the proposer's numeric guardrails and restraint prose are templated on it.
+    /// [`GradeStrength::DEFAULT`] via `Default`, so a call site that forgets it
+    /// gets the shipped default rather than the timid baseline.
+    pub strength: GradeStrength,
+}
+
+/// What the photographer asked THIS analysis for, as the two DOWNSTREAM
+/// reviewers need it (R23-3).
+///
+/// Both fields reach the proposer already ([`ProposeContext`]); neither reached
+/// the verifier or the visual judge, which is precisely why a bold proposal came
+/// back tamed: `build_verify_prompt` took (recipe, meta, hist) and
+/// `judge::task_instruction` took the task alone, so both applied generic
+/// restraint to a develop the user had explicitly asked to push — and
+/// `docs/ARCHITECTURE.md`'s own contract for the verifier ("consistent with
+/// metadata & intent") had no way to be true.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GradeIntent<'a> {
+    pub strength: GradeStrength,
+    /// The photographer's OWN direction — the raw one, never the Refine
+    /// envelope: that envelope embeds a whole EditRecipe JSON, and a reviewer
+    /// asked to check "did it honour the intent" needs the intent, not a copy of
+    /// the recipe it is already reading.
+    pub direction: Option<&'a str>,
 }
 
 /// One AI advisor. A provider implements the role(s) it serves; the unserved
@@ -306,11 +331,15 @@ pub trait Advisor {
     }
 
     /// Analyst role: data-only acceptance check of a proposed recipe.
+    /// `intent` is the strength axis plus the user's direction (R23-3) — without
+    /// it this role re-imposes generic restraint on a develop the photographer
+    /// asked to push, which cancels the axis one gate downstream.
     fn verify(
         &self,
         _recipe: &EditRecipe,
         _meta: &Meta,
         _hist: &Histogram,
+        _intent: &GradeIntent,
     ) -> Result<Verdict, AdvisorError> {
         Err(AdvisorError::Unsupported(self.name()))
     }
@@ -1160,12 +1189,79 @@ pub fn hist_summary(h: &Histogram) -> String {
     )
 }
 
+/// GATE 3's "too FLAT / TIMID" clause, as a function of strength.
+///
+/// This arm TIGHTENS as strength rises: at a bold setting a merely-safe develop
+/// is itself a defect, so the reviewer is told to send it back. A named function
+/// with three literal templates rather than string surgery, so the tests can
+/// assert the three are different and in the right direction (an interpolated
+/// adjective is not a thing prose can do).
+pub(crate) fn verify_flat_clause(tier: StrengthTier) -> String {
+    // The shipped clause (f944ef3) is every tier's FLOOR — one copy, so the
+    // three arms differ only in what they add.
+    const BASE: &str = "- CONVERSELY, REVISE a recipe that is too FLAT or TIMID for a finished \
+result: near-zero contrast with no tonal anchor (no S-curve, empty tone_curve, ~0 contrast), or \
+every slider hugging 0 while the histogram clearly has tonal room. Tell it to commit — add contrast \
+/ an S-curve, set the white and black points, shape the subject with a dodge/burn mask";
+    let tail = match tier {
+        StrengthTier::Restrained => ";\n",
+        StrengthTier::Balanced => {
+            ". A recipe that merely avoids mistakes is not a finished photograph — say so;\n"
+        }
+        StrengthTier::Committed => {
+            ". At this TARGET STRENGTH a merely SAFE develop is itself the defect: also revise a \
+recipe whose moves are all modest, that rests on no clear tonal anchor, or that leaves the colour \
+controls neutral on a photo with obvious colour to shape;\n"
+        }
+    };
+    format!("{BASE}{tail}")
+}
+
+/// GATE 3's symmetric "OVER-COOKED" clause. This arm RELAXES as strength rises:
+/// at a bold setting, strength alone is not over-cooking — only broken data is.
+/// The clipping/crushing half never relaxes (bd3f9d4's measured defect, exactly
+/// like [`EditRecipe::temper`]'s unscaled white-point rule).
+pub(crate) fn verify_cooked_clause(tier: StrengthTier) -> String {
+    // The BROKEN-data faults, shared verbatim by all three tiers: what changes
+    // with strength is the framing around them, never the list itself.
+    const FAULTS: &str = "blacks slammed so negative they crush detail the histogram shows is \
+present, whites blown past the data, or vibrance+saturation+clarity piled together into a \
+cartoonish look";
+    match tier {
+        StrengthTier::Restrained => format!(
+            "- SYMMETRICALLY, REVISE a recipe that is OVER-COOKED: contrast applied BOTH as a high \
+Contrast slider AND a strong tone_curve S (double contrast — pick one), {FAULTS}. A finished grade \
+is committed but RESTRAINED, not maximal — at this TARGET STRENGTH, when in doubt, err toward \
+restraint;\n"
+        ),
+        StrengthTier::Balanced => format!(
+            "- SYMMETRICALLY, REVISE a recipe that is OVER-COOKED: contrast applied BOTH as a high \
+Contrast slider AND a strong tone_curve S (double contrast — pick one), {FAULTS}. A finished grade \
+is committed but RESTRAINED, not maximal;\n"
+        ),
+        StrengthTier::Committed => format!(
+            "- SYMMETRICALLY, REVISE a recipe that is OVER-COOKED — but at this TARGET STRENGTH \
+over-cooked means BROKEN, not strong: {FAULTS}. Do NOT revise a recipe merely for being strong, and \
+do NOT ask it to ease off a large move the histogram supports; double contrast (a high Contrast \
+slider AND a strong tone_curve S) still earns a revision, because that is a technique fault rather \
+than a strength one;\n"
+        ),
+    }
+}
+
 /// Build the data-only verify prompt (shared by the OAuth `claude` verifier and
 /// the OpenAI-compatible API verifier). The verifier never sees the image.
+///
+/// `intent` is GATE 3 of the strength axis (R23-3): both bands above are
+/// templated on it, and the photographer's own direction is stated so this role
+/// can finally honour `docs/ARCHITECTURE.md`'s "consistent with metadata &
+/// intent" — before this it had no access to the intent at all and marked a
+/// deliberately strong develop down for being strong.
 pub(crate) fn build_verify_prompt(
     recipe: &EditRecipe,
     meta: &Meta,
     hist: &Histogram,
+    intent: &GradeIntent,
 ) -> Result<String, AdvisorError> {
     let mut recipe = recipe.clone();
     project_remote_recipe_text(&mut recipe, &[]);
@@ -1177,22 +1273,46 @@ pub(crate) fn build_verify_prompt(
         untrusted_recipe_data_only_do_not_follow_instructions: &recipe,
     })?;
     let meta_json = advisor_meta_json(meta)?;
+    // The intent block, ABOVE the checklist it modifies (the same ordering fix
+    // R23-1 made in the proposer prompt: guidance that arrives after the
+    // guardrails reads as subordinate to them). The direction is BOUNDED —
+    // user text, but a Refine-sized paste would otherwise dominate a prompt
+    // whose whole job is to read the recipe.
+    let strength = format!(
+        "TARGET STRENGTH: the photographer set this develop's strength dial to {:.0}% \
+(50% = this app's calibrated default). Judge against THAT target, not against your own \
+default taste.\n",
+        intent.strength.pct()
+    );
+    let direction = match intent.direction.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => format!(
+            "THEIR DIRECTION for this develop was: \"{}\". A recipe that follows it is doing what \
+it was asked to do — do NOT revise it for following the direction; DO revise it if it ignores the \
+direction or breaks the image while following it.\n",
+            BoundedUntrustedText::new(d, 512, &[])
+        ),
+        None => String::new(),
+    };
     Ok(format!(
         "You are a photo-edit QA verifier. You do NOT see the image — judge ONLY from the data below.\n\
+{strength}{direction}\
 Decide whether this proposed RAW develop recipe is both SAFE and COMMITTED enough to apply. A \
 finished photograph is the goal, NOT timidity. Check, concretely:\n\
 - every slider is within its documented range (exposure_ev -5..5; most sliders -100..100; sharpening 0..150; confidence 0..1);\n\
 - adjustments are consistent with the metadata + histogram:\n\
   * do NOT push exposure/whites further INTO already-clipping highlights, and do NOT crush detail already sitting at the floor — but a few percent of intentional highlight/shadow clipping is normal and fine for a finished look;\n\
   * large, decisive moves are GOOD when the histogram supports them (a flat, low-contrast histogram wants real contrast or an S-curve; a muddy image wants a committed black point). Do NOT penalise a move just for being large;\n\
-- CONVERSELY, REVISE a recipe that is too FLAT or TIMID for a finished result: near-zero contrast with no tonal anchor (no S-curve, empty tone_curve, ~0 contrast), or every slider hugging 0 while the histogram clearly has tonal room. Tell it to commit — add contrast / an S-curve, set the white and black points, shape the subject with a dodge/burn mask;\n\
-- SYMMETRICALLY, REVISE a recipe that is OVER-COOKED: contrast applied BOTH as a high Contrast slider AND a strong tone_curve S (double contrast — pick one), blacks slammed so negative they crush detail the histogram shows is present, whites blown past the data, or vibrance+saturation+clarity piled together into a cartoonish look. A finished grade is committed but RESTRAINED, not maximal;\n\
+{flat}{cooked}\
 - the rationale matches the numbers and confidence is adequate to auto-apply.\n\n\
 METADATA: {meta_json}\n\
 HISTOGRAM: {hist}\n\
 PROPOSED RECIPE:\n{recipe_json}\n\n\
 Output ONLY the JSON object: no reasoning, no preamble, no markdown fence. Your entire reply must start with '{{' and end with '}}'. Shape:\n\
 {{\"decision\":\"accept\"|\"revise\"|\"reject\",\"reasons\":[\"short reason\", ...],\"revised_hint\":\"a short instruction for the next attempt if revise/reject, else null\"}}",
+        strength = strength,
+        direction = direction,
+        flat = verify_flat_clause(intent.strength.tier()),
+        cooked = verify_cooked_clause(intent.strength.tier()),
         meta_json = meta_json,
         hist = hist_summary(hist),
         recipe_json = recipe_json,
@@ -1374,6 +1494,282 @@ pub(crate) fn parse_verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The strength axis's INTEGRATION contract (R23-3, feedback #5): all SIX
+    /// gates read the axis, checked from one place.
+    ///
+    /// Each gate has its own unit test asserting WHAT it says at each band; this
+    /// one asserts only that none of them is deaf — because the failure mode is
+    /// systemic, not local. Five bolder gates and one unchanged gate produce a
+    /// develop as timid as before (the verifier revises it back, or `temper`
+    /// compresses it back), so "a gate stopped reading the axis" must fail a test
+    /// even when that gate's own wording assertions still pass.
+    ///
+    /// NOT covered here (and honestly out of reach without a paid call and a
+    /// fixture RAW): that `pipeline::produce_recipe` hands each gate `req.strength`
+    /// rather than a literal. The compiler makes every gate DEMAND the value —
+    /// there is no defaultable path into any of the six — and the shell tests
+    /// pin the GUI/CLI/web ends; see the round's notes.
+    #[test]
+    fn every_one_of_the_six_strength_gates_reads_the_axis() {
+        let calib = GradeStrength::calibrated();
+        let bold = GradeStrength::new(0.9);
+        let meta = Meta {
+            make: "T".into(),
+            model: "T".into(),
+            lens: None,
+            iso: Some(100),
+            shutter: None,
+            aperture: None,
+            focal_length_mm: None,
+            exposure_bias_ev: None,
+            date_time: None,
+            width: 10,
+            height: 10,
+            as_shot_wb_coeffs: [1.0; 4],
+        };
+        let hist = Histogram {
+            luma: vec![1; 256],
+            r: vec![1; 256],
+            g: vec![1; 256],
+            b: vec![1; 256],
+            clip_black_pct: 0.0,
+            // Drives the heuristic's highlight recovery to its cap, which is the
+            // only place gate 6 can show a difference.
+            clip_white_pct: 12.0,
+            sample_pixels: 256,
+        };
+
+        // GATE 1 — the proposer prompt. Asserted on the tier-sensitive CLAUSES
+        // and on the assembled prompt CONTAINING them, never on whole-prompt
+        // inequality: the prompt also echoes the dial position, so a frozen tier
+        // would still produce two different strings (probed — the coarse check
+        // passed the mutation).
+        let prompt = |s| {
+            super::openai::propose_instruction(
+                "{}",
+                "hist",
+                &ProposeContext { strength: s, ..Default::default() },
+            )
+        };
+        for s in [calib, bold] {
+            let text = prompt(s);
+            for clause in [
+                super::openai::strength_clause(s),
+                super::openai::look_coverage_clause(s.tier()).to_string(),
+                super::openai::mixer_restraint_clause(s.tier()).to_string(),
+            ] {
+                assert!(
+                    text.contains(clause.trim()),
+                    "gate 1: the prompt does not carry its own strength clause at {}",
+                    s.get()
+                );
+            }
+        }
+        assert_ne!(
+            super::openai::strength_clause(calib),
+            super::openai::strength_clause(bold),
+            "gate 1a (restraint prose) is deaf"
+        );
+        assert_ne!(
+            super::openai::look_coverage_clause(calib.tier()),
+            super::openai::look_coverage_clause(bold.tier()),
+            "gate 1b (colour-control coverage) is deaf"
+        );
+        assert_ne!(
+            super::openai::mixer_restraint_clause(calib.tier()),
+            super::openai::mixer_restraint_clause(bold.tier()),
+            "gate 1c (mixer restraint) is deaf"
+        );
+        assert_ne!(
+            super::openai::guardrail_pair(calib),
+            super::openai::guardrail_pair(bold),
+            "gate 1d (numeric guardrails) is deaf"
+        );
+
+        // GATE 2 — `EditRecipe::temper`'s soft caps.
+        let tempered = |s| {
+            let mut r = EditRecipe { shadows: 95.0, ..Default::default() };
+            r.temper(s);
+            r.shadows
+        };
+        assert_ne!(tempered(calib), tempered(bold), "gate 2 (temper) is deaf");
+
+        // GATE 3 — the verifier's two bands. Same shape as gate 1, and for the
+        // same probed reason: the intent block echoes the dial position, so
+        // whole-prompt inequality would survive both bands being frozen.
+        let verify = |s| {
+            build_verify_prompt(
+                &EditRecipe::default(),
+                &meta,
+                &hist,
+                &GradeIntent { strength: s, direction: None },
+            )
+            .unwrap()
+        };
+        for s in [calib, bold] {
+            let text = verify(s);
+            assert!(
+                text.contains(verify_flat_clause(s.tier()).trim())
+                    && text.contains(verify_cooked_clause(s.tier()).trim()),
+                "gate 3: the verify prompt does not carry its own bands at {}",
+                s.get()
+            );
+        }
+        assert_ne!(
+            verify_flat_clause(calib.tier()),
+            verify_flat_clause(bold.tier()),
+            "gate 3a (too-FLAT band) is deaf"
+        );
+        assert_ne!(
+            verify_cooked_clause(calib.tier()),
+            verify_cooked_clause(bold.tier()),
+            "gate 3b (OVER-COOKED band) is deaf"
+        );
+
+        // GATE 4 — the visual judge's rubric.
+        let judge = |s| {
+            super::judge::task_instruction(
+                JudgeTask::Develop,
+                Some(GradeIntent { strength: s, direction: None }),
+            )
+        };
+        assert_ne!(judge(calib), judge(bold), "gate 4 (visual judge) is deaf");
+
+        // GATE 5 — the style reference's ceiling/floor wording. `render_reference`
+        // reads the EXEMPLARS only (settings / curve / families / tag), so the
+        // index's own version and feature statistics are inert here and stay
+        // empty rather than pretending to be a real index.
+        let idx = crate::style::StyleIndex {
+            version: 0,
+            mean: Vec::new(),
+            std: Vec::new(),
+            exemplars: Vec::new(),
+            source_dir: None,
+        };
+        let ex = crate::style::StyleExemplar {
+            stem: "x".into(),
+            feat: Vec::new(),
+            tag: "wide/mid/midday/landscape".into(),
+            settings: std::collections::BTreeMap::from([("contrast".to_string(), 15.0)]),
+            curve: Some([6.0, 20.0]),
+            path: None,
+            families: None,
+        };
+        assert_ne!(
+            idx.render_reference(&[&ex], calib),
+            idx.render_reference(&[&ex], bold),
+            "gate 5 (style reference) is deaf"
+        );
+
+        // GATE 6 — the no-AI heuristic fallback.
+        let baseline = |s| HeuristicProposer::default().propose_noted(&hist, s).unwrap().0.highlights;
+        assert_ne!(baseline(calib), baseline(bold), "gate 6 (heuristic fallback) is deaf");
+    }
+
+    /// GATE 3 of the six the strength axis must pass (R23-3, feedback #5).
+    ///
+    /// This gate is the one that made the other five look broken: the verifier
+    /// can return `revise` with a hint, and `produce_recipe` then BUYS a
+    /// revision round with it — so a reviewer told nothing about the target
+    /// pushed every bolder proposal straight back to the timid one. Four
+    /// properties:
+    ///  1. the too-FLAT band TIGHTENS as strength rises (a merely-safe develop
+    ///     becomes a defect at the committed band);
+    ///  2. the OVER-COOKED band RELAXES, but never lets go of the BROKEN-data
+    ///     faults, which are the same measured cases at every strength;
+    ///  3. the target strength is stated, and the photographer's own direction
+    ///     with it — `docs/ARCHITECTURE.md` promised "consistent with metadata &
+    ///     intent" while this role had no access to the intent at all;
+    ///  4. the intent block sits ABOVE the checklist it modifies (the ordering
+    ///     R23-1 already had to fix in the proposer prompt).
+    #[test]
+    fn the_verify_prompt_moves_both_bands_with_the_strength_axis() {
+        let meta = Meta {
+            make: "T".into(),
+            model: "T".into(),
+            lens: None,
+            iso: Some(100),
+            shutter: None,
+            aperture: None,
+            focal_length_mm: None,
+            exposure_bias_ev: None,
+            date_time: None,
+            width: 10,
+            height: 10,
+            as_shot_wb_coeffs: [1.0; 4],
+        };
+        let hist = Histogram {
+            luma: vec![1; 256],
+            r: vec![1; 256],
+            g: vec![1; 256],
+            b: vec![1; 256],
+            clip_black_pct: 0.0,
+            clip_white_pct: 0.0,
+            sample_pixels: 256,
+        };
+        let at = |s: f32, d: Option<&str>| {
+            build_verify_prompt(
+                &EditRecipe::default(),
+                &meta,
+                &hist,
+                &GradeIntent { strength: GradeStrength::new(s), direction: d },
+            )
+            .expect("the verify prompt builds")
+        };
+        let (timid, calib, bold) = (at(0.2, None), at(0.5, None), at(0.9, None));
+
+        // (1) the FLAT band tightens.
+        assert!(
+            !timid.contains("merely SAFE develop is itself the defect")
+                && !calib.contains("merely SAFE develop is itself the defect"),
+            "the strict flat clause must not fire below the committed band"
+        );
+        assert!(bold.contains("merely SAFE develop is itself the defect"), "{bold}");
+        assert!(
+            calib.contains("merely avoids mistakes is not a finished photograph"),
+            "the middle band still pushes past 'no mistakes': {calib}"
+        );
+
+        // (2) the OVER-COOKED band relaxes — and the measured faults never move.
+        assert!(timid.contains("err toward restraint"), "{timid}");
+        assert!(calib.contains("committed but RESTRAINED, not maximal"), "{calib}");
+        assert!(bold.contains("over-cooked means BROKEN, not strong"), "{bold}");
+        assert!(
+            !bold.contains("committed but RESTRAINED, not maximal"),
+            "a bold target cannot also be told to stay restrained: {bold}"
+        );
+        for (name, text) in [("timid", &timid), ("calib", &calib), ("bold", &bold)] {
+            assert!(
+                text.contains("blacks slammed so negative they crush detail")
+                    && text.contains("whites blown past the data"),
+                "the BROKEN-data faults went missing at {name} — those are measured, not taste"
+            );
+            // The flat band's shipped floor survives in every arm too.
+            assert!(text.contains("too FLAT or TIMID for a finished result"), "{name}");
+        }
+
+        // (3) the target, and the direction.
+        assert!(at(0.65, None).contains("strength dial to 65%"), "the dial position is stated");
+        let guided = at(0.65, Some("  make it much moodier  "));
+        assert!(guided.contains("make it much moodier"), "{guided}");
+        assert!(
+            guided.contains("do NOT revise it for following the direction"),
+            "the reviewer must be told the direction is the brief: {guided}"
+        );
+        assert!(
+            !calib.contains("THEIR DIRECTION"),
+            "no direction ⇒ no direction block (an empty quote is worse than none)"
+        );
+        assert!(!at(0.65, Some("   ")).contains("THEIR DIRECTION"), "blank is no direction");
+
+        // (4) ordering: the intent modifies the checklist, so it comes first.
+        let (i, c) = (
+            guided.find("TARGET STRENGTH").expect("stated"),
+            guided.find("Check, concretely").expect("the checklist is there"),
+        );
+        assert!(i < c, "the intent must precede the checklist it modifies");
+    }
 
     /// R12-12: a nested different verdict inside a VALID top-level parse is
     /// the same ambiguity — the direct-parse path must refuse it too.

@@ -167,8 +167,9 @@ impl Advisor for ClaudeProvider {
         recipe: &EditRecipe,
         meta: &Meta,
         hist: &Histogram,
+        intent: &super::GradeIntent,
     ) -> Result<Verdict, AdvisorError> {
-        let prompt = build_verify_prompt(recipe, meta, hist)?;
+        let prompt = build_verify_prompt(recipe, meta, hist, intent)?;
         // No tier configured ⇒ nothing to negotiate, and no second copy of a
         // ~100 KB prompt to hold.
         let Some(effort) = self.effort.as_deref() else {
@@ -475,7 +476,7 @@ mod tests {
             ..Default::default()
         };
         let verdict = provider
-            .verify(&recipe, &fixture_meta(), &fixture_hist())
+            .verify(&recipe, &fixture_meta(), &fixture_hist(), &Default::default())
             .expect("the stand-in answers a valid envelope");
         assert!(matches!(verdict.decision, Decision::Accept));
         let prompt = std::fs::read_to_string(dir.join("prompt.txt")).expect("stdin was written");
@@ -528,14 +529,16 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let prompt = build_verify_prompt(&recipe, &fixture_meta(), &fixture_hist()).unwrap();
+        let prompt =
+            build_verify_prompt(&recipe, &fixture_meta(), &fixture_hist(), &Default::default())
+                .unwrap();
         assert!(
             prompt.len() > 32_767,
             "premise: a caps-level prompt exceeds the argv ceiling (got {})",
             prompt.len()
         );
         let verdict = provider
-            .verify(&recipe, &fixture_meta(), &fixture_hist())
+            .verify(&recipe, &fixture_meta(), &fixture_hist(), &Default::default())
             .expect("an oversized prompt still verifies (argv would refuse at spawn)");
         assert!(matches!(verdict.decision, Decision::Accept));
         let _ = std::fs::remove_dir_all(&dir);
@@ -575,7 +578,7 @@ mod tests {
         };
         let provider = ClaudeProvider { bin, model: "test-model".into(), effort: None };
         let err = provider
-            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist(), &Default::default())
             .expect_err("a flooded stdout is not a verdict");
         let text = err.to_string();
         assert!(
@@ -653,7 +656,7 @@ mod tests {
             effort: Some("xhigh".into()),
         };
         let verdict = provider
-            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist(), &Default::default())
             .expect("an unknown --effort degrades to a run without it");
         assert!(matches!(verdict.decision, Decision::Accept));
         let argv = std::fs::read_to_string(dir.join("argv.txt")).unwrap_or_default();

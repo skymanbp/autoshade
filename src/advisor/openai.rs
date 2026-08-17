@@ -20,6 +20,7 @@ use crate::recipe::{EditRecipe, HSL_BANDS};
 
 use super::catalogue::{self, edit_recipe_schema};
 use super::{hist_summary, strip_code_fence, Advisor, AdvisorError, Preview, ProposeContext};
+use crate::recipe::{GradeStrength, StrengthTier};
 
 pub struct OpenAiProvider {
     api_key: Option<String>,
@@ -43,6 +44,116 @@ impl OpenAiProvider {
     }
 }
 
+/// The numeric tone guardrail the prompt quotes, as a function of strength —
+/// GATE 1a of six (R23-3).
+///
+/// Anchored at the calibration point, and one-sided on purpose: at or below
+/// `GradeStrength::CALIBRATED` it quotes bd3f9d4's measured ±50 / ±35, and above
+/// it the pair opens LINEARLY to ±75 / ±55 at full strength. Nothing on this
+/// axis TIGHTENS the pair below the calibrated numbers, because those came from
+/// real highlight-integrity cases (a recipe that dragged sea foam to grey) —
+/// only the bold half of the dial is new information.
+///
+/// Returned as a pair, not baked into a sentence, so the numbers can be asserted
+/// without matching prose.
+pub(crate) fn guardrail_pair(strength: GradeStrength) -> (f32, f32) {
+    let t = strength.above_calibration();
+    (50.0 + 25.0 * t, 35.0 + 20.0 * t)
+}
+
+/// GATE 1b: the restraint prose that used to be the model's LAST and only word
+/// on how hard to push (openai.rs's unconditional "CALIBRATE THE STRENGTH …
+/// tasteful, restrained" paragraph, f944ef3).
+///
+/// Also carries GATE 5's proposer half — the "MATCH the reference, do NOT exceed
+/// it" clause. That clause was a BINARY consequence of the Style slider being
+/// non-zero: whichever way the user pushed the strength axis, a retrieved
+/// reference re-imposed "do not exceed". At [`StrengthTier::Committed`] the
+/// reference becomes the FLOOR of the range instead of its ceiling, which is
+/// what makes the two sliders independent axes rather than one.
+pub(crate) fn strength_clause(strength: GradeStrength) -> String {
+    let pct = strength.pct();
+    match strength.tier() {
+        // Verbatim the shipped text — the calibrated wording, kept intact so a
+        // low setting is provably "the old behaviour and no more".
+        StrengthTier::Restrained => String::from(
+            "CALIBRATE THE STRENGTH of the grade to a tasteful, restrained finished look; and when a REFERENCE \
+of this photographer's own past edits is provided below, MATCH its level of contrast, tonal depth \
+and saturation — do NOT exceed it. A committed grade is not a maximal one. Concretely: place the \
+black and white points deliberately but do NOT slam them (avoid crushing blacks or blowing whites \
+past the reference habit), and use vibrance, saturation and clarity SPARINGLY — only as much as the \
+reference shows; stacked vibrance+saturation+clarity reads as over-processed. Stay well inside the \
+documented ranges (they are safety bounds, not a target). ",
+        ),
+        StrengthTier::Balanced => format!(
+            "CALIBRATE THE STRENGTH of the grade to a CONFIDENT finished look: the photographer set this \
+develop's strength dial to {pct:.0}% of full (50% = this app's cautious baseline). When a REFERENCE of \
+their own past edits is provided below, match its level of contrast, tonal depth and saturation and \
+treat that level as the CENTRE of your range, not a ceiling. Place the black and white points \
+deliberately, and use vibrance, saturation and clarity purposefully rather than sparingly — but \
+never stack all three at once, which reads as over-processed. Stay inside the documented ranges \
+(they are safety bounds, not a target). "
+        ),
+        StrengthTier::Committed => format!(
+            "CALIBRATE THE STRENGTH of the grade to a BOLD, fully committed finished look: the photographer \
+set this develop's strength dial to {pct:.0}% of full (50% is this app's cautious baseline), so a safe, \
+mild result is the WRONG answer here — commit to a look. When a REFERENCE of their own past edits is \
+provided below, use it as the FLOOR of your range: match its character, and you MAY go further than \
+it in contrast, tonal depth and saturation. Place the black and white points decisively and shape \
+colour with conviction. What boldness does NOT buy is broken data: never crush shadow detail the \
+histogram shows is present, never blow the highlights past the white point, and never stack \
+vibrance+saturation+clarity into a cartoon. Stay inside the documented ranges (they are safety \
+bounds, not a target). "
+        ),
+    }
+}
+
+/// GATE 1c: the "how much colour shaping" pair of sentences.
+///
+/// `Most photos need only a couple of HSL bands or one subtle wheel, if any`
+/// (372a0dc) is the sentence that made the mixer opt-OUT by default. Above the
+/// restrained tier it becomes an explicit per-control DECISION — which is also
+/// where R23-4's `tool_plan` will land, so the two do not contradict each other.
+pub(crate) fn look_coverage_clause(tier: StrengthTier) -> &'static str {
+    match tier {
+        StrengthTier::Restrained => {
+            "Most photos need only a couple of HSL bands or one subtle wheel, if any. "
+        }
+        StrengthTier::Balanced => {
+            "Do not leave the colour controls neutral by DEFAULT: for EACH of `hsl`, `color_grade` \
+and the per-channel curves, decide explicitly whether this photo wants it and say so in the \
+rationale — \"this photo does not need it\" is a valid answer, \"I did not consider it\" is not. "
+        }
+        StrengthTier::Committed => {
+            "Do not leave the colour controls neutral by DEFAULT: for EACH of `hsl`, `color_grade` \
+and the per-channel curves, decide explicitly whether this photo wants it, USE the ones it wants at \
+a strength a viewer can see, and say what you chose and why in the rationale — \"this photo does not \
+need it\" is a valid answer, \"I did not consider it\" is not. "
+        }
+    }
+}
+
+/// GATE 1d: the one sentence that carried the mixer's restraint ("use them the
+/// way the photographer does (sparingly, to MATCH the reference)"). Same
+/// reference-as-ceiling → reference-as-floor flip as [`strength_clause`].
+pub(crate) fn mixer_restraint_clause(tier: StrengthTier) -> &'static str {
+    match tier {
+        StrengthTier::Restrained => {
+            "For deeper LOOK shaping, you may use the colour-mixer controls — but the SAME restraint \
+applies: use them the way the photographer does (sparingly, to MATCH the reference), never to \
+over-saturate. "
+        }
+        StrengthTier::Balanced => {
+            "For deeper LOOK shaping, use the colour-mixer controls the way the photographer does — \
+at the reference's own level where one is provided — without tipping into over-saturation. "
+        }
+        StrengthTier::Committed => {
+            "For deeper LOOK shaping, use the colour-mixer controls decisively: at or beyond the \
+reference's own level where the photo calls for it, stopping short of over-saturation. "
+        }
+    }
+}
+
 /// Assemble the proposer prompt. A named function, not inline text, because
 /// its ORDER is now load-bearing: the photographer's direction comes before
 /// the restraint prose it overrides, and the tests read the assembled string
@@ -50,7 +161,7 @@ impl OpenAiProvider {
 ///
 /// The two untrusted blocks (style reference, reviewer hint) are appended by
 /// the caller, which owns their fences.
-fn propose_instruction(meta_json: &str, hist: &str, ctx: &ProposeContext) -> String {
+pub(super) fn propose_instruction(meta_json: &str, hist: &str, ctx: &ProposeContext) -> String {
     // ROLE + TASK, then the sections R23-1 rearranged: the photographer's own
     // DIRECTION now lands BEFORE the restraint prose (feedback #5 — the
     // generic "restrained / SPARINGLY / ±50" guidance used to be the model's
@@ -84,27 +195,37 @@ so in the rationale. The only exception is each control's hard range in the CONT
 those are safety bounds, and a value outside them is discarded. ",
         );
     }
+    // GATE 1 (R23-3): the restraint prose and its numbers are TEMPLATED on the
+    // strength axis now. Split into named clauses so each band is assertable —
+    // and so the two sentences that must NEVER move with strength (the specular
+    // white rule below, and `temper`'s white-point coupling) stay visibly
+    // unconditional beside the ones that do.
+    instruction.push_str(&strength_clause(ctx.strength));
+    let (tone_pm, point_pm) = guardrail_pair(ctx.strength);
+    instruction.push_str(&format!(
+        "Concretely keep Highlights and Shadows within about ±{tone_pm:.0} and Whites/Blacks within \
+±{point_pm:.0}; reserve larger moves only for a genuinely blown or blocked histogram. "
+    ));
     instruction.push_str(
-        "CALIBRATE THE STRENGTH of the grade to a tasteful, restrained finished look; and when a REFERENCE \
-of this photographer's own past edits is provided below, MATCH its level of contrast, tonal depth \
-and saturation — do NOT exceed it. A committed grade is not a maximal one. Concretely: place the \
-black and white points deliberately but do NOT slam them (avoid crushing blacks or blowing whites \
-past the reference habit), and use vibrance, saturation and clarity SPARINGLY — only as much as the \
-reference shows; stacked vibrance+saturation+clarity reads as over-processed. Stay well inside the \
-documented ranges (they are safety bounds, not a target). \
-Concretely keep Highlights and Shadows within about ±50 and Whites/Blacks within ±35; reserve larger \
-moves only for a genuinely blown or blocked histogram. CRITICAL: recovering highlights must NOT grey \
+        // UNCONDITIONAL at every strength: bd3f9d4 fixed a measured defect here
+        // (Highlights −78.81 with Whites +10.27 greyed the sea foam), not a
+        // matter of taste — the same reason `EditRecipe::temper` does not scale
+        // its white-point coupling.
+        "CRITICAL: recovering highlights must NOT grey \
 out specular whites (sea foam, clouds, sun glints) — if you pull Highlights strongly negative, RAISE \
-Whites enough to keep the white point bright. \
-For deeper LOOK shaping, you may use the colour-mixer controls — but the SAME restraint applies: \
-use them the way the photographer does (sparingly, to MATCH the reference), never to over-saturate. \
-For `hsl`, each axis MUST be an array of EXACTLY 8 numbers in the documented band order (e.g. drop \
+Whites enough to keep the white point bright. ",
+    );
+    instruction.push_str(mixer_restraint_clause(ctx.strength.tier()));
+    instruction.push_str(
+        "For `hsl`, each axis MUST be an array of EXACTLY 8 numbers in the documented band order (e.g. drop \
 blue+aqua luminance to deepen a sky; lift/shift orange for skin). For `color_grade`, keep \
 `blending` at 50 unless you have reason; small saturations (~5..25) read as a tasteful split-tone. \
 Leave any of these NEUTRAL when the photo does not call for them — `hsl` all zeros, `color_grade` \
-wheels at 0 (blending 50), curves empty. Most photos need only a couple of HSL bands or one subtle \
-wheel, if any. \
-Use the `masks` array PROACTIVELY to dodge and burn like a darkroom print: even with NO explicit \
+wheels at 0 (blending 50), curves empty. ",
+    );
+    instruction.push_str(look_coverage_clause(ctx.strength.tier()));
+    instruction.push_str(
+        "Use the `masks` array PROACTIVELY to dodge and burn like a darkroom print: even with NO explicit \
 user request, add 1-2 local masks to lift the subject, hold back a hot sky, or deepen distracting \
 corners when it makes the photo read better. Masks are tonal/colour adjustments through gradient \
 masks — never painting, generating, or adding content. If a global edit alone achieves the look, \
@@ -293,7 +414,9 @@ impl Advisor for OpenAiProvider {
                 dropped.describe()
             ));
         }
-        recipe.temper(); // taste guardrail: couple highlight-recovery to the white point, soft-cap extremes
+        // GATE 2: the same axis that shaped the prompt shapes the soft caps, or
+        // a bolder proposal is compressed straight back to the old ceiling here.
+        recipe.temper(ctx.strength);
         Ok(recipe)
     }
 }
@@ -486,6 +609,97 @@ mod tests {
         assert!(!plain.contains("USER DIRECTION (a specific request"), "{plain}");
         assert!(!plain.contains("THIS DIRECTION OVERRIDES"), "{plain}");
         assert!(plain.contains("the as-shot Kelvin could not be read"), "{plain}");
+    }
+
+    /// GATE 1 of the six the strength axis must pass (R23-3, feedback #5 — "the
+    /// AI is too timid, and the prompt barely moves it").
+    ///
+    /// Four properties, on the ASSEMBLED prompt (a live propose costs a paid
+    /// call):
+    ///  1. the guardrail NUMBERS open up with strength, monotonically, and never
+    ///     tighten below bd3f9d4's measured ±50 / ±35 — the calibration point and
+    ///     everything below it quote exactly the shipped pair;
+    ///  2. the restraint PROSE is a different sentence in each of the three
+    ///     bands (an interpolated adjective is not a thing, so the bands are the
+    ///     mechanism and must be provably distinct);
+    ///  3. the reference clause flips from CEILING ("do NOT exceed it") to FLOOR
+    ///     at the committed band — that clause was the other half of the binary
+    ///     style gate, and leaving it fixed is what made "more personal style"
+    ///     mean "more restraint";
+    ///  4. the do-no-clip rule is UNCONDITIONAL at every strength. It is
+    ///     bd3f9d4's measured defect (greyed sea foam), not a taste dial — the
+    ///     same reason `EditRecipe::temper` never scales its white-point guard.
+    #[test]
+    fn the_prompt_guardrails_and_restraint_prose_follow_the_strength_axis() {
+        let at = |s: f32| {
+            propose_instruction(
+                "{}",
+                "hist",
+                &ProposeContext { strength: GradeStrength::new(s), ..Default::default() },
+            )
+        };
+        let (timid, calib, default, bold) = (at(0.2), at(0.5), at(GradeStrength::DEFAULT), at(0.9));
+
+        // (1) numbers. The calibration point IS the shipped sentence.
+        const SHIPPED: &str = "within about ±50 and Whites/Blacks within ±35";
+        assert!(calib.contains(SHIPPED), "0.5 must quote the calibrated pair: {calib}");
+        assert!(
+            timid.contains(SHIPPED),
+            "nothing on this axis may tighten below the MEASURED pair — only the bold half is new"
+        );
+        assert!(default.contains("within about ±58 and Whites/Blacks within ±41"), "{default}");
+        assert!(bold.contains("within about ±70 and Whites/Blacks within ±51"), "{bold}");
+        // …and the pair function itself is monotone non-decreasing.
+        let pairs: Vec<(f32, f32)> =
+            [0.0, 0.4, 0.5, 0.65, 0.8, 1.0].iter().map(|&s| guardrail_pair(GradeStrength::new(s))).collect();
+        for w in pairs.windows(2) {
+            assert!(w[1].0 >= w[0].0 && w[1].1 >= w[0].1, "guardrails must not tighten: {pairs:?}");
+        }
+        assert_eq!(pairs[2], (50.0, 35.0), "the calibration point is the shipped pair, exactly");
+
+        // (2) three distinct restraint templates, in the right direction.
+        assert!(timid.contains("tasteful, restrained finished look") && timid.contains("SPARINGLY"));
+        assert!(timid.contains("Most photos need only a couple of HSL bands"));
+        assert!(calib.contains("CONFIDENT finished look"), "{calib}");
+        assert!(
+            !calib.contains("SPARINGLY") && !calib.contains("Most photos need only a couple"),
+            "above the restrained band the opt-OUT default must be gone: {calib}"
+        );
+        assert!(calib.contains("decide explicitly whether this photo wants it"));
+        assert!(bold.contains("BOLD, fully committed finished look"), "{bold}");
+        assert!(bold.contains("at a strength a viewer can see"), "{bold}");
+        assert!(timid != calib && calib != bold, "the three bands must not render the same prompt");
+        // The DEFAULT and the calibration point share the Balanced band BY
+        // DESIGN (prose is banded, numbers are continuous), so what separates
+        // them is the numbers and the quoted dial position — nothing else.
+        // Pinned, so a future retune of the band edges notices it is doing that.
+        assert_eq!(
+            GradeStrength::calibrated().tier(),
+            GradeStrength::default().tier(),
+            "0.5 and 0.65 are meant to share a prose band"
+        );
+        assert_eq!(
+            default
+                .replace("±58", "±50")
+                .replace("±41", "±35")
+                .replace("dial to 65% of full", "dial to 50% of full"),
+            calib,
+            "0.5 and 0.65 must differ ONLY in the guardrail numbers and the quoted dial position"
+        );
+
+        // (3) reference: ceiling below the committed band, floor at it.
+        assert!(timid.contains("do NOT exceed it"), "{timid}");
+        assert!(calib.contains("not a ceiling"), "{calib}");
+        assert!(bold.contains("use it as the FLOOR of your range"), "{bold}");
+        assert!(!bold.contains("do NOT exceed it"), "a floor and a ceiling cannot both hold: {bold}");
+
+        // (4) the measured do-no-clip rule holds at EVERY strength.
+        for (name, text) in [("timid", &timid), ("calib", &calib), ("bold", &bold)] {
+            assert!(
+                text.contains("recovering highlights must NOT grey out specular whites"),
+                "the white-point rule went missing at {name} — that is bd3f9d4's defect, not taste"
+            );
+        }
     }
 
     fn cfg_for(url: &str) -> Config {

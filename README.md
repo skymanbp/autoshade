@@ -71,6 +71,16 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   names the shots it actually leaned on in the rationale; an optional switch
   also *shows* the vision model the single most similar past photo (off by
   default — it bills a second image per call).
+- **Grade strength** — the second, independent taste dial (**Strength** in the AI
+  panel, `--strength`): *Style* asks how close to your own past edits, *Strength*
+  asks how committed the result should be. One value drives all six places that
+  used to decide restraint on their own — the proposer prompt's numeric
+  guardrails and wording, the recipe's soft caps, the verifier's two-sided band,
+  the visual judge's rubric, whether a retrieved reference is a ceiling or a
+  floor, and the no-key fallback. `0.50` reproduces every release up to v0.28.0
+  (that is where the guardrails were calibrated); the default `0.65` pushes a
+  little further, and above `0.70` the AI is told to commit. The clipping and
+  white-point safeguards never move with it.
 - **Look matching (reverse-fit)** — `match` takes the same frame twice (your
   source and a finished rendition of it: a `reimagine` output, an exported JPEG,
   any reference of that shot) and *solves* for the `EditRecipe` that reproduces
@@ -133,9 +143,9 @@ Then any of:
 
 ```
 autoshop decode  <src>                       # preview + EXIF + histogram
-autoshop analyze <src> [--guidance "..."]    # AI → recipe.json + .xmp (no render; incl. visual review loop)
+autoshop analyze <src> [--guidance "..."] [--style 0..1] [--strength 0..1]   # AI → recipe.json + .xmp (no render; incl. visual review loop)
 autoshop apply   <src> <recipe.json> -o out  # render a recipe to an image
-autoshop auto    <src> [--denoise] [--guidance "..."]   # analyze + render, end-to-end
+autoshop auto    <src> [--denoise] [--guidance "..."] [--style 0..1] [--strength 0..1]   # analyze + render, end-to-end
 autoshop denoise <src> [--strength 0..1] [--model ...]  # AI denoise → clean 16-bit master
 autoshop batch   <dir> [--render] [--limit N]           # process a whole folder
 autoshop eval    <dir> [--limit N]           # compare AI edits vs your own .xmp

@@ -19,9 +19,9 @@ use autoshop::advisor::Verdict;
 use autoshop::config::Config;
 use autoshop::pipeline::{
     default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe, write_xmp,
-    StyleRequest,
+    GradeRequest,
 };
-use autoshop::recipe::EditRecipe;
+use autoshop::recipe::{EditRecipe, GradeStrength};
 use autoshop::style::StyleIndex;
 
 #[derive(Parser)]
@@ -67,6 +67,12 @@ enum Command {
         /// `style-index`). Omit to use AUTOSHOP_STYLE_STRENGTH (default 0.3).
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
+        /// How COMMITTED the grade should be, 0..1 — a different axis from
+        /// `--style`: 0.5 is the calibrated baseline every guardrail was tuned
+        /// at, and the default 0.65 pushes a little further. Above 0.7 the AI is
+        /// told to commit; the clipping/white-point safeguards never move.
+        #[arg(long, value_parser = unit_interval)]
+        strength: Option<f32>,
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
     Apply {
@@ -92,6 +98,10 @@ enum Command {
         /// `style-index`). Omit for AUTOSHOP_STYLE_STRENGTH (default 0.3).
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
+        /// How COMMITTED the grade should be, 0..1 (see `analyze --strength`);
+        /// default 0.65, and 0.5 is the calibrated baseline.
+        #[arg(long, value_parser = unit_interval)]
+        strength: Option<f32>,
         /// Run AI denoise (SCUNet, GPU) before developing — for high-ISO/astro.
         #[arg(long)]
         denoise: bool,
@@ -270,10 +280,23 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Decode { raw, out } => decode_cmd(&raw, out),
-        Command::Analyze { raw, out, guidance, style } => analyze_cmd(&raw, out, guidance, style),
+        Command::Analyze { raw, out, guidance, style, strength } => {
+            analyze_cmd(&raw, out, guidance, style, strength)
+        }
         Command::Apply { raw, recipe, out } => apply_cmd(&raw, &recipe, &out),
-        Command::Auto { raw, out, guidance, style, denoise, denoise_strength, denoise_model } => {
-            auto_cmd(&raw, out, guidance, style, denoise, denoise_strength, denoise_model)
+        Command::Auto {
+            raw,
+            out,
+            guidance,
+            style,
+            strength,
+            denoise,
+            denoise_strength,
+            denoise_model,
+        } => {
+            auto_cmd(
+                &raw, out, guidance, style, strength, denoise, denoise_strength, denoise_model,
+            )
         }
         Command::Denoise { input, out, strength, model } => denoise_cmd(&input, out, strength, model),
         Command::Batch { dir, render, limit } => batch_cmd(&dir, render, limit),
@@ -452,7 +475,28 @@ fn require_choice(flag: &str, value: &str, allowed: &[&str]) -> Result<()> {
     anyhow::bail!("{flag} must be one of {} (got {value:?})", allowed.join("|"))
 }
 
-fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style: Option<f32>) -> Result<()> {
+/// The two TASTE dials, resolved from `analyze`/`auto`'s flags — ONE place, so
+/// the two single-photo commands can never diverge (R23-3).
+///
+/// `--style` omitted falls back to the configured `AUTOSHOP_STYLE_STRENGTH`, as
+/// it always has. `--strength` omitted is the SHIPPED default (0.65), not the
+/// calibration point: `autoshop analyze` and a double-clicked GUI must develop
+/// the same photo the same way when neither is told otherwise.
+fn analyze_request(style: Option<f32>, strength: Option<f32>, cfg: &Config) -> GradeRequest {
+    GradeRequest {
+        style: style.unwrap_or(cfg.style_strength),
+        send_reference_image: false,
+        strength: GradeStrength::from_optional(strength),
+    }
+}
+
+fn analyze_cmd(
+    raw: &Path,
+    out: Option<PathBuf>,
+    guidance: Option<String>,
+    style: Option<f32>,
+    strength: Option<f32>,
+) -> Result<()> {
     let cfg = Config::load();
     if let Some(o) = &out {
         // Full preflight BEFORE the paid propose+verify (L09#1) — an `-o`
@@ -465,9 +509,9 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     // "adjust current edit" path is a web-UI affordance. judge = true: an
     // explicitly invoked single-photo analyze gets the visual closed loop
     // (batch passes false — spend never multiplies silently).
-    let style = style.unwrap_or(cfg.style_strength);
+    let req = analyze_request(style, strength, &cfg);
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, StyleRequest::strength(style), true)?;
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true)?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
@@ -624,11 +668,13 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // one clap subcommand's own flag set
 fn auto_cmd(
     raw: &Path,
     out: Option<PathBuf>,
     guidance: Option<String>,
     style: Option<f32>,
+    strength: Option<f32>,
     denoise: bool,
     denoise_strength: Option<f32>,
     denoise_model: Option<String>,
@@ -648,11 +694,11 @@ fn auto_cmd(
     pipeline::preflight_out(&out, raw)?;
     image::ImageFormat::from_path(&out)
         .with_context(|| format!("unsupported output format {}", out.display()))?;
-    let style = style.unwrap_or(cfg.style_strength);
+    let req = analyze_request(style, strength, &cfg);
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, StyleRequest::strength(style), true)?;
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true)?;
     let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
@@ -866,6 +912,9 @@ fn match_cmd(
                 &cfg,
                 autoshop::advisor::JudgeImages { reference: &t, candidate: &f },
                 autoshop::advisor::JudgeTask::FitMatch,
+                None,
+                // No grade intent: FitMatch scores how closely two renders
+                // MATCH, a question the strength axis cannot change (R23-3).
                 None,
             )?)
         }))
@@ -1206,7 +1255,7 @@ fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Ver
     // paid vision calls — the closed loop is for the interactive surfaces
     // (review R20-M2).
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, cfg, false, None, None, StyleRequest::strength(cfg.style_strength), false)?;
+        produce_recipe(raw, cfg, false, None, None, GradeRequest::with_style(cfg.style_strength), false)?;
     // A non-Accept verdict may not auto-save (user decision). In a headless
     // batch that means NO sidecars and NO deliverable: the photo stays
     // pending, the caller's summary names it, and a re-run re-attempts it —
@@ -1293,20 +1342,11 @@ fn sparkline(bins: &[u32]) -> String {
 #[cfg(test)]
 mod tests {
 
-    /// L10 preflight family: certain failures refuse at the door.
-    #[test]
-    fn the_cli_preflights_refuse_certain_failures_before_any_paid_work() {
-        use autoshop::config::Config;
-        // Closed-set values (L10-10).
-        assert!(require_choice("--fidelity", "high", &["high", "low"]).is_ok());
-        let e = require_choice("--fidelity", "medium", &["high", "low"])
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("high|low") && e.contains("medium"), "{e}");
-
-        // Missing image key (L10-13) — a config with no key refuses with the
-        // reason, not a late server error.
-        let cfg = Config {
+    /// A keyless, endpoint-less Config — the shape the preflight tests and the
+    /// flag-resolution test both need (no key, so nothing here can reach a
+    /// network or bill anything).
+    fn cfg_fixture() -> autoshop::config::Config {
+        autoshop::config::Config {
             openai_api_key: None,
             openai_model: "m".into(),
             openai_base_url: "http://127.0.0.1:1".into(),
@@ -1327,7 +1367,22 @@ mod tests {
             denoise_cache: String::new(),
             segment_script: String::new(),
             style_strength: 0.5,
-        };
+        }
+    }
+
+    /// L10 preflight family: certain failures refuse at the door.
+    #[test]
+    fn the_cli_preflights_refuse_certain_failures_before_any_paid_work() {
+        // Closed-set values (L10-10).
+        assert!(require_choice("--fidelity", "high", &["high", "low"]).is_ok());
+        let e = require_choice("--fidelity", "medium", &["high", "low"])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("high|low") && e.contains("medium"), "{e}");
+
+        // Missing image key (L10-13) — a config with no key refuses with the
+        // reason, not a late server error.
+        let cfg = cfg_fixture();
         let e = require_image_key(&cfg, "reimagine").unwrap_err().to_string();
         assert!(e.contains("OPENAI_API_KEY"), "{e}");
     }
@@ -1443,6 +1498,43 @@ mod tests {
             ])
             .is_ok()
         );
+
+        // R23-3: the GRADE strength axis is a THIRD 0..=1 flag on this parser,
+        // and it lands on `analyze` and `auto` — the two single-photo commands.
+        // Same door as the others (a NaN dial must not read as "most timid").
+        for bad in ["NaN", "inf", "2", "-0.1"] {
+            for cmd in ["analyze", "auto"] {
+                assert!(
+                    Cli::try_parse_from(["autoshop", cmd, "p.arw", "--strength", bad]).is_err(),
+                    "{cmd} --strength {bad} must be refused"
+                );
+            }
+        }
+        for cmd in ["analyze", "auto"] {
+            let cli = Cli::try_parse_from(["autoshop", cmd, "p.arw", "--strength", "0.9"])
+                .unwrap_or_else(|e| panic!("{cmd} --strength 0.9 must parse: {e}"));
+            let got = match cli.command {
+                Command::Analyze { strength, .. } | Command::Auto { strength, .. } => strength,
+                _ => panic!("`{cmd} --strength` parsed as some other subcommand"),
+            };
+            assert_eq!(got, Some(0.9), "{cmd} must carry the value, not drop it");
+        }
+        // …and the flag actually decides the request `analyze`/`auto` build —
+        // the PRODUCTION resolver, shared by both commands.
+        let cfg = autoshop::config::Config { style_strength: 0.3, ..cfg_fixture() };
+        let plain = analyze_request(None, None, &cfg);
+        assert_eq!(plain.style, 0.3, "omitted --style keeps AUTOSHOP_STYLE_STRENGTH");
+        assert_eq!(
+            plain.strength.get(),
+            GradeStrength::DEFAULT,
+            "omitted --strength is the SHIPPED default (0.65) — the CLI and a double-clicked \
+             GUI must develop the same photo the same way when neither is told otherwise"
+        );
+        let dialled = analyze_request(Some(0.1), Some(0.9), &cfg);
+        assert_eq!((dialled.style, dialled.strength.get()), (0.1, 0.9), "no axis swap");
+        assert!(!dialled.send_reference_image, "every non-GUI surface stays on the text reference");
+        // 0.5 is the calibration point, one flag away.
+        assert_eq!(analyze_request(None, Some(0.5), &cfg).strength, GradeStrength::calibrated());
     }
     /// L09#1 ordering: with a nonexistent RAW, a bad `-o` must fail on the
     /// OUTPUT (pre-pay preflight), never on decode or a paid call.
@@ -1451,13 +1543,14 @@ mod tests {
         let dir = std::env::temp_dir()
             .join(format!("autoshop-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None)
+        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "analyze: {e}");
         let e = auto_cmd(
             Path::new("no-such.arw"),
             Some(dir.join("x.xyz")),
+            None,
             None,
             None,
             false,

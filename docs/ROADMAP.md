@@ -1274,7 +1274,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   master_loads（冷变体母版解码完成曾滞留到下次输入）；F7 batch fail>0 /
   eval 全败改非零退出；F8 match -o==xmp_target 先拒（曾两行 success 但
   产物被覆盖）；F9 match 清像素链失败改硬错误（曾静默留旧 master 链）；
-  F10 unit_interval 解析器护 4 个 0..=1 旗标（--style NaN 曾静默禁用）；
+  F10 unit_interval 解析器护当时 4 个 0..=1 旗标（--style NaN 曾静默禁用；
+  R23-3 起共 6 个——analyze/auto 各加 --strength）；
   F11 中文两处（曲线标题丢近似告警、提供商范围漏填充/重绘）；F12 XMP
   曲线越界坐标改判 unparsable 整组拒绝+披露（"999,-5"曾饱和成近黑单点
   曲线并随保存持久化）；F13 色轮 hue 在场不可读→成对清零 sat（bogus 曾

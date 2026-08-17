@@ -5256,7 +5256,7 @@ mod tests {
             ..Default::default()
         };
         r.clamp();
-        r.temper();
+        r.temper(crate::recipe::GradeStrength::calibrated());
         let lum = |p: [f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
         let mut foam = vec![[0.90_f32, 0.93, 0.96]];
         apply_develop(&mut foam, 1, 1, &r);

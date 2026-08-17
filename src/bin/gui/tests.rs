@@ -4240,6 +4240,78 @@
         );
     }
 
+    /// R23-3 (feedback #5, "the AI is too timid + give me a strength slider"):
+    /// the desktop SHELL of the grade-strength axis.
+    ///
+    /// Four properties, because a slider that fails any one of them is
+    /// decoration: it must be DRAWN beside Style (the two are one pair of axes,
+    /// and the reported problem was that only the style half existed), start and
+    /// persist at ONE constant shared with the lib, light the section ● when
+    /// moved, and actually reach the request the analyze worker builds.
+    #[test]
+    fn the_grade_strength_slider_sits_beside_style_and_rides_the_analyze_request() {
+        // One definition, three consumers (app default / pref default / the
+        // slider's reset target) — the R22 #16 rule, applied to the new dial.
+        assert_eq!(AutoshopApp::default().grade_strength, GRADE_STRENGTH_DEFAULT);
+        assert_eq!(
+            Prefs::default().grade_strength, GRADE_STRENGTH_DEFAULT,
+            "a prefs file written before this key existed must decode to the SAME number — \
+             serde's own f32 default (0.0) would be the most TIMID setting on a dial that \
+             exists because the AI was too timid"
+        );
+        assert_eq!(
+            GRADE_STRENGTH_DEFAULT,
+            autoshop::recipe::GradeStrength::DEFAULT,
+            "the GUI must not own a second copy of this number — the CLI and the web body \
+             default through the lib's constant"
+        );
+        assert_eq!(GRADE_STRENGTH_DEFAULT, 0.65, "user decision 2026-08-17 ⑦");
+
+        // DRAWN — at the DEFAULT 320 px side panel, which is the whole point:
+        // `tall_frame` builds that width, and before this round the two dials
+        // shared the verbs' row, where `egui::Slider`'s own nested (non-wrapping)
+        // horizontal overflowed the clip rect. The row rendered Style's value
+        // "30" with the word "Style" itself off-panel, and a second dial there
+        // was invisible outright. Assert the LABELS, not just the values: the
+        // label is the half that was being clipped.
+        let mut app = AutoshopApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        for label in ["Style", "Strength", "30", "65"] {
+            assert!(
+                seen.iter().any(|t| t == label),
+                "「{label}」 was not drawn in a 320 px panel: {seen:?}"
+            );
+        }
+
+        // The ● follows it — including a move DOWN to the calibration point,
+        // which is still a move away from the shipped default.
+        assert!(!app.ai_section_active(), "a fresh AI area has no state to flag");
+        app.grade_strength = autoshop::recipe::GradeStrength::CALIBRATED;
+        assert!(
+            app.ai_section_active(),
+            "0.50 is the calibration point, not the default — moving there IS AI state"
+        );
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "AI  ●"),
+            "a moved Strength slider must light the collapsed header's ●: {seen:?}"
+        );
+        app.grade_strength = GRADE_STRENGTH_DEFAULT;
+        assert!(!app.ai_section_active(), "back at the default ⇒ back to no dot");
+
+        // …and it reaches the worker's request, on its OWN axis (the two dials
+        // must not be able to swap: `style` is a bare fraction, `strength` a
+        // `GradeStrength`, so a transposed pair would not compile).
+        let app = AutoshopApp { grade_strength: 0.9, style_strength: 0.2, ..Default::default() };
+        let req = autoshop::pipeline::GradeRequest {
+            style: app.style_strength,
+            send_reference_image: app.send_style_ref_image,
+            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+        };
+        assert_eq!(req.strength.get(), 0.9);
+        assert_eq!(req.style, 0.2);
+    }
+
     /// R22 #16d: the Local Masks header's ● was `n_masks > 0` while every ROW
     /// dot below it used the engine's own rule. So a list of muted or parked
     /// masks — no adjustment set, or the eye off — claimed an active local
@@ -4439,13 +4511,14 @@
         // …and the request the analyze worker builds carries the flag, so the
         // checkbox cannot become decoration.
         let app = AutoshopApp { send_style_ref_image: true, ..Default::default() };
-        let req = autoshop::pipeline::StyleRequest {
-            strength: app.style_strength,
+        let req = autoshop::pipeline::GradeRequest {
+            style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
+            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
         };
         assert!(req.send_reference_image);
         assert!(
-            !autoshop::pipeline::StyleRequest::strength(0.65).send_reference_image,
+            !autoshop::pipeline::GradeRequest::with_style(0.65).send_reference_image,
             "every non-GUI surface stays on the text reference"
         );
     }

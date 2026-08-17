@@ -41,13 +41,14 @@ impl Advisor for OpenAiVerifier {
         recipe: &EditRecipe,
         meta: &Meta,
         hist: &Histogram,
+        intent: &super::GradeIntent,
     ) -> Result<Verdict, AdvisorError> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             AdvisorError::Missing(
                 "analysis API key (set it in Settings, or AUTOSHOP_ANALYSIS_API_KEY)".into(),
             )
         })?;
-        let prompt = build_verify_prompt(recipe, meta, hist)?;
+        let prompt = build_verify_prompt(recipe, meta, hist, intent)?;
         let mut body = json!({
             "model": self.model,
             "messages": [{ "role": "user", "content": prompt }],
@@ -197,7 +198,7 @@ mod tests {
             effort: None,
         };
         let e = verifier
-            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist(), &Default::default())
             .expect_err("finish_reason=tool_calls refuses");
         assert!(format!("{e}").contains("cut off"), "{e}");
         join_stub(handle);
@@ -216,7 +217,7 @@ mod tests {
             effort: None,
         };
         let e = verifier
-            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist(), &Default::default())
             .expect_err("finish_reason=length refuses");
         assert!(format!("{e}").contains("cut off"), "{e}");
         join_stub(handle);
@@ -252,7 +253,7 @@ mod tests {
             effort: Some("high".into()),
         };
         let verdict = verifier
-            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist())
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist(), &Default::default())
             .expect("both refusals are absorbed and the third POST verifies");
         assert!(matches!(verdict.decision, Decision::Accept));
         join_stub(handle);

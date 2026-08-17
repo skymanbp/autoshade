@@ -597,10 +597,25 @@ impl StyleIndex {
     }
 
     /// Render retrieved exemplars as a SOFT reference block for the advisor prompt.
-    pub fn render_reference(&self, ex: &[&StyleExemplar]) -> Option<String> {
+    ///
+    /// `strength` is GATE 5 of the strength axis (R23-3): this block's two
+    /// "…and not stronger / do not exceed it" clauses were the OTHER half of the
+    /// binary style gate. Whatever the strength dial said, retrieving a reference
+    /// re-imposed a ceiling — so the two sliders were not independent axes, and a
+    /// user who built a library got MORE restraint by asking for more personal
+    /// style. At [`StrengthTier::Committed`] the same measured habits become a
+    /// FLOOR instead. The NUMBERS in this block never change: they are what the
+    /// photographer actually did, and rewriting a measurement to match a dial
+    /// would be a fabrication.
+    pub fn render_reference(
+        &self,
+        ex: &[&StyleExemplar],
+        strength: crate::recipe::GradeStrength,
+    ) -> Option<String> {
         if ex.is_empty() {
             return None;
         }
+        let bold = strength.tier() == crate::recipe::StrengthTier::Committed;
         let lines: Vec<String> = ex
             .iter()
             .map(|e| {
@@ -619,9 +634,14 @@ impl StyleIndex {
             let n = curves.len() as f32;
             let bl = curves.iter().map(|c| c[0]).sum::<f32>() / n;
             let ss = curves.iter().map(|c| c[1]).sum::<f32>() / n;
+            let aim = if bold {
+                "— shape your `tone_curve` at least this strongly; you MAY go further."
+            } else {
+                "— shape your `tone_curve` to a similar gentleness, not stronger."
+            };
             format!(
                 "  THEIR TYPICAL MASTER TONE CURVE: black-lift {bl:+.0}, S-strength {ss:+.0} \
-(0..255 scale) — shape your `tone_curve` to a similar gentleness, not stronger."
+(0..255 scale) {aim}"
             )
         } else {
             String::new()
@@ -638,11 +658,15 @@ impl StyleIndex {
             let mean = |f: fn(&crate::eval::FamilySummary) -> f32| {
                 fams.iter().map(f).sum::<f32>() / n
             };
+            let aim = if bold {
+                "treat this LEVEL of colour shaping as your FLOOR — you may go beyond it."
+            } else {
+                "match this LEVEL of colour shaping, do not exceed it."
+            };
             format!(
                 "  THEIR TYPICAL COLOUR SHAPING ({} of {} similar shots): HSL mixer mean |hue| \
 {:.0}, |sat| {:.0}, |lum| {:.0} across the 8 bands; colour-grade strongest wheel saturation \
-{:.0}, mean |wheel lum| {:.0}; per-channel RGB curves on {:.1} of 3 channels — match this LEVEL \
-of colour shaping, do not exceed it.",
+{:.0}, mean |wheel lum| {:.0}; per-channel RGB curves on {:.1} of 3 channels — {aim}",
                 fams.len(),
                 ex.len(),
                 mean(|f| f.hsl[0]),
@@ -1053,7 +1077,7 @@ mod tests {
             exemplars: vec![],
             source_dir: None,
         };
-        let r = idx.render_reference(&[&ex]).unwrap();
+        let r = idx.render_reference(&[&ex], crate::recipe::GradeStrength::calibrated()).unwrap();
         assert!(r.contains("TYPICAL MASTER TONE CURVE"), "{r}");
         assert!(r.contains("S-strength +20"), "{r}");
     }
@@ -1164,14 +1188,70 @@ mod tests {
             exemplars: vec![],
             source_dir: None,
         };
-        let r = idx.render_reference(&[&with, &without]).unwrap();
+        let r = idx.render_reference(&[&with, &without], crate::recipe::GradeStrength::calibrated()).unwrap();
         assert!(r.contains("THEIR TYPICAL COLOUR SHAPING (1 of 2 similar shots)"), "{r}");
         assert!(r.contains("|sat| 18"), "{r}");
         assert!(r.contains("strongest wheel saturation 20"), "{r}");
         assert!(r.contains("on 2.0 of 3 channels"), "{r}");
         // No summary anywhere = no claim.
-        let plain = idx.render_reference(&[&without]).unwrap();
+        let plain = idx.render_reference(&[&without], crate::recipe::GradeStrength::calibrated()).unwrap();
         assert!(!plain.contains("COLOUR SHAPING"), "{plain}");
+    }
+
+    /// GATE 5 of the six the strength axis must pass (R23-3, feedback #5).
+    ///
+    /// This block's two "…and not stronger / do not exceed it" clauses were the
+    /// other half of the binary style gate: retrieving a reference re-imposed a
+    /// CEILING no matter what the strength dial said, so asking for more personal
+    /// style bought more restraint (and a user with a library could not ask for a
+    /// bolder grade at all). At the committed band the same measured habits
+    /// become a FLOOR — while the NUMBERS stay identical, because they are what
+    /// the photographer actually did and a dial must not rewrite a measurement.
+    #[test]
+    fn the_style_reference_flips_from_a_ceiling_to_a_floor_on_the_strength_axis() {
+        use crate::recipe::GradeStrength;
+        let ex = StyleExemplar {
+            stem: "x".into(),
+            feat: vec![0.0; NDIM],
+            tag: "wide/mid/midday/landscape".into(),
+            settings: BTreeMap::from([("contrast".to_string(), 15.0)]),
+            curve: Some([6.0, 20.0]),
+            path: None,
+            families: Some(crate::eval::FamilySummary {
+                hsl: [2.0, 18.0, 6.0],
+                grade: [20.0, 4.0],
+                rgb_curves: 2,
+            }),
+        };
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![],
+            source_dir: None,
+        };
+        let at = |s: f32| idx.render_reference(&[&ex], GradeStrength::new(s)).unwrap();
+        let (calib, default, bold) = (at(0.5), at(GradeStrength::DEFAULT), at(0.9));
+
+        // Below the committed band: the shipped ceiling wording, verbatim.
+        for (name, text) in [("calibrated", &calib), ("default", &default)] {
+            assert!(text.contains("to a similar gentleness, not stronger."), "{name}: {text}");
+            assert!(text.contains("do not exceed it."), "{name}: {text}");
+            assert!(!text.contains("FLOOR"), "{name} must not raise the floor: {text}");
+        }
+        // At it: the same habit read as a floor.
+        assert!(bold.contains("at least this strongly; you MAY go further."), "{bold}");
+        assert!(bold.contains("treat this LEVEL of colour shaping as your FLOOR"), "{bold}");
+        assert!(!bold.contains("do not exceed it"), "a floor and a ceiling cannot both hold: {bold}");
+
+        // The MEASURED numbers are byte-identical in both — this is a wording
+        // axis, never a licence to restate the photographer's own history.
+        for text in [&calib, &bold] {
+            assert!(text.contains("black-lift +6, S-strength +20"), "{text}");
+            assert!(text.contains("|sat| 18"), "{text}");
+            assert!(text.contains("strongest wheel saturation 20"), "{text}");
+            assert!(text.contains("contrast +15"), "{text}");
+        }
     }
 
     #[test]

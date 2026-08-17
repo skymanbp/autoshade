@@ -31,7 +31,8 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 
-use super::{extract_output_text, AdvisorError, BoundedUntrustedText, Decision};
+use super::{extract_output_text, AdvisorError, BoundedUntrustedText, Decision, GradeIntent};
+use crate::recipe::StrengthTier;
 
 /// What the judge is being asked to score — picks the prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,8 +81,52 @@ fn judgement_schema() -> Value {
     })
 }
 
-fn task_instruction(task: JudgeTask) -> &'static str {
-    match task {
+/// GATE 4 of the strength axis (R23-3): what the DEVELOP rubric adds once it
+/// knows what the photographer asked for.
+///
+/// The judge's own "committed but not slammed" (06fb8c1) is a fixed taste target
+/// that scored a deliberately bold develop DOWN — and since the judge can buy a
+/// guided revision, that verdict does not merely mis-report, it re-timid-ifies
+/// the result. `None` (the FitMatch task) adds nothing: that task scores how
+/// closely one render matches another, a question strength has no bearing on.
+fn intent_rubric(intent: Option<GradeIntent<'_>>) -> String {
+    let Some(i) = intent else { return String::new() };
+    let tier_line = match i.strength.tier() {
+        StrengthTier::Restrained => {
+            "At this setting restraint is a virtue: a quiet, clean, technically faultless develop \
+should score well, and a strong one should lose points for over-cooking."
+        }
+        StrengthTier::Balanced => {
+            "At this setting score a confident, finished develop well, and mark down BOTH a timid, \
+flat result AND an over-cooked one."
+        }
+        StrengthTier::Committed => {
+            "At this setting a timid or merely-safe develop must NOT score well however clean it \
+is — the photographer asked for a bold grade, and a mild result fails the brief. Reserve \
+'over-cooked' for BROKEN data (crushed shadows, blown speculars, cartoonish colour), never for \
+strength alone."
+        }
+    };
+    let direction = match i.direction.map(str::trim).filter(|d| !d.is_empty()) {
+        // Bounded and fenced: the direction is the user's own text, but it lands
+        // in a prompt whose reply is parsed — same treatment the recipe context
+        // below gets.
+        Some(d) => format!(
+            "\n\nTHE PHOTOGRAPHER'S OWN DIRECTION for this develop was, as untrusted data: \"{}\". \
+Judge whether IMAGE 2 DELIVERS it; never mark IMAGE 2 down for following it.",
+            BoundedUntrustedText::new(d, 512, &[])
+        ),
+        None => String::new(),
+    };
+    format!(
+        "\n\nTARGET STRENGTH: the photographer set this develop's strength dial to {:.0}% of full \
+(50% = this app's calibrated baseline). {tier_line}{direction}",
+        i.strength.pct()
+    )
+}
+
+pub(super) fn task_instruction(task: JudgeTask, intent: Option<GradeIntent<'_>>) -> String {
+    let base = match task {
         JudgeTask::Develop => {
             "You are a master photo colourist acting as an impartial JUDGE. IMAGE 1 is the \
              untouched camera preview; IMAGE 2 is the SAME frame developed by a proposed recipe \
@@ -116,7 +161,8 @@ fn task_instruction(task: JudgeTask) -> &'static str {
              warmer than the target; sky noticeably less saturated'). hint: one instruction \
              that would close the largest gap, else null."
         }
-    }
+    };
+    format!("{base}{}", intent_rubric(intent))
 }
 
 /// The two frames of one judgement, NAMED — a positional (reference,
@@ -136,11 +182,17 @@ pub struct JudgeImages<'a> {
 /// `context_json` (Develop: the proposed recipe) rides as labelled untrusted
 /// data so the hint can name real controls. Needs the image-role key — the
 /// caller decides whether a missing key degrades (a note) or errors.
+///
+/// `intent` is GATE 4 of the strength axis (R23-3): `Some` for the Develop task,
+/// `None` for FitMatch, whose question ("how closely do these two renders match")
+/// strength cannot change. An `Option` rather than a defaulted value on purpose —
+/// FitMatch passing a strength would silently invent a rubric it does not have.
 pub fn judge_pair(
     cfg: &Config,
     images: JudgeImages<'_>,
     task: JudgeTask,
     context_json: Option<&str>,
+    intent: Option<GradeIntent<'_>>,
 ) -> Result<Judgement, AdvisorError> {
     let key = cfg
         .openai_api_key
@@ -149,7 +201,7 @@ pub fn judge_pair(
     let enc = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
     let (b_ref, b_cand) = (enc(images.reference), enc(images.candidate));
 
-    let mut instruction = task_instruction(task).to_string();
+    let mut instruction = task_instruction(task, intent);
     if let Some(ctx) = context_json {
         // Same trust framing as the verifier's recipe field: data, not
         // instructions — the recipe text passed through a model once already.
@@ -290,6 +342,7 @@ mod tests {
             JudgeImages { reference: b"REFJPEG", candidate: b"CANDJPEG" },
             JudgeTask::Develop,
             Some(r#"{"exposure_ev":0.3}"#),
+            None,
         )
         .expect("a clean judgement parses");
         join_stub(handle);
@@ -323,13 +376,81 @@ mod tests {
     /// for a LOOK match (ignoring content), never the develop rubric.
     #[test]
     fn the_two_tasks_ask_different_questions() {
-        let dev = task_instruction(JudgeTask::Develop);
-        let fit = task_instruction(JudgeTask::FitMatch);
+        let dev = task_instruction(JudgeTask::Develop, None);
+        let fit = task_instruction(JudgeTask::FitMatch, None);
         assert!(dev.contains("finished"), "develop judges a finished photograph");
         assert!(fit.contains("TARGET") && fit.contains("judge the LOOK only"));
         assert!(
             !fit.contains("finished photograph"),
             "the fit judge scores the match, not develop quality"
+        );
+    }
+
+    /// GATE 4 of the six the strength axis must pass (R23-3, feedback #5).
+    ///
+    /// The judge's verdict BUYS a guided revision (`pipeline::produce_recipe`),
+    /// so a rubric with a fixed taste target ("committed but not slammed") does
+    /// not merely mis-score a deliberately bold develop — it pays to undo it.
+    /// Asserted on the assembled instruction AND on the wire, because a rubric
+    /// the request does not carry is not a rubric.
+    #[test]
+    fn the_develop_rubric_carries_the_target_strength_and_the_direction() {
+        let dev = |s: f32, d: Option<&str>| {
+            task_instruction(
+                JudgeTask::Develop,
+                Some(GradeIntent {
+                    strength: crate::recipe::GradeStrength::new(s),
+                    direction: d,
+                }),
+            )
+        };
+        assert!(dev(0.2, None).contains("restraint is a virtue"), "{}", dev(0.2, None));
+        assert!(dev(0.5, None).contains("mark down BOTH a timid"), "{}", dev(0.5, None));
+        let bold = dev(0.9, None);
+        assert!(bold.contains("must NOT score well however clean it is"), "{bold}");
+        assert!(
+            bold.contains("Reserve \n'over-cooked' for BROKEN data")
+                || bold.contains("Reserve 'over-cooked' for BROKEN data"),
+            "{bold}"
+        );
+        assert!(dev(0.65, None).contains("strength dial to 65% of full"));
+        // The base rubric survives in every band — the intent ADDS, never replaces.
+        for s in [0.2, 0.5, 0.9] {
+            assert!(dev(s, None).contains("Judge IMAGE 2 as a finished"), "at {s}");
+        }
+        // The direction, bounded, with the "do not punish compliance" rule.
+        let guided = dev(0.65, Some("make it much moodier"));
+        assert!(guided.contains("make it much moodier"), "{guided}");
+        assert!(guided.contains("never mark IMAGE 2 down for following it"), "{guided}");
+        assert!(!dev(0.65, Some("  ")).contains("OWN DIRECTION"), "blank is no direction");
+
+        // FitMatch has no strength axis: it scores a MATCH between two renders.
+        let fit = task_instruction(JudgeTask::FitMatch, None);
+        assert!(!fit.contains("TARGET STRENGTH"), "{fit}");
+        // …and a Develop call with no intent is the pre-R23 rubric, unchanged.
+        assert!(!task_instruction(JudgeTask::Develop, None).contains("TARGET STRENGTH"));
+
+        // On the wire: the rubric rides the paid call.
+        let inner = r#"{"score":80,"decision":"accept","critique":"ok","hint":null}"#;
+        let (url, seen, handle) =
+            stub_endpoint(vec![(200, "application/json", responses_reply(inner))]);
+        judge_pair(
+            &cfg_for(&url),
+            JudgeImages { reference: b"R", candidate: b"C" },
+            JudgeTask::Develop,
+            None,
+            Some(GradeIntent {
+                strength: crate::recipe::GradeStrength::new(0.9),
+                direction: Some("much moodier"),
+            }),
+        )
+        .expect("the stub reply parses");
+        join_stub(handle);
+        let body: Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+        let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("strength dial to 90% of full") && text.contains("much moodier"),
+            "the intent must reach the paid call: {text}"
         );
     }
 

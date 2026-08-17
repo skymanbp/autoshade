@@ -340,12 +340,70 @@ this trait.)
 > side and the measuring side from silently falling behind it (a field added to
 > the recipe without a registry row does not compile).
 
+### 3.1 The grade-strength axis — one dial, six gates (R23-3)
+
+How hard the AI pushes is a first-class user input: `recipe::GradeStrength`
+(0..1) — the GUI's **Strength** slider, the CLI's `--strength`, the web body's
+`grade_strength`. It has two NAMED points: `0.50` is the point every restraint
+constant in the app was tuned at (the 147-photo eval of `f944ef3` plus
+`bd3f9d4`'s highlight-integrity cases), i.e. the behaviour of every release up to
+v0.28.0; `0.65` is the shipped default (user decision 2026-08-17 — "a bit braver
+than today, with one click back to the calibration point").
+
+The value is **deliberately not an `EditRecipe` field**. It is intent for one
+analysis, not a develop parameter: in the recipe it would have to be projected
+into a Lightroom XMP contract that has no such notion, and it would change
+`store::recipe_norm`'s structural fingerprint — the R21 deleted-version registry
+documents that a schema drift there fails *open*, so every already-recorded
+deletion would lose its structure arm.
+
+Why it is an axis and not a patch: **six** independent places decided "how hard
+to push", each a hard-coded constant, and five of them getting braver while one
+stays fixed produces a develop exactly as timid as before (the verifier revises it
+back, or `temper` compresses it back). All six read the dial.
+
+| # | Gate | Where | What the dial changes |
+|---|------|-------|-----------------------|
+| 1 | Proposer prompt | `advisor::openai::{strength_clause, guardrail_pair, look_coverage_clause, mixer_restraint_clause}` | Three banded restraint templates; the quoted ±Highlights/Shadows and ±Whites/Blacks pair opens from the measured ±50/±35 up to ±75/±55; "most photos need only a couple of HSL bands" becomes an explicit per-control decision |
+| 2 | `EditRecipe::temper` | [`src/recipe.rs`](../src/recipe.rs) | The four soft-cap knees/ceilings scale by `1 + (s − 0.5)·0.7` — 0.5 is the shipped 50→70 / 30→45 exactly, and full strength asymptotes at 94.5, still inside the ±100 hard `clamp` |
+| 3 | Verifier prompt | `advisor::{verify_flat_clause, verify_cooked_clause}` | The too-FLAT band tightens, the OVER-COOKED band relaxes; the target and the photographer's DIRECTION are stated ABOVE the checklist they modify |
+| 4 | Visual judge rubric | `advisor::judge::intent_rubric` | The Develop rubric gains the target and the direction. FitMatch gains neither — a look MATCH has no strength |
+| 5 | Style reference wording | `style::render_reference` (+ gate 1's reference clause) | Below the committed band the retrieved habit is a CEILING ("not stronger", "do not exceed it"); at it, a FLOOR. The measured NUMBERS never change — a dial must not restate what the photographer actually did |
+| 6 | No-AI fallback | `advisor::heuristic` | The baseline's histogram-driven recovery goes through the same `temper` dial, so the fallback cannot taste different from the AI path at one setting |
+
+Bands are coarse (≤ 0.4 restrained / ≤ 0.7 balanced / above committed) because
+prose cannot be interpolated; every NUMBER on the axis is continuous. One
+consequence worth knowing: 0.50 and 0.65 share the balanced band, so they differ
+in the guardrail numbers and `temper`'s knees, not in the adjectives.
+
+Two things the axis must never touch, both measured defects rather than taste:
+`temper`'s **white-point coupling** (`whites ← −highlights·0.3`, global and per
+mask — `bd3f9d4` fixed a recipe that dragged sea foam to grey), and the prompt's
+matching "recovering highlights must NOT grey out specular whites" rule, which
+stays unconditional at every strength. `clamp`'s hard ranges are a safety bound
+and are not on the axis either. The **Style** slider's `blend_toward` cap (0.6) is
+off the axis on purpose too: that number bounds mean-regression toward the user's
+own average edit, so coupling it to strength would turn "push harder" into "look
+more like my average" — the other axis, pointing the other way.
+
+This also closes a gap this document had already declared: the verifier row above
+has always promised "consistent with metadata **& intent**", while
+`build_verify_prompt` took `(recipe, meta, hist)` and could not see the intent at
+all. It now takes an `advisor::GradeIntent` — strength plus the photographer's
+own direction (the RAW one, never the Refine envelope, which embeds a whole
+recipe the reviewer is already reading).
+
 Sketch (final shape):
 
 ```rust
 trait Advisor {                      // one trait, many providers
-    fn propose(&self, img: &Preview, meta: &Meta) -> Result<EditRecipe>;   // image role
-    fn verify(&self, recipe: &EditRecipe, meta: &Meta) -> Result<Verdict>; // analyst role
+    // `ProposeContext` / `GradeIntent` carry the per-call intent (style
+    // reference, direction, revision hint, WB anchor, grade strength) so a new
+    // input cannot be silently dropped by a call site that still compiles.
+    fn propose(&self, img: &Preview, meta: &Meta, hist: &Histogram,
+               ctx: &ProposeContext) -> Result<EditRecipe>;                // image role
+    fn verify(&self, recipe: &EditRecipe, meta: &Meta, hist: &Histogram,
+              intent: &GradeIntent) -> Result<Verdict>;                    // analyst role
 }
 // propose: OpenAiProvider (HTTP vision)        |  HeuristicProposer (no-key baseline)
 // verify:  ClaudeProvider (claude CLI -p OAuth) |  OpenAiVerifier (HTTP chat, OpenAI-compatible)

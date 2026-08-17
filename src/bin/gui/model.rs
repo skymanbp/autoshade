@@ -185,6 +185,12 @@ pub(crate) enum ExportRoute {
 pub(crate) struct Prefs {
     pub(crate) gallery_dir: Option<PathBuf>,
     pub(crate) style_strength: f32,
+    /// R23-3: how COMMITTED the AI's grade should be, 0..1 — the second taste
+    /// axis. `#[serde(default)]` on the struct would decode an older prefs file
+    /// as 0.0, i.e. the MOST timid setting on a dial that exists because the AI
+    /// was too timid, so [`Prefs::default`] supplies 0.65 and serde's
+    /// struct-level default routes every missing key through it.
+    pub(crate) grade_strength: f32,
     /// R23-2: the opt-in style REFERENCE photo. `#[serde(default)]` on the
     /// struct means an older prefs file decodes it as `false` — the same
     /// answer as [`Prefs::default`], so an upgrade never silently starts
@@ -222,6 +228,7 @@ impl Default for Prefs {
         Self {
             gallery_dir: None,
             style_strength: STYLE_STRENGTH_DEFAULT,
+            grade_strength: GRADE_STRENGTH_DEFAULT,
             // OFF, like every other paid opt-in here (see `fit_ai_judge`).
             send_style_ref_image: false,
             style_src_dir: None,
@@ -256,6 +263,17 @@ impl Default for Prefs {
 /// "the user moved it" was a statement no predicate could make without adding a
 /// third copy to drift from the other two.
 pub(crate) const STYLE_STRENGTH_DEFAULT: f32 = 0.30;
+
+/// Where the GRADE strength starts, and what its slider's double-click /
+/// right-click reset lands on (R23-3; user decision 2026-08-17 ⑦ = 0.65).
+///
+/// An ALIAS of the library's own constant, never a second literal: the lib uses
+/// it for the CLI's omitted `--strength`, the web body's absent field and
+/// `GradeStrength::default()`, so a GUI copy would let the desktop app develop a
+/// photo differently from `autoshop analyze` on the same untouched settings.
+/// `GradeStrength::CALIBRATED` (0.50) is the other named point on this dial —
+/// the behaviour of every release before R23, one drag away.
+pub(crate) const GRADE_STRENGTH_DEFAULT: f32 = autoshop::recipe::GradeStrength::DEFAULT;
 
 pub(crate) const PREVIEW_EDGE: u32 = 1280; // working preview size for fast live develop
 

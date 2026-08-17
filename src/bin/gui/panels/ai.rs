@@ -19,7 +19,9 @@
 //! 「第二十二至二十四轮计划」): the grade STRENGTH slider (default 0.65), the
 //! thinking-depth control, and the style-library entry with its reference-image
 //! switch. They are analysis-side, so they belong in `ai_analysis` beside
-//! Direction / Style.
+//! Direction / Style. Two of the three have landed — the library entry (R23-2)
+//! and the STRENGTH slider (R23-3, beside Style: they are one pair of taste
+//! axes, and the reported defect was that only the style half existed).
 //!
 //! R23-2 landed the third of those: [`AutoshopApp::ai_style_library`] — the
 //! desktop app's FIRST production-side entry for the style reference library
@@ -47,11 +49,13 @@ impl AutoshopApp {
     ///
     /// Written next to the panel it describes, and enumerating that panel's OWN
     /// field set in reading order: the verdict `ai_analysis` prints, the
-    /// Direction it consumes, and the Style strength that steers both verbs.
-    /// Style was the drift this predicate exists to close (R22 #16) — it is the
-    /// one AI input with a NON-ZERO default, so the honest test is "moved off
-    /// [`STYLE_STRENGTH_DEFAULT`]", and comparing against the same constant the
-    /// slider resets to means the dot and the reset can never disagree.
+    /// Direction it consumes, and the two taste dials that steer both verbs —
+    /// Style and (R23-3) grade Strength.
+    /// Style was the drift this predicate exists to close (R22 #16), and both
+    /// dials have a NON-ZERO default, so the honest test is "moved off
+    /// [`STYLE_STRENGTH_DEFAULT`] / [`GRADE_STRENGTH_DEFAULT`]" — comparing
+    /// against the same constants the sliders reset to means the dot and the
+    /// resets can never disagree.
     ///
     /// Deliberately NOT in the set: `reimagine_prompt`, `fit_ai_judge`,
     /// `zoned_fit`, and (R23-2) `send_style_ref_image` / `style_src_dir`. Those
@@ -63,6 +67,9 @@ impl AutoshopApp {
         self.verdict.is_some()
             || !self.guidance.is_empty()
             || self.style_strength != STYLE_STRENGTH_DEFAULT
+            // R23-3: the strength axis is the SECOND non-zero-default AI input,
+            // so it joins on the same "moved off the shared default" test.
+            || self.grade_strength != GRADE_STRENGTH_DEFAULT
     }
 
     pub(crate) fn ai_panel(&mut self, ui: &mut egui::Ui) {
@@ -181,8 +188,7 @@ impl AutoshopApp {
         // consumes). TWO explicit verbs replace the old pre-armed
         // 「Refine」 checkbox — a mode you had to remember to tick
         // (and untick) before clicking is exactly the kind of hidden
-        // state a button-per-intent design removes. Wrapped so the
-        // Style slider never strands off-panel at narrow widths.
+        // state a button-per-intent design removes.
         ui.horizontal_wrapped(|ui| {
             // `analyze_inflight` too, or ✕ leaves these ENABLED while
             // `start_analyze` silently refuses (it must refuse — the
@@ -227,7 +233,18 @@ impl AutoshopApp {
             {
                 self.start_analyze(true);
             }
-            ui.separator();
+        });
+        // The two TASTE DIALS get their own lines, below the verbs (R23-3).
+        //
+        // They used to share the verbs' row, with a note claiming the wrap kept
+        // Style on-panel at narrow widths. It did not: `egui::Slider` lays its
+        // value box, track and LABEL out in a nested `ui.horizontal`, and a
+        // nested row never wraps in a wrapping parent — it overflows and is
+        // clipped. At the default 320 px side panel the row drew only Style's
+        // value ("30"), with the word "Style" itself off-panel, and a headless
+        // frame confirms it. Adding a second dial to that row hid it outright.
+        // One dial per line is also what every other slider in this app does.
+        ui.horizontal_wrapped(|ui| {
             // #16: the ONE slider in the app that never went through the
             // panel's own helper — a bare `egui::Slider` with `show_value(false)`
             // and a hand-rolled "30%" label beside it, so it alone had no
@@ -269,6 +286,22 @@ impl AutoshopApp {
                 ));
             }
         });
+        // R23-3 (feedback #5): the SECOND taste axis, directly under the first —
+        // they are a PAIR, and the whole reported problem was that only the style
+        // half existed, so "lean on my habits" was the only dial there was and it
+        // bought MORE restraint. Same helper as Style, so it gets the same 0..100
+        // track, double-click reset and ↑/↓ nudge.
+        Self::slider_pct_hinted(
+            ui,
+            lang,
+            tr(lang, "Strength"),
+            &mut self.grade_strength,
+            1.0,
+            GRADE_STRENGTH_DEFAULT,
+            tr(lang,
+                "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is the calibrated baseline every AI guardrail was tuned at (the behaviour of earlier releases); the default 65% (double-click to reset) leans a little further; above 70% the AI is told to commit to a look. The clipping and white-point safeguards never widen with it.",
+            ),
+        );
         self.ai_style_library(ui);
     }
 

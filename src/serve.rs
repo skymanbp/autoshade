@@ -1381,6 +1381,12 @@ struct AnalyzeReq {
     /// slider). `None` falls back to the configured default.
     #[serde(default)]
     style_strength: Option<f32>,
+    /// 0..1 — how COMMITTED the grade should be (R23-3). A different axis from
+    /// `style_strength`: 0.5 is the calibrated baseline, `None` = the shipped
+    /// default (0.65), which is what an older client that never sends the field
+    /// gets — the same answer the desktop app's own default gives.
+    #[serde(default)]
+    grade_strength: Option<f32>,
     /// A box the user dragged on the image (normalized 0..1) to target a local
     /// edit; the direction is then applied to a mask over that region.
     #[serde(default)]
@@ -1722,6 +1728,10 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // whole AI chain blocking every settings save.
     let cfg = state.config().clone();
     let style = req.style_strength.unwrap_or(cfg.style_strength);
+    // Untrusted network number: `GradeStrength::new` clamps to 0..1 and turns a
+    // NaN into the default rather than into "maximum restraint" (the same door
+    // every other body field goes through).
+    let grade = crate::recipe::GradeStrength::from_optional(req.grade_strength);
     // produce_recipe itself strips the base look + lens profile from the
     // PROMPT copy (they are already IN the embedded preview's pixels) and
     // needs the UNSTRIPPED base so carry_over_unrepresentable can keep the
@@ -1741,7 +1751,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         false,
         guidance,
         refine_base.as_ref(),
-        pipeline::StyleRequest::strength(style),
+        pipeline::GradeRequest { style, send_reference_image: false, strength: grade },
         true,
     )?;
     // A non-Accept verdict may not auto-save (user decision): the verifier
@@ -3169,6 +3179,39 @@ fn precondition_failed(if_match: Option<&str>, current: Option<&str>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R23-3 shell (feedback #5): the web body's own end of the grade-strength
+    /// axis. An older tab that never sends the field must land on the SAME
+    /// default the desktop app and the CLI use — and a hostile number must go
+    /// through the door, not into the axis. (0.0 would be the most TIMID setting
+    /// on a dial that exists because the AI was too timid, which is why the
+    /// absent field cannot simply decode to a bare `f32` zero.)
+    #[test]
+    fn an_analyze_body_without_a_grade_strength_lands_on_the_shipped_default() {
+        use crate::recipe::GradeStrength;
+        let parse = |body: &str| serde_json::from_str::<AnalyzeReq>(body).expect("body parses");
+        // The PRODUCTION resolver, not a re-implementation of it — a test that
+        // spells the decision itself proves only that the test agrees with
+        // itself.
+        let resolve = |r: &AnalyzeReq| GradeStrength::from_optional(r.grade_strength).get();
+
+        // The pre-R23 body shape, verbatim: no field at all.
+        let old = parse(r#"{"id":0,"style_strength":0.3}"#);
+        assert_eq!(old.grade_strength, None);
+        assert_eq!(resolve(&old), GradeStrength::DEFAULT);
+
+        // Sent, and honoured — on its OWN axis, not the style one.
+        let sent = parse(r#"{"id":0,"style_strength":0.3,"grade_strength":0.9}"#);
+        assert_eq!(resolve(&sent), 0.9);
+        assert_eq!(sent.style_strength, Some(0.3), "the two axes must not alias");
+
+        // Untrusted numbers: clamped, and a non-finite one is the default.
+        assert_eq!(resolve(&parse(r#"{"id":0,"grade_strength":9}"#)), 1.0);
+        assert_eq!(resolve(&parse(r#"{"id":0,"grade_strength":-4}"#)), 0.0);
+        // JSON cannot spell NaN, but 1e39 overflows f32 to +inf on the way in —
+        // the same route the judge's score test uses.
+        assert_eq!(resolve(&parse(r#"{"id":0,"grade_strength":1e39}"#)), GradeStrength::DEFAULT);
+    }
 
     /// L04-7: the warning header must SURVIVE its worst real payloads — the
     /// xmlns-conflict sentence carries an em dash, and localized IO errors

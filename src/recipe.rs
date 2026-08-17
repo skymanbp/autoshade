@@ -1106,7 +1106,15 @@ impl EditRecipe {
     ///  2. **Soft-cap over-aggressive tone moves** toward a tasteful ceiling with a
     ///     smooth knee (not a hard clip), so Highlights/Shadows asymptote near ±70
     ///     and Whites/Blacks near ±45 instead of slamming to the ±100 schema bound.
-    pub fn temper(&mut self) {
+    ///
+    /// `strength` scales rule 2 only — see [`GradeStrength::soft_cap_factor`] for
+    /// the formula and [`GradeStrength::CALIBRATED`] for the point at which this
+    /// function reproduces the shipped knees exactly. Rule 1 is **not** scaled:
+    /// it is not a taste knob but the fix for a measured defect (bd3f9d4 —
+    /// Highlights −78.81 with Whites +10.27 dragged sea foam to grey), so scaling
+    /// it by strength would re-open that defect at low strength and over-apply it
+    /// at high strength.
+    pub fn temper(&mut self, strength: GradeStrength) {
         // Smoothly compress a magnitude past `knee` toward `ceil` (C1-continuous at
         // the knee; asymptotes to `ceil`, so |out| < ceil always). Identity below knee.
         fn soft_cap(v: f32, knee: f32, ceil: f32) -> f32 {
@@ -1118,23 +1126,31 @@ impl EditRecipe {
             let excess = a - knee;
             v.signum() * (knee + span * (excess / (excess + span)))
         }
+        // ONE factor for all four knees, so the calibrated RATIO between the
+        // tone pair (50→70) and the point pair (30→45) survives the scaling.
+        let f = strength.soft_cap_factor();
+        let (tone_knee, tone_ceil) = (TEMPER_TONE_KNEE * f, TEMPER_TONE_CEIL * f);
+        let (point_knee, point_ceil) = (TEMPER_POINT_KNEE * f, TEMPER_POINT_CEIL * f);
         // Couple recovery to whites BEFORE soft-capping (uses the original strength).
+        // NOT scaled by `strength` — see the doc comment: white-point protection is
+        // a measured defect fix, not a taste dial.
         if self.highlights < 0.0 {
             self.whites = self.whites.max((-self.highlights * 0.3).min(50.0));
         }
-        self.highlights = soft_cap(self.highlights, 50.0, 70.0);
-        self.shadows = soft_cap(self.shadows, 50.0, 70.0);
-        self.whites = soft_cap(self.whites, 30.0, 45.0);
-        self.blacks = soft_cap(self.blacks, 30.0, 45.0);
+        self.highlights = soft_cap(self.highlights, tone_knee, tone_ceil);
+        self.shadows = soft_cap(self.shadows, tone_knee, tone_ceil);
+        self.whites = soft_cap(self.whites, point_knee, point_ceil);
+        self.blacks = soft_cap(self.blacks, point_knee, point_ceil);
         // Same restraint on each local mask's tone sliders.
         for m in self.masks.iter_mut() {
+            // Mask side of the SAME white-point protection — also unscaled.
             if m.highlights < 0.0 {
                 m.whites = m.whites.max((-m.highlights * 0.3).min(50.0));
             }
-            m.highlights = soft_cap(m.highlights, 50.0, 70.0);
-            m.shadows = soft_cap(m.shadows, 50.0, 70.0);
-            m.whites = soft_cap(m.whites, 30.0, 45.0);
-            m.blacks = soft_cap(m.blacks, 30.0, 45.0);
+            m.highlights = soft_cap(m.highlights, tone_knee, tone_ceil);
+            m.shadows = soft_cap(m.shadows, tone_knee, tone_ceil);
+            m.whites = soft_cap(m.whites, point_knee, point_ceil);
+            m.blacks = soft_cap(m.blacks, point_knee, point_ceil);
         }
     }
 
@@ -1167,6 +1183,145 @@ impl EditRecipe {
                 },
                 ..self.clone()
             } == EditRecipe::default()
+    }
+}
+
+/// [`EditRecipe::temper`]'s shipped soft-cap knees and ceilings — the values
+/// bd3f9d4 tuned, named so the strength axis scales ONE definition instead of
+/// eight literals. `GradeStrength::CALIBRATED` reproduces exactly these.
+pub const TEMPER_TONE_KNEE: f32 = 50.0; // Highlights / Shadows
+pub const TEMPER_TONE_CEIL: f32 = 70.0;
+pub const TEMPER_POINT_KNEE: f32 = 30.0; // Whites / Blacks
+pub const TEMPER_POINT_CEIL: f32 = 45.0;
+
+/// Which of the three strength BANDS a [`GradeStrength`] falls in — the coarse
+/// dial the prompt/verifier/judge templates switch on.
+///
+/// Prose cannot be interpolated the way a number can, so the wording is banded
+/// while every NUMBER on the axis stays continuous. Consequence worth knowing:
+/// the calibration point (0.50) and the shipped default (0.65) share the
+/// `Balanced` band, so they differ in the guardrail NUMBERS the prompt quotes
+/// and in `temper`'s knees, not in the adjectives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrengthTier {
+    /// ≤ 0.4 — the shipped-since-f944ef3 restraint prose, verbatim.
+    Restrained,
+    /// 0.4 … 0.7 — confident: the model must decide about each look control
+    /// rather than default it to neutral.
+    Balanced,
+    /// Above 0.7 — committed: the reference becomes a floor rather than a
+    /// ceiling, and only BROKEN data (not strength) counts as over-cooked.
+    Committed,
+}
+
+/// How COMMITTED an AI-proposed develop should be — the app's strength axis
+/// (R23-3, feedback #5: "the AI is too timid, and I want a strength slider").
+///
+/// Deliberately **not** a field of [`EditRecipe`]: strength is the user's
+/// INTENT for one analysis, not a develop parameter. In the recipe it would
+/// (a) have to be projected into the Lightroom XMP contract, which has no such
+/// notion, and (b) change `store::recipe_norm`'s structural fingerprint — the
+/// R21 deleted-version registry documents that a schema drift there fails OPEN,
+/// so every already-recorded deletion would silently lose its structure arm.
+///
+/// SIX gates in this app decide "how hard to push", and every one of them was a
+/// hard-coded constant. This value drives all six — the proposer prompt
+/// (`advisor::openai`), [`EditRecipe::temper`], the verifier's two-sided band
+/// (`advisor::build_verify_prompt`), the visual judge's rubric
+/// (`advisor::judge`), the style-reference wording (`style::render_reference`)
+/// and the no-AI fallback (`advisor::heuristic`). Missing ONE gate cancels the
+/// axis: a bolder proposal that the verifier then calls over-cooked comes back
+/// exactly as timid as before, which is why each module carries its own gate
+/// test.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct GradeStrength(f32);
+
+impl GradeStrength {
+    /// The point every restraint constant in the app was tuned at (the 147-photo
+    /// eval of f944ef3, plus bd3f9d4's highlight-integrity cases). At this value
+    /// the prompt quotes ±50/±35 and [`EditRecipe::temper`] uses the shipped
+    /// 50→70 / 30→45 knees — i.e. 0.5 IS the behaviour of every release before
+    /// this one.
+    pub const CALIBRATED: f32 = 0.5;
+    /// What every surface starts at (user decision 2026-08-17 ⑦: "a bit braver
+    /// than today, with one click back to the calibration point").
+    pub const DEFAULT: f32 = 0.65;
+    /// Upper edge of [`StrengthTier::Restrained`] (inclusive).
+    pub const TIER_LOW_MAX: f32 = 0.4;
+    /// Upper edge of [`StrengthTier::Balanced`] (inclusive).
+    pub const TIER_MID_MAX: f32 = 0.7;
+    /// Slope of the [`soft_cap_factor`](Self::soft_cap_factor) line.
+    pub const SOFT_CAP_SPREAD: f32 = 0.7;
+
+    /// Clamp into 0..=1. A non-finite value is the shipped default, never 0 —
+    /// a NaN slider must not silently mean "maximum restraint".
+    pub fn new(v: f32) -> Self {
+        Self(if v.is_finite() { v.clamp(0.0, 1.0) } else { Self::DEFAULT })
+    }
+
+    /// The calibration point — "behave exactly like every release before R23".
+    pub fn calibrated() -> Self {
+        Self(Self::CALIBRATED)
+    }
+
+    /// Resolve a dial a surface may not have sent: the CLI's omitted
+    /// `--strength`, the web body's absent `grade_strength`. ONE definition of
+    /// that decision, because getting it wrong is silent — `Option::unwrap_or`
+    /// with a bare `0.0` would make "the client said nothing" mean "be as timid
+    /// as possible", on the very dial that exists because the AI was too timid.
+    pub fn from_optional(v: Option<f32>) -> Self {
+        v.map(Self::new).unwrap_or_default()
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+
+    /// 0..=100, for the one-decimal-free `{:.0}%` the prompts quote.
+    pub fn pct(self) -> f32 {
+        self.0 * 100.0
+    }
+
+    pub fn tier(self) -> StrengthTier {
+        if self.0 <= Self::TIER_LOW_MAX {
+            StrengthTier::Restrained
+        } else if self.0 <= Self::TIER_MID_MAX {
+            StrengthTier::Balanced
+        } else {
+            StrengthTier::Committed
+        }
+    }
+
+    /// How far ABOVE the calibration point, as 0..=1 (0 at or below it). The
+    /// ramp every "open the numbers up" formula shares, so the axis can never
+    /// tighten a number below its calibrated value: the guardrails were measured
+    /// there, and only the bold half of the axis is new.
+    pub fn above_calibration(self) -> f32 {
+        ((self.0 - Self::CALIBRATED) / (1.0 - Self::CALIBRATED)).clamp(0.0, 1.0)
+    }
+
+    /// The multiplier on [`EditRecipe::temper`]'s four knees and ceilings.
+    ///
+    /// `1 + (s − 0.5) · 0.7`, so:
+    ///   * s = 0.5 → 1.0 — the shipped 50→70 / 30→45 knees, bit for bit;
+    ///   * s = 1.0 → 1.35 — the widest ceiling (70) becomes 94.5, and `soft_cap`
+    ///     ASYMPTOTES to its ceiling, so the output stays ≥ 5.5 inside the ±100
+    ///     hard `clamp`. The clamp is a safety bound, never a target, and this
+    ///     axis does not touch it;
+    ///   * s = 0.0 → 0.65 — knees at 32.5/19.5, i.e. more restrained than any
+    ///     release so far, which is what a 0 % strength dial should mean.
+    pub fn soft_cap_factor(self) -> f32 {
+        1.0 + (self.0 - Self::CALIBRATED) * Self::SOFT_CAP_SPREAD
+    }
+}
+
+impl Default for GradeStrength {
+    /// [`Self::DEFAULT`] — the product default, so a call site that forgets to
+    /// thread the axis gets the shipped behaviour rather than the timid one this
+    /// round exists to fix. Measurement runs that need the fixed baseline say
+    /// [`Self::calibrated`] explicitly (see `eval.rs`).
+    fn default() -> Self {
+        Self(Self::DEFAULT)
     }
 }
 
@@ -1406,8 +1561,10 @@ mod tests {
         // The reported over-cooked recipe: strong −Highlights with low Whites greys
         // the foam. temper() lifts the white point and softens the extremes, WITHOUT
         // touching a modest recipe's committed tone moves.
+        // At the CALIBRATION point — the assertions below are the shipped
+        // behaviour, so they double as the "0.5 changes nothing" pin.
         let mut hot = EditRecipe { highlights: -78.81, whites: 10.27, shadows: 95.0, ..Default::default() };
-        hot.temper();
+        hot.temper(GradeStrength::calibrated());
         assert!(hot.whites >= 23.0, "recovery must lift the white point: whites={}", hot.whites);
         assert!(hot.highlights >= -65.0, "highlights not tempered: {}", hot.highlights);
         assert!(hot.highlights <= -55.0, "highlights over-tempered (lost commitment): {}", hot.highlights);
@@ -1415,10 +1572,121 @@ mod tests {
 
         // A modest recipe keeps its tone moves; recovery still nudges whites a touch.
         let mut mild = EditRecipe { highlights: -30.0, shadows: 20.0, whites: 5.0, ..Default::default() };
-        mild.temper();
+        mild.temper(GradeStrength::calibrated());
         assert_eq!(mild.highlights, -30.0, "modest highlights must pass through");
         assert_eq!(mild.shadows, 20.0, "modest shadows must pass through");
         assert!(mild.whites >= 9.0, "modest recovery still protects speculars: {}", mild.whites);
+    }
+
+    /// The strength axis's own arithmetic: the two NAMED points, the three
+    /// bands, and the door every surface's number comes through (R23-3).
+    ///
+    /// The named points are a promise made in the UI ("50% is the calibrated
+    /// baseline", "double-click resets to 65%"), so they are pinned here rather
+    /// than only in the GUI: the CLI's omitted `--strength`, the web body's
+    /// absent field and the desktop default all resolve through these.
+    #[test]
+    fn the_strength_axis_has_two_named_points_three_bands_and_one_door() {
+        use super::*;
+        assert_eq!(GradeStrength::CALIBRATED, 0.5);
+        assert_eq!(GradeStrength::DEFAULT, 0.65, "user decision 2026-08-17 ⑦");
+        assert_eq!(GradeStrength::default().get(), GradeStrength::DEFAULT);
+        assert_eq!(GradeStrength::calibrated().get(), GradeStrength::CALIBRATED);
+
+        // Bands, on their edges (inclusive upper bounds, so 0.4 and 0.7 are the
+        // last member of their band — the boundary a retune would move).
+        for (v, want) in [
+            (0.0, StrengthTier::Restrained),
+            (0.4, StrengthTier::Restrained),
+            (0.401, StrengthTier::Balanced),
+            (0.5, StrengthTier::Balanced),
+            (0.65, StrengthTier::Balanced),
+            (0.7, StrengthTier::Balanced),
+            (0.701, StrengthTier::Committed),
+            (1.0, StrengthTier::Committed),
+        ] {
+            assert_eq!(GradeStrength::new(v).tier(), want, "band edge moved at {v}");
+        }
+
+        // The door: clamped, and a non-finite dial is the DEFAULT — never 0.0,
+        // which would be the most timid setting on the dial that exists because
+        // the AI was too timid.
+        assert_eq!(GradeStrength::new(-1.0).get(), 0.0);
+        assert_eq!(GradeStrength::new(4.0).get(), 1.0);
+        assert_eq!(GradeStrength::new(f32::NAN).get(), GradeStrength::DEFAULT);
+        assert_eq!(GradeStrength::new(f32::INFINITY).get(), GradeStrength::DEFAULT);
+
+        // The one-sided ramp the prompt's numbers ride: 0 at and below the
+        // calibration point (those numbers were MEASURED — the axis may open
+        // them up, never tighten them), 1 at full strength.
+        assert_eq!(GradeStrength::new(0.0).above_calibration(), 0.0);
+        assert_eq!(GradeStrength::calibrated().above_calibration(), 0.0);
+        assert_eq!(GradeStrength::new(0.75).above_calibration(), 0.5);
+        assert_eq!(GradeStrength::new(1.0).above_calibration(), 1.0);
+    }
+
+    /// GATE 2 of the six the strength axis has to pass (R23-3, feedback #5).
+    ///
+    /// Three properties, each of which the axis is worthless without:
+    ///  1. the four soft-cap knees MOVE with strength, monotonically — a bolder
+    ///     proposal must survive `temper` instead of being compressed back;
+    ///  2. 0.5 is the calibration point *exactly* (the knees are the literals
+    ///     bd3f9d4 tuned), so "one click back to 0.5" is a real promise;
+    ///  3. the white-point coupling does NOT scale — that rule is the fix for a
+    ///     measured defect (foam dragged to grey), and scaling it would re-open
+    ///     the defect at low strength.
+    #[test]
+    fn temper_knees_scale_with_strength_but_the_white_point_guard_never_does() {
+        // (1) + (2): the same over-cooked recipe at three strengths.
+        let hot = |s: f32| {
+            let mut r = EditRecipe { highlights: -78.81, shadows: 95.0, blacks: -60.0, ..Default::default() };
+            r.temper(GradeStrength::new(s));
+            r
+        };
+        let (timid, calib, bold) = (hot(0.2), hot(0.5), hot(0.9));
+        assert!(
+            timid.shadows < calib.shadows && calib.shadows < bold.shadows,
+            "shadows must open up monotonically: {} < {} < {}",
+            timid.shadows, calib.shadows, bold.shadows
+        );
+        assert!(
+            timid.highlights > calib.highlights && calib.highlights > bold.highlights,
+            "negative highlights must open up monotonically: {} > {} > {}",
+            timid.highlights, calib.highlights, bold.highlights
+        );
+        assert!(
+            timid.blacks > calib.blacks && calib.blacks > bold.blacks,
+            "blacks must open up monotonically: {} > {} > {}",
+            timid.blacks, calib.blacks, bold.blacks
+        );
+        // The calibration point reproduces the pre-R23 arithmetic to the bit:
+        // shadows 95 through knee 50 / ceil 70 → 50 + 20·45/65.
+        assert_eq!(GradeStrength::calibrated().soft_cap_factor(), 1.0);
+        assert_eq!(calib.shadows, 50.0 + 20.0 * (45.0 / 65.0));
+        // …and even at full strength the asymptote stays inside the ±100 clamp.
+        assert!(
+            TEMPER_TONE_CEIL * GradeStrength::new(1.0).soft_cap_factor() < 100.0,
+            "the soft-cap ceiling must never reach the hard clamp"
+        );
+
+        // (3) The white-point guard is strength-INVARIANT, globally and per mask.
+        // Highlights −40 sits below every knee at every strength, so the ONLY
+        // thing that can move `whites` here is the coupling.
+        for s in [0.0_f32, 0.5, 1.0] {
+            let mut r = EditRecipe {
+                highlights: -40.0,
+                whites: 0.0,
+                masks: vec![LocalAdjustment {
+                    highlights: -40.0,
+                    whites: 0.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            r.temper(GradeStrength::new(s));
+            assert_eq!(r.whites, 12.0, "global white-point guard drifted at strength {s}");
+            assert_eq!(r.masks[0].whites, 12.0, "mask white-point guard drifted at strength {s}");
+        }
     }
 
     #[test]
