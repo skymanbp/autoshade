@@ -184,6 +184,16 @@ impl AutoshopApp {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
         let mut changed = false;
         ui.heading(tr(lang, "Develop"));
+        // OUTSIDE the editable gate below, deliberately (#4 review point): the
+        // histogram is a READOUT. Its only interaction is the pair of clipping
+        // triangles, whose click reaches `toggle_clipping` — that writes
+        // `show_clipping` + the overlay texture and, on a fresh open with no
+        // retained frame, `dirty`. None of those is EDIT state: no recipe field
+        // is read into a widget or written back, so the L15-2 input-loss class
+        // (edit photo A's sliders while B lands) cannot arise here. The worst
+        // mid-open outcome is one preview build whose frame `finish_redevelop`
+        // then discards by its base+recipe identity check. Greying the tone
+        // readout during every open would be the bigger regression.
         self.histogram_ui(ui);
         ui.add_space(SPACE_SM);
 
@@ -191,9 +201,10 @@ impl AutoshopApp {
         // photo A while B lands and replaces the whole recipe — silent input
         // loss (L15-2). Busy alone must NOT gate here: a 600 s analyze keeps
         // the panel live; only the open transition freezes it.
+        // The AI area carries its OWN copy of this gate (panels/ai.rs) — it
+        // used to ride inside this closure as `dev_ai`.
         let editable = !self.open_in_flight;
         ui.add_enabled_ui(editable, |ui| {
-        changed |= self.dev_ai(ui);
         // Lightroom-style grouping: a wall of 16 sliders scans terribly; four
         // titled sections (tone open, the rest by activity) scan at a glance.
         // A section whose values are non-neutral shows a ● so a collapsed
@@ -387,145 +398,6 @@ impl AutoshopApp {
 
     /// One develop-panel section — body extracted verbatim from
     /// develop_panel (round-12 decomposition; spacing included).
-    fn dev_ai(&mut self, ui: &mut egui::Ui) -> bool {
-        let lang = self.lang;
-        // The AI area: everything one Analyze run reads or writes, in ONE
-        // place (UX batch — Direction/Refine/Style used to be scattered
-        // across two toolbar rows with Undo/Redo in between). Open whenever
-        // there's a verdict to show; the inputs are always present.
-        let ai_active = self.verdict.is_some() || !self.guidance.is_empty();
-        egui::CollapsingHeader::new(section_title(tr(lang, "AI"), ai_active))
-            .id_salt("sec_verdict")
-            .default_open(true)
-            .show(ui, |ui| {
-                if let Some((d, reasons)) = &self.verdict {
-                    // Accept reads calm; anything else (Revise/Reject)
-                    // gets the warn colour so it can't be skimmed past.
-                    // Matched on the TYPED decision, never its rendered
-                    // spelling — the old `starts_with("Accept")` sniff
-                    // would have flipped every verdict to warn the moment
-                    // the word was translated.
-                    let col = if matches!(d, autoshop::advisor::Decision::Accept) {
-                        ui.visuals().strong_text_color()
-                    } else {
-                        ui.visuals().warn_fg_color
-                    };
-                    let text = trf(
-                        lang,
-                        "{decision} — {reasons}",
-                        &[
-                            ("decision", tr(lang, autoshop::advisor::decision_key(d))),
-                            ("reasons", &reasons.join("; ")),
-                        ],
-                    );
-                    ui.label(egui::RichText::new(text).color(col));
-                }
-                // The deterministic tail renders LOCALIZED when its typed
-                // notes ride along and still match the string's suffix
-                // (L12#2B); any mismatch — a truncation, a disk-restored
-                // develop with no notes — shows the raw English instead
-                // (silent-English fallback, user decision 2026-08-11).
-                let localized = (!self.rationale_notes.is_empty())
-                    .then(|| {
-                        let det: String = self
-                            .rationale_notes
-                            .iter()
-                            .map(autoshop::rationale::render_one)
-                            .collect();
-                        self.rationale.strip_suffix(det.as_str()).map(|prose| {
-                            let mut s = String::from(prose);
-                            for n in &self.rationale_notes {
-                                let args: Vec<(&str, &str)> =
-                                    n.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
-                                s.push_str(&trf(lang, n.key, &args));
-                            }
-                            s
-                        })
-                    })
-                    .flatten();
-                let shown = localized.as_deref().unwrap_or(&self.rationale);
-                if !shown.is_empty() {
-                    ui.label(
-                        egui::RichText::new(format!("“{shown}”"))
-                            .italics()
-                            .weak(),
-                    );
-                }
-                ui.label(tr(lang, "Direction"))
-                    .on_hover_text(tr(lang, "Free-text direction for AI Analyze — e.g. warmer and moodier"));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.guidance)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(tr(lang, "e.g. warmer and moodier, lift the shadows")),
-                );
-                // The prompt's triggers sit DIRECTLY under it (user feedback:
-                // the toolbar Analyze button sat nowhere near the text it
-                // consumes). TWO explicit verbs replace the old pre-armed
-                // 「Refine」 checkbox — a mode you had to remember to tick
-                // (and untick) before clicking is exactly the kind of hidden
-                // state a button-per-intent design removes. Wrapped so the
-                // Style slider never strands off-panel at narrow widths.
-                ui.horizontal_wrapped(|ui| {
-                    // `analyze_inflight` too, or ✕ leaves these ENABLED while
-                    // `start_analyze` silently refuses (it must refuse — the
-                    // cancelled call is still on the wire and still billing).
-                    // A button that looks live and does nothing, for up to the
-                    // 600 s stall budget, with the status line saying the app
-                    // is free, is worse than one that says why it is greyed.
-                    let ready =
-                        self.src_path.is_some() && !self.busy && !self.analyze_inflight;
-                    let waiting = self.analyze_inflight && !self.busy;
-                    let why = |ui: egui::Response| {
-                        if waiting {
-                            ui.on_hover_text(tr(
-                                lang,
-                                "the cancelled AI call is still running (and still billed) — this re-arms when it finishes or times out",
-                            ))
-                        } else {
-                            ui
-                        }
-                    };
-                    if why(ui
-                        .add_enabled(ready, egui::Button::new(tr(lang, "AI Analyze")))
-                        .on_hover_text(tr(lang,
-                            "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
-                             review: the result is RENDERED and judged by the vision model, which may \
-                             buy one guided revision — extra vision cost per run), written into the \
-                             sliders — undoable. Uses the Direction above; Style steers it.",
-                        )))
-                        .clicked()
-                    {
-                        self.start_analyze(false);
-                    }
-                    // Refining a neutral edit IS analyzing — disable the verb
-                    // until there is an edit to refine.
-                    let has_edit = ready && !self.recipe.is_noop();
-                    if why(ui
-                        .add_enabled(has_edit, egui::Button::new(tr(lang, "AI Refine")))
-                        .on_hover_text(tr(lang,
-                            "Adjust the CURRENT edit instead of proposing from scratch — your sliders are \
-                             the starting point (enabled once the edit is non-neutral).",
-                        )))
-                        .clicked()
-                    {
-                        self.start_analyze(true);
-                    }
-                    ui.separator();
-                    ui.label(tr(lang, "Style")).on_hover_text(
-                        tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
-                    );
-                    ui.add(egui::Slider::new(&mut self.style_strength, 0.0..=1.0).show_value(false))
-                        .on_hover_text(
-                            tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
-                        );
-                    ui.label(format!("{:.0}%", self.style_strength * 100.0));
-                });
-            });
-        false
-    }
-
-    /// One develop-panel section — body extracted verbatim from
-    /// develop_panel (round-12 decomposition; spacing included).
     fn dev_tone_wb(&mut self, ui: &mut egui::Ui) -> bool {
         let lang = self.lang;
         let mut changed = false;
@@ -543,6 +415,13 @@ impl AutoshopApp {
         };
 
         ui.add_space(SPACE_MD); // same section fence as every sibling
+        // #14b: the FIRST of the panel's group captions. The two existing group
+        // fences (before Detail, before Local Masks) marked boundaries without
+        // ever saying what they divided; the five groups the panel actually has
+        // are AI (its own panel above) → tone & colour → detail & lens → local
+        // & pixel → versions & export. Captions only: no section moved, no
+        // fence rhythm changed.
+        group_caption(ui, tr(lang, "Tone & Colour"));
         egui::CollapsingHeader::new(section_title(tr(lang, "Tone & WB"), tone_active))
             .id_salt("sec_tone")
             .default_open(true)
@@ -783,6 +662,7 @@ impl AutoshopApp {
         ui.add_space(SPACE_MD);
         ui.separator();
         ui.add_space(SPACE_XS);
+        group_caption(ui, tr(lang, "Detail & Lens")); // #14b, group 2 of 4 here
         egui::CollapsingHeader::new(section_title(tr(lang, "Detail"), detail_active))
             .id_salt("sec_detail")
             .default_open(false)
@@ -802,11 +682,14 @@ impl AutoshopApp {
                     let ready = self.src_path.is_some() && !self.busy;
                     if ui
                         .add_enabled(ready, egui::Button::new(tr(lang, "🤖 AI Denoise now")))
-                        .on_hover_text(tr(lang,
+                        // 🤖 + the cross-reference line (#4): this verb stays
+                        // beside Noise Reduction on purpose, so its tooltip is
+                        // where it says the rest of the AI moved to.
+                        .on_hover_text(ai_xref(lang, tr(lang,
                             "Run the SCUNet GPU sidecar on this variant's pixels and show the result on canvas \
                              (undoable — bakes a clean base into the current variant; the develop sliders keep \
                              applying on top; first run downloads the model)",
-                        ))
+                        )))
                         .clicked()
                     {
                         self.start_ai_denoise();
@@ -1010,6 +893,8 @@ impl AutoshopApp {
         ui.add_space(SPACE_MD);
         ui.separator();
         ui.add_space(SPACE_XS);
+        // #14b, group 3: masks and the pixel-level tools they reach.
+        group_caption(ui, tr(lang, "Local & Pixel"));
         // --- 局部调整: manual masks — the SAME recipe.masks the AI writes -----
         let n_masks = self.recipe.masks.len();
         let n_masks_s = n_masks.to_string();
@@ -1090,20 +975,26 @@ impl AutoshopApp {
                 let missing = tr(lang,
                     "this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
                 );
+                // 🤖 on BOTH (#4): one prefix marks every AI verb app-wide, and
+                // 「☁ AI select sky」 was the lone exception — a weather glyph
+                // where its twin one row over already wore the robot. The
+                // tooltip carries the AI-panel cross-reference, but only on the
+                // arm that CAN run: a missing-sidecar message must stay about
+                // the missing sidecar.
                 if ui
                     .add_enabled(can_seg, egui::Button::new(tr(lang, "🤖 AI select subject")))
-                    .on_hover_text(if has_helper { tr(lang,
+                    .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
                         "U²-Net salient-subject segmentation → bitmap mask (python sidecar: pip install rembg; first run auto-downloads the model to ~/.u2net)",
-                    ) } else { missing })
+                    )) } else { missing.to_string() })
                     .clicked()
                 {
                     self.start_segment("subject", "Subject");
                 }
                 if ui
-                    .add_enabled(can_seg, egui::Button::new(tr(lang, "☁ AI select sky")))
-                    .on_hover_text(if has_helper { tr(lang,
+                    .add_enabled(can_seg, egui::Button::new(tr(lang, "🤖 AI select sky")))
+                    .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
                         "SegFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~14MB model)",
-                    ) } else { missing })
+                    )) } else { missing.to_string() })
                     .clicked()
                 {
                     self.start_segment("sky", "Sky");
@@ -1903,7 +1794,16 @@ impl AutoshopApp {
         let lang = self.lang;
 
         // --- 版本: recipe snapshots ≈ LR virtual copies (gap batch G) --------
+        // #14b, group 4 — DELIVERY (versions + export): what leaves the app,
+        // as opposed to what is being edited. This boundary gets the same
+        // fence + hairline + breather rhythm the other two group fences use
+        // (Detail, Local Masks) — the rhythm is completed here, not changed:
+        // Versions previously opened with a bare sibling-section fence while
+        // being the head of a different KIND of group.
         ui.add_space(SPACE_MD);
+        ui.separator();
+        ui.add_space(SPACE_XS);
+        group_caption(ui, tr(lang, "Versions & Export"));
         let n_ver = self.versions.len();
         let n_ver_s = n_ver.to_string();
         egui::CollapsingHeader::new(section_title(&trf(lang, "Versions ({n})", &[("n", &n_ver_s)]), n_ver > 0))
@@ -2047,8 +1947,8 @@ impl AutoshopApp {
                             }
                         });
                 });
-                ui.checkbox(&mut self.save_denoise, tr(lang, "AI Denoise")).on_hover_text(
-                    tr(lang, "SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it."),
+                ui.checkbox(&mut self.save_denoise, tr(lang, "🤖 AI Denoise")).on_hover_text(
+                    ai_xref(lang, tr(lang, "SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.")),
                 );
                 ui.label(
                     egui::RichText::new(tr(lang, "Applied by Export / Download… in the toolbar (Ctrl+E). Files land in ./out unless Download picks a path."))

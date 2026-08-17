@@ -271,6 +271,18 @@ pub(crate) struct AutoshopApp {
     pub(crate) gallery_thumb_rect: Option<egui::Rect>, // test seam: … and the image drawn inside it
     #[cfg(test)]
     pub(crate) brush_slider_rect: Option<egui::Rect>, // test seam: the last Brush size slider's rect
+    /// Test seam (#14a): every prompt field laid out this frame, in draw order
+    /// (Direction, Reimagine, Generative Fill). A Vec, not three Options: the
+    /// width cap is ONE rule and the test asserts it over the whole set, so a
+    /// fourth prompt field added later is covered without touching the test.
+    #[cfg(test)]
+    pub(crate) prompt_rects: Vec<egui::Rect>,
+    /// Test seam (#4): was the AI section's body ENABLED this frame? The
+    /// mid-open editable gate (L15-2) that the AI area used to inherit from
+    /// `develop_panel` had to be rebuilt in its new host, and nothing but this
+    /// can tell a rebuilt gate from a comment about one.
+    #[cfg(test)]
+    pub(crate) ai_gate_enabled: Option<bool>,
     // --- batch recipe copy / paste ---
     pub(crate) multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     pub(crate) copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1084,11 +1096,15 @@ impl AutoshopApp {
             let controls = egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.src_path.is_some() {
+                        // The AI area is FIRST (R22 #4): one first-level
+                        // section holding every AI develop verb — analysis,
+                        // whole-image generation, reverse-fit — above the
+                        // sliders it writes into. It used to be three
+                        // fragments: a section inside Develop, a section in
+                        // the middle of Retouch, and a switch in Settings.
+                        self.ai_panel(ui);
                         self.develop_panel(ui);
                         self.retouch_panel(ui);
-                        // Verdict + rationale moved to the TOP of develop_panel
-                        // ("AI verdict" section) — the output of the headline
-                        // feature no longer hides below every adjustment section.
                     } else {
                         // Empty state with the same voice as the canvas hero:
                         // centered, quiet, and it says what to do next — a
@@ -1470,6 +1486,10 @@ impl Default for AutoshopApp {
             gallery_thumb_rect: None,
             #[cfg(test)]
             brush_slider_rect: None,
+            #[cfg(test)]
+            prompt_rects: Vec::new(),
+            #[cfg(test)]
+            ai_gate_enabled: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,
@@ -1677,7 +1697,11 @@ impl eframe::App for AutoshopApp {
                             .rounding(RADIUS_MD)
                             .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                             .show(ui, |ui| {
-                                ui.set_max_width(420.0);
+                                // Named token (#14a): this 420 is a WRAPPED
+                                // paragraph's measure, not the prompt-field
+                                // ceiling that happens to share the number —
+                                // see theme.rs on why they are two constants.
+                                ui.set_max_width(TOAST_W_MAX);
                                 ui.label(egui::RichText::new(&t.text).color(fg.gamma_multiply(fade)));
                             })
                             .response

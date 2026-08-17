@@ -235,9 +235,12 @@ impl AutoshopApp {
         // `let f = &mut self.settings` block below holds a partial borrow of self.
         let lang = self.lang;
         ui.label(
+            // "& Theme", not "& Reverse-fit": the reverse-fit switch this
+            // sentence used to point at now lives in the AI panel (R22 #4), and
+            // Theme is the other control here that applies without a save.
             egui::RichText::new(tr(
                 lang,
-                "Language & Reverse-fit apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
+                "Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
             ))
             .weak()
             .small(),
@@ -268,12 +271,11 @@ impl AutoshopApp {
         if self.theme != before_theme {
             install_theme(ui.ctx(), self.theme);
         }
-        ui.separator();
-        ui.heading(tr(lang, "Reverse-fit"));
-        ui.checkbox(&mut self.zoned_fit, tr(lang, "Zoned fit (sky)")).on_hover_text(tr(
-            lang,
-            "On reverse-fit, auto-split the sky on both sides and colour-correct sky↔sky separately (exposure / recolour gains / saturation, bitmap mask). Masks are rendered by the local engine; the LR sidecar carries only the global part. Needs the python segmentation deps (transformers + torch); falls back to pure global reverse-fit when unavailable, noting it in the rationale.",
-        ));
+        // 「Zoned fit (sky)」 MOVED to the AI panel's reverse-fit sub-area (R22
+        // #4): it is a setting for ONE button, and it sat two panels away from
+        // that button — you changed it here and then went hunting for 「🎛
+        // Reverse-fit」. The `zoned_fit` FIELD is untouched (same Prefs key,
+        // same persistence, same `start_fit` read); only its UI row moved.
         ui.separator();
         // The develop store is otherwise invisible (hashed AppData folders) —
         // this is the one place that names it and rescues pre-store saves.

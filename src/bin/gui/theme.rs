@@ -371,6 +371,28 @@ pub(crate) const RADIUS_SM: f32 = 3.0;
 pub(crate) const RADIUS_MD: f32 = 6.0;
 pub(crate) const RADIUS_LG: f32 = 10.0;
 
+/// Width tokens (#14a). A TEXT FIELD's readable ceiling: prompts are
+/// sentences, and a field that simply takes `available_width()` becomes an
+/// 800 px ribbon the moment the side panel is dragged wide — the eye then
+/// tracks a single line across the whole panel. Fields clamp DOWNWARD to this
+/// (`util::prompt_field`, and the Reimagine row's measured arithmetic
+/// `.min()`s its result), which is why the cap cannot resurrect the R19
+/// runaway: that one came from a row asking for MORE than it had.
+///
+/// NOTE — [`TOAST_W_MAX`] below happens to hold the SAME number for a
+/// different reason (a wrapped paragraph's comfortable measure vs. one
+/// clipped line's). They are two tokens on purpose: tuning one must not drag
+/// the other along, and the pre-#14a code had this value as a bare `420.0`
+/// literal in app.rs with no name at all.
+pub(crate) const FIELD_W_MAX: f32 = 420.0;
+/// …and a field's floor: below this a prompt box shows ~6 characters and the
+/// row reads as broken. Inherited from the Reimagine row's own `.max(80.0)`
+/// (R19), which is now this token's one definition.
+pub(crate) const FIELD_W_MIN: f32 = 80.0;
+/// Toast pill measure: a WRAPPED paragraph, capped so a long error does not
+/// stretch across a 4K canvas (see [`FIELD_W_MAX`] on why these are two).
+pub(crate) const TOAST_W_MAX: f32 = 420.0;
+
 /// Install the full UI style for one theme: a fresh egui dark/light Visuals
 /// base (so toggling is idempotent — no residue from the other theme), the
 /// warm-gold accent family from [`ThemeColors`], softer rounding, a calmer

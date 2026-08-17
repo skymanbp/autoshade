@@ -3328,6 +3328,13 @@
     /// being absorbed by wrapping and instead widened the auto-fitting
     /// side panel by 8 px EVERY frame (probed during review). Three frames
     /// pin both: a stable panel width and a one-line button.
+    ///
+    /// R22-6: that row MOVED into the AI panel (`ai_panel`, #4), so this test
+    /// follows its host — driving `retouch_panel` alone would leave
+    /// `reimagine_btn_rect` unset and the assertions vacuous (the seam's
+    /// `expect` is what turns that into a red instead of a silent pass). Both
+    /// panels are driven so the width witness still covers everything the side
+    /// panel stacks below the AI area.
     #[test]
     fn the_generate_button_stays_one_line_and_the_panel_stays_put() {
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
@@ -3347,7 +3354,10 @@
                     let r = egui::SidePanel::left("controls")
                         .default_width(320.0)
                         .show(ctx, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| app.retouch_panel(ui));
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                app.ai_panel(ui);
+                                app.retouch_panel(ui);
+                            });
                         });
                     // the panel's rendered width, the runaway's witness
                     widths.push(r.response.rect.width());
@@ -3364,6 +3374,139 @@
                 "{lang:?}: the Generate button must be one line tall ({} vs {one_line})",
                 btn.height()
             );
+        }
+    }
+
+    /// R22-6 (#4): the AI area's mid-open EDITABLE GATE, in its new host.
+    ///
+    /// L15-2: while a decode is in flight (`open_in_flight`) the panel's
+    /// controls address the STASHED photo A, and B is about to land and replace
+    /// the whole recipe — typing a Direction or firing Analyze there is silent
+    /// input loss. The analysis block used to sit INSIDE `develop_panel`'s
+    /// `add_enabled_ui(editable, …)` closure and inherited that gate for free;
+    /// moving it into `ai_panel` (#4) meant re-establishing it by hand, which
+    /// is exactly the kind of migration that loses a guard quietly. `busy`
+    /// alone must NOT gate (a 600 s analyze keeps the panel live), so both
+    /// halves are pinned. Deleting the `add_enabled_ui` wrapper in ai.rs fails
+    /// phase ②.
+    #[test]
+    fn the_ai_panel_freezes_only_while_a_photo_is_opening() {
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let frame = |app: &mut AutoshopApp| -> Option<bool> {
+            app.ai_gate_enabled = None; // this frame's evidence only
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                        app.ai_panel(ui);
+                    });
+                },
+            );
+            app.ai_gate_enabled
+        };
+        // ① settled: live.
+        let mut app = AutoshopApp::default();
+        assert_eq!(frame(&mut app), Some(true), "a settled panel must be editable");
+        // ② mid-open: frozen.
+        app.open_in_flight = true;
+        assert_eq!(
+            frame(&mut app),
+            Some(false),
+            "mid-open the AI controls address the STASHED photo — they must be inert (L15-2)"
+        );
+        // ③ busy but NOT opening (a 600 s analyze): still live, or cancelling
+        // and re-typing a direction would be impossible for ten minutes.
+        app.open_in_flight = false;
+        app.busy = true;
+        assert_eq!(frame(&mut app), Some(true), "a long AI call must not freeze the panel");
+    }
+
+    /// R22-6 (#14a): a prompt field has a READABLE ceiling. Every one of them
+    /// used to take `available_width()` — fine at the 320 px default, an
+    /// 800 px single-line ribbon once the side panel is dragged wide (the panel
+    /// deliberately keeps NO max width: the curve and HSL editors are better
+    /// wide, so the cap belongs on the FIELDS). Laid out at 800 px, which is
+    /// exactly where the old code fails: every field then measures its full
+    /// available width and blows the `FIELD_W_MAX` assertion.
+    ///
+    /// All three prompts are pinned by ONE rule over the `prompt_rects` seam:
+    /// Direction and Generative Fill go through `util::prompt_field`, while the
+    /// Reimagine row keeps its own R19 galley arithmetic and only `.min()`s the
+    /// result — three sites, one ceiling, and a fourth field added later is
+    /// covered without editing this test.
+    #[test]
+    fn a_prompt_field_never_grows_past_its_readable_width() {
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            // Text long enough that a field free to grow would want to: the
+            // singleline clip keeps this from mattering, the cap is about the
+            // BOX, and a filled buffer also exercises the hover-tooltip arm.
+            app.guidance = "warmer and moodier, lift the shadows a lot, and keep the sky honest".into();
+            app.reimagine_prompt = app.guidance.clone();
+            app.fill_prompt = app.guidance.clone();
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 1200.0),
+                )),
+                ..Default::default()
+            };
+            // Three frames, because a WIDTH rule and an auto-fitting side panel
+            // is exactly the pair that produced R19's +8 px/frame runaway: the
+            // cap only ever asks for LESS than the row has (which cannot grow
+            // the panel), and this is what says so.
+            let mut widths = Vec::new();
+            for _ in 0..3 {
+                app.prompt_rects.clear(); // the LAST frame's evidence only
+                let _ = ctx.run(input(), |ctx| {
+                    // Both prompt-bearing folds are collapsed by default; egui's
+                    // own test hook opens every collapsible (the same one the
+                    // mask-brush width test uses), so an unopened fold cannot
+                    // make this vacuous.
+                    ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                    let r =
+                        egui::SidePanel::left("controls").default_width(800.0).show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                app.ai_panel(ui);
+                                app.retouch_panel(ui);
+                            });
+                        });
+                    widths.push(r.response.rect.width());
+                });
+            }
+            assert!(
+                (widths[0] - widths[2]).abs() < 0.5,
+                "{lang:?}: the wide panel must not grow across frames: {widths:?}"
+            );
+            assert_eq!(
+                app.prompt_rects.len(),
+                3,
+                "{lang:?}: expected the Direction / Reimagine / Fill prompts to lay out, got {:?}",
+                app.prompt_rects
+            );
+            for (i, r) in app.prompt_rects.iter().enumerate() {
+                assert!(
+                    r.width() <= crate::theme::FIELD_W_MAX + 0.5,
+                    "{lang:?}: prompt field {i} is {:.1} px wide on an 800 px panel — past the \
+                     {:.0} px readable ceiling (a dropped `.min(FIELD_W_MAX)`)",
+                    r.width(),
+                    crate::theme::FIELD_W_MAX
+                );
+                assert!(
+                    r.width() >= crate::theme::FIELD_W_MIN,
+                    "{lang:?}: prompt field {i} collapsed to {:.1} px",
+                    r.width()
+                );
+            }
         }
     }
 

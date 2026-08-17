@@ -639,147 +639,21 @@ impl AutoshopApp {
         ui.separator();
         ui.heading(tr(lang, "Retouch"));
 
-        // Whole-image generative re-render: let gpt-image DIRECTLY produce the
-        // picture (the optional "GPT makes the image" path). Distinct from
-        // AI Analyze, which emits a faithful parametric recipe. The result
-        // becomes a new「AI 生成」variant in the strip below; the reverse-fit
-        // button then closes the loop, adding a「反推」variant whose look lives
-        // in an editable recipe (full-res + XMP). No more "continue from
-        // master" button — each result is its own selectable variant, so a
-        // slider edit can never revert or double-cook it.
-        egui::CollapsingHeader::new(tr(lang, "Reimagine (whole image)"))
-            .id_salt("sec_reimagine")
-            .default_open(true)
-            .show(ui, |ui| {
-                // This entry's OWN style prompt, right next to its trigger
-                // (it used to silently borrow the Direction field at the top
-                // of the panel — a prompt and its button belong together).
-                ui.horizontal_wrapped(|ui| {
-                    // The prompt field's width reserve follows the BUTTON'S
-                    // localized label, measured — the old fixed 130 px was
-                    // one pixel SHORT of the English "✨ Generate image"
-                    // (131 px at Button style + padding; the zh label needs
-                    // only 103), so the button's text wrapped into two
-                    // lines, twice the height of every neighbour (R19 user
-                    // report). Extend-mode is the belt to the measured
-                    // braces: the button can never wrap internally again —
-                    // which is also why the row math must be EXACT, frame
-                    // margins included: with Extend, any surplus stops
-                    // being absorbed by a wrap and instead widens the
-                    // auto-fitting side panel by that surplus EVERY frame
-                    // (probed: +8 px/frame runaway when the TextEdit's own
-                    // frame margin was left out of the reserve). The margin
-                    // is therefore pinned HERE and handed to the widget, so
-                    // the arithmetic and the widget can never disagree.
-                    const TE_MARGIN: egui::Margin = egui::Margin::symmetric(4.0, 2.0);
-                    let btn_label = tr(lang, "✨ Generate image");
-                    let btn_w = ui
-                        .painter()
-                        .layout_no_wrap(
-                            btn_label.to_owned(),
-                            egui::TextStyle::Button.resolve(ui.style()),
-                            ui.visuals().text_color(),
-                        )
-                        .size()
-                        .x
-                        + 2.0 * ui.spacing().button_padding.x;
-                    let field_w = (ui.available_width()
-                        - btn_w
-                        - ui.spacing().item_spacing.x
-                        - TE_MARGIN.sum().x)
-                        .max(80.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.reimagine_prompt)
-                            .margin(TE_MARGIN)
-                            .desired_width(field_w)
-                            .hint_text(tr(lang, "style to repaint toward — e.g. golden-hour glow, moody film look")),
-                    );
-                    ui.add_enabled_ui(!self.busy, |ui| {
-                        let resp = ui.add(
-                            egui::Button::new(btn_label).wrap_mode(egui::TextWrapMode::Extend),
-                        );
-                        #[cfg(test)]
-                        {
-                            self.reimagine_btn_rect = Some(resp.rect);
-                        }
-                        if resp
-                            .on_hover_text(tr(lang,
-                                "Repaint the whole image with gpt-image, styled by the prompt on the left \
-                                 (empty = a neutral finished develop). Repainted pixels = not faithful; the \
-                                 result is added as an 「AI generated」 variant at the bottom and switched to, \
-                                 so you can keep tweaking without reverting. Models that accept any size \
-                                 (gpt-image-2) reach ~8MP, others ~1.5K. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
-                            ))
-                            .clicked()
-                        {
-                            self.start_reimagine();
-                        }
-                    });
-                });
-                // Reverse-fit the active generated variant's look back into an
-                // editable recipe — how the low-res experiment becomes a
-                // full-res, XMP-able「反推」variant.
-                let can_fit = self.fit_target().is_some() && self.source_preview.is_some();
-                if !can_fit {
-                    ui.label(
-                        egui::RichText::new(tr(lang,
-                            "Generate an image first and stay on that variant to reverse-fit its recipe."))
-                            .weak()
-                            .small(),
-                    );
-                }
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(!self.busy && can_fit, |ui| {
-                        if ui
-                            .button(tr(lang, "🎛 Reverse-fit recipe → sliders/XMP"))
-                            .on_hover_text(tr(lang,
-                                "Statistical fit: reverse the freshly generated look into editable develop params \
-                                 (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
-                                 into this photo's develop store; hit Export to render the full-resolution result.",
-                            ))
-                            .clicked()
-                        {
-                            self.start_fit();
-                        }
-                        if ui
-                            .button(tr(lang, "📝 Extract style prompt"))
-                            .on_hover_text(tr(lang,
-                                "Compare the original / generated images and have the vision model write a reusable \
-                                 style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and \
-                                 saves ./out/<stem>.style.txt.",
-                            ))
-                            .clicked()
-                        {
-                            self.start_style_prompt();
-                        }
-                    });
-                    // R20 opt-in LLM-as-a-judge. OUTSIDE the can_fit gate: the
-                    // toggle is a persisted PREFERENCE, not a fit-time verb —
-                    // gating it on can_fit locked a setting behind having a
-                    // generated variant active (review R20-N1). Only busy
-                    // disables it.
-                    ui.add_enabled_ui(!self.busy, |ui| {
-                        ui.checkbox(&mut self.fit_ai_judge, tr(lang, "AI review"))
-                            .on_hover_text(tr(lang,
-                                "After the fit, show the target and the fitted render to the vision model and \
-                                 have it SCORE the match (0-100) with a short critique — LLM as a judge. One \
-                                 paid vision call per fit (needs the image API key); the fit itself stays \
-                                 local and free. The score lands in the status line below. No cancel: like \
-                                 the fit itself, the app stays busy until the review returns.",
-                            ));
-                    });
-                });
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP \
-                         (the full-resolution way).",
-                    ))
-                    .weak()
-                    .small(),
-                );
-            });
-
-        // Mask tools shared by Fill AND Heal — one brush, two consumers.
+        // Whole-image Reimagine + reverse-fit MOVED to the AI panel (R22 #4,
+        // panels/ai.rs): they are AI develop verbs, and living here put them
+        // between the brush tools — a generative re-render of the whole frame
+        // sitting in the middle of dust-spot healing. Everything below is
+        // PIXEL work on the current rendition.
+        //
+        // Mask tools shared by Fill AND Heal — one brush, two consumers. They
+        // hang BARE between the sections that use them (#14b), which read as
+        // three peers with three loose controls above them; the caption says
+        // whose they are. NOT a collapsible on purpose: both Fill and Heal need
+        // to see the brush without opening anything. No fence of its own: the
+        // panel's separator + heading directly above IS this group's boundary,
+        // and a second hairline two lines under the first read as a stutter.
+        ui.add_space(SPACE_XS);
+        group_caption(ui, tr(lang, "Brush (shared)"));
         ui.horizontal(|ui| {
             let r = ui
                 .checkbox(&mut self.paint_mode, tr(lang, "Paint mask"))
@@ -803,12 +677,20 @@ impl AutoshopApp {
         egui::CollapsingHeader::new(tr(lang, "Generative Fill"))
             .id_salt("sec_fill")
             .default_open(false)
+            // Test-only force-open: this fold hides a width-pinned prompt row
+            // (see util::fold_open_in_tests).
+            .open(fold_open_in_tests())
             .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.fill_prompt)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(tr(lang, "what belongs there, e.g. remove the trash can, extend the sky")),
+                // #14a: was `desired_width(f32::INFINITY)`.
+                let _field = prompt_field(
+                    ui,
+                    &mut self.fill_prompt,
+                    tr(lang, "what belongs there, e.g. remove the trash can, extend the sky"),
                 );
+                #[cfg(test)]
+                {
+                    self.prompt_rects.push(_field.rect);
+                }
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("fill_quality")
                         .selected_text(tr(lang, ["high", "medium", "low"][self.fill_quality.min(2)]))
@@ -850,8 +732,12 @@ impl AutoshopApp {
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(!self.busy, |ui| {
                         if ui
-                            .button(tr(lang, "✦ AI heal (auto)"))
-                            .on_hover_text(tr(lang, "A vision model finds small dust spots / blemishes (API call), then each is healed from surrounding REAL pixels — never generated"))
+                            // 🤖, the one AI prefix app-wide (#4): ✦ was this
+                            // verb's private glyph. The tooltip carries the
+                            // AI-panel cross-reference — this stays HERE, at
+                            // the pixels it heals.
+                            .button(tr(lang, "🤖 AI heal (auto)"))
+                            .on_hover_text(ai_xref(lang, tr(lang, "A vision model finds small dust spots / blemishes (API call), then each is healed from surrounding REAL pixels — never generated")))
                             .clicked()
                         {
                             self.start_heal(false);

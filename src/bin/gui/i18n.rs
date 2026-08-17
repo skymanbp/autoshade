@@ -221,7 +221,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Paint the area, write what belongs there, then Remove/Fill. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
         "涂抹区域，写下那里该有什么，再点 Remove/Fill。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
     ("Heal (pixel)", "去瑕疵 · Heal（像素）"),
-    ("✦ AI heal (auto)", "✦ AI 去瑕疵 (auto)"),
+    ("🤖 AI heal (auto)", "🤖 AI 去瑕疵 (auto)"),
     ("Heal painted area", "修复涂抹区域"),
     ("AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out.",
         "AI 自动识别灰尘/瑕疵，或涂抹蒙版后修复。按周围像素做像素级修饰；存 ./out。"),
@@ -339,7 +339,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("🤖 AI select subject", "🤖 AI 选主体"),
     ("U²-Net salient-subject segmentation → bitmap mask (python sidecar: pip install rembg; first run auto-downloads the model to ~/.u2net)",
         "U²-Net 显著主体分割 → 位图蒙版（python sidecar：pip install rembg；首次运行自动下载模型到 ~/.u2net）"),
-    ("☁ AI select sky", "☁ AI 选天空"),
+    ("🤖 AI select sky", "🤖 AI 选天空"),
     ("SegFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~14MB model)",
         "SegFormer-ADE20K 天空分割 → 位图蒙版（python sidecar：pip install transformers；首次运行自动下载约 14MB 模型）"),
     ("this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
@@ -471,6 +471,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Display P3 (wide-gamut screens)", "Display P3（广色域屏）"),
     ("Adobe RGB (print)", "Adobe RGB（印刷）"),
     ("AI Denoise", "AI 降噪"),
+    ("🤖 AI Denoise", "🤖 AI 降噪"),
     ("Download…", "下载…"),
     ("Download… = save the full-resolution export to a path you choose", "下载…＝把全分辨率导出保存到你选的路径"),
     ("Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store",
@@ -668,8 +669,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
         "AI 分割{what}中…（首次运行自动下载模型；失败会在此报告）"),
     ("Reset to its default", "重置为默认值"),
-    ("Language & Reverse-fit apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
-        "「语言」与「反推」立即生效。下方的提供商设置经「保存设置」写入你 Autoshop 个人目录下的 autoshop.local.json（不在仓库里），对下一次 AI 调用生效（分析 / 填充 / 重绘）。"),
+    ("Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshop.local.json in your per-user Autoshop folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
+        "「语言」与「主题」立即生效。下方的提供商设置经「保存设置」写入你 Autoshop 个人目录下的 autoshop.local.json（不在仓库里），对下一次 AI 调用生效（分析 / 填充 / 重绘）。"),
 
     // ── Status bar · WB / range pick + manual mask placement ─────────────────
     ("WB eyedropper: {k} K · tint {tint} — fine-tune in the Tone section",
@@ -1157,6 +1158,18 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "冷知识：这个空页面加载完的时候，Photoshop 的启动画面还没画完那朵云。"),
     ("Every shortcut above ships free — no Creative tier, no Cloud, no monthly ransom.",
         "以上快捷键全部免费——没有 Creative 档位，没有 Cloud，没有每月赎金。"),
+    // ── R22 #4/#14b: AI panel (analysis / whole-image / reverse-fit) ──────────
+    //    + the develop panel's group captions
+    ("Analysis", "分析"),
+    ("Pixel-level AI tools stay at their tools: select subject / select sky in Local Masks, denoise in Detail, heal and fill in Retouch.",
+        "像素级 AI 工具就近放置：选主体 / 选天空在局部蒙版，降噪在细节，修复填充在修饰。"),
+    ("More AI features are in the AI area at the top of this panel",
+        "更多 AI 功能都在本面板上方的 AI 区"),
+    ("Tone & Colour", "影调与色彩"),
+    ("Detail & Lens", "细节与镜头"),
+    ("Local & Pixel", "局部与像素"),
+    ("Versions & Export", "版本与导出"),
+    ("Brush (shared)", "画笔（共用）"),
 ];
 
 #[cfg(test)]

@@ -173,6 +173,82 @@ pub(crate) fn fit_in_capped(tex_size: egui::Vec2, max_w: f32, avail_y: f32, cap:
     tex_size * s
 }
 
+/// A GROUP caption: the weak small line that names one band of sections
+/// (#14b). The develop panel's five groups — tone & colour, detail & lens,
+/// local & pixel, versions & export, plus the AI panel above it — already had
+/// the two `separator` fences that mark three of those boundaries and nothing
+/// that said what the fence divided; per-mask sliders got captions in R22-5
+/// (the `group` closure in `dev_masks`) and this is the same device one level
+/// up. Caption only — the sections keep their own collapsing state, so
+/// nothing here can hide a control.
+pub(crate) fn group_caption(ui: &mut egui::Ui, title: &str) {
+    ui.label(egui::RichText::new(title).weak().small());
+}
+
+/// ONE cross-reference sentence appended to a pixel-level AI verb's own
+/// tooltip (#4). The AI *develop* verbs (Analyze / Refine / Reimagine /
+/// reverse-fit) collected into the AI panel; the pixel-level ones deliberately
+/// did NOT move — 「AI select subject」 belongs beside the mask list, denoise
+/// beside sharpening, heal in Retouch — so each says where the rest of the AI
+/// lives instead of leaving the panel looking like the whole of it.
+///
+/// Appended to the EXISTING tooltip text rather than folded into every one of
+/// those (long, translated) strings: one new catalogue entry instead of five
+/// rewritten ones, and one tooltip per widget — a second `on_hover_text` on
+/// the same response stacks two bubbles (see `slider_hinted`).
+pub(crate) fn ai_xref(lang: Lang, tip: &str) -> String {
+    format!("{tip}\n\n{}", tr(lang, "More AI features are in the AI area at the top of this panel"))
+}
+
+/// Fold-state override for the two collapsibles that hide a WIDTH-PINNED row
+/// (the Reimagine prompt+button row and the Generative Fill prompt): `None` in
+/// a real run — the user's own fold state — and `Some(true)` under `cfg(test)`,
+/// because a headless frame never clicks a header and an unopened fold makes a
+/// width assertion silently vacuous instead of red. The width tests also call
+/// egui's own `set_everything_is_visible`; this covers the panels a test drives
+/// without it.
+pub(crate) fn fold_open_in_tests() -> Option<bool> {
+    cfg!(test).then_some(true)
+}
+
+/// A prompt text field with a readable width ceiling (#14a).
+///
+/// Prompts are sentences, so their fields want to be wide — but only up to a
+/// point: `desired_width(f32::INFINITY)` (what the Direction and Fill fields
+/// used) tracks `available_width()`, which on a panel dragged out to 800 px
+/// draws a single-line ribbon the full width of the panel. This clamps
+/// DOWNWARD to [`FIELD_W_MAX`] — never asking for more space than the row has,
+/// so it cannot reproduce the R19 runaway (that row asked for a SURPLUS every
+/// frame and the auto-fitting side panel granted it).
+///
+/// Two escapes for a prompt longer than the box: while the field has keyboard
+/// focus it widens to the full available width (typing needs to see the tail),
+/// and hovering shows the whole text — a singleline `TextEdit` clips (it
+/// scrolls, it does not wrap), so the tail is otherwise unreadable.
+///
+/// The id is PREDICTED (`next_auto_id`) and handed to the widget explicitly, so
+/// this frame's width can honour last frame's focus without a second widget or
+/// a caller-supplied salt.
+pub(crate) fn prompt_field(ui: &mut egui::Ui, buf: &mut String, hint: &str) -> egui::Response {
+    let id = ui.next_auto_id();
+    let focused = ui.memory(|m| m.has_focus(id));
+    let avail = ui.available_width();
+    let w = if focused { avail } else { avail.min(FIELD_W_MAX) };
+    let mut resp = ui.add(
+        egui::TextEdit::singleline(buf)
+            .id(id)
+            .desired_width(w.max(FIELD_W_MIN))
+            .hint_text(hint),
+    );
+    // Allocate the tooltip string only while it is actually being shown (this
+    // runs every frame for every prompt field). `buf`'s borrow ended with the
+    // `add` above.
+    if resp.hovered() && !buf.trim().is_empty() {
+        resp = resp.on_hover_text(buf.clone());
+    }
+    resp
+}
+
 /// Section header text with an activity dot when the section holds non-neutral
 /// values — a collapsed active adjustment must never be invisible.
 pub(crate) fn section_title(base: &str, active: bool) -> String {
@@ -846,7 +922,7 @@ pub(crate) fn big_decode_gate() -> &'static std::sync::Mutex<()> {
 /// Is the Python segmentation sidecar actually present in THIS install?
 ///
 /// The release packages carry no `python/` directory, so on a downloaded build
-/// 「🤖 AI select subject」/「☁ AI select sky」 could only ever fail — the button
+/// 「🤖 AI select subject」/「🤖 AI select sky」 could only ever fail — the button
 /// looked available and spent the click on a "sidecar not found at …" toast.
 /// Resolved ONCE: `config::bundled_helper` searches the executable's directory
 /// and its ancestors (never the cwd), and the env override is read at launch,
