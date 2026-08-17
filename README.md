@@ -86,10 +86,19 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   any reference of that shot) and *solves* for the `EditRecipe` that reproduces
   it through the engine — CDF tone matching, then saturation, then colour cast.
   No pixels are copied, so the fit applies at full sensor resolution and writes
-  recipe.json + XMP. Deterministic, **no API key needed**. Opt-in **AI review**
-  (GUI checkbox / `--ai-judge`): the vision model scores how faithfully the
-  fitted render matches the target (0-100 + critique — LLM as a judge; one
-  paid vision call, informational only).
+  recipe.json + XMP. Deterministic, **no API key needed**. In the desktop app
+  the reference is either the active generated variant or **any file you pick**
+  (「Choose reference…」 — your Lightroom export, the camera JPEG, a TIFF; a RAW
+  is developed neutrally first). Two honesty readings ride every fit: the
+  frame-global look residual, and a **joint distribution check** over luminance
+  × chroma value ranges, which can only lower the reported confidence, never
+  raise it. Opt-in **AI review** (GUI checkbox / `--ai-judge`): the vision model
+  scores how faithfully the fitted render matches the target (0-100 + critique +
+  its suggestion — LLM as a judge; one paid vision call, informational only).
+  Opt-in **deep** (GUI 「deep」 / `--deep`) lets that review ACT: it runs before
+  the save and buys ONE guided retry, where the reviewer picks which of the
+  app's own moves to try (never a parameter value) and the retry is kept only if
+  it re-scores at least as high.
 - **Generative (experimental)** — `reimagine` / `retouch` via OpenAI Images.
 - **Pixel retouch / Heal (experimental)** — an optional mode where the AI removes
   dust / blemishes / specks by healing from SURROUNDING REAL pixels
@@ -152,7 +161,7 @@ autoshop eval    <dir> [--limit N]           # compare AI edits vs your own .xmp
 autoshop style-index <dir>                   # build the "your taste" reference index (also in the GUI: AI panel › Style reference library)
 autoshop serve   <dir> [--port 8080]         # local web UI
 autoshop reimagine <raw> --prompt "..."      # experimental generative restyle
-autoshop match   <raw> <target> [--render] [--zoned] [--ai-judge]  # reverse-fit a look → editable recipe + XMP (no key; --ai-judge scores the match, needs key)
+autoshop match   <raw> <target> [--render] [--zoned] [--ai-judge] [--deep]  # reverse-fit a look → editable recipe + XMP (no key; --ai-judge scores the match and --deep lets it buy one guided retry, both need a key)
 autoshop retouch   <raw> --mask m.png --prompt "..."    # experimental generative object removal
 autoshop heal      <src> [--mask m.png] [--no-auto]     # pixel heal: spot/blemish removal (NOT generative)
 autoshop recipe-schema                       # print the EditRecipe JSON shape

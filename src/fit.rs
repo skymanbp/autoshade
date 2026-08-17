@@ -244,6 +244,69 @@ const ROT_VISIBLE_AFTER: f32 = 0.09;
 /// convicting that feature (the 0.83× margin collapse above).
 const ROT_HUE_MEASURABLE_CHROMA: f32 = 0.03;
 
+// --- the REPORTED-CONFIDENCE family (R23-6) ---------------------------------
+// One calibration with two ends, named as one so they can never be retuned
+// apart again. They were two bare literals — `(1.0 - err * 6.0).clamp(0.25,
+// 0.95)` at the bottom of `fit_recipe_from` and `err_after > 0.12` on the FAR
+// warning — and their relationship was invisible: the slope drives confidence
+// onto its floor at err = (1 − 0.25)/6 = 0.125, so the FAR line is the same
+// point, rounded down. That coincidence is not decoration; it means "the
+// number bottomed out" and "the warning fires" are ONE decision expressed
+// twice, and R17's real pair sits under BOTH (err_before 0.0947 → 0.0267),
+// which is exactly why neither ever fired on the fit the user called
+// nonsense. `the_confidence_family_is_one_calibration` pins the relation.
+//
+// The slope stays 6.0: this round does not retune the look-error ladder (it
+// would need the real failure pair that has not arrived). What changes is
+// that this ladder is no longer the ONLY thing allowed to set the number —
+// see `fit_zoned::JOINT_CONFIDENCE_SLOPE`, which can only lower it.
+
+/// Confidence per unit of look error.
+const CONFIDENCE_SLOPE: f32 = 6.0;
+/// Never claim less than this — a fit that lands far is still a fit, and 0
+/// would read as "broken" rather than "approximate".
+const CONFIDENCE_FLOOR: f32 = 0.25;
+/// Never claim more than this: a statistical match against a non-aligned
+/// target is never certain, whatever the residual says.
+const CONFIDENCE_CEIL: f32 = 0.95;
+/// The FAR line — the residual at which [`CONFIDENCE_SLOPE`] has already
+/// driven confidence onto [`CONFIDENCE_FLOOR`] ((1 − 0.25)/6 = 0.125),
+/// rounded down to a legible number.
+const FIT_FAR_ERR: f32 = 0.12;
+
+/// The one clamp both confidence ladders (this module's and the zoned one's)
+/// pass through, so the floor and ceiling are stated once.
+pub(crate) fn clamp_confidence(v: f32) -> f32 {
+    v.clamp(CONFIDENCE_FLOOR, CONFIDENCE_CEIL)
+}
+
+/// Confidence from the frame-global look error.
+fn confidence_from_look_err(err: f32) -> f32 {
+    clamp_confidence(1.0 - err * CONFIDENCE_SLOPE)
+}
+
+/// Aspect-ratio disagreement past which the two frames are unlikely to be
+/// the same shot (R23-6 B-7). 2% mirrors the grid-comparability rule inside
+/// [`neutral_gate_misprediction`] — a few rows of a 384-edge thumbnail, i.e.
+/// beyond what aspect rounding and a sane crop explain. A WARNING, never a
+/// refusal: the reference is a file the user chose on purpose, and a fit
+/// between two shots of the same scene is unreliable, not illegal.
+const SAME_FRAME_ASPECT_TOL: f32 = 0.02;
+
+/// Do these two images plausibly show the SAME frame? `false` ⇒ warn.
+///
+/// Two cheap readings, in the order that costs least: the aspect ratios, and
+/// then the grid comparability [`neutral_gate_misprediction`] already
+/// computes (it returns infinity when the two analysis grids differ by more
+/// than aspect rounding). Both are necessary conditions, neither is
+/// sufficient — a different photograph of the same scene at the same aspect
+/// passes, and nothing short of registration would catch it.
+pub fn same_frame_plausible(src: &DynamicImage, target: &DynamicImage) -> bool {
+    let ar = |w: u32, h: u32| w.max(1) as f32 / h.max(1) as f32;
+    let (a, b) = (ar(src.width(), src.height()), ar(target.width(), target.height()));
+    (a - b).abs() <= SAME_FRAME_ASPECT_TOL * a.max(b)
+}
+
 /// The fit outcome: the recipe plus the distribution error (mean |Δ| over luma
 /// quantiles and channel means, 0 = identical look) before and after.
 pub struct FitReport {
@@ -290,6 +353,12 @@ pub fn fit_recipe_from(
         base.tone_curve.is_empty() && base.masks.is_empty() && base.red_curve.is_empty(),
         "the fit base must be a calibration-only recipe"
     );
+    // R23-6 B-7: the reference no longer has to be an in-app generated
+    // variant, so "is this even the same photograph?" is now a question the
+    // fit can be asked. Measured BEFORE the thumbnails, which normalise the
+    // long edge and would hide a shape mismatch. A warning only — see
+    // [`same_frame_plausible`].
+    let same_frame = same_frame_plausible(src, target);
     let s_img = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
     let t_img = target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
     // The base render IS the reference domain: err_before is "calibration
@@ -423,7 +492,7 @@ pub fn fit_recipe_from(
     // lavender. Per-band intent is statistically unidentifiable here — like
     // local masks, it belongs to the AI style-prompt path, not to
     // distribution matching.
-    let fit_cast_stage = |recipe: &mut EditRecipe| -> bool {
+    let fit_cast_stage = |recipe: &mut EditRecipe| -> CastOutcome {
         recipe.red_curve = Vec::new();
         recipe.green_curve = Vec::new();
         recipe.blue_curve = Vec::new();
@@ -432,7 +501,7 @@ pub fn fit_recipe_from(
         recipe.red_curve = residual_channel_curve(&cur, &tp, 0);
         recipe.green_curve = residual_channel_curve(&cur, &tp, 1);
         recipe.blue_curve = residual_channel_curve(&cur, &tp, 2);
-        let mut rehue_blocked = false;
+        let mut out = CastOutcome::default();
         if !(recipe.red_curve.is_empty()
             && recipe.green_curve.is_empty()
             && recipe.blue_curve.is_empty())
@@ -444,18 +513,18 @@ pub fn fit_recipe_from(
             // holds nowhere) and the rotation budget (nor a region re-hued
             // into hues it does hold — golden-sky case). The vetoes only ever
             // reject, never rescue.
-            let ratio_fail = look_err(&with_px, &tp) > err_without * CAST_ACCEPT_RATIO;
-            rehue_blocked = cast_paints_foreign_hues(&cur, &with_px, &tp)
+            out.ratio_rejected = look_err(&with_px, &tp) > err_without * CAST_ACCEPT_RATIO;
+            out.rehue_blocked = cast_paints_foreign_hues(&cur, &with_px, &tp)
                 || cast_rotates_a_region(&cur, &with_px);
-            if ratio_fail || rehue_blocked {
+            if out.ratio_rejected || out.rehue_blocked {
                 recipe.red_curve = Vec::new();
                 recipe.green_curve = Vec::new();
                 recipe.blue_curve = Vec::new();
             }
         }
-        rehue_blocked
+        out
     };
-    let mut curves_rehue_blocked = fit_cast_stage(&mut recipe);
+    let mut cast = fit_cast_stage(&mut recipe);
 
     // --- 4b) do-no-harm — the pipeline-END check ------------------------------
     // Goal: don't hand back a recipe that renders FARTHER from the target
@@ -477,7 +546,7 @@ pub fn fit_recipe_from(
     while err_after > err_before + 1e-4 && recipe.saturation != 0.0 {
         let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
         recipe.saturation = round1(next);
-        curves_rehue_blocked = fit_cast_stage(&mut recipe);
+        cast = fit_cast_stage(&mut recipe);
         err_after = look_err(&pixels_of(&render::develop_preview(&s_img, &recipe)), &tp);
     }
     let sat_reduced = recipe.saturation != sat_fitted;
@@ -499,8 +568,17 @@ pub fn fit_recipe_from(
     // (err_before 0.0010 -> err_after 0.0029 is nearly 3x worse, and no
     // absolute floor below 0.003 catches it). Scale with the error instead
     // and add the quantisation budget once.
-    const FIT_QUANT: f32 = 1.2e-3;
-    if err_after > err_before * 1.25 + FIT_QUANT {
+    // The SECOND reading, taken here because here is where "the finished
+    // recipe against the untouched base" is the question (R23-6, feedback
+    // #16). `joint_base` describes doing nothing; `joint_after` describes
+    // shipping this recipe. Both are `None` when the family has no opinion —
+    // fail-open, and every use below is written so `None` changes nothing.
+    let joint_base = crate::fit_zoned::joint_reading(&sp, &tp);
+    let mut after_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+    let mut joint_after = crate::fit_zoned::joint_reading(&after_px, &tp);
+    let harm = terminal_harm(err_before, err_after, joint_base, joint_after);
+    let joint_regressed = harm.joint;
+    if harm.any() {
         // Reset to the BASE, not to a bare default (R16): "do no harm" means
         // degrading to the calibration look the canvas would show with no
         // fit at all — a bare default would re-introduce the dark neutral
@@ -509,6 +587,9 @@ pub fn fit_recipe_from(
         recipe = base.clone();
         err_after = err_before;
         fit_regressed = true;
+        // …and so is the render, and so is its joint reading.
+        after_px = sp.clone();
+        joint_after = joint_base;
     }
 
     // --- report ---------------------------------------------------------------
@@ -541,18 +622,52 @@ pub fn fit_recipe_from(
     // Keyed on the RESIDUAL, not the pre-fit distance: a large but perfectly
     // fittable tone gap (2 EV of exposure) starts far and ends near — only a
     // look the model cannot approach deserves the warning.
-    if err_after > 0.12 {
+    if err_after > FIT_FAR_ERR {
         push_note(
             &mut rationale,
             &mut notes,
             Note::new(keys::FIT_NOTE_FAR, vec![("err_after", format!("{err_after:.2}"))]),
         );
     }
+    // The joint value-range reading, ALWAYS reported when it has one: it is
+    // the only number in this report that `look_err` did not produce, and
+    // burying it behind a threshold would leave the user with a single
+    // self-graded score again. Named "joint distribution", never "region" —
+    // the buckets are value ranges whose pixels are scattered frame-wide.
+    if let Some(j) = joint_after {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_JOINT,
+                vec![
+                    ("weighted", format!("{:.3}", j.weighted)),
+                    ("worst", format!("{:.3}", j.worst)),
+                    ("label", j.worst_label.to_string()),
+                    ("n", j.buckets.to_string()),
+                ],
+            ),
+        );
+        if j.weighted >= crate::fit_zoned::JOINT_FAR_ERR {
+            push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_JOINT_FAR));
+        }
+    } else {
+        // FAIL-OPEN, disclosed. "No opinion" and "no problem" are different
+        // claims and must not read the same (E-15): with no second reading
+        // the confidence below is the look-error ladder on its own.
+        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_JOINT_NONE));
+    }
     if sat_pegged {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_SAT_PEGGED));
     }
     if fit_regressed {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REGRESSED));
+        if joint_regressed {
+            // WHICH check refused matters: the scalar arm and this one see
+            // different damage, and "the value ranges drifted" is actionable
+            // where "it rendered farther" is not.
+            push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_JOINT_REGRESSED));
+        }
     } else if sat_reduced {
         push_note(
             &mut rationale,
@@ -566,14 +681,287 @@ pub fn fit_recipe_from(
             ),
         );
     }
-    if curves_rehue_blocked {
-        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REHUE_BLOCKED));
+    if let Some(k) = cast.note_key() {
+        push_note(&mut rationale, &mut notes, Note::plain(k));
+    }
+    // Which controls this target's look may need that the solver has no way
+    // to reach — SPECIFIC to this pair, not the blanket sentence the summary
+    // already carries (R23-6 A-5).
+    if let Some(n) = unrepresented_note(&recipe, &after_px, &tp, err_after) {
+        push_note(&mut rationale, &mut notes, n);
+    }
+    if !same_frame {
+        push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_NOT_SAME_FRAME));
     }
     recipe.rationale = rationale;
-    recipe.confidence = (1.0 - err_after * 6.0).clamp(0.25, 0.95);
+    // Confidence: the look-error ladder, and never MORE than the joint
+    // reading's own ladder allows. One-directional on purpose — a reading
+    // that cannot see (`None`) must not raise a claim, and the two metrics
+    // disagreeing means the honest answer is the lower one. On the fixture
+    // set this is what finally separates a fit that reproduces the look from
+    // one that only scores well: the unreachable-repaint pair reads 0.52 by
+    // look error and 0.25 here.
+    recipe.confidence = match joint_after {
+        Some(j) => confidence_from_look_err(err_after).min(clamp_confidence(
+            1.0 - j.weighted * crate::fit_zoned::JOINT_CONFIDENCE_SLOPE,
+        )),
+        None => confidence_from_look_err(err_after),
+    };
     recipe.clamp();
     FitReport { recipe, err_before, err_after, notes }
 }
+
+/// Re-measure a recipe the way [`fit_recipe_from`] measures its own output:
+/// the frame-global look distance, and the confidence both ladders agree on.
+/// Returns `(err, confidence)`.
+///
+/// Exposed for the ONE caller that legitimately hands back a recipe it did
+/// not itself solve: the GUI's deep reverse-fit (R23-6 D) may adjust a
+/// fitted recipe on the visual reviewer's say-so, and reporting the solve's
+/// pre-adjustment numbers next to post-adjustment pixels would be exactly
+/// the kind of stale claim this round is about. Deterministic and local —
+/// the same two renders the fit already pays for.
+pub fn rescore(src: &DynamicImage, target: &DynamicImage, recipe: &EditRecipe) -> (f32, f32) {
+    let s = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
+    let t = pixels_of(&target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+    let cand = pixels_of(&render::develop_preview(&s, recipe));
+    let err = look_err(&cand, &t);
+    let conf = match crate::fit_zoned::joint_reading(&cand, &t) {
+        Some(j) => confidence_from_look_err(err).min(clamp_confidence(
+            1.0 - j.weighted * crate::fit_zoned::JOINT_CONFIDENCE_SLOPE,
+        )),
+        None => confidence_from_look_err(err),
+    };
+    (err, conf)
+}
+
+/// Which of the two hue/ratio gates (if either) refused the colour stage —
+/// both used to collapse into one boolean, and only one of them had a note.
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+struct CastOutcome {
+    /// A pixel-aligned hue gate fired (foreign hues, or a region re-hued).
+    rehue_blocked: bool,
+    /// The aggregate ratio refused: the curves did not buy enough.
+    ratio_rejected: bool,
+}
+
+/// Did the finished recipe do HARM — and which check says so?
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+struct TerminalHarm {
+    /// The frame-global look error regressed past the fit's own quantisation
+    /// budget (R16's rule, unchanged).
+    scalar: bool,
+    /// The joint value-range distributions drifted apart past
+    /// [`crate::fit_zoned::JOINT_DRIFT_TOL`] (R23-6's additional veto).
+    joint: bool,
+}
+
+impl TerminalHarm {
+    fn any(self) -> bool {
+        self.scalar || self.joint
+    }
+}
+
+/// Tolerance for the fit's OWN quantisation, not a fixed error size. The
+/// rounded sliders, the 8-bit residual tone curve and the f32 develop round
+/// trip cost about 1e-3 of residual even on an IDENTICAL pair, where
+/// `err_before` is exactly 0 — so a bare +1e-4 margin fired there, wiping a
+/// perfectly good near-neutral solve and reporting "outside the global
+/// model's reach" directly beneath a printed residual of 0.000 -> 0.000.
+///
+/// A flat FLOOR is the wrong correction though: it would also wave through a
+/// fit that is genuinely worse whenever both numbers are small (err_before
+/// 0.0010 -> err_after 0.0029 is nearly 3× worse, and no absolute floor below
+/// 0.003 catches it). Scale with the error instead and add the quantisation
+/// budget once.
+const FIT_QUANT: f32 = 1.2e-3;
+
+/// The TERMINAL do-no-harm decision, pure so both of its arms are testable
+/// without a fixture that can reach them end to end.
+///
+/// Two independent readings, OR-ed, because they see different damage. The
+/// scalar arm is R16's and unchanged. The joint arm (R23-6) is the
+/// ADDITIONAL veto in [`crate::fit_zoned::ZONE_GLOBAL_REGRESSION_TOL`]'s
+/// shape: a fit that leaves the value ranges further apart than doing
+/// nothing has done harm whatever the scalar says — and the scalar
+/// structurally cannot say it, its colour term being three unconditional
+/// channel means. It only ever REJECTS, never rescues (a joint reading that
+/// improves cannot save a recipe the scalar convicts), and it is FAIL-OPEN:
+/// either side missing means no opinion, never "no problem".
+fn terminal_harm(
+    err_before: f32,
+    err_after: f32,
+    joint_base: Option<crate::fit_zoned::JointReading>,
+    joint_after: Option<crate::fit_zoned::JointReading>,
+) -> TerminalHarm {
+    TerminalHarm {
+        scalar: err_after > err_before * 1.25 + FIT_QUANT,
+        joint: match (joint_base, joint_after) {
+            (Some(b), Some(a)) => {
+                a.weighted > b.weighted + crate::fit_zoned::JOINT_DRIFT_TOL
+            }
+            _ => false,
+        },
+    }
+}
+
+impl CastOutcome {
+    /// What the user is told about an EMPTY colour stage — pure, so the
+    /// silent arm is testable without a fixture that reaches it.
+    ///
+    /// R23-6 A-2: `ratio_rejected` used to produce no note at all, so "the
+    /// colour stage produced nothing" — the commonest outcome of the whole
+    /// stage — reached the user as an unexplained absence, while the hue
+    /// gates next to it did disclose. The hue note WINS a double rejection:
+    /// it is the more specific statement, and a fit that would have re-hued
+    /// a region is the thing worth saying.
+    fn note_key(self) -> Option<&'static str> {
+        if self.rehue_blocked {
+            Some(crate::rationale::keys::FIT_NOTE_REHUE_BLOCKED)
+        } else if self.ratio_rejected {
+            Some(crate::rationale::keys::FIT_NOTE_CAST_REJECTED)
+        } else {
+            None
+        }
+    }
+}
+
+/// Name the develop controls THIS pair's residual points at that the fit has
+/// no way to solve for (R23-6 A-5).
+///
+/// The summary note already says "local masks and per-band HSL are not
+/// recovered" on every fit ever produced, which is true and useless: it does
+/// not say whether THIS target needed them. The solve domain is a fact about
+/// the code — the global arm writes exposure/contrast/highlights/shadows/
+/// whites/blacks, a tone curve, one saturation and three channel curves, and
+/// NOTHING in `advisor::catalogue::RECIPE_CONTROLS` else — so the honest
+/// disclosure is the intersection of "the model can express it", "we never
+/// solve it" and "the residual has evidence pointing at it".
+///
+/// The evidence tests are deliberately coarse and stated as SUSPICION, never
+/// as measurement: the residual decomposition can say a gap is chromatic
+/// rather than tonal, and it cannot say which control would close it. Naming
+/// a control the residual gives no sign of would be inventing a diagnosis.
+///
+/// `after_px` is the FINISHED render — the residual is what the fit could
+/// not close, so the evidence has to be read there and not on the base.
+fn unrepresented_note(
+    recipe: &EditRecipe,
+    after_px: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    err_after: f32,
+) -> Option<crate::rationale::Note> {
+    // Nothing left to explain.
+    if err_after <= FIT_QUANT_CLEAN {
+        return None;
+    }
+    let mut names: Vec<&str> = Vec::new();
+
+    // --- is what is LEFT a colour difference, and is it conditioned on
+    // brightness? That is exactly the question the joint family answers, and
+    // exactly the shape `hsl` / `color_grade` have. Reading the CHROMATIC
+    // buckets against the NEUTRAL ones at the same brightness separates "the
+    // coloured pixels disagree" (a colour move) from "everything disagrees"
+    // (a tone or exposure gap the fit does solve for) — a distinction no
+    // single global statistic can make, which is why the band-centroid test
+    // below cannot carry this on its own: a target that moves a whole region
+    // to a hue the source has NOWHERE leaves both bands under the 1.5%
+    // two-sided weight gate and is invisible to it (the cross-band blindness
+    // `look_err`'s own hue term documents).
+    let buckets = crate::fit_zoned::joint_buckets(after_px, tp);
+    let worst_of = |chromatic: bool| -> f32 {
+        buckets
+            .iter()
+            .filter(|b| b.chromatic == chromatic)
+            .map(|b| b.err)
+            .fold(0.0f32, f32::max)
+    };
+    let (chromatic_worst, neutral_worst) = (worst_of(true), worst_of(false));
+    let colour_shaped = chromatic_worst >= UNREPRESENTED_CHROMATIC_ERR
+        && chromatic_worst >= neutral_worst + UNREPRESENTED_CHROMATIC_LEAD;
+
+    // …and the classic evidence for the same conclusion: a populated band
+    // whose centroid hue is far off. Kept as a SECOND route because it fires
+    // on frames where the residual is a rotation rather than a magnitude,
+    // and the two routes miss different things.
+    let (sa, ta) = band_stats(after_px);
+    let (sb, tb) = band_stats(tp);
+    let mut worst_band = 0.0f32;
+    if ta >= 1.0 && tb >= 1.0 {
+        for i in 0..8 {
+            let (x, y) = (&sa[i], &sb[i]);
+            if x.w / ta < 0.015 || y.w / tb < 0.015 {
+                continue;
+            }
+            let mut d = y.sin.atan2(y.cos).to_degrees() - x.sin.atan2(x.cos).to_degrees();
+            while d > 180.0 {
+                d -= 360.0;
+            }
+            while d < -180.0 {
+                d += 360.0;
+            }
+            worst_band = worst_band.max(d.abs() as f32);
+        }
+    }
+    if colour_shaped || worst_band >= UNREPRESENTED_HUE_DEG {
+        // `hsl` is the per-band colour mixer the solver bans outright (see
+        // the stage-4 comment); `color_grade` is the tone-conditioned
+        // version of the same move. Name the second only when the channel
+        // curves — our one lever with that shape — are absent, which is
+        // both the honest condition and the common one (they are refused by
+        // the three gates far more often than they are kept).
+        names.push("hsl");
+        if recipe.red_curve.is_empty()
+            && recipe.green_curve.is_empty()
+            && recipe.blue_curve.is_empty()
+        {
+            names.push("color_grade");
+        }
+    }
+    // A surviving UNIFORM channel-mean offset is the white-balance shape,
+    // and `temperature_k` / `tint` are assigned NOWHERE in this module or
+    // the zoned one — the one control family the user will look for first.
+    let mean = |px: &[[f32; 3]], ch: usize| -> f32 {
+        if px.is_empty() {
+            0.0
+        } else {
+            px.iter().map(|p| p[ch]).sum::<f32>() / px.len() as f32
+        }
+    };
+    let rb = (mean(after_px, 0) - mean(tp, 0)) - (mean(after_px, 2) - mean(tp, 2));
+    if rb.abs() >= UNREPRESENTED_WB_RB {
+        names.push("temperature_k/tint");
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some(crate::rationale::Note::new(
+        crate::rationale::keys::FIT_NOTE_UNREPRESENTED,
+        vec![("controls", names.join(", "))],
+    ))
+}
+
+/// Below this residual there is nothing to explain and the disclosure would
+/// be noise — the same order as the fit's own quantisation budget.
+const FIT_QUANT_CLEAN: f32 = 0.01;
+/// Worst populated-band centroid disagreement (degrees) that counts as
+/// "this target used a per-band colour move". 20° is well past the ±13.5°
+/// the engine's own HSL hue axis can even express, so a gap this size cannot
+/// be a rounding artefact of a band the fit did reach.
+const UNREPRESENTED_HUE_DEG: f32 = 20.0;
+/// A chromatic bucket must miss by at least this much before the residual
+/// is called colour-shaped. On the fixture set the fits that LAND leave
+/// every chromatic bucket under 0.05 (the haze pair's worst is 0.041), while
+/// the region-graded canyon leaves 0.098 and the unreachable repaint 0.71.
+const UNREPRESENTED_CHROMATIC_ERR: f32 = 0.06;
+/// …and it must miss by this much MORE than the neutral buckets at the same
+/// brightness, or the difference is a tone/exposure gap the solver does
+/// address rather than a colour one it cannot.
+const UNREPRESENTED_CHROMATIC_LEAD: f32 = 0.02;
+/// Red-minus-blue mean offset (in 0..1 channel units) that counts as a
+/// white-balance-shaped residual. 0.02 ≈ 5/255 across the whole frame —
+/// visible as a cast, and an order above the fit's own rounding.
+const UNREPRESENTED_WB_RB: f32 = 0.02;
 
 // --------------------------------------------------------------------------
 // tone solve
@@ -2157,6 +2545,371 @@ mod tests {
         // neutrals is what a corrective cast legitimately does.
         let neutral = vec![[0.68f32, 0.68, 0.68]; 1000];
         assert_eq!(rehued_share(&neutral, &with), 0.0);
+    }
+
+    /// The haze pair, whose cast curves are ACCEPTED — reused by several
+    /// tests below, so the fixture is built once.
+    fn haze_pair() -> (DynamicImage, DynamicImage) {
+        let clean = synth();
+        let mut haze = EditRecipe {
+            exposure_ev: -0.3,
+            contrast: -45.0,
+            blacks: 40.0,
+            saturation: -40.0,
+            blue_curve: vec![
+                CurvePoint { input: 0, output: 25 },
+                CurvePoint { input: 128, output: 132 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            ..Default::default()
+        };
+        haze.clamp();
+        let base = render::develop_preview(&clean, &haze);
+        (base, clean)
+    }
+
+    /// THE CALIBRATION RECORD for the joint value-range family (R23-6).
+    ///
+    /// Every threshold in `fit_zoned`'s joint block was set from this table
+    /// and nothing else, so the table lives here as an executable
+    /// assertion — a fixture drift that moves the numbers must fail loudly
+    /// rather than quietly invalidate the constants.
+    ///
+    /// Measured (weighted reading, base → finished fit):
+    ///   identity                     0.0000 → 0.0009   (pure quantisation)
+    ///   roundtrip (known recipe)     0.0592 → 0.0044
+    ///   haze → clean (cast kept)     0.1802 → 0.0446
+    ///   canyon warm (violet class)   0.1767 → 0.0607
+    ///   canyon gold (rotation class) 0.2428 → 0.0925
+    ///   hazy canyon → vivid warm     0.5874 → 0.5813
+    ///
+    /// Two facts the constants rest on:
+    ///   * SEPARATION — every honest fit lands at 0.004-0.093, while the one
+    ///     pair whose target is a repaint no global model can reach (the
+    ///     real-pair geometry of 2026-07-09 #2) stays at 0.58. That is what
+    ///     [`fit_zoned::JOINT_FAR_ERR`] = 0.25 sits between, and it is the
+    ///     whole point of the second reading: `look_err` scores that same
+    ///     fit 0.080, i.e. confidence 0.52, a number the user reads as "it
+    ///     mostly worked".
+    ///   * MONOTONICITY — every pair improves or holds, the single exception
+    ///     being the identity pair's +0.0009 of rounding. That is what
+    ///     [`fit_zoned::JOINT_DRIFT_TOL`] = 0.05 has 56× of headroom over.
+    ///
+    /// HONEST STATUS: synthetic fixtures plus the two archived real-pair
+    /// geometries they distil. The new real "the reverse-fit is nonsense"
+    /// pair this round asked for did not arrive, so these constants are
+    /// provisional pending a real-pair review.
+    #[test]
+    fn joint_family_is_calibrated_on_the_fixture_set() {
+        let edge = ANALYZE_EDGE;
+        let read = |src: &DynamicImage, tgt: &DynamicImage| -> (f32, f32, f32) {
+            let s2 = src.thumbnail(edge, edge);
+            let tp2 = pixels_of(&tgt.thumbnail(edge, edge));
+            let rep = fit_recipe(src, tgt);
+            let base_px = pixels_of(&render::develop_preview(&s2, &EditRecipe::default()));
+            let fit_px = pixels_of(&render::develop_preview(&s2, &rep.recipe));
+            let b = crate::fit_zoned::joint_reading(&base_px, &tp2).expect("base reading");
+            let a = crate::fit_zoned::joint_reading(&fit_px, &tp2).expect("fit reading");
+            (b.weighted, a.weighted, rep.err_after)
+        };
+        let mut honest_max = 0.0f32;
+        for (name, src, tgt) in [
+            ("identity", synth(), synth()),
+            ("canyon warm", canyon(false), canyon(true)),
+            ("canyon gold", canyon(false), canyon_gold_target()),
+        ] {
+            let (before, after, _) = read(&src, &tgt);
+            assert!(
+                after <= before + crate::fit_zoned::JOINT_DRIFT_TOL,
+                "{name}: the fit must not push the joint reading past the drift \
+                 tolerance ({before:.4} -> {after:.4})"
+            );
+            honest_max = honest_max.max(after);
+        }
+        {
+            let (base, clean) = haze_pair();
+            let (before, after, _) = read(&base, &clean);
+            assert!(after < before * 0.5, "haze: {before:.4} -> {after:.4}");
+            honest_max = honest_max.max(after);
+        }
+        {
+            let src = synth();
+            let mut truth = EditRecipe {
+                exposure_ev: 0.35,
+                contrast: 18.0,
+                highlights: -25.0,
+                whites: 12.0,
+                saturation: 15.0,
+                ..Default::default()
+            };
+            truth.clamp();
+            let tgt = render::develop_preview(&src, &truth);
+            let (before, after, _) = read(&src, &tgt);
+            assert!(after < before * 0.5, "roundtrip: {before:.4} -> {after:.4}");
+            honest_max = honest_max.max(after);
+        }
+        // The separation the FAR line lives in. Both sides asserted, so a
+        // drift that closes the gap from either end fails here rather than
+        // silently making the reading useless.
+        let (_, unreachable, look) = read(&hazy_canyon_source(), &vivid_warm_target());
+        assert!(
+            honest_max < crate::fit_zoned::JOINT_FAR_ERR * 0.6,
+            "the honest fits must stay well under the FAR line (worst {honest_max:.4})"
+        );
+        assert!(
+            unreachable > crate::fit_zoned::JOINT_FAR_ERR * 2.0,
+            "the unreachable repaint must stay well over the FAR line ({unreachable:.4})"
+        );
+        // …and the reason the second reading exists: the scalar calls that
+        // same fit a partial success.
+        assert!(
+            look < 0.12,
+            "premise: the scalar reports this unreachable fit as a modest \
+             residual ({look:.4}) — if it ever reports it as far, this pair \
+             no longer demonstrates the gap"
+        );
+    }
+
+    /// The joint family may REPORT the worst bucket but must never gate on
+    /// it — measured here, because the temptation is obvious and the data
+    /// says the opposite. A change that fixes a bucket moves its members
+    /// out of it, so a per-stage worst-bucket comparison inverts: the one
+    /// correct cast in the fixture set gets worse by it, and the two casts
+    /// that must be refused get better.
+    #[test]
+    fn the_worst_bucket_cannot_gate_a_stage() {
+        let edge = ANALYZE_EDGE;
+        let cast_pair = |src: &DynamicImage, tgt: &DynamicImage| -> (f32, f32) {
+            let s2 = src.thumbnail(edge, edge);
+            let tp2 = pixels_of(&tgt.thumbnail(edge, edge));
+            let rep = fit_recipe(src, tgt);
+            let mut pre = rep.recipe.clone();
+            pre.red_curve = Vec::new();
+            pre.green_curve = Vec::new();
+            pre.blue_curve = Vec::new();
+            let cur = pixels_of(&render::develop_preview(&s2, &pre));
+            let mut with = pre.clone();
+            with.red_curve = residual_channel_curve(&cur, &tp2, 0);
+            with.green_curve = residual_channel_curve(&cur, &tp2, 1);
+            with.blue_curve = residual_channel_curve(&cur, &tp2, 2);
+            let with_px = pixels_of(&render::develop_preview(&s2, &with));
+            (
+                crate::fit_zoned::joint_reading(&cur, &tp2).expect("without").worst,
+                crate::fit_zoned::joint_reading(&with_px, &tp2).expect("with").worst,
+            )
+        };
+        let (base, clean) = haze_pair();
+        let (haze_without, haze_with) = cast_pair(&base, &clean);
+        assert!(
+            haze_with > haze_without,
+            "premise: the CORRECT cast makes the worst bucket read worse \
+             ({haze_without:.4} -> {haze_with:.4})"
+        );
+        let (gold_without, gold_with) = cast_pair(&canyon(false), &canyon_gold_target());
+        assert!(
+            gold_with < gold_without,
+            "premise: the cast that MUST be refused makes the worst bucket \
+             read better ({gold_without:.4} -> {gold_with:.4})"
+        );
+        // The conclusion, stated as an assertion so it cannot rot: any
+        // "worst bucket must not get worse" rule ranks these two the wrong
+        // way round.
+        assert!(
+            haze_with - haze_without > gold_with - gold_without,
+            "a worst-bucket drift gate would reject the correct cast before \
+             the wrecking one"
+        );
+    }
+
+    /// The confidence family is ONE calibration: the FAR warning fires
+    /// exactly where the slope has already bottomed the number out. Two
+    /// literals could drift apart silently; this is why they are named.
+    #[test]
+    fn the_confidence_family_is_one_calibration() {
+        let bottom = (1.0 - CONFIDENCE_FLOOR) / CONFIDENCE_SLOPE;
+        assert!(
+            (bottom - FIT_FAR_ERR).abs() <= 0.01,
+            "the FAR line ({FIT_FAR_ERR}) must be the residual at which the \
+             slope reaches the floor ({bottom})"
+        );
+        assert_eq!(confidence_from_look_err(bottom + 0.001), CONFIDENCE_FLOOR);
+        assert_eq!(confidence_from_look_err(0.0), CONFIDENCE_CEIL);
+        // The joint ladder is its own calibration with the same shape.
+        let jb = (1.0 - CONFIDENCE_FLOOR) / crate::fit_zoned::JOINT_CONFIDENCE_SLOPE;
+        assert!(
+            (jb - crate::fit_zoned::JOINT_FAR_ERR).abs() <= 0.01,
+            "the joint FAR line must be the weighted reading at which its own \
+             slope reaches the floor ({jb})"
+        );
+    }
+
+    /// R23-6 A-2: the colour stage's SILENT arm. `ratio_fail` empties all
+    /// three channel curves and used to push no note, while the hue gates
+    /// beside it did disclose — so the commonest way for the colour stage to
+    /// produce nothing was also the only one the user could not read about.
+    ///
+    /// The decision is pinned as a PURE function because no fixture in this
+    /// repo reaches the ratio arm without a hue gate also firing (measured:
+    /// of the six fixture pairs, 13 stage runs accept, 8 are hue-only
+    /// rejections and 5 are both) — an end-to-end test would therefore pass
+    /// on the hue note and prove nothing about the arm it is named for.
+    #[test]
+    fn a_silently_rejected_colour_stage_now_says_so() {
+        use crate::rationale::keys;
+        // The arm this test exists for: no hue damage, the aggregate simply
+        // did not earn the risk.
+        assert_eq!(
+            CastOutcome { rehue_blocked: false, ratio_rejected: true }.note_key(),
+            Some(keys::FIT_NOTE_CAST_REJECTED)
+        );
+        // The hue note wins a double rejection — more specific, and the
+        // thing worth saying.
+        assert_eq!(
+            CastOutcome { rehue_blocked: true, ratio_rejected: true }.note_key(),
+            Some(keys::FIT_NOTE_REHUE_BLOCKED)
+        );
+        assert_eq!(
+            CastOutcome { rehue_blocked: true, ratio_rejected: false }.note_key(),
+            Some(keys::FIT_NOTE_REHUE_BLOCKED)
+        );
+        // An ACCEPTED stage says nothing — a note on every fit is noise.
+        assert_eq!(CastOutcome::default().note_key(), None);
+
+        // …and the end-to-end property that follows from it: whenever the
+        // colour stage ships nothing, SOMETHING explains it.
+        for (name, src, tgt) in [
+            ("canyon warm", canyon(false), canyon(true)),
+            ("canyon gold", canyon(false), canyon_gold_target()),
+            ("hazy canyon", hazy_canyon_source(), vivid_warm_target()),
+        ] {
+            let rep = fit_recipe(&src, &tgt);
+            let empty = rep.recipe.red_curve.is_empty()
+                && rep.recipe.green_curve.is_empty()
+                && rep.recipe.blue_curve.is_empty();
+            if !empty {
+                continue;
+            }
+            assert!(
+                rep.notes.iter().any(|n| {
+                    n.key == keys::FIT_NOTE_CAST_REJECTED
+                        || n.key == keys::FIT_NOTE_REHUE_BLOCKED
+                        || n.key == keys::FIT_NOTE_REGRESSED
+                }),
+                "{name}: an empty colour stage must disclose WHY: {}",
+                rep.recipe.rationale
+            );
+        }
+    }
+
+    /// R23-6 A-5: the disclosure names controls for THIS pair, not the
+    /// blanket sentence every fit carries. The canyon-gold pair's residual
+    /// is a per-band hue move the solver has no dial for.
+    #[test]
+    fn the_unsolvable_controls_are_named_for_this_pair() {
+        let rep = fit_recipe(&canyon(false), &canyon_gold_target());
+        let note = rep
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED)
+            .unwrap_or_else(|| panic!("no specific disclosure: {}", rep.recipe.rationale));
+        let controls = &note.args.iter().find(|(k, _)| *k == "controls").expect("arg").1;
+        assert!(controls.contains("hsl"), "expected the colour mixer named, got {controls}");
+        // And it must NOT fire on a pair the solver actually reproduces —
+        // a disclosure that always fires is the blanket sentence again.
+        let (base, clean) = haze_pair();
+        let good = fit_recipe(&base, &clean);
+        assert!(
+            !good
+                .notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED),
+            "a fit that lands must not claim a missing control: {}",
+            good.recipe.rationale
+        );
+    }
+
+    /// R23-6 B-7: any file may now be the reverse-fit target, so a
+    /// reference that is not this frame must be WARNED about — and not
+    /// refused: the user chose the file.
+    #[test]
+    fn a_differently_shaped_reference_is_warned_about_not_refused() {
+        let src = synth(); // 192x128, aspect 1.5
+        // A genuinely different shape — `thumbnail` PRESERVES aspect, so it
+        // cannot build this case; cropping can.
+        let tall = synth().crop_imm(0, 0, 96, 128); // aspect 0.75
+        assert!(!same_frame_plausible(&src, &tall));
+        assert!(same_frame_plausible(&src, &synth()));
+        // A resize of the SAME frame must not trip it: aspect survives
+        // `thumbnail`, and its integer rounding is what the tolerance is for.
+        assert!(same_frame_plausible(&src, &synth().thumbnail(97, 97)));
+        let rep = fit_recipe(&src, &tall);
+        assert!(
+            rep.notes
+                .iter()
+                .any(|n| n.key == crate::rationale::keys::FIT_NOTE_NOT_SAME_FRAME),
+            "the doubt must be disclosed: {}",
+            rep.recipe.rationale
+        );
+        // Refused would be wrong: a recipe still comes back.
+        assert!(rep.err_after.is_finite());
+    }
+
+    /// The joint family's ADDITIONAL terminal veto (R23-6 C, role 3). No
+    /// fixture in this repo reaches it — by design, since it has 56× headroom
+    /// over the largest non-improvement measured — so the decision itself is
+    /// pinned here, both arms and the fail-open direction.
+    #[test]
+    fn the_terminal_check_reads_both_metrics_and_fails_open() {
+        use crate::fit_zoned::{JointReading, JOINT_DRIFT_TOL};
+        let j = |w: f32| {
+            Some(JointReading { worst: w, worst_label: "shadows/colour", weighted: w, buckets: 6 })
+        };
+        // A clean fit: neither arm objects.
+        assert_eq!(
+            terminal_harm(0.09, 0.03, j(0.18), j(0.04)),
+            TerminalHarm { scalar: false, joint: false }
+        );
+        // The scalar arm alone (R16's rule, untouched).
+        assert!(terminal_harm(0.010, 0.030, j(0.10), j(0.02)).scalar);
+        // The JOINT arm alone — the case that motivated it: the frame-global
+        // number improves while the value ranges are driven apart.
+        let joint_only = terminal_harm(0.09, 0.03, j(0.10), j(0.10 + JOINT_DRIFT_TOL + 0.01));
+        assert!(joint_only.joint && !joint_only.scalar);
+        assert!(joint_only.any(), "the two arms are OR-ed, not AND-ed");
+        // …and it is BOUNDED: drift inside the tolerance is not harm.
+        assert!(!terminal_harm(0.09, 0.03, j(0.10), j(0.10 + JOINT_DRIFT_TOL - 0.01)).joint);
+        // FAIL-OPEN in both directions: no reading ⇒ no verdict from this
+        // arm, never a silent pass dressed as approval.
+        assert!(!terminal_harm(0.09, 0.03, None, j(0.9)).joint);
+        assert!(!terminal_harm(0.09, 0.03, j(0.0), None).joint);
+        // …but the scalar arm still stands on its own when it does.
+        assert!(terminal_harm(0.01, 0.9, None, None).any());
+        // It can only REJECT: a joint reading that improves cannot rescue a
+        // recipe the scalar convicts.
+        assert!(terminal_harm(0.010, 0.030, j(0.90), j(0.001)).any());
+    }
+
+    /// The joint reading may only LOWER the reported confidence, and the
+    /// case it exists for is the one the scalar over-reports.
+    #[test]
+    fn the_joint_reading_can_only_lower_confidence() {
+        let rep = fit_recipe(&hazy_canyon_source(), &vivid_warm_target());
+        let scalar_alone = confidence_from_look_err(rep.err_after);
+        assert!(
+            rep.recipe.confidence < scalar_alone - 0.1,
+            "the unreachable repaint must not keep the scalar's claim \
+             ({scalar_alone:.2} vs reported {:.2})",
+            rep.recipe.confidence
+        );
+        assert!(rep.recipe.confidence >= CONFIDENCE_FLOOR);
+        // …and on a fit that genuinely lands, it must not invent doubt.
+        let (base, clean) = haze_pair();
+        let good = fit_recipe(&base, &clean);
+        assert!(
+            good.recipe.confidence >= 0.75,
+            "a landed fit must keep its confidence, got {}",
+            good.recipe.confidence
+        );
     }
 
     #[test]

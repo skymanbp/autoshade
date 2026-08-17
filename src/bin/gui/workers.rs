@@ -1343,6 +1343,13 @@ impl AutoshopApp {
                             self.clone_mode = false;
                             self.clone_src = None;
                             self.verdict = None;
+                            // R23-6 B: the chosen reverse-fit reference names
+                            // a rendition of THE PREVIOUS photo. Carried
+                            // across an open it would silently fit this photo
+                            // against the last one's export — the exact
+                            // "reference is not this frame" case the fit can
+                            // now only warn about.
+                            self.fit_ref = None;
                             // (rationale already restored alongside the recipe)
                             self.refresh_versions(); // version snapshots are per-photo
                             self.dirty = true; // render the (restored or neutral) after
@@ -2238,16 +2245,60 @@ impl AutoshopApp {
             ),
             // R20 opt-in AI review. The critique is model English by the
             // rationale contract (args ride verbatim, like {err} text).
-            FitNote::AiReview { score, critique } => trf(
-                lang,
-                " · AI review: match {score}/100 — {critique}",
-                &[("score", &format!("{score:.0}")), ("critique", critique)],
-            ),
+            FitNote::AiReview { score, critique, hint } => {
+                let mut s = trf(
+                    lang,
+                    " · AI review: match {score}/100 — {critique}",
+                    &[("score", &format!("{score:.0}")), ("critique", critique)],
+                );
+                // R23-6: the third of the three things the paid call
+                // returned. R20 kept the score and the critique and dropped
+                // this one with no reason on record. Labelled as a
+                // SUGGESTION because on this path nothing acted on it.
+                if let Some(h) = hint.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+                    s.push_str(&trf(
+                        lang,
+                        " · it suggests: {hint} (nothing was changed — tick 「deep」 to let it try)",
+                        &[("hint", h)],
+                    ));
+                }
+                s
+            }
             FitNote::AiReviewFailed(e) => trf(
                 lang,
                 " · AI review unavailable ({err}) — the fit itself already landed",
                 &[("err", e)],
             ),
+            // R23-6 A-3: loud, because "the reverse-fit did nothing" is what
+            // it means and a rationale line was not carrying it.
+            FitNote::FitReset => tr(
+                lang,
+                " · ⚠ THE REVERSE-FIT WAS DISCARDED: every version of it rendered farther from the target than your untouched photo, so the recipe was reset to neutral — this is the same as not having reverse-fitted at all",
+            )
+            .to_string(),
+            FitNote::ReferenceNotSameFrame => tr(
+                lang,
+                " · ⚠ the reference does not look like this same frame — the result is unreliable",
+            )
+            .to_string(),
+            FitNote::DeepFit { rounds, action, adopted } => {
+                if *rounds == 0 {
+                    tr(lang, " · deep: the review found nothing this app can act on — the plain fit stands")
+                        .to_string()
+                } else if *adopted {
+                    trf(
+                        lang,
+                        " · deep: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
+                        &[("action", action)],
+                    )
+                } else {
+                    trf(
+                        lang,
+                        " · deep: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
+                        &[("action", action)],
+                    )
+                }
+            }
         }
     }
 

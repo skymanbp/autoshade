@@ -2,6 +2,8 @@
 
 use super::*;
 
+use autoshop::advisor::{hint_action, FitAction};
+
 impl AutoshopApp {
     /// Restore persisted prefs (last folder, view mode, export options) and
     /// re-open the library the user was browsing. Window geometry itself is
@@ -27,6 +29,7 @@ impl AutoshopApp {
             app.save_denoise = prefs.save_denoise;
             app.zoned_fit = prefs.zoned_fit;
             app.fit_ai_judge = prefs.fit_ai_judge;
+            app.fit_deep = prefs.fit_deep;
             app.view_mode = prefs.view_mode;
             app.exp_long_edge = prefs.exp_long_edge;
             app.exp_sharpen = prefs.exp_sharpen.clamp(0.0, 100.0);
@@ -2220,10 +2223,13 @@ impl AutoshopApp {
         );
     }
 
-    /// Reverse-fit ("match"): statistically solve the develop parameters that map
-    /// the SOURCE neutral onto the active「AI 生成」variant — the result lands as
-    /// a new「反推」variant (base = source neutral, look in the recipe), and for a
-    /// RAW the XMP sidecar is written immediately. Deterministic, no API call.
+    /// Reverse-fit ("match"): statistically solve the develop parameters that
+    /// map the SOURCE neutral onto a finished rendition of this frame — the
+    /// active「AI 生成」variant, or (R23-6) any reference file the user chose.
+    /// The result lands as a new「反推」variant (base = source neutral, look in
+    /// the recipe), and for a RAW the XMP sidecar is written immediately. The
+    /// fit itself is deterministic and local; only the optional review calls
+    /// out.
     ///
     /// The base is `source_preview`, NOT `base_preview`: after a reimagine the
     /// active variant's base IS the generated raster, and fitting a rendition
@@ -2239,6 +2245,10 @@ impl AutoshopApp {
         let src_path = self.src_path.clone();
         let zoned = self.zoned_fit;
         let ai_judge = self.fit_ai_judge;
+        // The deep path IS the review, iterated — it cannot run without it,
+        // and the checkbox is disabled accordingly, but the worker must not
+        // depend on a UI gate for a spending decision.
+        let deep = self.fit_deep && ai_judge;
         let lang = self.lang;
         self.busy = true;
         let mut running = if zoned {
@@ -2246,7 +2256,9 @@ impl AutoshopApp {
         } else {
             tr(lang, "Reverse-fitting… (statistical fit, local compute)").to_string()
         };
-        if ai_judge {
+        if deep {
+            running.push_str(tr(lang, " · deep: AI review BEFORE saving, up to one guided retry"));
+        } else if ai_judge {
             // The review runs AFTER the local fit and is a network call — the
             // busy line must own that extra wait up front.
             running.push_str(tr(lang, " · then AI review (vision call)"));
@@ -2255,8 +2267,16 @@ impl AutoshopApp {
         self.spawn_worker(
             move || {
                 let res = (|| -> anyhow::Result<FitOutcome> {
-                    // baked-by-construction: fit_target is a Generated variant's ./out raster.
-                    let target = autoshop::decode::load_image(&tgt)?;
+                    // THE raw-vs-baked dispatch (R22-1): the reference may now
+                    // be any file the user picked, including a RAW, which
+                    // `decode::load_image` refuses by name. `source_pixels`
+                    // develops a RAW neutrally and loads a baked file — the
+                    // one branch, never hand-copied. The cap is comfortably
+                    // above both consumers (the fit analyses at 384, the judge
+                    // at 1024) and preserves aspect, which the same-frame
+                    // check reads.
+                    const FIT_REF_EDGE: u32 = 2048;
+                    let target = autoshop::render::source_pixels(&tgt, Some(FIT_REF_EDGE))?;
                     // The gate runs at PERSIST time (below), not up front:
                     // a pre-fit snapshot left the whole multi-minute
                     // segmentation as a race window — an explicit save
@@ -2297,25 +2317,174 @@ impl AutoshopApp {
                             )
                         })
                         .unwrap_or_default();
-                    let rep = match (zoned, &src_path) {
-                        (true, Some(p)) => {
-                            let cfg = autoshop::config::Config::load();
-                            let seg =
-                                autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
-                            let mask = autoshop::store::claim_raster(p, "mask-zone-sky")?;
-                            autoshop::fit_zoned::fit_recipe_zoned_from(
-                                &base, &target, &seg, &mask, &fit_base,
-                            )
-                        }
-                        _ => autoshop::fit::fit_recipe_from(&base, &target, &fit_base),
+                    // ONE judge call site for both orderings (R23-6): the
+                    // default path reviews AFTER the persist, the deep path
+                    // reviews BEFORE it and again after its retry, and a
+                    // second hand-written copy of "encode both frames at
+                    // detail:high tile size and ask FitMatch" is exactly how
+                    // the two would drift into judging different pixels.
+                    // Domain: `rep.recipe` renders from the source NEUTRAL
+                    // (`base` — the room the composed fit solved in), so that
+                    // render against the target is the pair the fit's own
+                    // residual measures.
+                    const JUDGE_EDGE: u32 = 1024; // detail:high tiles at 512 px — 4 tiles read a grade
+                    let judge_of = |recipe: &autoshop::recipe::EditRecipe|
+                     -> anyhow::Result<autoshop::advisor::Judgement> {
+                        let cfg = autoshop::config::Config::load();
+                        let enc = |img: &image::DynamicImage| -> anyhow::Result<Vec<u8>> {
+                            let mut j = Vec::new();
+                            img.write_to(
+                                &mut std::io::Cursor::new(&mut j),
+                                image::ImageFormat::Jpeg,
+                            )?;
+                            Ok(j)
+                        };
+                        let fitted = autoshop::render::develop_preview(
+                            &base.thumbnail(JUDGE_EDGE, JUDGE_EDGE),
+                            recipe,
+                        );
+                        let t_jpeg = enc(&target.thumbnail(JUDGE_EDGE, JUDGE_EDGE))?;
+                        let f_jpeg = enc(&fitted)?;
+                        Ok(autoshop::advisor::judge_pair(
+                            &cfg,
+                            autoshop::advisor::JudgeImages {
+                                reference: &t_jpeg,
+                                candidate: &f_jpeg,
+                            },
+                            autoshop::advisor::JudgeTask::FitMatch,
+                            None,
+                            // FitMatch scores a MATCH between two renders —
+                            // the strength axis has no bearing on it (R23-3).
+                            None,
+                        )?)
                     };
+                    let run_zoned = |seg_on: bool| -> anyhow::Result<autoshop::fit::FitReport> {
+                        Ok(match (seg_on, &src_path) {
+                            (true, Some(p)) => {
+                                let cfg = autoshop::config::Config::load();
+                                let seg =
+                                    autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
+                                let mask = autoshop::store::claim_raster(p, "mask-zone-sky")?;
+                                autoshop::fit_zoned::fit_recipe_zoned_from(
+                                    &base, &target, &seg, &mask, &fit_base,
+                                )
+                            }
+                            _ => autoshop::fit::fit_recipe_from(&base, &target, &fit_base),
+                        })
+                    };
+                    let mut rep = run_zoned(zoned)?;
                     // FACTS, not prose (L12#4): the landing renders these
                     // with the language live when the result LANDS — the old
                     // trf calls here used the language captured at spawn,
                     // minutes stale after a segmentation run.
                     let mut status: Vec<FitNote> = Vec::new();
+                    // ── the DEEP path (R23-6 D). Everything here happens
+                    // BEFORE the persist below, which is the whole point and
+                    // the deliberate revision of R20's ordering — recorded at
+                    // the persist site.
+                    //
+                    // Discipline, copied wholesale from `visual_review_round`
+                    // (pipeline.rs) because it is the shape that already
+                    // survived review: the retry must re-score AT LEAST as
+                    // high to be kept, an action that changes nothing
+                    // short-circuits before spending a second call, and every
+                    // failure keeps the plain solve and degrades to a note.
+                    let mut judged: Option<autoshop::advisor::Judgement> = None;
+                    if deep {
+                        match judge_of(&rep.recipe) {
+                            Ok(first) => {
+                                let action = hint_action(
+                                    first.hint.as_deref().unwrap_or(""),
+                                    !rep.recipe.masks.is_empty(),
+                                    !zoned && src_path.is_some(),
+                                );
+                                let candidate = match action {
+                                    // The one action that needs the solver
+                                    // again. A claim/segmentation failure is
+                                    // not an error here: the plain solve in
+                                    // hand is already a valid result.
+                                    FitAction::Zoned => run_zoned(true).ok(),
+                                    FitAction::Saturation(d) => {
+                                        let mut r = rep.recipe.clone();
+                                        r.saturation += d;
+                                        r.clamp();
+                                        // Identical settings ⇒ nothing to
+                                        // judge, and no second call bought.
+                                        (r.saturation != rep.recipe.saturation).then(|| {
+                                            let (err, conf) =
+                                                autoshop::fit::rescore(&base, &target, &r);
+                                            r.confidence = conf;
+                                            autoshop::fit::FitReport {
+                                                recipe: r,
+                                                err_before: rep.err_before,
+                                                err_after: err,
+                                                notes: rep.notes.clone(),
+                                            }
+                                        })
+                                    }
+                                    FitAction::None => None,
+                                };
+                                let mut rounds = 0usize;
+                                let mut adopted = false;
+                                match candidate {
+                                    Some(mut cand) => {
+                                        rounds = 1;
+                                        match judge_of(&cand.recipe) {
+                                            Ok(second) if second.score >= first.score => {
+                                                adopted = true;
+                                                autoshop::rationale::push_note(
+                                                    &mut cand.recipe.rationale,
+                                                    &mut cand.notes,
+                                                    autoshop::rationale::Note::new(
+                                                        autoshop::rationale::keys::FIT_NOTE_DEEP_ADOPTED,
+                                                        vec![
+                                                            ("score1", format!("{:.0}", first.score)),
+                                                            ("score2", format!("{:.0}", second.score)),
+                                                            ("action", action.tag().to_string()),
+                                                        ],
+                                                    ),
+                                                );
+                                                rep = cand;
+                                                judged = Some(second);
+                                            }
+                                            // Lower, or un-judgeable: the
+                                            // plain solve stands, and the
+                                            // FIRST verdict is the one that
+                                            // describes what ships.
+                                            Ok(_) => judged = Some(first),
+                                            Err(e) => {
+                                                status.push(FitNote::AiReviewFailed(e.to_string()));
+                                                judged = Some(first);
+                                            }
+                                        }
+                                    }
+                                    None => judged = Some(first),
+                                }
+                                status.push(FitNote::DeepFit {
+                                    rounds,
+                                    action: action.tag(),
+                                    adopted,
+                                });
+                            }
+                            Err(e) => status.push(FitNote::AiReviewFailed(e.to_string())),
+                        }
+                    }
                     if !rep.recipe.masks.is_empty() {
                         status.push(FitNote::IncludesSkyZone);
+                    }
+                    // R23-6 A-3: the terminal do-no-harm reset is "the
+                    // reverse-fit did nothing", and a line inside a rationale
+                    // block is not where a user finds that out.
+                    if rep.notes.iter().any(|n| n.key == autoshop::rationale::keys::FIT_NOTE_REGRESSED)
+                    {
+                        status.push(FitNote::FitReset);
+                    }
+                    if rep
+                        .notes
+                        .iter()
+                        .any(|n| n.key == autoshop::rationale::keys::FIT_NOTE_NOT_SAME_FRAME)
+                    {
+                        status.push(FitNote::ReferenceNotSameFrame);
                     }
                     let mut persisted = false;
                     if let Some(p) = &src_path {
@@ -2415,55 +2584,47 @@ impl AutoshopApp {
                             status.push(FitNote::NotPersistedLock(e.to_string()));
                         }
                     }
-                    // R20 opt-in AI review (LLM-as-a-judge): the vision model
+                    // Opt-in AI review (LLM-as-a-judge): the vision model
                     // scores how faithfully the fitted render matches the
-                    // target look. AFTER the persist on purpose — the review
-                    // is informational and must never gate, delay or fail the
-                    // fit's landing; every failure degrades to a status note.
+                    // target look.
+                    //
+                    // ORDERING, and its history. R20 decided this review runs
+                    // AFTER the persist on purpose — informational, never
+                    // gating, delaying or failing the fit's landing, every
+                    // failure degrading to a status note (docs/ROADMAP.md's
+                    // R20 entry; Opus S5 定案). That is still the DEFAULT
+                    // path below, unchanged to the byte.
+                    //
+                    // R23-6 revises it for one explicitly-chosen case: with
+                    // 「deep」 ticked the user has asked the reviewer to act,
+                    // which it cannot do after the recipe is on disk. The deep
+                    // block above therefore reviews BEFORE the persist and may
+                    // buy ONE bounded guided retry (user decision 2026-08-17
+                    // ⑥). The R20 rule is not repealed — it is now the
+                    // behaviour of the unticked box, which is also the
+                    // default, and the historical entry stays as written.
+                    //
                     // Domain: rep.recipe renders from the source NEUTRAL
                     // (source_preview — the room the composed fit solved in),
                     // so that render vs the target is exactly the pair the
                     // fit's own residual measures.
                     if ai_judge {
-                        // detail:high tiles at 512 px — a 1024 edge gives the
-                        // judge 4 tiles per frame, enough to read a grade.
-                        const JUDGE_EDGE: u32 = 1024;
-                        let cfg = autoshop::config::Config::load();
-                        let enc = |img: &image::DynamicImage| -> anyhow::Result<Vec<u8>> {
-                            let mut j = Vec::new();
-                            img.write_to(
-                                &mut std::io::Cursor::new(&mut j),
-                                image::ImageFormat::Jpeg,
-                            )?;
-                            Ok(j)
+                        // The deep path already judged the recipe that
+                        // ships — judging it a third time would just bill the
+                        // user for the same answer.
+                        let verdict = match judged {
+                            Some(j) => Ok(j),
+                            None => judge_of(&rep.recipe),
                         };
-                        let fitted = autoshop::render::develop_preview(
-                            &base.thumbnail(JUDGE_EDGE, JUDGE_EDGE),
-                            &rep.recipe,
-                        );
-                        let pair = enc(&target.thumbnail(JUDGE_EDGE, JUDGE_EDGE))
-                            .and_then(|t| Ok((t, enc(&fitted)?)));
-                        match pair {
-                            Ok((t_jpeg, f_jpeg)) => match autoshop::advisor::judge_pair(
-                                &cfg,
-                                autoshop::advisor::JudgeImages {
-                                    reference: &t_jpeg,
-                                    candidate: &f_jpeg,
-                                },
-                                autoshop::advisor::JudgeTask::FitMatch,
-                                None,
-                                // FitMatch scores a MATCH between two renders —
-                                // the strength axis has no bearing on it (R23-3).
-                                None,
-                            ) {
-                                Ok(j) => status.push(FitNote::AiReview {
-                                    score: j.score,
-                                    critique: j.critique,
-                                }),
-                                Err(e) => {
-                                    status.push(FitNote::AiReviewFailed(e.to_string()));
-                                }
-                            },
+                        match verdict {
+                            Ok(j) => status.push(FitNote::AiReview {
+                                score: j.score,
+                                critique: j.critique,
+                                // R23-6: SHOWN, never executed on this path.
+                                // R20 dropped it silently and the user paid
+                                // for it.
+                                hint: j.hint,
+                            }),
                             Err(e) => status.push(FitNote::AiReviewFailed(e.to_string())),
                         }
                     }

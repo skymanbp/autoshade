@@ -324,7 +324,7 @@ this trait.)
 |------|------------------|--------------|-----|
 | **Image advisor** (图像) | OpenAI-compatible vision over HTTP (default `gpt-5.5`); Settings offers **API** (a real key) or **OAuth** (a local Codex bridge fronting a ChatGPT subscription) | **yes** (preview) | Look at the photo → emit an `EditRecipe`. The `claude` CLI has no image input in print mode, so this role never uses the claude OAuth path. |
 | **Analyst / verifier** (分析) | **OAuth** (`claude` CLI, default model `opus`) **or** API (OpenAI-compatible chat) | **no** (data only) | Reason over EXIF/histogram; **acceptance-verify** the recipe (ranges sane? consistent with metadata & intent? confidence adequate?) and flag/veto bad recipes. |
-| **Visual judge** (R20, `advisor::judge` — reuses the image role's endpoint/key, not a third credential) | same OpenAI-compatible vision endpoint as the image role | **yes** (reference + candidate renders) | Score a RESULT against a reference (strict-schema `{score, decision, critique, hint}`). Two consumers: the analyze closed loop (proposal rendered → judged → one guided revision, adopted only on a ≥ re-score) and the reverse-fit's opt-in AI review (target vs fitted render, informational). |
+| **Visual judge** (R20, `advisor::judge` — reuses the image role's endpoint/key, not a third credential) | same OpenAI-compatible vision endpoint as the image role | **yes** (reference + candidate renders) | Score a RESULT against a reference (strict-schema `{score, decision, critique, hint}`). Two consumers: the analyze closed loop (proposal rendered → judged → one guided revision, adopted only on a ≥ re-score) and the reverse-fit's opt-in AI review (target vs fitted render). Since R23-6 the fit review's `hint` is SHOWN (R20 dropped it silently) and, with the opt-in `deep` switch, is read by `advisor::hint_action` as a CHOICE among the app's own bounded moves (`FitAction`) — never as a parameter value, which is why the closed list lives beside the reply it reads. |
 
 > The verifier judges at the **data level** — recipe + histogram/clipping stats +
 > the advisor's rationale — *without* re-doing vision. The R20 judge is the
@@ -334,6 +334,15 @@ this trait.)
 > and every adopt/keep/failure branch discloses through the rationale. It is
 > a paid vision call, so it is an explicit caller decision: interactive
 > analyze surfaces pass `judge = true`; `batch` and `eval` pass `false`.
+>
+> **Ordering, and its one revision.** R20 decided the REVERSE-FIT's review
+> runs AFTER the persist — informational, never gating, every failure a
+> status note. That is still the default path and is unchanged. R23-6 revises
+> it for one explicitly-chosen case (user decision 2026-08-17 ⑥): with 「deep」
+> ticked, the review runs BEFORE the persist and may buy ONE guided retry,
+> because a reviewer cannot act on a recipe that is already on disk. The
+> analyze loop's ordering is untouched, and the CLI needed none — `match` has
+> always evaluated before it writes.
 
 > **The control registry is the single source of the AI contract** (R23-1,
 > [`src/advisor/catalogue.rs`](../src/advisor/catalogue.rs)): `RECIPE_CONTROLS` /
@@ -474,7 +483,11 @@ per CALL SITE — every line naming the gate carries `// baked-by-construction:
 <why>` (or `// not-a-consumer-call:` for the gate's own declaration and tests),
 and an unmarked line fails the build. It used to assert a FILE allow-list, which
 let an already-listed file — including the v0.22 accident site itself — grow a new
-hand-rolled decode unnoticed.
+hand-rolled decode unnoticed. R23-6 moved two more consumers onto the gate: both
+reverse-fit entries (`match`'s `--target` and the desktop reference picker) now
+accept a RAW reference through `source_pixels` rather than refusing it by name —
+the CLI prints the one thing that makes it honest, that a RAW reference is
+developed NEUTRALLY and its own develop settings are not read.
 
 ### 4.2 Vision advisor — image processing (M1)
 
@@ -695,6 +708,37 @@ always attempted — the skip line and the acceptance floor are split
 constants precisely so nothing fixable is declined untried. The GUI's **反推 / Reverse-fit** action drives the
 same two entry points (`fit_recipe`, `fit_recipe_zoned`) and lands the
 result as an editable variant.
+
+**The reference, and the second reading (v0.29.0, R23-6).** The desktop
+target is no longer only an app-generated variant: `canvas::fit_target`
+prefers an explicitly chosen `fit_ref` (「Choose reference…」 — any finished
+rendition of the same frame; a RAW goes through `render::source_pixels` and is
+developed NEUTRALLY, which the CLI says out loud) and falls back to the active
+generated variant. Both entries coexist, and the CLI has always accepted an
+arbitrary path. A cheap same-frame check (`fit::same_frame_plausible`, aspect
+within 2%) WARNS — never refuses — when the reference is not this shot.
+Alongside the frame-global `look_err`, every fit now carries a **joint
+value-range reading** (`fit_zoned::joint_reading`): four luminance bands ×
+two chroma classes, built on the existing `zone_moments` weight-vector
+interface, compared with `zone_err`'s formula read in the DISPLAY domain so
+one number means the same thing in shadows and highlights. It answers a
+question no term of `look_err` computes — its colour term is three
+*unconditional* channel means and its hue term skips everything under 0.06
+chroma — and it has exactly three jobs: report; cap the reported confidence
+(downward only, never raise); and act as ONE additional bounded-drift veto at
+the pipeline END (`fit::terminal_harm`), fail-open, in
+`ZONE_GLOBAL_REGRESSION_TOL`'s shape. It is deliberately NOT a per-stage gate:
+measured on this repo's own fixtures, the bucket a change fixes loses its
+members to a neighbour, so a per-stage worst-bucket comparison rejects the one
+correct cast in the set and admits both wrecks
+(`fit::tests::the_worst_bucket_cannot_gate_a_stage`). It is never mixed into
+`look_err`'s weighted sum — R17-R19's constants were each calibrated against a
+real failure pair. `AUTOSHOP_FIT_JOINT=off` removes the whole family for
+baseline comparison. A zoned fit's **confidence** now comes from the zones it
+actually accepted rather than the frame-global number this module's own
+acceptance doc proves cannot judge a zone; `err_after` keeps its contract
+(frame-global, comparable to `err_before`) and the rationale says which is
+which.
 
 Since v0.25.0 the GUI drives both entry points through a **composed
 calibration base** (`fit_recipe_from` / `fit_recipe_zoned_from` with

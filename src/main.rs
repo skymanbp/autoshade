@@ -224,6 +224,13 @@ enum Command {
         /// a review failure never fails the fit.
         #[arg(long)]
         ai_judge: bool,
+        /// R23-6: let that review ACT — one bounded guided retry, kept only if
+        /// it re-scores at least as high (the reviewer picks WHICH of this
+        /// app's moves to try, never the values). Implies --ai-judge; up to
+        /// two paid vision calls. Ordering is already correct here: the CLI
+        /// has always evaluated before it writes.
+        #[arg(long)]
+        deep: bool,
         /// Named recipe JSON artifact for `apply` (default:
         /// ./out/<stem>.matched.json). The canonical recipe.json in this
         /// photo's develop store — what the GUI and web restore — is ALWAYS
@@ -332,8 +339,10 @@ fn main() -> Result<()> {
             require_image_key(&cfg, "reimagine")?;
             generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, &out)
         }
-        Command::Match { raw, target, render, zoned, style_prompt, ai_judge, out } => {
-            match_cmd(&raw, &target, render, zoned, style_prompt, ai_judge, out)
+        Command::Match { raw, target, render, zoned, style_prompt, ai_judge, deep, out } => {
+            // --deep IS the review, iterated: asking for the loop without the
+            // reviewer is not a configuration, it is a typo.
+            match_cmd(&raw, &target, render, zoned, style_prompt, ai_judge || deep, deep, out)
         }
         Command::Retouch { raw, mask, prompt, quality, full_res, out } => {
             let cfg = Config::load();
@@ -853,6 +862,7 @@ fn denoise_cmd(
 /// (the same frame, differently developed — e.g. the reimagine output). The
 /// deliverables are parametric (recipe JSON + XMP + optional full-res render),
 /// so the low-res generative experiment becomes a real, adjustable develop.
+#[allow(clippy::too_many_arguments)] // one flag per CLI switch; a struct would just rename them
 fn match_cmd(
     raw: &Path,
     target: &Path,
@@ -860,6 +870,7 @@ fn match_cmd(
     zoned: bool,
     style_prompt: bool,
     ai_judge: bool,
+    deep: bool,
     out: Option<PathBuf>,
 ) -> Result<()> {
     // BEFORE any fitting/segmentation is paid for: `-o` naming the photo's
@@ -878,10 +889,30 @@ fn match_cmd(
         );
     }
     let src = decode::preview_only(raw)?;
-    // baked-by-construction: the match TARGET is a rendition; a RAW is refused by name.
-    let tgt = decode::load_image(target)?;
+    // THE raw-vs-baked dispatch (R22-1). The target is a finished rendition
+    // of this frame — usually a baked file, but "another RAW you developed
+    // elsewhere" is a legitimate reference and `decode::load_image` refuses a
+    // RAW by name, so it went through this one branch (R23-6, matching the
+    // desktop app's reference picker). The cap is comfortably above both
+    // consumers (the fit analyses at 384, the judge at 1024) and preserves
+    // aspect, which the same-frame check reads.
+    const MATCH_REF_EDGE: u32 = 2048;
+    let tgt = autoshop::render::source_pixels(target, Some(MATCH_REF_EDGE))?;
+    if decode::is_raw(target) {
+        // Said out loud, because it is the one way this entry can mislead: a
+        // RAW carries no look of its own here. `source_pixels` develops it
+        // NEUTRALLY — its sidecar, its Lightroom edits and its develop store
+        // are not read — so what is being matched is the camera-neutral
+        // render, not "how that photo looks in your catalogue".
+        println!(
+            "  note: {} is a RAW — it is developed NEUTRALLY as the reference; \
+             its own develop settings are not read",
+            target.display()
+        );
+    }
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
-    let mut rep = if zoned {
+    let run_fit = |seg_on: bool| -> Result<fit::FitReport> {
+        Ok(if seg_on {
         // Sky mask lands at the GUI's convention (the photo's develop dir,
         // a FRESH claimed `mask-zone-sky*.png` per run — see
         // store::claim_raster: rewriting one fixed name in place left the
@@ -901,9 +932,11 @@ fn match_cmd(
         pipeline::guard_readonly(&mask, raw)?;
         println!("  zoned: segmenting the sky in both images (local python sidecar) …");
         autoshop::fit_zoned::fit_recipe_zoned(&src, &tgt, &seg, &mask)
-    } else {
-        fit::fit_recipe(&src, &tgt)
+        } else {
+            fit::fit_recipe(&src, &tgt)
+        })
     };
+    let mut rep = run_fit(zoned)?;
     // Calibration stamp, ONE snapshot (produce_recipe's rule): the fit solved
     // against the camera's embedded preview — the very base the base curve
     // approximates — but the deliverable renders from the NEUTRAL sensor
@@ -922,30 +955,110 @@ fn match_cmd(
     // those pixels), so the judge must see develop_preview(preview, deltas) —
     // after the calibration stamp below the same render would apply the base
     // curve a second time. Informational: a failure warns, never errs.
-    let judged = if ai_judge {
-        const JUDGE_EDGE: u32 = 1024; // detail:high tiles at 512 px — 4 tiles read a grade
+    const JUDGE_EDGE: u32 = 1024; // detail:high tiles at 512 px — 4 tiles read a grade
+    let judge_of = |recipe: &EditRecipe| -> Result<autoshop::advisor::Judgement> {
         let cfg = Config::load();
         let enc = |img: &image::DynamicImage| -> Result<Vec<u8>> {
             let mut j = Vec::new();
             img.write_to(&mut std::io::Cursor::new(&mut j), image::ImageFormat::Jpeg)?;
             Ok(j)
         };
-        let fitted = autoshop::render::develop_preview(
-            &src.thumbnail(JUDGE_EDGE, JUDGE_EDGE),
-            &rep.recipe,
-        );
-        Some(enc(&tgt.thumbnail(JUDGE_EDGE, JUDGE_EDGE)).and_then(|t| {
-            let f = enc(&fitted)?;
-            Ok(autoshop::advisor::judge_pair(
-                &cfg,
-                autoshop::advisor::JudgeImages { reference: &t, candidate: &f },
-                autoshop::advisor::JudgeTask::FitMatch,
-                None,
-                // No grade intent: FitMatch scores how closely two renders
-                // MATCH, a question the strength axis cannot change (R23-3).
-                None,
-            )?)
-        }))
+        let fitted =
+            autoshop::render::develop_preview(&src.thumbnail(JUDGE_EDGE, JUDGE_EDGE), recipe);
+        let t = enc(&tgt.thumbnail(JUDGE_EDGE, JUDGE_EDGE))?;
+        let f = enc(&fitted)?;
+        Ok(autoshop::advisor::judge_pair(
+            &cfg,
+            autoshop::advisor::JudgeImages { reference: &t, candidate: &f },
+            autoshop::advisor::JudgeTask::FitMatch,
+            None,
+            // No grade intent: FitMatch scores how closely two renders
+            // MATCH, a question the strength axis cannot change (R23-3).
+            None,
+        )?)
+    };
+    let judged = if ai_judge {
+        match judge_of(&rep.recipe) {
+            // --deep (R23-6): let the review ACT, once, bounded. The ordering
+            // question that forced a decision in the GUI does not arise here —
+            // this command has always evaluated before it writes (everything
+            // below the recipe printout) — so `--deep` only adds the retry.
+            // Discipline copied from `pipeline::visual_review_round`: the
+            // retry must re-score AT LEAST as high, an action that changes
+            // nothing short-circuits before a second call is bought, and every
+            // failure keeps the plain solve.
+            Ok(first) if deep => {
+                let action = autoshop::advisor::hint_action(
+                    first.hint.as_deref().unwrap_or(""),
+                    !rep.recipe.masks.is_empty(),
+                    !zoned,
+                );
+                println!(
+                    "  deep: first review {:.0}/100 — trying: {}",
+                    first.score,
+                    action.tag()
+                );
+                let candidate = match action {
+                    autoshop::advisor::FitAction::Zoned => run_fit(true).ok(),
+                    autoshop::advisor::FitAction::Saturation(d) => {
+                        let mut r = rep.recipe.clone();
+                        r.saturation += d;
+                        r.clamp();
+                        (r.saturation != rep.recipe.saturation).then(|| {
+                            let (err, conf) = fit::rescore(&src, &tgt, &r);
+                            r.confidence = conf;
+                            fit::FitReport {
+                                recipe: r,
+                                err_before: rep.err_before,
+                                err_after: err,
+                                notes: rep.notes.clone(),
+                            }
+                        })
+                    }
+                    autoshop::advisor::FitAction::None => None,
+                };
+                match candidate {
+                    Some(mut cand) => match judge_of(&cand.recipe) {
+                        Ok(second) if second.score >= first.score => {
+                            autoshop::rationale::push_note(
+                                &mut cand.recipe.rationale,
+                                &mut cand.notes,
+                                autoshop::rationale::Note::new(
+                                    autoshop::rationale::keys::FIT_NOTE_DEEP_ADOPTED,
+                                    vec![
+                                        ("score1", format!("{:.0}", first.score)),
+                                        ("score2", format!("{:.0}", second.score)),
+                                        ("action", action.tag().to_string()),
+                                    ],
+                                ),
+                            );
+                            println!(
+                                "  deep: the retry re-scored {:.0}/100 — adopted",
+                                second.score
+                            );
+                            rep = cand;
+                            Some(Ok(second))
+                        }
+                        Ok(second) => {
+                            println!(
+                                "  deep: the retry re-scored {:.0}/100 (lower) — discarded",
+                                second.score
+                            );
+                            Some(Ok(first))
+                        }
+                        Err(e) => {
+                            eprintln!("  ⚠ deep: the retry could not be re-judged ({e:#}) — discarded");
+                            Some(Ok(first))
+                        }
+                    },
+                    None => {
+                        println!("  deep: nothing to try — the plain fit stands");
+                        Some(Ok(first))
+                    }
+                }
+            }
+            other => Some(other),
+        }
     } else {
         None
     };
@@ -1447,14 +1560,21 @@ mod tests {
 
     use super::*;
 
-    /// `match --target` names a FINISHED photo, so the CLI hands it to the
-    /// baked decoder. When the user points it at a RAW instead (an easy
-    /// mistake — both live in the same folder), the refusal must SAY that,
-    /// before the fit is paid for. Before the decode gate this surfaced as
-    /// "The image format could not be determined", which reads like a corrupt
-    /// file rather than the wrong kind of file.
+    /// `match --target` names a finished RENDITION of this frame. Until
+    /// R23-6 that meant a baked file only, and a RAW target was refused by
+    /// name before the fit was paid for (the refusal replaced "The image
+    /// format could not be determined", which reads like a corrupt file
+    /// rather than the wrong kind of file).
+    ///
+    /// R23-6 opens the reference to any file the user names — the desktop
+    /// app's new reference picker offers RAWs too, and the two commands must
+    /// not disagree about what a reference is — so a RAW now goes through
+    /// `render::source_pixels` (developed NEUTRALLY; the caller is told so).
+    /// What must NOT regress is the readability of the failure when the file
+    /// cannot be decoded at all: it still has to name the file and say what
+    /// was wrong with it, before anything is written.
     #[test]
-    fn match_refuses_a_raw_target_readably() {
+    fn match_names_the_file_when_a_raw_target_cannot_be_decoded() {
         let dir = std::env::temp_dir().join(format!("autoshop-match-rawtgt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1467,12 +1587,12 @@ mod tests {
 
         let e = format!(
             "{:#}",
-            match_cmd(&src, &target, false, false, false, false, None)
-                .expect_err("a RAW target must refuse")
+            match_cmd(&src, &target, false, false, false, false, false, None)
+                .expect_err("an undecodable RAW target must refuse")
         );
         assert!(
-            e.contains("RAW") && e.contains("reference.ARW"),
-            "the refusal must name the file and what is wrong with it: {e}"
+            e.contains("reference.ARW"),
+            "the refusal must name the file: {e}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -2873,7 +2873,11 @@ pub(crate) fn srgb_to_linear(c: f32) -> f32 {
         ((c + 0.055) / 1.055).powf(2.4)
     }
 }
-fn linear_to_srgb(c: f32) -> f32 {
+// `pub(crate)` for the same reason as its inverse above: the zoned fit's
+// joint value-range family reads its bucket means back OUT of linear light
+// (R23-6), and a second copy of this curve would be a second thing to keep
+// in step with the engine.
+pub(crate) fn linear_to_srgb(c: f32) -> f32 {
     if c <= 0.0031308 {
         c * 12.92
     } else {

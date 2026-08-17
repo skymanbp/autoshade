@@ -186,8 +186,32 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "用 gpt-image 直接重绘整张图（风格取左侧提示词；留空=中性成片方向）。重绘像素=非保真；生成后自动加入底部「AI 生成」变体并切过去，可继续微调不会变回去。支持任意尺寸的模型（gpt-image-2）可达 ~8MP，其余 ~1.5K。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
     ("style to repaint toward — e.g. golden-hour glow, moody film look",
         "想重绘成的风格——如「金色黄昏氛围」「胶片低饱和」"),
-    ("Generate an image first and stay on that variant to reverse-fit its recipe.",
-        "先「AI 生成出片」并停在该变体上，才能反推它的配方。"),
+    // R23-6 B: the reverse-fit target is no longer only an app-generated
+    // variant, so the empty-state line names BOTH entries.
+    ("Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe.",
+        "在下面选一张参考图，或者「AI 生成出片」并停在该变体上，才能反推配方。"),
+    ("🖼 Choose reference…", "🖼 选择参考图…"),
+    ("Reverse-fit toward ANY finished version of THIS SAME photo — your own \
+      Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
+      (developed neutrally first). The fit solves the develop parameters that \
+      reproduce that file's look and leaves your pixels untouched. It must be \
+      the same frame: a different picture is warned about, not refused, and \
+      its result means nothing.",
+        "把本图的任意一张成品当作反推目标——你自己在 Lightroom / Capture One 导出的成片、相机直出 JPEG、TIFF，或另一个 RAW（会先中性显影）。反推求解的是能重现该文件观感的显影参数，不动你的像素。它只能是同一张照片：换成别的画面只会得到警告而不会被拒绝，而那样的结果没有意义。"),
+    ("Forget this reference and go back to reverse-fitting the active generated variant",
+        "清除这张参考图，回到反推当前 AI 生成变体"),
+    ("deep", "深度"),
+    ("DEEP REVERSE-FIT: run the review BEFORE saving and let it buy one \
+      guided retry — the reviewer's suggestion picks the next ACTION \
+      (add the zoned pass, pull the chroma chase back), never the \
+      numbers, and the retry is kept only if it re-scores at least as \
+      high. COST: up to two paid vision calls instead of one, and the \
+      save waits for them; there is NO cancel, exactly as for the \
+      review itself. Off = the reviewed fit is saved first and the \
+      score is a note (the behaviour of every release since v0.26.0).",
+        "深度反推：在保存之前先做复查，并让它换来一次按提示的重试——复查给出的提示只用来挑选下一个动作（加上分区处理、把饱和度拉回来），从不直接写参数；重试只有在复查分数不低于原分时才会被采用。开销：最多两次收费视觉调用而不是一次，保存也要等它们返回；与复查本身一样，没有取消。关闭 = 先保存复查过的反推结果，分数只作为一条注记（v0.26.0 以来每个版本的行为）。"),
+    ("Turn on 「AI review」 first — the deep fit is that review, iterated",
+        "请先勾选「AI 打分」——深度反推就是把这次复查反复做几轮"),
     ("🎛 Reverse-fit recipe → sliders/XMP", "🎛 反推配方 → 滑杆/XMP"),
     ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result.",
         "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。"),
@@ -195,8 +219,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and saves ./out/<stem>.style.txt.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入 Reimagine 提示词（可直接给别的照片重绘用）并存 ./out/<stem>.style.txt。"),
     ("AI review", "AI 打分"),
-    ("After the fit, show the target and the fitted render to the vision model and have it SCORE the match (0-100) with a short critique — LLM as a judge. One paid vision call per fit (needs the image API key); the fit itself stays local and free. The score lands in the status line below. No cancel: like the fit itself, the app stays busy until the review returns.",
-        "反推后把 目标图/拟合渲染 交给 vision 模型打分：0-100 匹配度 + 说明（LLM as a judge）。每次反推一次 vision API 费（需图像 API 密钥）；反推本身仍为本地免费。得分显示在下方状态行。无法取消：与反推本身一样，打分返回前 app 保持忙碌。"),
+    // R23-6 D: the hint is no longer discarded, so the tooltip says so.
+    ("After the fit, show the target and the fitted render to the vision model and have it SCORE the match (0-100) with a short critique — LLM as a judge. One paid vision call per fit (needs the image API key); the fit itself stays local and free. The score, its critique AND its suggestion land in the status line below — nothing is changed for you. No cancel: like the fit itself, the app stays busy until the review returns.",
+        "反推后把 目标图/拟合渲染 交给 vision 模型打分：0-100 匹配度 + 说明（LLM as a judge）。每次反推一次 vision API 收费（需图像 API 密钥）；反推本身仍为本地免费。得分、说明和它给出的建议都显示在下方状态行——不会替你改动任何参数。无法取消：与反推本身一样，打分返回前 app 保持忙碌。"),
     ("After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP (the full-resolution way).",
         "生成后可「反推配方」把观感变成滑杆+XMP（全分辨率的正道）。"),
     ("Paint mask", "涂抹蒙版"),
@@ -831,6 +856,21 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " · AI 打分：匹配 {score}/100——{critique}"),
     (" · AI review unavailable ({err}) — the fit itself already landed",
         " · AI 打分不可用（{err}）——反推本身已完成"),
+    // ── R23-6: the reverse-fit's own status facts (workers::render_fit_note)
+    (" · it suggests: {hint} (nothing was changed — tick 「deep」 to let it try)",
+        " · 它的建议：{hint}（什么都没有改动——勾选「深度」才会让它去试）"),
+    (" · ⚠ THE REVERSE-FIT WAS DISCARDED: every version of it rendered farther from the target than your untouched photo, so the recipe was reset to neutral — this is the same as not having reverse-fitted at all",
+        " · ⚠ 反推结果已被丢弃：它的每一个版本渲染出来都比你未处理的原图离目标更远，配方已重置为中性——这与没有做反推是一样的"),
+    (" · ⚠ the reference does not look like this same frame — the result is unreliable",
+        " · ⚠ 参考图与本图不像是同一张照片——结果不可信"),
+    (" · deep: AI review BEFORE saving, up to one guided retry",
+        " · 深度：保存之前先做 AI 复查，最多一次按提示的重试"),
+    (" · deep: the review found nothing this app can act on — the plain fit stands",
+        " · 深度：复查没有给出本应用做得了的动作——保留原始反推结果"),
+    (" · deep: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
+        " · 深度：按复查提示试了「{action}」，已采用（复查分数不低于原分）"),
+    (" · deep: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
+        " · 深度：按复查提示试了「{action}」，已丢弃（复查分数更低）"),
     ("Reverse-fit failed", "反推失败"),
     ("Style prompt extracted → filled into the Reimagine prompt (also saved ./out/<stem>.style.txt)",
         "风格提示词已提取 → 已填入 Reimagine 提示词（同时存 ./out/<stem>.style.txt）"),
@@ -1173,6 +1213,46 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Colour-cast curves were withheld: they would have re-hued a \
       region of the frame (pixel-aligned hue-damage gates).",
         " 色偏曲线已被扣留：它们会使画面某区域变色（像素对齐的色相损伤门）。"),
+    (" Deep reverse-fit: the visual reviewer scored the plain solve \
+      {score1}/100, so one guided retry was bought ({action}); it \
+      re-scored {score2}/100 and was kept (a lower score would have been \
+      discarded).",
+        " 深度反推：视觉复查给未加提示的解打了 {score1}/100，于是换来一次按提示的重试（{action}）；重试复查得 {score2}/100，已采用（分数更低会被丢弃）。"),
+    // ── R23-6: the reverse-fit honesty batch + the joint value-range family ──
+    (" The colour stage produced NOTHING: the per-channel cast curves it \
+      fitted did not improve the look by a clear enough margin to earn \
+      the risk of dragging every region, so they were rejected and this \
+      fit carries tone and saturation only.",
+        " 色彩环节什么也没有产出：它拟合出的逐通道色偏曲线对观感的改进幅度不明显，不值得让整幅画面的每个区域都被拖动，因此被拒绝——本次反推只有影调与饱和度。"),
+    (" Joint distribution check (luminance × chroma value ranges, {n} of \
+      them carried evidence on both sides): area-weighted mismatch \
+      {weighted}, worst range {worst} in {label}. These are VALUE ranges, \
+      not areas of the picture — their pixels are spread over the whole \
+      frame.",
+        " 联合分布检查（亮度 × 色度值域桶，其中 {n} 个在两侧都有充分证据）：按覆盖比例计算的失配 {weighted}，最差值域 {worst}（{label}）。这些是数值区间而不是画面上的区域——桶内像素分布在整幅画面各处。"),
+    (" That joint mismatch is large: the two images still differ inside \
+      matching value ranges, which the single residual number above \
+      cannot show — treat this fit as a starting point, not a match.",
+        " 联合失配偏大：两张图在相同的数值区间内仍然不同，而上面那个单一残差数字显示不出这一点——请把本次反推当作起点，而不是匹配结果。"),
+    (" (the joint distribution check found no value range with enough \
+      evidence on both sides, so it has no opinion on this pair — the \
+      confidence above rests on the single residual number alone)",
+        " （联合分布检查没有找到两侧证据都充分的数值区间，因此它对本次配对没有意见——上面的置信度只依据那一个残差数字）"),
+    (" (the refusal came from the joint distribution check, not the \
+      residual: the fitted recipe pushed the value ranges further apart \
+      than leaving the photo alone)",
+        " （这次拒绝来自联合分布检查而非残差：拟合配方让各数值区间比不做任何处理时相距更远）"),
+    (" This target's look appears to use {controls}, which the reverse-fit \
+      never solves for (its whole solution space is exposure/contrast/\
+      highlights/shadows/whites/blacks, a tone curve, one global \
+      saturation and the three channel curves) — that part of the look \
+      cannot arrive through this route.",
+        " 目标成品的风格里可能用到了 {controls}，而反推从不求解这些参数（它的整个求解域只有曝光/对比度/高光/阴影/白色/黑色、一条影调曲线、一个全局饱和度和三条通道曲线）——这部分风格无法从这条路径得到。"),
+    (" WARNING: the reference does not look like the same frame as this \
+      photo (their proportions disagree). The fit matched distributions \
+      anyway, as it was asked to, but a match between two different \
+      pictures describes neither — treat the result as unreliable.",
+        " 警告：参考图与本图不像是同一张照片（两者比例不同）。反推仍按要求做了分布匹配，但两张不同画面之间的匹配说明不了什么——结果请视为不可靠。"),
     (" Zoned sky fit unavailable ({e}) — global fit only.",
         " 分区天空拟合不可用（{e}）——仅保留全局拟合。"),
     (" Zoned fit skipped: no usable sky partition (sky covers {s}% \
@@ -1200,6 +1280,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" The {label} zone already matches the target (zone residual \
       {before}) — no correction needed.",
         " {label} 区已与目标匹配（区残差 {before}）——无需校正。"),
+    (" Confidence for this fit comes from the {n} zone correction(s) that \
+      were actually accepted (worst zone residual {worst}), not from the \
+      frame-wide residual {frame} — a frame-wide distribution cannot \
+      judge a zone whose share of the two frames differs.",
+        " 本次拟合的置信度来自实际被接受的 {n} 个分区校正（最差区残差 {worst}），而不是来自全画面残差 {frame}——当某个区在两张图中所占比例不同时，全画面分布无法判断它。"),
     (" [revision round {round} failed ({e}) — keeping the previous verified proposal]",
         " [第 {round} 轮修订失败（{e}）——保留上一轮已验证的提案]"),
     (" [verification of revision round {round} failed ({e}) — keeping the previous \

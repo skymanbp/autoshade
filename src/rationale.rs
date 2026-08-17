@@ -88,6 +88,62 @@ pub mod keys {
     pub const FIT_NOTE_REHUE_BLOCKED: &str =
         " Colour-cast curves were withheld: they would have re-hued a \
          region of the frame (pixel-aligned hue-damage gates).";
+    /// R23-6 A-2: the colour stage's SILENT rejection arm. `ratio_fail`
+    /// empties all three channel curves and used to push no note at all, so
+    /// "the colour stage produced nothing" — its commonest outcome — reached
+    /// the user as an unexplained absence.
+    pub const FIT_NOTE_CAST_REJECTED: &str =
+        " The colour stage produced NOTHING: the per-channel cast curves it \
+         fitted did not improve the look by a clear enough margin to earn \
+         the risk of dragging every region, so they were rejected and this \
+         fit carries tone and saturation only.";
+    /// R23-6 C: the second reading, independent of the look error above.
+    pub const FIT_NOTE_JOINT: &str =
+        " Joint distribution check (luminance × chroma value ranges, {n} of \
+         them carried evidence on both sides): area-weighted mismatch \
+         {weighted}, worst range {worst} in {label}. These are VALUE ranges, \
+         not areas of the picture — their pixels are spread over the whole \
+         frame.";
+    /// The fail-open case, said out loud. When the joint family finds no
+    /// value range with evidence on both sides it has NO opinion — and the
+    /// confidence above is then the look-error ladder alone, which is the
+    /// self-graded number this round exists to stop presenting as a verdict.
+    /// Silence here would make two different claims look identical.
+    pub const FIT_NOTE_JOINT_NONE: &str =
+        " (the joint distribution check found no value range with enough \
+         evidence on both sides, so it has no opinion on this pair — the \
+         confidence above rests on the single residual number alone)";
+    pub const FIT_NOTE_JOINT_FAR: &str =
+        " That joint mismatch is large: the two images still differ inside \
+         matching value ranges, which the single residual number above \
+         cannot show — treat this fit as a starting point, not a match.";
+    pub const FIT_NOTE_JOINT_REGRESSED: &str =
+        " (the refusal came from the joint distribution check, not the \
+         residual: the fitted recipe pushed the value ranges further apart \
+         than leaving the photo alone)";
+    /// R23-6 A-5: which controls THIS pair seems to need that the solver
+    /// never assigns.
+    pub const FIT_NOTE_UNREPRESENTED: &str =
+        " This target's look appears to use {controls}, which the reverse-fit \
+         never solves for (its whole solution space is exposure/contrast/\
+         highlights/shadows/whites/blacks, a tone curve, one global \
+         saturation and the three channel curves) — that part of the look \
+         cannot arrive through this route.";
+    /// R23-6 D: the deep reverse-fit adopted a guided retry. The persisted
+    /// record has to say the shipped recipe is not the plain solve — the
+    /// status line is transient, the rationale is what reopening the photo
+    /// shows.
+    pub const FIT_NOTE_DEEP_ADOPTED: &str =
+        " Deep reverse-fit: the visual reviewer scored the plain solve \
+         {score1}/100, so one guided retry was bought ({action}); it \
+         re-scored {score2}/100 and was kept (a lower score would have been \
+         discarded).";
+    /// R23-6 B-7: the reference may not be the same frame.
+    pub const FIT_NOTE_NOT_SAME_FRAME: &str =
+        " WARNING: the reference does not look like the same frame as this \
+         photo (their proportions disagree). The fit matched distributions \
+         anyway, as it was asked to, but a match between two different \
+         pictures describes neither — treat the result as unreliable.";
 
     // --- zoned fit (fit_zoned.rs) ---------------------------------------
     pub const ZONED_UNAVAILABLE: &str = " Zoned sky fit unavailable ({e}) — global fit only.";
@@ -116,6 +172,18 @@ pub mod keys {
     pub const ZONE_ALREADY_MATCHED: &str =
         " The {label} zone already matches the target (zone residual \
          {before}) — no correction needed.";
+    /// R23-6 A-4: what the reported confidence of a ZONED fit now means.
+    /// Before this round the zone stage overwrote both `err_after` and
+    /// `confidence` with the frame-global look error of the zoned render —
+    /// the very number this module's own acceptance doc proves cannot judge
+    /// a zone (0.507 → 0.015 zone-local while the frame moved 0.1768 →
+    /// 0.1792). The frame number is still reported, because it is what
+    /// `err_before` is comparable to; it is simply no longer the verdict.
+    pub const ZONE_CONFIDENCE: &str =
+        " Confidence for this fit comes from the {n} zone correction(s) that \
+         were actually accepted (worst zone residual {worst}), not from the \
+         frame-wide residual {frame} — a frame-wide distribution cannot \
+         judge a zone whose share of the two frames differs.";
 
     // --- the propose/verify pipeline (pipeline.rs) ----------------------
     pub const REVISION_FAILED: &str =

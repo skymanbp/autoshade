@@ -170,6 +170,17 @@ pub(crate) struct AutoshopApp {
     pub(crate) save_denoise: bool,     // run SCUNet AI denoise before the full-res render
     pub(crate) zoned_fit: bool,        // 反推 adds a sky-to-sky zoned correction (bitmap mask)
     pub(crate) fit_ai_judge: bool,     // 反推 then asks the vision model to SCORE the match (paid, opt-in)
+    // R23-6 D: 反推 runs the visual judge BEFORE the persist and buys bounded
+    // guided rounds off it. Paid and opt-in, like `fit_ai_judge`, and a
+    // REVISION of the R20 decision that the fit's review is informational
+    // only — user decision 2026-08-17 ⑥, recorded at `start_fit`.
+    pub(crate) fit_deep: bool,
+    // R23-6 B: an explicitly chosen reverse-fit reference (any finished
+    // rendition of this frame — a Lightroom export, a camera JPEG, another
+    // RAW's develop). SESSION state, not a preference: it names one file for
+    // one photo, and remembering it across an app restart would silently fit
+    // the next photo against the last photo's reference. Cleared on open.
+    pub(crate) fit_ref: Option<PathBuf>,
     pub(crate) show_settings: bool,    // the Settings window is open
     pub(crate) show_shortcuts: bool,   // the keyboard cheat-sheet window is open (F1 / ? / ⌨)
     // Tab hides both side panels (the LR grammar) for an edge-to-edge canvas.
@@ -1451,6 +1462,10 @@ impl Default for AutoshopApp {
             zoned_fit: true,
             // Paid opt-in (a vision call per fit) — mirror Prefs::default.
             fit_ai_judge: false,
+            // Paid opt-in, and up to three vision calls — mirror Prefs::default.
+            fit_deep: false,
+            // Session state, never persisted (see the field's comment).
+            fit_ref: None,
             show_settings: false,
             show_shortcuts: false,
             panels_hidden: false,
@@ -1820,6 +1835,10 @@ impl eframe::App for AutoshopApp {
                 save_denoise: self.save_denoise,
                 zoned_fit: self.zoned_fit,
                 fit_ai_judge: self.fit_ai_judge,
+                // R23-6 D: the deep reverse-fit toggle persists like every
+                // other paid opt-in. `fit_ref` deliberately does NOT — it
+                // names one file for one photo (see the field).
+                fit_deep: self.fit_deep,
                 view_mode: self.view_mode,
                 exp_long_edge: self.exp_long_edge,
                 exp_sharpen: self.exp_sharpen,

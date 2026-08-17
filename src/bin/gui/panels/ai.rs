@@ -623,10 +623,62 @@ impl AutoshopApp {
         if !can_fit {
             ui.label(
                 egui::RichText::new(tr(lang,
-                    "Generate an image first and stay on that variant to reverse-fit its recipe."))
+                    "Pick a reference below, or generate an image and stay on that variant, to reverse-fit a recipe."))
                     .weak()
                     .small(),
             );
+        }
+        // ── the REFERENCE row (R23-6 B): any finished rendition of this same
+        // frame — your own Lightroom export, the camera's JPEG, another RAW
+        // developed elsewhere. The generated-variant entry below still works
+        // untouched; this one simply stops it from being the only one.
+        let mut pick_ref = false;
+        let mut clear_ref = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(!self.busy, |ui| {
+                if ui
+                    .button(tr(lang, "🖼 Choose reference…"))
+                    .on_hover_text(tr(lang,
+                        "Reverse-fit toward ANY finished version of THIS SAME photo — your own \
+                         Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
+                         (developed neutrally first). The fit solves the develop parameters that \
+                         reproduce that file's look and leaves your pixels untouched. It must be \
+                         the same frame: a different picture is warned about, not refused, and \
+                         its result means nothing.",
+                    ))
+                    .clicked()
+                {
+                    pick_ref = true;
+                }
+            });
+            if let Some(p) = self.fit_ref.clone() {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.display().to_string());
+                ui.label(egui::RichText::new(name).weak().small())
+                    .on_hover_text(p.display().to_string());
+                // Bare glyph, not `tr` — the symbol IS the label in every
+                // language (the same rule the variant-strip and gallery ✕
+                // buttons follow); only the tooltip is translated.
+                if ui
+                    .small_button("✕")
+                    .on_hover_text(tr(lang,
+                        "Forget this reference and go back to reverse-fitting the active generated variant",
+                    ))
+                    .clicked()
+                {
+                    clear_ref = true;
+                }
+            }
+        });
+        // rfd OUTSIDE the closure above (it borrows `ui`) and after the row is
+        // laid out: the dialog is modal and blocks this thread.
+        if pick_ref && let Some(p) = util::photo_file_dialog() {
+            self.fit_ref = Some(p);
+        }
+        if clear_ref {
+            self.fit_ref = None;
         }
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(!self.busy && can_fit, |ui| {
@@ -664,10 +716,39 @@ impl AutoshopApp {
                         "After the fit, show the target and the fitted render to the vision model and \
                          have it SCORE the match (0-100) with a short critique — LLM as a judge. One \
                          paid vision call per fit (needs the image API key); the fit itself stays \
-                         local and free. The score lands in the status line below. No cancel: like \
-                         the fit itself, the app stays busy until the review returns.",
+                         local and free. The score, its critique AND its suggestion land in the \
+                         status line below — nothing is changed for you. No cancel: like the fit \
+                         itself, the app stays busy until the review returns.",
                     ));
             });
+        });
+        // R23-6 D: the review can now also ACT, when asked. Directly under
+        //「AI review」 and gated on it, because a deep fit IS that review plus
+        // a loop — a checkbox that silently switched the other one on would
+        // be two settings pretending to be one.
+        //
+        // Its own ROW, not another widget in the wrapped row above: the
+        // reverse-fit row already carries two long buttons and a checkbox,
+        // and a fourth item widened the auto-fitting side panel by 25 px
+        // (measured;`the_generate_button_stays_one_line_and_the_panel_stays_put`
+        // is the witness — that test exists because this panel's width has
+        // run away once before).
+        ui.add_enabled_ui(!self.busy && self.fit_ai_judge, |ui| {
+            ui.checkbox(&mut self.fit_deep, tr(lang, "deep"))
+                .on_hover_text(if self.fit_ai_judge {
+                    tr(lang,
+                        "DEEP REVERSE-FIT: run the review BEFORE saving and let it buy one \
+                         guided retry — the reviewer's suggestion picks the next ACTION \
+                         (add the zoned pass, pull the chroma chase back), never the \
+                         numbers, and the retry is kept only if it re-scores at least as \
+                         high. COST: up to two paid vision calls instead of one, and the \
+                         save waits for them; there is NO cancel, exactly as for the \
+                         review itself. Off = the reviewed fit is saved first and the \
+                         score is a note (the behaviour of every release since v0.26.0).",
+                    )
+                } else {
+                    tr(lang, "Turn on 「AI review」 first — the deep fit is that review, iterated")
+                });
         });
         // Migrated from Settings (#4): a switch that only ever changes what
         // the button above does. Same rule as 「AI review」 — a persisted

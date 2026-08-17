@@ -274,6 +274,330 @@ pub(crate) fn zone_luma_cdf(px: &[[f32; 3]], weights: &[f32]) -> Vec<f32> {
 }
 
 // --------------------------------------------------------------------------
+// the JOINT VALUE-RANGE family (R23-6, feedback #16)
+// --------------------------------------------------------------------------
+//
+// A SECOND reading of "how far apart do these two renders look", independent
+// of `fit::look_err` — which is simultaneously the global fit's optimisation
+// target, its acceptance gate and its reported score, so it can and does
+// declare victory on its own terms (the metric self-reference this round
+// exists to break). Built on THIS module's machinery rather than beside it:
+// a bucket is just another weight vector for [`zone_moments`] (whose doc has
+// always said "a decoded segmentation mask, or anything else"), and the
+// mismatch is [`zone_err`]. No second partition mechanism, no second set of
+// moment definitions, no second thing to keep in step.
+//
+// WHAT IT IS, stated precisely because the naming is load-bearing: a joint
+// value-range bucket holds every pixel whose LUMINANCE falls in one band AND
+// whose CHROMA falls on one side of the near-neutral line. Those pixels are
+// scattered across the WHOLE frame. This is NOT a spatial region and must
+// never be reported as one ("worst region" would answer a question it did
+// not ask); the user-facing wording is "joint distribution check". The
+// spatial question is answered by the sky/land zones above.
+//
+// WHY IT IS NEW INFORMATION — the one thing that had to be settled before
+// writing a line of it, because a reading that merely re-derives look_err is
+// worth nothing. look_err's tonal term is 21 luma quantiles, so a plain
+// luminance-band comparison IS a coarser copy of it. But its colour term is
+// three UNCONDITIONAL channel means, and its hue term buckets by HUE with
+// every pixel under 0.06 chroma skipped outright (`fit::band_stats`) —
+// neither is conditioned on brightness. "The colour balance of the
+// near-neutral pixels in the shadows" and "the chroma of the coloured pixels
+// in the highlights" are therefore quantities no term of look_err computes,
+// and they are exactly where a split-tone, a tinted black point or a
+// white-balance drift lives. Hence JOINT buckets (luma × chroma), never
+// luma-only.
+//
+// WHAT IT MAY DO — three roles, and the boundary between them was decided by
+// measurement, not by taste (the numbers live in
+// `fit::tests::joint_family_is_calibrated_on_the_fixture_set`):
+//   1. REPORT. Always, when it has an opinion.
+//   2. CAP the reported confidence. Only downward: a reading that cannot see
+//      must never raise a claim (see [`JOINT_CONFIDENCE_SLOPE`]).
+//   3. ONE additional bounded-drift veto, in the shape
+//      [`ZONE_GLOBAL_REGRESSION_TOL`] already has and fail-open like
+//      `fit::neutral_gate_misprediction` — but at the PIPELINE END only
+//      (final render vs the untouched base), never inside a stage. Tried
+//      inside the cast stage first and measured: the bucket that a change
+//      fixes loses its members to a neighbour, so the per-stage comparison
+//      inverts, rejecting the one correct cast in the fixture set and
+//      admitting both wrecks (the numbers are on [`JointReading::worst`]).
+// It is never mixed into look_err's weighted sum: R17-R19's constants were
+// each calibrated against a real failure pair, and re-weighting that sum
+// would invalidate all of them at once.
+
+/// Luminance bands. Four, not more: every bucket must still hold enough
+/// pixels for a MEAN to be stable, and a real photograph does not spread its
+/// mass evenly — eight bands routinely leave two of them under the evidence
+/// floor on a normally-exposed frame, which is a reading that silently
+/// abstains rather than one that is finer.
+pub(crate) const JOINT_LUMA_BANDS: usize = 4;
+/// Chroma classes inside each band: near-neutral, and chromatic.
+pub(crate) const JOINT_CHROMA_CLASSES: usize = 2;
+/// The family size — `bucket = band * JOINT_CHROMA_CLASSES + class`.
+pub(crate) const JOINT_BUCKETS: usize = JOINT_LUMA_BANDS * JOINT_CHROMA_CLASSES;
+
+/// Stable ASCII tags, in bucket-index order. They ride note args verbatim
+/// (the `{label}` convention the ZONE_* notes use), so they stay English in
+/// every rendering and never need a font glyph beyond ASCII.
+pub(crate) const JOINT_LABELS: [&str; JOINT_BUCKETS] = [
+    "shadows/neutral",
+    "shadows/colour",
+    "low-mids/neutral",
+    "low-mids/colour",
+    "high-mids/neutral",
+    "high-mids/colour",
+    "highlights/neutral",
+    "highlights/colour",
+];
+
+/// The chroma ramp's two ends — DEFINITIONS borrowed from the two chroma
+/// landmarks this codebase has already measured, not new thresholds: 0.03 is
+/// `fit`'s "a pale sky still testifies" level (`VETO_SUPPORT_CHROMA` /
+/// `ROT_HUE_MEASURABLE_CHROMA`) and 0.06 is the band-statistics gate
+/// (`fit::band_stats`) above which a pixel is treated as carrying hue. A RAMP
+/// rather than a step because a hard cut puts the whole near-grey population
+/// on a cliff that the fit's own saturation dial walks pixels across.
+const JOINT_CHROMA_LO: f32 = 0.03;
+const JOINT_CHROMA_HI: f32 = 0.06;
+
+/// A bucket needs this weighted share of the frame ON BOTH SIDES before its
+/// moments are read. Self-standing, NOT inherited from [`MIN_ZONE_SHARE`]
+/// (0.03, a segmented sky's floor): eight buckets partition unity, so a
+/// perfectly ordinary frame gives several of them well under a segmented
+/// region's share, and 2% of the 384-edge analysis frame is ≈ 2 900 px —
+/// still 5.7× the 512-px absolute evidence floor `fit::enough_evidence`
+/// demands of the tone gate's population.
+const JOINT_MIN_SHARE: f32 = 0.02;
+
+// --- the joint family's OWN acceptance ladder --------------------------------
+// Calibrated on this repo's fixture set and NOWHERE inherited from the
+// sky/land zones (their four constants each carry a measured real-pair
+// anchor for a DIFFERENT quantity and must not be borrowed — R19). Every
+// number below is pinned by `joint_family_is_calibrated_on_the_fixture_set`,
+// which also records the whole measurement table.
+//
+// HONEST STATUS: these are calibrated against SYNTHETIC fixtures plus the
+// two archived real-pair GEOMETRIES those fixtures distil. No new real
+// "the reverse-fit is nonsense" pair was available when they were set (the
+// requested sample is still outstanding), so the ladder is provisional and
+// wants a real-pair review before anyone treats a number here as measured
+// truth. What the fixtures DO establish is the separation: an honest fit
+// lands the weighted reading at 0.001-0.06, while the one pair whose target
+// is a repaint the global model structurally cannot reach lands at 0.58.
+
+/// The weighted reading at which reported confidence hits its floor — the
+/// joint family's counterpart of `fit`'s own FAR line, and the other end of
+/// the same calibration as [`JOINT_CONFIDENCE_SLOPE`]. 0.25 sits 4× above
+/// the worst honest fit in the fixture set (0.061, the region-graded canyon)
+/// and 2.3× below the unreachable repaint (0.581).
+pub(crate) const JOINT_FAR_ERR: f32 = 0.25;
+/// Confidence slope on the weighted reading: `(1 − FLOOR) / JOINT_FAR_ERR`,
+/// i.e. the two ends of ONE calibration, exactly as `fit`'s
+/// `CONFIDENCE_SLOPE` / `FIT_FAR_ERR` pair now is.
+pub(crate) const JOINT_CONFIDENCE_SLOPE: f32 = 3.0;
+/// Bounded-drift tolerance for the pipeline-end guard (role 3 above): how
+/// much WORSE the finished recipe's weighted reading may be than the
+/// untouched base's before the fit is declared to have done harm the
+/// look-error check could not see. Every fixture in the set IMPROVES this
+/// reading (0.180→0.045, 0.177→0.061, 0.243→0.093, 0.587→0.581, 0.059→0.004)
+/// except the identity pair, which regresses by 0.0009 of pure
+/// quantisation — so 0.05 is 56× the only observed non-improvement, and far
+/// under the smallest gap between fixtures. Deliberately loose: this guard
+/// exists to catch a disaster the scalar cannot see, not to referee taste.
+pub(crate) const JOINT_DRIFT_TOL: f32 = 0.05;
+
+/// One bucket's mismatch: [`zone_err`]'s formula, read in the DISPLAY
+/// domain.
+///
+/// `zone_err` compares linear-light channel means, and this module has
+/// already written down what that costs (see [`ZONE_MATCHED_EV`]: sRGB 0.12
+/// and 0.173 score the same 0.012 while sitting 0.9 EV apart). The sky/land
+/// zones answer that with an EV companion on a single absolute line, because
+/// there is one zone at one level. Here the buckets are DEFINED at different
+/// brightness levels, so a linear-absolute error would hand "the worst
+/// bucket" to the highlights in every photograph ever taken, and dividing by
+/// the level instead (tried first, measured) hands it to the shadows just as
+/// mechanically — a 4/255 difference in a black bucket reads 0.8 there.
+/// Encoding both means to sRGB before differencing is the fix with a reason:
+/// it is the domain `look_err`'s own channel-mean term uses, so 4/255 means
+/// 4/255 wherever it happens, and the chroma term (already sRGB) needs no
+/// separate treatment. Same two terms, same weights, same shape as
+/// [`zone_err`] — only the domain differs, and it differs on purpose.
+fn joint_bucket_err(s: &ZoneMoments, t: &ZoneMoments) -> f32 {
+    let enc = |v: f32| render::linear_to_srgb(v.clamp(0.0, 1.0));
+    let mean = (0..3)
+        .map(|c| (enc(s.mean_lin[c]) - enc(t.mean_lin[c])).abs())
+        .sum::<f32>()
+        / 3.0;
+    mean + (s.chroma - t.chroma).abs()
+}
+
+/// The weight vector of one joint bucket, written into `out` (reused across
+/// buckets — eight full `Vec<f32>` per side is 4.7 MB of nothing).
+///
+/// The luminance half is a tent partition of unity over
+/// [`JOINT_LUMA_BANDS`] centres, flat past the outer two, so the eight
+/// buckets' weights sum to exactly 1 for every pixel and the shares are
+/// readable as frame fractions. The chroma half is the ramp described at
+/// [`JOINT_CHROMA_LO`].
+fn joint_weights(px: &[[f32; 3]], bucket: usize, out: &mut Vec<f32>) {
+    let band = bucket / JOINT_CHROMA_CLASSES;
+    let chromatic = bucket % JOINT_CHROMA_CLASSES == 1;
+    let n = JOINT_LUMA_BANDS as f32;
+    let centre = (band as f32 + 0.5) / n;
+    out.clear();
+    out.reserve(px.len());
+    for p in px {
+        let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        let below = band == 0 && l < centre;
+        let above = band + 1 == JOINT_LUMA_BANDS && l > centre;
+        let lw = if below || above { 1.0 } else { (1.0 - (l - centre).abs() * n).clamp(0.0, 1.0) };
+        let chroma = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+        let cw = ((chroma - JOINT_CHROMA_LO) / (JOINT_CHROMA_HI - JOINT_CHROMA_LO)).clamp(0.0, 1.0);
+        out.push(lw * if chromatic { cw } else { 1.0 - cw });
+    }
+}
+
+/// One qualifying bucket of the joint family.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JointBucket {
+    pub label: &'static str,
+    /// [`joint_bucket_err`] between the candidate's and the target's members.
+    pub err: f32,
+    /// The share the two sides AGREE on (the smaller of the two): a bucket
+    /// holding 30% of the target and 3% of the candidate is thin evidence,
+    /// and taking the minimum says so without needing a second rule.
+    pub share: f32,
+    /// The chroma class this bucket belongs to. Exposed because the
+    /// difference between "the coloured pixels of this brightness disagree"
+    /// and "the near-grey ones do" is the whole conditional information the
+    /// family was built to produce: the first is a colour move (a per-band
+    /// mixer, a split tone), the second is a white balance or a tinted
+    /// black point. `fit::unrepresented_note` reads exactly that.
+    pub chromatic: bool,
+}
+
+/// Every bucket of the joint family that carries evidence on BOTH sides, in
+/// [`JOINT_LABELS`] order. Empty when none qualifies or the family is off —
+/// see [`joint_reading`] for what "empty" is allowed to mean.
+pub fn joint_buckets(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Vec<JointBucket> {
+    if !joint_family_enabled() {
+        return Vec::new();
+    }
+    let mut wa: Vec<f32> = Vec::new();
+    let mut wb: Vec<f32> = Vec::new();
+    let mut out = Vec::with_capacity(JOINT_BUCKETS);
+    for (b, label) in JOINT_LABELS.iter().enumerate() {
+        joint_weights(cand, b, &mut wa);
+        joint_weights(tgt, b, &mut wb);
+        let ms = zone_moments(cand, &wa);
+        let mt = zone_moments(tgt, &wb);
+        if ms.share < JOINT_MIN_SHARE || mt.share < JOINT_MIN_SHARE {
+            continue;
+        }
+        out.push(JointBucket {
+            label,
+            err: joint_bucket_err(&ms, &mt),
+            share: ms.share.min(mt.share),
+            chromatic: b % JOINT_CHROMA_CLASSES == 1,
+        });
+    }
+    out
+}
+
+/// The joint-family reading of one (candidate, target) pixel pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JointReading {
+    /// The largest [`joint_bucket_err`] among the qualifying buckets.
+    ///
+    /// REPORT-ONLY, never a gate. Measured on this repo's own fixtures
+    /// (`fit::tests::joint_family_is_calibrated_on_the_fixture_set`): a
+    /// change that fixes a bucket can push its members OUT of the bucket, so
+    /// the surviving worst is not comparable across an edit — on the haze
+    /// pair the correctly-accepted cast curves move it 0.073 → 0.082
+    /// (worse) while on the two canyon pairs the curves that MUST be
+    /// rejected move it 0.389 → 0.115 and 0.098 → 0.133 with the qualifying
+    /// count collapsing 7 → 4. A "worst bucket must not get worse" veto
+    /// would therefore reject the one correct cast in the set and admit the
+    /// wrecks. This is the failure this module already recorded from the
+    /// other side (see [`ZONE_ACCEPT_RATIO`]: "a correct blue→gold repaint
+    /// migrates band mass, which the worst-band hue term can only read as
+    /// damage"), reproduced first-hand on the new reading.
+    pub worst: f32,
+    /// Which bucket that was ([`JOINT_LABELS`]).
+    pub worst_label: &'static str,
+    /// Share-weighted mean over the qualifying buckets — the stable half,
+    /// and the only one anything decides on.
+    pub weighted: f32,
+    /// How many of the [`JOINT_BUCKETS`] qualified.
+    pub buckets: usize,
+}
+
+/// Read the joint value-range family for a candidate render against a target.
+///
+/// `None` — the FAIL-OPEN answer — when no bucket clears [`JOINT_MIN_SHARE`]
+/// on both sides (a monochrome frame, a target sharing no value range with
+/// the source) or when the family is switched off. Every caller must treat
+/// `None` as "this reading has no opinion", never as "no problem": that is
+/// the failure direction `fit::neutral_gate_misprediction` chose, and for
+/// the same reason — a reading that cannot see is not evidence of health.
+///
+/// The two slices need NOT be the same length: buckets correspond by VALUE,
+/// not by position, which is what makes this reading immune to the
+/// composition differences that defeat frame-global distribution matching
+/// (a generative target holding ~3× the sky area, measured — see
+/// [`ZONE_ACCEPT_RATIO`]).
+pub fn joint_reading(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Option<JointReading> {
+    let buckets = joint_buckets(cand, tgt);
+    if buckets.is_empty() {
+        return None;
+    }
+    let mut worst = 0.0f32;
+    let mut worst_label = buckets[0].label;
+    let mut acc = 0.0f64;
+    let mut acc_w = 0.0f64;
+    for b in &buckets {
+        acc += b.err as f64 * b.share as f64;
+        acc_w += b.share as f64;
+        if b.err > worst {
+            worst = b.err;
+            worst_label = b.label;
+        }
+    }
+    Some(JointReading {
+        worst,
+        worst_label,
+        weighted: if acc_w > 0.0 { (acc / acc_w) as f32 } else { 0.0 },
+        buckets: buckets.len(),
+    })
+}
+
+/// The comparison path (R23-6 E-15): `AUTOSHOP_FIT_JOINT=off` takes the
+/// whole family out of the fit, so the R17-R19 baseline numbers can be
+/// reproduced against the same binary instead of against a memory. Read
+/// ONCE per process — the fit's "deterministic" contract is about its
+/// arguments, and a switch that could flip between two calls of the same run
+/// would not be.
+///
+/// With it off, every reading below is `None` and each of the three roles
+/// degrades to exactly the pre-R23-6 behaviour: no report note (bar the
+/// fail-open disclosure), no confidence cap, no terminal veto. Verified by
+/// running the suite under it — all 40 pre-existing `fit` / `fit_zoned`
+/// tests pass unchanged; the five that fail are the ones asserting this
+/// family EXISTS, which is the correct answer to switching it off and is
+/// why the variable is a diagnostic, not a supported test configuration.
+fn joint_family_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("AUTOSHOP_FIT_JOINT").as_deref().map(str::trim),
+            Ok("off") | Ok("0") | Ok("false")
+        )
+    })
+}
+
+// --------------------------------------------------------------------------
 // orchestration
 // --------------------------------------------------------------------------
 
@@ -449,32 +773,108 @@ fn attach_zones(
     }
     let swl: Vec<f32> = sw.iter().map(|w| 1.0 - w).collect();
     let twl: Vec<f32> = tw.iter().map(|w| 1.0 - w).collect();
-    let sky =
-        attach_one_zone(&s_img, &tgt_px, report, &sw, &tw, mask_path, MaskRole::ZoneSky, false);
-    let land =
-        attach_one_zone(&s_img, &tgt_px, report, &swl, &twl, mask_path, MaskRole::ZoneLand, true);
-    if !sky && !land {
+    // The running FRAME-GLOBAL error, threaded through the zone passes for
+    // the bounded-drift insurance ONLY (R23-6 honesty fix). It used to be
+    // `report.err_after` itself, read and overwritten in place — which made
+    // the number handed to the user, and the confidence derived from it, the
+    // very frame-global metric this module's own [`ZONE_ACCEPT_RATIO`] doc
+    // proves cannot judge a zone (0.507 → 0.015 zone-local while the frame
+    // moved 0.1768 → 0.1792). Drift still has to be measured incrementally,
+    // so the value still has to be carried; it is simply no longer the same
+    // variable as the report's verdict.
+    let mut frame_err = report.err_after;
+    let sky = attach_one_zone(
+        &s_img,
+        &tgt_px,
+        report,
+        &mut frame_err,
+        &sw,
+        &tw,
+        mask_path,
+        MaskRole::ZoneSky,
+        false,
+    );
+    let land = attach_one_zone(
+        &s_img,
+        &tgt_px,
+        report,
+        &mut frame_err,
+        &swl,
+        &twl,
+        mask_path,
+        MaskRole::ZoneLand,
+        true,
+    );
+    let accepted: Vec<AcceptedZone> = [sky, land].into_iter().flatten().collect();
+    if accepted.is_empty() {
         std::fs::remove_file(mask_path).ok();
+        return;
     }
+    // `err_after` keeps its CONTRACT — the frame-global look distance of the
+    // recipe that actually ships, in the same unit as `err_before`, which is
+    // what every printout pairs it with. What changes is that it no longer
+    // doubles as the zone stage's verdict.
+    report.err_after = frame_err;
+    // CONFIDENCE, on the other hand, is a verdict, and it now comes from what
+    // was actually judged: the WORST accepted zone's own residual, on the
+    // zone scale, floored against the global stage's own claim so neither
+    // stage can promise what the other did not deliver. Worst, not
+    // area-weighted: a perfectly matched sky over a wrecked foreground is not
+    // a 70%-confident fit, and the zones are few and large enough that the
+    // worst one is never a sliver.
+    let worst = accepted.iter().map(|z| z.after).fold(0.0f32, f32::max);
+    let zone_conf = fit::clamp_confidence(1.0 - worst * ZONE_CONFIDENCE_SLOPE);
+    report.recipe.confidence = report.recipe.confidence.min(zone_conf);
+    crate::rationale::push_note(
+        &mut report.recipe.rationale,
+        &mut report.notes,
+        crate::rationale::Note::new(
+            crate::rationale::keys::ZONE_CONFIDENCE,
+            vec![
+                ("n", accepted.len().to_string()),
+                ("worst", format!("{worst:.3}")),
+                ("frame", format!("{frame_err:.3}")),
+            ],
+        ),
+    );
 }
 
-/// Fit + gate ONE zone; returns whether its correction was kept. The zone is
-/// measured on a fresh render of the CURRENT recipe (including any zone
-/// already attached), so corrections stack the way the engine renders them.
-/// Judged by the ZONE-LOCAL error (see [`ZONE_ACCEPT_RATIO`] for the
-/// measured reason the frame-global metric cannot be the judge), with the
-/// frame-global error as a bounded-drift insurance only.
+/// A zone whose correction was kept — what [`attach_zones`] needs to report
+/// on the stage as a whole.
+struct AcceptedZone {
+    /// The zone-local residual it landed at ([`zone_err`]).
+    after: f32,
+}
+
+/// Confidence slope on the ZONE scale — the joint family's and the global
+/// fit's slopes each belong to their own metric, and this is the third.
+/// Anchored on this module's own measured landings: corrections that work
+/// land at 0.007-0.015 and [`ZONE_MATCHED_ERR`] (0.02) is the ceiling of
+/// "matched", so 0.02 must still read as high confidence (0.90 here) while
+/// the floor is reached at a zone residual of 0.15 — ten times the observed
+/// good landing, i.e. a zone that was not corrected at all.
+const ZONE_CONFIDENCE_SLOPE: f32 = 5.0;
+
+/// Fit + gate ONE zone; returns its verdict when the correction was kept.
+/// The zone is measured on a fresh render of the CURRENT recipe (including
+/// any zone already attached), so corrections stack the way the engine
+/// renders them. Judged by the ZONE-LOCAL error (see [`ZONE_ACCEPT_RATIO`]
+/// for the measured reason the frame-global metric cannot be the judge);
+/// `frame_err` carries the running frame-global look distance IN and OUT and
+/// is used for the bounded-drift insurance only — it is deliberately not the
+/// report's own field any more (R23-6).
 #[allow(clippy::too_many_arguments)] // internal seam; a struct would just rename the args
 fn attach_one_zone(
     s_img: &DynamicImage,
     tgt_px: &[[f32; 3]],
     report: &mut FitReport,
+    frame_err: &mut f32,
     sw: &[f32],
     tw: &[f32],
     mask_path: &Path,
     role: MaskRole,
     inverted: bool,
-) -> bool {
+) -> Option<AcceptedZone> {
     // `label` drives the rationale prose; it's the zone's stable ASCII tag, so
     // the text stays English/identical regardless of the GUI's display language.
     let label = role.tag();
@@ -494,7 +894,7 @@ fn attach_one_zone(
                 ],
             ),
         );
-        return false;
+        return None;
     }
     let zone_before = zone_err(&ms, &mt);
     // Already-matched zone: attempting a fit would be dialling noise — the
@@ -513,7 +913,7 @@ fn attach_one_zone(
                 vec![("label", label.to_string()), ("before", format!("{zone_before:.3}"))],
             ),
         );
-        return false;
+        return None;
     }
     let d = fit_zone_dials(&ms, &mt);
     let round1 = |v: f32| (v * 10.0).round() / 10.0;
@@ -583,7 +983,7 @@ fn attach_one_zone(
     let zone_after = zone_err(&m_after, &mt);
     let ev_after = (mt.luma_lin.max(1e-6) / m_after.luma_lin.max(1e-6)).log2().abs();
     if zone_accepts(zone_before, zone_after, ev_after)
-        && zoned_err <= report.err_after + ZONE_GLOBAL_REGRESSION_TOL
+        && zoned_err <= *frame_err + ZONE_GLOBAL_REGRESSION_TOL
     {
         let m = report.recipe.masks.last().expect("zone mask just pushed");
         let g = m.color_gains.unwrap_or([1.0; 3]);
@@ -623,9 +1023,13 @@ fn attach_one_zone(
                 ),
             );
         }
-        report.err_after = zoned_err;
-        report.recipe.confidence = (1.0 - zoned_err * 6.0).clamp(0.25, 0.95);
-        true
+        // The running frame-global value advances so the NEXT zone's drift
+        // budget is measured from here — but neither `err_after` nor
+        // `confidence` is written from it any more (R23-6): see the comment
+        // in [`attach_zones`] and this module's own [`ZONE_ACCEPT_RATIO`]
+        // proof that this number cannot judge a zone.
+        *frame_err = zoned_err;
+        Some(AcceptedZone { after: zone_after })
     } else {
         report.recipe.masks.pop();
         crate::rationale::push_note(
@@ -640,12 +1044,12 @@ fn attach_one_zone(
                     ("ratio", format!("{:.0}", ZONE_ACCEPT_RATIO * 100.0)),
                     ("floor", format!("{ZONE_MATCHED_ERR:.3}")),
                     ("gain", format!("{:.0}", (1.0 - ZONE_FLOOR_MIN_GAIN) * 100.0)),
-                    ("drift", format!("{:+.3}", zoned_err - report.err_after)),
+                    ("drift", format!("{:+.3}", zoned_err - *frame_err)),
                     ("tol", format!("{ZONE_GLOBAL_REGRESSION_TOL:+.3}")),
                 ],
             ),
         );
-        false
+        None
     }
 }
 
@@ -671,6 +1075,85 @@ fn mask_weights(mask: &GrayImage, w: u32, h: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame with mass in every luminance band and both chroma classes —
+    /// the joint family's own fixture, so its unit tests do not depend on
+    /// `fit`'s.
+    fn joint_fixture(warm_shift: f32) -> Vec<[f32; 3]> {
+        let mut px = Vec::with_capacity(4096);
+        for i in 0..4096 {
+            let l = 0.05 + 0.9 * (i % 64) as f32 / 63.0;
+            if (i / 64) % 2 == 0 {
+                px.push([l, l, l]); // neutral
+            } else {
+                px.push([(l + warm_shift).clamp(0.0, 1.0), l * 0.7, l * 0.35]); // chromatic
+            }
+        }
+        px
+    }
+
+    /// The eight bucket weights must partition unity — every pixel counted
+    /// exactly once across the family, so the shares read as frame fractions
+    /// and the area weighting means what it says.
+    #[test]
+    fn the_joint_buckets_partition_unity() {
+        let px = joint_fixture(0.0);
+        let mut total = vec![0.0f32; px.len()];
+        let mut w = Vec::new();
+        for b in 0..JOINT_BUCKETS {
+            joint_weights(&px, b, &mut w);
+            assert_eq!(w.len(), px.len());
+            for (t, x) in total.iter_mut().zip(&w) {
+                assert!((0.0..=1.0).contains(x), "weight out of range: {x}");
+                *t += x;
+            }
+        }
+        for (i, t) in total.iter().enumerate() {
+            assert!((t - 1.0).abs() < 1e-5, "pixel {i} got total weight {t}");
+        }
+        // …and the shares of the qualifying buckets cannot exceed the frame.
+        let sum: f32 = joint_buckets(&px, &px).iter().map(|b| b.share).sum();
+        assert!(sum <= 1.0 + 1e-5, "shares sum to {sum}");
+    }
+
+    /// Buckets correspond by VALUE, not by position: two frames of totally
+    /// different SIZE and layout that hold the same value populations must
+    /// read as matched. This is the property that makes the reading immune
+    /// to the composition differences frame-global matching dies on.
+    #[test]
+    fn the_joint_family_matches_by_value_not_by_position() {
+        let a = joint_fixture(0.0);
+        // Same populations, HALF the pixels, reversed order.
+        let mut b: Vec<[f32; 3]> = a.iter().step_by(2).copied().collect();
+        b.reverse();
+        assert_ne!(a.len(), b.len());
+        let r = joint_reading(&a, &b).expect("both sides carry the same values");
+        assert!(r.weighted < 0.01, "same values must read matched: {r:?}");
+        assert!(r.buckets >= 4, "the fixture must exercise most of the family: {r:?}");
+        // A real difference must show up, and in a CHROMATIC bucket — the
+        // shift only touches coloured pixels.
+        let warm = joint_fixture(0.25);
+        let r2 = joint_reading(&a, &warm).expect("reading");
+        assert!(r2.weighted > 10.0 * r.weighted, "the warm shift must register: {r2:?}");
+        assert!(
+            r2.worst_label.ends_with("colour"),
+            "a chroma-only difference must land in a colour bucket: {r2:?}"
+        );
+    }
+
+    /// FAIL-OPEN: no evidence ⇒ no opinion, never "no problem".
+    #[test]
+    fn the_joint_family_abstains_without_evidence() {
+        // A frame with two pixels cannot clear the share floor on 8 buckets.
+        let tiny = vec![[0.5f32, 0.5, 0.5]; 2];
+        let other = vec![[0.9f32, 0.1, 0.1]; 2];
+        // Every bucket but one is empty on at least one side.
+        let r = joint_reading(&tiny, &other);
+        assert!(r.is_none() || r.unwrap().buckets < JOINT_BUCKETS);
+        // An EMPTY side has no opinion at all.
+        assert_eq!(joint_reading(&[], &[]), None);
+        assert_eq!(joint_buckets(&[], &tiny).len(), 0);
+    }
 
     #[test]
     fn zone_moments_use_only_the_weighted_pixels() {
@@ -978,6 +1461,53 @@ mod tests {
             report.recipe.rationale.contains("global fit only"),
             "rationale must carry the XMP honesty note: {}",
             report.recipe.rationale
+        );
+        // R23-6 A-4: confidence must NOT be the frame-global look error's
+        // verdict any more. The old line was
+        // `confidence = (1 - zoned_err * 6).clamp(0.25, 0.95)`, which on this
+        // fixture reports a number derived from a metric the module's own
+        // ZONE_ACCEPT_RATIO doc proves cannot see the zone. It now comes from
+        // the accepted zones, and says so.
+        assert!(
+            report.recipe.rationale.contains("Confidence for this fit comes from"),
+            "the zoned fit must say where its confidence came from: {}",
+            report.recipe.rationale
+        );
+        let frame_verdict = fit::clamp_confidence(1.0 - report.err_after * 6.0);
+        assert!(
+            report.recipe.confidence != frame_verdict
+                || (report.err_after - 0.0).abs() < 1e-6,
+            "confidence still reads as the frame-global formula ({} vs {frame_verdict})",
+            report.recipe.confidence
+        );
+        std::fs::remove_file(mask_path).ok();
+    }
+
+    /// The zone stage's verdict is bounded by BOTH stages: it may not raise
+    /// the global fit's own claim, and the global fit may not keep a claim
+    /// the zones contradict.
+    #[test]
+    fn a_zoned_fits_confidence_comes_from_the_zones_it_accepted() {
+        let (src, tgt, sky_mask) = zoned_pair();
+        let mask_path = fixture_mask_path("zoned-confidence-mask");
+        sky_mask.save(&mask_path).unwrap();
+        let mut report = fit::fit_recipe(&src, &tgt);
+        let global_conf = report.recipe.confidence;
+        attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
+        assert!(
+            !report.recipe.masks.is_empty(),
+            "premise: a zone attaches on this fixture: {}",
+            report.recipe.rationale
+        );
+        assert!(
+            report.recipe.confidence <= global_conf + 1e-6,
+            "the zone stage must not raise the global claim ({} > {global_conf})",
+            report.recipe.confidence
+        );
+        assert!(
+            report.recipe.confidence >= 0.25,
+            "…nor sink below the family floor: {}",
+            report.recipe.confidence
         );
         std::fs::remove_file(mask_path).ok();
     }

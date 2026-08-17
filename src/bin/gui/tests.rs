@@ -4504,6 +4504,102 @@
         );
     }
 
+    /// R23-6 B (user decision 2026-08-17 ⑤): the reverse-fit target used to
+    /// be reachable ONLY by generating an image and standing on that variant
+    /// — `fit_target`'s `(v.kind == Generated).then(...)`, whose downstream
+    /// effect was that "the target is not pixel-aligned" became an axiom of
+    /// the method instead of a property of the only target the desktop app
+    /// could offer. Any finished version of the same frame is a legitimate
+    /// target (the CLI has always accepted one; fit.rs's own doc has always
+    /// promised one).
+    ///
+    /// Red before the change on every assertion below: with no Generated
+    /// variant `fit_target()` returned `None` whatever `fit_ref` held, the
+    /// panel offered no way to name a file, and its empty state told the user
+    /// to go and generate an image.
+    #[test]
+    fn a_chosen_reference_is_a_reverse_fit_target_without_any_generated_variant() {
+        let reference = std::path::PathBuf::from("D:/exports/_DSC9621-lightroom.tif");
+        // A stock app: ONE Original variant, nothing generated.
+        let mut app = AutoshopApp::default();
+        assert_eq!(app.fit_target(), None, "premise: nothing to fit against yet");
+        app.fit_ref = Some(reference.clone());
+        assert_eq!(
+            app.fit_target(),
+            Some(reference.clone()),
+            "an explicitly chosen reference IS the target"
+        );
+        // …and it OUTRANKS a generated variant: an explicit choice must not
+        // be shadowed by whichever card happens to be active.
+        let generated = std::path::PathBuf::from("./out/_DSC9621.reimagine.png");
+        app.variants.push(Variant {
+            kind: VariantKind::Generated,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: Some(generated.clone()),
+            thumb: None,
+        });
+        app.active = app.variants.len() - 1;
+        assert_eq!(app.fit_target(), Some(reference), "the chosen reference wins");
+        // Clearing it hands the entry back to the generated variant — both
+        // doors stay open, which is the whole shape of this change.
+        app.fit_ref = None;
+        assert_eq!(app.fit_target(), Some(generated));
+    }
+
+    /// The panel half of the same change: the door has to be visible, and the
+    /// empty state has to stop naming only the generative path.
+    #[test]
+    fn the_reverse_fit_area_offers_the_reference_picker() {
+        let mut app = AutoshopApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t.contains("Choose reference")),
+            "the reference entry must exist at all: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("Pick a reference below")),
+            "the empty state must name BOTH doors, not just the generative one: {seen:?}"
+        );
+        // The chosen file is shown, so "what am I fitting against" is
+        // answerable without opening a dialog again.
+        app.fit_ref = Some(std::path::PathBuf::from("D:/exports/_DSC9621-lightroom.tif"));
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t.contains("_DSC9621-lightroom.tif")),
+            "the chosen reference must be named on the panel: {seen:?}"
+        );
+    }
+
+    /// R23-6 D (user decision 2026-08-17 ⑥): the deep reverse-fit is a PAID
+    /// opt-in on top of another paid opt-in, so it must be off in both
+    /// defaults — a prefs file written before the key existed has to decode
+    /// to the same answer a fresh install gives — and it must not be
+    /// reachable without the review it iterates.
+    #[test]
+    fn the_deep_reverse_fit_is_off_by_default_and_gated_on_the_review() {
+        assert!(!AutoshopApp::default().fit_deep, "spending is opt-in");
+        assert!(
+            !Prefs::default().fit_deep,
+            "an older prefs file must decode to the same answer"
+        );
+        let mut app = AutoshopApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "deep"),
+            "the switch must exist: {seen:?}"
+        );
+        // The gate is on the WIDGET, so the tooltip that explains the gate is
+        // what a headless frame can witness; the enabled state itself is
+        // egui's and is asserted through the same predicate the UI uses.
+        assert!(!app.fit_ai_judge, "premise: the review is off in a stock app");
+        app.fit_ai_judge = true;
+        app.fit_deep = true;
+        // The worker's own gate, which must not depend on the UI's: deep
+        // without the review is not a configuration.
+        assert!(app.fit_deep && app.fit_ai_judge);
+    }
+
     /// R23-2: the reference-PHOTO switch is off by default in BOTH defaults
     /// (the app's and the prefs'), so neither a fresh install nor an upgraded
     /// prefs file silently starts putting a second image on every paid call.

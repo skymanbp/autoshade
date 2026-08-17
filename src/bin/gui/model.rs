@@ -214,6 +214,11 @@ pub(crate) struct Prefs {
     pub(crate) save_denoise: bool,
     pub(crate) zoned_fit: bool,
     pub(crate) fit_ai_judge: bool,
+    /// R23-6: the DEEP reverse-fit (judge before the persist, bounded guided
+    /// rounds). `#[serde(default)]` on the struct decodes an older prefs file
+    /// as `false` — the same answer [`Prefs::default`] gives, so an upgrade
+    /// never silently starts spending vision calls on every reverse-fit.
+    pub(crate) fit_deep: bool,
     pub(crate) view_mode: ViewMode,
     pub(crate) exp_long_edge: u32,
     pub(crate) exp_sharpen: f32,
@@ -248,6 +253,9 @@ impl Default for Prefs {
             // AI review of the fit OFF by default: it is a PAID vision call
             // per fit — spending is the user's opt-in, never a default.
             fit_ai_judge: false,
+            // The deep reverse-fit is the same rule and a bigger bill (up to
+            // three vision calls per fit), so the same answer.
+            fit_deep: false,
             view_mode: ViewMode::SideBySide,
             exp_long_edge: 0,
             exp_sharpen: 0.0,
@@ -609,10 +617,28 @@ pub(crate) enum FitNote {
     /// The judgement's accept/revise decision is deliberately NOT carried:
     /// the prompt pins its thresholds to the score (accept = 85+), so the
     /// score already says it — a second word would just need translating.
-    AiReview { score: f32, critique: String },
+    ///
+    /// `hint` is the reviewer's ONE actionable instruction. R20 dropped it
+    /// on the floor — the ROADMAP entry gave a reason for dropping
+    /// `decision` and none at all for this — so the user paid for a vision
+    /// call and was shown two thirds of what it said. It is displayed, never
+    /// executed, on the default path; the deep path (R23-6 D) additionally
+    /// uses it to pick an ACTION, never to write a value.
+    AiReview { score: f32, critique: String, hint: Option<String> },
     /// The AI review call failed — the fit itself already landed; this is
     /// the informational layer degrading, never the fit erroring.
     AiReviewFailed(String),
+    /// R23-6 A-3: the terminal do-no-harm fired and the whole recipe was
+    /// reset to the calibration base. A rationale line was never enough for
+    /// this one — it is the "the reverse-fit did nothing" outcome, and it
+    /// belongs in the status line in those words.
+    FitReset,
+    /// R23-6 B-7: the chosen reference does not look like this frame.
+    ReferenceNotSameFrame,
+    /// R23-6 D: the deep path ran and this is what it did. `rounds` counts
+    /// the guided retries actually bought (0 = the first review already
+    /// stood), `action` names what was tried, `adopted` whether it was kept.
+    DeepFit { rounds: usize, action: &'static str, adopted: bool },
 }
 
 /// The reverse-fit result: recipe + errors + typed notes. `persisted` is

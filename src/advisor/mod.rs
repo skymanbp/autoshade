@@ -20,7 +20,7 @@ mod openai_verify;
 
 pub use claude::ClaudeProvider;
 pub use heuristic::HeuristicProposer;
-pub use judge::{judge_pair, JudgeImages, JudgeTask, Judgement};
+pub use judge::{hint_action, judge_pair, FitAction, JudgeImages, JudgeTask, Judgement};
 pub use openai::{describe_style, OpenAiProvider};
 pub use openai_verify::OpenAiVerifier;
 

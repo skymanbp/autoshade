@@ -104,11 +104,31 @@ impl AutoshopApp {
         };
     }
 
-    /// The reverse-fit / style-prompt target: the ./out PNG behind the active
-    /// variant when it is an AI-generated rendition (nothing to fit otherwise).
-    /// Reverse-fit maps the SOURCE neutral onto this rendition, so it only
-    /// makes sense when the look lives in a generated raster.
+    /// The reverse-fit / style-prompt target: a finished rendition of THIS
+    /// frame whose look is to be solved back into develop parameters.
+    ///
+    /// Two entries, in precedence order (R23-6 B, user decision 2026-08-17
+    /// ⑤ — "a second develop of the same frame", i.e. the photographer's own
+    /// Lightroom export or the camera's JPEG, not only what this app
+    /// generated):
+    ///
+    ///   1. `fit_ref` — a file the user picked on purpose. It wins, because
+    ///      an explicit choice must not be shadowed by whichever variant
+    ///      happens to be active.
+    ///   2. the ./out raster behind the active variant when that variant is
+    ///      an AI-generated rendition — the original entry, unchanged.
+    ///
+    /// The restriction to (2) was never a property of the fit: `fit.rs`'s
+    /// own doc has always said "any finished reference of the SAME frame",
+    /// and the CLI `match` has always accepted an arbitrary path. It was a
+    /// GUI-side `then(...)` that made the generative path the only reachable
+    /// one — and, downstream of that, made "the target is not pixel-aligned"
+    /// read as an axiom of the method rather than a consequence of the only
+    /// target the desktop app could offer.
     pub(crate) fn fit_target(&self) -> Option<PathBuf> {
+        if let Some(p) = &self.fit_ref {
+            return Some(p.clone());
+        }
         let v = self.active_variant()?;
         (v.kind == VariantKind::Generated).then(|| v.origin.clone()).flatten()
     }

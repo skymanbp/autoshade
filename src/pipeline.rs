@@ -4247,6 +4247,53 @@ mod tests {
              (mean quantile gap {:.1}/255)",
             mean_gap * 255.0
         );
+        // R23-6 E-14: the five global luma quantiles above are the whole
+        // contract this harness had, and they are structurally blind to the
+        // failure the user reports — a fit whose value ranges are wrong can
+        // hold every global quantile. Print the JOINT family per bucket
+        // (base vs finished, so the direction is visible, not just the
+        // level), and assert the same bounded-drift rule the fit itself
+        // applies. The per-bucket ASSERTION stays opt-in until real failure
+        // pairs exist to calibrate a per-bucket ceiling against
+        // (AUTOSHOP_FIT_REPRO_JOINT_MAX=<f32>) — a number invented here
+        // would be a guess wearing a test's clothes.
+        let src_px = crate::fit::pixels_of(&crate::render::develop_preview(
+            &neutral.thumbnail(edge, edge),
+            &fit_base,
+        ));
+        let tgt_px = crate::fit::pixels_of(&target.thumbnail(edge, edge));
+        let fit_px = crate::fit::pixels_of(&fitted);
+        for (side, px) in [("base", &src_px), ("fitted", &fit_px)] {
+            for b in crate::fit_zoned::joint_buckets(px, &tgt_px) {
+                eprintln!(
+                    "joint {side:<6} {:<18} err {:.4}  share {:.3}",
+                    b.label, b.err, b.share
+                );
+            }
+        }
+        let jb = crate::fit_zoned::joint_reading(&src_px, &tgt_px);
+        let ja = crate::fit_zoned::joint_reading(&fit_px, &tgt_px);
+        eprintln!("joint reading: base {jb:?}\njoint reading: fit  {ja:?}");
+        if let (Some(b), Some(a)) = (jb, ja) {
+            assert!(
+                a.weighted <= b.weighted + crate::fit_zoned::JOINT_DRIFT_TOL,
+                "the fit pushed the joint value-range distributions further \
+                 apart than leaving the photo alone ({:.4} -> {:.4})",
+                b.weighted,
+                a.weighted
+            );
+            if let Ok(max) = std::env::var("AUTOSHOP_FIT_REPRO_JOINT_MAX") {
+                let max: f32 = max.trim().parse().expect("AUTOSHOP_FIT_REPRO_JOINT_MAX");
+                for bucket in crate::fit_zoned::joint_buckets(&fit_px, &tgt_px) {
+                    assert!(
+                        bucket.err <= max,
+                        "value range {} misses by {:.4} (ceiling {max})",
+                        bucket.label,
+                        bucket.err
+                    );
+                }
+            }
+        }
     }
 
     /// L09#1: the pre-pay output preflight — a directory target refuses
