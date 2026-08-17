@@ -370,6 +370,43 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **v0.28.0 RELEASED（2026-08-17，第二十二轮=用户 17 条反馈三轮清账之 R22：
+  缺陷+UI）** — 锁定计划（上方第二十二至二十四轮段）之 R22 全量落地，七个实
+  现提交+一个复审修复提交（3f13bd8→52c2400），33+ 文件，测试 449→467 lib
+  /7→8 CLI/73→89 GUI/2 合约。用户条目闭环：**#2**（蒙版精修报错=load_image
+  「仅光栅」前提无机制——门内拒 RAW+`render::source_pixels` 统一分派收编 5
+  处手抄+巡逻测试改逐调用点 why 标记；masks.rs 走真显影双绑定 guide=
+  active_source_path/claim=src_path；聚合预算预检（复审 HIGH-1：预检单栅格
+  vs 加载器聚合两把量尺，>53.7Mpx 双精修炸导出——同源判据修）；分割 sidecar
+  缺失按钮置灰披露）；**#17**（缩略图恒定槽位+保比内嵌，方向链本就正确；
+  STRIP_THUMB_H 解遮蔽）；**#9**（画笔滑杆进蒙版会话行绑同一 self.brush+
+  孤儿会话修）；**#15a/#10**（蒙版 clarity/dehaze/texture 上引擎：dehaze
+  拆分 golden 钉、加权 unsharp 严格等价推导、融合通道保持不拆（部分权重
+  渲染兼容裁决）、engine_active 两消费点同扩；面板 LR 三组 Tone/Detail/
+  Color、Temp/Tint 实时开尔文换算、color_gains 披露+清除）；**M6a**（XMP
+  导出侧五类损失写侧单一来源穿 GUI/serve/CLI）；**#4/#14**（panels/ai.rs
+  一级 AI 面板三子区，editable 门/R19 宽度算术/can_fit 门外三条警戒线变异
+  钉；FIELD_W_MAX=420 尺寸令牌+prompt_field 原语聚焦放宽；分组弱标题+画笔
+  共用小节）；**#11**（导出分裂按钮+目标三态设置 Prefs+绝对路径提示+批量
+  共读；Download… 退役 9 词条）；**SF8**（XMP 一键导出到照片旁：原子
+  create_new 永不静默覆盖+二次确认——「照片库只读」不变量的唯一文档化例
+  外，README 同步）；打磨批（● 指示器谓词对齐字段集、STYLE_STRENGTH_
+  DEFAULT 单一常量、四 Full-res 限定词）。**Opus 5 全量 diff 对抗复审
+  SHIP-WITH-FIXES：1H/2M/5L/5N 全处置**（10 修入 52c2400；3 有据不修：
+  BYTES_PER_PIXEL=24 既往偏低~17% 本轮无新峰值登记 R23、M6a stderr 时序
+  与既有 merge note 一致、id_salt 迁移折叠态一次性重置即本条披露）；13 项
+  契约检查全绿（R21 登记簿零触碰、R20 三定案、D13 键位、变体不混合 busy
+  门不可达）。**发版披露**：①audit_i18n 在 HEAD cbb9900 本就红（v0.26.2
+  的 JUDGE_UNCHANGED 缺 zh 对，与该轮台账「audit_i18n 0」矛盾）——已补对；
+  ②带蒙版三项的旧 develop 重渲染新观感（用户 2026-08-16 批准）+judge 分
+  数基线随像素移动；③clarity-only 位图蒙版开始加载栅格；④「803 子集」精
+  确口径=SC 单面字形数，五字体 cmap 并集 2396 码点；⑤保存侧 MaskLoss 红
+  toast 频率待用户实测反馈；⑥.gitattributes 钉 *.py=LF（此前干净克隆
+  denoise 测试会红=「全量绿」不可复现，已修）；⑦L4 常量修正登记 R23。
+  门：**467 lib+8 CLI+89 GUI+2 合约双配置、clippy --all-targets --bins
+  --features gui 0、audit_i18n 0、字体门绿**。发布戳：见下方 release
+  ledger 提交（tag v0.28.0，资产字节验证）。
+
 - **v0.27.0 RELEASED（2026-08-14，第二十一轮=版本快照删除复活根修）** —
   用户报"存档（快照版本读取）删不掉：点删除显示已删，重开 AS 还在"。
   **确诊（repro 测试第一方复现，一类根因三条复活臂）**：①backup gate 的
