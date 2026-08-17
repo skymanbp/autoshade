@@ -159,8 +159,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Writes each photo's develop into your develop store (recipe JSON; RAW also gets a Lightroom XMP). Leaves library files untouched, renders nothing.",
         "把每张照片的显影写入显影库（配方 JSON；RAW 另附 Lightroom XMP）。不动库文件、不渲染成品。"),
     ("🖼 Render selected ({n})", "🖼 渲染选中({n})"),
-    ("Each renders by its own saved develop from the store (neutral develop if none) → ./out/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
-        "每张按它在显影库里保存的显影出图（没有则中性显影）→ ./out/<名>.developed.*，用当前格式/长边/锐化/质量；AI Denoise 不参与批量"),
+    ("Each renders by its own saved develop from the store (neutral develop if none) → <Destination>/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
+        "每张按它在显影库里保存的显影出图（没有则中性显影）→ <目标位置>/<名>.developed.*，用当前格式/长边/锐化/质量；AI Denoise 不参与批量"),
     ("Clear selection", "清除多选"),
     ("Include crop / straighten when pasting", "粘贴时含裁剪/拉直"),
     ("Off by default — composition rarely transfers between photos", "默认不带几何 — 构图在照片间通常不可复用"),
@@ -472,8 +472,18 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Adobe RGB (print)", "Adobe RGB（印刷）"),
     ("AI Denoise", "AI 降噪"),
     ("🤖 AI Denoise", "🤖 AI 降噪"),
-    ("Download…", "下载…"),
-    ("Download… = save the full-resolution export to a path you choose", "下载…＝把全分辨率导出保存到你选的路径"),
+    // R22-7 retired 「Download…」 and its hover: the button was start_render_to
+    // with a dialog-supplied path, which is now the Destination setting's
+    // 「Ask every time」 value and the split button's ▾ half.
+    ("Destination", "目标位置"),
+    ("./out folder", "./out 文件夹"),
+    ("Last used folder", "上次用过的文件夹"),
+    ("Ask every time", "每次都问"),
+    ("a save dialog opens on every export", "每次导出都会打开保存对话框"),
+    ("Export to…", "导出到…"),
+    ("Export to a one-off path…", "只把这一次导出写到你选的路径…"),
+    ("Pick a path for THIS export only — the Destination setting is left as it is",
+        "只为「这一次」导出选路径——不改「目标位置」设置"),
     ("Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store",
         "Ctrl+S · 把这张照片的显影保存到显影库（配方 + RAW 附带 Lightroom/ACR XMP；已烘焙的修饰母版会被关联，重新打开可恢复）"),
 
@@ -554,12 +564,17 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "选区 {w}×{h}% — 输入方向语后 AI 分析（点击清除）"),
 
     // ── Status bar · batch render / paste / preview re-decode ────────────────
-    ("Batch-rendering {n} photos → ./out …", "批量渲染 {n} 张 → ./out …"),
-    ("./out — batch {n} done", "./out — 批量 {n} 张完成"),
+    // R22-7: the three batch lines carried a hardcoded ./out, which the
+    // Destination setting turned into a lie. Start and landing name the root
+    // that was ACTUALLY used ({path}, from the outcome's own fact); the
+    // per-photo tick drops it — 500 repetitions of one folder name only pushed
+    // the counts out of a truncated status line.
+    ("Batch-rendering {n} photos → {path} …", "批量渲染 {n} 张 → {path} …"),
+    ("batch {n} done → {path}", "批量 {n} 张完成 → {path}"),
     ("Batch: {ok} succeeded, {fail} failed: {detail}", "批量：{ok} 成功、{fail} 失败：{detail}"),
     (" · same-name photos kept apart: {list}", " · 同名照片已避让：{list}"),
     (" · {n} base look(s) re-estimated (a pre-era save rendered too dark)", " · {n} 张的相机基调已重估（旧版保存的基调渲染过暗）"),
-    ("Batch-rendering {done}/{total} → ./out …", "批量渲染 {done}/{total} → ./out …"),
+    ("Batch-rendering {done}/{total} …", "批量渲染 {done}/{total} …"),
     ("Pasting recipe to {n} photos…", "粘贴配方到 {n} 张…"),
     ("Recipe pasted to {ok} photos ({xmp} XMP) → develop store", "配方已粘贴到 {ok} 张（{xmp} 个 XMP）→ 显影库"),
     ("{ok} succeeded, {fail} failed: {detail}", "{ok} 成功、{fail} 失败：{detail}"),
@@ -805,6 +820,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Develop store", "显影库 · Develop store"),
     ("Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHOP_DATA_DIR environment variable.",
         "已保存显影的存放地：配方、Lightroom XMP、版本快照与蒙版栅格 — 每张照片一个文件夹，按其绝对路径键控。可用 AUTOSHOP_DATA_DIR 环境变量改存放位置。"),
+    // R22-8 · SF8-C: the row shows the OPEN photo's hash subdirectory, so it
+    // needs a way in — the folder name is a hash nobody can retype.
+    ("🗂 Show in file manager", "🗂 在文件管理器中打开"),
+    ("Open this folder in your file manager", "在文件管理器中打开这个文件夹"),
+    ("Nothing saved for this photo yet — the folder appears with the first save",
+        "这张照片还没有任何保存内容——第一次保存后文件夹才会出现"),
+    ("could not open the folder: {err}", "无法打开文件夹：{err}"),
     ("Import develops from an old ./out folder…", "从旧 ./out 文件夹导入显影…"),
     ("Saves made before v0.13 lived in a ./out folder next to wherever the app was launched. If your old edits are missing, point this at that folder — its recipes / XMP / versions migrate into the develop store.",
         "v0.13 之前的保存放在启动目录旁的 ./out 里。如果旧编辑不见了，把这里指向那个文件夹 — 其中的配方/XMP/版本会迁入显影库。"),
@@ -843,14 +865,30 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Ctrl+Y · redo the undone edit", "Ctrl+Y · 重做撤销的编辑"),
     ("◫ Compare", "◫ 对比"),
     ("Export", "导出 · Export"),
-    ("Export (settings in the Export section)", "导出（设置在 Export 节）"),
+    ("Export to the Destination (Destination + settings in the Export section)",
+        "导出到「目标位置」（目标位置与设置都在 Export 节）"),
     ("Format", "格式"),
     ("Save develop", "保存显影"),
     ("Save develop (recipe + XMP for RAW)", "保存显影（recipe + RAW 的 XMP）"),
-    ("Ctrl+Shift+E · full-resolution render to ./out (follows the current variant's pixels); settings in the Export section",
-        "Ctrl+Shift+E · 全分辨率渲染到 ./out（跟随当前变体的像素）；设置在 Export 节"),
-    ("Applied by Export / Download… in the toolbar (Ctrl+E). Files land in ./out unless Download picks a path.",
-        "由工具栏的 Export / Download…（Ctrl+E）使用。文件写入 ./out，Download 可另选路径。"),
+    ("Ctrl+Shift+E (or Ctrl+E) · full-resolution render to the Destination below (follows the current variant's pixels); Destination + settings live in the Export section",
+        "Ctrl+Shift+E（或 Ctrl+E）· 全分辨率渲染到下方「目标位置」（跟随当前变体的像素）；目标位置与其余设置都在 Export 节"),
+    ("Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render selected」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination.",
+        "由工具栏的「Export」（Ctrl+Shift+E，或 Ctrl+E）和图库的「Render selected」使用。Export 旁的 ▾ 只把这一次的文件写到你选的路径，不改「目标位置」。"),
+    // R22-8 · SF8-A: hand the stored projection to Lightroom (which only ever
+    // looks beside the photo). 边车 is this table's word for the RAW-adjacent
+    // .xmp — see the terminology note in the XMP-save block.
+    ("Export .xmp beside the photo", "导出 .xmp 到照片旁"),
+    ("⚠ Overwrite the .xmp already there", "⚠ 覆盖已存在的 .xmp"),
+    ("Copy this photo's stored Lightroom/ACR sidecar into the photo's own folder, where Lightroom reads it. Save the develop first — this delivers what is stored, not what is unsaved on the canvas.",
+        "把这张照片在显影库里的 Lightroom/ACR 边车复制到照片自己的文件夹，Lightroom 就是在那里读它。请先保存显影——这里给出的是已保存的内容，不是画布上未保存的改动。"),
+    ("RAW only — a baked PNG/TIFF has no Lightroom sidecar convention, so its neighbouring .xmp belongs to another program",
+        "仅 RAW —— 烘焙好的 PNG/TIFF 没有 Lightroom 边车约定，旁边的 .xmp 属于别的程序"),
+    ("A .xmp already sits beside this photo (Lightroom's own, or an earlier copy) — clicking again replaces it",
+        "这张照片旁已有 .xmp（Lightroom 自己的，或早先复制的）—— 再点一次会替换它"),
+    ("Lightroom sidecar delivered → {path}", "Lightroom 边车已写到照片旁 → {path}"),
+    ("a .xmp already sits beside this photo ({path}) — click again to replace it",
+        "这张照片旁已有 .xmp（{path}）—— 再点一次会替换它"),
+    ("the .xmp could not be delivered: {err}", "无法写出 .xmp：{err}"),
     ("SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.",
         "显影前 SCUNet AI 降噪——高 ISO/星空（慢，GPU；需 python 边车）。批量渲染不含此项。"),
     ("All regions", "全部区域"),

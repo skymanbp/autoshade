@@ -1203,6 +1203,83 @@ pub fn xmp_target(src: &Path) -> PathBuf {
     develop_dir(src).join(format!("{}.xmp", crate::pipeline::stem(src)))
 }
 
+/// Where [`export_xmp_beside`] delivers: `<photo folder>/<name>.xmp`, spelled
+/// EXACTLY as [`lightroom_sidecar`] and `pipeline::write_xmp` read it
+/// (`with_extension`), so the file this produces is the file those two
+/// recognise. `None` only for a pathless photo.
+pub fn xmp_beside_target(src: &Path) -> Option<PathBuf> {
+    src.parent().is_some().then(|| src.with_extension("xmp"))
+}
+
+/// Hand this photo's stored Lightroom XMP projection over to Lightroom: copy
+/// `<develop dir>/<stem>.xmp` to the photo's OWN folder as `<name>.xmp`, which
+/// is the only place Lightroom / Camera Raw look for a sidecar.
+///
+/// **This is the one deliberate write into the photo's folder.** Everything
+/// else refuses (`pipeline::guard_readonly`, "the photo library is read-only")
+/// and that guard is intentionally NOT consulted here — it exists to stop
+/// RENDERED deliverables and `-o` mistakes from landing in a library, whereas
+/// an XMP sidecar is metadata that Lightroom itself writes there by convention,
+/// the destination is fixed (never user-typed), and the caller is one explicit
+/// per-photo click. It is never reachable from a batch, a paste or the CLI.
+///
+/// `overwrite = false` refuses an existing sidecar with
+/// [`std::io::ErrorKind::AlreadyExists`] — Lightroom's own file may be sitting
+/// there, and the caller turns that refusal into a confirmation. The refusal is
+/// an ATOMIC `create_new` claim, not an `exists()` probe, so a file that appears
+/// between the check and the write cannot be clobbered unseen.
+///
+/// No develop lock, and the READ half is what makes that safe, not just the
+/// write half: the projection is published with [`durable_write`] (stage +
+/// atomic rename — `pipeline::write_xmp_doc`), never retire-then-write, so a
+/// concurrent save leaves no window in which `xmp_target` is missing or half
+/// written. A reader sees the previous complete sidecar or the next one. The
+/// write half touches nothing inside the develop directory at all. Taking the
+/// lock would therefore only add a way for the hand-off to fail while another
+/// Autoshop happens to be saving.
+pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf> {
+    let stored = xmp_target(src);
+    let bytes = std::fs::read(&stored).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // "Nothing there" is a WORKFLOW state, not a missing file: the
+            // develop has not been saved (or this photo is not a RAW), and the
+            // remedy belongs in the message.
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "no stored Lightroom XMP for this photo yet ({}) — save the develop first",
+                    stored.display()
+                ),
+            )
+        } else {
+            e
+        }
+    })?;
+    let Some(to) = xmp_beside_target(src) else {
+        return Err(std::io::Error::other(format!(
+            "{} has no containing folder to deliver into",
+            src.display()
+        )));
+    };
+    let claimed = if overwrite {
+        false
+    } else {
+        // Claim the name atomically; AlreadyExists travels to the caller
+        // verbatim so it can ask before replacing someone else's file.
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&to)?;
+        true
+    };
+    // ONE write protocol for the payload either way (L03) — and a failed
+    // publish must not leave the empty claim behind as a "sidecar".
+    if let Err(e) = durable_write(&to, &bytes) {
+        if claimed {
+            let _ = std::fs::remove_file(&to);
+        }
+        return Err(e);
+    }
+    Ok(to)
+}
+
 /// Numbered snapshot `v<n>.recipe.json` (GUI versions + programmatic backups).
 pub fn version_target(src: &Path, n: u32) -> PathBuf {
     develop_dir(src).join(format!("v{n}.recipe.json"))
@@ -5769,6 +5846,60 @@ mod tests {
             panic!("an unreadable sidecar must be disclosed, not treated as absent");
         };
         assert!(why.contains("UTF-8"), "the reason names the cause: {why}");
+    }
+
+    /// R22-8 / SF8-A: the hand-off to Lightroom. The projection lands beside the
+    /// photo with its bytes intact; a sidecar ALREADY there (Lightroom's own) is
+    /// refused rather than silently replaced; and the explicit second attempt
+    /// replaces it. Every arm is a separate failure mode — the middle one is the
+    /// whole point of the feature having a confirmation at all.
+    #[test]
+    fn the_lightroom_hand_off_lands_beside_the_photo_and_never_clobbers_in_silence() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-store-test-xmp-beside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_r22_beside.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+
+        // Nothing saved yet: the refusal is NotFound and says what to do.
+        let err = export_xmp_beside(&raw, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            err.to_string().contains("save the develop first"),
+            "the workflow remedy travels with the refusal: {err}"
+        );
+        assert!(
+            !raw.with_extension("xmp").exists(),
+            "a refusal writes NOTHING beside the photo"
+        );
+
+        // A stored projection → it lands beside the photo, byte for byte.
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(xmp_target(&raw), b"<x:xmpmeta>ours</x:xmpmeta>").unwrap();
+        let to = export_xmp_beside(&raw, false).unwrap();
+        assert_eq!(to, raw.with_extension("xmp"), "the name Lightroom looks for");
+        assert_eq!(std::fs::read(&to).unwrap(), b"<x:xmpmeta>ours</x:xmpmeta>");
+
+        // Someone else's sidecar is now in the way (this is also what a SECOND
+        // click sees). Refused, and their bytes survive untouched.
+        std::fs::write(&to, b"<x:xmpmeta>LIGHTROOM</x:xmpmeta>").unwrap();
+        let err = export_xmp_beside(&raw, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&to).unwrap(),
+            b"<x:xmpmeta>LIGHTROOM</x:xmpmeta>",
+            "a refused hand-off leaves the existing sidecar EXACTLY as it was"
+        );
+
+        // …and the explicit overwrite does replace it.
+        export_xmp_beside(&raw, true).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"<x:xmpmeta>ours</x:xmpmeta>");
+
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// L02: the bounded reader — over the cap is InvalidData naming the

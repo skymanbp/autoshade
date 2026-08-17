@@ -289,6 +289,183 @@
         assert_eq!(n("photo.developed.png", "png"), PathBuf::from("photo.developed.png"));
     }
 
+    /// R22-7: the Destination setting's three states, plus the fourth case that
+    /// only the pure resolver can express — "last used folder" before anything
+    /// has been exported. `./out` must stay the default answer (the CLI/batch
+    /// root), a remembered folder must be used VERBATIM, and both asking states
+    /// must be the SAME `None` so one code path handles them.
+    ///
+    /// The paths here do not exist, on purpose: the resolver must not stat
+    /// anything (the toolbar hover resolves it every frame, and a deleted
+    /// folder is re-created by the render rather than turning into a dialog).
+    #[test]
+    fn the_destination_setting_resolves_to_one_delivery_folder() {
+        use std::path::{Path, PathBuf};
+        let last = Path::new("D:/deliver/tripA");
+        assert_eq!(
+            crate::export::export_dest_dir(ExportDest::OutFolder, None),
+            Some(PathBuf::from("out")),
+            "the default is the CLI's and the batch renderer's own root"
+        );
+        assert_eq!(
+            crate::export::export_dest_dir(ExportDest::OutFolder, Some(last)),
+            Some(PathBuf::from("out")),
+            "…and a remembered folder does not override an explicit ./out"
+        );
+        assert_eq!(
+            crate::export::export_dest_dir(ExportDest::LastUsed, Some(last)),
+            Some(last.to_path_buf()),
+            "the remembered folder is used verbatim, not joined onto ./out"
+        );
+        assert_eq!(
+            crate::export::export_dest_dir(ExportDest::LastUsed, None),
+            None,
+            "nothing remembered yet ⇒ ask once and let the answer seed the memory"
+        );
+        assert_eq!(crate::export::export_dest_dir(ExportDest::Ask, Some(last)), None);
+        // Every code is round-trippable, and an unknown one degrades to ./out
+        // rather than to a dialog (a prefs file from a newer build must not turn
+        // every export into a prompt).
+        for d in ExportDest::ALL {
+            assert_eq!(ExportDest::from_pref(d.pref_code()), d);
+        }
+        assert_eq!(ExportDest::from_pref(0), ExportDest::OutFolder, "serde's default");
+        assert_eq!(ExportDest::from_pref(200), ExportDest::OutFolder);
+    }
+
+    /// R22-7: 「Ask every time」 must reach the dialog, never a silent write.
+    /// The seam under test is the ROUTE — the decision the Export button makes
+    /// before anything is written — because the dialog itself cannot be opened
+    /// from a headless test. The mutation this catches is the tempting one: an
+    /// `unwrap_or_else(|| "out".into())` in the resolver, which would turn every
+    /// ask into a silent ./out delivery.
+    #[test]
+    fn the_ask_destination_routes_to_the_dialog_instead_of_writing() {
+        use std::path::PathBuf;
+        let src = PathBuf::from("D:/library/DSC00042.ARW");
+        let asking = AutoshopApp {
+            src_path: Some(src.clone()),
+            exp_dest: ExportDest::Ask,
+            exp_format: ExportFormat::Jpeg,
+            // A remembered folder is present ON PURPOSE: "ask every time" must
+            // outrank it, or the setting silently becomes "last used".
+            last_export_dir: Some(PathBuf::from("D:/deliver/tripA")),
+            ..Default::default()
+        };
+        assert_eq!(asking.export_route(), ExportRoute::Ask);
+        let candidate = PathBuf::from("out").join("DSC00042.developed.jpg");
+        assert!(
+            !candidate.exists(),
+            "deciding the route must not have created {}",
+            candidate.display()
+        );
+        // The same app with the default destination DOES resolve to a file —
+        // without this half the assertion above could pass on a broken route
+        // that never renders anything at all.
+        let direct = AutoshopApp {
+            src_path: Some(src),
+            exp_dest: ExportDest::OutFolder,
+            exp_format: ExportFormat::Jpeg,
+            ..Default::default()
+        };
+        assert_eq!(direct.export_route(), ExportRoute::Render(candidate));
+    }
+
+    /// R22-7: the landing names an ABSOLUTE path. `./out` is relative to the
+    /// directory the app was launched from, so the old message pointed at a
+    /// folder the user had to guess at — and a windowed build has no shell to
+    /// resolve it in.
+    #[test]
+    fn a_finished_export_names_an_absolute_path() {
+        use std::path::PathBuf;
+        let ctx = egui::Context::default();
+        let mut app = AutoshopApp { busy: true, ..Default::default() };
+        let rel = PathBuf::from("out").join("_r22_abs.developed.tif");
+        let abs = std::path::absolute(&rel).unwrap();
+        assert_ne!(abs, rel, "fixture: the path must actually be relative");
+        app.tx
+            .send(Msg::Exported(Ok(ExportOutcome::Single { out: rel, relooked: false })))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert!(
+            app.status.contains(&abs.display().to_string()),
+            "the completion message must be actionable: {}",
+            app.status
+        );
+        assert!(
+            !app.status.contains(r"\\?\"),
+            "…and readable — no canonicalize verbatim prefix: {}",
+            app.status
+        );
+    }
+
+    /// R22-8 / SF8-A: the two-click confirm. A sidecar already beside the photo
+    /// (Lightroom's own) ARMS the button instead of being overwritten; the
+    /// second click replaces it and disarms. Runs against the real develop store
+    /// for a temp fixture photo, like every other store-touching GUI test.
+    #[test]
+    fn handing_the_sidecar_to_lightroom_never_overwrites_in_silence() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-gui-xmp-beside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_r22_handoff.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = autoshop::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(autoshop::store::xmp_target(&raw), b"<x:xmpmeta>ours</x:xmpmeta>").unwrap();
+        let beside = raw.with_extension("xmp");
+
+        let mut app = AutoshopApp { src_path: Some(raw.clone()), ..Default::default() };
+        assert!(app.can_export_xmp_beside(), "a RAW can hand its sidecar over");
+
+        // First delivery: nothing in the way, so it lands with no confirmation.
+        app.export_xmp_beside();
+        assert!(!app.xmp_beside_confirm, "an unobstructed hand-off needs no confirm");
+        assert_eq!(std::fs::read(&beside).unwrap(), b"<x:xmpmeta>ours</x:xmpmeta>");
+        assert!(
+            app.status.contains(&abs_display(&beside)),
+            "the status names where it landed: {}",
+            app.status
+        );
+
+        // Lightroom's own file appears there. One click must ARM, not write.
+        std::fs::write(&beside, b"<x:xmpmeta>LIGHTROOM</x:xmpmeta>").unwrap();
+        app.export_xmp_beside();
+        assert!(app.xmp_beside_confirm, "the armed state is the confirmation");
+        assert_eq!(
+            std::fs::read(&beside).unwrap(),
+            b"<x:xmpmeta>LIGHTROOM</x:xmpmeta>",
+            "the first click left their sidecar untouched"
+        );
+        assert!(
+            app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)),
+            "a refusal must be seen, not only appear in a status line"
+        );
+
+        // Second click: armed ⇒ overwrite, then disarm.
+        app.export_xmp_beside();
+        assert!(!app.xmp_beside_confirm, "the arm is spent");
+        assert_eq!(std::fs::read(&beside).unwrap(), b"<x:xmpmeta>ours</x:xmpmeta>");
+
+        // A non-RAW cannot: its neighbouring .xmp is another program's file.
+        let baked = dir.join("_r22_handoff.png");
+        std::fs::write(&baked, b"png").unwrap();
+        let baked_app = AutoshopApp { src_path: Some(baked), ..Default::default() };
+        assert!(
+            !baked_app.can_export_xmp_beside(),
+            "only a RAW has the Lightroom sidecar convention"
+        );
+        assert!(
+            !AutoshopApp::default().can_export_xmp_beside(),
+            "…and with no photo open there is nothing to hand over"
+        );
+
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Both themes must keep every text-on-chrome pairing at WCAG AA (4.5:1
     /// for text, 3:1 for the armed indicator glyph). This is the contract the
     /// Light scheme was tuned against, and the guard that keeps a future

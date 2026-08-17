@@ -2328,6 +2328,35 @@ mod guard_tests {
         assert_eq!(d, PathBuf::from("out").join("DSC00002.developed.tif"));
         assert_eq!(names.renamed.len(), 2);
     }
+
+    /// R22-7: a rooted batch delivers into the root it was GIVEN — including
+    /// the same-stem "(2)" arm, which had its own hardcoded `./out` and would
+    /// otherwise scatter the second copy of a name back into ./out while its
+    /// sibling went to the user's folder. The disclosure line names the real
+    /// destination too, or the batch summary would point at a file that is not
+    /// there.
+    #[test]
+    fn batch_names_deliver_into_the_root_they_were_given() {
+        let root = PathBuf::from("D:/deliver/tripA");
+        let mut names = BatchNames::rooted(root.clone());
+        let a = names.claim(Path::new("D:/roll1/DSC00001.ARW"), "developed", "tif");
+        let b = names.claim(Path::new("D:/roll2/DSC00001.ARW"), "developed", "tif");
+        assert_eq!(a, root.join("DSC00001.developed.tif"));
+        assert_eq!(b, root.join("DSC00001 (2).developed.tif"), "the dedup arm is rooted too");
+        assert_eq!(names.renamed.len(), 1);
+        assert!(
+            names.renamed[0].contains(&root.join("DSC00001 (2).developed.tif").display().to_string()),
+            "the disclosure names the real destination: {}",
+            names.renamed[0]
+        );
+        // …and the CLI's default is byte-identical to what it always produced.
+        let mut plain = BatchNames::default();
+        assert_eq!(
+            plain.claim(Path::new("D:/roll1/DSC00001.ARW"), "developed", "tif"),
+            default_out(Path::new("D:/roll1/DSC00001.ARW"), "developed", "tif"),
+            "an un-rooted batch is exactly default_out, as every CLI caller expects"
+        );
+    }
 }
 
 /// `./out/<stem>.<kind>.<ext>` — outputs never go beside the source RAW.
@@ -2351,21 +2380,47 @@ pub struct BatchNames {
     taken: std::collections::HashSet<String>,
     /// Disclosure lines, `"<final deliverable> ← <source photo>"`.
     pub renamed: Vec<String>,
+    /// Delivery ROOT for every claim. `None` = `./out`, i.e. exactly what
+    /// [`default_out`] gives — the CLI's shape, and what `Default::default()`
+    /// still produces byte for byte. The GUI passes the user's export
+    /// destination setting here so a batch render lands where its single
+    /// exports do (R22-7); the naming and dedup rules are untouched by it.
+    root: Option<PathBuf>,
 }
 
 impl BatchNames {
+    /// A batch that delivers into `dir` instead of `./out`.
+    pub fn rooted(dir: PathBuf) -> Self {
+        Self { root: Some(dir), ..Default::default() }
+    }
+
     /// The deliverable path for `raw`, unique within this batch.
     pub fn claim(&mut self, raw: &Path, kind: &str, ext: &str) -> PathBuf {
-        let mut out = default_out(raw, kind, ext);
+        let mut out = self.rooted_name(raw, kind, ext, 1);
         let mut n = 1u32;
         while !self.taken.insert(out.to_string_lossy().to_lowercase()) {
             n += 1;
-            out = PathBuf::from("out").join(format!("{} ({n}).{kind}.{ext}", stem(raw)));
+            out = self.rooted_name(raw, kind, ext, n);
         }
         if n > 1 {
             self.renamed.push(format!("{} ← {}", out.display(), raw.display()));
         }
         out
+    }
+
+    /// `<root>/<stem>[ (n)].<kind>.<ext>`. `n == 1` is the bare name, and it
+    /// comes from [`default_out`] so this type never re-spells the deliverable
+    /// convention; only the parent directory is swapped when a root was set.
+    fn rooted_name(&self, raw: &Path, kind: &str, ext: &str, n: u32) -> PathBuf {
+        let base = if n == 1 {
+            default_out(raw, kind, ext)
+        } else {
+            PathBuf::from("out").join(format!("{} ({n}).{kind}.{ext}", stem(raw)))
+        };
+        match (&self.root, base.file_name()) {
+            (Some(root), Some(name)) => root.join(name),
+            _ => base,
+        }
     }
 }
 

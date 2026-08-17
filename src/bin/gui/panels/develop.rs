@@ -1896,11 +1896,39 @@ impl AutoshopApp {
             || self.exp_long_edge != 0
             || self.exp_sharpen != 0.0
             || self.exp_space != 0
+            || self.exp_dest != ExportDest::OutFolder
             || self.save_denoise;
         egui::CollapsingHeader::new(section_title(tr(lang, "Export"), export_active))
             .id_salt("sec_export")
             .default_open(false)
             .show(ui, |ui| {
+                // WHERE first (R22-7): the delivery target is now a setting
+                // rather than a property of which toolbar button was pressed,
+                // and it is the one whose wrong value sends the file somewhere
+                // the user has to hunt for — so it leads the section instead of
+                // hiding under the encoder dials.
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "Destination"));
+                    egui::ComboBox::from_id_salt("exp_dest")
+                        .selected_text(tr(lang, self.exp_dest.label()))
+                        .width(170.0)
+                        .show_ui(ui, |ui| {
+                            for d in ExportDest::ALL {
+                                ui.selectable_value(&mut self.exp_dest, d, tr(lang, d.label()));
+                            }
+                        });
+                });
+                // The RESOLVED target, spelled out: "./out" is relative to
+                // whichever directory the app was launched from, and "last used
+                // folder" says nothing about which folder that is.
+                ui.label(
+                    egui::RichText::new(match self.export_dest_dir() {
+                        Some(d) => abs_display(&d),
+                        None => tr(lang, "a save dialog opens on every export").to_string(),
+                    })
+                    .weak()
+                    .small(),
+                );
                 // One setting per row: two label+combo pairs in a non-wrapping
                 // horizontal overflowed the 320px panel in Chinese.
                 ui.horizontal(|ui| {
@@ -1951,10 +1979,43 @@ impl AutoshopApp {
                     ai_xref(lang, tr(lang, "SCUNet AI denoise before developing — high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it.")),
                 );
                 ui.label(
-                    egui::RichText::new(tr(lang, "Applied by Export / Download… in the toolbar (Ctrl+E). Files land in ./out unless Download picks a path."))
+                    egui::RichText::new(tr(lang, "Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render selected」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination."))
                         .weak()
                         .small(),
                 );
+                // --- SF8-A: hand the Lightroom sidecar over ----------------
+                // The XMP projection has always been written INSIDE the hashed
+                // develop folder, which is the right home for state — but the
+                // one thing users do with an XMP is give it to Lightroom, and
+                // Lightroom only looks for it beside the photo. That left the
+                // hand-off as "browse into %LOCALAPPDATA% yourself".
+                ui.add_space(SPACE_MD);
+                ui.separator();
+                let raw = self.can_export_xmp_beside();
+                let label = if self.xmp_beside_confirm {
+                    tr(lang, "⚠ Overwrite the .xmp already there")
+                } else {
+                    tr(lang, "Export .xmp beside the photo")
+                };
+                let hint = if !raw {
+                    // The disabled REASON, not a repeat of the label: only a
+                    // camera RAW has the sidecar convention (store::
+                    // lightroom_sidecar and pipeline::write_xmp draw the same
+                    // line), so a baked PNG/TIFF's neighbouring .xmp belongs to
+                    // some other program and must not be written over.
+                    tr(lang, "RAW only — a baked PNG/TIFF has no Lightroom sidecar convention, so its neighbouring .xmp belongs to another program")
+                } else if self.xmp_beside_confirm {
+                    tr(lang, "A .xmp already sits beside this photo (Lightroom's own, or an earlier copy) — clicking again replaces it")
+                } else {
+                    tr(lang, "Copy this photo's stored Lightroom/ACR sidecar into the photo's own folder, where Lightroom reads it. Save the develop first — this delivers what is stored, not what is unsaved on the canvas.")
+                };
+                if ui
+                    .add_enabled(raw && !self.busy, egui::Button::new(label))
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    self.export_xmp_beside();
+                }
             });
         false
     }

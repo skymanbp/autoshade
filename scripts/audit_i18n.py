@@ -73,6 +73,10 @@ DYNAMIC_SITES = [
     (r"^(?:self\.variants\[self\.active\]\.)?kind\.label\(\)", "VariantKind::label"),
     (r"^(?:self\.theme|t)\.label\(\)", "ThemePref::label"),
     (r"^(?:self\.exp_format|f)\.label\(\)", "ExportFormat::label"),
+    # R22-7 export DESTINATION labels. `ExportDest::Ask.label()` is the export
+    # summary naming the ask-state through the same table rather than owning a
+    # second spelling of it, so it belongs on this pattern too.
+    (r"^(?:self\.exp_dest|d|ExportDest::Ask)\.label\(\)", "ExportDest::label"),
     (r"^EXPORT_SPACES\[", "EXPORT_SPACES"),
     (r"^GRADE_REGIONS\[", "GRADE_REGIONS"),
     (r"^CROP_ASPECTS\[", "CROP_ASPECTS"),
@@ -108,6 +112,9 @@ DYNAMIC_SOURCES = [
     # 阶段4 delivery format+depth labels (model.rs); a sixth variant without
     # a zh pair fails the gate.
     ("impl_fn", "gui", "impl ExportFormat", "fn label"),
+    # R22-7 delivery DESTINATION labels (model.rs); a fourth destination
+    # without a zh pair fails the gate the same way.
+    ("impl_fn", "gui", "impl ExportDest", "fn label"),
     ("impl_fn", "recipe", "impl MaskRole", "fn en_name"),
     # decision_key is a free fn; the "impl_fn" extractor only needs the fn's
     # body braces, so anchoring on the pub declaration works the same way.
@@ -388,10 +395,14 @@ def literal_bypasses(src: str) -> list[tuple[int, str]]:
     """Letter-bearing literals handed straight to UI text constructors —
     text the catalogue can never translate. Literals inside tr()/trf()/
     format!() sub-calls are the translated path and are skipped."""
+    # `menu_button` joined the list with R22-7's export split button. Its own
+    # label there is a bare 「▾」 — no ASCII letters, so `lettered()` keeps it out
+    # — but the WIDGET KIND has to be scanned or the next menu label ships
+    # untranslated through a hole this gate was supposed to close.
     ctor = re.compile(
-        r"(?:\.(?:small_button|button|label|heading|selectable_label|on_hover_text"
-        r"|checkbox|radio_value|selectable_value|hyperlink_to|text)|RichText::new"
-        r"|Window::new)\s*\("
+        r"(?:\.(?:small_button|button|menu_button|label|heading|selectable_label"
+        r"|on_hover_text|checkbox|radio_value|selectable_value|hyperlink_to|text)"
+        r"|RichText::new|Window::new)\s*\("
     )
     skip_callee = re.compile(r"(?:\btrf?|format!)\s*\($")
     out: list[tuple[int, str]] = []

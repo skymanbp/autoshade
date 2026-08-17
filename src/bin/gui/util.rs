@@ -673,6 +673,44 @@ pub(crate) fn same_master_opt(a: Option<&std::path::Path>, b: Option<&std::path:
     }
 }
 
+/// A path as the user can ACT on it: absolute, and readable (R22-7).
+///
+/// Every deliverable path the window names goes through here. `./out` is
+/// relative to whatever directory the app happened to be launched from, so
+/// "exported → out/DSC0001.developed.tif" named a folder the user then had to
+/// guess at. Deliberately `std::path::absolute`, not `canonicalize`: the target
+/// usually does not exist yet (it is about to be written), and canonicalize
+/// hands back Windows' `\\?\` verbatim prefix — correct, and unreadable in a
+/// status line. Falls back to the raw spelling if even the lexical form fails
+/// (an empty path), because a message must never be worse than before.
+pub(crate) fn abs_display(p: &std::path::Path) -> String {
+    std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()).display().to_string()
+}
+
+/// Show `dir` in the OS file manager (Explorer / Finder / xdg-open).
+///
+/// NOT a shell invocation: the path is one argv entry, so nothing inside it is
+/// interpreted — and the only caller passes a path this app computed itself
+/// (the develop store), never text from a file. No new dependency either; the
+/// tree had no file-manager call before this one.
+///
+/// Success is judged by SPAWN, not by exit status: `explorer.exe` returns a
+/// non-zero code even when it opens the window, so waiting on it would report a
+/// failure that did not happen. Stated cost of not waiting: on Unix the
+/// `xdg-open`/`open` child is not reaped until Autoshop exits (one defunct entry
+/// per click of a button nobody clicks in a loop). Waiting instead would block
+/// the UI thread on a helper whose runtime we do not control.
+pub(crate) fn reveal_folder(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(dir);
+    cmd.spawn().map(|_| ())
+}
+
 /// Per-call temp-file counter: a cancelled worker and its replacement run
 /// CONCURRENTLY in one process, so pid-only names collide.
 pub(crate) static GUI_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

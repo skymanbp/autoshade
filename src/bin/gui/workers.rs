@@ -376,7 +376,13 @@ impl AutoshopApp {
                     self.batch_progress = None; // the bar belongs to ONE batch run
                     match outcome {
                         ExportOutcome::Single { out, relooked } => {
-                            let mut p = out.display().to_string();
+                            // ABSOLUTE (R22-7): the deliverable exists NOW, and
+                            // "exported → out/DSC0001.developed.tif" named a
+                            // folder relative to whatever directory the app was
+                            // launched from — the single most-reported "where
+                            // did my file go". `abs_display` is lexical, so it
+                            // costs nothing and yields no `\\?\` prefix.
+                            let mut p = abs_display(&out);
                             if relooked {
                                 // The export repaired its own COPY of this
                                 // canvas's washed base curve (export.rs) —
@@ -404,7 +410,7 @@ impl AutoshopApp {
                             }
                             self.done(trf(lang, "exported → {path}", &[("path", &p)]));
                         }
-                        ExportOutcome::Batch { ok, errs, renamed, relooked, warns } => {
+                        ExportOutcome::Batch { ok, errs, renamed, relooked, warns, dest } => {
                             // Same-stem photos were kept apart — disclose
                             // WHICH photo took WHICH name, or the user hunts
                             // for an export that "vanished".
@@ -441,7 +447,11 @@ impl AutoshopApp {
                             if errs.is_empty() {
                                 self.done(format!(
                                     "{}{renames}{relook}{develop_warns}",
-                                    trf(lang, "./out — batch {n} done", &[("n", &ok.to_string())])
+                                    trf(
+                                        lang,
+                                        "batch {n} done → {path}",
+                                        &[("n", &ok.to_string()), ("path", &abs_display(&dest))],
+                                    )
                                 ));
                             } else {
                                 // A partial failure keeps the error channel,
@@ -471,9 +481,15 @@ impl AutoshopApp {
                 }
                 Msg::BatchProgress { done, total } => {
                     self.batch_progress = Some((done, total));
+                    // No destination here: the tick fires once per photo and the
+                    // root was already named when the batch started (and is
+                    // named again at the landing). Repeating it 500 times only
+                    // pushed the counts out of a truncated status line — and
+                    // the old hardcoded "./out" became a lie the moment the
+                    // destination became a setting (R22-7).
                     self.status = trf(
                         lang,
-                        "Batch-rendering {done}/{total} → ./out …",
+                        "Batch-rendering {done}/{total} …",
                         &[("done", &done.to_string()), ("total", &total.to_string())],
                     );
                 }

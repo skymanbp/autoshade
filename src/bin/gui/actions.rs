@@ -15,6 +15,7 @@ impl AutoshopApp {
         {
             app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
             app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
+            app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
             app.last_export_dir = prefs.last_export_dir.clone();
             app.save_denoise = prefs.save_denoise;
             app.zoned_fit = prefs.zoned_fit;
@@ -263,6 +264,12 @@ impl AutoshopApp {
         // what had happened. "＋ Save as version" was the mirror image: it
         // wrote A's canvas into B's develop as B's next version.
         self.versions.clear();
+        // …and so does the armed "overwrite the .xmp beside the photo" confirm
+        // (R22-8): it is a claim about THIS photo's neighbouring sidecar, and
+        // carrying it across would let one click overwrite the NEXT photo's
+        // Lightroom sidecar with no warning at all. Same reasoning as the
+        // version list above.
+        self.xmp_beside_confirm = false;
         self.status = trf(lang, "decoding {path} …", &[("path", &path.display().to_string())]);
         // Working-preview size is a user choice now (gap batch E): 1280 keeps
         // sliders fluid; 2560/4096 trade tick latency for real 1:1 detail when

@@ -46,8 +46,18 @@ pub(crate) struct AutoshopApp {
     pub(crate) guidance: String, // free-text direction for the AI ("warmer, moodier")
     // Delivery format + depth (阶段4) — replaces the old save_jpeg bool.
     pub(crate) exp_format: ExportFormat,
-    // The folder the last Download… landed in; the dialog reopens there.
+    // WHERE an export lands (R22-7) — the setting that replaced the
+    // Export / Download… button pair. See [`ExportDest`].
+    pub(crate) exp_dest: ExportDest,
+    // The folder the last export landed in; ExportDest::LastUsed delivers
+    // there, and the ask-dialog reopens there.
     pub(crate) last_export_dir: Option<PathBuf>,
+    // The 「export .xmp beside the photo」 button is armed for a SECOND click:
+    // a sidecar already sits beside this photo (Lightroom's own, or an earlier
+    // copy) and the next click overwrites it. Session state, cleared on every
+    // photo open and after the copy lands — a two-click confirm rather than a
+    // modal, matching how the rest of this panel confirms in place.
+    pub(crate) xmp_beside_confirm: bool,
     // --- undo / redo (a drag is one step, committed on release). Each step
     // carries the recipe AND the active variant's pixel identity (base Arc +
     // origin), so a baked pixel retouch (heal / clone / generative fill) is
@@ -923,52 +933,45 @@ impl AutoshopApp {
                 // Delivery ACTIONS (their settings live in the Develop panel's
                 // Export section; the hover echoes the current delivery state
                 // so it stays glanceable without a toolbar row of combos).
+                //
+                // ONE split button (R22-7). 「Export」 and 「Download…」 were the
+                // same code path — start_render_to — differing only in where
+                // the target came from, which made "where do my files go" a
+                // property of WHICH BUTTON you pressed instead of a setting.
+                // The main half now follows the Destination setting; the ▾ half
+                // is the one-off escape hatch that leaves the setting alone.
+                // Zero item_spacing joins the two halves visually into one
+                // control (egui has no split-button widget).
                 let summary = self.export_summary(lang);
-                if ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "Export")))
-                    .on_hover_text(format!(
-                        "{}\n{summary}",
-                        tr(lang, "Ctrl+Shift+E · full-resolution render to ./out (follows the current variant's pixels); settings in the Export section")
-                    ))
-                    .clicked()
-                {
-                    self.start_export();
-                }
-                if ui
-                    .add_enabled(ready, egui::Button::new(tr(lang, "Download…")))
-                    .on_hover_text(format!(
-                        "{}\n{summary}",
-                        tr(lang, "Download… = save the full-resolution export to a path you choose")
-                    ))
-                    .clicked()
-                {
-                    let ext = self.exp_format.ext();
-                    // Suggest a name from the ACTIVE variant's pixel source (a
-                    // Generated variant → its reimagine stem), matching what
-                    // Export writes; the rendered pixels already follow it.
-                    let src = self.active_source_path();
-                    let stem = src
-                        .as_deref()
-                        .and_then(|p| p.file_stem())
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("photo")
-                        .to_string();
-                    let mut dlg = rfd::FileDialog::new()
-                        .add_filter(ext, &[ext])
-                        .set_file_name(format!("{stem}.developed.{ext}"));
-                    // Reopen where the last Download landed (阶段4) —
-                    // persisted in Prefs, so it survives restarts.
-                    if let Some(d) = self.last_export_dir.clone().filter(|d| d.is_dir()) {
-                        dlg = dlg.set_directory(d);
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    if ui
+                        .add_enabled(ready, egui::Button::new(tr(lang, "Export")))
+                        .on_hover_text(format!(
+                            "{}\n{summary}",
+                            tr(lang, "Ctrl+Shift+E (or Ctrl+E) · full-resolution render to the Destination below (follows the current variant's pixels); Destination + settings live in the Export section")
+                        ))
+                        .clicked()
+                    {
+                        self.start_export();
                     }
-                    if let Some(p) = dlg.save_file() {
-                        // The format dropdown owns the container — the typed
-                        // name only picks the stem (normalize_export_target).
-                        let p = normalize_export_target(p, ext);
-                        self.last_export_dir = p.parent().map(|d| d.to_path_buf());
-                        self.start_render_to(p);
-                    }
-                }
+                    // `add_enabled_ui`, not a disabled Button: menu_button
+                    // returns an InnerResponse and takes no enabled flag.
+                    ui.add_enabled_ui(ready, |ui| {
+                        ui.menu_button("▾", |ui| {
+                            if ui
+                                .button(tr(lang, "Export to…"))
+                                .on_hover_text(tr(lang, "Pick a path for THIS export only — the Destination setting is left as it is"))
+                                .clicked()
+                            {
+                                ui.close_menu();
+                                self.export_to_chosen_path();
+                            }
+                        })
+                        .response
+                        .on_hover_text(tr(lang, "Export to a one-off path…"));
+                    });
+                });
                 if ui
                     .add_enabled(ready, egui::Button::new(tr(lang, "Save develop")))
                     .on_hover_text(tr(lang, "Ctrl+S · save this photo's develop (recipe + a Lightroom/ACR XMP for RAW; a baked retouch master is linked so reopening restores it) to your develop store"))
@@ -1287,7 +1290,7 @@ impl AutoshopApp {
                     // natural-language words, so they stay literal.
                     let rows: [(&str, &str); 33] = [
                         ("Ctrl/⌘+O", tr(lang, "Open photo")),
-                        ("Ctrl/⌘+Shift+E / Ctrl/⌘+E", tr(lang, "Export (settings in the Export section)")),
+                        ("Ctrl/⌘+Shift+E / Ctrl/⌘+E", tr(lang, "Export to the Destination (Destination + settings in the Export section)")),
                         ("Ctrl/⌘+S", tr(lang, "Save develop (recipe + XMP for RAW)")),
                         ("Ctrl/⌘+Z / +Shift+Z / +Y", tr(lang, "Undo / Redo")),
                         ("Ctrl/⌘+Shift+C / +Shift+V", tr(lang, "Copy recipe / paste to selected")),
@@ -1383,7 +1386,11 @@ impl Default for AutoshopApp {
             grade_region: 0,
             guidance: String::new(),
             exp_format: ExportFormat::Tiff16,
+            // ./out — the CLI's and the batch renderer's own root; mirror
+            // Prefs::default so a missing pref key means exactly this.
+            exp_dest: ExportDest::OutFolder,
             last_export_dir: None,
+            xmp_beside_confirm: false,
             committed: UndoStep::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1751,6 +1758,7 @@ impl eframe::App for AutoshopApp {
                 // pre-阶段4 build reading this prefs file sane.
                 save_jpeg: self.exp_format == ExportFormat::Jpeg,
                 exp_format: self.exp_format.pref_code(),
+                exp_dest: self.exp_dest.pref_code(),
                 last_export_dir: self.last_export_dir.clone(),
                 save_denoise: self.save_denoise,
                 zoned_fit: self.zoned_fit,

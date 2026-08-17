@@ -116,6 +116,70 @@ impl ExportFormat {
     }
 }
 
+/// WHERE an export lands — the delivery target, promoted to a first-class
+/// setting (R22-7). Before this it was not a setting at all: "Export" hardcoded
+/// a cwd-relative `./out` and "Download…" always opened a save dialog, and the
+/// TARGET was the only difference between those two toolbar buttons. One
+/// setting + one split button replaces the pair.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum ExportDest {
+    /// `./out` beside the working directory — what the CLI, the web surface
+    /// and the batch renderer have always used, and still the default.
+    #[default]
+    OutFolder,
+    /// Wherever the last export landed (`last_export_dir`). With nothing
+    /// remembered yet this ASKS once and the answer seeds the memory.
+    LastUsed,
+    /// Ask every time (the old Download… behaviour, now a setting).
+    Ask,
+}
+
+impl ExportDest {
+    pub(crate) const ALL: [ExportDest; 3] =
+        [ExportDest::OutFolder, ExportDest::LastUsed, ExportDest::Ask];
+
+    /// English label — the i18n skeleton key (zh via `tr`; the audit extracts
+    /// this fn's literals).
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ExportDest::OutFolder => "./out folder",
+            ExportDest::LastUsed => "Last used folder",
+            ExportDest::Ask => "Ask every time",
+        }
+    }
+
+    pub(crate) fn pref_code(self) -> u8 {
+        match self {
+            ExportDest::OutFolder => 0,
+            ExportDest::LastUsed => 1,
+            ExportDest::Ask => 2,
+        }
+    }
+
+    /// Prefs migration: 0 is also serde's default, so a prefs file written
+    /// before R22-7 restores the historical `./out` behaviour, and an unknown
+    /// code from a NEWER build degrades to it too rather than to "ask".
+    pub(crate) fn from_pref(code: u8) -> Self {
+        match code {
+            1 => ExportDest::LastUsed,
+            2 => ExportDest::Ask,
+            _ => ExportDest::OutFolder,
+        }
+    }
+}
+
+/// What the Export button does THIS click, decided before anything is written
+/// (R22-7). A separate type rather than an `Option<PathBuf>` so the asking
+/// arm is a state a headless test can assert on — the dialog itself cannot be
+/// opened from a test, but the decision that leads to it can.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum ExportRoute {
+    /// The destination setting resolved to this concrete file.
+    Render(PathBuf),
+    /// The setting has to ask (Ask, or LastUsed with nothing remembered).
+    Ask,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct Prefs {
@@ -124,7 +188,10 @@ pub(crate) struct Prefs {
     pub(crate) save_jpeg: bool,
     /// [`ExportFormat::pref_code`]; 0 defers to `save_jpeg` (migration).
     pub(crate) exp_format: u8,
-    /// The folder the last Download… landed in — the dialog reopens there.
+    /// [`ExportDest::pref_code`]; 0 (serde's default too) = `./out`.
+    pub(crate) exp_dest: u8,
+    /// The folder the last export landed in — the target of
+    /// [`ExportDest::LastUsed`], and where the ask-dialog reopens.
     pub(crate) last_export_dir: Option<PathBuf>,
     pub(crate) save_denoise: bool,
     pub(crate) zoned_fit: bool,
@@ -149,6 +216,7 @@ impl Default for Prefs {
             style_strength: 0.30,
             save_jpeg: false,
             exp_format: 0,
+            exp_dest: 0, // ./out — the CLI/batch shape, unchanged for old prefs
             last_export_dir: None,
             save_denoise: false,
             // Zoned sky reverse-fit ON by default: it degrades gracefully to
@@ -257,8 +325,21 @@ pub(crate) enum ExportOutcome {
     Single { out: PathBuf, relooked: bool },
     /// A batch: counts + per-photo errors (library English, shown verbatim
     /// as today) + the same-stem rename disclosures + relook count + the
-    /// per-photo develop warnings the OPEN path would have surfaced (L16-2).
-    Batch { ok: usize, errs: Vec<String>, renamed: Vec<String>, relooked: usize, warns: Vec<String> },
+    /// per-photo develop warnings the OPEN path would have surfaced (L16-2),
+    /// plus the delivery ROOT this run actually used.
+    ///
+    /// That root is a FACT the worker carries (L12#4), not something the
+    /// landing re-derives: the Destination combo stays reachable for the
+    /// minutes a batch runs, and a landing that read the CURRENT setting
+    /// would name a folder the files are not in.
+    Batch {
+        ok: usize,
+        errs: Vec<String>,
+        renamed: Vec<String>,
+        relooked: usize,
+        warns: Vec<String>,
+        dest: PathBuf,
+    },
 }
 
 /// Batch recipe-paste facts (L12#4). `errs` non-empty = partial failure —

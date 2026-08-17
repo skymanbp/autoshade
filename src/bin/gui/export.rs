@@ -137,11 +137,42 @@ fn clamp_disclosed(r: &mut EditRecipe, warns: &mut Vec<String>) {
     }
 }
 
+/// The destination DIRECTORY a [`ExportDest`] setting resolves to — the one
+/// authority the single export, the batch render, the toolbar summary and the
+/// Export section's echo all read (R22-7).
+///
+/// Touches NO filesystem, deliberately. The toolbar hover resolves this on
+/// every frame, and a per-frame `is_dir()` is the very thing `pixels_on_disk`
+/// exists to avoid for the ● indicator. It also keeps display and behaviour
+/// identical: a remembered folder that has since been deleted is shown, and
+/// then RE-CREATED by the render (`start_render_to` create_dir_all's its
+/// parent, exactly as it does for a missing `./out`) — an export to a named
+/// folder should not silently become a dialog because the folder was tidied
+/// away. A genuinely unreachable path (an unplugged drive) fails the render
+/// with the real reason, which beats a prompt that explains nothing. The
+/// `is_dir()` probe survives only where it is really required: rfd's
+/// `set_directory`, which needs an existing folder to open at.
+///
+/// `None` = the setting has to ask. Two states answer that: `Ask` always, and
+/// `LastUsed` before anything has been exported — asking once there seeds the
+/// memory, after which every export lands silently in that folder. Falling
+/// back to `./out` instead would make "last used folder" mean "./out forever"
+/// for anyone who picked it before their first export.
+pub(crate) fn export_dest_dir(dest: ExportDest, last: Option<&std::path::Path>) -> Option<PathBuf> {
+    match dest {
+        ExportDest::OutFolder => Some(PathBuf::from("out")),
+        ExportDest::LastUsed => last.map(|d| d.to_path_buf()),
+        ExportDest::Ask => None,
+    }
+}
+
 impl AutoshopApp {
-    /// One-line echo of the current delivery settings for the Export /
-    /// Download hover — e.g. "JPEG · 2560 px · q95 · sRGB (universal)" — so
-    /// the state stays glanceable now that the settings live in the Export
-    /// section instead of a toolbar row.
+    /// One-line echo of the current delivery settings for the Export hover —
+    /// e.g. "JPEG · 2560 px · q95 · sRGB (universal) · → D:\deliver" — so the
+    /// state stays glanceable now that the settings live in the Export section
+    /// instead of a toolbar row. The DESTINATION is the last segment (R22-7):
+    /// it is the one delivery setting whose wrong value sends a file somewhere
+    /// the user then has to hunt for.
     pub(crate) fn export_summary(&self, lang: Lang) -> String {
         let mut parts: Vec<String> = Vec::new();
         parts.push(tr(lang, self.exp_format.label()).to_string());
@@ -160,13 +191,21 @@ impl AutoshopApp {
         if self.save_denoise {
             parts.push(tr(lang, "AI Denoise").to_string());
         }
+        parts.push(match self.export_dest_dir() {
+            // Absolute, like every other place a target is named now: "./out"
+            // is relative to whatever directory the app was launched from, and
+            // that is exactly the thing users could not find.
+            Some(d) => format!("→ {}", abs_display(&d)),
+            None => format!("→ {}", tr(lang, ExportDest::Ask.label())),
+        });
         parts.join(" · ")
     }
 
-    /// `./out/<stem>.developed.{tif|jpg}` — the default export target. The stem
-    /// follows the ACTIVE variant's pixel source, so a Generated variant exports
-    /// under its reimagine stem (and its AI pixels), not the original's.
-    pub(crate) fn default_out(&self) -> PathBuf {
+    /// `<stem>.developed.{tif|jpg}` — the file name every destination shares.
+    /// The stem follows the ACTIVE variant's pixel source, so a Generated
+    /// variant exports under its reimagine stem (and its AI pixels), not the
+    /// original's.
+    pub(crate) fn export_file_name(&self) -> String {
         let src = self.active_source_path();
         let stem = src
             .as_deref()
@@ -175,21 +214,42 @@ impl AutoshopApp {
             .unwrap_or("out")
             .to_string();
         let ext = self.exp_format.ext();
-        PathBuf::from("out").join(format!("{stem}.developed.{ext}"))
+        format!("{stem}.developed.{ext}")
+    }
+
+    /// This app's destination setting resolved to a directory (`None` = ask) —
+    /// [`export_dest_dir`] with the app's own state. Read by the single export,
+    /// the batch render and both on-screen echoes, so all four name ONE place.
+    pub(crate) fn export_dest_dir(&self) -> Option<PathBuf> {
+        export_dest_dir(self.exp_dest, self.last_export_dir.as_deref())
+    }
+
+    /// What the Export button will do this click — resolved BEFORE anything is
+    /// written, so "Ask every time" cannot fall through to a silent write.
+    pub(crate) fn export_route(&self) -> ExportRoute {
+        match self.export_dest_dir() {
+            Some(dir) => ExportRoute::Render(dir.join(self.export_file_name())),
+            None => ExportRoute::Ask,
+        }
     }
 
     /// Render the full-resolution develop to `out` on a worker thread (16-bit
     /// TIFF, or 8-bit JPEG when the path ends in .jpg). Renders the ACTIVE
     /// variant's pixel source (a Generated variant → its full-res reimagine PNG,
     /// developed by the recipe), so what exports matches what's on screen.
-    pub(crate) fn start_render_to(&mut self, out: PathBuf) {
-        let Some(path) = self.active_source_path() else { return };
+    ///
+    /// Returns whether a render actually STARTED. The ask-dialog caller
+    /// remembers the chosen folder only then (R22-7): the read-only-library
+    /// guard below can refuse a target, and `ExportDest::LastUsed` would
+    /// otherwise memorise a folder every future export is refused for.
+    pub(crate) fn start_render_to(&mut self, out: PathBuf) -> bool {
+        let Some(path) = self.active_source_path() else { return false };
         if self.busy {
-            return;
+            return false;
         }
         let lang = self.lang;
-        // Same library-read-only gate every CLI export runs: without it,
-        // Download…'s save dialog was the one door that could drop a
+        // Same library-read-only gate every CLI export runs: without it, the
+        // export dialog's chosen path was the one door that could drop a
         // developed.tif beside the source RAW. Guard BOTH anchors: `path` is
         // the render source, which for a Generated variant is the ./out PNG —
         // guarding only that would leave the ORIGINAL photo's library folder
@@ -205,18 +265,25 @@ impl AutoshopApp {
                 let t = e.to_string();
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t);
-                return;
+                return false;
             }
         }
         self.busy = true;
+        // ABSOLUTE, both here and at the landing (workers.rs): `./out` is
+        // relative to the directory the app was launched from, so a bare
+        // "out/DSC0001.developed.tif" named a place the user had no way to
+        // locate from inside the window. `absolute` is lexical — it needs no
+        // existing file (this one is about to be created) and, unlike
+        // `canonicalize`, it does not hand back a `\\?\` verbatim prefix.
+        let shown = abs_display(&out);
         self.status = if self.save_denoise {
             trf(
                 lang,
                 "rendering + AI denoise → {path} … (GPU sidecar, can take minutes)",
-                &[("path", &out.display().to_string())],
+                &[("path", &shown)],
             )
         } else {
-            trf(lang, "rendering full-resolution → {path} …", &[("path", &out.display().to_string())])
+            trf(lang, "rendering full-resolution → {path} …", &[("path", &shown)])
         };
         let recipe = self.recipe.clone();
         let denoise = self.save_denoise;
@@ -263,10 +330,12 @@ impl AutoshopApp {
             },
             |e| Msg::Exported(Err(e)),
         );
+        true
     }
 
     /// The delivery options the export UI currently dials in (gap batch F) —
-    /// shared by single export, Download… and batch render.
+    /// shared by the single export, the one-off "Export to…" path and the
+    /// batch render.
     pub(crate) fn export_opts(&self) -> autoshop::render::ExportOpts {
         autoshop::render::ExportOpts {
             long_edge: (self.exp_long_edge > 0).then_some(self.exp_long_edge),
@@ -300,15 +369,36 @@ impl AutoshopApp {
         if targets.is_empty() {
             return;
         }
+        // ONE destination setting for batch and single alike (R22-7): the batch
+        // used to hardcode ./out while a single export could be sent anywhere,
+        // so the same library came out in two different folders. "Ask every
+        // time" asks ONCE for a folder here — a per-photo dialog across 500
+        // frames is not a delivery flow — and the answer seeds `last_export_dir`
+        // exactly like the single-export dialog does.
+        let dest = match self.export_dest_dir() {
+            Some(d) => d,
+            None => {
+                let mut dlg = rfd::FileDialog::new();
+                if let Some(d) = self.last_export_dir.clone().filter(|d| d.is_dir()) {
+                    dlg = dlg.set_directory(d);
+                }
+                let Some(d) = dlg.pick_folder() else { return };
+                self.last_export_dir = Some(d.clone());
+                d
+            }
+        };
         let ext = self.exp_format.ext().to_string();
         let export = self.export_opts();
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         self.busy = true;
         self.status = trf(
             lang,
-            "Batch-rendering {n} photos → ./out …",
-            &[("n", &targets.len().to_string())],
+            "Batch-rendering {n} photos → {path} …",
+            &[("n", &targets.len().to_string()), ("path", &abs_display(&dest))],
         );
+        // The root travels to the landing as a FACT (L12#4) alongside the
+        // BatchNames that consumes it.
+        let dest_fact = dest.clone();
         self.batch_progress = Some((0, targets.len())); // the top-bar progress bar
         // Interim BatchProgress ticks flow through this extra clone; the
         // TERMINAL Msg::Exported is owned by spawn_worker (panic-safe).
@@ -356,7 +446,7 @@ impl AutoshopApp {
                     // name. Single exports stay stem-keyed (re-export
                     // replaces in place) — the dedup is batch-level by
                     // decision.
-                    let mut names = autoshop::pipeline::BatchNames::default();
+                    let mut names = autoshop::pipeline::BatchNames::rooted(dest);
                     // Disclosure counter, like `names.renamed`: this worker
                     // was the one reader that repaired with nobody watching.
                     let mut relooked = 0usize;
@@ -437,6 +527,16 @@ impl AutoshopApp {
                                 (recipe, snap.pixel_source)
                             };
                             let out = names.claim(p, "developed", &ext);
+                            // The read-only-library gate the single export has
+                            // always run, now needed HERE too (R22-7): the
+                            // batch root became user-choosable, so a
+                            // destination inside the photo library must be
+                            // refused instead of being safe by construction
+                            // (the old hardcoded ./out). Anchored on the PHOTO
+                            // — that is the library folder being protected; a
+                            // baked master's own home is ./out, never a
+                            // library.
+                            autoshop::pipeline::guard_readonly(&out, p)?;
                             autoshop::pipeline::ensure_parent(&out)?;
                             let mut recipe = recipe;
                             if pix.as_ref().is_some_and(|(_, generated)| *generated) {
@@ -498,6 +598,10 @@ impl AutoshopApp {
                         renamed: names.renamed,
                         relooked,
                         warns,
+                        // Where this run actually delivered — carried, not
+                        // re-derived at the landing (the Destination combo
+                        // stays reachable while a batch runs).
+                        dest: dest_fact,
                     })
                 };
                 Msg::Exported(res)
@@ -506,9 +610,115 @@ impl AutoshopApp {
         );
     }
 
+    /// The Export button / Ctrl+Shift+E: deliver to whatever the Destination
+    /// setting says. ONE entry point for both arms (R22-7) — the old pair of
+    /// toolbar buttons differed only in where the path came from, so "ask"
+    /// became a value of the setting instead of a second button.
     pub(crate) fn start_export(&mut self) {
-        let out = self.default_out();
-        self.start_render_to(out);
+        match self.export_route() {
+            ExportRoute::Render(out) => {
+                self.start_render_to(out);
+            }
+            ExportRoute::Ask => self.export_to_chosen_path(),
+        }
+    }
+
+    /// Ask for a path and render there — the ▾ menu's 「Export to…」 and the
+    /// 「Ask every time」 destination share this ONE body. The chosen folder is
+    /// remembered (so `ExportDest::LastUsed` has something to point at) only
+    /// when the render actually started: a target the read-only-library guard
+    /// refuses must not become the remembered destination.
+    pub(crate) fn export_to_chosen_path(&mut self) {
+        let ext = self.exp_format.ext();
+        let mut dlg =
+            rfd::FileDialog::new().add_filter(ext, &[ext]).set_file_name(self.export_file_name());
+        // Reopen where the last export landed (阶段4) — persisted in Prefs, so
+        // it survives restarts.
+        if let Some(d) = self.last_export_dir.clone().filter(|d| d.is_dir()) {
+            dlg = dlg.set_directory(d);
+        }
+        let Some(p) = dlg.save_file() else { return };
+        // The format dropdown owns the container — the typed name only picks
+        // the stem (normalize_export_target).
+        let p = normalize_export_target(p, ext);
+        let dir = p.parent().map(|d| d.to_path_buf());
+        if self.start_render_to(p) {
+            self.last_export_dir = dir;
+        }
+    }
+
+    /// Can this photo's sidecar be handed to Lightroom at all? RAW only, and
+    /// keyed to the ORIGINAL photo (`src_path`), never the active variant: the
+    /// projection belongs to the RAW no matter which rendition is on screen.
+    ///
+    /// Only a camera RAW has the sidecar convention — `store::
+    /// lightroom_sidecar` and `pipeline::write_xmp` draw the same line, and a
+    /// baked PNG/TIFF's neighbouring `.xmp` is another program's file, which
+    /// this must never offer to overwrite.
+    ///
+    /// Deliberately NOT gated on the projection existing: that would be a disk
+    /// stat per frame, and "save the develop first" is a better answer from the
+    /// click (the store's own NotFound message says exactly that) than a button
+    /// that is greyed out for a reason nothing explains.
+    pub(crate) fn can_export_xmp_beside(&self) -> bool {
+        self.src_path.as_deref().is_some_and(autoshop::decode::is_raw)
+    }
+
+    /// SF8-A: hand the stored Lightroom sidecar over to Lightroom — copy this
+    /// photo's `<stem>.xmp` projection out of the hashed develop folder and
+    /// beside the photo itself, the only place Lightroom looks.
+    ///
+    /// Two-click confirm rather than a modal: an existing `.xmp` beside the
+    /// photo may be Lightroom's OWN, so the first click arms
+    /// `xmp_beside_confirm` (the button relabels itself) and only the second
+    /// passes `overwrite = true`. The refusal comes from the store's atomic
+    /// claim, not from an `exists()` probe here, so the arming can never be
+    /// answered by a file that appeared in between.
+    pub(crate) fn export_xmp_beside(&mut self) {
+        let lang = self.lang;
+        let Some(path) = self.src_path.clone() else { return };
+        let overwrite = self.xmp_beside_confirm;
+        match autoshop::store::export_xmp_beside(&path, overwrite) {
+            Ok(to) => {
+                self.xmp_beside_confirm = false;
+                // A file just landed in the user's PHOTO folder — the one place
+                // this app otherwise never writes. That is worth a toast, not
+                // just a status line that the next message scrolls away.
+                let t = trf(
+                    lang,
+                    "Lightroom sidecar delivered → {path}",
+                    &[("path", &abs_display(&to))],
+                );
+                self.status = t.clone();
+                self.toast(ToastKind::Success, t);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && !overwrite => {
+                // ARM, do not write. The status says what the second click will
+                // do; the button says it too (develop.rs) so the armed state is
+                // visible even after the status line has moved on.
+                self.xmp_beside_confirm = true;
+                let there = autoshop::store::xmp_beside_target(&path)
+                    .map(|p| abs_display(&p))
+                    .unwrap_or_default();
+                let t = trf(
+                    lang,
+                    "a .xmp already sits beside this photo ({path}) — click again to replace it",
+                    &[("path", &there)],
+                );
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t);
+            }
+            Err(e) => {
+                self.xmp_beside_confirm = false;
+                let t = trf(
+                    lang,
+                    "the .xmp could not be delivered: {err}",
+                    &[("err", &e.to_string())],
+                );
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t);
+            }
+        }
     }
 
     /// Save this photo's develop to the central store: recipe.json for every

@@ -76,7 +76,7 @@ impl AutoshopApp {
                     .add(chip(trf(lang, "🖼 Render selected ({n})", &[("n", &n_s)])))
                     .on_hover_text(tr(
                         lang,
-                        "Each renders by its own saved develop from the store (neutral develop if none) → ./out/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
+                        "Each renders by its own saved develop from the store (neutral develop if none) → <Destination>/<name>.developed.*, using the current format / long-edge / sharpening / quality; AI Denoise sits out the batch.",
                     ))
                     .clicked()
                 {

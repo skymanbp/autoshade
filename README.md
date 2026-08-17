@@ -80,12 +80,20 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   auto-detect + paint-to-add. Writes a pixel master to `./out`.
 - **Batch** the whole library, **eval** the AI against your own edits.
 - **Your library stays read-only** — the engine refuses to write into a source
-  RAW's folder. Exports (developed/heal/retouch images) go to `./out`; develop
+  RAW's folder. Exports (developed/heal/retouch images) go to `./out` by
+  default; in the GUI the delivery folder is a setting (**Export → Destination**:
+  `./out`, the last folder used, or ask every time), and single export, the ▾
+  one-off path and 「Render selected」 all deliver to the same place. Develop
   STATE (recipes, Lightroom XMP, version snapshots, mask rasters, the baked
   pixel-master link and the GUI's variant strip) lives in a per-user develop
   store (`AUTOSHOP_DATA_DIR`, else
   `%LOCALAPPDATA%/autoshop/develops/<stem>-<path hash>/`), so two same-named
   photos never collide and edits survive launching from any directory.
+  The one deliberate exception to read-only: 「Export .xmp beside the photo」
+  copies a RAW's stored Lightroom/ACR sidecar into the photo's own folder,
+  because that is the only place Lightroom reads one. It is a per-photo click,
+  never batched, and it refuses to replace an existing `.xmp` without a second
+  confirming click.
 
 <div align="center"><img src="assets/denoise-demo.png" width="520" alt="AI denoise before/after" /></div>
 

@@ -280,15 +280,42 @@ impl AutoshopApp {
         // The develop store is otherwise invisible (hashed AppData folders) —
         // this is the one place that names it and rescues pre-store saves.
         ui.heading(tr(lang, "Develop store"));
-        ui.label(
-            egui::RichText::new(autoshop::store::store_root().display().to_string())
-                .small()
-                .weak(),
-        )
-        .on_hover_text(tr(
+        // THIS photo's folder, not just the root (R22-8): the root is one line
+        // above a hash-named subdirectory the user then has to identify by
+        // guessing, and "where is my XMP" is the question this row exists to
+        // answer. Falls back to the root when no photo is open, which is all
+        // there is to say then.
+        let shown = match self.src_path.as_deref() {
+            Some(p) => autoshop::store::develop_dir(p),
+            None => autoshop::store::store_root(),
+        };
+        ui.label(egui::RichText::new(abs_display(&shown)).small().weak()).on_hover_text(tr(
             lang,
             "Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHOP_DATA_DIR environment variable.",
         ));
+        // Enabled only when the folder EXISTS: an unsaved photo has no develop
+        // directory yet, and a file manager pointed at a missing path silently
+        // opens somewhere else entirely (Explorer lands in Documents). One stat
+        // per frame, but only while this window is open — a cached answer would
+        // be wrong for exactly the case that matters (the user saves, then
+        // reaches for this button). `develop_dir` above costs nothing repeated:
+        // its identity resolution is memoized for the process (store::
+        // identity_of), and `store_root` was already read here every frame.
+        let exists = shown.is_dir();
+        if ui
+            .add_enabled(exists, egui::Button::new(tr(lang, "🗂 Show in file manager")))
+            .on_hover_text(if exists {
+                tr(lang, "Open this folder in your file manager")
+            } else {
+                tr(lang, "Nothing saved for this photo yet — the folder appears with the first save")
+            })
+            .clicked()
+            && let Err(e) = reveal_folder(&shown)
+        {
+            let t = trf(lang, "could not open the folder: {err}", &[("err", &e.to_string())]);
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
+        }
         if ui
             .button(tr(lang, "Import develops from an old ./out folder…"))
             .on_hover_text(tr(
