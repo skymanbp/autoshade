@@ -13,7 +13,7 @@ use crate::advisor::{
 };
 use crate::config::Config;
 use crate::decode;
-use crate::recipe::{EditRecipe, GradeStrength};
+use crate::recipe::{EditRecipe, GradeStrength, StrengthTier};
 use crate::xmp;
 
 /// The TASTE dials one develop is asked for — the two independent axes plus the
@@ -47,6 +47,19 @@ pub struct GradeRequest {
     /// How COMMITTED the grade should be (the GUI's 「Strength」 slider,
     /// `--strength` on the CLI). Defaults to [`GradeStrength::DEFAULT`].
     pub strength: GradeStrength,
+    /// DEEP THINKING (R23-4, feedback #13): ask the proposer for its structured
+    /// working in the same strict response, raise this run's reasoning tier one
+    /// step, and let the visual judge converge over more than one round.
+    ///
+    /// `false` by DEFAULT and by construction on the unattended surfaces: batch
+    /// and eval build their request through [`Self::default`] /
+    /// [`Self::with_style`], and `produce_recipe` calls the proposer
+    /// unconditionally — before any judge gate — so a thinking chain riding on
+    /// `propose` would double a 500-photo batch's spend and stop eval from
+    /// measuring the bare proposal the restraint constants were calibrated
+    /// against. It is an INTERACTIVE opt-in: the GUI checkbox, `--deep`, the web
+    /// body's `deep`.
+    pub think: bool,
 }
 
 impl GradeRequest {
@@ -94,8 +107,11 @@ fn reference_preview(path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Run the full advise chain for one RAW: decode → propose (GPT or heuristic
-/// fallback) → Claude verify → optional one revision round. `verbose` prints the
-/// proposer/verifier lines (CLI uses true, the server uses false).
+/// fallback) → Claude verify → up to two verifier-driven revision rounds →
+/// (when `judge`) the visual closed loop, which since R23-4 converges over one
+/// to three guided rounds depending on the strength axis and `req.think`.
+/// `verbose` prints the proposer/verifier/judge lines and, in thinking mode,
+/// the model's full tool plan (CLI uses true, the server uses false).
 /// Run the advise chain for one RAW. `guidance` is an optional user direction
 /// (a prompt steering the edit, e.g. "warmer and moodier") woven into the GPT
 /// prompt.
@@ -297,14 +313,26 @@ pub fn produce_recipe(
         reference_image: ref_preview.as_ref(),
         // GATE 1 (prompt) + GATE 2 (`temper`, inside the provider).
         strength: req.strength,
+        // R23-4: the structured working + the deepened tier, on EVERY propose
+        // this analysis makes (the revision rounds spread this struct) — a
+        // first call that planned and a revision that did not would answer two
+        // different questions, exactly like the reference image above.
+        think: req.think,
     };
     let mut det_notes: Vec<crate::rationale::Note> = Vec::new();
+    // The working of the proposal that SURVIVES (R23-4). Every arm that
+    // replaces `recipe` wholesale replaces this with it — a plan describing a
+    // discarded candidate is worse than none.
+    let mut thinking: Option<crate::advisor::Thinking> = None;
     let (mut recipe, can_revise) = if cfg.openai_api_key.is_some() {
         if verbose {
             println!("proposer : OpenAI ({})", cfg.openai_model);
         }
-        match openai.propose(&preview, meta, hist, &propose_ctx) {
-            Ok(r) => (r, true),
+        match openai.propose_planned(&preview, meta, hist, &propose_ctx) {
+            Ok((r, t)) => {
+                thinking = t;
+                (r, true)
+            }
             Err(e) if base.is_some() => {
                 // REFINE means "adjust MY edit": the heuristic fallback
                 // proposes from scratch and cannot see the base, so falling
@@ -383,7 +411,7 @@ pub fn produce_recipe(
         // the loop stopped in the rationale, the one channel all three surfaces
         // show (the windowed GUI has no console for the CLI's stderr). A
         // FIRST-round failure still errors: there is no good pair to keep.
-        let revised = match openai.propose(
+        let (revised, revised_thinking) = match openai.propose_planned(
             &preview,
             meta,
             hist,
@@ -408,6 +436,8 @@ pub fn produce_recipe(
                 // Fresh model prose — the notes described the DISCARDED
                 // recipe's tail, so they reset with it (the suffix contract).
                 det_notes.clear();
+                // …and the working travels with the proposal it explains.
+                thinking = revised_thinking;
                 verdict = v;
             }
             Err(e) => {
@@ -505,12 +535,26 @@ pub fn produce_recipe(
     // and lens_profile default (the refine-strip rule) while carrying the
     // real WB anchor.
     //
-    // COST: paid vision calls (1 judge; +1 propose, +1 verify, +1 judge
-    // when a revision is bought). `judge` is therefore an explicit caller
+    // COST: paid vision calls (1 judge; +1 propose, +1 verify, +1 judge per
+    // guided round bought). `judge` is therefore an explicit caller
     // decision: interactive analyze passes true (this closed loop IS the
     // R20 strengthening); batch and eval pass false — a 500-photo batch
     // must not silently multiply spend, and eval measures the RAW proposal
     // (review R20-M2/M3).
+    //
+    // R23-4 turns the single round into a bounded CONVERGENCE loop
+    // (`judge_convergence` / `judge_next_round`): up to 3 rounds, and only
+    // where the photographer asked for depth or for a bold grade — every
+    // other path keeps exactly the one round R20 shipped. The three R20
+    // decisions hold PER ROUND, not once: the fee is the caller's explicit
+    // choice (this same `judge` gate), a revision is adopted only when the
+    // re-judge holds the score (`visual_review_round`'s `>=`), and an
+    // identical revision short-circuits before paying for a verify or a
+    // re-judge (that check lives inside `visual_review_round`, so it fires
+    // on every round by construction). Worst case for one analyze: 11 API
+    // calls today (6 carrying images, 8 high-detail frames), 17 with deep
+    // thinking at a committed strength (10 with images, 14 frames) — the
+    // numbers the GUI tooltip and `--deep`'s help quote.
     if judge && can_revise {
         let judge_view = |r: &EditRecipe| -> EditRecipe {
             let mut v = r.clone();
@@ -555,191 +599,248 @@ pub fn produce_recipe(
                 Some(intent),
             )
         };
+        // R23-4: how far this analysis may iterate, from ONE pure decision
+        // (`judge_convergence`) — the target the rubric already stated in
+        // words, and the round cap that keeps it bounded.
+        let (target, cap) = judge_convergence(req.strength, req.think);
+        // Every note this block writes, HELD until the loop ends. An adopted
+        // round replaces `recipe` wholesale and clears `det_notes` with it (the
+        // rationale-suffix contract), so a note pushed mid-loop would be
+        // dropped by the very round it describes — the same defect R23-2 fixed
+        // for the style block by moving it below the judge. Flushed onto the
+        // FINAL recipe in order, which on the single-round path is
+        // byte-identical to the old inline pushes (nothing is ever dropped
+        // there).
+        let mut log: Vec<crate::rationale::Note> = Vec::new();
         match judge_of(&recipe) {
             Err(e) => {
-                crate::rationale::push_note(
-                    &mut recipe.rationale,
-                    &mut det_notes,
-                    crate::rationale::Note::new(
-                        crate::rationale::keys::JUDGE_UNAVAILABLE,
-                        vec![("e", e.to_string())],
-                    ),
-                );
+                log.push(crate::rationale::Note::new(
+                    crate::rationale::keys::JUDGE_UNAVAILABLE,
+                    vec![("e", e.to_string())],
+                ));
             }
-            Ok(j1) => {
+            Ok(first) => {
                 if verbose {
                     println!(
                         "judge    : {:.0}/100 {:?} — {}",
-                        j1.score, j1.decision, j1.critique
+                        first.score, first.decision, first.critique
                     );
                 }
-                let score1 = format!("{:.0}", j1.score);
-                // An Accept's hint (if any) is advice, not a request — only a
-                // revise/reject verdict WITH an instruction buys the round.
-                let hint = j1
-                    .hint
-                    .as_deref()
-                    .filter(|_| j1.decision != Decision::Accept);
-                match hint {
-                    None => {
-                        crate::rationale::push_note(
-                            &mut recipe.rationale,
-                            &mut det_notes,
-                            crate::rationale::Note::new(
-                                crate::rationale::keys::JUDGE_SCORE,
-                                vec![
-                                    ("score", score1.clone()),
-                                    ("critique", j1.critique.clone()),
-                                ],
-                            ),
+                // The judgement describing the recipe currently held, and how
+                // many guided rounds have been paid for.
+                let mut current = first;
+                let mut rounds_done = 0usize;
+                loop {
+                    let score1 = format!("{:.0}", current.score);
+                    // R20's rule owns round 1 (a non-Accept verdict WITH an
+                    // instruction); the target and the cap own every round
+                    // after it. See `judge_next_round`.
+                    let Some(hint) = judge_next_round(rounds_done, &current, target, cap) else {
+                        log.push(crate::rationale::Note::new(
+                            crate::rationale::keys::JUDGE_SCORE,
+                            vec![("score", score1), ("critique", current.critique.clone())],
+                        ));
+                        break;
+                    };
+                    // Short prefix: the whole hint is bounded at 1024 in
+                    // the proposer, so every prefix byte comes out of the
+                    // judge's own instruction (review R20-N2).
+                    let h = format!("visual judge (it SAW your previous render): {hint}");
+                    if verbose {
+                        println!(
+                            "judge    : guided revision {}/{cap} (hint: {h})",
+                            rounds_done + 1
                         );
                     }
-                    Some(h) => {
-                        // Short prefix: the whole hint is bounded at 1024 in
-                        // the proposer, so every prefix byte comes out of the
-                        // judge's own instruction (review R20-N2).
-                        let h = format!("visual judge (it SAW your previous render): {h}");
-                        if verbose {
-                            println!("judge    : guided revision (hint: {h})");
-                        }
-                        let mut candidate_distilled = false;
-                        match visual_review_round(
-                            &h,
-                            &recipe,
-                            |h| {
-                                let mut r = openai.propose(
-                                    &preview,
-                                    meta,
-                                    hist,
-                                    &crate::advisor::ProposeContext {
-                                        hint: Some(h),
-                                        ..propose_ctx
-                                    },
-                                )?;
-                                // The candidate walks the SAME look chain the
-                                // original walked (style distillation above)
-                                // — otherwise adopting it would silently
-                                // undo the user's style pull (review R20-S2).
-                                if let Some(sr) = &retrieved {
-                                    let pre = r.clone();
-                                    crate::style::blend_toward(
-                                        &mut r,
-                                        &sr.targets,
-                                        req.style.clamp(0.0, 1.0) * 0.6,
-                                    );
-                                    r.clamp();
-                                    candidate_distilled = r != pre;
-                                }
-                                Ok(r)
-                            },
-                            |r| verifier.verify(r, meta, hist, &intent),
-                            judge_of,
-                            j1.score,
-                        ) {
-                            VisualRound::Adopted { recipe: r2, verdict: v2, second } => {
-                                recipe = *r2;
-                                // Fresh model prose — the notes described the
-                                // DISCARDED recipe's tail (the suffix contract).
-                                det_notes.clear();
-                                verdict = v2;
-                                if verbose {
-                                    println!(
-                                        "judge    : re-scored {:.0}/100 — adopted",
-                                        second.score
-                                    );
-                                }
-                                crate::rationale::push_note(
-                                    &mut recipe.rationale,
-                                    &mut det_notes,
-                                    crate::rationale::Note::new(
-                                        crate::rationale::keys::JUDGE_ADOPTED,
-                                        vec![
-                                            ("score1", score1),
-                                            ("score2", format!("{:.0}", second.score)),
-                                            ("critique", second.critique.clone()),
-                                        ],
-                                    ),
+                    let mut candidate_distilled = false;
+                    let mut candidate_thinking: Option<crate::advisor::Thinking> = None;
+                    let outcome = visual_review_round(
+                        &h,
+                        &recipe,
+                        |h| {
+                            let (mut r, t) = openai.propose_planned(
+                                &preview,
+                                meta,
+                                hist,
+                                &crate::advisor::ProposeContext {
+                                    hint: Some(h),
+                                    ..propose_ctx
+                                },
+                            )?;
+                            candidate_thinking = t;
+                            // The candidate walks the SAME look chain the
+                            // original walked (style distillation above)
+                            // — otherwise adopting it would silently
+                            // undo the user's style pull (review R20-S2).
+                            if let Some(sr) = &retrieved {
+                                let pre = r.clone();
+                                crate::style::blend_toward(
+                                    &mut r,
+                                    &sr.targets,
+                                    req.style.clamp(0.0, 1.0) * 0.6,
                                 );
-                                if candidate_distilled {
-                                    crate::rationale::push_note(
-                                        &mut recipe.rationale,
-                                        &mut det_notes,
-                                        crate::rationale::Note::new(
-                                            crate::rationale::keys::STYLE_DISTILLED,
-                                            vec![(
-                                                "pct",
-                                                format!(
-                                                    "{:.0}",
-                                                    req.style.clamp(0.0, 1.0) * 0.6 * 100.0
-                                                ),
-                                            )],
+                                r.clamp();
+                                candidate_distilled = r != pre;
+                            }
+                            Ok(r)
+                        },
+                        |r| verifier.verify(r, meta, hist, &intent),
+                        judge_of,
+                        current.score,
+                    );
+                    rounds_done += 1;
+                    match outcome {
+                        VisualRound::Adopted { recipe: r2, verdict: v2, second } => {
+                            recipe = *r2;
+                            // Fresh model prose — the notes described the
+                            // DISCARDED recipe's tail (the suffix contract).
+                            det_notes.clear();
+                            // …and the working travels with its proposal.
+                            thinking = candidate_thinking;
+                            verdict = v2;
+                            if verbose {
+                                println!(
+                                    "judge    : re-scored {:.0}/100 — adopted",
+                                    second.score
+                                );
+                            }
+                            let score2 = format!("{:.0}", second.score);
+                            // Look ahead with the SAME predicate the loop
+                            // head uses: an adoption that is the last word
+                            // keeps R20's terminal note (byte-identical on
+                            // the single-round path), while one the loop will
+                            // iterate past logs the round and moves on.
+                            let more =
+                                judge_next_round(rounds_done, &second, target, cap).is_some();
+                            log.push(crate::rationale::Note::new(
+                                if more {
+                                    crate::rationale::keys::JUDGE_ROUND
+                                } else {
+                                    crate::rationale::keys::JUDGE_ADOPTED
+                                },
+                                if more {
+                                    vec![
+                                        ("round", rounds_done.to_string()),
+                                        ("score1", score1),
+                                        ("score2", score2),
+                                        ("target", format!("{target:.0}")),
+                                    ]
+                                } else {
+                                    vec![
+                                        ("score1", score1),
+                                        ("score2", score2),
+                                        ("critique", second.critique.clone()),
+                                    ]
+                                },
+                            ));
+                            if candidate_distilled {
+                                log.push(crate::rationale::Note::new(
+                                    crate::rationale::keys::STYLE_DISTILLED,
+                                    vec![(
+                                        "pct",
+                                        format!(
+                                            "{:.0}",
+                                            req.style.clamp(0.0, 1.0) * 0.6 * 100.0
                                         ),
-                                    );
-                                }
+                                    )],
+                                ));
                             }
-                            VisualRound::Unchanged => {
-                                crate::rationale::push_note(
-                                    &mut recipe.rationale,
-                                    &mut det_notes,
-                                    crate::rationale::Note::new(
-                                        crate::rationale::keys::JUDGE_UNCHANGED,
-                                        vec![
-                                            ("score", score1),
-                                            ("critique", j1.critique.clone()),
-                                        ],
-                                    ),
+                            if !more {
+                                break;
+                            }
+                            current = second;
+                        }
+                        VisualRound::Unchanged => {
+                            // The model returned the SAME settings: another
+                            // round would ask the same question of the same
+                            // recipe and pay for the same answer. (R20 定案 3
+                            // — the short-circuit lives inside
+                            // `visual_review_round`, so it fires on EVERY
+                            // round, not just the first.)
+                            log.push(crate::rationale::Note::new(
+                                crate::rationale::keys::JUDGE_UNCHANGED,
+                                vec![("score", score1), ("critique", current.critique.clone())],
+                            ));
+                            break;
+                        }
+                        VisualRound::KeptLower { second_score } => {
+                            if verbose {
+                                println!(
+                                    "judge    : re-scored {second_score:.0}/100 — lower, revision discarded"
                                 );
                             }
-                            VisualRound::KeptLower { second_score } => {
-                                if verbose {
-                                    println!(
-                                        "judge    : re-scored {second_score:.0}/100 — lower, revision discarded"
-                                    );
-                                }
-                                crate::rationale::push_note(
-                                    &mut recipe.rationale,
-                                    &mut det_notes,
-                                    crate::rationale::Note::new(
-                                        crate::rationale::keys::JUDGE_KEPT,
-                                        vec![
-                                            ("score1", score1),
-                                            ("critique", j1.critique.clone()),
-                                            ("score2", format!("{second_score:.0}")),
-                                        ],
-                                    ),
-                                );
-                            }
-                            VisualRound::RoundFailed { e } => {
-                                crate::rationale::push_note(
-                                    &mut recipe.rationale,
-                                    &mut det_notes,
-                                    crate::rationale::Note::new(
-                                        crate::rationale::keys::JUDGE_ROUND_FAILED,
-                                        vec![
-                                            ("score", score1),
-                                            ("critique", j1.critique.clone()),
-                                            ("e", e),
-                                        ],
-                                    ),
-                                );
-                            }
-                            VisualRound::RejudgeFailed { e } => {
-                                crate::rationale::push_note(
-                                    &mut recipe.rationale,
-                                    &mut det_notes,
-                                    crate::rationale::Note::new(
-                                        crate::rationale::keys::JUDGE_REJUDGE_FAILED,
-                                        vec![
-                                            ("score", score1),
-                                            ("critique", j1.critique.clone()),
-                                            ("e", e),
-                                        ],
-                                    ),
-                                );
-                            }
+                            log.push(crate::rationale::Note::new(
+                                crate::rationale::keys::JUDGE_KEPT,
+                                vec![
+                                    ("score1", score1),
+                                    ("critique", current.critique.clone()),
+                                    ("score2", format!("{second_score:.0}")),
+                                ],
+                            ));
+                            break;
+                        }
+                        VisualRound::RoundFailed { e } => {
+                            log.push(crate::rationale::Note::new(
+                                crate::rationale::keys::JUDGE_ROUND_FAILED,
+                                vec![
+                                    ("score", score1),
+                                    ("critique", current.critique.clone()),
+                                    ("e", e),
+                                ],
+                            ));
+                            break;
+                        }
+                        VisualRound::RejudgeFailed { e } => {
+                            log.push(crate::rationale::Note::new(
+                                crate::rationale::keys::JUDGE_REJUDGE_FAILED,
+                                vec![
+                                    ("score", score1),
+                                    ("critique", current.critique.clone()),
+                                    ("e", e),
+                                ],
+                            ));
+                            break;
                         }
                     }
                 }
+            }
+        }
+        // Onto the recipe that SURVIVED the loop.
+        for note in log {
+            crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
+        }
+    }
+
+    // ── R23-4 THINKING disclosure, same placement and same reason ──────────
+    // The three single-sentence fields of the working that belongs to the
+    // recipe actually being returned. Bounded at the trust boundary already
+    // (advisor::THINK_FIELD_MAX_BYTES), so what lands here is three sentences,
+    // not a transcript — the plan's per-family reasoning is deliberately NOT in
+    // the rationale (it is 9 clauses long, and this string is capped and
+    // reprinted on five surfaces); the CLI prints it in full below.
+    if let Some(t) = &thinking {
+        for (key, arg, text) in [
+            (crate::rationale::keys::THINK_SCENE, "scene", &t.scene),
+            (crate::rationale::keys::THINK_LOOK, "look", &t.intended_look),
+            (crate::rationale::keys::THINK_CRITIQUE, "critique", &t.self_critique),
+        ] {
+            if !text.is_empty() {
+                crate::rationale::push_note(
+                    &mut recipe.rationale,
+                    &mut det_notes,
+                    crate::rationale::Note::new(key, vec![(arg, text.clone())]),
+                );
+            }
+        }
+        if verbose && !t.tool_plan.is_empty() {
+            println!("plan     : the model's tool plan for this photo");
+            for step in &t.tool_plan {
+                println!(
+                    "  {} {:<14} {}",
+                    if step.used { "USE " } else { "skip" },
+                    step.control,
+                    step.why
+                );
             }
         }
     }
@@ -882,6 +983,72 @@ pub(crate) fn style_gap_note(
             vec![("pct", format!("{:.0}", strength.clamp(0.0, 1.0) * 100.0))],
         ),
     })
+}
+
+// ── judge CONVERGENCE (R23-4, feedback #13) ────────────────────────────────
+//
+// R20 shipped a loop that could only ask "did that make it worse?"
+// (`visual_review_round`'s do-no-harm `>=`). The judge's rubric has stated an
+// ABSOLUTE scale since day one — `judge.rs`: 90+ ship as-is, 75-89 good with
+// minor polish left, 50-74 clearly improvable — and nothing read it, so a
+// develop scored 62 and stopped there as contentedly as one scored 91.
+//
+// These are the three target scores that scale, one per strength band. They are
+// TASTE constants, not measurements: named and adjacent so a retune is one edit
+// with the whole ladder visible, and pinned by
+// `the_convergence_ladder_is_gated_and_ordered`.
+const JUDGE_TARGET_RESTRAINED: f32 = 78.0;
+const JUDGE_TARGET_BALANCED: f32 = 82.0;
+const JUDGE_TARGET_COMMITTED: f32 = 88.0;
+
+/// The score this analysis iterates toward, and the CAP on guided rounds.
+///
+/// Both scale with the strength axis: a restrained develop is finished sooner,
+/// by definition, than one the photographer asked to commit. The cap is GATED,
+/// though — R20's first定案 is that a paid visual round is an explicit caller
+/// decision, and multiplying rounds multiplies that spend, so anything past the
+/// historical single round needs the user to have asked for depth (`think`) or
+/// for a bold grade (the committed band). Everything else keeps exactly the
+/// round budget every release since R20 has had.
+///
+/// `judge = false` (batch, eval) never reaches this: the whole block is behind
+/// that gate, so the unattended surfaces cannot iterate at all.
+pub(crate) fn judge_convergence(strength: GradeStrength, think: bool) -> (f32, usize) {
+    let (target, cap) = match strength.tier() {
+        StrengthTier::Restrained => (JUDGE_TARGET_RESTRAINED, 1),
+        StrengthTier::Balanced => (JUDGE_TARGET_BALANCED, 2),
+        StrengthTier::Committed => (JUDGE_TARGET_COMMITTED, 3),
+    };
+    let deep = think || strength.tier() == StrengthTier::Committed;
+    (target, if deep { cap } else { 1 })
+}
+
+/// May the judge buy ANOTHER guided round, and with what instruction?
+///
+/// `Some(hint)` runs a round; `None` means the reviewed develop stands. The
+/// FIRST round's test is R20's, unchanged and unconditional: a non-Accept
+/// verdict carrying an instruction. `target` deliberately does NOT apply at
+/// `rounds_done == 0` — a default-path analysis must behave exactly as it did
+/// before R23-4 whatever the target says, and suppressing the historical round
+/// because a 79 already cleared 78 would be a silent behaviour change dressed
+/// up as convergence. From the second round on the target IS the stop
+/// condition, so the loop finally knows the difference between "not worse" and
+/// "good enough".
+pub(crate) fn judge_next_round(
+    rounds_done: usize,
+    j: &crate::advisor::Judgement,
+    target: f32,
+    cap: usize,
+) -> Option<&str> {
+    if rounds_done >= cap || (rounds_done > 0 && j.score >= target) {
+        return None;
+    }
+    // An Accept's hint (if any) is advice, not a request — only a
+    // revise/reject verdict WITH an instruction buys the round.
+    if j.decision == Decision::Accept {
+        return None;
+    }
+    j.hint.as_deref().map(str::trim).filter(|h| !h.is_empty())
 }
 
 /// Outcome of one judge-guided visual revision round (R20 closed loop).
@@ -2002,6 +2169,220 @@ mod visual_round_tests {
             70.0,
         );
         assert!(matches!(out, VisualRound::Unchanged));
+    }
+
+    /// R23-4 (feedback #13), the loop's own contract: how far one analysis may
+    /// iterate, and who is allowed to pay for it.
+    ///
+    /// Two properties the cost guardrail rests on: the DEFAULT path keeps
+    /// exactly R20's single round at every strength (nothing gets more
+    /// expensive because a constant moved), and the extra rounds unlock only
+    /// where the user asked — deep thinking, or a committed grade.
+    #[test]
+    fn the_convergence_ladder_is_gated_and_ordered() {
+        let at = |s: f32, think: bool| judge_convergence(GradeStrength::new(s), think);
+        // Ungated: one round, whatever the band — R20's budget, unchanged.
+        for s in [0.0, 0.4, 0.5, GradeStrength::DEFAULT, 0.7] {
+            assert_eq!(at(s, false).1, 1, "an unasked-for round must not appear at {s}");
+        }
+        // The committed band buys its own depth (the user asked for a bold
+        // grade, and that is what needs the iterations).
+        assert_eq!(at(0.9, false), (JUDGE_TARGET_COMMITTED, 3));
+        // Deep thinking buys it in the two lower bands too.
+        assert_eq!(at(0.2, true), (JUDGE_TARGET_RESTRAINED, 1), "restrained stays one round");
+        assert_eq!(at(GradeStrength::DEFAULT, true), (JUDGE_TARGET_BALANCED, 2));
+        assert_eq!(at(0.9, true), (JUDGE_TARGET_COMMITTED, 3));
+        // The targets rise with the band — a bolder develop is finished later.
+        // (Read through `judge_convergence` rather than the consts directly:
+        // clippy refuses a compile-time-constant assertion, and the property
+        // that matters is the one the LOOP sees anyway.)
+        let targets: Vec<f32> = [0.2, 0.5, 0.9].iter().map(|&s| at(s, true).0).collect();
+        assert!(
+            targets[0] < targets[1] && targets[1] < targets[2],
+            "the ladder must be monotone: a stronger grade cannot have a LOWER bar: {targets:?}"
+        );
+        // …and every target sits inside judge.rs's stated rubric bands (below
+        // 90 "ship as-is", above 75 "minor polish left"), or the loop would
+        // either never stop or stop at a develop the rubric calls improvable.
+        for t in [JUDGE_TARGET_RESTRAINED, JUDGE_TARGET_BALANCED, JUDGE_TARGET_COMMITTED] {
+            assert!((75.0..=90.0).contains(&t), "{t} is outside the judge's own scale");
+        }
+    }
+
+    /// The round predicate. R20's rule owns round 1 unconditionally; the target
+    /// owns every round after it.
+    #[test]
+    fn the_round_predicate_keeps_r20s_first_round_and_then_converges() {
+        let with = |score: f32, decision, hint: Option<&str>| Judgement {
+            score,
+            decision,
+            critique: "c".into(),
+            hint: hint.map(str::to_string),
+        };
+        let revise = |score, hint| with(score, Decision::Revise, hint);
+
+        // Round 1 — exactly R20: a non-Accept verdict WITH an instruction.
+        assert_eq!(judge_next_round(0, &revise(60.0, Some("lift")), 82.0, 2), Some("lift"));
+        assert_eq!(
+            judge_next_round(0, &revise(95.0, Some("lift")), 82.0, 2),
+            Some("lift"),
+            "the target must NOT suppress the historical first round — that would be a \
+             silent behaviour change on the default path"
+        );
+        assert_eq!(judge_next_round(0, &revise(60.0, None), 82.0, 2), None, "no hint, no round");
+        assert_eq!(
+            judge_next_round(0, &with(60.0, Decision::Accept, Some("polish")), 82.0, 2),
+            None,
+            "an Accept's hint is advice, not a request"
+        );
+        assert_eq!(judge_next_round(0, &revise(60.0, Some("   ")), 82.0, 2), None, "blank hint");
+
+        // Round 2+ — the target is the stop condition, and the cap is absolute.
+        assert_eq!(judge_next_round(1, &revise(81.9, Some("more")), 82.0, 2), Some("more"));
+        assert_eq!(
+            judge_next_round(1, &revise(82.0, Some("more")), 82.0, 2),
+            None,
+            "at the target the loop stops even with budget left and a hint offered"
+        );
+        assert_eq!(judge_next_round(2, &revise(10.0, Some("more")), 82.0, 2), None, "cap");
+        assert_eq!(judge_next_round(1, &revise(10.0, Some("more")), 82.0, 1), None, "cap");
+    }
+
+    /// The production loop's SHAPE, driven over canned score sequences with the
+    /// real `visual_review_round` and the real predicate — the part that cannot
+    /// be tested through `produce_recipe` without a RAW, a network and money.
+    ///
+    /// The three R20 decisions must survive multi-round化, and each one is a
+    /// COUNT here rather than a claim: the same-settings short-circuit fires on
+    /// EVERY round (not just the first), do-no-harm still ends the chain, and
+    /// nothing runs at all past the round budget.
+    #[test]
+    fn a_multi_round_chain_converges_short_circuits_and_does_no_harm() {
+        struct Run {
+            rounds: usize,
+            proposes: usize,
+            verifies: usize,
+            judges: usize,
+            final_exposure: f32,
+        }
+        // `repeat_at`: the round on which the proposer returns the CURRENT
+        // recipe's settings verbatim (the R20-3 short-circuit case).
+        let drive = |scores: &[f32], strength: f32, think: bool, repeat_at: Option<usize>| -> Run {
+            let (target, cap) = judge_convergence(GradeStrength::new(strength), think);
+            let judged = |i: usize| Judgement {
+                score: scores[i.min(scores.len() - 1)],
+                decision: Decision::Revise,
+                critique: "c".into(),
+                hint: Some("keep going".into()),
+            };
+            let (mut proposes, mut verifies, mut judges) = (0usize, 0usize, 0usize);
+            let mut recipe = EditRecipe::default();
+            let mut current = judged(0);
+            let mut rounds = 0usize;
+            while let Some(hint) = judge_next_round(rounds, &current, target, cap) {
+                assert_eq!(hint, "keep going");
+                let next_round = rounds + 1;
+                let outcome = visual_review_round(
+                    hint,
+                    &recipe,
+                    |_| {
+                        proposes += 1;
+                        Ok(if repeat_at == Some(next_round) {
+                            // Same SETTINGS, fresh prose — the shape the
+                            // short-circuit exists to catch.
+                            EditRecipe { rationale: "new words".into(), ..recipe.clone() }
+                        } else {
+                            EditRecipe { exposure_ev: next_round as f32 * 0.25, ..Default::default() }
+                        })
+                    },
+                    |_| {
+                        verifies += 1;
+                        Ok(accept())
+                    },
+                    |_| {
+                        judges += 1;
+                        Ok(judged(next_round))
+                    },
+                    current.score,
+                );
+                rounds += 1;
+                match outcome {
+                    VisualRound::Adopted { recipe: r2, second, .. } => {
+                        recipe = *r2;
+                        current = second;
+                    }
+                    _ => break,
+                }
+            }
+            Run {
+                rounds,
+                proposes,
+                verifies,
+                judges,
+                final_exposure: recipe.exposure_ev,
+            }
+        };
+
+        // Default path (balanced, no深度): ONE round, exactly as R20 shipped —
+        // the score sequence would happily support three.
+        let r = drive(&[60.0, 70.0, 80.0, 90.0], GradeStrength::DEFAULT, false, None);
+        assert_eq!((r.rounds, r.proposes, r.verifies, r.judges), (1, 1, 1, 1));
+
+        // Deep + committed: iterate to the cap while the score stays under the
+        // target, adopting each improvement.
+        let r = drive(&[60.0, 70.0, 80.0, 86.0], 0.9, true, None);
+        assert_eq!((r.rounds, r.proposes, r.verifies, r.judges), (3, 3, 3, 3));
+        assert_eq!(r.final_exposure, 0.75, "the last adopted candidate is the one kept");
+
+        // …and it STOPS the moment the target is met, budget unspent.
+        let r = drive(&[60.0, 92.0, 95.0, 99.0], 0.9, true, None);
+        assert_eq!(
+            (r.rounds, r.proposes, r.judges),
+            (1, 1, 1),
+            "92 clears the 88 target — a second round would be paid for nothing"
+        );
+
+        // R20 定案 3, per ROUND: the model repeating itself on round 2 must not
+        // buy a verify or a re-judge, and must end the chain.
+        let r = drive(&[60.0, 70.0, 80.0, 90.0], 0.9, true, Some(2));
+        assert_eq!(
+            (r.rounds, r.proposes, r.verifies, r.judges),
+            (2, 2, 1, 1),
+            "the second round proposed and short-circuited: 2 proposals, but only the \
+             FIRST round's verify + re-judge were paid for"
+        );
+
+        // R20 定案 2, do-no-harm: a lower re-score ends the chain and keeps the
+        // reviewed recipe (exposure stays at the previous round's value).
+        let r = drive(&[60.0, 70.0, 55.0, 99.0], 0.9, true, None);
+        assert_eq!((r.rounds, r.proposes, r.judges), (2, 2, 2));
+        assert_eq!(r.final_exposure, 0.25, "the losing candidate must not survive");
+    }
+
+    /// The cost guardrail the consensus called for by name: the unattended
+    /// surfaces cannot think, and cannot be made to by a default.
+    ///
+    /// `produce_recipe` calls the proposer BEFORE any judge gate
+    /// (`openai.propose_planned(...)`, unconditional), so `judge: false` alone
+    /// does not protect batch or eval from a thinking envelope — only the
+    /// request they build does. Both build it here.
+    #[test]
+    fn the_unattended_surfaces_can_never_think() {
+        assert!(!GradeRequest::default().think, "the struct default is the batch default");
+        assert!(
+            !GradeRequest::with_style(0.3).think,
+            "`batch` builds its request through with_style — it has no way to reach the flag"
+        );
+        // eval's own literal (eval.rs): the calibration point plus struct defaults.
+        let eval_req = GradeRequest {
+            strength: GradeStrength::calibrated(),
+            ..Default::default()
+        };
+        assert!(!eval_req.think, "eval must keep measuring the BARE proposal");
+        assert_eq!(eval_req.strength.get(), GradeStrength::CALIBRATED);
+        // And the judge loop cannot iterate for them either: eval/batch pass
+        // judge=false, but even if that changed, the ungated cap is 1.
+        assert_eq!(judge_convergence(eval_req.strength, eval_req.think).1, 1);
     }
 
     #[test]

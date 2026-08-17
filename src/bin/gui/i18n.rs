@@ -927,8 +927,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── UX batch (toolbar slim-down · AI section · Export section · tools) ──
     ("AI", "AI"),
     ("AI Analyze", "AI 分析"),
-    ("AI proposes a recipe from scratch (GPT proposal + validation + a visual review: the result is RENDERED and judged by the vision model, which may buy one guided revision — extra vision cost per run), written into the sliders — undoable. Uses the Direction above; Style steers it.",
-        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订——每次多一点 vision 费），直接写入滑杆——可撤销。读上方「方向」文本；风格滑杆一同生效。"),
+    ("AI proposes a recipe from scratch (GPT proposal + validation + a visual review: the result is RENDERED and judged by the vision model, which may buy one guided revision), written into the sliders — undoable. Uses the Direction above; Style and Strength steer it. COST, worst case: 11 API calls, 6 of them carrying images (8 high-detail frames). 「Deep thinking」 below raises that ceiling — its own tooltip has the numbers.",
+        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订），直接写入滑杆——可撤销。读上方「方向」文本；风格与强度两个滑杆一同生效。费用最多为 11 次 API 调用，其中 6 次带图（8 张高清图）。下方的「Deep thinking」会把这个上限提高——具体数字见它自己的说明。"),
+    // R23-4 · feedback #13: the thinking-mode switch and its cost disclosure.
+    ("Deep thinking", "深度思考"),
+    ("Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the rationale above. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this on at a committed Strength it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
+        "让 AI 把思考过程写出来，并允许它反复改进。提案要先说明它读到的画面，对每一类工具（影调 / 白平衡 / 清晰与饱和 / HSL / 调色 / 曲线 / 细节 / 裁切 / 蒙版）逐一给出用或不用的理由，说明想要的成片效果，最后再对自己的结果做一次自查——这三段话会出现在上方的说明里。它还会把图像模型的推理档位本次提高一级（仅在设置里选了「provider default」以外的档位时有效），并让视觉复查继续跑到分数达标为止：强度中等时 2 轮，高于 70% 时 3 轮。费用：不开本项时一次分析最多 11 次 API 调用（6 次带图，8 张高清图）；开启本项、强度较高时，最多 17 次调用（10 次带图，14 张高清图），每次提案还多约 10-20% 的输出 token。批处理与 eval 从不启用它。"),
     ("Direction", "方向"),
     ("Free-text direction for AI Analyze — e.g. warmer and moodier",
         "给 AI 分析的自由文字方向——如「更暖、更有氛围」"),
@@ -1218,6 +1222,18 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [AI visual review unavailable ({e}) — the develop was not visually \
       checked]",
         " [AI 视觉复查不可用（{e}）——本次显影未经视觉检查]"),
+    // ── R23-4: one intermediate round of the multi-round convergence loop ───
+    (" [AI visual review round {round}: {score1}/100 → a guided revision \
+      re-scored {score2}/100 and was adopted; still under the {target}/100 \
+      target, so another round was bought]",
+        " [AI 视觉复查第 {round} 轮：{score1}/100 → 按提示修订后复查 {score2}/100，已采用；仍低于 {target}/100 的目标，因此继续下一轮]"),
+    // ── R23-4: deep thinking — the three single-sentence fields ─────────────
+    (" [deep thinking — what it saw: {scene}]",
+        " [深度思考——它读到的画面：{scene}]"),
+    (" [deep thinking — the look it aimed for: {look}]",
+        " [深度思考——它想要的成片效果：{look}]"),
+    (" [deep thinking — its own critique against your strength target: {critique}]",
+        " [深度思考——它对照你的强度目标做的自查：{critique}]"),
     (" [style distillation then pulled the global sliders toward this user's past \
       edits (effective strength {pct}%) — final values can differ from the \
       derivation above]",

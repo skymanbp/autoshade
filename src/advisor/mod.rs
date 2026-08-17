@@ -289,7 +289,67 @@ pub struct ProposeContext<'a> {
     /// [`GradeStrength::DEFAULT`] via `Default`, so a call site that forgets it
     /// gets the shipped default rather than the timid baseline.
     pub strength: GradeStrength,
+    /// THINKING MODE (R23-4, feedback #13): ask for the structured working —
+    /// scene → tool plan → intended look → recipe → self-critique — inside the
+    /// SAME strict response (`catalogue::think_envelope_schema`), and raise this
+    /// call's reasoning-effort tier one step.
+    ///
+    /// `false` is not merely the default, it is the default PATH: with it the
+    /// request is byte-identical to the pre-R23-4 shape, because the surfaces
+    /// that must never pay for it (batch, eval) reach `propose` unconditionally —
+    /// `pipeline::produce_recipe` calls the proposer before any judge gate, so a
+    /// thinking chain riding along would double a 500-photo batch's spend and
+    /// stop eval from measuring the bare proposal it calibrates against.
+    pub think: bool,
 }
+
+/// The proposer's structured WORKING for one call — R23-4's answer to "make it
+/// think", as an auditable intermediate product rather than more invisible
+/// reasoning tokens (feedback #13).
+///
+/// Deliberately NOT part of [`EditRecipe`]: the recipe is persisted
+/// (`recipe.json`, `deny_unknown_fields`), projected into an XMP comment,
+/// re-serialized into R21's deletion fingerprint and pasted into the verifier's
+/// prompt — four contracts a per-call scratchpad has no business entering. It
+/// rides the propose RESULT instead, and reaches the user as bounded rationale
+/// notes.
+///
+/// Every string is bounded on arrival ([`THINK_FIELD_MAX_BYTES`], and the plan
+/// itself at [`TOOL_PLAN_MAX`] entries): it is model text on its way to a
+/// rationale that is itself capped, and a model that answers a "one sentence"
+/// field with a page must not be able to crowd the disclosure out.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Thinking {
+    /// One sentence: what this photograph is and what its light is doing.
+    pub scene: String,
+    /// One entry per control FAMILY (`catalogue::CONTROL_FAMILIES`).
+    pub tool_plan: Vec<ToolStep>,
+    /// One sentence: the finished look being aimed for.
+    pub intended_look: String,
+    /// One sentence: the model's own verdict on its answer, against the
+    /// TARGET STRENGTH it was given.
+    pub self_critique: String,
+}
+
+/// One line of a [`Thinking::tool_plan`]: a control family, whether this
+/// develop uses it, and why. `used` rather than `use` — the wire spelling is
+/// `use`, which is a Rust keyword.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolStep {
+    pub control: String,
+    pub used: bool,
+    pub why: String,
+}
+
+/// Per-field bound on the thinking prose (each field is specified as ONE
+/// sentence; 200 bytes is a generous sentence and a hard ceiling on what can
+/// reach the rationale).
+pub const THINK_FIELD_MAX_BYTES: usize = 200;
+
+/// Bound on plan entries kept. The schema asks for one per family (9); the
+/// margin absorbs a model that repeats one without letting a runaway list
+/// through.
+pub const TOOL_PLAN_MAX: usize = 16;
 
 /// What the photographer asked THIS analysis for, as the two DOWNSTREAM
 /// reviewers need it (R23-3).

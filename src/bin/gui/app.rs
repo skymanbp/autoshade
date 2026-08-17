@@ -52,6 +52,13 @@ pub(crate) struct AutoshopApp {
     /// not only its numbers. Persisted, and OFF by default — it puts a second
     /// image on every call of a paid analysis (the checkbox says so).
     pub(crate) send_style_ref_image: bool,
+    /// R23-4, feedback #13 ("let it think"): DEEP THINKING for this photo's
+    /// analysis — the structured working in the proposal, one step more
+    /// reasoning effort, and a visual judge allowed to converge over more than
+    /// one round. Persisted, OFF by default: it is the most expensive switch on
+    /// the panel (the checkbox states the call counts), and every unattended
+    /// surface (batch, eval) is structurally unable to turn it on.
+    pub(crate) deep_think: bool,
     /// The folder the style library was last built FROM — prefilled into the
     /// picker so a rebuild does not mean finding it again. Persisted.
     pub(crate) style_src_dir: Option<PathBuf>,
@@ -1421,6 +1428,8 @@ impl Default for AutoshopApp {
             // OFF: an extra image on a paid call is the user's opt-in, never a
             // default (the same rule `fit_ai_judge` follows).
             send_style_ref_image: false,
+            // OFF, same rule and a bigger bill (up to 17 calls per analyze).
+            deep_think: false,
             style_src_dir: None,
             style_info: None,
             style_info_loading: false,
@@ -1800,6 +1809,7 @@ impl eframe::App for AutoshopApp {
                 style_strength: self.style_strength,
                 grade_strength: self.grade_strength,
                 send_style_ref_image: self.send_style_ref_image,
+                deep_think: self.deep_think,
                 style_src_dir: self.style_src_dir.clone(),
                 // Both written: exp_format is the truth, save_jpeg keeps a
                 // pre-阶段4 build reading this prefs file sane.

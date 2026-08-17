@@ -50,8 +50,9 @@ enum Command {
     /// Decode a RAW, ask the AI advisor to propose an edit, have Claude verify
     /// it, and write the recipe JSON + a Lightroom .xmp sidecar (no render).
     /// R20: also runs the visual closed loop — the proposal is RENDERED and
-    /// judged by the vision model, which may buy ONE guided revision (extra
-    /// vision cost per run; batch/eval skip this).
+    /// judged by the vision model, which may buy ONE guided revision (or up to
+    /// three, with --deep or a high --strength; extra vision cost per run,
+    /// batch/eval skip this entirely).
     Analyze {
         /// Path to the RAW file.
         raw: PathBuf,
@@ -73,6 +74,16 @@ enum Command {
         /// told to commit; the clipping/white-point safeguards never move.
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
+        /// DEEP THINKING: the proposer first states the scene, decides each tool
+        /// family explicitly and names the look it is going for, then critiques
+        /// its own answer (printed here in full); its reasoning tier goes up one
+        /// step, and the visual judge may run up to 2-3 guided rounds instead of
+        /// one. COSTS MORE: a normal analyze is at worst 11 API calls (6 with
+        /// images, 8 high-detail); with --deep at a committed strength it is at
+        /// worst 17 calls (10 with images, 14 high-detail), plus ~10-20% more
+        /// output tokens per proposal. `batch` never does this.
+        #[arg(long)]
+        deep: bool,
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
     Apply {
@@ -102,6 +113,10 @@ enum Command {
         /// default 0.65, and 0.5 is the calibrated baseline.
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
+        /// DEEP THINKING (see `analyze --deep`): structured working + a raised
+        /// reasoning tier + a multi-round visual judge. Costs more per photo.
+        #[arg(long)]
+        deep: bool,
         /// Run AI denoise (SCUNet, GPU) before developing — for high-ISO/astro.
         #[arg(long)]
         denoise: bool,
@@ -280,8 +295,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Decode { raw, out } => decode_cmd(&raw, out),
-        Command::Analyze { raw, out, guidance, style, strength } => {
-            analyze_cmd(&raw, out, guidance, style, strength)
+        Command::Analyze { raw, out, guidance, style, strength, deep } => {
+            analyze_cmd(&raw, out, guidance, style, strength, deep)
         }
         Command::Apply { raw, recipe, out } => apply_cmd(&raw, &recipe, &out),
         Command::Auto {
@@ -290,12 +305,14 @@ fn main() -> Result<()> {
             guidance,
             style,
             strength,
+            deep,
             denoise,
             denoise_strength,
             denoise_model,
         } => {
             auto_cmd(
-                &raw, out, guidance, style, strength, denoise, denoise_strength, denoise_model,
+                &raw, out, guidance, style, strength, deep, denoise, denoise_strength,
+                denoise_model,
             )
         }
         Command::Denoise { input, out, strength, model } => denoise_cmd(&input, out, strength, model),
@@ -482,11 +499,20 @@ fn require_choice(flag: &str, value: &str, allowed: &[&str]) -> Result<()> {
 /// it always has. `--strength` omitted is the SHIPPED default (0.65), not the
 /// calibration point: `autoshop analyze` and a double-clicked GUI must develop
 /// the same photo the same way when neither is told otherwise.
-fn analyze_request(style: Option<f32>, strength: Option<f32>, cfg: &Config) -> GradeRequest {
+fn analyze_request(
+    style: Option<f32>,
+    strength: Option<f32>,
+    deep: bool,
+    cfg: &Config,
+) -> GradeRequest {
     GradeRequest {
         style: style.unwrap_or(cfg.style_strength),
         send_reference_image: false,
         strength: GradeStrength::from_optional(strength),
+        // R23-4: opt-in per invocation, and per invocation only — `batch`
+        // builds its request through `GradeRequest::with_style`, which has no
+        // way to reach this flag.
+        think: deep,
     }
 }
 
@@ -496,6 +522,7 @@ fn analyze_cmd(
     guidance: Option<String>,
     style: Option<f32>,
     strength: Option<f32>,
+    deep: bool,
 ) -> Result<()> {
     let cfg = Config::load();
     if let Some(o) = &out {
@@ -509,7 +536,7 @@ fn analyze_cmd(
     // "adjust current edit" path is a web-UI affordance. judge = true: an
     // explicitly invoked single-photo analyze gets the visual closed loop
     // (batch passes false — spend never multiplies silently).
-    let req = analyze_request(style, strength, &cfg);
+    let req = analyze_request(style, strength, deep, &cfg);
     let (recipe, verdict, _notes) =
         produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true)?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
@@ -675,6 +702,7 @@ fn auto_cmd(
     guidance: Option<String>,
     style: Option<f32>,
     strength: Option<f32>,
+    deep: bool,
     denoise: bool,
     denoise_strength: Option<f32>,
     denoise_model: Option<String>,
@@ -694,7 +722,7 @@ fn auto_cmd(
     pipeline::preflight_out(&out, raw)?;
     image::ImageFormat::from_path(&out)
         .with_context(|| format!("unsupported output format {}", out.display()))?;
-    let req = analyze_request(style, strength, &cfg);
+    let req = analyze_request(style, strength, deep, &cfg);
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
@@ -1522,7 +1550,7 @@ mod tests {
         // …and the flag actually decides the request `analyze`/`auto` build —
         // the PRODUCTION resolver, shared by both commands.
         let cfg = autoshop::config::Config { style_strength: 0.3, ..cfg_fixture() };
-        let plain = analyze_request(None, None, &cfg);
+        let plain = analyze_request(None, None, false, &cfg);
         assert_eq!(plain.style, 0.3, "omitted --style keeps AUTOSHOP_STYLE_STRENGTH");
         assert_eq!(
             plain.strength.get(),
@@ -1530,11 +1558,23 @@ mod tests {
             "omitted --strength is the SHIPPED default (0.65) — the CLI and a double-clicked \
              GUI must develop the same photo the same way when neither is told otherwise"
         );
-        let dialled = analyze_request(Some(0.1), Some(0.9), &cfg);
+        let dialled = analyze_request(Some(0.1), Some(0.9), false, &cfg);
         assert_eq!((dialled.style, dialled.strength.get()), (0.1, 0.9), "no axis swap");
         assert!(!dialled.send_reference_image, "every non-GUI surface stays on the text reference");
         // 0.5 is the calibration point, one flag away.
-        assert_eq!(analyze_request(None, Some(0.5), &cfg).strength, GradeStrength::calibrated());
+        assert_eq!(
+            analyze_request(None, Some(0.5), false, &cfg).strength,
+            GradeStrength::calibrated()
+        );
+        // R23-4: `--deep` is the ONLY way this resolver's thinking flag turns
+        // on, and it is a THIRD axis — it must not be confusable with either
+        // dial (`batch` never reaches this function at all).
+        assert!(!plain.think, "omitted --deep is off, like every paid opt-in");
+        assert!(analyze_request(None, None, true, &cfg).think, "--deep must reach the request");
+        assert!(
+            !analyze_request(Some(1.0), Some(1.0), false, &cfg).think,
+            "pushing both dials to the maximum must not buy the thinking envelope"
+        );
     }
     /// L09#1 ordering: with a nonexistent RAW, a bad `-o` must fail on the
     /// OUTPUT (pre-pay preflight), never on decode or a paid call.
@@ -1543,7 +1583,7 @@ mod tests {
         let dir = std::env::temp_dir()
             .join(format!("autoshop-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None)
+        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, false)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "analyze: {e}");
@@ -1553,6 +1593,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
             None,
             None,

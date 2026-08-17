@@ -4307,6 +4307,7 @@
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
             strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            think: app.deep_think,
         };
         assert_eq!(req.strength.get(), 0.9);
         assert_eq!(req.style, 0.2);
@@ -4515,11 +4516,54 @@
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
             strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            think: app.deep_think,
         };
         assert!(req.send_reference_image);
         assert!(
             !autoshop::pipeline::GradeRequest::with_style(0.65).send_reference_image,
             "every non-GUI surface stays on the text reference"
+        );
+    }
+
+    /// R23-4 (feedback #13, "let it think"): the desktop shell of thinking
+    /// mode. It is the most expensive switch on the panel, so the properties
+    /// that matter are: off in BOTH defaults, drawn beside the dials it reads
+    /// (the round budget comes off the Strength band right above it), NOT part
+    /// of the section ● (it is a persisted preference of a paid verb, exactly
+    /// like the reference-photo switch), and actually present in the request the
+    /// analyze worker builds.
+    #[test]
+    fn the_deep_thinking_switch_is_off_by_default_and_rides_the_request() {
+        assert!(
+            !AutoshopApp::default().deep_think,
+            "a fresh app must not start paying for a deeper analyze"
+        );
+        assert!(
+            !Prefs::default().deep_think,
+            "a prefs file written before this key existed must decode to the SAME answer"
+        );
+        let mut app = AutoshopApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Deep thinking"),
+            "the switch was not drawn in a 320 px panel: {seen:?}"
+        );
+        // Same rule as `fit_ai_judge` / `send_style_ref_image`: a remembered
+        // preference is not "this photo's AI inputs carry state".
+        app.deep_think = true;
+        assert!(!app.ai_section_active(), "a preference must not light the section ●");
+
+        let app = AutoshopApp { deep_think: true, ..Default::default() };
+        let req = autoshop::pipeline::GradeRequest {
+            style: app.style_strength,
+            send_reference_image: app.send_style_ref_image,
+            strength: autoshop::recipe::GradeStrength::new(app.grade_strength),
+            think: app.deep_think,
+        };
+        assert!(req.think, "the checkbox must reach the worker's request");
+        assert!(
+            !autoshop::pipeline::GradeRequest::with_style(0.65).think,
+            "every unattended surface stays out of thinking mode"
         );
     }
 

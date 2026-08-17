@@ -199,6 +199,22 @@ pub mod keys {
     pub const JUDGE_UNAVAILABLE: &str =
         " [AI visual review unavailable ({e}) — the develop was not visually \
          checked]";
+    /// R23-4: ONE intermediate round of the multi-round convergence loop. The
+    /// terminal round keeps `JUDGE_ADOPTED` (so a single-round analysis — every
+    /// default-path one — writes exactly what it wrote before this round), and
+    /// each earlier adoption logs here with its number and both scores.
+    pub const JUDGE_ROUND: &str =
+        " [AI visual review round {round}: {score1}/100 → a guided revision \
+         re-scored {score2}/100 and was adopted; still under the {target}/100 \
+         target, so another round was bought]";
+
+    // --- deep thinking mode (pipeline.rs, R23-4) -------------------------
+    /// The proposer's own reading of the photograph, one sentence. Model prose
+    /// rides the arg verbatim (the `{e}`/`{critique}` convention).
+    pub const THINK_SCENE: &str = " [deep thinking — what it saw: {scene}]";
+    pub const THINK_LOOK: &str = " [deep thinking — the look it aimed for: {look}]";
+    pub const THINK_CRITIQUE: &str =
+        " [deep thinking — its own critique against your strength target: {critique}]";
 
     // --- heuristic baseline (advisor/heuristic.rs) ----------------------
     pub const HEURISTIC_UNAVAILABLE: &str =

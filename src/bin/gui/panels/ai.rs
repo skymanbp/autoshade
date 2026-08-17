@@ -15,13 +15,14 @@
 //! carry a 🤖 prefix and a cross-reference tooltip (`util::ai_xref`) instead,
 //! and the index line at the foot of this panel says where each one is.
 //!
-//! R23 lands three more controls HERE (locked plan, docs/ROADMAP.md
-//! 「第二十二至二十四轮计划」): the grade STRENGTH slider (default 0.65), the
-//! thinking-depth control, and the style-library entry with its reference-image
-//! switch. They are analysis-side, so they belong in `ai_analysis` beside
-//! Direction / Style. Two of the three have landed — the library entry (R23-2)
-//! and the STRENGTH slider (R23-3, beside Style: they are one pair of taste
-//! axes, and the reported defect was that only the style half existed).
+//! R23 landed three more controls HERE (locked plan, docs/ROADMAP.md
+//! 「第二十二至二十四轮计划」), all analysis-side and so all inside
+//! `ai_analysis`, beside the Direction they steer: the style-library entry with
+//! its reference-image switch (R23-2), the grade STRENGTH slider (R23-3, beside
+//! Style — they are one pair of taste axes, and the reported defect was that
+//! only the style half existed), and the 「Deep thinking」 switch (R23-4,
+//! feedback #13), which sits under both dials because it reads them: the visual
+//! judge's round budget comes off the Strength band directly above it.
 //!
 //! R23-2 landed the third of those: [`AutoshopApp::ai_style_library`] — the
 //! desktop app's FIRST production-side entry for the style reference library
@@ -213,8 +214,10 @@ impl AutoshopApp {
                 .on_hover_text(tr(lang,
                     "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
                      review: the result is RENDERED and judged by the vision model, which may \
-                     buy one guided revision — extra vision cost per run), written into the \
-                     sliders — undoable. Uses the Direction above; Style steers it.",
+                     buy one guided revision), written into the sliders — undoable. Uses the \
+                     Direction above; Style and Strength steer it. COST, worst case: 11 API \
+                     calls, 6 of them carrying images (8 high-detail frames). 「Deep thinking」 \
+                     below raises that ceiling — its own tooltip has the numbers.",
                 )))
                 .clicked()
             {
@@ -302,6 +305,13 @@ impl AutoshopApp {
                 "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is the calibrated baseline every AI guardrail was tuned at (the behaviour of earlier releases); the default 65% (double-click to reset) leans a little further; above 70% the AI is told to commit to a look. The clipping and white-point safeguards never widen with it.",
             ),
         );
+        // R23-4 (feedback #13): the THIRD analysis-side control, under the two
+        // dials it modifies — the target score and round budget it unlocks are
+        // read off the Strength band directly above it.
+        ui.checkbox(&mut self.deep_think, tr(lang, "Deep thinking"))
+            .on_hover_text(tr(lang,
+                "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the rationale above. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this on at a committed Strength it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
+            ));
         self.ai_style_library(ui);
     }
 

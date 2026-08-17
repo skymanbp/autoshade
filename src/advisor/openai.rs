@@ -19,7 +19,10 @@ use crate::rationale::{keys, render_one, Note};
 use crate::recipe::{EditRecipe, HSL_BANDS};
 
 use super::catalogue::{self, edit_recipe_schema};
-use super::{hist_summary, strip_code_fence, Advisor, AdvisorError, Preview, ProposeContext};
+use super::{
+    hist_summary, strip_code_fence, Advisor, AdvisorError, BoundedUntrustedText, Preview,
+    ProposeContext, Thinking, ToolStep, THINK_FIELD_MAX_BYTES, TOOL_PLAN_MAX,
+};
 use crate::recipe::{GradeStrength, StrengthTier};
 
 pub struct OpenAiProvider {
@@ -245,6 +248,13 @@ state (components, toggles, colour gains) the schema does not carry, and your ma
 discarded wholesale in favour of the original masks.  ",
     );
     instruction.push_str(&catalogue::prompt_catalogue());
+    // R23-4: the thinking envelope's own instructions — the response SHAPE
+    // changes with it, so the two must be switched by the same flag or the
+    // model is asked for a plan it has nowhere to put (or given a schema it
+    // was never told about).
+    if ctx.think {
+        instruction.push_str(&catalogue::think_prompt());
+    }
     // WHITE BALANCE is a PAIR of semantics (#12): the absolute Kelvin
     // target and the relative tint shift. Telling the model only the first
     // leaves it setting `tint` as if that were absolute too — and neither
@@ -286,23 +296,43 @@ do not describe it. IMAGE 1 is the only photo you are developing.  ",
     instruction
 }
 
-impl Advisor for OpenAiProvider {
-    fn name(&self) -> &'static str {
-        "openai"
-    }
+/// The image role's reasoning tiers, in order — the same three the GUI's image
+/// picker offers (`gui::model::EFFORT_TIERS_API`; the five-tier CLI ladder
+/// belongs to the OAuth analysis role, which drives neither propose nor judge).
+const EFFORT_LADDER: [&str; 3] = ["low", "medium", "high"];
 
-    fn propose(
+/// ONE step up that ladder, for a deep-thinking call (R23-4).
+///
+/// Capped at the top tier, and deliberately INERT in the two cases where there
+/// is no current step to add one to:
+///   * `None` — the user's configured "provider default", which `config::effort`
+///     documents as the explicit "send no effort parameter" choice. Inventing a
+///     tier here would override that choice AND, on an endpoint with no
+///     reasoning notion, buy a 400 + retry negotiation on every call.
+///   * an off-ladder tier (`xhigh`, a bridge's own spelling) — `config::effort`
+///     validates SHAPE only, so a config file may legitimately carry one; the
+///     next step up from it is not ours to guess.
+///
+/// The GUI tooltip states both, because a knob that silently does nothing is
+/// the defect this round exists to fix, not to add.
+pub(crate) fn deepen_effort(current: Option<&str>) -> Option<String> {
+    let cur = current?;
+    let i = EFFORT_LADDER.iter().position(|t| *t == cur)?;
+    Some(EFFORT_LADDER[(i + 1).min(EFFORT_LADDER.len() - 1)].to_string())
+}
+
+impl OpenAiProvider {
+    /// The request body for ONE propose call. Extracted from [`Self::propose`]
+    /// so the field-ORDER probe (an `#[ignore]`d live call) sends byte-for-byte
+    /// the request production sends — a probe that rebuilt the body would
+    /// measure its own copy.
+    fn propose_body(
         &self,
         img: &Preview,
         meta: &Meta,
         hist: &Histogram,
         ctx: &ProposeContext,
-    ) -> Result<EditRecipe, AdvisorError> {
-        let key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| AdvisorError::Missing("OPENAI_API_KEY".into()))?;
-
+    ) -> Result<Value, AdvisorError> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&img.jpeg);
         let meta_json = super::advisor_meta_json(meta)?;
         let mut instruction = propose_instruction(&meta_json, &hist_summary(hist), ctx);
@@ -345,7 +375,15 @@ impl Advisor for OpenAiProvider {
                                  "image_url": format!("data:image/jpeg;base64,{rb64}"),
                                  "detail": "high" }));
         }
-        let body = json!({
+        // The response CONTRACT is the one thing thinking mode changes on the
+        // wire: `think: false` sends the schema (and the schema NAME) every
+        // release before R23-4 sent, byte for byte.
+        let (format_name, schema) = if ctx.think {
+            ("develop_plan", catalogue::think_envelope_schema())
+        } else {
+            ("edit_recipe", edit_recipe_schema())
+        };
+        Ok(json!({
             "model": self.model,
             // The Responses API STORES responses (input images included) in
             // the key owner's account by default — under a key planted by a
@@ -359,13 +397,42 @@ impl Advisor for OpenAiProvider {
             }],
             "text": { "format": {
                 "type": "json_schema",
-                "name": "edit_recipe",
+                "name": format_name,
                 "strict": true,
-                "schema": edit_recipe_schema()
+                "schema": schema
             }}
-        });
+        }))
+    }
+
+    /// `propose`, plus the structured WORKING when the caller asked for it
+    /// (R23-4). The [`Advisor`] trait method below is this one with the second
+    /// half dropped — one request builder, one parser, no second code path that
+    /// could drift from the default one.
+    pub fn propose_planned(
+        &self,
+        img: &Preview,
+        meta: &Meta,
+        hist: &Histogram,
+        ctx: &ProposeContext,
+    ) -> Result<(EditRecipe, Option<Thinking>), AdvisorError> {
+        let key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| AdvisorError::Missing("OPENAI_API_KEY".into()))?;
+        let body = self.propose_body(img, meta, hist, ctx)?;
 
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
+        // Deep thinking raises the tier through the EXISTING knob (see
+        // `deepen_effort`): `post_ai_json` spells it per endpoint family and
+        // negotiates it away when the endpoint has no such notion. Never into
+        // the body — a hand-written `reasoning` object sets
+        // `caller_owns_reasoning`, which switches off both the liveness summary
+        // stream and that negotiation.
+        let effort = if ctx.think {
+            deepen_effort(self.effort.as_deref()).or_else(|| self.effort.clone())
+        } else {
+            self.effort.clone()
+        };
         // A high-detail image + strict structured output is the slowest text
         // call in the app (the codex bridge adds its own hop). Streaming-first:
         // the budget bounds SILENCE, not healthy generation time — a real 360 s
@@ -377,7 +444,7 @@ impl Advisor for OpenAiProvider {
             body,
             super::PROPOSE_TIMEOUT_SECS,
             super::SseFamily::Responses,
-            self.effort.as_deref(),
+            effort.as_deref(),
         )?;
 
         let recipe_json = extract_output_text(&value).ok_or_else(|| AdvisorError::Transport(
@@ -387,6 +454,14 @@ impl Advisor for OpenAiProvider {
         // instead of throwing the whole paid call away (see
         // `repair_hsl_axis_lengths`).
         let mut parsed: Value = serde_json::from_str(strip_code_fence(&recipe_json))?;
+        // Unwrap the envelope, keeping the working. A `think` response that
+        // arrived WITHOUT the wrapper (a bridge that ignored the schema) is
+        // read as a bare recipe rather than failing a paid call — the thinking
+        // is the bonus, the recipe is the deliverable.
+        let thinking = ctx
+            .think
+            .then(|| take_thinking(&mut parsed, key))
+            .flatten();
         let repaired = repair_hsl_axis_lengths(&mut parsed);
         let mut recipe: EditRecipe = serde_json::from_value(parsed)?;
         super::project_remote_recipe_text(&mut recipe, &[key]);
@@ -417,8 +492,69 @@ impl Advisor for OpenAiProvider {
         // GATE 2: the same axis that shaped the prompt shapes the soft caps, or
         // a bolder proposal is compressed straight back to the old ceiling here.
         recipe.temper(ctx.strength);
-        Ok(recipe)
+        Ok((recipe, thinking))
     }
+}
+
+impl Advisor for OpenAiProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn propose(
+        &self,
+        img: &Preview,
+        meta: &Meta,
+        hist: &Histogram,
+        ctx: &ProposeContext,
+    ) -> Result<EditRecipe, AdvisorError> {
+        self.propose_planned(img, meta, hist, ctx).map(|(r, _)| r)
+    }
+}
+
+/// Lift the thinking fields OUT of a `develop_plan` envelope and leave the bare
+/// recipe behind in `v`, so everything downstream parses the same object it has
+/// always parsed. `None` when the reply is not an envelope at all.
+///
+/// Every string is bounded and secret-projected HERE, at the trust boundary —
+/// these end up in a rationale that is itself capped, and the plan's `why`
+/// clauses are model prose arriving from a network.
+fn take_thinking(v: &mut Value, key: &str) -> Option<Thinking> {
+    let obj = v.as_object_mut()?;
+    let recipe = obj.remove("recipe")?;
+    let bounded = |val: Option<&Value>, max: usize| -> String {
+        BoundedUntrustedText::new(
+            val.and_then(Value::as_str).unwrap_or("").trim(),
+            max,
+            &[key],
+        )
+        .into_string()
+    };
+    let tool_plan = obj
+        .get("tool_plan")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .take(TOOL_PLAN_MAX)
+                .map(|s| ToolStep {
+                    // 64 bytes: the family names are our own enum, so anything
+                    // longer is a model that ignored it.
+                    control: bounded(s.get("control"), 64),
+                    used: s.get("use").and_then(Value::as_bool).unwrap_or(false),
+                    why: bounded(s.get("why"), THINK_FIELD_MAX_BYTES),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let thinking = Thinking {
+        scene: bounded(obj.get("scene"), THINK_FIELD_MAX_BYTES),
+        tool_plan,
+        intended_look: bounded(obj.get("intended_look"), THINK_FIELD_MAX_BYTES),
+        self_critique: bounded(obj.get("self_critique"), THINK_FIELD_MAX_BYTES),
+    };
+    *v = recipe;
+    Some(thinking)
 }
 
 /// Pad or truncate each `hsl` axis to the 8 ACR bands, returning what was
@@ -539,6 +675,7 @@ pub(crate) fn extract_output_text(v: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::advisor::tests::{join_stub, stub_endpoint};
 
     /// Strict mode cannot bound an array's LENGTH, so a miscounted HSL axis is
     /// a real response shape — and it used to fail the WHOLE recipe parse,
@@ -830,6 +967,258 @@ mod tests {
             text.contains("IMAGE 1 is the RAW preview to develop")
                 && text.contains("IMAGE 2 is a FINISHED photo"),
             "the prompt must tell the model which frame is which: {text}"
+        );
+    }
+
+    /// R23-4 (feedback #13), the half that protects everyone who did NOT ask
+    /// for it: with `think: false` the request is the shipped one — same schema
+    /// OBJECT, same schema NAME, no thinking instructions in the prompt, and
+    /// the effort tier untouched.
+    ///
+    /// This is the test the cost guardrail rests on. `pipeline::produce_recipe`
+    /// calls `propose` unconditionally, BEFORE the judge gate, so batch and eval
+    /// go through this exact path on every photo; a thinking field that leaked
+    /// into the default request would enlarge a 500-photo batch's bill and move
+    /// the eval baseline the restraint constants are calibrated against.
+    #[test]
+    fn a_default_propose_is_byte_for_byte_the_shipped_request() {
+        let reply = serde_json::json!({
+            "output": [{ "content": [{ "type": "output_text",
+                                       "text": "{\"exposure_ev\":0.2}" }] }]
+        })
+        .to_string();
+        let (url, seen, handle) = stub_endpoint(vec![(200, "application/json", reply)]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        p.propose(
+            &Preview { jpeg: b"TARGETJPEG".to_vec() },
+            &meta_fixture(),
+            &hist_fixture(),
+            &ProposeContext::default(),
+        )
+        .expect("the stub reply parses");
+        join_stub(handle);
+        let body: Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+        let format = &body["text"]["format"];
+        assert_eq!(format["name"], "edit_recipe", "the schema NAME is part of the shape");
+        assert_eq!(
+            format["schema"],
+            edit_recipe_schema(),
+            "think:false must send the bare recipe schema — no envelope, not even an empty one"
+        );
+        assert_eq!(format["strict"], true);
+        let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        for leak in ["THINK FIRST", "tool_plan", "self_critique", "intended_look"] {
+            assert!(!text.contains(leak), "the default prompt must not carry `{leak}`: {text}");
+        }
+        // `reasoning` itself is present — that is post_ai_json's liveness
+        // summary stream, on every Responses call since long before this round.
+        // What must be absent is the TIER: none was configured, so none is sent.
+        assert!(
+            body["reasoning"].get("effort").is_none(),
+            "no tier was configured, so none may be sent: {body}"
+        );
+    }
+
+    /// The opt-in half: one call, one paid request, and the working comes back
+    /// beside the recipe.
+    ///
+    /// Pinned on the WIRE (the envelope is the whole feature — a schema the
+    /// request does not carry is not a schema) and on the PARSE: the recipe is
+    /// lifted out of the envelope so everything downstream sees the object it
+    /// has always seen, and the thinking is bounded on arrival because it is
+    /// model prose on its way to a capped rationale.
+    #[test]
+    fn deep_thinking_wraps_the_same_recipe_schema_and_returns_the_plan() {
+        let long = "x".repeat(4096);
+        let inner = serde_json::json!({
+            "scene": format!("A backlit harbour at dusk. {long}"),
+            "tool_plan": [
+                {"control": "tone", "use": true, "why": "the histogram is flat"},
+                {"control": "hsl", "use": false, "why": "the palette is already clean"},
+            ],
+            "intended_look": "warm, committed, with a real black point",
+            "recipe": {"exposure_ev": 0.4, "rationale": "lifted the shadows"},
+            "self_critique": format!("Could go further on contrast. {long}"),
+        })
+        .to_string();
+        let reply = serde_json::json!({
+            "output": [{ "content": [{ "type": "output_text", "text": inner }] }]
+        })
+        .to_string();
+        let (url, seen, handle) = stub_endpoint(vec![(200, "application/json", reply)]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        let (recipe, thinking) = p
+            .propose_planned(
+                &Preview { jpeg: b"TARGETJPEG".to_vec() },
+                &meta_fixture(),
+                &hist_fixture(),
+                &ProposeContext { think: true, ..Default::default() },
+            )
+            .expect("the envelope reply parses");
+        join_stub(handle);
+
+        // The wire: ONE request, the envelope schema, and the recipe schema
+        // nested inside it UNCHANGED (no second copy of the contract).
+        let body: Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+        let format = &body["text"]["format"];
+        assert_eq!(format["name"], "develop_plan");
+        assert_eq!(format["schema"], catalogue::think_envelope_schema());
+        assert_eq!(format["schema"]["properties"]["recipe"], edit_recipe_schema());
+        assert_eq!(
+            format["schema"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["scene", "tool_plan", "intended_look", "recipe", "self_critique"],
+        );
+        assert_eq!(body["store"], false, "the photo-exfiltration rule is not a mode");
+        let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("THINK FIRST"), "the prompt must explain the envelope: {text}");
+        assert!(text.contains("• hsl —"), "…and list the families from the registry");
+
+        // The parse: the recipe survived the unwrapping, the plan came with it.
+        assert_eq!(recipe.exposure_ev, 0.4);
+        assert!(recipe.rationale.contains("lifted the shadows"));
+        let t = thinking.expect("thinking mode returns the working");
+        assert!(t.scene.starts_with("A backlit harbour at dusk."));
+        assert!(
+            t.scene.len() <= crate::advisor::THINK_FIELD_MAX_BYTES
+                && t.self_critique.len() <= crate::advisor::THINK_FIELD_MAX_BYTES,
+            "a 4 KiB 'one sentence' must be bounded before it reaches the rationale"
+        );
+        assert_eq!(t.intended_look, "warm, committed, with a real black point");
+        assert_eq!(t.tool_plan.len(), 2);
+        assert_eq!(t.tool_plan[0].control, "tone");
+        assert!(t.tool_plan[0].used && !t.tool_plan[1].used);
+        assert_eq!(t.tool_plan[1].why, "the palette is already clean");
+
+        // Fail-open: a bridge that ignored the schema and answered a BARE
+        // recipe still yields the develop — the working is the bonus.
+        let bare = serde_json::json!({
+            "output": [{ "content": [{ "type": "output_text",
+                                       "text": "{\"exposure_ev\":0.9}" }] }]
+        })
+        .to_string();
+        let (url, _seen, handle) = stub_endpoint(vec![(200, "application/json", bare)]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        let (recipe, thinking) = p
+            .propose_planned(
+                &Preview { jpeg: b"J".to_vec() },
+                &meta_fixture(),
+                &hist_fixture(),
+                &ProposeContext { think: true, ..Default::default() },
+            )
+            .expect("a bare recipe is still a recipe");
+        join_stub(handle);
+        assert_eq!(recipe.exposure_ev, 0.9);
+        assert_eq!(thinking, None, "no envelope, no claim of one");
+    }
+
+    /// The effort half of "deep thinking": ONE step up the image role's ladder,
+    /// spelled by `post_ai_json` through the existing knob — never a hand-built
+    /// `reasoning` object, which would set `caller_owns_reasoning` and switch
+    /// off both the liveness summary stream and the tier negotiation.
+    #[test]
+    fn deep_thinking_raises_the_effort_tier_one_step_and_never_invents_one() {
+        // The ladder itself, including its two INERT cases.
+        assert_eq!(deepen_effort(Some("low")).as_deref(), Some("medium"));
+        assert_eq!(deepen_effort(Some("medium")).as_deref(), Some("high"));
+        assert_eq!(deepen_effort(Some("high")).as_deref(), Some("high"), "capped at the top");
+        assert_eq!(deepen_effort(None), None, "'provider default' is an explicit choice");
+        assert_eq!(deepen_effort(Some("xhigh")), None, "an off-ladder tier is not ours to guess");
+
+        // …and on the wire, where it has to arrive as `reasoning.effort`.
+        let reply = serde_json::json!({
+            "output": [{ "content": [{ "type": "output_text", "text": "{\"exposure_ev\":0}" }] }]
+        })
+        .to_string();
+        let sent = |think: bool, tier: Option<&str>| -> Value {
+            let (url, seen, handle) =
+                stub_endpoint(vec![(200, "application/json", reply.clone())]);
+            let mut cfg = cfg_for(&url);
+            cfg.image_effort = tier.map(str::to_string);
+            let p = OpenAiProvider::new(&cfg);
+            p.propose(
+                &Preview { jpeg: b"J".to_vec() },
+                &meta_fixture(),
+                &hist_fixture(),
+                &ProposeContext { think, ..Default::default() },
+            )
+            .expect("the stub reply parses");
+            join_stub(handle);
+            serde_json::from_str(&seen.lock().unwrap()[0]).unwrap()
+        };
+        assert_eq!(sent(false, Some("low"))["reasoning"]["effort"], "low", "the user's own tier");
+        assert_eq!(sent(true, Some("low"))["reasoning"]["effort"], "medium", "one step, not two");
+        assert!(
+            sent(true, None)["reasoning"].get("effort").is_none(),
+            "thinking must not invent a tier where the user chose the provider's default"
+        );
+    }
+
+    /// The one thing this round could NOT verify without spending money, kept
+    /// as an executable question instead of a claim (R23-4's implementation
+    /// guard rail).
+    ///
+    /// `catalogue::think_envelope_schema` lists the thinking fields BEFORE
+    /// `recipe` in `required`, and the prompt states that order — but whether
+    /// OpenAI's strict structured output GENERATES fields in the declared order
+    /// is undocumented, and if it does not, "think before you write" is only as
+    /// strong as the prompt. This probe measures it on a real call: the byte
+    /// offset of `"scene"` in the RAW response text must precede `"recipe"`.
+    ///
+    /// Run it deliberately (it costs one paid vision call):
+    ///   AUTOSHOP_THINK_PROBE_KEY=sk-… cargo test --lib -- --ignored think_envelope_field_order
+    /// `AUTOSHOP_THINK_PROBE_MODEL` / `AUTOSHOP_THINK_PROBE_BASE` override the
+    /// model (default `gpt-5`) and the endpoint (default the OpenAI API).
+    #[test]
+    #[ignore = "live probe: needs AUTOSHOP_THINK_PROBE_KEY and spends one paid vision call"]
+    fn think_envelope_field_order_probe() {
+        let Ok(key) = std::env::var("AUTOSHOP_THINK_PROBE_KEY") else {
+            panic!("set AUTOSHOP_THINK_PROBE_KEY to the image-role API key");
+        };
+        let mut cfg = cfg_for(
+            &std::env::var("AUTOSHOP_THINK_PROBE_BASE")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+        );
+        cfg.openai_api_key = Some(key.clone());
+        cfg.openai_model =
+            std::env::var("AUTOSHOP_THINK_PROBE_MODEL").unwrap_or_else(|_| "gpt-5".to_string());
+        let p = OpenAiProvider::new(&cfg);
+
+        // A tiny synthetic frame: this measures FIELD ORDER, not photography.
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 64, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 4) as u8, 128])
+        }))
+        .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+        .expect("encode the probe frame");
+        let ctx = ProposeContext { think: true, ..Default::default() };
+        let body = p
+            .propose_body(&Preview { jpeg }, &meta_fixture(), &hist_fixture(), &ctx)
+            .expect("the probe body builds");
+        let value = super::super::post_ai_json(
+            &format!("{}/responses", cfg.openai_base_url.trim_end_matches('/')),
+            &key,
+            body,
+            super::super::PROPOSE_TIMEOUT_SECS,
+            super::super::SseFamily::Responses,
+            deepen_effort(cfg.image_effort.as_deref()).as_deref(),
+        )
+        .expect("the probe call completes");
+        let text = extract_output_text(&value).expect("the probe response carries output text");
+        eprintln!("probe response ({} bytes):\n{text}", text.len());
+        let at = |k: &str| text.find(k).unwrap_or_else(|| panic!("`{k}` is missing: {text}"));
+        let (scene, plan, recipe, critique) =
+            (at("\"scene\""), at("\"tool_plan\""), at("\"recipe\""), at("\"self_critique\""));
+        eprintln!("offsets: scene={scene} tool_plan={plan} recipe={recipe} critique={critique}");
+        assert!(
+            scene < recipe && plan < recipe,
+            "strict mode did NOT generate the declared order — the envelope still \
+             structures the answer, but 'think before you write' would then rest on the \
+             prompt alone; record this and consider the separate plan role"
         );
     }
 }

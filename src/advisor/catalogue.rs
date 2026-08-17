@@ -847,6 +847,159 @@ fn local_adjustment_schema() -> Value {
     strict_object(&LOCAL_CONTROLS)
 }
 
+// ── control FAMILIES + the thinking envelope (R23-4, feedback #13) ──────────
+
+/// One FAMILY of develop controls — the vocabulary the thinking mode writes
+/// its `tool_plan` in.
+///
+/// NOT one row per field: 33 global controls × `{use, why}` would multiply the
+/// response (and its cost) for no gain, while the reported defect is that whole
+/// CLASSES of tool go unconsidered ("it never touches hsl or color_grade"),
+/// which is a question about families. `members` are [`RECIPE_CONTROLS`] names
+/// and the partition is pinned BOTH ways by
+/// `every_ai_visible_control_belongs_to_exactly_one_family`, so a control added
+/// to the registry cannot quietly fall outside the plan the model is asked to
+/// make.
+#[derive(Debug, Clone, Copy)]
+pub struct Family {
+    /// The wire spelling — one value of the `control` enum in the envelope
+    /// schema, and the word the prompt uses.
+    pub name: &'static str,
+    /// What the model is told this family covers.
+    pub covers: &'static str,
+    /// The registry rows it owns.
+    pub members: &'static [&'static str],
+}
+
+/// The 9 families the AI-visible global controls partition into.
+pub const CONTROL_FAMILIES: [Family; 9] = [
+    Family {
+        name: "tone",
+        covers: "exposure, contrast and the four tonal bands (highlights / shadows / whites / blacks)",
+        members: &["exposure_ev", "contrast", "highlights", "shadows", "whites", "blacks"],
+    },
+    Family {
+        name: "white_balance",
+        covers: "the absolute Kelvin target and the relative green/magenta tint",
+        members: &["temperature_k", "tint"],
+    },
+    Family {
+        name: "presence",
+        covers: "vibrance, saturation, clarity and dehaze",
+        members: &["vibrance", "saturation", "clarity", "dehaze"],
+    },
+    Family {
+        name: "hsl",
+        covers: "the 8-band hue / saturation / luminance colour mixer",
+        members: &["hsl"],
+    },
+    Family {
+        name: "color_grade",
+        covers: "the shadow / midtone / highlight / global colour-grading wheels",
+        members: &["color_grade"],
+    },
+    Family {
+        name: "curves",
+        covers: "the master tone curve and the three per-channel RGB curves",
+        members: &["tone_curve", "red_curve", "green_curve", "blue_curve"],
+    },
+    Family {
+        name: "detail",
+        covers: "capture sharpening and global luminance noise reduction",
+        members: &["sharpening", "noise_reduction"],
+    },
+    Family {
+        name: "framing",
+        covers: "the crop rectangle and the straighten angle",
+        members: &["straighten_deg", "crop"],
+    },
+    Family {
+        name: "masks",
+        covers: "local (masked) adjustments — dodging, burning, holding a sky back",
+        members: &["masks"],
+    },
+];
+
+/// The AI-visible rows that are BOOKKEEPING rather than develop tools, so they
+/// belong to no family. Spelled out (not inferred) so a future non-tool field
+/// is a deliberate edit here rather than a silent hole in the partition.
+pub const NOT_A_TOOL: [&str; 3] = ["version", "rationale", "confidence"];
+
+/// The five-field THINKING ENVELOPE (R23-4): the model states what it sees,
+/// which tool families it will use and why, and the look it is aiming for
+/// BEFORE it writes the numbers — then critiques its own answer after.
+///
+/// `recipe` is the SAME [`edit_recipe_schema`] the default path sends, nested
+/// verbatim: the thinking fields are not develop controls and must never enter
+/// [`RECIPE_CONTROLS`] (they would reach `recipe.json`, the XMP comment,
+/// `deny_unknown_fields` downgrades and R21's `recipe_norm` structure
+/// fingerprint). One envelope, one paid call, zero new roles.
+///
+/// ORDER, honestly: `required` lists the fields in thinking order, and the
+/// prompt states that order explicitly. Whether OpenAI's strict structured
+/// output GENERATES fields in the declared order is UNVERIFIED — it cannot be
+/// tested without a real paid call, so the probe lives as an `#[ignore]`d,
+/// env-gated test (`openai::tests::think_envelope_field_order_probe`). The
+/// envelope's structural benefits (an explicit plan, an auditable self-critique,
+/// a per-family use/skip decision) do not depend on generation order; only the
+/// "think before you write" strength does. `properties` is alphabetical on the
+/// wire regardless — this tree's `serde_json` has no `preserve_order` feature,
+/// so a JSON object's keys serialize sorted, exactly as the recipe schema's
+/// own properties already do.
+pub fn think_envelope_schema() -> Value {
+    let families: Vec<Value> =
+        CONTROL_FAMILIES.iter().map(|f| Value::String(f.name.to_string())).collect();
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scene", "tool_plan", "intended_look", "recipe", "self_critique"],
+        "properties": {
+            "scene": {"type": "string"},
+            "tool_plan": {"type": "array", "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["control", "use", "why"],
+                "properties": {
+                    "control": {"type": "string", "enum": Value::Array(families)},
+                    "use": {"type": "boolean"},
+                    "why": {"type": "string"}
+                }
+            }},
+            "intended_look": {"type": "string"},
+            "recipe": edit_recipe_schema(),
+            "self_critique": {"type": "string"}
+        }
+    })
+}
+
+/// The prompt half of the envelope: what each field means, in the order the
+/// response must take. Generated from [`CONTROL_FAMILIES`] so the plan's
+/// candidate list can never advertise a family the schema's enum rejects.
+pub fn think_prompt() -> String {
+    let list: String = CONTROL_FAMILIES
+        .iter()
+        .map(|f| format!("  • {} — {}\n", f.name, f.covers))
+        .collect();
+    format!(
+        "THINK FIRST, THEN ANSWER. Your reply is an ENVELOPE whose keys must be emitted in \
+THIS ORDER: `scene`, `tool_plan`, `intended_look`, `recipe`, `self_critique`. Write the first \
+three BEFORE the numbers — they are your working, not a summary of it.\n\
+  1. `scene` — ONE sentence on what this photograph is and what its light is doing.\n\
+  2. `tool_plan` — ONE entry for EACH tool family below, in this order, with `use` true or \
+false and ONE short clause of `why`. \"this photo does not need it\" is a valid reason; \
+\"I did not consider it\" is not. Deciding a family is unnecessary is a real decision — make it \
+explicitly rather than by omission.\n\
+{list}\
+  3. `intended_look` — ONE sentence naming the finished look you are going for.\n\
+  4. `recipe` — the EditRecipe itself, which must EXECUTE the plan above: a family you marked \
+`use: true` has to show up in the numbers, and one you marked `use: false` stays at its neutral \
+value.\n\
+  5. `self_critique` — ONE sentence judging your own answer against the TARGET STRENGTH \
+above: is this a finished photograph at that strength, or did you play it safe? Name the \
+weakest part.\n"
+    )
+}
+
 /// JSON Schema for [`EditRecipe`] in OpenAI strict mode: every property listed
 /// in `required`, `additionalProperties:false`, optionals expressed as
 /// nullable — DERIVED from [`RECIPE_CONTROLS`] (R23-1), so a new recipe field
@@ -1477,5 +1630,95 @@ mod tests {
         // other as absolute too.
         assert!(text.contains("ABSOLUTE colour temperature in Kelvin"), "{text}");
         assert!(text.contains("RELATIVE to the as-shot white balance"), "{text}");
+    }
+
+    /// R23-4: the `tool_plan`'s candidate list is a PARTITION of the registry's
+    /// AI-visible global rows — every tool belongs to exactly one family, and no
+    /// family names a control that does not exist.
+    ///
+    /// This is the same guarantee `prompt_catalogue` gets from the registry, one
+    /// level up: without it a control added in a later round would be in the
+    /// schema and in the prompt catalogue while being absent from the plan the
+    /// model is asked to make about its own tools — the exact blind spot #13
+    /// reports, reintroduced through the back door.
+    #[test]
+    fn every_ai_visible_control_belongs_to_exactly_one_family() {
+        let mut owned: Vec<&str> = Vec::new();
+        for f in &CONTROL_FAMILIES {
+            for m in f.members {
+                assert!(
+                    !owned.contains(m),
+                    "{m} is claimed by two families — the plan would ask about it twice"
+                );
+                owned.push(m);
+            }
+        }
+        let owned: BTreeSet<String> = owned.into_iter().map(str::to_string).collect();
+        let tools: BTreeSet<String> = names(&RECIPE_CONTROLS, Some(false))
+            .into_iter()
+            .filter(|n| !NOT_A_TOOL.contains(&n.as_str()))
+            .collect();
+        assert_same(
+            "the tool families",
+            ("the registry's AI-visible develop tools", &tools),
+            ("the families' members", &owned),
+        );
+        // The bookkeeping rows really are AI-visible rows (an obsolete
+        // exclusion would silently shrink the left side above).
+        for n in NOT_A_TOOL {
+            assert!(
+                global_control(n).is_some_and(|c| !c.engine_only),
+                "{n} is excluded from the plan but is not an AI-visible control"
+            );
+        }
+        // The schema's enum IS the family list, and the prompt names each one.
+        let schema = think_envelope_schema();
+        let enum_values: Vec<&str> = schema["properties"]["tool_plan"]["items"]["properties"]
+            ["control"]["enum"]
+            .as_array()
+            .expect("the control field is an enum")
+            .iter()
+            .map(|v| v.as_str().expect("enum values are strings"))
+            .collect();
+        assert_eq!(
+            enum_values,
+            CONTROL_FAMILIES.iter().map(|f| f.name).collect::<Vec<_>>(),
+            "the schema enum must be the family table, in its order"
+        );
+        let prompt = think_prompt();
+        for f in &CONTROL_FAMILIES {
+            assert!(prompt.contains(f.name), "{} is missing from the think prompt", f.name);
+            assert!(prompt.contains(f.covers), "{}'s coverage line is missing", f.name);
+        }
+    }
+
+    /// The envelope wraps the recipe schema VERBATIM and adds four thinking
+    /// fields — it must not fork a second copy of the recipe contract, and the
+    /// thinking fields must not leak into the recipe (they would reach
+    /// recipe.json, the XMP comment and R21's structure fingerprint).
+    #[test]
+    fn the_think_envelope_nests_the_recipe_schema_unchanged() {
+        let env = think_envelope_schema();
+        assert_eq!(
+            env["properties"]["recipe"],
+            edit_recipe_schema(),
+            "the nested recipe must be the SAME schema the default path sends"
+        );
+        assert_eq!(
+            env["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["scene", "tool_plan", "intended_look", "recipe", "self_critique"],
+            "the required array is the declared thinking ORDER (see the fn's note on \
+             generation order — the probe test measures reality)"
+        );
+        assert_eq!(env["additionalProperties"], false, "strict mode");
+        // The thinking fields are NOT registry rows — the recipe's own key set
+        // is untouched by the envelope.
+        let recipe_keys = required_keys(&edit_recipe_schema());
+        for f in ["scene", "tool_plan", "intended_look", "self_critique"] {
+            assert!(
+                !recipe_keys.contains(f),
+                "{f} reached the RECIPE schema — it would land in recipe.json and the XMP"
+            );
+        }
     }
 }

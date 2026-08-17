@@ -16,6 +16,7 @@ impl AutoshopApp {
             app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
             app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
             app.send_style_ref_image = prefs.send_style_ref_image;
+            app.deep_think = prefs.deep_think;
             // Only a folder that still EXISTS is prefilled: a picker opened at
             // a deleted path lands wherever the OS decides (the same rule the
             // gallery restore above follows).
@@ -2157,6 +2158,10 @@ impl AutoshopApp {
             // here for the same reason, and separate from `style` on purpose
             // (「像不像我」 vs 「下手多重」).
             strength: autoshop::recipe::GradeStrength::new(self.grade_strength),
+            // R23-4: read on the UI thread with the rest of the request, for
+            // the same reason — a checkbox flipped mid-call must not change
+            // what this call is paying for.
+            think: self.deep_think,
         };
         // Free-text direction ("warmer, moodier") steers the proposal; with
         // `refine` (its own button now — no pre-armed checkbox), the AI

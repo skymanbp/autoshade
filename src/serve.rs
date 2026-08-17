@@ -1387,6 +1387,13 @@ struct AnalyzeReq {
     /// gets — the same answer the desktop app's own default gives.
     #[serde(default)]
     grade_strength: Option<f32>,
+    /// DEEP THINKING (R23-4, feedback #13): the proposer returns its structured
+    /// working in the same response, its reasoning tier goes up one step, and
+    /// the visual judge may converge over more than one round. Absent = `false`,
+    /// which is the shape every older client sends and the only shape that
+    /// leaves the request byte-identical to the previous release's.
+    #[serde(default)]
+    deep: Option<bool>,
     /// A box the user dragged on the image (normalized 0..1) to target a local
     /// edit; the direction is then applied to a mask over that region.
     #[serde(default)]
@@ -1751,7 +1758,16 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         false,
         guidance,
         refine_base.as_ref(),
-        pipeline::GradeRequest { style, send_reference_image: false, strength: grade },
+        // `deep` is opt-in per request and absent by default (R23-4): a browser
+        // session must not start paying for a thinking envelope, a raised
+        // reasoning tier and up to three judge rounds through a field it never
+        // set — the same rule as the reference photo above.
+        pipeline::GradeRequest {
+            style,
+            send_reference_image: false,
+            strength: grade,
+            think: req.deep.unwrap_or(false),
+        },
         true,
     )?;
     // A non-Accept verdict may not auto-save (user decision): the verifier

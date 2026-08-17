@@ -196,6 +196,10 @@ pub(crate) struct Prefs {
     /// answer as [`Prefs::default`], so an upgrade never silently starts
     /// spending an extra image per analysis.
     pub(crate) send_style_ref_image: bool,
+    /// R23-4: deep thinking. `#[serde(default)]` on the struct decodes an older
+    /// prefs file as `false` — the same answer [`Prefs::default`] gives, so an
+    /// upgrade never silently starts paying for a deeper (and longer) analyze.
+    pub(crate) deep_think: bool,
     /// The folder the style library was last built from (R23-2), so a rebuild
     /// starts where the last build did.
     pub(crate) style_src_dir: Option<PathBuf>,
@@ -231,6 +235,7 @@ impl Default for Prefs {
             grade_strength: GRADE_STRENGTH_DEFAULT,
             // OFF, like every other paid opt-in here (see `fit_ai_judge`).
             send_style_ref_image: false,
+            deep_think: false,
             style_src_dir: None,
             save_jpeg: false,
             exp_format: 0,
