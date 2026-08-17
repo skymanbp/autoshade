@@ -583,7 +583,10 @@ pub(crate) fn effort_picker(
 /// Save-all writes one per stashed photo so background variants survive the
 /// quit (before v0.22 they were "unsavable" and pinned the dialog forever).
 pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshop::store::VariantsRecord> {
-    if st.others.is_empty() && st.kind == VariantKind::Original {
+    // The ONE triviality judgement (R24-3), shared with the live strip's
+    // `current_strip_record`: a lone base negative needs no sidecar UNLESS
+    // it carries a name or a minted identity, which nothing else stores.
+    if crate::model::strip_is_trivial(st.kind, &st.id, st.name.as_deref(), st.others.len()) {
         return None;
     }
     Some(autoshop::store::VariantsRecord {

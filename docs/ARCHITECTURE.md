@@ -582,7 +582,58 @@ three-valued kind, each card since v0.30.0 also carrying an opaque stable
 `deny_unknown_fields`, so an older build reads a newer strip and simply
 ignores the pair), which is what lets a 「反推 Reverse-fit」 or 「AI 生成」
 card survive a reopen and lets the quit dialog's Save-all genuinely save
-background variants instead of livelocking. Copy the XMP beside the RAW when
+background variants instead of livelocking.
+
+The strip record's ACTIVE half (`active_kind` / `active_pos` / `active_id` /
+`active_name`) describes the card whose develop `recipe.json` mirrors, so
+v0.30.0 gives every writer of a develop ONE way to keep it truthful:
+`store::variants_member(src, ActiveWrite)` produces the commit's `variants`
+member and nothing else decides it. The GUI (Ctrl+S, the Analyze landing)
+OWNS the strip and hands the whole record over — `Strip(Some(rec))`, or
+`Strip(None)` when the strip went trivial, which clears the file; a writer
+that only knows the KIND of develop it published says so (`Kind("fitted")` —
+the CLI `match`, the GUI reverse-fit worker; never `"original"`, because a
+photo has exactly one base negative and a second Original card could never be
+deleted again); a writer that learned nothing about the card leaves the record
+standing (`Unknown` — the web save, the batch paste). Before this, five
+production writers published a new active develop with `variants: Keep` and a
+CLI `match` over a photo whose record said `original` reopened as 「▣ 原片」
+holding a reverse-fit; the batch paste was the fifth and did not go through
+`commit_develop` at all (it now does, so its recipe write is a single
+generation like every other). A "trivial" strip is one card, kind Original,
+with no name and no minted identity (`model::strip_is_trivial`, shared by the
+live strip and the navigation stash) — since the cards became renameable in
+v0.30.0, a name or an id IS a reason for the record to exist, because nothing
+else stores either.
+
+On the strip itself the ACTIVE card carries the actions that act on the live
+canvas: 「＋」 saves the develop as a numbered snapshot (v0.30.0), the card's
+name is editable in place (the rename buffer is keyed by the card's own id, so
+an async push that renumbers the strip cannot land the text on another card),
+and 「▣」 copies this card's develop onto the ▣ Original card. That last one
+keeps two things apart on purpose: it overwrites the Original CARD's develop
+PARAMETERS — its baked pixels and raster origin stay, and the source card
+survives (Lightroom's 「Set Copy as Original」) — while Ctrl+S is what
+afterwards makes that card's develop the photo's saved develop in
+`recipe.json`. It is one Ctrl+Z, because it lands the canvas on the Original
+first (which reseeds history with that card's own develop) and commits exactly
+one step; a pixel-state card shows the button DISABLED with the reverse-fit
+remedy, the same judgement Ctrl+S's XMP refusal and 「＋」 apply. The 「✕」
+ARMS before it fires: deleting a card is irreversible in a way deleting a
+version is not the mirror of — undo history is per-variant by contract and no
+registry can bring a card back the way `.deleted-versions.json` keeps a
+deleted number burned — so the first click asks and the second deletes.
+
+`store::list_edits(src)` is the read side: a photo's whole edit-state list in
+one query — the strip's cards in strip order, then its version snapshots
+ascending with their advisory metadata attached (restricted to numbers that
+are actually listed, so a kill between a delete's sweep and its metadata drop
+can never surface a phantom row). It is a synthesized VIEW, never a stored
+one: the two halves live in different files under deliberately different
+lifecycle rules (`variants.json` is a generation member a develop clear
+sweeps; the `v<n>` family is kept). A live editor's in-memory strip outranks
+the variant half, so the GUI consumes the version half and keeps rendering its
+own cards; for every non-GUI surface this IS the list. Copy the XMP beside the RAW when
 you want Lightroom to pick it up. A Lightroom sidecar that already sits beside
 the RAW is READ on open — the newer intent wins — and never overwritten (mask
 corrections it carries that classic import can't represent — brush / AI /

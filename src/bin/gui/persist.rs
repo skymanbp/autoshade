@@ -525,6 +525,50 @@ pub(crate) fn stamp_calibration(
     }
 }
 
+/// Reconcile a LOADED SNAPSHOT's calibration with the card it lands on
+/// (R24-3) — the two directions of one rule, in one place.
+///
+/// A version snapshot is a develop taken off SOME card, and calibration
+/// (camera base curve, in-camera lens profile, as-shot anchor) belongs to the
+/// card's PIXELS, never to the snapshot:
+///
+/// * onto a PIXEL-STATE card the calibration is STRIPPED — its raster already
+///   carries the camera look, the lens geometry and a baked white balance, so
+///   rendering them again cooks each twice;
+/// * off a pixel-state card the snapshot arrives WITHOUT any (the rule above
+///   applied when it was saved) and its era stamp is current by default, so
+///   loading it onto a parametric card left the negative rendering with no
+///   camera base look at all and the pre-era repair declined it twice over
+///   (stamp current, curve shorter than three knots). That direction had no
+///   owner until R24-3; this is it.
+///
+/// `calibration` is a closure so the photo's estimate — a RAW decode — is
+/// paid only in the branch that needs it. Returns whether a stamp happened,
+/// for the caller's disclosure.
+pub(crate) fn reconcile_snapshot_calibration(
+    r: &mut EditRecipe,
+    onto_pixel_state: bool,
+    calibration: impl FnOnce() -> (Vec<[f32; 2]>, autoshop::recipe::LensProfile, Option<(f32, f32)>),
+) -> bool {
+    if onto_pixel_state {
+        r.base_curve = Vec::new();
+        r.lens_profile = Default::default();
+        // The anchor too: baked pixels carry a baked white balance, so an
+        // absolute-Kelvin claim over them would be false — a generated canvas
+        // keeps the relative 5500 model.
+        r.as_shot_k = None;
+        r.as_shot_tint = None;
+        return false;
+    }
+    if !r.base_curve.is_empty() {
+        return false; // the snapshot brought its own calibration
+    }
+    let (knots, lens, as_shot) = calibration();
+    let stamped = !knots.is_empty();
+    stamp_calibration(r, &knots, &lens, as_shot);
+    stamped
+}
+
 /// Rebuild the background-variant strip from the persisted record: kind
 /// strings parse (an unknown kind drops that variant LOUDLY), identities and
 /// names come back with their cards (R24-2 — an id-less legacy entry is

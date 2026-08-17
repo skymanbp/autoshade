@@ -738,11 +738,12 @@ impl AutoshopApp {
     /// write — steer the user to 反推 (which produces a Fitted variant whose XMP
     /// IS the look). Always keyed to the original RAW `src_path`.
     pub(crate) fn save_xmp(&mut self) {
-        // Flush a typed-but-uncommitted mask rename FIRST (U10): every save
-        // entry point (Ctrl+S, the Save develop button) must write the name
-        // the user sees in the box, not the pre-focus snapshot.
-        self.commit_mask_name_buf();
-        self.commit_version_name_buf(); // the version half of the same rule
+        // Flush every typed-but-uncommitted name FIRST (U10): a save entry
+        // point (Ctrl+S, the Save develop button) must write the names the
+        // user sees in the boxes, not the pre-focus snapshots — and the
+        // strip record this save publishes carries the card names, so the
+        // card box has to land before the record is built.
+        self.commit_pending_names();
         let lang = self.lang;
         if self.active_is_generated() {
             // A keyboard Ctrl+S refusal must be SEEN — the status line alone
@@ -931,12 +932,14 @@ impl AutoshopApp {
                 // on the next open.
                 None => autoshop::store::CommitMember::Clear,
             };
-            let variants = match &strip_rec {
-                Some(rec) => autoshop::store::CommitMember::Write(
-                    autoshop::store::variants_record_bytes(&path, rec)?,
-                ),
-                None => autoshop::store::CommitMember::Clear,
-            };
+            // The strip half through the ONE owner (R24-4
+            // `store::variants_member`): Ctrl+S is the writer that OWNS the
+            // whole strip, so it hands the live record over verbatim — and
+            // a trivial strip still clears the record, exactly as before.
+            let variants = autoshop::store::variants_member(
+                &path,
+                autoshop::store::ActiveWrite::Strip(strip_rec.as_ref()),
+            )?;
             autoshop::store::commit_develop(
                 &path,
                 autoshop::store::DevelopCommit { recipe: Some(recipe_bytes), pixels, variants },
@@ -1190,7 +1193,35 @@ impl AutoshopApp {
                                 .map_err(|e| anyhow::anyhow!(
                                     "refusing to overwrite the saved develop: backing it up failed ({e})"
                                 ))?;
-                            autoshop::pipeline::write_recipe(path, &r, None)?;
+                            // ONE single-generation commit, like every other
+                            // develop writer (R24-4): the paste used to call
+                            // `pipeline::write_recipe` DIRECTLY — the fifth
+                            // production write of an active develop, and the
+                            // only one with no `variants` member at all, so
+                            // an invariant patrolling `commit_develop` call
+                            // sites could never see it. `pixels: Keep` is
+                            // today's behaviour stated out loud: a paste
+                            // copies develop PARAMETERS and never touches the
+                            // target's baked master link. The strip member
+                            // goes through the shared primitive as
+                            // `Unknown` — a paste replaces the develop inside
+                            // whatever card the target is on without learning
+                            // anything about that card, and it must not claim
+                            // the base negative's slot (a second Original
+                            // card can never be deleted again).
+                            autoshop::store::commit_develop(
+                                path,
+                                autoshop::store::DevelopCommit {
+                                    recipe: Some(autoshop::pipeline::recipe_store_bytes(
+                                        path, &r,
+                                    )?),
+                                    pixels: autoshop::store::CommitMember::Keep,
+                                    variants: autoshop::store::variants_member(
+                                        path,
+                                        autoshop::store::ActiveWrite::Unknown,
+                                    )?,
+                                },
+                            )?;
                             if autoshop::decode::is_raw(path) {
                                 // Recipe-write-decides: an XMP failure after
                                 // the recipe landed is a partial success —

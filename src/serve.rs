@@ -2452,9 +2452,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // the develop's persisted pixel source on save — the GUI rule: saving
     // records pixel identity, else the healed pixels evaporate on the very
     // reopen that follows "saved". Only ever WRITTEN here: an absent claim
-    // must not clear a GUI-persisted master (`Keep`). `variants: Keep` too —
-    // the web writes no strip; a GUI-authored strip going stale under a web
-    // save is the registered cross-surface residual, unchanged here.
+    // must not clear a GUI-persisted master (`Keep`).
     let pixels = match &master {
         // GENERATED provenance rides from the issuance registry: hardcoding
         // inplace here made every later open render the base curve / lens
@@ -2464,12 +2462,25 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         ),
         None => crate::store::CommitMember::Keep,
     };
+    // The strip half goes through the ONE owner (R24-4): the web writes no
+    // strip of its own, so it states only what this save really establishes
+    // — a GENERATED session master in the same generation makes the active
+    // card pixel-state, and anything else leaves the record standing
+    // (`Unknown`; the web cannot name a card it never renders, and claiming
+    // the base negative's slot would mint a second, undeletable Original).
+    let variants = crate::store::variants_member(
+        &raw,
+        match &master {
+            Some((_, true)) => crate::store::ActiveWrite::Kind("generated"),
+            _ => crate::store::ActiveWrite::Unknown,
+        },
+    )?;
     crate::store::commit_develop(
         &raw,
         crate::store::DevelopCommit {
             recipe: Some(pipeline::recipe_store_bytes(&raw, &req.recipe)?),
             pixels,
-            variants: crate::store::CommitMember::Keep,
+            variants,
         },
     )?;
     let mut master_note = String::new();

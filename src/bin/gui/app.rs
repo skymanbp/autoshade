@@ -319,6 +319,19 @@ pub(crate) struct AutoshopApp {
     pub(crate) strip_card_rect: Option<egui::Rect>,   // test seam: first variant card's column rect
     #[cfg(test)]
     pub(crate) strip_title_rect: Option<egui::Rect>,  // test seam: the painted "Variants" title rect
+    /// Test seam (R24-3): the active card's 「apply to Original」 button —
+    /// its rect and whether it was ENABLED, which is the whole point on a
+    /// pixel-state card (shown with the reason, not hidden).
+    #[cfg(test)]
+    pub(crate) strip_apply: Option<(egui::Rect, bool)>,
+    #[cfg(test)]
+    pub(crate) strip_name_rect: Option<egui::Rect>,   // test seam: the card's name widget (label or box)
+    /// Test seam (R24-4): the edit-state list's rows, in draw order —
+    /// `variant:<kind>` for a rendition card, `version:<n>` for a snapshot.
+    /// Strings, not a count: the ORDER (cards above versions) is the claim
+    /// the list makes.
+    #[cfg(test)]
+    pub(crate) edit_list_rows: Vec<String>,
     #[cfg(test)]
     pub(crate) reimagine_btn_rect: Option<egui::Rect>, // test seam: the ✨ Generate button's rect
     #[cfg(test)]
@@ -415,6 +428,19 @@ pub(crate) struct AutoshopApp {
     /// Versions list filter: show only snapshots taken from the ACTIVE
     /// variant (R24-2). Session state, deliberately not persisted.
     pub(crate) versions_current_only: bool,
+    /// A VARIANT rename in flight (R24-3): (the photo, the card's id, the
+    /// name as seeded, the edit buffer). Keyed by the card's own opaque id,
+    /// not its strip index — a background push or delete renumbers indices
+    /// while a box is open, and the version buffer's number key showed the
+    /// way. Unlike the version half this commits into memory only: a card's
+    /// name reaches disk with the strip record, at the next save.
+    pub(crate) variant_name_buf: Option<(PathBuf, String, String, String)>,
+    /// The strip's ✕ is ARMED, not fired (R24-4): the index whose delete the
+    /// next click confirms. A variant delete is immediate and irreversible —
+    /// the undo stack is per-variant by contract (`reset_history`) and no
+    /// tombstone can bring a card back — so it asks first, the same
+    /// arm-then-act shape as `xmp_beside_confirm`.
+    pub(crate) variant_delete_confirm: Option<usize>,
 }
 
 impl AutoshopApp {
@@ -794,11 +820,11 @@ impl AutoshopApp {
             // flush); Ctrl+V mirrors ⇩ Paste to selected — and like the
             // disabled buttons, a press that would not act stays silent.
             if do_copy && self.src_path.is_some() && !self.busy {
-                self.commit_mask_name_buf();
-                // The version half of the same boundary rule (R24-2): a name
-                // typed into a version row and never blurred still reaches
-                // disk before anything else in the app acts.
-                self.commit_version_name_buf();
+                // Every name box at once (the 10+1 boundary rule): a name
+                // typed into a mask row, a version row or a variant card and
+                // never blurred still lands before anything else in the app
+                // acts.
+                self.commit_pending_names();
                 self.copied = Some(self.recipe.clone());
                 self.copied_from = self.src_path.clone();
                 self.status = tr(
@@ -1572,6 +1598,12 @@ impl Default for AutoshopApp {
             #[cfg(test)]
             strip_title_rect: None,
             #[cfg(test)]
+            strip_apply: None,
+            #[cfg(test)]
+            strip_name_rect: None,
+            #[cfg(test)]
+            edit_list_rows: Vec::new(),
+            #[cfg(test)]
             reimagine_btn_rect: None,
             #[cfg(test)]
             gallery_slot_rect: None,
@@ -1611,6 +1643,8 @@ impl Default for AutoshopApp {
             version_meta: HashMap::new(),
             version_name_buf: None,
             versions_current_only: false,
+            variant_name_buf: None,
+            variant_delete_confirm: None,
             show_mask_overlay: true,
             mask_overlay_tex: None,
             overlay_stale: false,
@@ -1647,16 +1681,14 @@ impl eframe::App for AutoshopApp {
         // save-all / discard / cancel; the guard re-checks on the way out, so
         // both quit buttons work by making the state genuinely clean.
         if ctx.input(|i| i.viewport().close_requested()) {
-            // A typed-but-uncommitted mask rename must COUNT as unsaved
-            // work: commit it before the dirty check below — an otherwise
-            // clean recipe used to close without a prompt and the rename
-            // died with the window (U10).
-            self.commit_mask_name_buf();
-            // A version rename is not "unsaved work" in the same sense — it
-            // writes straight to its own advisory sidecar — but it must not
-            // die with the window either, so the last boundary before the
-            // quit decision flushes it too (R24-2).
-            self.commit_version_name_buf();
+            // A typed-but-uncommitted mask or CARD rename must COUNT as
+            // unsaved work: commit them before the dirty check below — an
+            // otherwise clean recipe used to close without a prompt and the
+            // rename died with the window (U10). A version rename is not
+            // unsaved work in the same sense (it writes straight to its own
+            // advisory sidecar), but it must not die with the window either,
+            // so the last boundary before the quit decision flushes the lot.
+            self.commit_pending_names();
             // Unsaved covers PIXELS too: a baked retouch whose master isn't
             // recorded in the store yet dies with the window exactly like an
             // unsaved slider move (the master PNG survives, its linkage not).

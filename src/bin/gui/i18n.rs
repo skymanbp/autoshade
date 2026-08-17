@@ -454,6 +454,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("A generated variant's look lives in its pixels — a version snapshot would store an almost-empty recipe; run 「Reverse-fit」 first",
         "AI 生成变体的效果在像素里——存版本只会存下一份基本空白的参数；请先跑「反推」"),
     ("Renaming v{n} failed: {err}", "v{n} 改名失败：{err}"),
+    // R24-3: loading a snapshot TAKEN on a generated card onto a parametric
+    // canvas — the snapshot carries no camera base look, so one is stamped.
+    ("this snapshot was taken on a generated variant, whose look lives in its pixels — the photo's own camera base look was applied so it renders on the negative",
+        "这个快照存自 AI 生成变体，效果在像素里——已补上本照片自己的相机基础色调，让它在底片上正常渲染"),
+    // R24-4: the edit-state list (variant cards above the version rows).
+    ("Variants ({n})", "变体 · Variants ({n})"),
+    ("· current", "· 当前"),
+    ("· pixel-state (no XMP)", "· 像素态（不出 XMP）"),
+    ("· on baked pixels", "· 基于烘焙像素"),
 
     // ── Develop · export bar sliders (in update()) ───────────────────────────
     ("Output sharpening", "输出锐化"),
@@ -495,6 +504,27 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Variants", "变体"),
     ("Click to switch to this variant (lossless)", "点击切到此变体（无损）"),
     ("Delete this variant", "删除此变体"),
+    // R24-3: the card's own name (the strip is where the cards live, so the
+    // rename box lives there too) — 「Name」/「Name…」 reuse the mask panel's.
+    ("Name this variant", "给这个变体起个名字"),
+    // R24-3 (#7) 「apply to Original」. The two concepts stay apart: this
+    // overwrites the ▣ Original CARD's parameters, and Ctrl+S is what makes
+    // that card's develop the photo's saved develop.
+    ("Copy this variant's develop onto the ▣ Original card — its baked pixels and this card both stay. One Ctrl+Z undoes it; Ctrl+S then saves it as this photo's develop",
+        "把这个变体的显影参数复制到「▣ 原片」变体——它的烘焙像素和本变体都保留。一步 Ctrl+Z 可撤销；再按 Ctrl+S 才存为本照片的显影"),
+    ("A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first",
+        "AI 生成变体的效果在像素里——没有可复制到「▣ 原片」变体的显影参数；请先跑「反推」"),
+    ("this photo's strip holds no ▣ Original card to apply onto",
+        "这张照片的变体里没有「▣ 原片」可以覆盖"),
+    ("「{name}」 copied onto the ▣ Original card (its pixels are untouched) — Ctrl+Z undoes it; Ctrl+S then saves it as this photo's develop",
+        "「{name}」已复制到「▣ 原片」变体（像素未动）——Ctrl+Z 可撤销；再按 Ctrl+S 才存为本照片的显影"),
+    // R24-4: the strip's ✕ arms before it fires — a deleted card cannot be
+    // brought back, which is exactly what the version registry does NOT say
+    // about a deleted number.
+    ("Delete variant「{name}」? Click ✕ again to confirm — a deleted variant cannot be brought back (Ctrl+Z does not cross variants)",
+        "删除变体「{name}」？再点一次 ✕ 才会删除——删掉的变体无法找回（Ctrl+Z 只在同一变体内有效）"),
+    ("Click again to delete this variant — it cannot be brought back (Ctrl+Z does not cross variants)",
+        "再点一次就删除此变体——删掉无法找回（Ctrl+Z 只在同一变体内有效）"),
 
     // ── Toolbar · top row (update()) ─────────────────────────────────────────
     ("Batch {done}/{total}", "批量 {done}/{total}"),

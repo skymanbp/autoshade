@@ -177,21 +177,22 @@ impl AutoshopApp {
             self.toast(ToastKind::Error, t);
             return;
         }
-        // Flush a typed-but-uncommitted mask rename before the stash below
-        // snapshots the recipe — a thumbnail click / Ctrl+O / arrow-key nav
-        // with the name box focused silently stashed the OLD name (U10).
-        self.commit_mask_name_buf();
-        // …and the buffer itself dies with the photo: carried across, a
-        // same-index mask on the NEXT photo skipped the reseed and the box
-        // showed the previous photo's name text (M15).
+        // Flush every typed-but-uncommitted name before the stash below
+        // snapshots the strip — a thumbnail click / Ctrl+O / arrow-key nav
+        // with a name box focused silently stashed the OLD name (U10). Each
+        // buffer carries the photo it was seeded on, so the commits land on
+        // the OUTGOING photo even though `src_path` moves below.
+        self.commit_pending_names();
+        // …and the buffers themselves die with the photo (M15): carried
+        // across, a same-index mask / same-number version / same-card rename
+        // box on the NEXT photo skipped the reseed and greeted it pre-filled
+        // with the previous photo's text.
         self.mask_name_buf = None;
-        // A pending VERSION rename obeys the same boundary (R24-2). Its
-        // buffer carries the photo it was seeded on, so the commit lands on
-        // the outgoing photo even though `src_path` moves below — and the
-        // buffer still dies here, or the box would greet the incoming photo
-        // pre-filled with the previous one's version name.
-        self.commit_version_name_buf();
         self.version_name_buf = None;
+        self.variant_name_buf = None;
+        // An armed strip ✕ dies with the photo too — the index it named
+        // belongs to a strip that is about to be replaced (R24-4).
+        self.variant_delete_confirm = None;
         // The mid-open window marker (see confirm_quit_layer): src_path is
         // re-pointed below while recipe/saved_recipe still describe the old
         // photo; cleared in BOTH Msg::Opened arms. `open_same_path` is the
@@ -524,6 +525,16 @@ impl AutoshopApp {
                 VariantKind::from_store_str(&e.kind) == Some(v.kind)
                     && !dirty_vs(&v.recipe, &e.recipe)
                     && same_master_opt(v.origin.as_deref(), e.origin.as_deref())
+                    // …and the NAME (R24-3): renaming a card is unsaved work
+                    // like any other — the record is its only home, so
+                    // quitting on a renamed card without this comparison
+                    // discarded the name with no prompt. Deferred in R24-2
+                    // for want of a producer; the strip's rename box is one.
+                    // The card's ID is deliberately NOT compared: nothing in
+                    // the app re-mints an existing card's identity, so a
+                    // difference here could only come from the record, and
+                    // the read path already mints what it lacks.
+                    && e.name == v.name
             });
             if !matches {
                 n += 1;
@@ -532,11 +543,14 @@ impl AutoshopApp {
         // Cards persisted but no longer live: the deletion is unsaved too —
         // quitting now would resurrect them on the next open.
         n += rec.others.len().saturating_sub(live.len());
-        // Active-card identity drift: a changed kind or position reopens as
-        // a different strip even when every background card matches.
+        // Active-card identity drift: a changed kind, position or NAME
+        // reopens as a different strip even when every background card
+        // matches. (The active card's name lives in the record's own
+        // `active_name` — it is not in `others`.)
         let ak = self.active_variant().map_or(VariantKind::Original, |v| v.kind);
         if VariantKind::from_store_str(&rec.active_kind) != Some(ak)
             || rec.active_pos != self.active
+            || rec.active_name != self.active_variant().and_then(|v| v.name.clone())
         {
             n = n.max(1);
         }
@@ -556,11 +570,19 @@ impl AutoshopApp {
     }
 
     /// The live strip as a persistable [`store::VariantsRecord`]: `None` when
-    /// the strip is trivial (one Original card — recipe.json + pixels.json
-    /// already say everything, and a record would be pure sidecar noise).
+    /// the strip is trivial ([`crate::model::strip_is_trivial`] — recipe.json
+    /// plus pixels.json already say everything, and a record would be pure
+    /// sidecar noise). Since R24-3 a lone Original card that carries a NAME or
+    /// a minted identity is no longer trivial: the record is the only home
+    /// either of those has.
     pub(crate) fn current_strip_record(&self) -> Option<autoshop::store::VariantsRecord> {
         let ak = self.active_variant().map_or(VariantKind::Original, |v| v.kind);
-        if self.variants.len() <= 1 && ak == VariantKind::Original {
+        if crate::model::strip_is_trivial(
+            ak,
+            self.active_variant().map_or("", |v| v.id.as_str()),
+            self.active_variant().and_then(|v| v.name.as_deref()),
+            self.variants.len().saturating_sub(1),
+        ) {
             return None;
         }
         Some(autoshop::store::VariantsRecord {
@@ -771,8 +793,12 @@ impl AutoshopApp {
         self.sel_mask = None;
         self.sel_component = None;
         // Same boundary rule as open_path: the rename buffer belongs to the
-        // variant it was typed on (M15).
+        // variant it was typed on (M15). The strip's own rename box is keyed
+        // by CARD ID, not by what is on screen, so it deliberately survives
+        // a switch — but an armed ✕ does not: it named an index in the strip
+        // the user has just moved away from (R24-4).
         self.mask_name_buf = None;
+        self.variant_delete_confirm = None;
         self.overlay_ref = None;
         self.overlay_stale = true;
         self.last_rgb = None; // the retained frame belongs to the OLD variant
@@ -808,12 +834,11 @@ impl AutoshopApp {
             self.toast(ToastKind::Error, t);
             return;
         }
-        // Flush a typed-but-uncommitted mask rename INTO the snapshot below
+        // Flush every typed-but-uncommitted name INTO the snapshot below
         // (L11-1) — the same boundary rule open_path and Ctrl+C already
         // apply: commit first, then load_active's M15 clear drops the
         // buffer. Clearing without committing silently lost the rename.
-        self.commit_mask_name_buf();
-        self.commit_version_name_buf(); // the version half of the same rule
+        self.commit_pending_names();
         // Read BEFORE the &mut borrow below. `dirty` = an edit awaiting
         // dispatch; `develop_inflight` = a frame the switch is about to make
         // the acceptance gate reject. Either way no completed frame depicts
@@ -866,8 +891,7 @@ impl AutoshopApp {
         // switch's M15 boundary clear then discarded the typed name.
         // (switch_variant now flushes the same way — L11-1 — so every
         // variant boundary commits before the M15 clear.)
-        self.commit_mask_name_buf();
-        self.commit_version_name_buf(); // the version half of the same rule
+        self.commit_pending_names();
         // Same guarded card drop as switch_variant (L06#6): the async
         // completion switches away from a variant whose latest edits may
         // never have landed a frame.
@@ -898,6 +922,40 @@ impl AutoshopApp {
         if self.variants.len() <= 1 || idx >= self.variants.len() {
             return;
         }
+        // ARM, then act (R24-4). Deleting a card is IRREVERSIBLE in a way
+        // deleting a VERSION is not the mirror of, and the asymmetry was
+        // silent: undo history is per-variant by contract (`reset_history`
+        // clears it at every strip move, and `UndoStep` holds one recipe +
+        // one pixel identity, never the card list), no registry can bring a
+        // card back the way `.deleted-versions.json` keeps a deleted version
+        // deleted, and the strip is the only home a background variant's
+        // recipe has until the next save. So the ✕ asks: the first click
+        // arms this index (the button relabels itself and the status says
+        // what the second click will do), the second deletes. The arm dies
+        // with any other strip move — `load_active` clears it.
+        if self.variant_delete_confirm != Some(idx) {
+            self.variant_delete_confirm = Some(idx);
+            let lang = self.lang;
+            let name = self.variant_label(idx);
+            let t = trf(
+                lang,
+                "Delete variant「{name}」? Click ✕ again to confirm — a deleted variant cannot be brought back (Ctrl+Z does not cross variants)",
+                &[("name", &name)],
+            );
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
+            return;
+        }
+        self.variant_delete_confirm = None;
+        // A rename box aimed at the card being deleted dies WITH it — the
+        // version rows' rule, on the strip's key.
+        if self
+            .variant_name_buf
+            .as_ref()
+            .is_some_and(|(_, id, ..)| Some(id.as_str()) == self.variants.get(idx).map(|v| v.id.as_str()))
+        {
+            self.variant_name_buf = None;
+        }
         let active_removed = idx == self.active;
         self.variants.remove(idx);
         if self.active > idx {
@@ -914,6 +972,162 @@ impl AutoshopApp {
             // deleted canvas's own disclosure forward as if it still applied.
             self.set_canvas_status("variant removed");
         }
+    }
+
+    /// How card `idx` names itself in a sentence: the user's own name when
+    /// it has one, else its localized kind label. Owned, so callers can hand
+    /// it to `trf` while `self` is borrowed mutably.
+    pub(crate) fn variant_label(&self, idx: usize) -> String {
+        match self.variants.get(idx) {
+            Some(v) => v.name.clone().unwrap_or_else(|| tr(self.lang, v.kind.label()).to_string()),
+            None => String::new(),
+        }
+    }
+
+    /// Where this photo's base negative sits in the strip — `None` when the
+    /// strip has none. Not a hypothetical: a cold restore whose record named
+    /// a `fitted` active card and listed no Original entry rebuilds exactly
+    /// that, so every caller must say something honest instead of assuming
+    /// card 0 is the negative.
+    pub(crate) fn original_index(&self) -> Option<usize> {
+        self.variants.iter().position(|v| v.kind == VariantKind::Original)
+    }
+
+    /// R24-3 (#7): copy card `idx`'s develop onto the ▣ Original CARD.
+    ///
+    /// Two different things the UI has to keep apart: this overwrites the
+    /// Original card's develop PARAMETERS (its baked pixels and its raster
+    /// origin stay exactly as they were — the card keeps being the same
+    /// negative), and it is Ctrl+S that afterwards makes that card's develop
+    /// the photo's saved develop (`recipe.json`). The SOURCE card survives —
+    /// Lightroom's 「Set Copy as Original」 rule, and the user decision on
+    /// record.
+    ///
+    /// Undo is ONE step, borrowed from the strip's own machinery: the switch
+    /// lands the canvas on the Original first (which syncs the outgoing card
+    /// and reseeds history with the Original's OWN develop as the head), the
+    /// overwrite happens on that canvas, and `commit_now` pushes exactly one
+    /// step — so Ctrl+Z restores the develop the Original had.
+    ///
+    /// A PIXEL-STATE source is refused: its look lives in its raster, and the
+    /// canvas recipe over it is stripped of curve, lens and as-shot anchor by
+    /// construction, so "applying" it would hand the negative an almost-empty
+    /// develop. Same judgement (and same remedy) as Ctrl+S's XMP refusal and
+    /// 「＋ Save as version」's.
+    pub(crate) fn apply_to_original(&mut self, idx: usize, ctx: &egui::Context) {
+        let lang = self.lang;
+        if self.busy {
+            let t = tr(lang, "busy — variants unlock when the current task finishes");
+            self.toast(ToastKind::Error, t);
+            return;
+        }
+        let Some(src) = self.variants.get(idx) else { return };
+        if !src.kind.is_parametric() {
+            let t = tr(
+                lang,
+                "A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first",
+            );
+            self.status = t.into();
+            self.toast(ToastKind::Error, t);
+            return;
+        }
+        let Some(dst) = self.original_index() else {
+            let t = tr(
+                lang,
+                "this photo's strip holds no ▣ Original card to apply onto",
+            );
+            self.status = t.into();
+            self.toast(ToastKind::Error, t);
+            return;
+        };
+        if dst == idx {
+            return; // the negative is already itself
+        }
+        // A persistence-shaped action: every name box the user has open
+        // commits first (U10 / the 10+1 boundary rule).
+        self.commit_pending_names();
+        // The develop to copy is the LIVE canvas when the source card is the
+        // active one — its in-flight slider edits are what the user means by
+        // "this look" — and the card's stored recipe otherwise. Captured
+        // BEFORE the switch, which writes the canvas back into that card.
+        let recipe =
+            if idx == self.active { self.recipe.clone() } else { self.variants[idx].recipe.clone() };
+        let name = self.variant_label(idx);
+        self.switch_variant(dst, ctx);
+        if self.active != dst {
+            return; // the switch declined (it owns its own refusal message)
+        }
+        if let Some(o) = self.variants.get_mut(dst) {
+            o.recipe = recipe.clone();
+            // The card's thumbnail renders the develop we just replaced —
+            // the cross-card write rule the strip-healing loop in export.rs
+            // already follows. The strip's 「…」 placeholder takes over until
+            // the next develop lands.
+            o.thumb = None;
+        }
+        self.recipe = recipe;
+        self.resync_recipe_display();
+        self.dirty = true;
+        self.commit_now();
+        self.status = trf(
+            lang,
+            "「{name}」 copied onto the ▣ Original card (its pixels are untouched) — Ctrl+Z undoes it; Ctrl+S then saves it as this photo's develop",
+            &[("name", &name)],
+        );
+    }
+
+    /// Commit a pending VARIANT rename into the card it was typed on
+    /// (R24-3) — the strip half of the `commit_mask_name_buf` rule (U10).
+    ///
+    /// Keyed by (photo, card id), both captured at seed time: a background
+    /// push or delete renumbers strip INDICES while a box is open, so an
+    /// index key would cross-commit onto another card (the version buffer's
+    /// number key records the same lesson). Memory only — a card's name
+    /// reaches disk with the strip record at the next save, which is why
+    /// `open_dirty_variants` counts a renamed card as unsaved work.
+    pub(crate) fn commit_variant_name_buf(&mut self) {
+        let Some((photo, id, seed, buf)) = self.variant_name_buf.clone() else { return };
+        if buf == seed {
+            return;
+        }
+        if self.src_path.as_deref() != Some(photo.as_path()) || id.is_empty() {
+            // The card belongs to a photo that is no longer open (its strip
+            // went with it), or to no identifiable card at all: drop the
+            // buffer rather than paint the name onto whatever sits here now.
+            self.variant_name_buf = None;
+            return;
+        }
+        // Capped HERE, on the way in, to the same byte limit the store applies
+        // on the way out: a longer name would be truncated by
+        // `variants_record_bytes` and the live card would then differ from its
+        // own saved record for good — a photo permanently counted as unsaved
+        // work. Popped char by char so the cut lands on a boundary.
+        let mut named = buf.trim().to_string();
+        while named.len() > autoshop::store::MAX_STORE_NAME {
+            named.pop();
+        }
+        let named = Some(named).filter(|s| !s.is_empty());
+        if let Some(v) = self.variants.iter_mut().find(|v| v.id == id) {
+            v.name = named;
+        }
+        // Re-seed rather than clear (the version rule): the box is very
+        // likely still on screen, and a SECOND rename in it has to compare
+        // against what was just committed, not against the original.
+        self.variant_name_buf = Some((photo, id, buf.clone(), buf));
+    }
+
+    /// Flush every typed-but-uncommitted NAME box — masks, versions, variant
+    /// cards (U10; the 10+1 boundary rule).
+    ///
+    /// ONE owner on purpose: ten boundaries each hand-copying the growing
+    /// list is how a box silently stops being flushed the day a third kind
+    /// of name appears (R24-2 added the second by copying, R24-3 the third).
+    /// Every entry point that persists, navigates, snapshots or quits calls
+    /// THIS; the "+1" is each box's own lost-focus commit.
+    pub(crate) fn commit_pending_names(&mut self) {
+        self.commit_mask_name_buf();
+        self.commit_version_name_buf();
+        self.commit_variant_name_buf();
     }
 
     /// Every crop_mode flip goes through here (L13-1): `pan` is stored in
@@ -1018,10 +1232,30 @@ impl AutoshopApp {
         self.versions.clear();
         self.version_meta.clear();
         let Some(src) = self.src_path.as_deref() else { return };
-        self.versions = autoshop::store::list_versions(src);
-        for e in autoshop::store::read_version_meta(src) {
-            if self.versions.contains(&e.n) {
-                self.version_meta.insert(e.n, e);
+        // ONE store query for the photo's whole edit-state list (R24-4
+        // `store::list_edits`), which joins the version family with its
+        // advisory metadata — including the listed-numbers-only restriction
+        // this used to spell for itself. The VARIANT half is deliberately
+        // dropped here: it describes the LAST SAVED strip, while
+        // `self.variants` is the live one (pushes, deletes and renames that
+        // have not been saved yet), and an editor must never renumber its own
+        // cards from a stale record. For every non-GUI surface that half IS
+        // the list.
+        for e in autoshop::store::list_edits(src) {
+            if let autoshop::store::EditStateKind::Version { n, from_kind, from_id, source } =
+                e.state
+            {
+                self.versions.push(n);
+                self.version_meta.insert(
+                    n,
+                    autoshop::store::VersionMetaEntry {
+                        n,
+                        name: e.name,
+                        from_kind,
+                        from_id,
+                        origin: source,
+                    },
+                );
             }
         }
     }
@@ -1096,10 +1330,9 @@ impl AutoshopApp {
 
     /// Save the CURRENT develop as the next numbered version snapshot.
     pub(crate) fn save_version(&mut self) {
-        // A typed-but-uncommitted mask rename belongs in the snapshot —
-        // every persistence entry point flushes it (the U10 rule; L27).
-        self.commit_mask_name_buf();
-        self.commit_version_name_buf();
+        // A typed-but-uncommitted name belongs in the snapshot — every
+        // persistence entry point flushes all of them (the U10 rule; L27).
+        self.commit_pending_names();
         let lang = self.lang;
         // A PIXEL-STATE variant has no develop worth snapshotting: its look
         // lives in the raster, and the canvas recipe over it is stripped of
@@ -1277,15 +1510,25 @@ impl AutoshopApp {
                 // AND the lens corrections — a source-based snapshot's
                 // calibration would cook both twice (same strip rule as the
                 // open-restore and Analyze paths).
-                if self.active_is_generated() {
-                    r.base_curve = Vec::new();
-                    r.lens_profile = Default::default();
-                    // The anchor too: its pixels carry a BAKED white balance,
-                    // so an absolute-Kelvin claim over them would be false —
-                    // generated canvases keep the relative 5500 model.
-                    r.as_shot_k = None;
-                    r.as_shot_tint = None;
-                }
+                // BOTH directions of the calibration rule, through their one
+                // owner (R24-3 `reconcile_snapshot_calibration`): stripped
+                // onto a pixel-state card, and — the direction nothing
+                // covered — re-stamped when a snapshot taken OFF one lands on
+                // the negative with no camera base look at all. The photo's
+                // estimate is a RAW decode, so it is paid lazily, inside the
+                // branch that needs it.
+                let restamped = reconcile_snapshot_calibration(
+                    &mut r,
+                    self.active_is_generated(),
+                    || {
+                        let (k, t) = autoshop::pipeline::fresh_as_shot_wb(&src);
+                        (
+                            autoshop::pipeline::photo_base_knots(&src),
+                            autoshop::pipeline::fresh_lens_profile(&src),
+                            k.zip(t),
+                        )
+                    },
+                );
                 // A version snapshot is a saved recipe like any other, and
                 // it predates the era stamp by definition — loading one put
                 // an unrepaired washed curve straight onto the canvas and
@@ -1303,6 +1546,19 @@ impl AutoshopApp {
                 self.resync_recipe_display();
                 self.dirty = true;
                 let loaded = trf(lang, "Loaded version v{n} — Ctrl+Z returns to before the load", &[("n", &n.to_string())]);
+                if restamped {
+                    // Said out loud, in the same channel the other
+                    // calibration correction uses: the snapshot on disk holds
+                    // no camera base look, and the canvas now does.
+                    self.toast(
+                        ToastKind::Success,
+                        tr(
+                            lang,
+                            "this snapshot was taken on a generated variant, whose look lives in its pixels — the photo's own camera base look was applied so it renders on the negative",
+                        )
+                        .to_string(),
+                    );
+                }
                 self.status = if relook {
                     // The GUI's OWN sentence, localized: the engine note is
                     // English prose meant for the CLI/HTTP surfaces, and
@@ -2740,7 +2996,21 @@ impl AutoshopApp {
                                               &rep.recipe,
                                           )?),
                                           pixels: autoshop::store::CommitMember::Clear,
-                                          variants: autoshop::store::CommitMember::Keep,
+                                          // R24-4: this worker publishes a
+                                          // REVERSE-FIT into the active slot,
+                                          // and the strip record's active
+                                          // half has to say so — left `Keep`,
+                                          // a photo whose record read
+                                          // 「original」 reopened as 「▣ 原片」
+                                          // holding the fit. Worker thread:
+                                          // no live strip to hand over, so
+                                          // the shared primitive restates the
+                                          // one fact this writer owns (the
+                                          // card's id/name/position stand).
+                                          variants: autoshop::store::variants_member(
+                                              p,
+                                              autoshop::store::ActiveWrite::Kind("fitted"),
+                                          )?,
                                       },
                                   )?;
                                   Ok(())

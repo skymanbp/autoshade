@@ -1499,14 +1499,13 @@ impl AutoshopApp {
                     match *boxed {
                     Ok((recipe, verdict, rationale_notes)) => {
                         // Sliders stay live while Analyze runs (10-30 s):
-                        // flush a rename typed during the wait (the resync
-                        // below clears the buffer — unflushed, the rename
-                        // died with it, M16), then commit any mid-flight
-                        // edit as its own undo step NOW, or the wholesale
-                        // install below folds it into the pre-analyze step
-                        // and Ctrl+Z skips it.
-                        self.commit_mask_name_buf();
-                        self.commit_version_name_buf(); // version half (R24-2)
+                        // flush any name typed during the wait (the resync
+                        // below clears the mask buffer — unflushed, the
+                        // rename died with it, M16), then commit any
+                        // mid-flight edit as its own undo step NOW, or the
+                        // wholesale install below folds it into the
+                        // pre-analyze step and Ctrl+Z skips it.
+                        self.commit_pending_names();
                         self.commit_now();
                         let accepted =
                             verdict.decision == autoshop::advisor::Decision::Accept;
@@ -1601,15 +1600,25 @@ impl AutoshopApp {
                                     // land whole or not at all, so the
                                     // stash protection stays armed on any
                                     // failure instead of half a save
-                                    // declaring everything safe. `variants:
-                                    // Keep` — Analyze writes no strip; a
-                                    // GUI strip going stale under this
-                                    // save is the registered cross-surface
-                                    // residual, unchanged here.
+                                    // declaring everything safe.
+                                    // The STRIP lands in the same generation
+                                    // (R24-4): Analyze used to commit
+                                    // `variants: Keep`, so a record written
+                                    // before the user switched cards kept
+                                    // describing the OLD active card while
+                                    // recipe.json already held this one's AI
+                                    // develop — the registered cross-surface
+                                    // residual, closed here. This landing
+                                    // runs on the UI thread and therefore
+                                    // OWNS the live strip: it hands the whole
+                                    // record over (`ActiveWrite::Strip`),
+                                    // exactly like Ctrl+S, and advances the
+                                    // mirror below on success.
                                     let origin = self
                                         .active_variant()
                                         .and_then(|v| v.origin.clone());
                                     let generated = self.active_is_generated();
+                                    let strip_rec = self.current_strip_record();
                                     let commit_res: anyhow::Result<()> = (|| {
                                         let recipe_bytes =
                                             autoshop::pipeline::recipe_store_bytes(&p, &stamped)?;
@@ -1621,12 +1630,18 @@ impl AutoshopApp {
                                             ),
                                             None => autoshop::store::CommitMember::Clear,
                                         };
+                                        let variants = autoshop::store::variants_member(
+                                            &p,
+                                            autoshop::store::ActiveWrite::Strip(
+                                                strip_rec.as_ref(),
+                                            ),
+                                        )?;
                                         autoshop::store::commit_develop(
                                             &p,
                                             autoshop::store::DevelopCommit {
                                                 recipe: Some(recipe_bytes),
                                                 pixels,
-                                                variants: autoshop::store::CommitMember::Keep,
+                                                variants,
                                             },
                                         )?;
                                         Ok(())
@@ -1644,6 +1659,13 @@ impl AutoshopApp {
                                             self.saved_recipe = self.recipe.clone();
                                             self.nav_stash.remove(&p);
                                             self.pixels_on_disk = origin;
+                                            // The strip mirror advances WITH
+                                            // the commit (the Ctrl+S rule):
+                                            // all-or-nothing, so a failed
+                                            // commit leaves it untouched and
+                                            // the background-variant unsaved
+                                            // protection armed.
+                                            self.saved_strip = strip_rec;
                                             self.forget_open_base();
                                             if backed.is_some() {
                                                 self.refresh_versions();
@@ -2187,10 +2209,9 @@ impl AutoshopApp {
                                 // the pixel step, so one Ctrl+Z reverted both and
                                 // there was no way to keep the slider move while
                                 // dropping the retouch. Same rule, same reason as
-                                // the Analyze landing: commit (and flush a typed
-                                // rename) BEFORE the state swap.
-                                self.commit_mask_name_buf();
-                                self.commit_version_name_buf(); // version half (R24-2)
+                                // the Analyze landing: commit (and flush every
+                                // typed name) BEFORE the state swap.
+                                self.commit_pending_names();
                                 self.commit_now();
                                 let img = Arc::new(img);
                                 let (mw, mh) = img.dimensions();

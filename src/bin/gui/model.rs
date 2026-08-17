@@ -1083,6 +1083,36 @@ impl VariantKind {
 /// that only exist because something created them.
 pub(crate) const ORIGINAL_VARIANT_ID: &str = "original";
 
+/// Is this strip TRIVIAL — fully described by `recipe.json` + `pixels.json`,
+/// so a `variants.json` beside them would be pure sidecar noise?
+///
+/// ONE owner for the judgement (R24-3): `current_strip_record` (the live
+/// strip) and `stash_strip_record` (a navigated-away photo's) both answer it,
+/// and both must answer the same or a name typed on one path survives a save
+/// while the same name on the other does not.
+///
+/// A lone base negative is trivial only while it carries nothing the record
+/// would be the ONLY home for:
+/// * a NAME — renameable cards (R24-3) put user text on the one card that
+///   used to need no sidecar, and dropping the record would silently discard
+///   it;
+/// * an IDENTITY other than the fixed [`ORIGINAL_VARIANT_ID`] — a card whose
+///   id was minted (it came back from a record, or from a strip that had
+///   more cards) is what this photo's version snapshots point AT, so losing
+///   it un-attributes them for good. The fixed id needs no record: every
+///   reader reconstructs it.
+pub(crate) fn strip_is_trivial(
+    kind: VariantKind,
+    id: &str,
+    name: Option<&str>,
+    others: usize,
+) -> bool {
+    others == 0
+        && kind == VariantKind::Original
+        && name.is_none()
+        && (id.is_empty() || id == ORIGINAL_VARIANT_ID)
+}
+
 /// A card's id as the strip record spells it: an EMPTY id is "no identity
 /// recorded", which the record states by omitting the field rather than by
 /// writing `""` (a stored empty string would read back as a real id that

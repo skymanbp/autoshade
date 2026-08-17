@@ -1104,7 +1104,16 @@ fn match_cmd(
             autoshop::store::DevelopCommit {
                 recipe: Some(pipeline::recipe_store_bytes(raw, &rep.recipe)?),
                 pixels: autoshop::store::CommitMember::Clear,
-                variants: autoshop::store::CommitMember::Keep,
+                // R24-4: `match` publishes a REVERSE-FIT into the active
+                // slot, so a strip record left saying 「original」 would
+                // reopen the fit in the GUI as 「▣ 原片」. The CLI owns no
+                // strip — the shared primitive restates the one fact this
+                // write knows and leaves the card's id/name/position alone
+                // (and stays `Keep` when the photo has no strip record).
+                variants: autoshop::store::variants_member(
+                    raw,
+                    autoshop::store::ActiveWrite::Kind("fitted"),
+                )?,
             },
         )?;
         Ok(())

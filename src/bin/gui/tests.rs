@@ -260,12 +260,343 @@
         assert_eq!(restored[0].id, "card-a");
         assert_eq!(restored[0].name.as_deref(), Some("base"));
 
-        // The strip record is still skipped for a TRIVIAL strip — names do
-        // not make a lone Original worth a sidecar (R24-3 revisits this when
-        // the cards themselves become renameable).
+        // TRIVIALITY, R24-3: the cards became renameable, so a lone Original
+        // is no longer trivial by its card count alone — the record is the
+        // ONLY home its name and its minted id have, and dropping it would
+        // discard both silently (the `strip_is_trivial` owner, shared with
+        // the stash path).
         app.variants.truncate(1);
         app.active = 0;
+        let rec = app
+            .current_strip_record()
+            .expect("a NAMED lone Original still needs its record");
+        assert_eq!(rec.active_name.as_deref(), Some("base"));
+        assert_eq!(rec.active_id.as_deref(), Some("card-a"));
+        // Strip the two things only the record can hold and it goes back to
+        // being noise: recipe.json + pixels.json say everything, and the base
+        // negative's fixed id is reconstructed by every reader.
+        app.variants[0].name = None;
+        app.variants[0].id = crate::model::ORIGINAL_VARIANT_ID.to_string();
         assert!(app.current_strip_record().is_none());
+    }
+
+    /// R24-3 (#7): 「apply to Original」 copies a card's develop PARAMETERS
+    /// onto the base negative — and nothing else. Its baked pixels, its
+    /// raster origin and the SOURCE card all survive (Lightroom's 「Set Copy
+    /// as Original」 rule), and the whole thing is exactly one Ctrl+Z.
+    #[test]
+    fn applying_a_variant_to_the_original_copies_parameters_and_nothing_else() {
+        use crate::model::{Variant, VariantKind};
+        let ctx = egui::Context::default();
+        let pixels = Arc::new(image::DynamicImage::new_rgb8(8, 6));
+        let master = PathBuf::from("out/_apply_master.png");
+        let negative = Variant {
+            kind: VariantKind::Original,
+            id: crate::model::ORIGINAL_VARIANT_ID.into(),
+            name: None,
+            recipe: EditRecipe { contrast: 11.0, ..Default::default() },
+            base: Some(pixels.clone()),
+            origin: Some(master.clone()),
+            thumb: None,
+        };
+        let fitted = Variant {
+            kind: VariantKind::Fitted,
+            id: "card-fit".into(),
+            name: Some("dusk".into()),
+            recipe: EditRecipe { contrast: 44.0, exposure_ev: 0.5, ..Default::default() },
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let mut app = AutoshopApp {
+            variants: vec![negative, fitted],
+            active: 1,
+            recipe: EditRecipe { contrast: 44.0, exposure_ev: 0.5, ..Default::default() },
+            ..Default::default()
+        };
+        app.reset_history();
+        app.apply_to_original(1, &ctx);
+
+        assert_eq!(app.active, 0, "the canvas lands on the card that was written");
+        assert_eq!(app.variants.len(), 2, "the source card is KEPT");
+        assert_eq!(app.variants[1].name.as_deref(), Some("dusk"), "…untouched");
+        assert_eq!(app.variants[0].recipe.contrast, 44.0, "the develop was copied");
+        assert_eq!(app.variants[0].recipe.exposure_ev, 0.5);
+        assert!(
+            app.variants[0].base.as_ref().is_some_and(|b| Arc::ptr_eq(b, &pixels)),
+            "the negative's own pixels are not touched"
+        );
+        assert_eq!(
+            app.variants[0].origin.as_deref(),
+            Some(master.as_path()),
+            "…nor its raster origin: this copies PARAMETERS"
+        );
+        assert_eq!(app.recipe.contrast, 44.0, "the canvas shows what was applied");
+
+        // ONE Ctrl+Z, and the negative's own develop is back.
+        app.undo(&ctx);
+        assert_eq!(app.recipe.contrast, 11.0, "one undo step, not zero and not two");
+
+        // A PIXEL-STATE source is refused with the reverse-fit remedy — its
+        // look is in its raster, and the recipe over it is stripped bare.
+        let mut app = AutoshopApp {
+            variants: vec![
+                Variant {
+                    kind: VariantKind::Original,
+                    id: crate::model::ORIGINAL_VARIANT_ID.into(),
+                    name: None,
+                    recipe: EditRecipe { contrast: 11.0, ..Default::default() },
+                    base: None,
+                    origin: None,
+                    thumb: None,
+                },
+                Variant {
+                    kind: VariantKind::Generated,
+                    id: "card-gen".into(),
+                    name: None,
+                    recipe: EditRecipe::default(),
+                    base: None,
+                    origin: Some(PathBuf::from("out/_gen.png")),
+                    thumb: None,
+                },
+            ],
+            active: 1,
+            ..Default::default()
+        };
+        app.apply_to_original(1, &ctx);
+        assert_eq!(app.variants[0].recipe.contrast, 11.0, "the negative was not overwritten");
+        assert_eq!(app.active, 1, "and the canvas did not move");
+        assert!(
+            app.status.contains("Reverse-fit"),
+            "the refusal carries the remedy: {}",
+            app.status
+        );
+    }
+
+    /// R24-4 (#1, phase 2 — minimal): ONE list answers "what edit states does
+    /// this photo have" — the rendition CARDS first, the numbered SNAPSHOTS
+    /// under them. The order is the claim (a photo is one negative + N
+    /// variants + one version history), so the test pins it.
+    #[test]
+    fn the_edit_state_list_puts_the_cards_above_the_versions() {
+        use crate::model::{Variant, VariantKind};
+        let mk = |kind, id: &str| Variant {
+            kind,
+            id: id.into(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let mut app = AutoshopApp {
+            variants: vec![
+                mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
+                mk(VariantKind::Generated, "card-gen"),
+            ],
+            active: 0,
+            versions: vec![1, 2],
+            ..Default::default()
+        };
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                // Versions is a collapsed section by default; egui's own test
+                // hook opens every collapsible (the brush-slider test's idiom).
+                ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
+                });
+            },
+        );
+        assert_eq!(
+            app.edit_list_rows,
+            vec!["variant:original", "variant:generated", "version:1", "version:2"],
+            "cards above versions, in strip order then ascending"
+        );
+    }
+
+    /// R24-3/R24-4, on the real panel: the strip's ACTIVE card carries the
+    /// two new affordances — a name box and 「apply to Original」 — and a
+    /// PIXEL-STATE card shows the apply button DISABLED (with the reverse-fit
+    /// reason) rather than hiding it. Headless `Context::run`, never a window.
+    #[test]
+    fn the_active_card_offers_its_name_box_and_the_apply_button() {
+        use crate::model::{Variant, VariantKind};
+        let mk = |kind, id: &str| Variant {
+            kind,
+            id: id.into(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let photo = PathBuf::from("D:/library/_strip_affordances.ARW");
+        for (kind, expect_enabled) in
+            [(VariantKind::Fitted, true), (VariantKind::Generated, false)]
+        {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let mut app = AutoshopApp {
+                src_path: Some(photo.clone()),
+                variants: vec![
+                    mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
+                    mk(kind, "card-b"),
+                ],
+                active: 1,
+                ..Default::default()
+            };
+            let _ = ctx.run(input(), |ctx| {
+                egui::TopBottomPanel::bottom("variants")
+                    .exact_height(AutoshopApp::VARIANT_STRIP_H)
+                    .show(ctx, |ui| app.variant_strip(ui));
+            });
+            let (rect, enabled) = app
+                .strip_apply
+                .unwrap_or_else(|| panic!("{kind:?}: the active card has no apply button"));
+            assert!(rect.width() > 0.0, "{kind:?}: the apply button did not lay out");
+            assert_eq!(
+                enabled, expect_enabled,
+                "{kind:?}: a pixel-state card must SHOW the button disabled, not hide it"
+            );
+            // The name affordance is there too, and a seeded buffer turns it
+            // into the edit box (the version rows' shape, on the card's id).
+            assert!(
+                app.strip_name_rect.is_some_and(|r| r.width() > 0.0),
+                "{kind:?}: the active card offers no name affordance"
+            );
+            app.variant_name_buf =
+                Some((photo.clone(), "card-b".into(), String::new(), "dusk".into()));
+            app.strip_name_rect = None;
+            let _ = ctx.run(input(), |ctx| {
+                egui::TopBottomPanel::bottom("variants")
+                    .exact_height(AutoshopApp::VARIANT_STRIP_H)
+                    .show(ctx, |ui| app.variant_strip(ui));
+            });
+            assert!(
+                app.strip_name_rect.is_some_and(|r| r.width() > 0.0),
+                "{kind:?}: the seeded rename box did not lay out"
+            );
+        }
+    }
+
+    /// R24-3: a card rename lands on the CARD it was typed on — the buffer is
+    /// keyed by the card's own id, so an async push that renumbers the strip
+    /// mid-typing cannot paint the name onto a different card. And it counts
+    /// as unsaved work: the strip record is the name's only home.
+    #[test]
+    fn a_card_rename_follows_its_card_and_counts_as_unsaved() {
+        use crate::model::{Variant, VariantKind};
+        let mk = |kind, id: &str| Variant {
+            kind,
+            id: id.into(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let photo = PathBuf::from("D:/library/_rename_card.ARW");
+        let mut app = AutoshopApp {
+            src_path: Some(photo.clone()),
+            variants: vec![
+                mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
+                mk(VariantKind::Fitted, "card-fit"),
+            ],
+            active: 1,
+            ..Default::default()
+        };
+        // Typed on the Fitted card…
+        app.variant_name_buf =
+            Some((photo.clone(), "card-fit".into(), String::new(), "dusk".into()));
+        // …while an async completion inserts a card ahead of it.
+        app.variants.insert(1, mk(VariantKind::Generated, "card-gen"));
+        app.active = 2;
+        app.commit_pending_names();
+        assert_eq!(app.variants[1].name, None, "the renumbered neighbour is untouched");
+        assert_eq!(
+            app.variants[2].name.as_deref(),
+            Some("dusk"),
+            "the name follows the card's id, not its index"
+        );
+
+        // Unsaved-work accounting: the mirror still holds the pre-rename
+        // record, so quitting has to warn.
+        app.saved_strip = app.current_strip_record();
+        assert_eq!(app.open_dirty_variants(), 0, "premise: the mirror is current");
+        app.variants[2].name = Some("dawn".into());
+        assert!(app.open_dirty_variants() >= 1, "renaming the ACTIVE card is unsaved work");
+        app.variants[2].name = Some("dusk".into());
+        app.variants[0].name = Some("negative".into());
+        assert!(app.open_dirty_variants() >= 1, "…and so is renaming a background card");
+    }
+
+    /// R24-3: the calibration rule has TWO directions and one owner. Onto a
+    /// pixel-state card a snapshot's calibration is stripped; a snapshot
+    /// TAKEN off one arrives with none at all, and landing it on the negative
+    /// used to leave the photo rendering with no camera base look — the
+    /// pre-era repair declines it (current era stamp, curve under three
+    /// knots), so nothing else could have healed it.
+    #[test]
+    fn a_snapshot_off_a_generated_card_gets_the_negatives_calibration_back() {
+        let knots = vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]];
+        let lens = autoshop::recipe::LensProfile {
+            distortion: vec![0.02, 0.0, 0.0],
+            distortion_on: true,
+            ..Default::default()
+        };
+        let cal = || (knots.clone(), lens.clone(), Some((5200.0, 3.0)));
+
+        // The defect's direction: a snapshot with no calibration, onto the
+        // parametric negative.
+        let mut r = EditRecipe { contrast: 7.0, ..Default::default() };
+        assert!(
+            crate::persist::reconcile_snapshot_calibration(&mut r, false, cal),
+            "the stamp is reported so the load can disclose it"
+        );
+        assert_eq!(r.base_curve.len(), 3, "the photo's own camera base look is back");
+        assert_eq!(r.lens_profile.distortion, vec![0.02, 0.0, 0.0], "…the lens profile too");
+        assert_eq!(r.as_shot_k, Some(5200.0), "…and the as-shot anchor with it");
+        assert_eq!(r.contrast, 7.0, "the user's edits are not touched");
+
+        // A snapshot that BROUGHT its own calibration is left exactly alone —
+        // legacy develops must render as they were tuned.
+        let mut own = EditRecipe {
+            base_curve: vec![[0.0, 0.0], [0.5, 0.4], [1.0, 1.0]],
+            ..Default::default()
+        };
+        let before = own.clone();
+        assert!(!crate::persist::reconcile_snapshot_calibration(&mut own, false, cal));
+        assert_eq!(own, before, "a snapshot with its own curve is untouched");
+
+        // …and the other direction still strips, anchor included.
+        let mut onto_pixels = EditRecipe {
+            base_curve: vec![[0.0, 0.0], [1.0, 1.0]],
+            lens_profile: lens.clone(),
+            as_shot_k: Some(5200.0),
+            as_shot_tint: Some(3.0),
+            ..Default::default()
+        };
+        assert!(!crate::persist::reconcile_snapshot_calibration(&mut onto_pixels, true, cal));
+        assert!(onto_pixels.base_curve.is_empty(), "baked pixels carry the look already");
+        assert_eq!(onto_pixels.lens_profile, autoshop::recipe::LensProfile::default());
+        assert_eq!(onto_pixels.as_shot_k, None, "…and a baked white balance");
     }
 
     /// R24-2: 「＋ Save as version」 on a PIXEL-STATE card wrote a near-empty
@@ -3264,8 +3595,19 @@
             active: 1,
             ..Default::default()
         };
+        // R24-4: the ✕ ARMS first — a deleted card cannot be brought back, so
+        // the first call asks and changes nothing about the strip.
+        app.delete_variant(1, &ctx);
+        assert_eq!(app.variants.len(), 2, "the arming click deletes nothing");
+        assert_eq!(app.active, 1, "…and does not re-anchor the strip either");
+        assert_eq!(
+            app.variant_delete_confirm,
+            Some(1),
+            "the arming click names the card the next one deletes"
+        );
         app.delete_variant(1, &ctx);
         assert_eq!(app.active, 0, "premise: the strip re-anchored");
+        assert_eq!(app.variant_delete_confirm, None, "the arm is spent");
         assert!(
             app.status.contains("640px"),
             "the landing canvas's resolution is disclosed: {}",
@@ -3290,7 +3632,8 @@
             active: 1,
             ..Default::default()
         };
-        app.delete_variant(1, &ctx);
+        app.delete_variant(1, &ctx); // arm
+        app.delete_variant(1, &ctx); // …and confirm
         assert!(
             app.status.contains("variant removed"),
             "no disagreement, no claim: {}",

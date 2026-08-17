@@ -1810,10 +1810,88 @@ impl CommitMember {
     }
 }
 
+/// What a writer publishes into the ACTIVE slot of a photo's edit strip
+/// (R24-4).
+///
+/// `variants.json`'s active half (`active_kind` / `active_pos` /
+/// `active_id` / `active_name`) describes the card whose develop
+/// `recipe.json` mirrors. Five production writers used to publish a NEW
+/// active develop under `variants: CommitMember::Keep`, leaving that half
+/// describing the develop they had just replaced — a CLI `match` over a
+/// photo whose strip recorded 「original」 reopened as 「▣ 原片」 holding a
+/// reverse-fit. This enum is how each writer states what it actually knows,
+/// so ONE primitive ([`variants_member`]) owns the answer instead of five
+/// hand-rolled members drifting apart.
+pub enum ActiveWrite<'a> {
+    /// The caller owns the whole strip and hands it over verbatim — the GUI,
+    /// whose in-memory card list IS the truth. `None` means the strip went
+    /// trivial (a single Original card, which needs no sidecar): the record
+    /// is CLEARED, exactly as Ctrl+S has always done.
+    Strip(Option<&'a VariantsRecord>),
+    /// The caller knows only the KIND of develop it just published into the
+    /// active card ([`VariantEntry::kind`] spellings — a FORMAT value).
+    /// Never `"original"`: a photo has exactly ONE base negative, and a
+    /// foreign writer claiming that slot would leave a strip carrying two
+    /// Original cards, neither of which the strip UI will delete.
+    Kind(&'a str),
+    /// The caller replaced the develop INSIDE the active card without
+    /// learning anything about the card itself (the web save, the batch
+    /// paste): the record stands as written.
+    Unknown,
+}
+
+/// The `variants` member for a [`DevelopCommit`] — the ONE place that
+/// decides what a develop write does to `variants.json` (R24-4).
+///
+/// The read happens under the CALLER's develop lock (reentrant) and the
+/// patched record stages into the SAME generation as the recipe it belongs
+/// to, so the two can never disagree across a kill: before the commit marker
+/// the previous pair stands whole, after it recovery rolls both forward
+/// together.
+pub fn variants_member(src: &Path, w: ActiveWrite<'_>) -> std::io::Result<CommitMember> {
+    match w {
+        ActiveWrite::Strip(Some(rec)) => {
+            Ok(CommitMember::Write(variants_record_bytes(src, rec)?))
+        }
+        ActiveWrite::Strip(None) => Ok(CommitMember::Clear),
+        ActiveWrite::Unknown => Ok(CommitMember::Keep),
+        ActiveWrite::Kind(kind) => {
+            debug_assert!(
+                known_variant_kind(kind) && kind != "original",
+                "a foreign writer may not claim the base negative's slot ({kind})"
+            );
+            match read_variants_checked(src) {
+                // Nothing to keep truthful: the trivial one-card strip
+                // writes no record at all, and minting one HERE would
+                // publish a strip nobody has.
+                VariantsRead::Absent => Ok(CommitMember::Keep),
+                // A record this build cannot honour is someone's data —
+                // and a non-Keep member would make `refuse_unresolved_strip`
+                // fail the WHOLE save (`commit_develop`), so a sidecar the
+                // CLI never even reads must not block the CLI's write.
+                VariantsRead::Unresolved => Ok(CommitMember::Keep),
+                // Already true — and a no-op member keeps the bytes on disk
+                // byte-identical (a rewrite would churn the `.bak` pair for
+                // nothing).
+                VariantsRead::Strip(rec) if rec.active_kind == kind => Ok(CommitMember::Keep),
+                VariantsRead::Strip(mut rec) => {
+                    // The card's IDENTITY survives the restatement: the
+                    // write replaced the develop INSIDE the card, not the
+                    // card — its `active_id` is what version snapshots taken
+                    // from it point at (R24-2), and `active_name` is the
+                    // user's own label for that slot.
+                    rec.active_kind = kind.to_string();
+                    Ok(CommitMember::Write(variants_record_bytes(src, &rec)?))
+                }
+            }
+        }
+    }
+}
+
 /// A single-generation write of the develop triple. `recipe` bytes come from
 /// [`crate::pipeline::recipe_store_bytes`] (clamped + mask-relativized
 /// there), `pixels` from [`pixel_source_record_bytes`], `variants` from
-/// [`variants_record_bytes`] — the commit publishes, it does not interpret.
+/// [`variants_member`] — the commit publishes, it does not interpret.
 pub struct DevelopCommit {
     pub recipe: Option<Vec<u8>>,
     pub pixels: CommitMember,
@@ -4242,6 +4320,114 @@ pub fn read_version_meta(src: &Path) -> Vec<VersionMetaEntry> {
     read_version_meta_unlocked(&develop_dir(src)).versions
 }
 
+/// What ONE entry of a photo's edit-state list IS (R24-4). The two halves
+/// live in different files under different lifecycle rules — `variants.json`
+/// is a generation member `clear_develop` sweeps, the `v<n>.recipe.json`
+/// family is kept — so this is a synthesized VIEW, never a stored one.
+pub enum EditStateKind {
+    /// A rendition card from `variants.json`.
+    Variant {
+        /// [`VariantEntry::kind`] spelling ("original" | "generated" |
+        /// "fitted"). The taxonomy's binary is `!= "generated"` (parametric
+        /// vs pixel-state — the GUI's `VariantKind::is_parametric`, R24-1).
+        kind: String,
+        /// The card `recipe.json` currently mirrors.
+        active: bool,
+        /// The baked raster behind this card, if any — an ORTHOGONAL second
+        /// attribute (an in-place heal hangs one off an Original card).
+        origin: Option<PathBuf>,
+    },
+    /// A numbered snapshot (`v<n>.recipe.json`) plus its advisory metadata.
+    Version {
+        n: u32,
+        /// Which card the snapshot was taken from (R24-2), when recorded.
+        from_kind: Option<String>,
+        from_id: Option<String>,
+        /// [`VERSION_ORIGIN_USER`] or [`VERSION_ORIGIN_AUTO`].
+        source: Option<String>,
+    },
+}
+
+/// One edit state of a photo — a rendition card or a numbered snapshot.
+pub struct EditState {
+    /// The variant's own opaque id, or `v<n>` for a snapshot. An EMPTY
+    /// string is a card whose record predates identities (R24-2).
+    pub id: String,
+    pub name: Option<String>,
+    pub state: EditStateKind,
+}
+
+/// Every edit state of a photo in ONE query (R24-4): the strip's cards in
+/// strip order, then its version snapshots ascending.
+///
+/// The composition is the point — three files (`variants.json`,
+/// `pixels.json`, the `v<n>` family + `.version-meta.json`) answer "what
+/// edits does this photo have" together, and every consumer used to join
+/// them by hand. Version metadata is restricted to numbers that are actually
+/// LISTED: a kill between a delete's sweep and its metadata drop can leave a
+/// record for a burned number, and that must never surface as a phantom row.
+///
+/// The variant half is the LAST SAVED strip. A live editor's own card list
+/// outranks it (unsaved pushes, deletes and renames are not here), which is
+/// why the GUI consumes the version half of this call and keeps rendering
+/// its in-memory strip for the other; for every non-GUI surface this IS the
+/// list. The trivial one-card photo has no `variants.json` by design, so it
+/// contributes no Variant entry — its single base negative is implicit.
+pub fn list_edits(src: &Path) -> Vec<EditState> {
+    let mut out: Vec<EditState> = Vec::new();
+    if let Some(rec) = read_variants(src) {
+        let mut cards: Vec<EditState> = rec
+            .others
+            .iter()
+            .map(|e| EditState {
+                id: e.id.clone().unwrap_or_default(),
+                name: e.name.clone(),
+                state: EditStateKind::Variant {
+                    kind: e.kind.clone(),
+                    active: false,
+                    origin: e.origin.clone(),
+                },
+            })
+            .collect();
+        // The active card is NOT in `others` (that is the record's shape):
+        // it goes back at its recorded position, clamped — a hand-edited
+        // `active_pos` past the end must not panic a read-only listing.
+        let at = rec.active_pos.min(cards.len());
+        cards.insert(
+            at,
+            EditState {
+                id: rec.active_id.clone().unwrap_or_default(),
+                name: rec.active_name.clone(),
+                state: EditStateKind::Variant {
+                    kind: rec.active_kind.clone(),
+                    active: true,
+                    // The ACTIVE card's baked master is recorded in
+                    // pixels.json, never in the strip record (recipe.json +
+                    // pixels.json stay the cross-surface authority for the
+                    // active develop).
+                    origin: read_pixel_source(src).map(|(p, _generated)| p),
+                },
+            },
+        );
+        out.extend(cards);
+    }
+    let meta = read_version_meta(src);
+    for n in list_versions(src) {
+        let m = meta.iter().find(|e| e.n == n);
+        out.push(EditState {
+            id: format!("v{n}"),
+            name: m.and_then(|e| e.name.clone()),
+            state: EditStateKind::Version {
+                n,
+                from_kind: m.and_then(|e| e.from_kind.clone()),
+                from_id: m.and_then(|e| e.from_id.clone()),
+                source: m.and_then(|e| e.origin.clone()),
+            },
+        });
+    }
+    out
+}
+
 fn write_version_meta_unlocked(dev: &Path, meta: &VersionMeta) -> std::io::Result<()> {
     if meta.versions.is_empty() {
         // Nothing left to say: take the file away rather than leave an empty
@@ -5692,6 +5878,184 @@ mod tests {
             active_pos: 0,
             others: Vec::new(),
         }
+    }
+
+    /// R24-4: a writer that publishes a NEW active develop but authors no
+    /// strip must leave `variants.json`'s active half describing what it just
+    /// wrote. Left `Keep` (four production writers did), a CLI `match` over a
+    /// photo whose record said 「original」 reopened as 「▣ 原片」 holding a
+    /// reverse-fit. The round trip is the point: everything the record holds
+    /// BESIDES the kind — the card's identity, its name, the background cards
+    /// with their own ids/names/origins — must come back untouched.
+    #[test]
+    fn a_foreign_develop_write_restates_the_strips_active_card() {
+        let (dir, raw, dev) = commit_fixture("active-restate");
+        let master = dev.join("card-b.png");
+        std::fs::write(&master, b"png").unwrap();
+        let rec = VariantsRecord {
+            v: 1,
+            active_kind: "original".into(),
+            active_pos: 1,
+            active_id: Some("card-a".into()),
+            active_name: Some("我的底片".into()),
+            others: vec![VariantEntry {
+                kind: "generated".into(),
+                recipe: EditRecipe { contrast: 12.0, ..Default::default() },
+                origin: Some(master.clone()),
+                id: Some("card-b".into()),
+                name: Some("warm".into()),
+            }],
+        };
+        write_variants(&raw, &rec).unwrap();
+
+        // The CLI's own commit, member for member.
+        commit_develop(
+            &raw,
+            DevelopCommit {
+                recipe: Some(b"{}".to_vec()),
+                pixels: CommitMember::Clear,
+                variants: variants_member(&raw, ActiveWrite::Kind("fitted")).unwrap(),
+            },
+        )
+        .unwrap();
+
+        let VariantsRead::Strip(back) = read_variants_checked(&raw) else {
+            panic!("the strip must still read back");
+        };
+        assert_eq!(back.active_kind, "fitted", "the active half names what was written");
+        assert_eq!(back.active_id.as_deref(), Some("card-a"), "the CARD kept its identity");
+        assert_eq!(back.active_name.as_deref(), Some("我的底片"), "…and its name");
+        assert_eq!(back.active_pos, 1, "…and its place in the strip");
+        assert_eq!(back.others.len(), 1, "background cards are none of this write's business");
+        assert_eq!(back.others[0].id.as_deref(), Some("card-b"));
+        assert_eq!(back.others[0].name.as_deref(), Some("warm"));
+        assert_eq!(back.others[0].origin.as_deref(), Some(master.as_path()));
+        assert_eq!(back.others[0].recipe.contrast, 12.0);
+
+        // Idempotent: the same write again now finds the record already true
+        // and stages nothing (no `.bak` churn for a no-op).
+        assert!(
+            matches!(variants_member(&raw, ActiveWrite::Kind("fitted")).unwrap(), CommitMember::Keep),
+            "a record that already says so is left alone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// The other three answers, each for its own reason (R24-4): no record to
+    /// keep truthful, a record this build cannot honour, and the GUI handing
+    /// over a whole strip (or clearing it).
+    #[test]
+    fn the_strip_member_keeps_its_hands_off_what_it_must() {
+        let (dir, raw, dev) = commit_fixture("active-keep");
+        // No strip record: a trivial one-card photo writes none, and minting
+        // one here would publish a strip nobody has.
+        assert!(matches!(
+            variants_member(&raw, ActiveWrite::Kind("fitted")).unwrap(),
+            CommitMember::Keep
+        ));
+        // A record this build cannot honour is someone's data — and a
+        // non-Keep member would make `refuse_unresolved_strip` fail the whole
+        // save, so a foreign sidecar must not block a write that never reads
+        // it.
+        std::fs::write(variants_path(&raw), b"{ not json").unwrap();
+        assert!(matches!(read_variants_checked(&raw), VariantsRead::Unresolved), "premise");
+        assert!(matches!(
+            variants_member(&raw, ActiveWrite::Kind("fitted")).unwrap(),
+            CommitMember::Keep
+        ));
+        // The strip's OWNER hands the record over verbatim — and `None` (the
+        // strip went trivial) still clears it, exactly as Ctrl+S always has.
+        let rec = strip_record("generated");
+        let bytes = variants_record_bytes(&raw, &rec).unwrap();
+        match variants_member(&raw, ActiveWrite::Strip(Some(&rec))).unwrap() {
+            CommitMember::Write(b) => assert_eq!(b, bytes, "verbatim, not re-derived"),
+            _ => panic!("an owned strip publishes"),
+        }
+        assert!(matches!(
+            variants_member(&raw, ActiveWrite::Strip(None)).unwrap(),
+            CommitMember::Clear
+        ));
+        // …and a writer that learned nothing about the card leaves it be.
+        assert!(matches!(
+            variants_member(&raw, ActiveWrite::Unknown).unwrap(),
+            CommitMember::Keep
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// R24-4: one query for a photo's whole edit-state list — the strip's
+    /// cards in strip order (the active one back at its recorded position),
+    /// then the numbered snapshots with their advisory metadata, restricted
+    /// to numbers that are actually listed.
+    #[test]
+    fn list_edits_joins_the_strip_with_the_version_history() {
+        let (dir, raw, dev) = commit_fixture("list-edits");
+        write_variants(
+            &raw,
+            &VariantsRecord {
+                v: 1,
+                active_kind: "fitted".into(),
+                active_pos: 1,
+                active_id: Some("card-fit".into()),
+                active_name: Some("dusk".into()),
+                others: vec![VariantEntry {
+                    kind: "original".into(),
+                    recipe: EditRecipe::default(),
+                    origin: None,
+                    id: Some("original".into()),
+                    name: None,
+                }],
+            },
+        )
+        .unwrap();
+        std::fs::write(version_target(&raw, 1), b"{}").unwrap();
+        record_version_meta(
+            &raw,
+            &VersionMetaEntry {
+                n: 1,
+                name: Some("before".into()),
+                from_kind: Some("original".into()),
+                from_id: Some("original".into()),
+                origin: Some(VERSION_ORIGIN_USER.to_string()),
+            },
+        )
+        .unwrap();
+        // A record for a number nothing lists (a kill between a delete's
+        // sweep and its metadata drop) must never surface as a phantom row.
+        record_version_meta(&raw, &VersionMetaEntry { n: 9, ..Default::default() }).unwrap();
+
+        let edits = list_edits(&raw);
+        assert_eq!(edits.len(), 3, "two cards + one snapshot, no phantom: {}", edits.len());
+        match &edits[0].state {
+            EditStateKind::Variant { kind, active, .. } => {
+                assert_eq!(kind, "original");
+                assert!(!active, "the base negative sits at position 0 and is not active here");
+            }
+            _ => panic!("cards come first, in strip order"),
+        }
+        assert_eq!(edits[1].id, "card-fit");
+        assert_eq!(edits[1].name.as_deref(), Some("dusk"));
+        match &edits[1].state {
+            EditStateKind::Variant { kind, active, .. } => {
+                assert_eq!(kind, "fitted");
+                assert!(active, "the active card returns at its recorded position");
+            }
+            _ => panic!("the active card is a card"),
+        }
+        assert_eq!(edits[2].id, "v1");
+        assert_eq!(edits[2].name.as_deref(), Some("before"));
+        match &edits[2].state {
+            EditStateKind::Version { n, from_id, source, .. } => {
+                assert_eq!(*n, 1);
+                assert_eq!(from_id.as_deref(), Some("original"), "provenance rides along");
+                assert_eq!(source.as_deref(), Some(VERSION_ORIGIN_USER));
+            }
+            _ => panic!("snapshots come after the cards"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     /// L03: the kill point IMMEDIATELY after the COMMIT marker's rename — all

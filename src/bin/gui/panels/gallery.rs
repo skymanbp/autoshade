@@ -51,10 +51,9 @@ impl AutoshopApp {
                     .on_hover_text(tr(lang, "Copy every develop setting from the current photo"))
                     .clicked()
                 {
-                    // Flush a pending mask rename first — the clipboard must
+                    // Flush every pending rename first — the clipboard must
                     // carry the name the user sees in the box (U10; CX5-9).
-                    self.commit_mask_name_buf();
-                    self.commit_version_name_buf(); // the version half (R24-2)
+                    self.commit_pending_names();
                     self.copied = Some(self.recipe.clone());
                     self.copied_from = self.src_path.clone();
                     self.status = tr(lang, "Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”").to_string();

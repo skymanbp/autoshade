@@ -70,7 +70,10 @@ RATIONALE = (REPO / "src" / "rationale.rs").read_text(encoding="utf-8")
 # through as an English fallback nobody notices.
 DYNAMIC_SITES = [
     (r"^plain\b", "set_canvas_status callers"),
-    (r"^(?:self\.variants\[self\.active\]\.)?kind\.label\(\)", "VariantKind::label"),
+    # `v.kind.label()`: R24-3/R24-4 name a card through a borrowed Variant —
+    # the edit-state list rows and `variant_label` (which spells a card's own
+    # name, falling back to this label). Same key set, same extraction.
+    (r"^(?:self\.variants\[self\.active\]\.|v\.)?kind\.label\(\)", "VariantKind::label"),
     (r"^(?:self\.theme|t)\.label\(\)", "ThemePref::label"),
     (r"^(?:self\.exp_format|f)\.label\(\)", "ExportFormat::label"),
     # R22-7 export DESTINATION labels. `ExportDest::Ask.label()` is the export
