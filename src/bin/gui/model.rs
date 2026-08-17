@@ -937,6 +937,11 @@ pub(crate) struct StashEntry {
     /// from navigation renamed 「▣ 原片」 (the strip's only rename bug that
     /// needed no disk at all).
     pub(crate) kind: VariantKind,
+    /// The ACTIVE variant's identity + user name (R24-2), carried for the
+    /// same reason its `kind` is: a nav round-trip that re-minted the id
+    /// would orphan every version snapshot taken from this card.
+    pub(crate) id: String,
+    pub(crate) name: Option<String>,
     /// The rest of the variant strip (everything but the active variant),
     /// so navigation restores the WHOLE session: a dirty BACKGROUND variant
     /// used to die silently on nav (H4) — the quit dialog discloses that
@@ -951,6 +956,11 @@ pub(crate) struct StashEntry {
 /// survive a photo switch; they rebuild on the first develop after restore).
 pub(crate) struct StashedVariant {
     pub(crate) kind: VariantKind,
+    /// Identity + user name travel with the card (R24-2): the stash is one
+    /// of the six hops a variant name has to survive, and a re-minted id on
+    /// the way back would break every version attributed to this card.
+    pub(crate) id: String,
+    pub(crate) name: Option<String>,
     pub(crate) recipe: EditRecipe,
     pub(crate) base: Option<Arc<image::DynamicImage>>,
     pub(crate) origin: Option<PathBuf>,
@@ -962,6 +972,21 @@ pub(crate) struct StashedVariant {
 /// pixels + its develop recipe.
 pub(crate) struct Variant {
     pub(crate) kind: VariantKind,
+    /// Stable, opaque identity for THIS card inside THIS photo (R24-2).
+    /// Persisted in `variants.json`, so it survives a reopen — that is what
+    /// lets a version snapshot say which variant it came from after the
+    /// session that took it is gone. Never shown; never parsed. The empty
+    /// string is the honest "no identity recorded" value (a legacy strip
+    /// record, a test fixture): it matches nothing, rather than matching
+    /// every other id-less card.
+    pub(crate) id: String,
+    /// The user's own name for this rendition. `None` ⇒ the strip shows the
+    /// kind label alone. Deliberately NOT part of `EditRecipe`: recipe.json
+    /// is the cross-surface develop contract, its bare `PartialEq` is the
+    /// backup gate's "already preserved" witness, and `dirty_vs` compares it
+    /// field-by-field — a name in there would make renaming a card look like
+    /// an edit to every one of them.
+    pub(crate) name: Option<String>,
     /// This variant's develop. The ACTIVE variant's recipe is mirrored in
     /// `AutoshopApp::recipe` (the live working copy the sliders edit); it is
     /// saved back here when you switch away.
@@ -1014,6 +1039,82 @@ impl VariantKind {
             _ => None,
         }
     }
+
+    /// The variant taxonomy's ONE binary (R24-1). A photo is *one negative +
+    /// N variants + one version history*; every variant is either
+    ///
+    /// * PARAMETRIC (`Original`, `Fitted`) — the look lives in the develop
+    ///   recipe, so it re-renders at any resolution, projects to XMP, and
+    ///   carries the camera calibration the base-curve estimator repairs; or
+    /// * PIXEL-STATE (`Generated`) — the look is baked into pixels, and only
+    ///   a reverse-fit turns it back into parameters.
+    ///
+    /// `origin.is_some()` ("this card hangs off a baked master") is an
+    /// ORTHOGONAL second attribute, not this axis: an in-place retouch master
+    /// hangs off an *Original*, and a *Fitted* card is source-based with no
+    /// master at all. The exhaustive match is the point — a fourth kind must
+    /// declare which side it lands on instead of inheriting `!= Generated`.
+    ///
+    /// Deliberately NOT collected here (checked site by site, R24-1):
+    /// * the `pixels.json` two-valued `generated` flag (export.rs:430,
+    ///   actions.rs:1582, workers.rs:1062) — a persisted FORMAT value in the
+    ///   same class as [`VariantKind::store_str`]; routing it through a
+    ///   semantic predicate would silently re-spell the on-disk flag the day
+    ///   the taxonomy grows a kind;
+    /// * `active_is_generated` (actions.rs) — it answers "is the active card
+    ///   THAT kind", and one of its own callers is the flag above;
+    /// * `fit_target` (canvas.rs) — a policy about which raster the
+    ///   reverse-fit defaults to, not a claim about parametric-ness;
+    /// * the `== Original` / `!= Original` branches (the strip's ✕ guard,
+    ///   the strip-triviality judgements) — a different axis entirely.
+    pub(crate) fn is_parametric(self) -> bool {
+        match self {
+            VariantKind::Original | VariantKind::Fitted => true,
+            VariantKind::Generated => false,
+        }
+    }
+}
+
+/// The fixed id of a photo's base negative card. A photo has exactly one
+/// Original, and the common photo (one card, no `variants.json` at all —
+/// the strip record is deliberately not written for a trivial strip) must
+/// still keep a STABLE identity across reopens, or every version snapshot
+/// taken from it would come back unattributed. Minted ids are for the cards
+/// that only exist because something created them.
+pub(crate) const ORIGINAL_VARIANT_ID: &str = "original";
+
+/// A card's id as the strip record spells it: an EMPTY id is "no identity
+/// recorded", which the record states by omitting the field rather than by
+/// writing `""` (a stored empty string would read back as a real id that
+/// happens to equal every other card's).
+pub(crate) fn variant_id_field(id: &str) -> Option<String> {
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// The inverse, on the way back in: a record that carries no id gets one
+/// MINTED (R24-2). Legacy `variants.json` files predate the field, and a
+/// card that stayed id-less could never be named as a version's source.
+pub(crate) fn variant_id_or_mint(id: Option<&String>) -> String {
+    match id {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => new_variant_id(),
+    }
+}
+
+/// Mint an opaque variant id, unique across processes and calls: pid,
+/// wall-clock nanos and a process-local counter. Opaque on purpose — nothing
+/// parses it back, so the shape can change without a format bump. (Two
+/// Autoshop processes editing the same photo mint from different pids; two
+/// cards in one process differ in the counter even inside one nanosecond.)
+pub(crate) fn new_variant_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("{:x}-{nanos:x}-{seq:x}", std::process::id())
 }
 
 /// The two mask geometries a user can place by dragging.

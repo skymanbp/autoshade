@@ -1052,12 +1052,25 @@ impl AutoshopApp {
                             // arm to ride back on — without this the card
                             // reopened renamed 「▣ 原片」).
                             let mut active_kind = VariantKind::Original;
+                            // …and its identity + name, from the same two
+                            // authorities (R24-2, hop 6 of 6). The default is
+                            // the FIXED base-negative id: the common photo
+                            // has one card and no strip record at all, and a
+                            // freshly minted id there would leave every
+                            // version it ever took unattributed on reopen.
+                            let mut active_id = ORIGINAL_VARIANT_ID.to_string();
+                            let mut active_name: Option<String> = None;
                             if let Some(st) =
                                 self.src_path.as_ref().and_then(|p| self.nav_stash.remove(p))
                             {
                                 recipe = st.recipe;
                                 active_kind = st.kind;
+                                active_id = st.id;
+                                active_name = st.name;
                                 pixels = match (st.base, st.origin) {
+                                    // The bool is the `pixels.json` FORMAT
+                                    // flag (R24-1's not-collected list), not
+                                    // the parametric predicate.
                                     (Some(b), Some(o)) => {
                                         Some((b, o, st.kind == VariantKind::Generated))
                                     }
@@ -1105,20 +1118,22 @@ impl AutoshopApp {
                                 // return; the deterministic-inability
                                 // population is empty for estimator-written
                                 // curves (the too-few-pixels guard is
-                                // coeval with base_curve itself). Generated
-                                // entries are skipped like the other four
-                                // ordering sites — their curves are empty
-                                // by invariant, and the explicit guard
-                                // beats leaning on six unrelated call
-                                // sites.
+                                // coeval with base_curve itself). Only
+                                // PARAMETRIC cards are repaired (R24-1): a
+                                // pixel-state card's curve is empty by
+                                // invariant. These two are 2 of the 6 sites
+                                // that spelled that binary by hand as
+                                // `!= Generated`; they ask
+                                // `VariantKind::is_parametric` now, so a
+                                // fourth kind cannot inherit the answer.
                                 if let Some(p) = self.src_path.clone() {
-                                    let mut relooked = active_kind != VariantKind::Generated
+                                    let mut relooked = active_kind.is_parametric()
                                         && autoshop::pipeline::repair_pre_era_base_curve(
                                             &p, &mut recipe,
                                         )
                                         .is_some();
                                     for sv in &mut stash_others {
-                                        if sv.kind != VariantKind::Generated {
+                                        if sv.kind.is_parametric() {
                                             relooked |=
                                                 autoshop::pipeline::repair_pre_era_base_curve(
                                                     &p,
@@ -1162,17 +1177,23 @@ impl AutoshopApp {
                                 }
                                 _ => None,
                             };
-                            if !from_stash
-                                && let Some(rec) = &disk_strip
-                                && rec.active_kind == "fitted"
-                            {
-                                // Fitted is source-based — it has no pixels
-                                // arm to ride back on; without this the card
-                                // cold-reopened renamed 「▣ 原片」. A recorded
-                                // "generated" needs no hand here: the baked
-                                // pixels arm below upgrades the card exactly
-                                // when the master really decoded.
-                                active_kind = VariantKind::Fitted;
+                            if !from_stash && let Some(rec) = &disk_strip {
+                                if rec.active_kind == "fitted" {
+                                    // Fitted is source-based — it has no pixels
+                                    // arm to ride back on; without this the card
+                                    // cold-reopened renamed 「▣ 原片」. A recorded
+                                    // "generated" needs no hand here: the baked
+                                    // pixels arm below upgrades the card exactly
+                                    // when the master really decoded.
+                                    active_kind = VariantKind::Fitted;
+                                }
+                                // The persisted strip is also where the active
+                                // card's identity + name live (R24-2); a record
+                                // written before those fields existed mints one.
+                                active_id = variant_id_or_mint(
+                                    rec.active_id.as_ref(),
+                                );
+                                active_name = rec.active_name.clone();
                             }
                             self.recipe = recipe.clone();
                             self.rationale = recipe.rationale.clone();
@@ -1189,6 +1210,8 @@ impl AutoshopApp {
                                 } else {
                                     VariantKind::Original
                                 },
+                                id: active_id,
+                                name: active_name,
                                 recipe,
                                 base: None,
                                 origin: None,
@@ -1287,6 +1310,10 @@ impl AutoshopApp {
                                     .drain(..)
                                     .map(|sv| Variant {
                                         kind: sv.kind,
+                                        // Hop 4 of 6 (R24-2): the stash back
+                                        // into the live strip.
+                                        id: sv.id,
+                                        name: sv.name,
                                         recipe: sv.recipe,
                                         base: sv.base,
                                         origin: sv.origin,
@@ -1479,6 +1506,7 @@ impl AutoshopApp {
                         // install below folds it into the pre-analyze step
                         // and Ctrl+Z skips it.
                         self.commit_mask_name_buf();
+                        self.commit_version_name_buf(); // version half (R24-2)
                         self.commit_now();
                         let accepted =
                             verdict.decision == autoshop::advisor::Decision::Accept;
@@ -2132,6 +2160,8 @@ impl AutoshopApp {
                                 self.push_variant(
                                     Variant {
                                         kind: VariantKind::Generated,
+                                        id: new_variant_id(),
+                                        name: None,
                                         recipe: EditRecipe::default(),
                                         base: Some(Arc::new(img)),
                                         origin: Some(saved),
@@ -2160,6 +2190,7 @@ impl AutoshopApp {
                                 // the Analyze landing: commit (and flush a typed
                                 // rename) BEFORE the state swap.
                                 self.commit_mask_name_buf();
+                                self.commit_version_name_buf(); // version half (R24-2)
                                 self.commit_now();
                                 let img = Arc::new(img);
                                 let (mw, mh) = img.dimensions();
@@ -2358,6 +2389,8 @@ impl AutoshopApp {
                         self.push_variant(
                             Variant {
                                 kind: VariantKind::Fitted,
+                                id: new_variant_id(),
+                                name: None,
                                 recipe: out.recipe,
                                 base: None,
                                 origin: None,

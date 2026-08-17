@@ -278,6 +278,8 @@ impl AutoshopApp {
         let accent = self.theme.colors().accent_text; // Copy — safe in closures
         let mut switch_to: Option<usize> = None;
         let mut delete: Option<usize> = None;
+        let mut save_version = false;
+        let busy = self.busy; // Copy — read before the card closures borrow self
         // The card column is centered by an EXPLICIT top pad, not by
         // cross-align: Align::Center positioned the row before its content
         // grew — egui seeds a horizontal row at interact_size.y, centered
@@ -396,6 +398,31 @@ impl AutoshopApp {
                             ui.horizontal(|ui| {
                                 let label = egui::RichText::new(tr(lang, kind.label())).small();
                                 ui.label(if active { label.strong().color(accent) } else { label });
+                                // R24-2 (user decision ②, in place of
+                                // save-as-you-go snapshots): a one-click
+                                // archive entry point ON the card whose
+                                // develop it snapshots. Active card only —
+                                // the button acts on the LIVE canvas, and
+                                // offering it on a background card would
+                                // promise a snapshot of something else.
+                                // A small_button in the existing label row:
+                                // the row is already at least interact_size.y
+                                // tall, so the strip's card-height arithmetic
+                                // (and its geometry test) is untouched.
+                                // Inert (visibly, not silently) while a photo
+                                // is still opening — the canvas then still
+                                // holds the OUTGOING photo's develop, and the
+                                // snapshot would land it in the incoming
+                                // photo's store. Same rule the Versions
+                                // section applies to its own copy.
+                                if active
+                                    && ui
+                                        .add_enabled(!busy, egui::Button::new("＋").small())
+                                        .on_hover_text(tr(lang, "Save all current develop parameters as a numbered snapshot (v<N>.recipe.json in this photo's develop store), reloadable anytime"))
+                                        .clicked()
+                                {
+                                    save_version = true;
+                                }
                                 // Any variant except the sole Original can be dropped.
                                 // ✕ — the ONE close/cancel glyph app-wide (the
                                 // old bare × was the fourth variant of it).
@@ -420,6 +447,11 @@ impl AutoshopApp {
             self.switch_variant(i, ui.ctx());
         } else if let Some(i) = delete {
             self.delete_variant(i, ui.ctx());
+        } else if save_version && !self.busy {
+            // The button above is already disabled while busy; the second
+            // read is defence in depth against a future caller path, at the
+            // cost of one bool.
+            self.save_version();
         }
     }
 
@@ -1915,11 +1947,116 @@ impl AutoshopApp {
                 {
                     self.save_version();
                 }
+                // R24-2: a version row is 「v3 「日落偏暖」· 来自 ◭ 反推」 —
+                // the number, the user's own name, and which VARIANT the
+                // snapshot was taken from. The filter answers "show me only
+                // this card's history"; rows it hides are COUNTED below, so
+                // a shrinking list is never mistaken for lost versions.
+                let active_id = self.active_variant().map(|v| v.id.clone()).unwrap_or_default();
+                let active_kind = self.active_variant().map(|v| v.kind);
+                if !self.versions.is_empty() {
+                    ui.checkbox(&mut self.versions_current_only, tr(lang, "Only this variant"))
+                        .on_hover_text(tr(
+                            lang,
+                            "Show only snapshots taken from the variant you are on. Versions with no recorded source (saved before this) are hidden while it is on.",
+                        ));
+                }
                 let mut load: Option<u32> = None;
                 let mut delete: Option<u32> = None;
-                for &n in &self.versions {
+                let mut rename: Option<u32> = None;
+                let mut hidden = 0usize;
+                // The list is cloned so the rows may borrow `self` mutably
+                // (the rename buffer) — it is a handful of u32.
+                let versions = self.versions.clone();
+                let photo = self.src_path.clone();
+                for n in versions {
+                    let meta = self.version_meta.get(&n).cloned();
+                    if self.versions_current_only
+                        && !Self::version_is_from(meta.as_ref(), &active_id, active_kind)
+                    {
+                        hidden += 1;
+                        continue;
+                    }
+                    let named = meta.as_ref().and_then(|m| m.name.clone());
+                    let editing = self
+                        .version_name_buf
+                        .as_ref()
+                        .is_some_and(|(p, j, ..)| *j == n && Some(p) == photo.as_ref());
                     ui.horizontal(|ui| {
                         ui.label(format!("v{n}"));
+                        let field_id = ui.make_persistent_id(("version_name", n));
+                        if editing {
+                            let resp = {
+                                let buf = &mut self
+                                    .version_name_buf
+                                    .as_mut()
+                                    .expect("checked just above")
+                                    .3;
+                                ui.add(
+                                    egui::TextEdit::singleline(buf)
+                                        .id(field_id)
+                                        .desired_width(110.0)
+                                        .hint_text(tr(lang, "Name")),
+                                )
+                            };
+                            // The +1 boundary: this row's own lost-focus
+                            // commit, the twin of the mask panel's (U10).
+                            // Enter counts as losing focus in egui. Leaving
+                            // the box also leaves EDIT MODE — a row that
+                            // stayed a TextEdit forever would keep asking
+                            // for focus below and never give it back.
+                            if resp.lost_focus() {
+                                self.commit_version_name_buf();
+                                self.version_name_buf = None;
+                            } else if !resp.has_focus() {
+                                // The frame the box first appears in: the
+                                // click that opened it landed on the LABEL
+                                // that used to be here, so the caret has to
+                                // be put here explicitly or the user's next
+                                // keystroke goes nowhere.
+                                resp.request_focus();
+                            }
+                        } else {
+                            let shown = match &named {
+                                Some(name) => format!("「{name}」"),
+                                None => tr(lang, "Name…").to_string(),
+                            };
+                            let text = match &named {
+                                Some(_) => egui::RichText::new(shown),
+                                None => egui::RichText::new(shown).weak(),
+                            };
+                            if ui
+                                .add(egui::Label::new(text).sense(egui::Sense::click()))
+                                .on_hover_text(tr(lang, "Name this snapshot"))
+                                .clicked()
+                            {
+                                rename = Some(n);
+                            }
+                        }
+                        // Provenance, only when it was actually recorded —
+                        // a version from before this existed says nothing
+                        // rather than guessing.
+                        if let Some(m) = &meta {
+                            let from = m.from_kind.as_deref().and_then(VariantKind::from_store_str);
+                            let note = match (from, m.origin.as_deref()) {
+                                // `kind` by name, not `k`: the i18n audit's
+                                // dynamic-key registry keys on the receiver
+                                // spelling (`kind.label()`), which is how a
+                                // new VariantKind without a zh pair is caught.
+                                (Some(kind), _) => Some(trf(
+                                    lang,
+                                    "· from {kind}",
+                                    &[("kind", tr(lang, kind.label()))],
+                                )),
+                                (None, Some(autoshop::store::VERSION_ORIGIN_AUTO)) => {
+                                    Some(tr(lang, "· auto-archived").to_string())
+                                }
+                                _ => None,
+                            };
+                            if let Some(note) = note {
+                                ui.label(egui::RichText::new(note).weak().small());
+                            }
+                        }
                         if ui.small_button(tr(lang, "Load")).on_hover_text(tr(lang, "Replace current parameters (one Ctrl+Z to undo)")).clicked() {
                             load = Some(n);
                         }
@@ -1932,12 +2069,46 @@ impl AutoshopApp {
                         }
                     });
                 }
+                if hidden > 0 {
+                    ui.label(
+                        egui::RichText::new(trf(
+                            lang,
+                            "{n} hidden — saved from another variant",
+                            &[("n", &hidden.to_string())],
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
+                if let Some(n) = rename
+                    && let Some(p) = photo.clone()
+                {
+                    // Switching rows commits the previous one to ITS OWN
+                    // (photo, number) first — the mask panel's cross-commit
+                    // rule, made structural by keying on the number.
+                    self.commit_version_name_buf();
+                    let cur = self
+                        .version_meta
+                        .get(&n)
+                        .and_then(|m| m.name.clone())
+                        .unwrap_or_default();
+                    self.version_name_buf = Some((p, n, cur.clone(), cur));
+                }
                 if let Some(n) = load {
                     self.load_version(n);
                 }
                 if let Some(n) = delete
                     && let Some(src) = self.src_path.clone()
                 {
+                    // A rename buffer aimed at the row being deleted dies
+                    // WITH it (R24-2): committing it afterwards would write a
+                    // name for a number that no longer exists and can never
+                    // be re-issued — a record only the next delete would
+                    // clean up.
+                    if self.version_name_buf.as_ref().is_some_and(|(p, j, ..)| *j == n && *p == src)
+                    {
+                        self.version_name_buf = None;
+                    }
                     // NoWait wrapper: delete_version locks internally with
                     // Wait — a foreground 🗑 click must fail into the error
                     // arm when another process holds the develop, not hang.

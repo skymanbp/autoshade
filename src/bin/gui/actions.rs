@@ -185,6 +185,13 @@ impl AutoshopApp {
         // same-index mask on the NEXT photo skipped the reseed and the box
         // showed the previous photo's name text (M15).
         self.mask_name_buf = None;
+        // A pending VERSION rename obeys the same boundary (R24-2). Its
+        // buffer carries the photo it was seeded on, so the commit lands on
+        // the outgoing photo even though `src_path` moves below — and the
+        // buffer still dies here, or the box would greet the incoming photo
+        // pre-filled with the previous one's version name.
+        self.commit_version_name_buf();
+        self.version_name_buf = None;
         // The mid-open window marker (see confirm_quit_layer): src_path is
         // re-pointed below while recipe/saved_recipe still describe the old
         // photo; cleared in BOTH Msg::Opened arms. `open_same_path` is the
@@ -235,6 +242,10 @@ impl AutoshopApp {
                     .filter(|(i, _)| *i != self.active)
                     .map(|(_, v)| StashedVariant {
                         kind: v.kind,
+                        // Hop 3 of 6 (R24-2): identity + name ride the stash
+                        // out; the workers restore is hop 4 back.
+                        id: v.id.clone(),
+                        name: v.name.clone(),
                         recipe: v.recipe.clone(),
                         base: v.base.clone(),
                         origin: v.origin.clone(),
@@ -248,6 +259,14 @@ impl AutoshopApp {
                         base: self.active_variant().and_then(|v| v.base.clone()),
                         origin,
                         kind: self.active_variant().map_or(VariantKind::Original, |v| v.kind),
+                        // The ACTIVE card's identity + name travel with the
+                        // rest of its state (R24-2): a nav round-trip that
+                        // re-minted the id would orphan every version taken
+                        // from this card.
+                        id: self
+                            .active_variant()
+                            .map_or_else(|| ORIGINAL_VARIANT_ID.to_string(), |v| v.id.clone()),
+                        name: self.active_variant().and_then(|v| v.name.clone()),
                         others,
                         active_pos,
                     },
@@ -557,8 +576,15 @@ impl AutoshopApp {
                     kind: v.kind.store_str().to_string(),
                     recipe: v.recipe.clone(),
                     origin: v.origin.clone(),
+                    // Hop 1 of 6 (R24-2): the live strip's identities + names
+                    // to disk. An EMPTY id is written as absent — the record
+                    // must not claim an identity the card does not have.
+                    id: variant_id_field(&v.id),
+                    name: v.name.clone(),
                 })
                 .collect(),
+            active_id: self.active_variant().and_then(|v| variant_id_field(&v.id)),
+            active_name: self.active_variant().and_then(|v| v.name.clone()),
         })
     }
 
@@ -608,6 +634,11 @@ impl AutoshopApp {
     /// Is the active variant an AI-generated raster (look baked into pixels,
     /// not the recipe)? Such a variant has no parametric XMP representation —
     /// exporting a sidecar for it would be a lie; steer the user to 反推 first.
+    ///
+    /// Kept as an IDENTITY question rather than re-expressed through
+    /// [`VariantKind::is_parametric`] (R24-1): several callers feed the
+    /// answer straight into the two-valued `pixels.json` format flag, which
+    /// must keep naming the kind it spells on disk.
     pub(crate) fn active_is_generated(&self) -> bool {
         self.active_variant().is_some_and(|v| v.kind == VariantKind::Generated)
     }
@@ -672,14 +703,14 @@ impl AutoshopApp {
         // switch_variant sync the OUTGOING canvas into the strip, so a
         // washed Original displaced by an AI push comes back through HERE
         // when its card is clicked — no navigation, no stash, no save
-        // involved. Memo-bounded; era-2 recipes short-circuit; a Generated
-        // entry is skipped like every other ordering site (its curve is
-        // empty by invariant).
+        // involved. Memo-bounded; era-2 recipes short-circuit; a PIXEL-STATE
+        // card is skipped like at every other ordering site (its curve is
+        // empty by invariant — see `VariantKind::is_parametric`, R24-1).
         // Synchronous first-click cost: the same accepted class as the open
         // gate — one estimate per photo per process when it succeeds, and a
         // transient inability early-exits on the failed probe and retries on
         // the next read.
-        if vkind != VariantKind::Generated
+        if vkind.is_parametric()
             // ...and never while a CROSS-PHOTO open is in flight (src_path
             // already points at the INCOMING photo — the apply_step /
             // live-canvas override hazard); a same-path keep-flight stays
@@ -782,6 +813,7 @@ impl AutoshopApp {
         // apply: commit first, then load_active's M15 clear drops the
         // buffer. Clearing without committing silently lost the rename.
         self.commit_mask_name_buf();
+        self.commit_version_name_buf(); // the version half of the same rule
         // Read BEFORE the &mut borrow below. `dirty` = an edit awaiting
         // dispatch; `develop_inflight` = a frame the switch is about to make
         // the acceptance gate reject. Either way no completed frame depicts
@@ -835,6 +867,7 @@ impl AutoshopApp {
         // (switch_variant now flushes the same way — L11-1 — so every
         // variant boundary commits before the M15 clear.)
         self.commit_mask_name_buf();
+        self.commit_version_name_buf(); // the version half of the same rule
         // Same guarded card drop as switch_variant (L06#6): the async
         // completion switches away from a variant whose latest edits may
         // never have landed a frame.
@@ -975,11 +1008,90 @@ impl AutoshopApp {
 
     /// Rescan the photo's develop dir for version snapshots (cached in
     /// `self.versions`; called on photo open and after saving a version — NOT
-    /// every frame).
+    /// every frame). The advisory name/provenance sidecar is read in the same
+    /// pass and RESTRICTED to numbers that are actually listed: a crash
+    /// between a delete's sweep and its metadata drop can leave a record for
+    /// a number nothing lists any more, and that record must never surface as
+    /// a phantom row (it can never be re-attached either — the number is
+    /// burned in the deleted-version registry).
     pub(crate) fn refresh_versions(&mut self) {
         self.versions.clear();
+        self.version_meta.clear();
         let Some(src) = self.src_path.as_deref() else { return };
         self.versions = autoshop::store::list_versions(src);
+        for e in autoshop::store::read_version_meta(src) {
+            if self.versions.contains(&e.n) {
+                self.version_meta.insert(e.n, e);
+            }
+        }
+    }
+
+    /// Does version metadata `m` name the given variant as its source
+    /// (R24-2)? The ID is authoritative when both sides have one — a card
+    /// renamed or re-kinded since the snapshot still matches. KIND is the
+    /// fallback for a record written before ids existed on this photo (or
+    /// for a card whose own id was never recorded). A record with neither —
+    /// or no record at all — is UNATTRIBUTED and matches nothing: the filter
+    /// is "only this variant", and quietly including everything unknown
+    /// would make it a checkbox that does not filter.
+    pub(crate) fn version_is_from(
+        m: Option<&autoshop::store::VersionMetaEntry>,
+        active_id: &str,
+        active_kind: Option<VariantKind>,
+    ) -> bool {
+        let Some(m) = m else { return false };
+        if let Some(id) = m.from_id.as_deref()
+            && !active_id.is_empty()
+        {
+            return id == active_id;
+        }
+        match (m.from_kind.as_deref(), active_kind) {
+            (Some(k), Some(ak)) => k == ak.store_str(),
+            _ => false,
+        }
+    }
+
+    /// Commit a pending version rename to ITS OWN photo and number — the
+    /// version half of the `commit_mask_name_buf` rule (U10): a name still
+    /// sitting in its TextEdit when the user hits Ctrl+S, clicks another
+    /// photo or quits must reach the disk, not die with the buffer. Keyed by
+    /// (photo, number), both captured at seed time, so a boundary that has
+    /// already re-pointed `src_path` cannot rename the incoming photo's v1.
+    /// The write is advisory: a failure is disclosed and the buffer is left
+    /// alone so the next boundary retries.
+    pub(crate) fn commit_version_name_buf(&mut self) {
+        let Some((photo, n, seed, buf)) = self.version_name_buf.clone() else { return };
+        if buf == seed {
+            return;
+        }
+        // NoWait wrapper around the store's own Wait lock (the delete_version
+        // rule): a develop held by another process must report here, never
+        // freeze the UI thread on a name.
+        match autoshop::store::with_develop_lock(
+            &photo,
+            autoshop::store::DevelopLockMode::NoWait,
+            || autoshop::store::set_version_name(&photo, n, Some(buf.as_str())),
+        ) {
+            Ok(()) => {
+                let named = Some(buf.trim().to_string()).filter(|s| !s.is_empty());
+                // Re-seed rather than clear: the row is very likely still on
+                // screen, and a SECOND rename in the same row has to compare
+                // against what we just wrote, not the original.
+                self.version_name_buf = Some((photo.clone(), n, buf.clone(), buf));
+                if self.src_path.as_deref() == Some(photo.as_path()) {
+                    self.version_meta
+                        .entry(n)
+                        .or_insert_with(|| autoshop::store::VersionMetaEntry {
+                            n,
+                            ..Default::default()
+                        })
+                        .name = named;
+                }
+            }
+            Err(e) => {
+                self.persist_postponed(&e, "Renaming v{n} failed: {err}", &[("n", &n.to_string())]);
+            }
+        }
     }
 
     /// Save the CURRENT develop as the next numbered version snapshot.
@@ -987,8 +1099,28 @@ impl AutoshopApp {
         // A typed-but-uncommitted mask rename belongs in the snapshot —
         // every persistence entry point flushes it (the U10 rule; L27).
         self.commit_mask_name_buf();
+        self.commit_version_name_buf();
         let lang = self.lang;
+        // A PIXEL-STATE variant has no develop worth snapshotting: its look
+        // lives in the raster, and the canvas recipe over it is stripped of
+        // curve, lens and as-shot anchor by construction — so "＋ Save as
+        // version" wrote a near-empty recipe that restored to nothing (R24-2).
+        // Same judgement as Ctrl+S's XMP refusal (`save_xmp`), same remedy:
+        // reverse-fit first, then the snapshot has parameters to hold.
+        if self.active_is_generated() {
+            let t = tr(
+                lang,
+                "A generated variant's look lives in its pixels — a version snapshot would store an almost-empty recipe; run 「Reverse-fit」 first",
+            );
+            self.status = t.into();
+            self.toast(ToastKind::Error, t);
+            return;
+        }
         let Some(src) = self.src_path.clone() else { return };
+        // Attribution for the record below, read before the lock closure
+        // borrows `self`: which card this snapshot is a picture OF (R24-2).
+        let from_kind = self.active_variant().map(|v| v.kind.store_str().to_string());
+        let from_id = self.active_variant().and_then(|v| variant_id_field(&v.id));
         // ONE NoWait lock across claim → raster freeze → recipe write:
         // another process's delete_version sweeping the just-claimed slot
         // mid-snapshot is a real interleave — and this is a foreground
@@ -1030,6 +1162,22 @@ impl AutoshopApp {
         }
         match res {
             Ok(p) => {
+                // Provenance BEFORE the rescan, so the fresh row already
+                // carries「· 来自 …」. Best-effort by contract (R24-2): the
+                // snapshot is on disk and complete — an advisory record that
+                // could not be written must not turn a successful save into a
+                // failure, it only leaves the version unattributed. The
+                // develop lock is already held (reentrant).
+                let _ = autoshop::store::record_version_meta(
+                    &src,
+                    &autoshop::store::VersionMetaEntry {
+                        n,
+                        name: None,
+                        from_kind: from_kind.clone(),
+                        from_id: from_id.clone(),
+                        origin: Some(autoshop::store::VERSION_ORIGIN_USER.to_string()),
+                    },
+                );
                 self.refresh_versions();
                 self.status = trf(
                     lang,
@@ -1460,10 +1608,7 @@ impl AutoshopApp {
         // any more. The gate stays because ungating the keyboard would
         // resurrect every scenario above, and the test drives it directly.
         if (!self.open_in_flight || (self.open_same_path && self.keep_recipe))
-            && !self
-                .variants
-                .get(self.active)
-                .is_some_and(|v| v.kind == VariantKind::Generated)
+            && self.variants.get(self.active).is_none_or(|v| v.kind.is_parametric())
             && let Some(p) = self.src_path.clone()
             && autoshop::pipeline::repair_pre_era_base_curve(&p, &mut self.recipe).is_some()
         {
@@ -1572,7 +1717,8 @@ impl AutoshopApp {
         // Everything quitting would lose: the stash + the open photo's canvas
         // (the live canvas outranks its own stale stash entry). Each entry
         // carries its pixel identity so 「Save all」 persists a baked retouch's
-        // master link exactly like Ctrl+S would.
+        // master link exactly like Ctrl+S would. (`== Generated` here is the
+        // `pixels.json` FORMAT flag — not the R24-1 parametric predicate.)
         let mut pending: Vec<PendingSave> = self
             .nav_stash
             .iter()

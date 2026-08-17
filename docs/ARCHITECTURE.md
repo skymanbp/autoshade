@@ -567,11 +567,20 @@ trusted), alongside `recipe.json` (the authoritative develop
 state), version snapshots (a deleted snapshot registers its number + content
 fingerprints in the develop's permanent `.deleted-versions.json`: the number
 is never re-issued and the backup gate stops auto-preserving the discarded
-content — a discard record, not a recovery copy), mask rasters, `pixels.json`
+content — a discard record, not a recovery copy), version NAMES + provenance
+(v0.30.0: `.version-meta.json`, an ADVISORY sidecar recording per number the
+user's own name plus which variant the snapshot came from and whether it was
+taken explicitly or by the backup gate; it follows the same non-generational
+discipline as `.deleted-versions.json` — no `.bak`, no commit membership, not
+swept by a develop clear, carried by adoption — and a name dies with its
+number, which is never re-issued), mask rasters, `pixels.json`
 (the baked pixel-master
 link) and, since v0.22.0, `variants.json` — the GUI's variant strip
 (background variants' kind/recipe/raster origin + the active card's
-three-valued kind), which is what lets a 「反推 Reverse-fit」 or 「AI 生成」
+three-valued kind, each card since v0.30.0 also carrying an opaque stable
+`id` and an optional `name`, both additive at `v=1`: the record is not
+`deny_unknown_fields`, so an older build reads a newer strip and simply
+ignores the pair), which is what lets a 「反推 Reverse-fit」 or 「AI 生成」
 card survive a reopen and lets the quit dialog's Save-all genuinely save
 background variants instead of livelocking. Copy the XMP beside the RAW when
 you want Lightroom to pick it up. A Lightroom sidecar that already sits beside

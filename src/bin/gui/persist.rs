@@ -526,10 +526,13 @@ pub(crate) fn stamp_calibration(
 }
 
 /// Rebuild the background-variant strip from the persisted record: kind
-/// strings parse (an unknown kind drops that variant LOUDLY), and every
-/// non-Generated recipe heals its pre-era base curve — a strip entry is
-/// one click from BEING the canvas. Generated entries carry empty curves
-/// by invariant and are skipped.
+/// strings parse (an unknown kind drops that variant LOUDLY), identities and
+/// names come back with their cards (R24-2 — an id-less legacy entry is
+/// minted one here, or the version snapshots taken from it could never be
+/// attributed again), and every PARAMETRIC recipe heals its pre-era base
+/// curve — a strip entry is one click from BEING the canvas. Pixel-state
+/// entries carry empty curves by invariant and are skipped
+/// ([`VariantKind::is_parametric`]).
 pub(crate) fn strip_from_record(
     rec: &autoshop::store::VariantsRecord,
     src: Option<&std::path::Path>,
@@ -547,6 +550,9 @@ pub(crate) fn strip_from_record(
             };
             Some(Variant {
                 kind,
+                // Hop 2 of 6 (R24-2): disk → live strip.
+                id: variant_id_or_mint(e.id.as_ref()),
+                name: e.name.clone(),
                 recipe: e.recipe.clone(),
                 base: None,
                 origin: e.origin.clone(),
@@ -556,7 +562,7 @@ pub(crate) fn strip_from_record(
         .collect();
     if let Some(p) = src {
         for v in strip.iter_mut() {
-            if v.kind != VariantKind::Generated {
+            if v.kind.is_parametric() {
                 let _ = autoshop::pipeline::repair_pre_era_base_curve(p, &mut v.recipe);
             }
         }

@@ -54,6 +54,7 @@ impl AutoshopApp {
                     // Flush a pending mask rename first — the clipboard must
                     // carry the name the user sees in the box (U10; CX5-9).
                     self.commit_mask_name_buf();
+                    self.commit_version_name_buf(); // the version half (R24-2)
                     self.copied = Some(self.recipe.clone());
                     self.copied_from = self.src_path.clone();
                     self.status = tr(lang, "Recipe copied — Ctrl/⌘+click to pick several, then “Paste to selected”").to_string();

@@ -156,6 +156,436 @@
         let _ = std::fs::remove_dir_all(&dev);
     }
 
+    /// R24-2: a variant's identity + name survive every hop between the live
+    /// strip, the navigation stash and `variants.json`. Six hops carry them,
+    /// and a name that falls off ANY of them is silent loss — the user typed
+    /// it, nothing warned, and the card comes back nameless.
+    #[test]
+    fn a_variant_name_survives_every_hop_it_has_to_take() {
+        use crate::model::{StashedVariant, Variant, VariantKind};
+        let mk = |kind, id: &str, name: Option<&str>| Variant {
+            kind,
+            id: id.into(),
+            name: name.map(str::to_string),
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let mut app = AutoshopApp {
+            variants: vec![
+                mk(VariantKind::Original, "card-a", Some("base")),
+                mk(VariantKind::Fitted, "card-b", Some("偏暖")),
+            ],
+            active: 1,
+            ..Default::default()
+        };
+
+        // Hop 1 (live strip → record) and hop 2 (record → live strip).
+        let rec = app.current_strip_record().expect("a two-card strip is worth recording");
+        assert_eq!(rec.active_id.as_deref(), Some("card-b"));
+        assert_eq!(rec.active_name.as_deref(), Some("偏暖"));
+        assert_eq!(rec.others[0].id.as_deref(), Some("card-a"));
+        assert_eq!(rec.others[0].name.as_deref(), Some("base"));
+        let back = crate::persist::strip_from_record(&rec, None);
+        assert_eq!(back[0].id, "card-a");
+        assert_eq!(back[0].name.as_deref(), Some("base"));
+
+        // A LEGACY record (no ids — every strip written before R24-2) is
+        // minted one on the way in, or the versions taken from that card
+        // could never be attributed again.
+        let legacy = autoshop::store::VariantsRecord {
+            v: 1,
+            active_kind: "original".into(),
+            active_pos: 0,
+            active_id: None,
+            active_name: None,
+            others: vec![autoshop::store::VariantEntry {
+                kind: "generated".into(),
+                recipe: EditRecipe::default(),
+                origin: None,
+                id: None,
+                name: None,
+            }],
+        };
+        let minted = crate::persist::strip_from_record(&legacy, None);
+        assert!(!minted[0].id.is_empty(), "an id-less legacy entry is minted an identity");
+
+        // Hop 3 (live strip → stash) and hop 5 (stash → record), driven
+        // through the stash-building path the way navigation does.
+        let others: Vec<StashedVariant> = app
+            .variants
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != app.active)
+            .map(|(_, v)| StashedVariant {
+                kind: v.kind,
+                id: v.id.clone(),
+                name: v.name.clone(),
+                recipe: v.recipe.clone(),
+                base: v.base.clone(),
+                origin: v.origin.clone(),
+            })
+            .collect();
+        let st = crate::model::StashEntry {
+            recipe: app.recipe.clone(),
+            base: None,
+            origin: None,
+            kind: app.variants[app.active].kind,
+            id: app.variants[app.active].id.clone(),
+            name: app.variants[app.active].name.clone(),
+            others,
+            active_pos: app.active,
+        };
+        let stashed = crate::util::stash_strip_record(&st).expect("a stashed strip is recordable");
+        assert_eq!(stashed.active_id.as_deref(), Some("card-b"));
+        assert_eq!(stashed.active_name.as_deref(), Some("偏暖"));
+        assert_eq!(stashed.others[0].id.as_deref(), Some("card-a"));
+        assert_eq!(stashed.others[0].name.as_deref(), Some("base"));
+
+        // Hop 4 (stash → live strip): the shape the Opened handler rebuilds.
+        let restored: Vec<Variant> = st
+            .others
+            .into_iter()
+            .map(|sv| Variant {
+                kind: sv.kind,
+                id: sv.id,
+                name: sv.name,
+                recipe: sv.recipe,
+                base: sv.base,
+                origin: sv.origin,
+                thumb: None,
+            })
+            .collect();
+        assert_eq!(restored[0].id, "card-a");
+        assert_eq!(restored[0].name.as_deref(), Some("base"));
+
+        // The strip record is still skipped for a TRIVIAL strip — names do
+        // not make a lone Original worth a sidecar (R24-3 revisits this when
+        // the cards themselves become renameable).
+        app.variants.truncate(1);
+        app.active = 0;
+        assert!(app.current_strip_record().is_none());
+    }
+
+    /// R24-2: 「＋ Save as version」 on a PIXEL-STATE card wrote a near-empty
+    /// recipe — the canvas over a generated raster carries no curve, no lens
+    /// profile and no as-shot anchor by construction, so the snapshot
+    /// restored to nothing. Same judgement as Ctrl+S's XMP refusal.
+    #[test]
+    fn saving_a_version_off_a_generated_variant_is_refused_not_emptied() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-genversion-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("photo.arw");
+        std::fs::write(&src, b"raw").unwrap();
+        let dev = autoshop::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        let mk = |kind| crate::model::Variant {
+            kind,
+            id: crate::model::new_variant_id(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: Some(dir.join("master.png")),
+            thumb: None,
+        };
+        let mut app = AutoshopApp {
+            src_path: Some(src.clone()),
+            variants: vec![mk(crate::model::VariantKind::Generated)],
+            ..Default::default()
+        };
+        app.save_version();
+        assert!(
+            autoshop::store::list_versions(&src).is_empty(),
+            "a generated card must not mint an empty snapshot"
+        );
+        assert!(
+            app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)),
+            "the refusal must be SEEN — the keyboard path has no other channel"
+        );
+
+        // The same canvas on a PARAMETRIC card saves, and records what it
+        // was a picture of.
+        app.toasts.clear();
+        app.variants = vec![crate::model::Variant {
+            id: "card-fit".into(),
+            ..mk(crate::model::VariantKind::Fitted)
+        }];
+        app.save_version();
+        assert_eq!(autoshop::store::list_versions(&src), vec![1]);
+        let meta = autoshop::store::read_version_meta(&src);
+        assert_eq!(meta[0].from_kind.as_deref(), Some("fitted"));
+        assert_eq!(meta[0].from_id.as_deref(), Some("card-fit"));
+        assert_eq!(meta[0].origin.as_deref(), Some(autoshop::store::VERSION_ORIGIN_USER));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// R24-2: the version ROW says what it is — 「v1 「偏暖」· from ◭
+    /// Reverse-fit」 — and the filter hides other cards' history while
+    /// COUNTING what it hid (a shrinking list must never read as lost
+    /// versions). Headless: no exe is launched, the panel is rendered into an
+    /// off-screen `egui::Context`.
+    #[test]
+    fn a_version_row_shows_its_name_and_where_it_came_from() {
+        fn texts(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<String>) {
+            fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+                match s {
+                    egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            shapes.iter().for_each(|c| walk(&c.shape, out));
+        }
+        let dir = std::env::temp_dir().join(format!("autoshop-verrow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("photo.arw");
+        std::fs::write(&src, b"raw").unwrap();
+
+        let mut app = AutoshopApp {
+            src_path: Some(src.clone()),
+            variants: vec![crate::model::Variant {
+                kind: crate::model::VariantKind::Fitted,
+                id: "card-fit".into(),
+                name: None,
+                recipe: EditRecipe::default(),
+                base: None,
+                origin: None,
+                thumb: None,
+            }],
+            versions: vec![1, 2],
+            ..Default::default()
+        };
+        app.version_meta.insert(
+            1,
+            autoshop::store::VersionMetaEntry {
+                n: 1,
+                name: Some("偏暖".into()),
+                from_kind: Some("fitted".into()),
+                from_id: Some("card-fit".into()),
+                origin: Some(autoshop::store::VERSION_ORIGIN_USER.into()),
+            },
+        );
+        app.version_meta.insert(
+            2,
+            autoshop::store::VersionMetaEntry {
+                n: 2,
+                origin: Some(autoshop::store::VERSION_ORIGIN_AUTO.into()),
+                ..Default::default()
+            },
+        );
+
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let frame = |app: &mut AutoshopApp| -> Vec<String> {
+            let mut seen = Vec::new();
+            let out = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1400.0, 20_000.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    // Versions is a collapsed section by default.
+                    ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                    egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
+                    });
+                },
+            );
+            texts(&out.shapes, &mut seen);
+            seen
+        };
+
+        let seen = frame(&mut app);
+        assert!(seen.iter().any(|t| t == "「偏暖」"), "the name is not on the row: {seen:?}");
+        assert!(
+            seen.iter().any(|t| t == "· from ◭ Reverse-fit"),
+            "the row does not say which variant it came from: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t == "· auto-archived"),
+            "an automatic snapshot must say so: {seen:?}"
+        );
+        assert!(seen.iter().any(|t| t == "Only this variant"), "no filter: {seen:?}");
+        assert!(
+            !seen.iter().any(|t| t.contains("hidden")),
+            "nothing is hidden while the filter is off: {seen:?}"
+        );
+
+        // Filter ON: v2 has no recorded source, so it goes — and says so.
+        app.versions_current_only = true;
+        let seen = frame(&mut app);
+        assert!(seen.iter().any(|t| t == "「偏暖」"), "this card's own version stays: {seen:?}");
+        assert!(
+            seen.iter().any(|t| t == "1 hidden — saved from another variant"),
+            "a filtered-out row must be COUNTED, not silently gone: {seen:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R24-2: a version name still sitting in its TextEdit must reach disk at
+    /// every commit boundary — the mask rename's U10 rule, applied to the
+    /// version rows. Driven through a REAL boundary (a variant switch), not
+    /// by calling the committer directly.
+    #[test]
+    fn a_pending_version_rename_survives_a_commit_boundary() {
+        let dir = std::env::temp_dir().join(format!("autoshop-verrename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("photo.arw");
+        std::fs::write(&src, b"raw").unwrap();
+        let dev = autoshop::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(
+            autoshop::store::version_target(&src, 1),
+            serde_json::to_string(&EditRecipe::default()).unwrap(),
+        )
+        .unwrap();
+
+        let mk = |kind| crate::model::Variant {
+            kind,
+            id: crate::model::new_variant_id(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let mut app = AutoshopApp {
+            src_path: Some(src.clone()),
+            variants: vec![
+                mk(crate::model::VariantKind::Original),
+                mk(crate::model::VariantKind::Fitted),
+            ],
+            active: 0,
+            ..Default::default()
+        };
+        app.refresh_versions();
+        assert_eq!(app.versions, vec![1]);
+        // Typed, never blurred.
+        app.version_name_buf = Some((src.clone(), 1, String::new(), "偏暖".into()));
+        let ctx = egui::Context::default();
+        app.switch_variant(1, &ctx);
+        assert_eq!(
+            autoshop::store::read_version_meta(&src)
+                .into_iter()
+                .find(|e| e.n == 1)
+                .and_then(|e| e.name)
+                .as_deref(),
+            Some("偏暖"),
+            "the boundary flushed the typed name to its own version"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// R24-2 (user decision ②): the archive entry point sits ON the variant
+    /// card — and only on the ACTIVE one, whose develop is what a snapshot
+    /// would capture. Headless render of the strip itself.
+    #[test]
+    fn the_active_variant_card_carries_the_save_as_version_button() {
+        fn texts(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<String>) {
+            fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+                match s {
+                    egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            shapes.iter().for_each(|c| walk(&c.shape, out));
+        }
+        let mk = |kind| crate::model::Variant {
+            kind,
+            id: crate::model::new_variant_id(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        let mut app = AutoshopApp {
+            variants: vec![
+                mk(crate::model::VariantKind::Original),
+                mk(crate::model::VariantKind::Fitted),
+            ],
+            active: 1,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let mut seen = Vec::new();
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::TopBottomPanel::bottom("variants")
+                    .exact_height(AutoshopApp::VARIANT_STRIP_H)
+                    .show(ctx, |ui| app.variant_strip(ui));
+            },
+        );
+        texts(&out.shapes, &mut seen);
+        assert_eq!(
+            seen.iter().filter(|t| *t == "＋").count(),
+            1,
+            "exactly one card — the active one — offers the snapshot: {seen:?}"
+        );
+    }
+
+    /// R24-2: the 「只看当前变体」 filter's matcher. ID beats kind when both
+    /// sides have one; kind is the fallback for records that predate ids;
+    /// an UNATTRIBUTED version matches nothing — a filter that quietly kept
+    /// everything unknown would be a checkbox that does not filter.
+    #[test]
+    fn the_version_filter_matches_by_id_then_kind_and_never_by_hope() {
+        use crate::model::VariantKind;
+        let meta = |from_id: Option<&str>, from_kind: Option<&str>| {
+            autoshop::store::VersionMetaEntry {
+                n: 1,
+                name: None,
+                from_kind: from_kind.map(str::to_string),
+                from_id: from_id.map(str::to_string),
+                origin: None,
+            }
+        };
+        let m = meta(Some("card-a"), Some("original"));
+        assert!(AutoshopApp::version_is_from(Some(&m), "card-a", Some(VariantKind::Original)));
+        assert!(
+            !AutoshopApp::version_is_from(Some(&m), "card-b", Some(VariantKind::Original)),
+            "a matching KIND must not smuggle in another card's history"
+        );
+        // Same card, re-kinded since the snapshot (R24-3's「应用到原图」 will
+        // do exactly that): the id still speaks for it.
+        assert!(AutoshopApp::version_is_from(Some(&m), "card-a", Some(VariantKind::Fitted)));
+
+        let old = meta(None, Some("fitted"));
+        assert!(AutoshopApp::version_is_from(Some(&old), "card-a", Some(VariantKind::Fitted)));
+        assert!(!AutoshopApp::version_is_from(Some(&old), "card-a", Some(VariantKind::Original)));
+
+        // A card with no id of its own falls back to kind too.
+        assert!(AutoshopApp::version_is_from(Some(&m), "", Some(VariantKind::Original)));
+
+        assert!(!AutoshopApp::version_is_from(Some(&meta(None, None)), "card-a", Some(VariantKind::Original)));
+        assert!(!AutoshopApp::version_is_from(None, "card-a", Some(VariantKind::Original)));
+    }
+
     /// L15-8: Clear must clear what Apply BAKES (the greyscale weight
     /// buffer), not only what the canvas shows — the session's own contract
     /// is "bakes exactly what it shows".
@@ -1156,6 +1586,8 @@
             source_preview: Some(base.clone()),
             base_preview: Some(base),
             variants: vec![Variant {
+                id: String::new(),
+                name: None,
                 kind: VariantKind::Original,
                 recipe: EditRecipe::default(),
                 base: None,
@@ -1277,11 +1709,15 @@
         app.nav_stash.insert(
             PathBuf::from("D:/__autoshop_chain__/other.ARW"),
             StashEntry {
+                id: String::new(),
+                name: None,
                 recipe: app.recipe.clone(),
                 base: None,
                 origin: None,
                 kind: VariantKind::Original,
                 others: vec![StashedVariant {
+                    id: String::new(),
+                    name: None,
                     kind: VariantKind::Generated,
                     recipe: EditRecipe { contrast: 33.0, ..Default::default() },
                     base: None,
@@ -1312,6 +1748,8 @@
         let ctx = egui::Context::default();
         let gen_base = Arc::new(image::DynamicImage::new_rgb8(8, 6));
         app.variants.push(Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Generated,
             recipe: EditRecipe { contrast: 33.0, ..Default::default() },
             base: Some(gen_base),
@@ -1951,6 +2389,8 @@
         let mut app = AutoshopApp::default();
         let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
         app.variants = vec![Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Original,
             recipe: EditRecipe::default(),
             base: Some(b0.clone()),
@@ -2011,6 +2451,8 @@
         );
         app.variants = vec![
             Variant {
+                id: String::new(),
+                name: None,
                 kind: VariantKind::Original,
                 recipe: EditRecipe::default(),
                 base: None,
@@ -2018,6 +2460,8 @@
                 thumb: Some(tex),
             },
             Variant {
+                id: String::new(),
+                name: None,
                 kind: VariantKind::Fitted,
                 recipe: EditRecipe::default(),
                 base: None,
@@ -2052,6 +2496,8 @@
         let mut app = AutoshopApp::default();
         let ctx = egui::Context::default();
         let mk = || Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Generated,
             recipe: EditRecipe::default(),
             base: None,
@@ -2150,6 +2596,8 @@
             EditRecipe { version: 1, base_curve: washy.clone(), ..Default::default() };
         app.src_path = Some(p);
         app.variants = vec![Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Original,
             recipe: pre_era.clone(),
             base: None,
@@ -2207,6 +2655,8 @@
                 "D:/__autoshop_edgeflight__/__autoshop_edgeflight__.ARW",
             )),
             variants: vec![Variant {
+                id: String::new(),
+                name: None,
                 kind: VariantKind::Original,
                 recipe: EditRecipe::default(),
                 base,
@@ -2345,6 +2795,8 @@
         std::fs::write(&master, b"png").unwrap();
         autoshop::store::write_pixel_source(src, &master, false).unwrap();
         let mk = |origin: PathBuf| Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Original,
             recipe: EditRecipe::default(),
             base: Some(Arc::new(image::DynamicImage::new_rgb8(4, 3))),
@@ -2366,10 +2818,14 @@
         // fully saved strip re-reports as unsaved (the original regression,
         // re-expressed against the v0.22 mirror).
         app.saved_strip = Some(autoshop::store::VariantsRecord {
+            active_id: None,
+            active_name: None,
             v: 1,
             active_kind: VariantKind::Original.store_str().to_string(),
             active_pos: 0,
             others: vec![autoshop::store::VariantEntry {
+                id: None,
+                name: None,
                 kind: VariantKind::Original.store_str().to_string(),
                 recipe: EditRecipe::default(),
                 origin: Some(std::path::absolute(&master).unwrap()),
@@ -2402,6 +2858,8 @@
         let src = PathBuf::from("D:/library/__autoshop_stashkind__.ARW");
         app.src_path = Some(src.clone());
         app.variants.push(Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Fitted,
             recipe: EditRecipe { contrast: 21.0, ..Default::default() },
             base: None,
@@ -2440,6 +2898,8 @@
             src_path: Some(src.to_path_buf()),
             variants: vec![
                 Variant {
+                    id: String::new(),
+                    name: None,
                     kind: VariantKind::Original,
                     recipe: EditRecipe::default(),
                     base: None,
@@ -2447,6 +2907,8 @@
                     thumb: None,
                 },
                 Variant {
+                    id: String::new(),
+                    name: None,
                     kind: VariantKind::Generated,
                     recipe: EditRecipe::default(),
                     base: Some(Arc::new(image::DynamicImage::new_rgb8(4, 3))),
@@ -2454,6 +2916,8 @@
                     thumb: None,
                 },
                 Variant {
+                    id: String::new(),
+                    name: None,
                     kind: VariantKind::Fitted,
                     recipe: EditRecipe { contrast: 40.0, ..Default::default() },
                     base: None,
@@ -2541,6 +3005,8 @@
         let mut app = AutoshopApp {
             src_path: Some(src.to_path_buf()),
             variants: vec![Variant {
+                id: String::new(),
+                name: None,
                 kind: VariantKind::Original,
                 recipe: EditRecipe::default(),
                 base: Some(Arc::new(image::DynamicImage::new_rgb8(4, 3))),
@@ -2584,6 +3050,8 @@
         let mut app = AutoshopApp {
             src_path: Some(src.to_path_buf()),
             variants: vec![Variant {
+                id: String::new(),
+                name: None,
                 kind: VariantKind::Generated,
                 recipe: EditRecipe::default(),
                 base: Some(Arc::new(image::DynamicImage::new_rgb8(4, 3))),
@@ -2629,6 +3097,8 @@
         // the surface that never expires.
         let ctx = egui::Context::default();
         let src = |base: Option<Arc<image::DynamicImage>>| Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Original,
             recipe: EditRecipe::default(),
             base,
@@ -2732,6 +3202,8 @@
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(800, 600))),
             base_preview: Some(current.clone()),
             variants: vec![Variant {
+                id: String::new(),
+                name: None,
                 kind: VariantKind::Original,
                 recipe: EditRecipe::default(),
                 base: Some(current.clone()),
@@ -2777,6 +3249,8 @@
         // disclosure forward.
         let ctx = egui::Context::default();
         let baked = |w: u32, h: u32, tag: &str| Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Generated,
             recipe: EditRecipe::default(),
             base: Some(Arc::new(image::DynamicImage::new_rgb8(w, h))),
@@ -2803,6 +3277,8 @@
             source_preview: Some(Arc::new(image::DynamicImage::new_rgb8(1280, 853))),
             variants: vec![
                 Variant {
+                    id: String::new(),
+                    name: None,
                     kind: VariantKind::Original,
                     recipe: EditRecipe::default(),
                     base: None,
@@ -2857,6 +3333,8 @@
         let ctx = egui::Context::default();
         app.src_path = Some(PathBuf::from("D:/__autoshop_deadopen__/__autoshop_deadopen__.ARW"));
         app.variants = vec![Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Original,
             recipe: EditRecipe::default(),
             base: Some(Arc::new(image::DynamicImage::new_rgb8(4, 3))),
@@ -3019,6 +3497,8 @@
         // A photo is open: its strip holds the outgoing variant that
         // push_variant snapshots the live canvas into.
         app.variants = vec![Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Original,
             recipe: EditRecipe::default(),
             base: None,
@@ -3032,6 +3512,8 @@
         app.mask_name_buf = Some((0, "old".into(), "sky gradient".into()));
         app.push_variant(
             Variant {
+                id: String::new(),
+                name: None,
                 kind: VariantKind::Fitted,
                 recipe: EditRecipe::default(),
                 base: None,
@@ -3755,6 +4237,8 @@
     #[test]
     fn the_variant_card_gets_equal_air_above_and_below() {
         let mk = |kind: crate::model::VariantKind| crate::model::Variant {
+            id: String::new(),
+            name: None,
             kind,
             recipe: Default::default(),
             base: None,
@@ -4533,6 +5017,8 @@
         // be shadowed by whichever card happens to be active.
         let generated = std::path::PathBuf::from("./out/_DSC9621.reimagine.png");
         app.variants.push(Variant {
+            id: String::new(),
+            name: None,
             kind: VariantKind::Generated,
             recipe: EditRecipe::default(),
             base: None,

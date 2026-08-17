@@ -1541,12 +1541,24 @@ pub fn variants_path(src: &Path) -> PathBuf {
 /// and its baked raster origin when the variant is pixel-based. Base pixels
 /// are NOT stored — they re-decode from `origin`; source-based variants
 /// re-develop the shared source.
+///
+/// `id` / `name` (R24-2) are ADDITIVE at v=1: this struct is deliberately
+/// NOT `deny_unknown_fields` (unlike [`EditRecipe`]), so a build that
+/// predates them reads a record carrying them and ignores both — the strip
+/// comes back complete, minus the names. `skip_serializing_if` keeps a strip
+/// with neither byte-identical to what earlier builds wrote.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariantEntry {
     pub kind: String,
     pub recipe: EditRecipe,
     #[serde(default)]
     pub origin: Option<PathBuf>,
+    /// Opaque stable identity for this card (see the GUI's `Variant::id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The user's own name for this rendition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// The strip minus the active variant (whose develop recipe.json owns),
@@ -1560,6 +1572,13 @@ pub struct VariantsRecord {
     pub active_kind: String,
     pub active_pos: usize,
     pub others: Vec<VariantEntry>,
+    /// The active card's identity + name — the same two facts every entry in
+    /// `others` carries, for the ONE card that is not in `others` (R24-2).
+    /// Additive at v=1 on the same terms as [`VariantEntry`]'s pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_name: Option<String>,
 }
 
 fn known_variant_kind(kind: &str) -> bool {
@@ -1589,6 +1608,8 @@ pub fn variants_record_bytes(src: &Path, rec: &VariantsRecord) -> std::io::Resul
         active_kind: rec.active_kind.clone(),
         active_pos: rec.active_pos,
         others: Vec::with_capacity(rec.others.len()),
+        active_id: rec.active_id.clone(),
+        active_name: rec.active_name.clone().map(|n| capped_name(&n)),
     };
     for e in &rec.others {
         let origin = match &e.origin {
@@ -1600,9 +1621,34 @@ pub fn variants_record_bytes(src: &Path, rec: &VariantsRecord) -> std::io::Resul
         };
         let mut recipe = e.recipe.clone();
         relativize_mask_paths(&mut recipe, &dir);
-        stored.others.push(VariantEntry { kind: e.kind.clone(), recipe, origin });
+        stored.others.push(VariantEntry {
+            kind: e.kind.clone(),
+            recipe,
+            origin,
+            id: e.id.clone(),
+            name: e.name.clone().map(|n| capped_name(&n)),
+        });
     }
     serde_json::to_vec_pretty(&stored).map_err(std::io::Error::other)
+}
+
+/// The byte cap every user-typed name in the store obeys — the same 256 the
+/// recipe's own clamp applies to mask names (`recipe.rs`). Truncated on a
+/// CHAR boundary: a cut mid-codepoint would publish invalid UTF-8 through a
+/// serializer that cannot represent it. Applied on the way in AND on the way
+/// out, so neither a hand-edited sidecar nor a future caller can hand the UI
+/// a megabyte-long label.
+pub const MAX_STORE_NAME: usize = 256;
+
+fn capped_name(s: &str) -> String {
+    if s.len() <= MAX_STORE_NAME {
+        return s.to_string();
+    }
+    let mut end = MAX_STORE_NAME;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 /// What a strip read actually found — the three states are NOT collapsible:
@@ -1679,7 +1725,12 @@ pub fn read_variants_checked(src: &Path) -> VariantsRead {
         return VariantsRead::Unresolved;
     }
     let dir = develop_dir(src);
+    // A name is display text with no downstream meaning, so a hand-edited or
+    // corrupt one is CAPPED, never a reason to refuse the whole strip (that
+    // would cost the user every background variant over a label).
+    rec.active_name = rec.active_name.as_deref().map(capped_name);
     for e in &mut rec.others {
+        e.name = e.name.as_deref().map(capped_name);
         if let Some(o) = &e.origin {
             // LEXICAL network/device refusal BEFORE any probe, like the
             // pixel-source origin: a crafted UNC origin must not be touched.
@@ -3545,6 +3596,19 @@ fn backup_store_half_unlocked(
             }
         }
     }
+    // Provenance, best-effort and AFTER the snapshot is really published
+    // (R24-2): this arm is the AUTOMATIC one — the gate preserving a save a
+    // programmatic write is about to replace. It cannot name the variant
+    // (the store has no strip cursor); the explicit 「＋ Save as version」
+    // adds `from_kind`/`from_id` at its own call site.
+    let _ = record_version_meta_unlocked(
+        &dev,
+        &VersionMetaEntry {
+            n,
+            origin: Some(VERSION_ORIGIN_AUTO.to_string()),
+            ..Default::default()
+        },
+    );
     Ok(Some(n))
 }
 
@@ -3710,6 +3774,17 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
         let _ = std::fs::remove_file(&dst); // release the claim
         return Err(e);
     }
+    // The xmp half of the same automatic gate (R24-2): one gate CALL can
+    // burn two numbers — the store snapshot and this sidecar snapshot
+    // interleave in one number space — so both stamp their own provenance.
+    let _ = record_version_meta_unlocked(
+        &dev,
+        &VersionMetaEntry {
+            n,
+            origin: Some(VERSION_ORIGIN_AUTO.to_string()),
+            ..Default::default()
+        },
+    );
     Ok(Some(n))
 }
 
@@ -4059,6 +4134,210 @@ fn discarded_xmp_matches(dev: &Path, text: &str) -> bool {
     reg.deleted.iter().any(|e| e.xmp.as_deref() == Some(h.as_str()))
 }
 
+/// The version NAME + PROVENANCE sidecar (R24-2): one `.version-meta.json`
+/// per develop dir recording, per snapshot number, the user's own name for
+/// it and where it came from — `{name, from_kind, from_id, origin}` with
+/// `origin` = "user" (an explicit 「＋ Save as version」) or "auto" (the
+/// backup gate preserving a save it was about to overwrite).
+///
+/// Purely ADVISORY. Nothing renders, restores, exports or dedups
+/// differently because of it, so every failure path answers "no metadata"
+/// instead of blocking the operation it decorates — the opposite stance to
+/// the [`DeletedVersions`] registry next door, which fails LOUD because
+/// losing an entry there resurrects content the user deleted. Losing a
+/// LABEL is cosmetic; losing a delete record is not.
+///
+/// It follows that registry's NON-GENERATIONAL discipline exactly, for the
+/// same reasons:
+///
+/// * published with [`durable_write`], never `publish_json_sidecar` — no
+///   `.bak`, and therefore deliberately NO entry in [`recover_orphan_baks`]'s
+///   pair list (a retired copy of an advisory file is a recovery route to
+///   nowhere, and republishing one would resurrect names for numbers the
+///   live file has since dropped);
+/// * never a [`CommitMember`]: it is not part of the develop the
+///   single-generation commit publishes as a unit, and a rename must not be
+///   able to fail a save;
+/// * absent from `clear_sweep`'s explicit file list, exactly like the
+///   versions it names — a clear that took the names while the snapshots
+///   themselves stand would leave every surviving version anonymous;
+/// * absent from [`adoption_skips`], so adoption COPIES it along with the
+///   versions (that list is an EXCLUSION list — putting the file in it is
+///   what would strand the names behind an adopted develop).
+///
+/// A name is bound to a NUMBER, and a deleted number is never re-issued
+/// (`DeletedVersions::hwm`), so [`delete_version`] drops the entry and no
+/// later snapshot can ever inherit it.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct VersionMetaEntry {
+    pub n: u32,
+    /// The user's own name for this snapshot. Capped like every other stored
+    /// name ([`MAX_STORE_NAME`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The `store_str` spelling of the variant this snapshot was taken from
+    /// ("original" | "generated" | "fitted"), when the taker knew it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_kind: Option<String>,
+    /// That variant's opaque id, so the attribution survives a card the user
+    /// later renames or re-kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_id: Option<String>,
+    /// [`VERSION_ORIGIN_USER`] or [`VERSION_ORIGIN_AUTO`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+/// An explicit 「＋ Save as version」.
+pub const VERSION_ORIGIN_USER: &str = "user";
+/// The backup gate preserving a save a programmatic write was about to
+/// replace (analyze persist, reverse-fit, paste, CLI, serve, migration).
+pub const VERSION_ORIGIN_AUTO: &str = "auto";
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct VersionMeta {
+    #[serde(default)]
+    versions: Vec<VersionMetaEntry>,
+}
+
+fn version_meta_path(dev: &Path) -> PathBuf {
+    dev.join(".version-meta.json")
+}
+
+/// Advisory read: a missing file is the normal case, and an unreadable or
+/// corrupt one degrades to "no names" WITH a warning — never an `Err`. A
+/// caller that could not open the file still has to be able to save, load
+/// and delete versions.
+fn read_version_meta_unlocked(dev: &Path) -> VersionMeta {
+    match read_text_capped(&version_meta_path(dev), MAX_STORE_JSON) {
+        Ok(t) => match serde_json::from_str::<VersionMeta>(&t) {
+            Ok(mut m) => {
+                for e in &mut m.versions {
+                    e.name = e.name.as_deref().map(capped_name);
+                }
+                m
+            }
+            Err(e) => {
+                eprintln!(
+                    "⚠ {} is unreadable ({e}) — version names are not shown (snapshots themselves are unaffected)",
+                    version_meta_path(dev).display()
+                );
+                VersionMeta::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => VersionMeta::default(),
+        Err(e) => {
+            eprintln!(
+                "⚠ {} could not be read ({e}) — version names are not shown (snapshots themselves are unaffected)",
+                version_meta_path(dev).display()
+            );
+            VersionMeta::default()
+        }
+    }
+}
+
+/// Every recorded version name / provenance for this photo, ascending. See
+/// [`VersionMetaEntry`] — advisory, so this never fails.
+pub fn read_version_meta(src: &Path) -> Vec<VersionMetaEntry> {
+    read_version_meta_unlocked(&develop_dir(src)).versions
+}
+
+fn write_version_meta_unlocked(dev: &Path, meta: &VersionMeta) -> std::io::Result<()> {
+    if meta.versions.is_empty() {
+        // Nothing left to say: take the file away rather than leave an empty
+        // registry standing (a develop with no names looks exactly like one
+        // that never had any — which is what it is).
+        return match std::fs::remove_file(version_meta_path(dev)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        };
+    }
+    let json = serde_json::to_string_pretty(meta).map_err(std::io::Error::other)?;
+    durable_write(&version_meta_path(dev), json.as_bytes())
+}
+
+/// Merge the `Some` fields of `entry` into v`entry.n`'s record (a `None`
+/// leaves what is already there — a later rename must not erase the
+/// provenance the save stamped, and vice versa). Creates the record when
+/// the number has none.
+fn record_version_meta_unlocked(dev: &Path, entry: &VersionMetaEntry) -> std::io::Result<()> {
+    let mut meta = read_version_meta_unlocked(dev);
+    match meta.versions.iter_mut().find(|e| e.n == entry.n) {
+        Some(cur) => {
+            if entry.name.is_some() {
+                cur.name = entry.name.as_deref().map(capped_name);
+            }
+            if entry.from_kind.is_some() {
+                cur.from_kind = entry.from_kind.clone();
+            }
+            if entry.from_id.is_some() {
+                cur.from_id = entry.from_id.clone();
+            }
+            if entry.origin.is_some() {
+                cur.origin = entry.origin.clone();
+            }
+        }
+        None => {
+            let mut fresh = entry.clone();
+            fresh.name = fresh.name.as_deref().map(capped_name);
+            meta.versions.push(fresh);
+        }
+    }
+    meta.versions.sort_by_key(|e| e.n);
+    write_version_meta_unlocked(dev, &meta)
+}
+
+/// Record (merge) advisory metadata for one version snapshot.
+pub fn record_version_meta(src: &Path, entry: &VersionMetaEntry) -> std::io::Result<()> {
+    with_develop_lock(src, DevelopLockMode::Wait, || {
+        record_version_meta_unlocked(&develop_dir(src), entry)
+    })
+}
+
+/// Name v`n` — `None` (or an all-whitespace name) CLEARS the name and
+/// leaves the provenance standing. Unlike [`record_version_meta`]'s merge,
+/// this one is authoritative for the name field: the rename UI has to be
+/// able to take a name back off.
+pub fn set_version_name(src: &Path, n: u32, name: Option<&str>) -> std::io::Result<()> {
+    let name = name.map(str::trim).filter(|s| !s.is_empty()).map(capped_name);
+    with_develop_lock(src, DevelopLockMode::Wait, || {
+        let dev = develop_dir(src);
+        std::fs::create_dir_all(&dev)?;
+        let mut meta = read_version_meta_unlocked(&dev);
+        match meta.versions.iter_mut().find(|e| e.n == n) {
+            Some(cur) => cur.name = name.clone(),
+            None => meta.versions.push(VersionMetaEntry {
+                n,
+                name: name.clone(),
+                ..Default::default()
+            }),
+        }
+        // A record that now says nothing at all is noise: drop it, so a name
+        // typed and taken back off leaves the dir as it was.
+        meta.versions.retain(|e| {
+            e.name.is_some() || e.from_kind.is_some() || e.from_id.is_some() || e.origin.is_some()
+        });
+        meta.versions.sort_by_key(|e| e.n);
+        write_version_meta_unlocked(&dev, &meta)
+    })
+}
+
+/// Drop v`n`'s advisory record — the delete half of "a name dies with its
+/// number". Best-effort by contract: the caller ignores the result, because
+/// a surviving name can never be re-attached (the number is burned in
+/// [`DeletedVersions`] and never re-issued) while a failed delete over a
+/// LABEL would be absurd.
+fn forget_version_meta_unlocked(dev: &Path, n: u32) -> std::io::Result<()> {
+    let mut meta = read_version_meta_unlocked(dev);
+    let before = meta.versions.len();
+    meta.versions.retain(|e| e.n != n);
+    if meta.versions.len() == before {
+        return Ok(());
+    }
+    write_version_meta_unlocked(dev, &meta)
+}
+
 fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
     // TRANSACTION MARKER FIRST (L03): a kill mid-sweep used to leave a
     // half-version — recipe alive with rasters gone (listed, loadable,
@@ -4073,6 +4352,12 @@ fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
     // stays unlisted and recovery retries the whole tail.
     register_deleted_version(src, n, true)?;
     sweep_version_unlocked(src, n, true)?;
+    // The NAME dies with the number (R24-2), and it dies LAST: the record is
+    // advisory, so a failure here must not fail the delete, and a crash in
+    // this window leaves a name attached to a number that is already both
+    // unlisted (swept) and permanently unclaimable (burned in the registry
+    // above) — unreachable, never re-attachable to a later snapshot.
+    let _ = forget_version_meta_unlocked(&develop_dir(src), n);
     let _ = std::fs::remove_file(deleting_marker(src, n));
     settle_consumed_marker(&deleting_marker(src, n));
     Ok(())
@@ -5400,6 +5685,8 @@ mod tests {
 
     fn strip_record(kind: &str) -> VariantsRecord {
         VariantsRecord {
+            active_id: None,
+            active_name: None,
             v: 1,
             active_kind: kind.to_string(),
             active_pos: 0,
@@ -6251,16 +6538,22 @@ mod tests {
             ..Default::default()
         });
         let rec = VariantsRecord {
+            active_id: None,
+            active_name: None,
             v: 1,
             active_kind: "fitted".into(),
             active_pos: 2,
             others: vec![
                 VariantEntry {
+                    id: None,
+                    name: None,
                     kind: "original".into(),
                     recipe: EditRecipe { contrast: 12.0, ..Default::default() },
                     origin: None,
                 },
                 VariantEntry {
+                    id: None,
+                    name: None,
                     kind: "generated".into(),
                     recipe: gen_recipe,
                     origin: Some(master.clone()),
@@ -6327,6 +6620,8 @@ mod tests {
 
         clear_variants(&photo).expect_err("clearing over an unresolved strip must refuse");
         let rec = VariantsRecord {
+            active_id: None,
+            active_name: None,
             v: 1,
             active_kind: "original".into(),
             active_pos: 0,
@@ -6344,6 +6639,148 @@ mod tests {
         assert!(matches!(read_variants_checked(&photo), VariantsRead::Absent));
         write_variants(&photo, &rec).expect("a resolved store accepts saves again");
         clear_variants(&photo).expect("and clears");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// R24-2: the version-name sidecar joins `.deleted-versions.json` in the
+    /// NON-GENERATIONAL club, and the two facts that class hangs on are
+    /// name-level — cheap to state here, and easy to break silently by
+    /// editing a list elsewhere in this file.
+    #[test]
+    fn the_version_meta_sidecar_keeps_the_non_generational_discipline() {
+        // Adoption's list is an EXCLUSION list: being ABSENT from it is what
+        // makes a file travel with an adopted develop. Putting the sidecar in
+        // it would strand every name behind the adoption.
+        assert!(!adoption_skips(".version-meta.json"));
+        assert!(!adoption_skips(".deleted-versions.json"));
+        // The generational pair list (`recover_orphan_baks`) covers exactly
+        // the three files `publish_json_sidecar` retires. The advisory
+        // sidecar must never join it: a republished `.bak` would resurrect
+        // names the live file has since dropped.
+        let src = std::path::Path::new("C:/nowhere/DSC_META.ARW");
+        let dev = develop_dir(src);
+        let pairs = [
+            (recipe_target(src), dev.join("recipe.json.bak")),
+            (pixel_source_path(src), dev.join("pixels.json.bak")),
+            (variants_path(src), dev.join("variants.json.bak")),
+        ];
+        assert!(
+            !pairs.iter().any(|(live, _)| *live == version_meta_path(&dev)),
+            "the advisory sidecar must stay out of the generational pair list"
+        );
+        assert_eq!(version_meta_path(&dev).file_name().unwrap(), ".version-meta.json");
+    }
+
+    /// R24-2: `id` / `name` are ADDITIVE at v=1, in both directions.
+    ///
+    /// FORWARD (the one that had to be verified before the field was added,
+    /// not after): what does a build that predates these fields do with a
+    /// record that carries them? `VariantEntry` / `VariantsRecord` are NOT
+    /// `deny_unknown_fields` — unlike `EditRecipe`, whose forward semantics
+    /// really is a hard refusal — so serde IGNORES anything it does not know
+    /// and the old build restores the strip complete, minus the names. This
+    /// test pins that by parsing a record with fields NO build has, which is
+    /// exactly the shape today's build is to a future one. The day someone
+    /// adds `deny_unknown_fields` here, a strip written by a newer Autoshop
+    /// would go `Unresolved` and every background variant would vanish from
+    /// the older one — this red test is the warning.
+    ///
+    /// BACKWARD: a record written before the fields existed reads back with
+    /// both `None`, and re-serializes byte-identically to what the older
+    /// build wrote (`skip_serializing_if`) — adding the pair changed nothing
+    /// on disk for strips that use neither.
+    #[test]
+    fn variant_ids_and_names_are_additive_in_both_directions() {
+        let base = std::env::temp_dir().join("autoshop-store-test-varnames");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let photo = base.join("DSC_VARNAMES.ARW");
+        std::fs::write(&photo, b"raw").unwrap();
+        let dev = develop_dir(&photo);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        // FORWARD: unknown members (a hypothetical future build's) are
+        // ignored, and the known ones still land.
+        std::fs::write(
+            variants_path(&photo),
+            br#"{
+              "v": 1,
+              "active_kind": "original",
+              "active_pos": 0,
+              "active_id": "card-a",
+              "active_name": "base",
+              "active_rating": 5,
+              "others": [
+                {"kind":"fitted","recipe":{},"id":"card-b","name":"sunset","flagged":true}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let rec = match read_variants_checked(&photo) {
+            VariantsRead::Strip(r) => r,
+            _ => panic!(
+                "a record carrying fields this build does not know must still restore — \
+                 VariantEntry/VariantsRecord must never become deny_unknown_fields"
+            ),
+        };
+        assert_eq!(rec.active_id.as_deref(), Some("card-a"));
+        assert_eq!(rec.active_name.as_deref(), Some("base"));
+        assert_eq!(rec.others[0].id.as_deref(), Some("card-b"));
+        assert_eq!(rec.others[0].name.as_deref(), Some("sunset"));
+
+        // A hand-edited name is CAPPED, never a reason to refuse the strip
+        // (that would cost the user every background variant over a label).
+        let long = "名".repeat(400);
+        write_variants(
+            &photo,
+            &VariantsRecord {
+                v: 1,
+                active_kind: "original".into(),
+                active_pos: 0,
+                active_id: Some("card-a".into()),
+                active_name: Some(long.clone()),
+                others: vec![VariantEntry {
+                    kind: "generated".into(),
+                    recipe: EditRecipe::default(),
+                    origin: None,
+                    id: Some("card-b".into()),
+                    name: Some(long),
+                }],
+            },
+        )
+        .unwrap();
+        let back = read_variants(&photo).expect("a long name is capped, not refused");
+        assert!(back.active_name.as_deref().unwrap().len() <= MAX_STORE_NAME);
+        assert!(back.others[0].name.as_deref().unwrap().len() <= MAX_STORE_NAME);
+        assert!(
+            back.active_name.as_deref().unwrap().ends_with('名'),
+            "the cap must land on a char boundary, never mid-codepoint"
+        );
+
+        // BACKWARD: a strip that uses neither field serializes exactly as an
+        // older build wrote it — no `"id": null` noise, no diff on disk.
+        let bare = VariantsRecord {
+            v: 1,
+            active_kind: "original".into(),
+            active_pos: 0,
+            active_id: None,
+            active_name: None,
+            others: vec![VariantEntry {
+                kind: "fitted".into(),
+                recipe: EditRecipe::default(),
+                origin: None,
+                id: None,
+                name: None,
+            }],
+        };
+        let bytes = variants_record_bytes(&photo, &bare).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("\"id\""), "an id-less strip must not grow an id key: {text}");
+        assert!(!text.contains("\"name\""), "a nameless strip must not grow a name key: {text}");
+        assert!(!text.contains("active_id"), "…nor an active_id key: {text}");
+
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -418,6 +418,9 @@ impl AutoshopApp {
         // are looking at) renders the stale (or absent) recipe.json / stale
         // saved pixels, visibly diverging from the screen.
         // path → (recipe, Some((master, generated)) | None = source pixels).
+        // The bool is the `pixels.json` FORMAT flag, not the R24-1 parametric
+        // predicate: it is written to disk, so it stays spelled against the
+        // kind it names (see `VariantKind::is_parametric`'s not-collected list).
         type BatchOverride = (EditRecipe, Option<(PathBuf, bool)>);
         let mut overrides: std::collections::HashMap<PathBuf, BatchOverride> = self
             .nav_stash
@@ -739,6 +742,7 @@ impl AutoshopApp {
         // entry point (Ctrl+S, the Save develop button) must write the name
         // the user sees in the box, not the pre-focus snapshot.
         self.commit_mask_name_buf();
+        self.commit_version_name_buf(); // the version half of the same rule
         let lang = self.lang;
         if self.active_is_generated() {
             // A keyboard Ctrl+S refusal must be SEEN — the status line alone
@@ -872,7 +876,7 @@ impl AutoshopApp {
             let active = self.active;
             for (i, v) in self.variants.iter_mut().enumerate() {
                 if i != active
-                    && v.kind != VariantKind::Generated
+                    && v.kind.is_parametric()
                     && autoshop::pipeline::repair_pre_era_base_curve(&path, &mut v.recipe)
                         .is_some()
                 {

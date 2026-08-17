@@ -130,6 +130,11 @@ impl AutoshopApp {
             return Some(p.clone());
         }
         let v = self.active_variant()?;
+        // Deliberately NOT `!is_parametric()` (R24-1): this is a POLICY about
+        // which raster the fit DEFAULTS to, not a claim about the card's
+        // parametric-ness — a Fitted card carrying an origin would satisfy
+        // the predicate's negation the day one does, and re-fitting a fit is
+        // not what the button means.
         (v.kind == VariantKind::Generated).then(|| v.origin.clone()).flatten()
     }
 

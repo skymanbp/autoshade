@@ -442,6 +442,18 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Replace current parameters (one Ctrl+Z to undo)", "替换当前参数（一步 Ctrl+Z 可撤销）"),
     ("Like LR virtual copies: store multiple parameter sets for one photo (B&W, cropped…) without overwriting.",
         "像 LR 虚拟副本：一张照片存多套参数（黑白版/裁剪版…），互不覆盖。"),
+    // R24-2: version names + provenance (.version-meta.json)
+    ("Name…", "起名…"),
+    ("Name this snapshot", "给这个快照起个名字"),
+    ("· from {kind}", "· 来自 {kind}"),
+    ("· auto-archived", "· 自动存档"),
+    ("Only this variant", "仅当前变体"),
+    ("Show only snapshots taken from the variant you are on. Versions with no recorded source (saved before this) are hidden while it is on.",
+        "只列出从当前变体存下的快照。没有记录来源的版本（早于此功能）会被隐藏。"),
+    ("{n} hidden — saved from another variant", "已隐藏 {n} 个（来自其他变体）"),
+    ("A generated variant's look lives in its pixels — a version snapshot would store an almost-empty recipe; run 「Reverse-fit」 first",
+        "AI 生成变体的效果在像素里——存版本只会存下一份基本空白的参数；请先跑「反推」"),
+    ("Renaming v{n} failed: {err}", "v{n} 改名失败：{err}"),
 
     // ── Develop · export bar sliders (in update()) ───────────────────────────
     ("Output sharpening", "输出锐化"),

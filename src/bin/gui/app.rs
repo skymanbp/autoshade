@@ -401,6 +401,20 @@ pub(crate) struct AutoshopApp {
     pub(crate) preview_edge: u32,                     // working-preview long edge: 1280 fluid / 2560 / 4096 detail
     // --- recipe versions (gap batch G): ./out/<stem>.v<N>.recipe.json ---
     pub(crate) versions: Vec<u32>,                    // snapshot numbers found for the open photo (sorted)
+    /// Advisory names + provenance for `versions`, keyed by number (R24-2).
+    /// Refreshed with the list; a number with no entry is simply unnamed —
+    /// `.version-meta.json` is not required to exist.
+    pub(crate) version_meta: HashMap<u32, autoshop::store::VersionMetaEntry>,
+    /// A version rename in flight: (the photo it belongs to, the number, the
+    /// name as seeded, the edit buffer). Keyed by the NUMBER — versions are
+    /// never re-numbered and a deleted number is never re-issued, so unlike
+    /// the mask buffer's row index this key cannot cross-commit onto some
+    /// other row. The photo rides along so a commit at a boundary that has
+    /// already re-pointed `src_path` still writes to the right develop.
+    pub(crate) version_name_buf: Option<(PathBuf, u32, String, String)>,
+    /// Versions list filter: show only snapshots taken from the ACTIVE
+    /// variant (R24-2). Session state, deliberately not persisted.
+    pub(crate) versions_current_only: bool,
 }
 
 impl AutoshopApp {
@@ -781,6 +795,10 @@ impl AutoshopApp {
             // disabled buttons, a press that would not act stays silent.
             if do_copy && self.src_path.is_some() && !self.busy {
                 self.commit_mask_name_buf();
+                // The version half of the same boundary rule (R24-2): a name
+                // typed into a version row and never blurred still reaches
+                // disk before anything else in the app acts.
+                self.commit_version_name_buf();
                 self.copied = Some(self.recipe.clone());
                 self.copied_from = self.src_path.clone();
                 self.status = tr(
@@ -1590,6 +1608,9 @@ impl Default for AutoshopApp {
             exp_space: 0,
             preview_edge: PREVIEW_EDGE,
             versions: Vec::new(),
+            version_meta: HashMap::new(),
+            version_name_buf: None,
+            versions_current_only: false,
             show_mask_overlay: true,
             mask_overlay_tex: None,
             overlay_stale: false,
@@ -1631,6 +1652,11 @@ impl eframe::App for AutoshopApp {
             // clean recipe used to close without a prompt and the rename
             // died with the window (U10).
             self.commit_mask_name_buf();
+            // A version rename is not "unsaved work" in the same sense — it
+            // writes straight to its own advisory sidecar — but it must not
+            // die with the window either, so the last boundary before the
+            // quit decision flushes it too (R24-2).
+            self.commit_version_name_buf();
             // Unsaved covers PIXELS too: a baked retouch whose master isn't
             // recorded in the store yet dies with the window exactly like an
             // unsaved slider move (the master PNG survives, its linkage not).

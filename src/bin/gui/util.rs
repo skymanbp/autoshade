@@ -597,8 +597,15 @@ pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshop::store::Var
                 kind: sv.kind.store_str().to_string(),
                 recipe: sv.recipe.clone(),
                 origin: sv.origin.clone(),
+                // Hop 5 of 6 (R24-2): a stashed photo's strip straight to
+                // disk — Save-all never rebuilds the live strip, so a name
+                // dropped here would die in the quit dialog.
+                id: variant_id_field(&sv.id),
+                name: sv.name.clone(),
             })
             .collect(),
+        active_id: variant_id_field(&st.id),
+        active_name: st.name.clone(),
     })
 }
 
