@@ -139,11 +139,20 @@ pub mod keys {
          re-scored {score2}/100 and was kept (a lower score would have been \
          discarded).";
     /// R23-6 B-7: the reference may not be the same frame.
+    ///
+    /// R23 round review LOW-3: the VERDICT was right and the attribution was
+    /// wrong. At a 2% aspect tolerance the commonest trigger by far is a crop
+    /// of exactly the frame the user meant — a 3:2 photo exported at 16:9 is
+    /// 18% out — and telling that user "two different pictures" sends them
+    /// hunting a file mix-up they did not make. Name the crop first. The
+    /// conclusion does not change: a crop moves which pixels the statistics are
+    /// taken over, so the two distributions are incomparable either way.
     pub const FIT_NOTE_NOT_SAME_FRAME: &str =
-        " WARNING: the reference does not look like the same frame as this \
-         photo (their proportions disagree). The fit matched distributions \
-         anyway, as it was asked to, but a match between two different \
-         pictures describes neither — treat the result as unreliable.";
+        " WARNING: the reference's proportions do not match this photo's — it \
+         was CROPPED, or it is not the same frame. Either way the two \
+         distributions are not comparable, because a crop changes which pixels \
+         the statistics are taken over. The fit matched them anyway, as it was \
+         asked to — treat the result as unreliable.";
 
     // --- zoned fit (fit_zoned.rs) ---------------------------------------
     pub const ZONED_UNAVAILABLE: &str = " Zoned sky fit unavailable ({e}) — global fit only.";

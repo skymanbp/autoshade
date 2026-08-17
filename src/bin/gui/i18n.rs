@@ -502,8 +502,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── AI panel · the grade STRENGTH axis (R23-3, feedback #5) ──────────────
     ("Strength", "强度"),
-    ("How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is the calibrated baseline every AI guardrail was tuned at (the behaviour of earlier releases); the default 65% (double-click to reset) leans a little further; above 70% the AI is told to commit to a look. The clipping and white-point safeguards never widen with it.",
-        "AI 下手有多重 —— 与「风格」是两条不同的轴：风格问「有多接近你过往的习惯」，强度问「出手多重」。50% 是所有 AI 参数标定的基准点（也就是此前各版本的行为）；默认 65%（双击复位到这里）比基准更进一点；高于 70% 会要求 AI 对每个控件都表态，不再默认留白。高光与黑位的安全边界永不随强度放宽。"),
+    ("How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
+        "AI 下手有多重 —— 与「风格」是两条不同的轴：风格问「有多接近你过往的习惯」，强度问「出手多重」。50% 是所有 AI 限制参数的标定点：±50/±35 这一对与配方的两对上限，与此前各版本逐位相同；但那些版本发出的克制用词，如今属于不高于 40% 的那一档，所以没有任何单一档位能把旧版完整带回来。41% 起，AI 要对每一个颜色控件逐一表态，不能默认留白；默认 65%（双击复位到这里）比标定点再进一点。高于 70% 时还会要求它把想用的控件用到观者可见的力度，并把视觉复查上限提到 3 轮 —— 与勾选「Deep thinking」相同的上限，两者只要占其一，最多就是 17 次 API 调用（其中 10 次带图）。高光与黑位的安全边界永不随强度放宽。"),
 
     // ── AI panel · style reference library (R23-2, feedback #6) ──────────────
     ("⚠ no library", "⚠ 未建库"),
@@ -861,12 +861,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " · 它的建议：{hint}（什么都没有改动——勾选「深度」才会让它去试）"),
     (" · ⚠ THE REVERSE-FIT WAS DISCARDED: every version of it rendered farther from the target than your untouched photo, so the recipe was reset to neutral — this is the same as not having reverse-fitted at all",
         " · ⚠ 反推结果已被丢弃：它的每一个版本渲染出来都比你未处理的原图离目标更远，配方已重置为中性——这与没有做反推是一样的"),
-    (" · ⚠ the reference does not look like this same frame — the result is unreliable",
-        " · ⚠ 参考图与本图不像是同一张照片——结果不可信"),
+    (" · ⚠ the reference's proportions do not match this photo — it was cropped, or it is not the same frame; either way the two distributions are not comparable",
+        " · ⚠ 参考图与本图的比例不一致——它被裁切过，或者不是同一张；两者都会让两边的分布无法相比"),
     (" · deep: AI review BEFORE saving, up to one guided retry",
         " · 深度：保存之前先做 AI 复查，最多一次按提示的重试"),
     (" · deep: the review found nothing this app can act on — the plain fit stands",
         " · 深度：复查没有给出本应用做得了的动作——保留原始反推结果"),
+    (" · deep: the review asked for {action}, which could not be carried out — the plain fit stands",
+        " · 深度：复查要求「{action}」，但它没能生效——保留原始反推结果"),
     (" · deep: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
         " · 深度：按复查提示试了「{action}」，已采用（复查分数不低于原分）"),
     (" · deep: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
@@ -976,12 +978,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── UX batch (toolbar slim-down · AI section · Export section · tools) ──
     ("AI", "AI"),
     ("AI Analyze", "AI 分析"),
-    ("AI proposes a recipe from scratch (GPT proposal + validation + a visual review: the result is RENDERED and judged by the vision model, which may buy one guided revision), written into the sliders — undoable. Uses the Direction above; Style and Strength steer it. COST, worst case: 11 API calls, 6 of them carrying images (8 high-detail frames). 「Deep thinking」 below raises that ceiling — its own tooltip has the numbers.",
-        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订），直接写入滑杆——可撤销。读上方「方向」文本；风格与强度两个滑杆一同生效。费用最多为 11 次 API 调用，其中 6 次带图（8 张高清图）。下方的「Deep thinking」会把这个上限提高——具体数字见它自己的说明。"),
+    ("AI proposes a recipe from scratch (GPT proposal + validation + a visual review: the result is RENDERED and judged by the vision model, which may buy one guided revision), written into the sliders — undoable. Uses the Direction above; Style and Strength steer it. COST, worst case: 11 API calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep thinking」 below OR pushing Strength above 70% raises that ceiling — either one alone does it; the Deep thinking tooltip has the numbers.",
+        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订），直接写入滑杆——可撤销。读上方「方向」文本；风格与强度两个滑杆一同生效。费用最多为 11 次 API 调用，其中 6 次带图（8 张高清图）。勾选下方的「Deep thinking」或把强度调到 70% 以上，都会把这个上限提高——两者占其一即可；具体数字见它自己的说明。"),
     // R23-4 · feedback #13: the thinking-mode switch and its cost disclosure.
     ("Deep thinking", "深度思考"),
-    ("Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the rationale above. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this on at a committed Strength it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
-        "让 AI 把思考过程写出来，并允许它反复改进。提案要先说明它读到的画面，对每一类工具（影调 / 白平衡 / 清晰与饱和 / HSL / 调色 / 曲线 / 细节 / 裁切 / 蒙版）逐一给出用或不用的理由，说明想要的成片效果，最后再对自己的结果做一次自查——这三段话会出现在上方的说明里。它还会把图像模型的推理档位本次提高一级（仅在设置里选了「provider default」以外的档位时有效），并让视觉复查继续跑到分数达标为止：强度中等时 2 轮，高于 70% 时 3 轮。费用：不开本项时一次分析最多 11 次 API 调用（6 次带图，8 张高清图）；开启本项、强度较高时，最多 17 次调用（10 次带图，14 张高清图），每次提案还多约 10-20% 的输出 token。批处理与 eval 从不启用它。"),
+    ("Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the rationale above. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
+        "让 AI 把思考过程写出来，并允许它反复改进。提案要先说明它读到的画面，对每一类工具（影调 / 白平衡 / 清晰与饱和 / HSL / 调色 / 曲线 / 细节 / 裁切 / 蒙版）逐一给出用或不用的理由，说明想要的成片效果，最后再对自己的结果做一次自查——这三段话会出现在上方的说明里。它还会把图像模型的推理档位本次提高一级（仅在设置里选了「provider default」以外的档位时有效），并让视觉复查继续跑到分数达标为止：强度中等时 2 轮，高于 70% 时 3 轮。费用：不开本项时一次分析最多 11 次 API 调用（6 次带图，8 张高清图）；只要勾选本项，或把强度调到 70% 以上（两者占其一即可），最多 17 次调用（10 次带图，14 张高清图），每次提案还多约 10-20% 的输出 token。批处理与 eval 从不启用它。"),
     ("Direction", "方向"),
     ("Free-text direction for AI Analyze — e.g. warmer and moodier",
         "给 AI 分析的自由文字方向——如「更暖、更有氛围」"),
@@ -1248,11 +1250,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       saturation and the three channel curves) — that part of the look \
       cannot arrive through this route.",
         " 目标成品的风格里可能用到了 {controls}，而反推从不求解这些参数（它的整个求解域只有曝光/对比度/高光/阴影/白色/黑色、一条影调曲线、一个全局饱和度和三条通道曲线）——这部分风格无法从这条路径得到。"),
-    (" WARNING: the reference does not look like the same frame as this \
-      photo (their proportions disagree). The fit matched distributions \
-      anyway, as it was asked to, but a match between two different \
-      pictures describes neither — treat the result as unreliable.",
-        " 警告：参考图与本图不像是同一张照片（两者比例不同）。反推仍按要求做了分布匹配，但两张不同画面之间的匹配说明不了什么——结果请视为不可靠。"),
+    (" WARNING: the reference's proportions do not match this photo's — it \
+      was CROPPED, or it is not the same frame. Either way the two \
+      distributions are not comparable, because a crop changes which pixels \
+      the statistics are taken over. The fit matched them anyway, as it was \
+      asked to — treat the result as unreliable.",
+        " 警告：参考图与本图的比例不一致——它被裁切过，或者不是同一张。两者都会让两边的分布无法相比，因为裁切会改变统计所覆盖的像素。反推仍按要求做了匹配——结果请视为不可靠。"),
     (" Zoned sky fit unavailable ({e}) — global fit only.",
         " 分区天空拟合不可用（{e}）——仅保留全局拟合。"),
     (" Zoned fit skipped: no usable sky partition (sky covers {s}% \

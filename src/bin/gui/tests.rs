@@ -4748,3 +4748,75 @@
         assert_eq!(app.style_build_progress, Some((40, 300)));
         assert!(app.status.contains("40") && app.status.contains("300"), "{}", app.status);
     }
+
+    /// R23 review LOW-4: `rounds == 0` had THREE producers and ONE sentence.
+    ///
+    /// "The review found nothing this app can act on" is the answer to
+    /// `FitAction::None` only. A zoned re-solve that errored, and a saturation
+    /// step that clamped back to the value in hand, are the app failing to carry
+    /// out a move it DID select — and the user has paid for the review either
+    /// way, so the two must not read the same. Rendered in BOTH languages,
+    /// because the fix is worthless if only the English half distinguishes.
+    #[test]
+    fn a_deep_fit_that_could_not_run_its_action_does_not_claim_the_review_was_empty() {
+        for lang in [Lang::En, Lang::Zh] {
+            let render = |outcome| {
+                AutoshopApp::render_fit_note(
+                    lang,
+                    &FitNote::DeepFit { action: "zoned sky/land pass", outcome },
+                )
+            };
+            let empty = render(DeepFitOutcome::NothingActionable);
+            let failed = render(DeepFitOutcome::ActionDidNotRun);
+            let kept = render(DeepFitOutcome::Adopted);
+            let dropped = render(DeepFitOutcome::Discarded);
+            assert_ne!(
+                empty, failed,
+                "{lang:?}: a selected action that could not run must not read as \
+                 'the review had nothing to say'"
+            );
+            // The three outcomes that FOLLOW a selected action all name it; the
+            // empty one has no action to name.
+            for (what, s) in [("failed", &failed), ("kept", &kept), ("dropped", &dropped)] {
+                assert!(
+                    s.contains("zoned sky/land pass"),
+                    "{lang:?}: the {what} sentence must name the action it is about: {s}"
+                );
+            }
+            // All four are distinct — no pair collapses into the same sentence.
+            let all = [&empty, &failed, &kept, &dropped];
+            for i in 0..all.len() {
+                for j in (i + 1)..all.len() {
+                    assert_ne!(all[i], all[j], "{lang:?}: two deep outcomes render identically");
+                }
+            }
+            // …and the zh half is really translated, not an English fallback.
+            if matches!(lang, Lang::Zh) {
+                assert!(failed.contains('深'), "the zh rendering fell back to English: {failed}");
+            }
+        }
+    }
+
+    /// R23 review LOW-6: the reverse-fit's paid-vision ceiling is TWO calls.
+    ///
+    /// The deep path's leftover used to be an `Option<Judgement>`, in which a
+    /// review that ran and FAILED was indistinguishable from one that never ran
+    /// — so after two failed attempts the informational block bought a third
+    /// and disclosed the same failure twice. The decision is pure, so the
+    /// ceiling is pinned here rather than inferred from the closure's shape.
+    #[test]
+    fn a_failed_deep_review_does_not_buy_a_third_vision_call() {
+        type Verdict = Option<Result<u8, String>>;
+        // The deep path never ran (「deep」 unticked): the informational review
+        // is the run's FIRST call, and it must still happen.
+        let none: Verdict = None;
+        assert_eq!(FitReviewPlan::of(&none), FitReviewPlan::Call);
+        // It ran and produced the verdict that describes what ships: reuse it —
+        // a second call would bill the user for the same answer.
+        let ok: Verdict = Some(Ok(88));
+        assert_eq!(FitReviewPlan::of(&ok), FitReviewPlan::Reuse);
+        // It ran and FAILED. This is the arm the defect lived in: the failure
+        // was already reported once, and a retry here is the third attempt.
+        let failed: Verdict = Some(Err("timed out reading response".into()));
+        assert_eq!(FitReviewPlan::of(&failed), FitReviewPlan::Skip);
+    }

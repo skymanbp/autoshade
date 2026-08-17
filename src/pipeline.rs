@@ -1068,6 +1068,13 @@ const JUDGE_TARGET_COMMITTED: f32 = 88.0;
 /// for a bold grade (the committed band). Everything else keeps exactly the
 /// round budget every release since R20 has had.
 ///
+/// The gate is a DISJUNCTION and every cost disclosure has to read that way
+/// (R23 review MED-2): `think` alone raises the ceiling, and a Strength above
+/// 70% alone raises it too, with no box ticked — the worst case of 17 calls
+/// (10 carrying images) belongs to EITHER, not to both together. The GUI's
+/// three tooltips and the CLI's `--strength` help all say it disjunctively for
+/// that reason.
+///
 /// `judge = false` (batch, eval) never reaches this: the whole block is behind
 /// that gate, so the unattended surfaces cannot iterate at all.
 pub(crate) fn judge_convergence(strength: GradeStrength, think: bool) -> (f32, usize) {

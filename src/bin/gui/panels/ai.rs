@@ -216,8 +216,9 @@ impl AutoshopApp {
                      review: the result is RENDERED and judged by the vision model, which may \
                      buy one guided revision), written into the sliders — undoable. Uses the \
                      Direction above; Style and Strength steer it. COST, worst case: 11 API \
-                     calls, 6 of them carrying images (8 high-detail frames). 「Deep thinking」 \
-                     below raises that ceiling — its own tooltip has the numbers.",
+                     calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep \
+                     thinking」 below OR pushing Strength above 70% raises that ceiling — \
+                     either one alone does it; the Deep thinking tooltip has the numbers.",
                 )))
                 .clicked()
             {
@@ -302,7 +303,7 @@ impl AutoshopApp {
             1.0,
             GRADE_STRENGTH_DEFAULT,
             tr(lang,
-                "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is the calibrated baseline every AI guardrail was tuned at (the behaviour of earlier releases); the default 65% (double-click to reset) leans a little further; above 70% the AI is told to commit to a look. The clipping and white-point safeguards never widen with it.",
+                "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
             ),
         );
         // R23-4 (feedback #13): the THIRD analysis-side control, under the two
@@ -310,7 +311,7 @@ impl AutoshopApp {
         // read off the Strength band directly above it.
         ui.checkbox(&mut self.deep_think, tr(lang, "Deep thinking"))
             .on_hover_text(tr(lang,
-                "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the rationale above. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this on at a committed Strength it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
+                "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the rationale above. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
             ));
         self.ai_style_library(ui);
     }

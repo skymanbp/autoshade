@@ -2358,21 +2358,37 @@ impl AutoshopApp {
                             None,
                         )?)
                     };
-                    let run_zoned = |seg_on: bool| -> anyhow::Result<autoshop::fit::FitReport> {
+                    // Returns the raster this run CLAIMED alongside the report:
+                    // `claim_raster` hands out a fresh `mask-zone-sky[-N].png`
+                    // and only the recipe that keeps the solve ever references
+                    // it, so a discarded candidate would leave a zero-reference
+                    // file behind (R23 review LOW-5). The claimed PATH, never a
+                    // rebuilt name — the claim may be the `-2` / `-3` suffix.
+                    let run_zoned = |seg_on: bool|
+                     -> anyhow::Result<(autoshop::fit::FitReport, Option<std::path::PathBuf>)> {
                         Ok(match (seg_on, &src_path) {
                             (true, Some(p)) => {
                                 let cfg = autoshop::config::Config::load();
                                 let seg =
                                     autoshop::segment::SegmentOpts::from_config(&cfg, "sky");
                                 let mask = autoshop::store::claim_raster(p, "mask-zone-sky")?;
-                                autoshop::fit_zoned::fit_recipe_zoned_from(
+                                let rep = autoshop::fit_zoned::fit_recipe_zoned_from(
                                     &base, &target, &seg, &mask, &fit_base,
-                                )
+                                );
+                                (rep, Some(mask))
                             }
-                            _ => autoshop::fit::fit_recipe_from(&base, &target, &fit_base),
+                            _ => (
+                                autoshop::fit::fit_recipe_from(&base, &target, &fit_base),
+                                None,
+                            ),
                         })
                     };
-                    let mut rep = run_zoned(zoned)?;
+                    // The FIRST solve's claim is deliberately not swept: this
+                    // report is the one that ships unless a candidate beats it,
+                    // and a candidate can only be the zoned pass when this solve
+                    // was NOT zoned (`hint_action`'s `zoned_used` fact), i.e.
+                    // when it claimed nothing at all.
+                    let (mut rep, _first_claim) = run_zoned(zoned)?;
                     // FACTS, not prose (L12#4): the landing renders these
                     // with the language live when the result LANDS — the old
                     // trf calls here used the language captured at spawn,
@@ -2389,7 +2405,16 @@ impl AutoshopApp {
                     // high to be kept, an action that changes nothing
                     // short-circuits before spending a second call, and every
                     // failure keeps the plain solve and degrades to a note.
-                    let mut judged: Option<autoshop::advisor::Judgement> = None;
+                    //
+                    // `judged` is THREE-state, the same shape the CLI's
+                    // `--deep` path uses: `None` = the deep path never ran,
+                    // `Some(Ok(_))` = a verdict describing what ships,
+                    // `Some(Err(_))` = the deep review ran and FAILED. The last
+                    // one used to be indistinguishable from "never ran", so the
+                    // informational block below bought a THIRD network attempt
+                    // after two had already failed — past the two-paid-calls
+                    // ceiling its own tooltip states (R23 review LOW-6).
+                    let mut judged: Option<anyhow::Result<autoshop::advisor::Judgement>> = None;
                     if deep {
                         match judge_of(&rep.recipe) {
                             Ok(first) => {
@@ -2411,27 +2436,54 @@ impl AutoshopApp {
                                         // Identical settings ⇒ nothing to
                                         // judge, and no second call bought.
                                         (r.saturation != rep.recipe.saturation).then(|| {
-                                            let (err, conf) =
-                                                autoshop::fit::rescore(&base, &target, &r);
-                                            r.confidence = conf;
-                                            autoshop::fit::FitReport {
-                                                recipe: r,
-                                                err_before: rep.err_before,
-                                                err_after: err,
-                                                notes: rep.notes.clone(),
-                                            }
+                                            // RE-DERIVED, never cloned off the
+                                            // solve (R23 review MED-3): every
+                                            // outcome note — the residual pair,
+                                            // the joint numbers, the
+                                            // unrepresented-controls diagnosis,
+                                            // the terminal-reset verdict the
+                                            // FitReset check below reads — is a
+                                            // statement about the recipe, and
+                                            // this recipe is not the one the
+                                            // solver reported on.
+                                            (
+                                                autoshop::fit::rescore_report(
+                                                    &base,
+                                                    &target,
+                                                    &r,
+                                                    rep.err_before,
+                                                    &rep.notes,
+                                                ),
+                                                None,
+                                            )
                                         })
                                     }
                                     FitAction::None => None,
                                 };
-                                let mut rounds = 0usize;
-                                let mut adopted = false;
-                                match candidate {
-                                    Some(mut cand) => {
-                                        rounds = 1;
-                                        match judge_of(&cand.recipe) {
-                                            Ok(second) if second.score >= first.score => {
-                                                adopted = true;
+                                let outcome = match candidate {
+                                    Some((mut cand, claimed)) => {
+                                        let verdict = judge_of(&cand.recipe);
+                                        let keep = matches!(
+                                            &verdict,
+                                            Ok(second) if second.score >= first.score
+                                        );
+                                        if !keep {
+                                            // The candidate is gone, so its
+                                            // claimed raster is now referenced
+                                            // by nothing (R23 review LOW-5).
+                                            // ONLY this run's claim is touched,
+                                            // by the path `claim_raster`
+                                            // returned. Best effort by design:
+                                            // a failure leaves an inert
+                                            // greyscale PNG the user can delete,
+                                            // and reporting it would be noise on
+                                            // a fit that succeeded.
+                                            if let Some(p) = &claimed {
+                                                let _ = std::fs::remove_file(p);
+                                            }
+                                        }
+                                        match verdict {
+                                            Ok(second) if keep => {
                                                 autoshop::rationale::push_note(
                                                     &mut cand.recipe.rationale,
                                                     &mut cand.notes,
@@ -2445,28 +2497,46 @@ impl AutoshopApp {
                                                     ),
                                                 );
                                                 rep = cand;
-                                                judged = Some(second);
+                                                judged = Some(Ok(second));
+                                                DeepFitOutcome::Adopted
                                             }
                                             // Lower, or un-judgeable: the
                                             // plain solve stands, and the
                                             // FIRST verdict is the one that
                                             // describes what ships.
-                                            Ok(_) => judged = Some(first),
+                                            Ok(_) => {
+                                                judged = Some(Ok(first));
+                                                DeepFitOutcome::Discarded
+                                            }
                                             Err(e) => {
                                                 status.push(FitNote::AiReviewFailed(e.to_string()));
-                                                judged = Some(first);
+                                                judged = Some(Ok(first));
+                                                DeepFitOutcome::Discarded
                                             }
                                         }
                                     }
-                                    None => judged = Some(first),
-                                }
-                                status.push(FitNote::DeepFit {
-                                    rounds,
-                                    action: action.tag(),
-                                    adopted,
-                                });
+                                    // No candidate, and WHY differs (R23
+                                    // review LOW-4): `FitAction::None` is the
+                                    // reviewer having named nothing this app
+                                    // can do, while a selected action that
+                                    // produced no candidate is the app failing
+                                    // to carry out a move it did choose — the
+                                    // zoned re-solve errored, or the saturation
+                                    // step clamped back to the value in hand.
+                                    None => {
+                                        judged = Some(Ok(first));
+                                        match action {
+                                            FitAction::None => DeepFitOutcome::NothingActionable,
+                                            _ => DeepFitOutcome::ActionDidNotRun,
+                                        }
+                                    }
+                                };
+                                status.push(FitNote::DeepFit { action: action.tag(), outcome });
                             }
-                            Err(e) => status.push(FitNote::AiReviewFailed(e.to_string())),
+                            Err(e) => {
+                                status.push(FitNote::AiReviewFailed(e.to_string()));
+                                judged = Some(Err(e));
+                            }
                         }
                     }
                     if !rep.recipe.masks.is_empty() {
@@ -2609,15 +2679,17 @@ impl AutoshopApp {
                     // so that render vs the target is exactly the pair the
                     // fit's own residual measures.
                     if ai_judge {
-                        // The deep path already judged the recipe that
-                        // ships — judging it a third time would just bill the
-                        // user for the same answer.
-                        let verdict = match judged {
-                            Some(j) => Ok(j),
-                            None => judge_of(&rep.recipe),
+                        // The two-paid-calls ceiling, decided by a pure
+                        // function so it is a pinned property and not a shape
+                        // one has to re-read this closure to check
+                        // (R23 review LOW-6).
+                        let verdict = match FitReviewPlan::of(&judged) {
+                            FitReviewPlan::Reuse => judged,
+                            FitReviewPlan::Skip => None,
+                            FitReviewPlan::Call => Some(judge_of(&rep.recipe)),
                         };
                         match verdict {
-                            Ok(j) => status.push(FitNote::AiReview {
+                            Some(Ok(j)) => status.push(FitNote::AiReview {
                                 score: j.score,
                                 critique: j.critique,
                                 // R23-6: SHOWN, never executed on this path.
@@ -2625,7 +2697,8 @@ impl AutoshopApp {
                                 // for it.
                                 hint: j.hint,
                             }),
-                            Err(e) => status.push(FitNote::AiReviewFailed(e.to_string())),
+                            Some(Err(e)) => status.push(FitNote::AiReviewFailed(e.to_string())),
+                            None => {}
                         }
                     }
                     Ok(FitOutcome {

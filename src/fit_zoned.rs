@@ -580,13 +580,27 @@ pub fn joint_reading(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Option<JointReading
 /// arguments, and a switch that could flip between two calls of the same run
 /// would not be.
 ///
-/// With it off, every reading below is `None` and each of the three roles
-/// degrades to exactly the pre-R23-6 behaviour: no report note (bar the
-/// fail-open disclosure), no confidence cap, no terminal veto. Verified by
-/// running the suite under it — all 40 pre-existing `fit` / `fit_zoned`
-/// tests pass unchanged; the five that fail are the ones asserting this
-/// family EXISTS, which is the correct answer to switching it off and is
-/// why the variable is a diagnostic, not a supported test configuration.
+/// With it off, [`joint_buckets`] returns empty and [`joint_reading`] `None`,
+/// and each of the FOUR consumers degrades to exactly the pre-R23-6 behaviour:
+///   1. the fit report's joint note — gone, replaced by the fail-open
+///      disclosure (`FIT_NOTE_JOINT_NONE`), which is the point of that note;
+///   2. the confidence cap (`fit::compose_report`, i.e. every fit report and
+///      every `fit::rescore_report`) — gone, so the reported confidence is the
+///      look-error ladder alone;
+///   3. the terminal do-no-harm veto's joint arm (`fit::terminal_harm`) — its
+///      `(Some, Some)` match never fires, so only R16's scalar arm convicts;
+///   4. `fit::unrepresented_note`, the one consumer that reads
+///      [`joint_buckets`] DIRECTLY rather than through [`joint_reading`] — its
+///      colour-shaped route sees an empty bucket list and can never fire, so
+///      the note falls back to the band-centroid route and the channel-mean
+///      white-balance test, both of which are joint-independent. That is a
+///      QUIETER disclosure, not a wrong one, and it was missing from this list.
+///
+/// Verified by running the suite under it — every `fit` / `fit_zoned` test that
+/// does not assert this family's existence passes unchanged (41 of them as of
+/// R23's round review); the five that fail are exactly the ones asserting it
+/// EXISTS, which is the correct answer to switching it off and is why the
+/// variable is a diagnostic, not a supported test configuration.
 fn joint_family_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {

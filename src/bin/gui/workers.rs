@@ -2205,7 +2205,7 @@ impl AutoshopApp {
     /// Render one reverse-fit landing fact in the CURRENT language — the
     /// worker returns [`FitNote`] facts, and this runs at landing time, so
     /// a language switch during the multi-minute fit renders fresh (L12#4).
-    fn render_fit_note(lang: Lang, n: &FitNote) -> String {
+    pub(crate) fn render_fit_note(lang: Lang, n: &FitNote) -> String {
         match n {
             FitNote::IncludesSkyZone => tr(
                 lang,
@@ -2276,29 +2276,40 @@ impl AutoshopApp {
                 " · ⚠ THE REVERSE-FIT WAS DISCARDED: every version of it rendered farther from the target than your untouched photo, so the recipe was reset to neutral — this is the same as not having reverse-fitted at all",
             )
             .to_string(),
+            // R23 review LOW-3: names the CROP, which at a 2% aspect tolerance
+            // is the likeliest cause by far on a reference the user exported
+            // themselves — "two different photos" sent them hunting a mix-up
+            // they had not made. The verdict is the same either way.
             FitNote::ReferenceNotSameFrame => tr(
                 lang,
-                " · ⚠ the reference does not look like this same frame — the result is unreliable",
+                " · ⚠ the reference's proportions do not match this photo — it was cropped, or it is not the same frame; either way the two distributions are not comparable",
             )
             .to_string(),
-            FitNote::DeepFit { rounds, action, adopted } => {
-                if *rounds == 0 {
+            // R23 review LOW-4: "found nothing to act on" is the answer to
+            // ONE of the no-retry paths. A move the app selected and then
+            // could not run is a different fact and gets its own sentence —
+            // the user has paid for a review either way.
+            FitNote::DeepFit { action, outcome } => match outcome {
+                DeepFitOutcome::NothingActionable => {
                     tr(lang, " · deep: the review found nothing this app can act on — the plain fit stands")
                         .to_string()
-                } else if *adopted {
-                    trf(
-                        lang,
-                        " · deep: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
-                        &[("action", action)],
-                    )
-                } else {
-                    trf(
-                        lang,
-                        " · deep: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
-                        &[("action", action)],
-                    )
                 }
-            }
+                DeepFitOutcome::ActionDidNotRun => trf(
+                    lang,
+                    " · deep: the review asked for {action}, which could not be carried out — the plain fit stands",
+                    &[("action", action)],
+                ),
+                DeepFitOutcome::Adopted => trf(
+                    lang,
+                    " · deep: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
+                    &[("action", action)],
+                ),
+                DeepFitOutcome::Discarded => trf(
+                    lang,
+                    " · deep: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
+                    &[("action", action)],
+                ),
+            },
         }
     }
 

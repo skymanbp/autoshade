@@ -370,10 +370,15 @@ this trait.)
 How hard the AI pushes is a first-class user input: `recipe::GradeStrength`
 (0..1) — the GUI's **Strength** slider, the CLI's `--strength`, the web body's
 `grade_strength`. It has two NAMED points: `0.50` is the point every restraint
-constant in the app was tuned at (the 147-photo eval of `f944ef3` plus
-`bd3f9d4`'s highlight-integrity cases), i.e. the behaviour of every release up to
-v0.28.0; `0.65` is the shipped default (user decision 2026-08-17 — "a bit braver
-than today, with one click back to the calibration point").
+NUMBER in the app was tuned at (the 147-photo eval of `f944ef3` plus
+`bd3f9d4`'s highlight-integrity cases) — the ±50/±35 guardrail pair and
+`temper`'s knees are bit-for-bit what shipped up to v0.28.0. It is **not** a
+"behave like the old release" switch: `0.50` lands in the *balanced* band, while
+the verbatim restraint wording those releases sent is now the *restrained*
+(`≤ 0.40`) prose, whose soft-cap factor is already 0.93 — so no single strength
+reproduces a pre-R23 request in its entirety. `0.65` is the shipped default
+(user decision 2026-08-17 — "a bit braver than today, with one click back to the
+calibration point").
 
 The value is **deliberately not an `EditRecipe` field**. It is intent for one
 analysis, not a develop parameter: in the recipe it would have to be projected

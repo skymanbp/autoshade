@@ -506,6 +506,16 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
                 // The CALIBRATION point, named: eval is the measurement
                 // baseline R23-5's wider ruler is calibrated against, so it must
                 // not drift when the product default moves (R23-3).
+                //
+                // What this pins is the NUMBER axis — the prompt's ±50/±35 pair
+                // and temper's knees are bit-for-bit pre-R23 here. It does NOT
+                // freeze the request: R23-1 rewrote the proposer prose at every
+                // strength (and the verbatim old wording now lives in the ≤ 0.4
+                // band, where soft_cap_factor is 0.93 and the numbers would drift
+                // instead). So scores from this harness are not comparable across
+                // R23 whatever value stands here — the same break the module doc
+                // already records for the widened ruler — and the 147-photo set
+                // has to be re-measured to give the new baseline a number.
                 pipeline::GradeRequest {
                     strength: crate::recipe::GradeStrength::calibrated(),
                     ..Default::default()

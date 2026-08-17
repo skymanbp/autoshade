@@ -285,7 +285,9 @@ pub(crate) const STYLE_STRENGTH_DEFAULT: f32 = 0.30;
 /// `GradeStrength::default()`, so a GUI copy would let the desktop app develop a
 /// photo differently from `autoshop analyze` on the same untouched settings.
 /// `GradeStrength::CALIBRATED` (0.50) is the other named point on this dial —
-/// the behaviour of every release before R23, one drag away.
+/// the calibrated guardrail NUMBERS, one drag away. Not the whole pre-R23
+/// request: that release's restraint wording is the ≤ 0.40 band's prose (see
+/// `GradeStrength::CALIBRATED`).
 pub(crate) const GRADE_STRENGTH_DEFAULT: f32 = autoshop::recipe::GradeStrength::DEFAULT;
 
 pub(crate) const PREVIEW_EDGE: u32 = 1280; // working preview size for fast live develop
@@ -635,10 +637,64 @@ pub(crate) enum FitNote {
     FitReset,
     /// R23-6 B-7: the chosen reference does not look like this frame.
     ReferenceNotSameFrame,
-    /// R23-6 D: the deep path ran and this is what it did. `rounds` counts
-    /// the guided retries actually bought (0 = the first review already
-    /// stood), `action` names what was tried, `adopted` whether it was kept.
-    DeepFit { rounds: usize, action: &'static str, adopted: bool },
+    /// R23-6 D: the deep path ran and this is what it did. `action` names the
+    /// move the review's hint selected; [`DeepFitOutcome`] says what became of
+    /// it.
+    DeepFit { action: &'static str, outcome: DeepFitOutcome },
+}
+
+/// What the deep reverse-fit's ONE guided retry came to.
+///
+/// Four states, not the `{rounds, adopted}` pair this used to be (R23 review
+/// LOW-4). `rounds == 0` had THREE producers — the hint named no move the app
+/// has, the zoned re-solve failed, or the saturation step clamped to the value
+/// the recipe already carried — and all three rendered as "the review found
+/// nothing this app can act on", which is only true of the first. The other two
+/// are the app failing to carry out a move it DID select, and telling the user
+/// the reviewer had no opinion hides that.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum DeepFitOutcome {
+    /// The hint named no move this app can make (`FitAction::None`).
+    NothingActionable,
+    /// A move WAS selected and could not be carried out: the zoned re-solve
+    /// errored (no raster home, segmentation unavailable), or the saturation
+    /// step landed on the value the recipe already had after clamping. No
+    /// second review was bought either way.
+    ActionDidNotRun,
+    /// The retry was bought and KEPT — it re-scored at least as high.
+    Adopted,
+    /// The retry was bought and discarded — it re-scored lower.
+    Discarded,
+}
+
+/// What the reverse-fit's INFORMATIONAL review should do at the end of a run,
+/// given whatever the deep path left behind.
+///
+/// Pure, and named, because what it protects is a SPEND ceiling the surface
+/// states as a number: 「deep」's tooltip promises at most two paid vision calls
+/// per fit. The deep path's outcome used to be an `Option<Judgement>`, in which
+/// "the review ran and FAILED" and "the deep path never ran" were the same
+/// `None` — so two failed attempts bought a third, and reported the same
+/// failure twice (R23 review LOW-6).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum FitReviewPlan {
+    /// The deep path holds the verdict that describes what ships — reuse it,
+    /// rather than paying for the same answer.
+    Reuse,
+    /// The deep path already tried and failed, and disclosed it once.
+    Skip,
+    /// Nobody has judged this recipe yet — buy the one informational call.
+    Call,
+}
+
+impl FitReviewPlan {
+    pub(crate) fn of<T, E>(deep: &Option<Result<T, E>>) -> Self {
+        match deep {
+            Some(Ok(_)) => Self::Reuse,
+            Some(Err(_)) => Self::Skip,
+            None => Self::Call,
+        }
+    }
 }
 
 /// The reverse-fit result: recipe + errors + typed notes. `persisted` is

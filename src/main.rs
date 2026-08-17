@@ -1004,16 +1004,13 @@ fn match_cmd(
                         let mut r = rep.recipe.clone();
                         r.saturation += d;
                         r.clamp();
-                        (r.saturation != rep.recipe.saturation).then(|| {
-                            let (err, conf) = fit::rescore(&src, &tgt, &r);
-                            r.confidence = conf;
-                            fit::FitReport {
-                                recipe: r,
-                                err_before: rep.err_before,
-                                err_after: err,
-                                notes: rep.notes.clone(),
-                            }
-                        })
+                        // RE-DERIVED from the adjusted recipe, never cloned off
+                        // the solve — the same defect and the same fix as the
+                        // GUI's deep block (R23 review MED-3): a cloned note
+                        // set describes the settings the recipe had BEFORE the
+                        // step, and this one is persisted into recipe.json.
+                        (r.saturation != rep.recipe.saturation)
+                            .then(|| fit::rescore_report(&src, &tgt, &r, rep.err_before, &rep.notes))
                     }
                     autoshop::advisor::FitAction::None => None,
                 };

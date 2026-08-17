@@ -1119,7 +1119,9 @@ impl EditRecipe {
     ///     negative without raising Whites drags specular whites (sea foam, clouds,
     ///     sun glints) to grey — so recovery lifts Whites proportionally. This is the
     ///     principled "keep whites white", at the recipe layer (the renderer stays
-    ///     faithful; it does not override the recipe).
+    ///     faithful; it does not override the recipe). It is applied as a FLOOR
+    ///     *after* rule 2, so rule 2 can never shave it — see the ordering note
+    ///     in the body.
     ///  2. **Soft-cap over-aggressive tone moves** toward a tasteful ceiling with a
     ///     smooth knee (not a hard clip), so Highlights/Shadows asymptote near ±70
     ///     and Whites/Blacks near ±45 instead of slamming to the ±100 schema bound.
@@ -1148,25 +1150,46 @@ impl EditRecipe {
         let f = strength.soft_cap_factor();
         let (tone_knee, tone_ceil) = (TEMPER_TONE_KNEE * f, TEMPER_TONE_CEIL * f);
         let (point_knee, point_ceil) = (TEMPER_POINT_KNEE * f, TEMPER_POINT_CEIL * f);
-        // Couple recovery to whites BEFORE soft-capping (uses the original strength).
-        // NOT scaled by `strength` — see the doc comment: white-point protection is
-        // a measured defect fix, not a taste dial.
-        if self.highlights < 0.0 {
-            self.whites = self.whites.max((-self.highlights * 0.3).min(50.0));
+        // Couple recovery to whites. Read off the ORIGINAL highlights (the
+        // recovery the model asked for), and applied as a FLOOR *after* the
+        // point soft-cap. NOT scaled by `strength` — see the doc comment:
+        // white-point protection is a measured defect fix, not a taste dial.
+        //
+        // The order is the rule, not an accident (R23 review NIT-2). Running the
+        // coupling BEFORE the cap let the cap eat into it at low strength: at
+        // s = 0 (knee 19.5, ceiling 29.25) a Highlights of −100 asks for whites
+        // 30 and came back 24.56 — the one rule this axis promises never to
+        // touch, scaled after all, and invisible to a test that only probed
+        // −40. As a floor the promise holds at every strength, and nothing moves
+        // at or above the calibration point: the guard's own ceiling is 30 (the
+        // ±100 Highlights range caps −h·0.3 there, below the `.min(50)`), which
+        // is exactly `TEMPER_POINT_KNEE` at f = 1, and `soft_cap` is the
+        // identity below its knee — so max(cap(w), g) == cap(max(w, g)) for
+        // every f ≥ 1. `clamp` runs before `temper` at both production call
+        // sites (advisor::openai, advisor::heuristic), which is what keeps
+        // −h·0.3 inside that 30.
+        fn white_point_floor(highlights: f32) -> Option<f32> {
+            (highlights < 0.0).then(|| (-highlights * 0.3).min(50.0))
         }
+        let guard = white_point_floor(self.highlights);
         self.highlights = soft_cap(self.highlights, tone_knee, tone_ceil);
         self.shadows = soft_cap(self.shadows, tone_knee, tone_ceil);
         self.whites = soft_cap(self.whites, point_knee, point_ceil);
+        if let Some(g) = guard {
+            self.whites = self.whites.max(g);
+        }
         self.blacks = soft_cap(self.blacks, point_knee, point_ceil);
         // Same restraint on each local mask's tone sliders.
         for m in self.masks.iter_mut() {
-            // Mask side of the SAME white-point protection — also unscaled.
-            if m.highlights < 0.0 {
-                m.whites = m.whites.max((-m.highlights * 0.3).min(50.0));
-            }
+            // Mask side of the SAME white-point protection — also unscaled, and
+            // floored after the cap for the same reason.
+            let guard = white_point_floor(m.highlights);
             m.highlights = soft_cap(m.highlights, tone_knee, tone_ceil);
             m.shadows = soft_cap(m.shadows, tone_knee, tone_ceil);
             m.whites = soft_cap(m.whites, point_knee, point_ceil);
+            if let Some(g) = guard {
+                m.whites = m.whites.max(g);
+            }
             m.blacks = soft_cap(m.blacks, point_knee, point_ceil);
         }
     }
@@ -1254,11 +1277,19 @@ pub enum StrengthTier {
 pub struct GradeStrength(f32);
 
 impl GradeStrength {
-    /// The point every restraint constant in the app was tuned at (the 147-photo
+    /// The point every restraint NUMBER in the app was tuned at (the 147-photo
     /// eval of f944ef3, plus bd3f9d4's highlight-integrity cases). At this value
     /// the prompt quotes ±50/±35 and [`EditRecipe::temper`] uses the shipped
-    /// 50→70 / 30→45 knees — i.e. 0.5 IS the behaviour of every release before
-    /// this one.
+    /// 50→70 / 30→45 knees, bit for bit.
+    ///
+    /// NOT a "behave like the last release" switch, and calling it one was this
+    /// axis's single dishonest claim. Two different axes run through here. The
+    /// NUMBERS are reproduced exactly at 0.5. The restraint PROSE every pre-R23
+    /// request carried verbatim is now the [`StrengthTier::Restrained`] wording,
+    /// i.e. the ≤ 0.4 band — while 0.5 lands in [`StrengthTier::Balanced`]. So no
+    /// single value on this dial reproduces a pre-R23 request in full: 0.5 buys
+    /// the calibrated numbers, 0.4 the old words (at `soft_cap_factor` 0.93, i.e.
+    /// with the numbers already tightened).
     pub const CALIBRATED: f32 = 0.5;
     /// What every surface starts at (user decision 2026-08-17 ⑦: "a bit braver
     /// than today, with one click back to the calibration point").
@@ -1276,7 +1307,9 @@ impl GradeStrength {
         Self(if v.is_finite() { v.clamp(0.0, 1.0) } else { Self::DEFAULT })
     }
 
-    /// The calibration point — "behave exactly like every release before R23".
+    /// The calibration point — the pre-R23 guardrail NUMBERS, not the whole
+    /// pre-R23 request (see [`Self::CALIBRATED`] for what does and does not come
+    /// back at this value).
     pub fn calibrated() -> Self {
         Self(Self::CALIBRATED)
     }
@@ -1703,6 +1736,55 @@ mod tests {
             r.temper(GradeStrength::new(s));
             assert_eq!(r.whites, 12.0, "global white-point guard drifted at strength {s}");
             assert_eq!(r.masks[0].whites, 12.0, "mask white-point guard drifted at strength {s}");
+        }
+        // …and at the guard's MAXIMUM, which is where the old ordering broke it
+        // (R23 review NIT-2). Highlights −100 asks for whites 30 — above the
+        // point knee at every s < 0.5 (19.5 at s = 0), so the pre-cap coupling
+        // came back 24.56 and the invariant above was only true because −40
+        // never left the identity region of the cap. The floor makes it true.
+        for s in [0.0_f32, 0.5, 1.0] {
+            let mut r = EditRecipe {
+                highlights: -100.0,
+                whites: 0.0,
+                masks: vec![LocalAdjustment {
+                    highlights: -100.0,
+                    whites: 0.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            r.temper(GradeStrength::new(s));
+            // 30 to within f32 rounding — `100 · 0.3` is 30.000002 in f32, and
+            // the point of the assertion is the guard's VALUE surviving, not
+            // the last mantissa bit of a multiply the shipped code also does.
+            assert!(
+                (r.whites - 30.0).abs() < 1e-4,
+                "global white point was shaved by the soft cap at strength {s}: {}",
+                r.whites
+            );
+            assert!(
+                (r.masks[0].whites - 30.0).abs() < 1e-4,
+                "mask white point was shaved by the soft cap at strength {s}: {}",
+                r.masks[0].whites
+            );
+        }
+        // The floor only ever RAISES: a recipe that already asks for more white
+        // point than the coupling wants keeps the soft-capped value, and that
+        // value is exactly what the pre-floor ordering produced (the algebraic
+        // identity the body's comment states, pinned rather than asserted in
+        // prose).
+        for s in [0.5_f32, 0.65, 1.0] {
+            let mut r = EditRecipe { highlights: -100.0, whites: 90.0, ..Default::default() };
+            r.temper(GradeStrength::new(s));
+            let f = GradeStrength::new(s).soft_cap_factor();
+            let (knee, ceil) = (TEMPER_POINT_KNEE * f, TEMPER_POINT_CEIL * f);
+            let span = ceil - knee;
+            let excess = 90.0 - knee;
+            assert_eq!(
+                r.whites,
+                knee + span * (excess / (excess + span)),
+                "a whites the user set above the guard must still be soft-capped at strength {s}"
+            );
         }
     }
 

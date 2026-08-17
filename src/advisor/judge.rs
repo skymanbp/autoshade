@@ -141,8 +141,23 @@ pub fn hint_action(hint: &str, zoned_used: bool, can_zone: bool) -> FitAction {
         // judge is describing: "too saturated" / "pull back" ⇒ down. The
         // default is up, because the reported failure mode of this whole
         // subsystem is under-reaching, not over-reaching.
+        //
+        // Every entry has to survive being a SUBSTRING, since that is what
+        // `contains` tests. Two did not and were removed (R23 round review
+        // NIT-1): "less" fires inside "flawless" / "seamless", "over" inside
+        // "recover" / "recovered" / "overall" — all four are ordinary words in
+        // praise or in a SHADOW instruction, and each one flipped a "push
+        // further" hint into a pull-back. "too " keeps its trailing space
+        // against the same failure.
+        //
+        // KNOWN residual, disclosed rather than silently carried: "lower" also
+        // sits inside "flower". A hint that names flowers and asks for more
+        // chroma reads as a pull-back. It stays because the direct reading
+        // ("lower the saturation") is the commoner one and the cost of a wrong
+        // sign is bounded — the retry is discarded unless it re-scores at least
+        // as high — but it is the same class of defect as the two above.
         let down = any(&[
-            "less", "too ", "over", "reduce", "desatur", "muted", "lower", "pull back",
+            "too ", "reduce", "desatur", "muted", "lower", "pull back",
             "dial back", "tone down",
         ]);
         return FitAction::Saturation(if down {
@@ -451,6 +466,20 @@ mod tests {
         assert_eq!(
             hint_action("push the saturation further", false, false),
             FitAction::Saturation(FIT_ACTION_SAT_STEP)
+        );
+        // …and the direction words are matched as SUBSTRINGS, so a word that
+        // merely CONTAINS one must not flip the sign (R23 review NIT-1). Both
+        // of these read as "push further" to a human and used to come back as
+        // a pull-back: "flawless" contains "less", "recover" contains "over".
+        assert_eq!(
+            hint_action("nearly flawless, push a touch more saturation", false, false),
+            FitAction::Saturation(FIT_ACTION_SAT_STEP),
+            "\"flawless\" must not be read as \"less\""
+        );
+        assert_eq!(
+            hint_action("recover the shadows and add saturation", false, false),
+            FitAction::Saturation(FIT_ACTION_SAT_STEP),
+            "\"recover\" must not be read as \"over\""
         );
         // Nothing executable, and — the point — no crash, no free text, no
         // number out of the model.

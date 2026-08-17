@@ -77,10 +77,13 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   used to decide restraint on their own — the proposer prompt's numeric
   guardrails and wording, the recipe's soft caps, the verifier's two-sided band,
   the visual judge's rubric, whether a retrieved reference is a ceiling or a
-  floor, and the no-key fallback. `0.50` reproduces every release up to v0.28.0
-  (that is where the guardrails were calibrated); the default `0.65` pushes a
-  little further, and above `0.70` the AI is told to commit. The clipping and
-  white-point safeguards never move with it.
+  floor, and the no-key fallback. `0.50` reproduces the calibrated *numbers* —
+  the ±50/±35 guardrail pair and the recipe's soft-cap knees are bit-for-bit
+  what shipped up to v0.28.0 — but not those releases' restraint *wording*,
+  which is now the `≤ 0.40` band's prose; no single setting reproduces an old
+  request in full. The default `0.65` pushes a little further, and above `0.70`
+  the AI is told to commit. The clipping and white-point safeguards never move
+  with it.
 - **Look matching (reverse-fit)** — `match` takes the same frame twice (your
   source and a finished rendition of it: a `reimagine` output, an exported JPEG,
   any reference of that shot) and *solves* for the `EditRecipe` that reproduces

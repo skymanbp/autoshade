@@ -285,22 +285,33 @@ fn confidence_from_look_err(err: f32) -> f32 {
     clamp_confidence(1.0 - err * CONFIDENCE_SLOPE)
 }
 
-/// Aspect-ratio disagreement past which the two frames are unlikely to be
-/// the same shot (R23-6 B-7). 2% mirrors the grid-comparability rule inside
-/// [`neutral_gate_misprediction`] — a few rows of a 384-edge thumbnail, i.e.
-/// beyond what aspect rounding and a sane crop explain. A WARNING, never a
-/// refusal: the reference is a file the user chose on purpose, and a fit
-/// between two shots of the same scene is unreliable, not illegal.
+/// Aspect-ratio disagreement past which the reference's pixel population is no
+/// longer this photo's (R23-6 B-7). 2% mirrors the grid-comparability rule
+/// inside [`neutral_gate_misprediction`] — a few rows of a 384-edge thumbnail,
+/// i.e. beyond what aspect ROUNDING explains.
+///
+/// A crop is NOT inside that budget, deliberately, and the doc used to imply it
+/// was (R23 review LOW-3): 3:2 recomposed to 16:9 is 18% out and trips this
+/// every time, on exactly the Lightroom/C1 export the tooltip asks for. The
+/// reading stays correct — a crop changes which pixels the statistics are taken
+/// over, so the two distributions stop being comparable — but the message it
+/// drives has to say CROP rather than accuse the user of picking the wrong
+/// file. A WARNING, never a refusal: the reference is a file the user chose on
+/// purpose, and an unreliable fit is not an illegal one.
 const SAME_FRAME_ASPECT_TOL: f32 = 0.02;
 
 /// Do these two images plausibly show the SAME frame? `false` ⇒ warn.
 ///
-/// Two cheap readings, in the order that costs least: the aspect ratios, and
-/// then the grid comparability [`neutral_gate_misprediction`] already
-/// computes (it returns infinity when the two analysis grids differ by more
-/// than aspect rounding). Both are necessary conditions, neither is
-/// sufficient — a different photograph of the same scene at the same aspect
-/// passes, and nothing short of registration would catch it.
+/// ONE reading: the aspect ratios, which is all this function has ever
+/// computed. (This doc used to promise a second — the grid comparability
+/// [`neutral_gate_misprediction`] returns infinity for. That test is real, but
+/// it belongs to `tone_cdf_pair`'s neutral-evidence gate and nothing routes its
+/// answer here, so the promise was fiction — R23 round review LOW-2.)
+///
+/// One reading is enough for what this result is ALLOWED to do. It is a
+/// necessary condition and never a sufficient one — a different photograph of
+/// the same scene at the same aspect passes, and nothing short of registration
+/// would catch it — which is exactly why the caller warns instead of refusing.
 pub fn same_frame_plausible(src: &DynamicImage, target: &DynamicImage) -> bool {
     let ar = |w: u32, h: u32| w.max(1) as f32 / h.max(1) as f32;
     let (a, b) = (ar(src.width(), src.height()), ar(target.width(), target.height()));
@@ -593,11 +604,75 @@ pub fn fit_recipe_from(
     }
 
     // --- report ---------------------------------------------------------------
-    // Honest-mismatch notes: the user reads WHY a fit stayed approximate
-    // instead of wondering what went wrong (real-machine feedback,
-    // 2026-07-09: a palette-transplant target produced a faithful-but-ugly
-    // max-saturation fit with zero explanation).
+    compose_report(
+        recipe,
+        Measured {
+            err_before,
+            err_after,
+            joint_after,
+            after_px: &after_px,
+            tp: &tp,
+            same_frame,
+        },
+        SolveFacts {
+            sat_pegged,
+            cast,
+            sat_fitted: sat_reduced.then_some(sat_fitted),
+            regressed: fit_regressed.then_some(joint_regressed),
+        },
+    )
+}
+
+/// What a [`FitReport`]'s notes need that only a MEASUREMENT can supply — all
+/// of it re-derivable from a (source, target, recipe) triple at any later time.
+struct Measured<'a> {
+    err_before: f32,
+    err_after: f32,
+    joint_after: Option<crate::fit_zoned::JointReading>,
+    /// The FINISHED render, i.e. the recipe applied to the source thumbnail.
+    after_px: &'a [[f32; 3]],
+    /// The target thumbnail.
+    tp: &'a [[f32; 3]],
+    same_frame: bool,
+}
+
+/// …and what only the SOLVE can supply: decisions the solver made on its way to
+/// the recipe, which no later re-measurement of that recipe can recover.
+///
+/// Split out from [`Measured`] precisely because the split is the contract for
+/// [`rescore_report`]: a recipe someone ADJUSTED after the solve can honestly
+/// re-derive everything on the measured side and nothing on this one.
+#[derive(Default, Clone, Copy)]
+struct SolveFacts {
+    /// The chroma chase hit the ±60 model cap with demand to spare.
+    sat_pegged: bool,
+    /// Which of the colour stage's gates (if either) refused the cast curves.
+    cast: CastOutcome,
+    /// `Some(sat_fitted)` when the do-no-harm loop shrank saturation away from
+    /// the chroma-matched value the chase produced.
+    sat_fitted: Option<f32>,
+    /// `Some(joint_arm_fired)` when the TERMINAL do-no-harm check reset the
+    /// whole recipe to the calibration base.
+    regressed: Option<bool>,
+}
+
+/// Build the rationale, the typed notes and the confidence of ONE fit report.
+///
+/// The single derivation path for every fit note in this module —
+/// [`fit_recipe_from`] ends here, and so does [`rescore_report`]. Written as a
+/// function rather than left inline for exactly that reason: the deep
+/// reverse-fit used to CLONE a solved report's notes onto an adjusted recipe,
+/// which persisted a rationale describing settings the photo no longer had
+/// (R23 review MED-3). A second, "refresh the notes" derivation would have had
+/// the same failure mode one release later, so there is only this one.
+///
+/// Honest-mismatch notes are the point: the user reads WHY a fit stayed
+/// approximate instead of wondering what went wrong (real-machine feedback,
+/// 2026-07-09: a palette-transplant target produced a faithful-but-ugly
+/// max-saturation fit with zero explanation).
+fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) -> FitReport {
     use crate::rationale::{keys, push_note, Note};
+    let (err_before, err_after) = (m.err_before, m.err_after);
     let mut notes: Vec<Note> = Vec::new();
     let mut rationale = String::new();
     // The summary comes first; the note fragments append after it. Two full
@@ -634,7 +709,7 @@ pub fn fit_recipe_from(
     // burying it behind a threshold would leave the user with a single
     // self-graded score again. Named "joint distribution", never "region" —
     // the buckets are value ranges whose pixels are scattered frame-wide.
-    if let Some(j) = joint_after {
+    if let Some(j) = m.joint_after {
         push_note(
             &mut rationale,
             &mut notes,
@@ -657,10 +732,10 @@ pub fn fit_recipe_from(
         // the confidence below is the look-error ladder on its own.
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_JOINT_NONE));
     }
-    if sat_pegged {
+    if solve.sat_pegged {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_SAT_PEGGED));
     }
-    if fit_regressed {
+    if let Some(joint_regressed) = solve.regressed {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REGRESSED));
         if joint_regressed {
             // WHICH check refused matters: the scalar arm and this one see
@@ -668,7 +743,7 @@ pub fn fit_recipe_from(
             // where "it rendered farther" is not.
             push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_JOINT_REGRESSED));
         }
-    } else if sat_reduced {
+    } else if let Some(sat_fitted) = solve.sat_fitted {
         push_note(
             &mut rationale,
             &mut notes,
@@ -681,16 +756,16 @@ pub fn fit_recipe_from(
             ),
         );
     }
-    if let Some(k) = cast.note_key() {
+    if let Some(k) = solve.cast.note_key() {
         push_note(&mut rationale, &mut notes, Note::plain(k));
     }
     // Which controls this target's look may need that the solver has no way
     // to reach — SPECIFIC to this pair, not the blanket sentence the summary
     // already carries (R23-6 A-5).
-    if let Some(n) = unrepresented_note(&recipe, &after_px, &tp, err_after) {
+    if let Some(n) = unrepresented_note(&recipe, m.after_px, m.tp, err_after) {
         push_note(&mut rationale, &mut notes, n);
     }
-    if !same_frame {
+    if !m.same_frame {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_NOT_SAME_FRAME));
     }
     recipe.rationale = rationale;
@@ -701,7 +776,7 @@ pub fn fit_recipe_from(
     // set this is what finally separates a fit that reproduces the look from
     // one that only scores well: the unreachable-repaint pair reads 0.52 by
     // look error and 0.25 here.
-    recipe.confidence = match joint_after {
+    recipe.confidence = match m.joint_after {
         Some(j) => confidence_from_look_err(err_after).min(clamp_confidence(
             1.0 - j.weighted * crate::fit_zoned::JOINT_CONFIDENCE_SLOPE,
         )),
@@ -711,28 +786,86 @@ pub fn fit_recipe_from(
     FitReport { recipe, err_before, err_after, notes }
 }
 
-/// Re-measure a recipe the way [`fit_recipe_from`] measures its own output:
-/// the frame-global look distance, and the confidence both ladders agree on.
-/// Returns `(err, confidence)`.
+/// Re-measure an ADJUSTED recipe the way [`fit_recipe_from`] measures its own
+/// output, and re-derive every note that describes an OUTCOME — through the
+/// same [`compose_report`] the solver itself ends in.
 ///
-/// Exposed for the ONE caller that legitimately hands back a recipe it did
-/// not itself solve: the GUI's deep reverse-fit (R23-6 D) may adjust a
-/// fitted recipe on the visual reviewer's say-so, and reporting the solve's
-/// pre-adjustment numbers next to post-adjustment pixels would be exactly
-/// the kind of stale claim this round is about. Deterministic and local —
-/// the same two renders the fit already pays for.
-pub fn rescore(src: &DynamicImage, target: &DynamicImage, recipe: &EditRecipe) -> (f32, f32) {
+/// For the ONE caller that legitimately hands back a recipe it did not itself
+/// solve: the deep reverse-fit (R23-6 D, GUI `actions.rs` and the CLI's
+/// `--deep`) may move a fitted recipe on the visual reviewer's say-so, and
+/// reporting the solve's pre-adjustment numbers next to post-adjustment pixels
+/// is exactly the kind of stale claim this round is about. Deterministic and
+/// local — the same two renders the fit already pays for.
+///
+/// This REPLACED a numbers-only `rescore` returning `(err, confidence)`
+/// (R23 review MED-3). That signature was the defect's enabler: it re-measured
+/// honestly and left the caller holding a report whose notes it had to source
+/// somewhere, and both call sites sourced them by `notes.clone()`. Every
+/// outcome sentence in that clone then described the recipe BEFORE the move —
+/// the joint numbers, the far-from-target verdict, the unrepresented-controls
+/// diagnosis, and a `FIT_NOTE_SAT_REDUCED` quoting a saturation the recipe no
+/// longer had. Worst of all it carried `FIT_NOTE_REGRESSED`, on which the GUI
+/// raises 「THE REVERSE-FIT WAS DISCARDED — reset to neutral」: after a terminal
+/// reset the deep arm can adopt base ± 10, and the user was told nothing had
+/// been applied while ± 10 was persisted.
+///
+/// `prior` is the solved report's notes, and exactly TWO families cross over —
+/// both statements about the SOLVE that the adjustment cannot falsify:
+///   * `FIT_NOTE_SAT_PEGGED` — the chroma chase hit the ±60 model cap, a fact
+///     about the target's chroma being out of the model's reach;
+///   * `FIT_NOTE_REHUE_BLOCKED` / `FIT_NOTE_CAST_REJECTED` — which gate refused
+///     the colour stage, and the adjustment does not refit those curves.
+///
+/// The three that are deliberately DROPPED rather than re-derived, because they
+/// report an action the solver took on a recipe this report no longer describes:
+/// `FIT_NOTE_REGRESSED`, `FIT_NOTE_JOINT_REGRESSED` (the terminal reset — the
+/// adjusted recipe is not the neutral one that note is about, and re-running the
+/// harm test here would either lie the same way or silently overrule the
+/// caller's own adoption decision), and `FIT_NOTE_SAT_REDUCED` (the do-no-harm
+/// loop's pull-back, whose "from X to Y" pair the adjustment breaks — and whose
+/// attribution to that loop would be false once the deep step moved the dial
+/// again). The caller states what it did through `FIT_NOTE_DEEP_ADOPTED`
+/// instead, which is the honest owner of that sentence.
+///
+/// `err_before` is the caller's, unchanged by construction: it measures the
+/// untouched base against the target and no recipe adjustment can move it.
+pub fn rescore_report(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    recipe: &EditRecipe,
+    err_before: f32,
+    prior: &[crate::rationale::Note],
+) -> FitReport {
+    use crate::rationale::keys;
+    let same_frame = same_frame_plausible(src, target);
     let s = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-    let t = pixels_of(&target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
-    let cand = pixels_of(&render::develop_preview(&s, recipe));
-    let err = look_err(&cand, &t);
-    let conf = match crate::fit_zoned::joint_reading(&cand, &t) {
-        Some(j) => confidence_from_look_err(err).min(clamp_confidence(
-            1.0 - j.weighted * crate::fit_zoned::JOINT_CONFIDENCE_SLOPE,
-        )),
-        None => confidence_from_look_err(err),
-    };
-    (err, conf)
+    let tp = pixels_of(&target.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE));
+    let after_px = pixels_of(&render::develop_preview(&s, recipe));
+    let joint_after = crate::fit_zoned::joint_reading(&after_px, &tp);
+    let carried = |k: &str| prior.iter().any(|n| n.key == k);
+    compose_report(
+        recipe.clone(),
+        Measured {
+            err_before,
+            err_after: look_err(&after_px, &tp),
+            joint_after,
+            after_px: &after_px,
+            tp: &tp,
+            same_frame,
+        },
+        SolveFacts {
+            sat_pegged: carried(keys::FIT_NOTE_SAT_PEGGED),
+            cast: CastOutcome {
+                rehue_blocked: carried(keys::FIT_NOTE_REHUE_BLOCKED),
+                ratio_rejected: carried(keys::FIT_NOTE_CAST_REJECTED),
+            },
+            // Dropped on purpose — see the doc above. Naming them here rather
+            // than omitting them silently is the point: the abstention has to
+            // be visible at the place that makes it.
+            sat_fitted: None,
+            regressed: None,
+        },
+    )
 }
 
 /// Which of the two hue/ratio gates (if either) refused the colour stage —
@@ -2852,6 +2985,81 @@ mod tests {
         );
         // Refused would be wrong: a recipe still comes back.
         assert!(rep.err_after.is_finite());
+    }
+
+    /// R23 review MED-3: an ADJUSTED recipe gets an adjusted REPORT.
+    ///
+    /// The deep reverse-fit moves a solved recipe's saturation and used to hand
+    /// the solve's own notes to the result. This pins the replacement contract
+    /// at the only place that can enforce it — outcome notes re-derived from the
+    /// adjusted recipe's own render, solve notes carried, and the two
+    /// do-no-harm sentences dropped rather than repeated about a recipe they no
+    /// longer describe. No network: `rescore_report` is deterministic.
+    #[test]
+    fn an_adjusted_recipe_gets_re_derived_notes_not_the_solves() {
+        use crate::rationale::{keys, Note};
+        let (src, tgt) = (hazy_canyon_source(), vivid_warm_target());
+        let solved = fit_recipe(&src, &tgt);
+
+        // The PRIOR the deep path would hand over. Built explicitly rather than
+        // taken from `solved`, so the assertions below hold whatever this
+        // fixture's solve happens to produce this release — the contract is
+        // about which KEYS survive an adjustment, not about one pair's numbers.
+        let prior = vec![
+            Note::plain(keys::FIT_NOTE_SAT_PEGGED),
+            Note::plain(keys::FIT_NOTE_CAST_REJECTED),
+            Note::plain(keys::FIT_NOTE_REGRESSED),
+            Note::plain(keys::FIT_NOTE_JOINT_REGRESSED),
+            Note::new(
+                keys::FIT_NOTE_SAT_REDUCED,
+                vec![("sat_fitted", "+52".into()), ("sat_now", "+26".into())],
+            ),
+        ];
+        let mut moved = solved.recipe.clone();
+        // The deep path's own fixed step (advisor::judge::FIT_ACTION_SAT_STEP,
+        // not re-exported); the size is immaterial here, only that it moves.
+        moved.saturation += 10.0;
+        moved.clamp();
+        let rep = rescore_report(&src, &tgt, &moved, solved.err_before, &prior);
+        let has = |k: &str| rep.notes.iter().any(|n| n.key == k);
+
+        // (1) The terminal-reset verdict must NOT survive. This is the arm with
+        // teeth: the GUI raises 「THE REVERSE-FIT WAS DISCARDED … reset to
+        // neutral」 off this key, so carrying it told the user nothing had been
+        // applied while the adjusted recipe was being persisted.
+        assert!(!has(keys::FIT_NOTE_REGRESSED), "the solve's terminal reset was carried over");
+        assert!(!has(keys::FIT_NOTE_JOINT_REGRESSED), "…and so was its joint arm");
+        // (2) Nor the do-no-harm pull-back, whose quoted pair the move breaks.
+        assert!(
+            !has(keys::FIT_NOTE_SAT_REDUCED),
+            "a saturation the recipe no longer has was reported: {}",
+            rep.recipe.rationale
+        );
+        assert!(
+            !rep.recipe.rationale.contains("+26"),
+            "the stale saturation value leaked into the rationale: {}",
+            rep.recipe.rationale
+        );
+        // (3) The two SOLVE facts do survive — the adjustment cannot falsify
+        // "the chroma chase hit the cap" or "which gate refused the curves".
+        assert!(has(keys::FIT_NOTE_SAT_PEGGED), "a solve fact was dropped");
+        assert!(has(keys::FIT_NOTE_CAST_REJECTED), "a solve fact was dropped");
+        // (4) The outcome notes are re-DERIVED, not absent: the summary quotes
+        // this recipe's own residual, and the report is self-consistent.
+        assert!(
+            has(keys::FIT_SUMMARY_WITH_CURVE) || has(keys::FIT_SUMMARY_NO_CURVE),
+            "no summary was derived"
+        );
+        assert_eq!(rep.err_before, solved.err_before, "err_before is the caller's, unchanged");
+        assert!(rep.recipe.rationale.contains(&format!("{:.3}", rep.err_after)));
+        assert_eq!(rep.recipe.saturation, moved.saturation, "the adjusted recipe rides through");
+        // …and the joint family's own accounting still holds: a reading or the
+        // fail-open disclosure, never both and never neither.
+        assert_ne!(
+            has(keys::FIT_NOTE_JOINT),
+            has(keys::FIT_NOTE_JOINT_NONE),
+            "the joint reading and its fail-open note must be exclusive"
+        );
     }
 
     /// The joint family's ADDITIONAL terminal veto (R23-6 C, role 3). No
