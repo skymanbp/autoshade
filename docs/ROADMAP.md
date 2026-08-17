@@ -404,8 +404,11 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   toast 频率待用户实测反馈；⑥.gitattributes 钉 *.py=LF（此前干净克隆
   denoise 测试会红=「全量绿」不可复现，已修）；⑦L4 常量修正登记 R23。
   门：**467 lib+8 CLI+89 GUI+2 合约双配置、clippy --all-targets --bins
-  --features gui 0、audit_i18n 0、字体门绿**。发布戳：见下方 release
-  ledger 提交（tag v0.28.0，资产字节验证）。
+  --features gui 0、audit_i18n 0、字体门绿**。
+  发布戳：feat `82ffa61`（实现链 3f13bd8→52c2400 共 8 提交），tag
+  v0.28.0 → `82ffa61`；assets 回下载字节验证与本地构建精确相等：cli
+  `796687fe…` = 28 279 766 B、gui `542e1ee4…` = 37 500 672 B（--version
+  自证 0.28.0；下载路径首遇 GitHub 503 两次，直链复验通过）。
 
 - **v0.27.0 RELEASED（2026-08-14，第二十一轮=版本快照删除复活根修）** —
   用户报"存档（快照版本读取）删不掉：点删除显示已删，重开 AS 还在"。
