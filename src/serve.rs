@@ -2574,6 +2574,7 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // The new master inherits the chain root's generated-ness: a fill
             // composited ONTO a generated master still carries its look.
             issue_session_master(&raw, &out, src_generated);
+            // baked-by-construction: the ./out retouch master written just above.
             let img = decode::load_image(&out)?
                 .resize(1400, 1400, image::imageops::FilterType::Triangle);
             let mut buf = Vec::new();
@@ -2702,6 +2703,7 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // Same inheritance rule as api_retouch (see there).
             issue_session_master(&raw, &out, src_generated);
             let img =
+                // baked-by-construction: the ./out heal master written just above.
                 decode::load_image(&out)?.resize(1400, 1400, image::imageops::FilterType::Triangle);
             let mut buf = Vec::new();
             img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)

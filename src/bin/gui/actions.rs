@@ -374,6 +374,7 @@ impl AutoshopApp {
                         (thumb, knots, lens, as_shot)
                     } else {
                         (
+                            // baked-by-construction: the !is_raw arm of the open (branch above).
                             autoshop::decode::load_image(&path)?.thumbnail(edge, edge),
                             Vec::new(),
                             Default::default(),
@@ -388,6 +389,7 @@ impl AutoshopApp {
                     let mut baked_note = None;
                     let baked = autoshop::store::read_pixel_source(&path).and_then(
                         |(origin, generated)| {
+                            // baked-by-construction: the store's baked pixel master (a PNG we wrote).
                             let img = match autoshop::decode::load_image(&origin) {
                                 Ok(i) => i,
                                 Err(e) => {
@@ -2139,6 +2141,7 @@ impl AutoshopApp {
         self.spawn_worker(
             move || {
                 let res = (|| -> anyhow::Result<FitOutcome> {
+                    // baked-by-construction: fit_target is a Generated variant's ./out raster.
                     let target = autoshop::decode::load_image(&tgt)?;
                     // The gate runs at PERSIST time (below), not up front:
                     // a pre-fit snapshot left the whole multi-minute

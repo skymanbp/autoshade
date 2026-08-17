@@ -373,8 +373,16 @@ impl AutoshopApp {
         // used to hardcode ./out while a single export could be sent anywhere,
         // so the same library came out in two different folders. "Ask every
         // time" asks ONCE for a folder here — a per-photo dialog across 500
-        // frames is not a delivery flow — and the answer seeds `last_export_dir`
-        // exactly like the single-export dialog does.
+        // frames is not a delivery flow.
+        //
+        // The chosen folder is NOT remembered here (R22 M1). A pick the
+        // read-only-library guard refuses every photo in delivers nothing, and
+        // remembering it made `ExportDest::LastUsed` point at that folder from
+        // then on — a destination that can only ever refuse. The memory is
+        // written where the files actually LAND (the `ExportOutcome::Batch`
+        // arm, `ok > 0`), which is the same rule the single-export dialog
+        // follows one level down (`export_to_chosen_path` records only when the
+        // render started).
         let dest = match self.export_dest_dir() {
             Some(d) => d,
             None => {
@@ -383,7 +391,6 @@ impl AutoshopApp {
                     dlg = dlg.set_directory(d);
                 }
                 let Some(d) = dlg.pick_folder() else { return };
-                self.last_export_dir = Some(d.clone());
                 d
             }
         };

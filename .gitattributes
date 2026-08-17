@@ -1,0 +1,10 @@
+# The Python sidecars are checked out with LF on every platform.
+#
+# They are not only run — they are ASSERTED ON as text: `denoise.rs` pulls
+# `python/denoise.py` in with `include_str!` and pins protocol invariants by
+# matching literal source, e.g. `"_reclaim_stale_parts(dest)\n    for attempt in"`.
+# With `core.autocrlf=true` (the Windows default, and this machine's setting) a
+# fresh clone would rewrite those newlines to CRLF and every such assertion would
+# fail on a tree that is byte-identical in git. Pinning eol here makes the working
+# copy match what the test expects, on any platform.
+*.py text eol=lf

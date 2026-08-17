@@ -102,6 +102,7 @@ impl AutoshopApp {
                     .and_then(|r| r.into_dimensions().map_err(std::io::Error::other))
                     .is_ok_and(|(w, h)| w as u64 * h as u64 > 24_000_000)
                     .then(|| big_decode_gate().lock().unwrap_or_else(|p| p.into_inner()));
+                // baked-by-construction: `origin` is the develop store's baked master.
                 let img = autoshop::decode::load_image(&origin).map(|im| {
                     // GUARDED shrink: plain `thumbnail` UPSCALES, which would
                     // inflate a small master instead of bounding a large one.
@@ -411,6 +412,17 @@ impl AutoshopApp {
                             self.done(trf(lang, "exported → {path}", &[("path", &p)]));
                         }
                         ExportOutcome::Batch { ok, errs, renamed, relooked, warns, dest } => {
+                            // Where the batch actually DELIVERED becomes the
+                            // remembered destination — here, not at the dialog
+                            // (R22 M1): a folder inside the photo library is
+                            // refused per photo by `guard_readonly`, so a batch
+                            // that picked one lands nothing, and remembering it
+                            // would leave `ExportDest::LastUsed` aimed at a
+                            // folder that can only refuse. `ok > 0` is the proof
+                            // that at least one file is really there.
+                            if ok > 0 {
+                                self.last_export_dir = Some(dest.clone());
+                            }
                             // Same-stem photos were kept apart — disclose
                             // WHICH photo took WHICH name, or the user hunts
                             // for an export that "vanished".

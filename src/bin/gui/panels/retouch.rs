@@ -223,6 +223,7 @@ impl AutoshopApp {
                     let r = autoshop::generative::retouch(&cfg, &path, &mask_tmp, &prompt, &quality, full_res, &out);
                     let _ = std::fs::remove_file(&mask_tmp);
                     r?;
+                    // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
                     // InPlace: refine the current rendition — bake into the active
                     // variant's base AND repoint its origin at this saved artifact
@@ -298,6 +299,7 @@ impl AutoshopApp {
                         let _ = std::fs::remove_file(t);
                     }
                     let rep = rep?;
+                    // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
                     // The report's rationale (AI-detect fallback, budget
                     // skips) must reach the status — stderr is invisible in
@@ -366,6 +368,7 @@ impl AutoshopApp {
                     let opts =
                         autoshop::denoise::DenoiseOpts::from_config(&cfg, None, 1.0);
                     autoshop::denoise::denoise_active(&opts, &path, full_res, &out)?;
+                    // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
                     // InPlace: bake into the active variant's base + repoint origin.
                     Ok((img, RetouchNote::Denoised(out.clone()), out, RetouchKind::InPlace))
@@ -421,6 +424,7 @@ impl AutoshopApp {
                     let rep = autoshop::retouch::clone_stamp(&path, &mask_tmp, src_pt, full_res, &out);
                     let _ = std::fs::remove_file(&mask_tmp);
                     let rep = rep?;
+                    // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
                     // InPlace: a pixel transplant of the current rendition — bake it
                     // into the active variant's base + repoint origin at the artifact.
@@ -513,6 +517,7 @@ impl AutoshopApp {
                     let cfg = autoshop::config::Config::load();
                     // fidelity "high" keeps it recognisably the same photo.
                     autoshop::generative::reimagine(&cfg, &path, &prompt, "high", &cfg.openai_image_quality, &out)?;
+                    // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshop::decode::load_image(&out)?.thumbnail(edge, edge);
                     // NewGenerated: a whole-frame rendition → a new Generated variant.
                     Ok((img, RetouchNote::Reimagined(out.clone()), out, RetouchKind::NewGenerated))
@@ -557,6 +562,7 @@ impl AutoshopApp {
                             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)?;
                         Ok(buf)
                     };
+                    // baked-by-construction: fit_target is a Generated variant's ./out raster.
                     let target = autoshop::decode::load_image(&tgt)?;
                     let prompt = autoshop::advisor::describe_style(&cfg, &jpg(&base)?, &jpg(&target)?)?;
                     // The side-file is a convenience copy — its write failing

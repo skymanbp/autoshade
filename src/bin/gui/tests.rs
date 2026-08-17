@@ -399,6 +399,62 @@
         );
     }
 
+    /// R22 M1: the batch destination is remembered where the files LAND, not
+    /// where the dialog pointed. Picking a folder inside the photo library made
+    /// `guard_readonly` refuse every photo — and the old code had already
+    /// written that folder into `last_export_dir`, so `ExportDest::LastUsed`
+    /// then aimed at a destination that could only ever refuse, permanently.
+    #[test]
+    fn a_batch_that_delivered_nothing_does_not_become_the_remembered_destination() {
+        use std::path::PathBuf;
+        let ctx = egui::Context::default();
+        let kept = PathBuf::from("D:/deliver/tripA");
+        let refused = PathBuf::from("D:/library/2026-08");
+        let mut app = AutoshopApp {
+            busy: true,
+            last_export_dir: Some(kept.clone()),
+            ..Default::default()
+        };
+        app.tx
+            .send(Msg::Exported(Ok(ExportOutcome::Batch {
+                ok: 0,
+                errs: vec!["the photo library is read-only: D:/library/2026-08".into()],
+                renamed: Vec::new(),
+                relooked: 0,
+                warns: Vec::new(),
+                dest: refused.clone(),
+            })))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(
+            app.last_export_dir.as_deref(),
+            Some(kept.as_path()),
+            "a batch that delivered nothing must leave the memory alone"
+        );
+
+        // The other half, or the assertion above would pass on a build that
+        // never remembers anything: a batch that DID deliver seeds the memory.
+        let landed = PathBuf::from("D:/deliver/tripB");
+        let mut ok_app = AutoshopApp { busy: true, ..Default::default() };
+        ok_app
+            .tx
+            .send(Msg::Exported(Ok(ExportOutcome::Batch {
+                ok: 2,
+                errs: Vec::new(),
+                renamed: Vec::new(),
+                relooked: 0,
+                warns: Vec::new(),
+                dest: landed.clone(),
+            })))
+            .unwrap();
+        ok_app.poll_workers(&ctx);
+        assert_eq!(
+            ok_app.last_export_dir.as_deref(),
+            Some(landed.as_path()),
+            "the folder the files really landed in becomes ExportDest::LastUsed"
+        );
+    }
+
     /// R22-8 / SF8-A: the two-click confirm. A sidecar already beside the photo
     /// (Lightroom's own) ARMS the button instead of being overwritten; the
     /// second click replaces it and disarms. Runs against the real develop store
@@ -1850,9 +1906,18 @@
         };
         // The gate's own arithmetic decides what "over budget" is — pin the
         // dimensions against it instead of hard-coding a pixel count that a
-        // budget change would silently make meaningless.
+        // budget change would silently make meaningless. Asked with an EMPTY
+        // recipe, so this fixture is over the budget on its own resolution
+        // alone; the aggregate arm (a second refine that fits alone but not
+        // beside the recipe's other rasters) is pinned in render.rs's
+        // `a_second_full_resolution_refine_is_refused_by_the_aggregate_budget`.
         assert!(
-            !autoshop::render::mask_raster_fits_budget(12_000, 9_000),
+            !autoshop::render::mask_raster_write_fits_budget(
+                &EditRecipe::default(),
+                None,
+                12_000,
+                9_000
+            ),
             "fixture: 108 MP must be over the mask budget"
         );
         app.tx
@@ -3966,8 +4031,8 @@
                     "位图蒙版 ×2",
                     "已静音蒙版 ×1",
                     "形状组件已压平 ×1",
-                    "径向旋转未带走 ×1",
-                    "重上色增益未带走 ×1",
+                    "径向旋转 ×1",
+                    "重上色增益 ×1",
                 ],
             ),
         ] {

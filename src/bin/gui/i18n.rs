@@ -618,8 +618,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("bitmap masks ×{n}", "位图蒙版 ×{n}"),
     ("muted masks ×{n}", "已静音蒙版 ×{n}"),
     ("shape components flattened ×{n}", "形状组件已压平 ×{n}"),
-    ("radial rotation ×{n}", "径向旋转未带走 ×{n}"),
-    ("recolour gains ×{n}", "重上色增益未带走 ×{n}"),
+    // No 「未带走」 on these two: the frame sentence above is already
+    // 「…不会带走：」, and "will not carry: radial rotation NOT CARRIED" reads as
+    // the opposite of what happened (R22 L5). The English labels are bare nouns
+    // for exactly that reason.
+    ("radial rotation ×{n}", "径向旋转 ×{n}"),
+    ("recolour gains ×{n}", "重上色增益 ×{n}"),
     ("could not clear the saved edits: {err}", "无法清除已保存的编辑：{err}"),
     ("save postponed: this photo is being changed by another Autoshop process ({err}); your canvas remains unsaved — retry",
         "保存已推迟：另一个 Autoshop 进程正在修改这张照片（{err}）；画布上的编辑尚未保存 — 请稍后重试"),

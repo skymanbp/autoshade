@@ -801,6 +801,7 @@ fn match_cmd(
         );
     }
     let src = decode::preview_only(raw)?;
+    // baked-by-construction: the match TARGET is a rendition; a RAW is refused by name.
     let tgt = decode::load_image(target)?;
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
     let mut rep = if zoned {

@@ -299,8 +299,9 @@ fn develop_peak_bytes(
 /// no `image`-crate decoder, so the honest gate is a named error, not a probe
 /// failure. Callers that may hold either kind of source want the one dispatch,
 /// [`crate::render::source_pixels`].
+// not-a-consumer-call: the gate's own declaration.
 pub fn load_image(path: &Path) -> Result<DynamicImage> {
-    load_image_gated(path, false)
+    load_image_gated(path, false) // not-a-consumer-call: dispatch inside the gate
 }
 
 /// [`load_image`] for the full-frame baked DEVELOP path
@@ -311,10 +312,12 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
 /// Thumbnail consumers (GUI open, denoise/retouch/fit pre-shrink) stay on
 /// [`load_image`]: they never build those planes, and charging them would
 /// refuse sources they legitimately shrink.
+// not-a-consumer-call: the gate's develop-charged twin.
 pub fn load_image_for_develop(path: &Path) -> Result<DynamicImage> {
-    load_image_gated(path, true)
+    load_image_gated(path, true) // not-a-consumer-call: dispatch inside the gate
 }
 
+// not-a-consumer-call: the gate's body — where a camera RAW is refused by name.
 fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     use image::ImageDecoder as _;
     // The "RAW → develop engine / baked → here" dispatch, enforced at the
@@ -422,6 +425,7 @@ pub fn decode_any(path: &Path) -> Result<Decoded> {
 }
 
 fn decode_baked(path: &Path) -> Result<Decoded> {
+    // baked-by-construction: decode_any sends a RAW to decode_raw; this is the baked arm.
     let preview = load_image(path)?;
     let (w, h) = preview.dimensions();
     let meta = Meta {
@@ -834,6 +838,7 @@ pub fn embedded_xmp(path: &Path) -> Result<Option<String>> {
 /// before/after, where only the image is needed.
 pub fn preview_only(path: &Path) -> Result<DynamicImage> {
     if !is_raw(path) {
+        // baked-by-construction: the !is_raw arm of preview_only.
         return load_image(path);
     }
     camera_rendition(path)?
@@ -998,7 +1003,7 @@ mod tests {
     /// the develop entry points) is what makes the next missed dispatch
     /// diagnosable in one read of the toast.
     #[test]
-    fn load_image_refuses_a_camera_raw_by_name() {
+    fn load_image_refuses_a_camera_raw_by_name() { // not-a-consumer-call: the gate's own test
         let dir = std::env::temp_dir().join(format!("autoshop-load-raw-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1010,7 +1015,9 @@ mod tests {
             // from a missing file or an unparseable header.
             std::fs::write(&p, b"not really a raw").unwrap();
             for (what, e) in [
+                // not-a-consumer-call: the gate's own refusal test.
                 ("load_image", load_image(&p).unwrap_err()),
+                // not-a-consumer-call: …and the develop-charged twin's.
                 ("load_image_for_develop", load_image_for_develop(&p).unwrap_err()),
             ] {
                 let e = format!("{e:#}");
@@ -1023,6 +1030,7 @@ mod tests {
         // A baked raster still loads through the very same gate.
         let png = dir.join("baked.png");
         image::RgbImage::from_pixel(4, 3, image::Rgb([9, 9, 9])).save(&png).unwrap();
+        // not-a-consumer-call: the gate's own baked-raster case.
         assert_eq!(load_image(&png).unwrap().dimensions(), (4, 3));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1158,6 +1166,7 @@ mod tests {
 
         let valid = dir.join("valid-profile.png");
         write(&valid, &build_test_icc());
+        // not-a-consumer-call: the gate's own ICC fixture (a PNG written above).
         let img = load_image(&valid).expect("a supported embedded profile is transformed");
         // The transform must ACTUALLY run, not merely parse: this profile's
         // TRCs are linear, so encoding (32,128,240) back to sRGB visibly
@@ -1173,6 +1182,7 @@ mod tests {
         let invalid = dir.join("invalid-profile.png");
         write(&invalid, b"not an ICC profile");
         assert!(
+            // not-a-consumer-call: the gate's own invalid-ICC case.
             load_image(&invalid).is_err(),
             "an invalid profile must not fall through to assumed sRGB"
         );
@@ -1208,6 +1218,7 @@ mod tests {
 
         let valid = dir.join("valid-profile.tiff");
         write(&valid, &build_test_icc());
+        // not-a-consumer-call: the gate's own TIFF-profile fixture.
         load_image(&valid).expect("a profiled TIFF is transformed via the fallback query");
 
         // The load-bearing half: an unparseable profile must ERROR. If the
@@ -1215,6 +1226,7 @@ mod tests {
         let invalid = dir.join("invalid-profile.tiff");
         write(&invalid, b"not an ICC profile");
         assert!(
+            // not-a-consumer-call: the gate's own invalid-TIFF-profile case.
             load_image(&invalid).is_err(),
             "a TIFF profile must reach the parser, not vanish into the limits bug"
         );
@@ -1249,6 +1261,7 @@ mod tests {
         enc.write_image(&bytes, 1, 1, image::ExtendedColorType::Rgb16)
             .unwrap();
 
+        // not-a-consumer-call: the gate's own 16-bit ICC fixture.
         let loaded = load_image(&p).expect("a profiled 16-bit TIFF must open");
         let DynamicImage::ImageRgb16(rgb) = &loaded else {
             panic!("bit depth must survive the transform, got {:?}", loaded.color());

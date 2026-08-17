@@ -718,9 +718,33 @@ pub(crate) fn abs_display(p: &std::path::Path) -> String {
 /// `xdg-open`/`open` child is not reaped until Autoshop exits (one defunct entry
 /// per click of a button nobody clicks in a loop). Waiting instead would block
 /// the UI thread on a helper whose runtime we do not control.
+///
+/// KNOWN LIMITATION, deliberately not worked around (and not verified on this
+/// machine): `explorer.exe` is reported to mis-parse an argument containing a
+/// comma, so revealing a folder whose name carries one — the develop dir embeds
+/// the photo's stem, so a photo called `a,b.arw` reaches it — can open the wrong
+/// window. It cannot open anything outside the user's own filesystem, so this is
+/// a cosmetic failure, not a safety one.
 pub(crate) fn reveal_folder(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(windows)]
-    let mut cmd = std::process::Command::new("explorer");
+    let mut cmd = {
+        // ABSOLUTE `explorer.exe`, never the bare name. Rust's own program
+        // resolution on Windows (`resolve_exe`) mirrors CreateProcess: the
+        // executable's directory, then THE CURRENT DIRECTORY, then PATH — so an
+        // `explorer.exe` sitting in the folder Autoshop was launched from would
+        // run instead of Windows'. That is the v0.18.0 threat model exactly
+        // (unpack someone else's photo bundle, run the app there, and their
+        // files must not execute). `SystemRoot` / `windir` are SYSTEM
+        // environment variables, not user paths; with neither set we fall back
+        // to the bare name — the old behaviour, and better than a button that
+        // cannot work at all.
+        match std::env::var_os("SystemRoot").or_else(|| std::env::var_os("windir")) {
+            Some(root) => {
+                std::process::Command::new(std::path::Path::new(&root).join("explorer.exe"))
+            }
+            None => std::process::Command::new("explorer.exe"),
+        }
+    };
     #[cfg(target_os = "macos")]
     let mut cmd = std::process::Command::new("open");
     #[cfg(all(not(windows), not(target_os = "macos")))]

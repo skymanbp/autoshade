@@ -517,10 +517,11 @@ pub(crate) enum MaskRefineOutcome {
     /// could repoint the WRONG mask when two masks legitimately reference one
     /// raster (Codex R9-1).
     Refined(usize, String, PathBuf),
-    /// The guide's own resolution would make a raster past the mask-raster
-    /// budget (`render::mask_raster_fits_budget`) — one no later open or export
-    /// could ever load. Refused with NOTHING written; the dimensions ride along
-    /// because the refusal has to say which source it is talking about.
+    /// A raster at the guide's resolution would not be loadable again NEXT TO
+    /// this recipe's other active rasters (`render::mask_raster_write_fits_budget`
+    /// — the aggregate budget the render's own loader charges, not this file
+    /// alone). Refused with NOTHING written; the dimensions ride along because
+    /// the refusal has to say which source it is talking about.
     OverBudget { w: u32, h: u32 },
 }
 

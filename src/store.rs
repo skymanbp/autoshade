@@ -1211,6 +1211,60 @@ pub fn xmp_beside_target(src: &Path) -> Option<PathBuf> {
     src.parent().is_some().then(|| src.with_extension("xmp"))
 }
 
+/// How long a staging file must have sat untouched before [`sweep_stale_sidecar_stages`]
+/// treats it as an orphan. A real publish stages, fsyncs and renames a few KB of
+/// XML in milliseconds, so a minute is far past "another Autoshop is mid-write"
+/// while still reclaiming litter on the very next click.
+const SIDECAR_STAGE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Reclaim staging files an EARLIER sidecar delivery left in the photo's own
+/// folder.
+///
+/// [`durable_write`] stages beside its target ([`sibling_tmp`]) and removes the
+/// stage when the publish fails — but a crash, a kill or a power loss between
+/// the two leaves `<name>.xmp.tmp.<pid>.<seq>` behind, and that folder is the
+/// user's PHOTO LIBRARY: nothing in this app ever looks there again, so the
+/// orphan is permanent litter in the one place we promise to keep clean
+/// (everywhere else the store's own recovery sweeps handle it).
+///
+/// Narrow by construction — this must never touch a file that is not ours:
+/// * only names matching this target's own stage pattern, `<file name>.tmp.` +
+///   two decimal fields, exactly what [`sibling_tmp`] mints;
+/// * only after `grace` has elapsed since the last write, because a younger
+///   stage may belong to another Autoshop publishing right now (deleting it
+///   would fail that delivery);
+/// * every error — unreadable directory, unstat-able entry, refused delete — is
+///   ignored: a hand-off must not fail because litter could not be collected.
+fn sweep_stale_sidecar_stages(to: &Path, grace: std::time::Duration) {
+    let (Some(dir), Some(name)) = (to.parent(), to.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let prefix = format!("{name}.tmp.");
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let raw = entry.file_name();
+        let Some(tail) = raw.to_str().and_then(|n| n.strip_prefix(&prefix)) else { continue };
+        let decimal = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let mut fields = tail.split('.');
+        let ours = matches!(
+            (fields.next(), fields.next(), fields.next()),
+            (Some(pid), Some(seq), None) if decimal(pid) && decimal(seq)
+        );
+        if !ours {
+            continue;
+        }
+        let orphaned = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= grace);
+        if orphaned {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Hand this photo's stored Lightroom XMP projection over to Lightroom: copy
 /// `<develop dir>/<stem>.xmp` to the photo's OWN folder as `<name>.xmp`, which
 /// is the only place Lightroom / Camera Raw look for a sidecar.
@@ -1261,6 +1315,11 @@ pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf
             src.display()
         )));
     };
+    // BEFORE this delivery stages anything of its own: collect the staging files
+    // an interrupted earlier hand-off may have left in the photo's folder. This
+    // is the only writer that ever stages there, so it is also the only thing
+    // that can clean up after itself (R22 L2).
+    sweep_stale_sidecar_stages(&to, SIDECAR_STAGE_GRACE);
     let claimed = if overwrite {
         false
     } else {
@@ -1271,13 +1330,34 @@ pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf
     };
     // ONE write protocol for the payload either way (L03) — and a failed
     // publish must not leave the empty claim behind as a "sidecar".
-    if let Err(e) = durable_write(&to, &bytes) {
-        if claimed {
-            let _ = std::fs::remove_file(&to);
+    //
+    // The rollback is NARROW on purpose (R22 L2): only a publish that never
+    // reached `to` may delete it. Once the staged bytes are renamed over the
+    // claim, that file IS the delivered sidecar, and the only step that can fail
+    // afterwards is the parent-directory fsync (`durable_os::finish_parent` —
+    // infallible on Windows, `File::open(dir).sync_all()` on unix). The old
+    // blanket `if claimed { remove_file }` deleted a correct, complete sidecar
+    // for that. The honest degradation is to keep the file and say the directory
+    // ENTRY is one notch less durable: the bytes are there, and only a crash in
+    // the next moment could lose the name.
+    match durable_write_tracked(&to, &bytes) {
+        (_, Ok(())) => Ok(to),
+        (true, Err(e)) => {
+            eprintln!(
+                "⚠ the Lightroom sidecar at {} was written, but its folder entry could not be \
+                 made durable ({e}) — the file is there; only a crash in the next moment could \
+                 lose the name",
+                to.display()
+            );
+            Ok(to)
         }
-        return Err(e);
+        (false, Err(e)) => {
+            if claimed {
+                let _ = std::fs::remove_file(&to);
+            }
+            Err(e)
+        }
     }
-    Ok(to)
 }
 
 /// Numbered snapshot `v<n>.recipe.json` (GUI versions + programmatic backups).
@@ -4201,21 +4281,38 @@ pub fn durable_adopt(path: &Path) -> std::io::Result<()> {
 
 /// Publish complete bytes through the one durable write protocol.
 pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    durable_write_tracked(path, bytes).1
+}
+
+/// [`durable_write`] plus the one fact a caller occasionally has to know: did
+/// the bytes reach the LIVE name before the error?
+///
+/// `true` = the file at `path` IS the new, complete payload and only the
+/// durability tail failed ([`durable_os::finish_parent`] — the sole step after
+/// the rename). A caller that "rolls back" on that error destroys a delivered
+/// file instead of cleaning up a half-write; [`export_xmp_beside`] is the one
+/// that used to (R22 L2).
+fn durable_write_tracked(path: &Path, bytes: &[u8]) -> (bool, std::io::Result<()>) {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
     {
-        std::fs::create_dir_all(parent)?;
+        return (false, Err(e));
     }
     let tmp = sibling_tmp(path);
+    let mut published = false;
     let result = (|| {
         write_staged(&tmp, bytes)?;
         durable_os::replace(&tmp, path)?;
+        published = true;
         durable_os::finish_parent(path)
     })();
     if result.is_err() {
+        // A no-op once the rename has consumed the stage — it only survives a
+        // failure BEFORE that.
         let _ = std::fs::remove_file(&tmp);
     }
-    result
+    (published, result)
 }
 
 /// Retire the live file to `<name>.bak`, durably publish its replacement, and
@@ -7143,6 +7240,83 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+
+        /// R22 L2①: the sidecar hand-off is the only writer that ever stages
+        /// inside the user's PHOTO folder, so it is the only thing that can
+        /// collect its own orphans — a crash between stage and rename used to
+        /// leave `<name>.xmp.tmp.<pid>.<seq>` there forever.
+        ///
+        /// The sweep has to be surgical: this pins BOTH halves — the orphan goes,
+        /// and every neighbour (the live sidecar, another photo's stage, a
+        /// look-alike that is not our pattern, the photo itself) stays.
+        #[test]
+        fn a_stale_sidecar_stage_is_reclaimed_and_nothing_else_is_touched() {
+            let dir = std::env::temp_dir().join("autoshop-store-test-sidecar-sweep");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let to = dir.join("DSC00042.xmp");
+            let orphan = dir.join("DSC00042.xmp.tmp.4242.7");
+            let keep = [
+                to.clone(),                              // the live sidecar
+                dir.join("DSC00042.ARW"),                // the photo itself
+                dir.join("DSC00099.xmp.tmp.4242.7"),     // ANOTHER photo's stage
+                dir.join("DSC00042.xmp.tmp.abc.7"),      // not our <pid>.<seq> shape
+                dir.join("DSC00042.xmp.tmp.4242.7.bak"), // …nor this one
+                dir.join("DSC00042.xmp.backup"),         // a user's own file
+            ];
+            for p in std::iter::once(&orphan).chain(keep.iter()) {
+                std::fs::write(p, b"x").unwrap();
+            }
+
+            // grace = 0: the fixtures were written milliseconds ago, and this is
+            // the "long since orphaned" case.
+            sweep_stale_sidecar_stages(&to, std::time::Duration::ZERO);
+            assert!(!orphan.exists(), "the orphaned stage must be reclaimed");
+            for p in &keep {
+                assert!(p.exists(), "the sweep must not touch {}", p.display());
+            }
+
+            // …and the grace period is what protects a CONCURRENT publish: a
+            // stage this fresh belongs to someone still writing it.
+            let fresh = dir.join("DSC00042.xmp.tmp.4243.1");
+            std::fs::write(&fresh, b"x").unwrap();
+            sweep_stale_sidecar_stages(&to, SIDECAR_STAGE_GRACE);
+            assert!(fresh.exists(), "a stage younger than the grace period is left alone");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// R22 L2②: `durable_write_tracked` reports whether the bytes reached
+        /// the live name, which is what lets `export_xmp_beside` keep a
+        /// delivered sidecar instead of deleting it when only the durability
+        /// tail failed.
+        ///
+        /// Two of the three states are reachable in a test; the third —
+        /// published, then `finish_parent` fails — has NO injection seam on
+        /// Windows, where `durable_os::finish_parent` is infallible by
+        /// construction (MOVEFILE_WRITE_THROUGH does that work inside the
+        /// rename). It is covered by the type instead: the caller's `(true,
+        /// Err)` arm cannot delete, because deletion lives only under `(false,
+        /// Err)`.
+        #[test]
+        fn a_durable_write_reports_whether_the_bytes_reached_the_live_name() {
+            let dir = std::env::temp_dir().join("autoshop-store-test-durable-tracked");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let target = dir.join("sidecar.xmp");
+            let (published, result) = durable_write_tracked(&target, b"<x:xmpmeta/>");
+            assert!(result.is_ok() && published, "a completed publish reports published");
+            assert_eq!(std::fs::read(&target).unwrap(), b"<x:xmpmeta/>");
+
+            // A failure BEFORE the rename must report `false` — that is the only
+            // state in which the caller is allowed to remove its claim.
+            let blocked = dir.join("wall").join("sidecar.xmp");
+            std::fs::write(dir.join("wall"), b"a FILE where the parent dir would go").unwrap();
+            let (published, result) = durable_write_tracked(&blocked, b"<x:xmpmeta/>");
+            assert!(result.is_err(), "staging under a file must fail");
+            assert!(!published, "nothing reached the live name");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
 
         #[test]
         fn clearing_one_same_stem_photo_suppresses_but_never_unlinks_legacy_bytes() {

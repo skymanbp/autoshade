@@ -77,6 +77,7 @@ pub fn source_pixels(path: &Path, cap: Option<u32>) -> Result<DynamicImage> {
     if crate::decode::is_raw(path) {
         return render_to_image(path, &EditRecipe::default(), None, cap);
     }
+    // baked-by-construction: the !is_raw arm of THE dispatch itself.
     let img = crate::decode::load_image(path)?;
     match cap {
         Some(edge) if img.width().max(img.height()) > edge => Ok(img.thumbnail(edge, edge)),
@@ -950,6 +951,7 @@ pub fn render_to_file(
         let working = if native_wide { space } else { ExportColorSpace::Srgb };
         render_to_image_in(src_path, recipe, denoise, None, working)?
     } else {
+        // baked-by-construction: the !is_raw_src arm (decided just above).
         let src = crate::decode::load_image_for_develop(src_path)?;
         render_baked_to_image(&src, recipe, denoise)?
     };
@@ -2053,13 +2055,95 @@ pub fn mask_from_memory_bounded(bytes: &[u8]) -> anyhow::Result<image::DynamicIm
     Ok(image::load_from_memory(bytes)?)
 }
 
-/// Would a mask raster of these dimensions ever be loadable again? The same
-/// worst-case footprint [`check_mask_dims`] gates READS with, exposed so a
-/// WRITER can refuse first: a full-resolution refine on a source past the
-/// budget would otherwise publish a raster every later open/export silently
-/// drops (the GUI's mask-refine precheck).
-pub fn mask_raster_fits_budget(w: u32, h: u32) -> bool {
-    (w as usize).saturating_mul(h as usize).saturating_mul(4) <= MASK_RASTER_BUDGET_BYTES
+/// Would a mask raster of these dimensions ever be loadable ON ITS OWN? The
+/// per-file half of the budget, which is all [`check_mask_dims`] can judge at a
+/// single READ. Deliberately NOT public: a WRITER that asked this question
+/// alone shipped the R22 H1 defect (the mask-refine precheck passed a raster
+/// the loader then refused for the AGGREGATE) — the writer-side question is
+/// [`mask_raster_write_fits_budget`].
+fn mask_raster_fits_budget(w: u32, h: u32) -> bool {
+    raster_bytes(w, h) <= MASK_RASTER_BUDGET_BYTES
+}
+
+/// The ONE worst-case footprint every budget arm charges a raster: ×4 = the
+/// decoder's native RGBA intermediate ahead of the grayscale conversion a
+/// snapshot retains.
+fn raster_bytes(w: u32, h: u32) -> usize {
+    (w as usize).saturating_mul(h as usize).saturating_mul(4)
+}
+
+/// Header-only projection of ONE mask raster already on disk — [`raster_bytes`]
+/// of its stored dimensions, without decoding it. `None` = the dimensions could
+/// not be read (a missing/unreadable file), which is the loader's own
+/// "find out at decode time" case.
+///
+/// Charged BEFORE the decode on purpose: the budget used to be spent only after
+/// `image::open` had allocated the full raster, so one compressed large file
+/// drove peak memory far past the advertised cap before being rejected.
+fn raster_projected_bytes(path: &str) -> Option<usize> {
+    let reader = image::ImageReader::open(std::path::Path::new(path)).ok()?;
+    let (w, h) = reader.into_dimensions().ok()?;
+    Some(raster_bytes(w, h))
+}
+
+/// Every bitmap geometry the develop pipeline would LOAD for this recipe, in
+/// the loader's own order: `(mask, geometry, path)` for each Bitmap base or
+/// component of a mask that will actually render.
+///
+/// ONE definition of "active", used by both the loader
+/// ([`load_mask_raster_snapshot_with_budget`]) and the writer-side precheck
+/// ([`mask_raster_write_fits_budget`]) — R22 H1: the precheck judged the
+/// incoming raster ALONE while the loader charges the whole active set, so a
+/// second full-resolution refine passed the precheck and was then refused by
+/// the aggregate (strict bail at export, silent skip in the preview).
+///
+/// NOT de-duplicated: the loader skips a path it already HOLDS (its `held_bytes`
+/// is the truth about what is charged), while the precheck de-duplicates by
+/// path — two different, correct answers to "have I counted this already?".
+fn active_bitmap_rasters(
+    recipe: &EditRecipe,
+) -> impl Iterator<Item = (&crate::recipe::LocalAdjustment, &MaskGeometry, &str)> {
+    recipe
+        .masks
+        .iter()
+        .filter(|m| m.enabled && m.amount != 0.0 && engine_active(m))
+        .flat_map(|m| {
+            std::iter::once(&m.mask)
+                .chain(m.components.iter().map(|c| &c.geometry))
+                .filter_map(move |g| match g {
+                    MaskGeometry::Bitmap { path } => Some((m, g, path.as_str())),
+                    _ => None,
+                })
+        })
+}
+
+/// Would a raster of `w`×`h` be loadable again ALONGSIDE the rest of this
+/// recipe's active rasters? The writer-side twin of the loader's aggregate
+/// charge, asked with the loader's own filter and the loader's own header-only
+/// projection — so a full-resolution mask refine cannot publish a raster that
+/// every later open/export drops (strictly: `render_to_file` bails and
+/// `develop_preview` skips it with a stderr line, i.e. one mask silently stops
+/// rendering).
+///
+/// `replacing` = the raster path this write will REPLACE (the refine target's
+/// current raster), excluded from the sum because it will not be loaded again.
+/// A raster whose header cannot be read is charged 0 — the same thing the
+/// loader can know at this point, and it finds out for real at decode time.
+pub fn mask_raster_write_fits_budget(
+    recipe: &EditRecipe,
+    replacing: Option<&str>,
+    w: u32,
+    h: u32,
+) -> bool {
+    let mut projected = raster_bytes(w, h);
+    let mut counted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (_, _, path) in active_bitmap_rasters(recipe) {
+        if Some(path) == replacing || !counted.insert(path) {
+            continue;
+        }
+        projected = projected.saturating_add(raster_projected_bytes(path).unwrap_or(0));
+    }
+    projected <= MASK_RASTER_BUDGET_BYTES
 }
 
 fn check_mask_dims(w: u32, h: u32, what: &str) -> anyhow::Result<()> {
@@ -2080,85 +2164,73 @@ fn load_mask_raster_snapshot_with_budget(
     let mut snapshot = MaskRasterSnapshot::default();
     let mut held_bytes = 0usize;
 
-    for mask in recipe
-        .masks
-        .iter()
-        .filter(|m| m.enabled && m.amount != 0.0 && engine_active(m))
-    {
-        for geometry in
-            std::iter::once(&mask.mask).chain(mask.components.iter().map(|c| &c.geometry))
-        {
-            let MaskGeometry::Bitmap { path } = geometry else { continue };
-            if snapshot.images.contains_key(path) {
-                continue;
-            }
-            let label = if mask.name.is_empty() { path.as_str() } else { mask.name.as_str() };
-            // Header-only dimension precheck BEFORE the decode: the budget
-            // used to be charged only after image::open had allocated the
-            // full raster (plus its native RGBA intermediate), so one
-            // compressed large file drove peak memory far past the
-            // advertised cap before being rejected. ×4 = the decoder's
-            // worst-case native intermediate ahead of the grayscale
-            // conversion this snapshot retains.
-            if let Ok(reader) = image::ImageReader::open(std::path::Path::new(path))
-                && let Ok((w, h)) = reader.into_dimensions()
-            {
-                let projected = (w as usize)
-                    .saturating_mul(h as usize)
-                    .saturating_mul(4)
-                    .saturating_add(held_bytes);
-                if projected > budget_bytes {
-                    if strict {
-                        bail!(
-                            "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
-                             loading '{path}' for mask '{label}' — no pixels were rendered"
-                        );
-                    }
-                    eprintln!(
-                        "mask raster '{path}' skipped: the active raster set exceeds the \
-                         {budget_bytes}-byte aggregate budget"
-                    );
-                    continue;
-                }
-            }
-            let Some(bitmap) = load_mask_bitmap(geometry) else {
-                if strict {
-                    bail!(
-                        "mask raster '{path}' for mask '{label}' is unreadable — no pixels were rendered"
-                    );
-                }
-                continue;
-            };
-            let incoming = bitmap.as_raw().len();
-            let Some(next_bytes) = held_bytes.checked_add(incoming) else {
-                if strict {
-                    bail!(
-                        "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
-                         loading '{path}' for mask '{label}' — no pixels were rendered"
-                    );
-                }
-                eprintln!(
-                    "mask raster '{path}' skipped: the active raster set exceeds the \
-                     {budget_bytes}-byte aggregate budget"
-                );
-                continue;
-            };
-            if next_bytes > budget_bytes {
-                if strict {
-                    bail!(
-                        "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
-                         loading '{path}' for mask '{label}' — no pixels were rendered"
-                    );
-                }
-                eprintln!(
-                    "mask raster '{path}' skipped: the active raster set exceeds the \
-                     {budget_bytes}-byte aggregate budget"
-                );
-                continue;
-            }
-            held_bytes = next_bytes;
-            snapshot.images.insert(path.clone(), bitmap);
+    // The active set and its per-file projection come from
+    // `active_bitmap_rasters` / `raster_projected_bytes` — the same two the
+    // writer-side precheck asks (R22 H1), so neither side can drift into a
+    // different idea of what is charged.
+    for (mask, geometry, path) in active_bitmap_rasters(recipe) {
+        if snapshot.images.contains_key(path) {
+            continue;
         }
+        let label = if mask.name.is_empty() { path } else { mask.name.as_str() };
+        // Header-only dimension precheck BEFORE the decode: the budget
+        // used to be charged only after image::open had allocated the
+        // full raster (plus its native RGBA intermediate), so one
+        // compressed large file drove peak memory far past the
+        // advertised cap before being rejected.
+        if let Some(incoming) = raster_projected_bytes(path) {
+            let projected = incoming.saturating_add(held_bytes);
+            if projected > budget_bytes {
+                if strict {
+                    bail!(
+                        "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
+                         loading '{path}' for mask '{label}' — no pixels were rendered"
+                    );
+                }
+                eprintln!(
+                    "mask raster '{path}' skipped: the active raster set exceeds the \
+                     {budget_bytes}-byte aggregate budget"
+                );
+                continue;
+            }
+        }
+        let Some(bitmap) = load_mask_bitmap(geometry) else {
+            if strict {
+                bail!(
+                    "mask raster '{path}' for mask '{label}' is unreadable — no pixels were rendered"
+                );
+            }
+            continue;
+        };
+        let incoming = bitmap.as_raw().len();
+        let Some(next_bytes) = held_bytes.checked_add(incoming) else {
+            if strict {
+                bail!(
+                    "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
+                     loading '{path}' for mask '{label}' — no pixels were rendered"
+                );
+            }
+            eprintln!(
+                "mask raster '{path}' skipped: the active raster set exceeds the \
+                 {budget_bytes}-byte aggregate budget"
+            );
+            continue;
+        };
+        if next_bytes > budget_bytes {
+            if strict {
+                bail!(
+                    "mask raster set exceeds the {budget_bytes}-byte aggregate budget while \
+                     loading '{path}' for mask '{label}' — no pixels were rendered"
+                );
+            }
+            eprintln!(
+                "mask raster '{path}' skipped: the active raster set exceeds the \
+                 {budget_bytes}-byte aggregate budget"
+            );
+            continue;
+        }
+        held_bytes = next_bytes;
+        snapshot.images.insert(path.to_string(), bitmap);
     }
     Ok(snapshot)
 }
@@ -4580,17 +4652,32 @@ mod tests {
     }
 
     /// Patrol (the `find_raws_accepts_every_raw_format_the_app_can_decode`
-    /// pattern: ONE predicate, app-wide): every remaining `decode::load_image`
-    /// call site is a place where the source is BAKED by construction. A new
-    /// consumer of *source* pixels must go through [`source_pixels`] instead —
-    /// the whole point of having one dispatch — so a new file appearing here
-    /// fails the build rather than shipping the next missed branch.
+    /// pattern: ONE predicate, app-wide): every line in the tree that names the
+    /// baked decoder must say, ON THE LINE, why it is allowed to. A new consumer
+    /// of *source* pixels must go through [`source_pixels`] instead — the whole
+    /// point of having one dispatch.
+    ///
+    /// Per CALL SITE, not per file (R22 M2). The old form asserted a sorted FILE
+    /// allow-list, so any file already on it could grow a new hand-rolled decode
+    /// of source pixels and stay green — including `bin/gui/workers.rs`, the
+    /// exact site of the v0.22 "AI mask refine failed" accident this patrol was
+    /// written for. Two markers, either on the line or on the line above it:
+    ///
+    /// * `// baked-by-construction: <why this path can never be a camera RAW>`
+    ///   — a consumer's call.
+    /// * `// not-a-consumer-call: <why the line is not a consumer at all>` — the
+    ///   gate's own declaration / dispatch / unit tests, and this patrol's own
+    ///   extractor literal. It exists so those lines stay HONEST instead of
+    ///   claiming a baked path they do not have.
     ///
     /// Lexical on purpose: the drift this catches is someone typing
     /// `load_image` in a new worker, which no type can prevent (both arms
-    /// return `DynamicImage`).
+    /// return `DynamicImage`). Known and accepted limit, unchanged from the
+    /// file-granular form: a `//`-prefixed line is skipped (that is where the
+    /// doc references live), and a mention inside a string literal is scanned
+    /// like a call — the marker is then the honest answer.
     #[test]
-    fn no_new_file_hand_rolls_the_baked_decode() {
+    fn every_baked_decode_line_says_why_it_is_allowed() {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for e in std::fs::read_dir(dir).expect("source dir listable") {
                 let p = e.expect("dir entry").path();
@@ -4604,50 +4691,42 @@ mod tests {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         walk(&src, &mut files);
+        files.sort();
         assert!(files.len() >= 20, "only {} source files walked — the patrol is broken", files.len());
 
-        let mut callers: Vec<String> = Vec::new();
-        let mut hits = 0usize;
+        const MARKERS: [&str; 2] = ["baked-by-construction:", "not-a-consumer-call:"];
+        let mut scanned = 0usize;
+        let mut unmarked: Vec<String> = Vec::new();
         for p in &files {
             let text = std::fs::read_to_string(p).expect("source readable");
-            // Comment lines carry the DOC references (`[`decode::load_image`]`),
-            // which are exactly what this patrol must not count.
-            let calls = text
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .filter(|l| l.contains("load_image"))
-                .count();
-            if calls > 0 {
-                hits += calls;
-                callers.push(
-                    p.strip_prefix(&src)
-                        .unwrap_or(p)
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                );
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                // Comment lines carry the DOC references, which are exactly what
+                // this patrol must not count.
+                // not-a-consumer-call: the patrol's own extractor literal.
+                if line.trim_start().starts_with("//") || !line.contains("load_image") {
+                    continue;
+                }
+                scanned += 1;
+                let above = i.checked_sub(1).map(|j| lines[j]).unwrap_or("");
+                if MARKERS.iter().any(|m| line.contains(m) || above.contains(m)) {
+                    continue;
+                }
+                unmarked.push(format!(
+                    "{}:{}: {}",
+                    p.strip_prefix(&src).unwrap_or(p).to_string_lossy().replace('\\', "/"),
+                    i + 1,
+                    line.trim()
+                ));
             }
         }
-        callers.sort();
-        assert!(hits >= 20, "only {hits} lexical hits — the extractor is broken");
-        // Sorted; each entry is a place whose path is BAKED by construction.
-        let allowed = [
-            // GUI: variant-origin masters, ./out retouch results and the
-            // reverse-fit target (a finished photo — a RAW is refused by name).
-            "bin/gui/actions.rs",
-            "bin/gui/panels/retouch.rs",
-            "bin/gui/workers.rs",
-            // The gate itself: definition + its own tests.
-            "decode.rs",
-            // CLI `match` target, same contract as the GUI's.
-            "main.rs",
-            "pipeline.rs", // its reverse-fit test's target
-            "render.rs",   // source_pixels' own baked arm + the export develop arm
-            "serve.rs",    // ./out retouch masters the web UI just wrote
-        ];
-        assert_eq!(
-            callers, allowed,
-            "a NEW file decodes source pixels by hand — route it through render::source_pixels \
-             (or, if the path really is baked by construction, add it here on purpose)"
+        assert!(scanned >= 20, "only {scanned} lines scanned — the extractor is broken");
+        assert!(
+            unmarked.is_empty(),
+            "these lines name the baked decoder with no reason on them — route the source through \
+             render::source_pixels, or mark the line `// baked-by-construction: <why>` (a path that \
+             cannot be a RAW) / `// not-a-consumer-call: <why>`:\n{}",
+            unmarked.join("\n")
         );
     }
 
@@ -8056,6 +8135,139 @@ mod tests {
         let expected = image::open(&clamped_out).unwrap().to_rgb16();
         assert_eq!(got.as_raw(), expected.as_raw());
         assert!(got.as_raw().iter().all(|&channel| channel != 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A PNG that carries ONLY its header (signature + IHDR + an empty IDAT),
+    /// so a fixture can claim 61 MP dimensions in 45 bytes.
+    ///
+    /// Legitimate for the budget projection under test because that projection
+    /// is header-only BY DESIGN (`raster_projected_bytes` never decodes), and
+    /// necessary because the honest alternative is not free: encoding a real
+    /// 9504×6336 grayscale PNG measured 3.16 s and a 60 MB allocation per
+    /// fixture (probed on this machine), twice over in the scenario below.
+    fn write_header_only_png(path: &std::path::Path, w: u32, h: u32) {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &b in bytes {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut out = (data.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            let mut crc_over = kind.to_vec();
+            crc_over.extend_from_slice(data);
+            out.extend_from_slice(&crc32(&crc_over).to_be_bytes());
+            out
+        }
+        // IHDR: width, height, 8-bit, colour type 0 (grayscale), deflate,
+        // adaptive filtering, no interlace — the same shape a mask raster has.
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+        let mut file = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        file.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        // The dimension reader stops at the first image-data chunk HEADER, so
+        // an empty IDAT is enough to make the header complete and parsable.
+        file.extend_from_slice(&chunk(b"IDAT", &[]));
+        std::fs::write(path, &file).expect("fixture written");
+    }
+
+    /// R22 H1: the mask-refine precheck must ask the question the LOADER asks —
+    /// the aggregate one. The refined raster is charged next to the recipe's
+    /// other active rasters, so the SECOND full-resolution refine on a 61 MP
+    /// photo is refused instead of publishing a raster that `render_to_file`
+    /// then bails on and `develop_preview` silently drops.
+    ///
+    /// The arithmetic, spelled out (61 MP Sony A7R: 9504×6336 = 60,217,344 px):
+    /// one raster projects 60,217,344 × 4 = 240,869,376 B, which fits the
+    /// 268,435,456 B (256 MiB) budget; two project 481,738,752 B, which does
+    /// not. The old single-raster judgement said yes to both.
+    #[test]
+    fn a_second_full_resolution_refine_is_refused_by_the_aggregate_budget() {
+        use crate::recipe::MaskGeometry;
+
+        let dir = std::env::temp_dir().join(format!(
+            "autoshop-refine-budget-{}-{}",
+            std::process::id(),
+            crate::store::next_tmp_seq()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two masks, both active, each with its own segmentation raster; `sky`
+        // is the one that gets refined to full resolution first.
+        let sky_full = dir.join("mask-sky-refined.png");
+        let sky_small = dir.join("mask-sky.png");
+        let ground_small = dir.join("mask-ground.png");
+        write_header_only_png(&sky_full, 9504, 6336);
+        for p in [&sky_small, &ground_small] {
+            image::GrayImage::from_pixel(64, 48, image::Luma([255])).save(p).unwrap();
+        }
+        let mask = |name: &str, path: &std::path::Path| LocalAdjustment {
+            name: name.into(),
+            mask: MaskGeometry::Bitmap { path: path.display().to_string() },
+            exposure_ev: 1.0,
+            ..Default::default()
+        };
+
+        // Leg 1 — refining `sky`: its own small raster is the one being
+        // REPLACED, so the sum is `ground`'s 12,288 B plus the incoming
+        // 240,869,376 B. Fits.
+        let pre_refine = EditRecipe {
+            masks: vec![mask("sky", &sky_small), mask("ground", &ground_small)],
+            ..Default::default()
+        };
+        assert!(
+            mask_raster_write_fits_budget(
+                &pre_refine,
+                Some(&sky_small.display().to_string()),
+                9504,
+                6336
+            ),
+            "the FIRST full-resolution refine fits: 240,881,664 B ≤ {MASK_RASTER_BUDGET_BYTES} B"
+        );
+
+        // Leg 2 — now refining `ground` while `sky` holds its 61 MP raster:
+        // 240,869,376 B already committed + 240,869,376 B incoming. Refused.
+        let recipe = EditRecipe {
+            masks: vec![mask("sky", &sky_full), mask("ground", &ground_small)],
+            ..Default::default()
+        };
+        assert!(
+            !mask_raster_write_fits_budget(
+                &recipe,
+                Some(&ground_small.display().to_string()),
+                9504,
+                6336
+            ),
+            "the SECOND full-resolution refine must be refused: 481,738,752 B > \
+             {MASK_RASTER_BUDGET_BYTES} B"
+        );
+        // And the refusal is the AGGREGATE's, not this file's: the same raster
+        // alone is still fine (which is exactly why the single-raster judgement
+        // said yes).
+        assert!(
+            mask_raster_write_fits_budget(&EditRecipe::default(), None, 9504, 6336),
+            "one 61 MP raster on its own fits — the aggregate is what refuses"
+        );
+        // A mask the engine will not render is not charged (the loader's own
+        // filter): muting `sky` frees its raster's share.
+        let mut muted = recipe.clone();
+        muted.masks[0].enabled = false;
+        assert!(
+            mask_raster_write_fits_budget(
+                &muted,
+                Some(&ground_small.display().to_string()),
+                9504,
+                6336
+            ),
+            "an inactive mask's raster is never loaded, so it must not be charged"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -293,12 +293,20 @@ impl AutoshopApp {
                         .size()
                         .x
                         + 2.0 * ui.spacing().button_padding.x;
-                    // …and #14a caps the RESULT: clamping DOWNWARD cannot
-                    // reproduce the runaway above (that came from asking for
-                    // more width than the row had), it only stops an 800 px
-                    // panel from drawing an 800 px prompt ribbon. The two
-                    // tokens are consts with MIN < MAX, so `clamp` cannot hit
-                    // its panicking case.
+                    // …and #14a caps the RESULT at FIELD_W_MAX, which only stops
+                    // an 800 px panel from drawing an 800 px prompt ribbon —
+                    // clamping DOWNWARD cannot feed the runaway above.
+                    //
+                    // The FLOOR is the honest half: FIELD_W_MIN does ask for
+                    // more than a very narrow row has, the shape the runaway
+                    // came from. It cannot self-feed the way the runaway did,
+                    // because the demand is a CONSTANT 80 px rather than one
+                    // defined in terms of `available_width()` — the panel widens
+                    // once to fit it and then the surplus is gone. Behaviour is
+                    // unchanged from R19 either way: FIELD_W_MIN IS that row's
+                    // own `.max(80.0)`, now a named token (theme.rs). Both are
+                    // consts with MIN < MAX, so `clamp` cannot hit its panicking
+                    // case.
                     let field_w = (ui.available_width()
                         - btn_w
                         - ui.spacing().item_spacing.x

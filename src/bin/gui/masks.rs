@@ -307,6 +307,13 @@ impl AutoshopApp {
             tr(self.lang, "Refining the mask to full resolution (decoding the full-size source) …")
                 .into();
         let stored_ref = path.clone();
+        // The budget precheck below is an AGGREGATE question ("would the refined
+        // raster still be loadable next to this recipe's other active
+        // rasters?"), so the recipe travels with the job. Spawn-time snapshot by
+        // design: it is the same recipe the landing re-validates `stored_ref`
+        // against, and the alternative — reading `self.recipe` from the worker —
+        // is not available on a background thread anyway.
+        let recipe_at_spawn = self.recipe.clone();
         self.spawn_worker(
             move || {
                 let res = (|| -> anyhow::Result<MaskRefineOutcome> {
@@ -321,12 +328,24 @@ impl AutoshopApp {
                     let full = autoshop::render::source_pixels(&guide_src, None)?;
                     // BEFORE the filter and before any claim: a refined raster
                     // is written at the GUIDE's resolution, and one past the
-                    // mask budget could never be read back (`open_mask_bounded`
-                    // refuses it) — the mask would go silently inert at the
-                    // next open and at export. Refuse here, with nothing
-                    // written, instead of at delivery time. A typed fact, not a
-                    // sentence: the landing does the wording (L12#4).
-                    if !autoshop::render::mask_raster_fits_budget(full.width(), full.height()) {
+                    // mask budget could never be read back — the mask would go
+                    // silently inert at the next open and at export. Refuse
+                    // here, with nothing written, instead of at delivery time.
+                    // A typed fact, not a sentence: the landing does the
+                    // wording (L12#4).
+                    //
+                    // The question is the AGGREGATE one the loader actually
+                    // asks (R22 H1): this raster PLUS the recipe's other active
+                    // rasters, minus the one this write replaces. Asking only
+                    // "does this raster fit alone?" passed a second 61 MP
+                    // refine and then blew the 256 MB aggregate — hard bail at
+                    // export, silent skip in the preview.
+                    if !autoshop::render::mask_raster_write_fits_budget(
+                        &recipe_at_spawn,
+                        Some(stored_ref.as_str()),
+                        full.width(),
+                        full.height(),
+                    ) {
                         return Ok(MaskRefineOutcome::OverBudget {
                             w: full.width(),
                             h: full.height(),

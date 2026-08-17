@@ -1488,7 +1488,7 @@ fn write_xmp_doc(
     // masks) — its notes ride the same channel as the regeneration note.
     let merged = merged.map(|mut o| {
         notes.append(&mut o.notes);
-        o.doc
+        (o.doc, o.losses)
     });
     if merged.is_none()
         && let Some(bp) = base_path
@@ -1524,18 +1524,23 @@ fn write_xmp_doc(
         msg
     });
     // M6a: the projection's OWN lossy edges (bitmap/muted masks skipped, extra
-    // shapes flattened, rotation + recolour dropped) — judged by the writer
-    // (`xmp::mask_export_losses`) on the CLAMPED recipe, i.e. exactly the
-    // masks the document below carries. The import direction had four
-    // disclosure sites and the export direction had none; this is that half.
-    // stderr covers every CLI path from here — one line, one place — the same
-    // deal the merge note above has; UI/web surfaces localise the structured
-    // list they get back.
-    let mask_losses = xmp::mask_export_losses(recipe);
+    // shapes flattened, rotation + recolour dropped) — judged by the WRITER on
+    // the CLAMPED recipe, i.e. exactly the masks the document carries. The
+    // import direction had four disclosure sites and the export direction had
+    // none; this is that half. stderr covers every CLI path from here — one
+    // line, one place — the same deal the merge note above has; UI/web surfaces
+    // localise the structured list they get back.
+    //
+    // The document and the verdicts arrive TOGETHER (R22 NIT-1): both arms
+    // produce the list while emitting the mask block, so this no longer calls
+    // `mask_export_losses` and builds that block a second time per save.
+    let (doc, mask_losses) = match merged {
+        Some(pair) => pair,
+        None => xmp::recipe_to_xmp_with_losses(recipe),
+    };
     if let Some(m) = xmp::describe_mask_losses(&mask_losses) {
         eprintln!("⚠ {m}");
     }
-    let doc = merged.unwrap_or_else(|| xmp::recipe_to_xmp(recipe));
     // Stage + rename, never truncate in place: `fs::write` opens the LIVE
     // sidecar with O_TRUNC, so a full disk, an interruption or a competing
     // writer left a truncated file where a valid Lightroom sidecar used to
@@ -3367,6 +3372,7 @@ mod tests {
             crate::render::render_to_image(&raw, &EditRecipe::default(), None, Some(1280))
                 .expect("neutral develop");
         let target =
+            // baked-by-construction: the repro env var names a finished rendition.
             crate::decode::load_image(std::path::Path::new(&tgt)).expect("target loads");
         let old = crate::fit::fit_recipe(&neutral, &target);
         eprintln!(

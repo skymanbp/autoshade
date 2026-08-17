@@ -82,8 +82,10 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
 - **Your library stays read-only** — the engine refuses to write into a source
   RAW's folder. Exports (developed/heal/retouch images) go to `./out` by
   default; in the GUI the delivery folder is a setting (**Export → Destination**:
-  `./out`, the last folder used, or ask every time), and single export, the ▾
-  one-off path and 「Render selected」 all deliver to the same place. Develop
+  `./out`, the last folder used, or ask every time) that both 「Export」 and
+  「Render selected」 follow, so a library comes out in one folder instead of two.
+  The one deliberate exception is the ▾ beside Export: it delivers a single file
+  to a path you pick for that export only and leaves the setting alone. Develop
   STATE (recipes, Lightroom XMP, version snapshots, mask rasters, the baked
   pixel-master link and the GUI's variant strip) lives in a per-user develop
   store (`AUTOSHOP_DATA_DIR`, else

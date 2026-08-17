@@ -385,7 +385,12 @@ may hold either kind asks `render::source_pixels(path, cap)` — the one two-arm
 branch (RAW → neutral `render_to_image` at `cap`; baked → `load_image`,
 thumbnailed to `cap` and only ever DOWN). A lib test patrols the remaining
 `load_image` call sites so a new consumer cannot re-copy the branch: hand-copying
-it is what silently broke full-resolution AI mask refine in v0.22.
+it is what silently broke full-resolution AI mask refine in v0.22. The patrol is
+per CALL SITE — every line naming the gate carries `// baked-by-construction:
+<why>` (or `// not-a-consumer-call:` for the gate's own declaration and tests),
+and an unmarked line fails the build. It used to assert a FILE allow-list, which
+let an already-listed file — including the v0.22 accident site itself — grow a new
+hand-rolled decode unnoticed.
 
 ### 4.2 Vision advisor — image processing (M1)
 
@@ -476,9 +481,12 @@ The **export** direction is disclosed the same way (M6a). Classic ACR XMP
 cannot express everything the engine renders, so the writer names what it left
 behind while it emits: raster (bitmap) and muted masks are skipped whole, extra
 Add/Subtract/Intersect shapes flatten to the base geometry, a rotated radial
-exports unrotated, and per-channel recolour gains do not travel. `xmp::
-mask_export_losses` (the writer's own per-mask verdicts — one loop, so the
-claim cannot drift from the file) rides `pipeline::write_xmp`'s return value to
+exports unrotated, and per-channel recolour gains do not travel. The verdicts are
+the writer's own, produced by the ONE loop that emits the mask block (so the claim
+cannot drift from the file) and handed back with the document itself —
+`xmp::recipe_to_xmp_with_losses` / `MergeOutcome::losses`, one pass per save;
+`xmp::mask_export_losses` is the same list for a surface that only wants the
+disclosure and writes nothing. It rides `pipeline::write_xmp`'s return value to
 every surface: the GUI localises it into the save status line and a toast, the
 web reply carries it in the note it already had, and stderr gets one line from
 `write_xmp_doc` for the CLI. `recipe.json` remains the lossless sidecar, which
