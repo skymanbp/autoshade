@@ -148,6 +148,19 @@ as-shot); `tint` is a RELATIVE green/magenta shift FROM the as-shot balance, NOT
 value.  ",
         ),
     });
+    // R23-2: with the opt-in reference IMAGE there are TWO frames on the wire,
+    // and nothing else in the prompt says which is which. Positional naming,
+    // the same convention the visual judge uses (`judge::task_instruction`
+    // names IMAGE 1 / IMAGE 2 by position); the develop target rides first.
+    if ctx.reference_image.is_some() {
+        instruction.push_str(
+            "TWO IMAGES ARE ATTACHED. IMAGE 1 is the RAW preview to develop. IMAGE 2 is a \
+FINISHED photo by this same photographer — the most similar shot in their own library — \
+attached as a VISUAL reference for their taste (tonality, contrast level, colour \
+treatment). Match that LEVEL of grading; do NOT copy its subject, framing or content, and \
+do not describe it. IMAGE 1 is the only photo you are developing.  ",
+        );
+    }
     instruction.push_str(&format!("METADATA: {meta_json}  HISTOGRAM: {hist}"));
     instruction
 }
@@ -193,20 +206,35 @@ impl Advisor for OpenAiProvider {
             instruction.push_str(&format!("  REVISION NOTE from the automated reviewer: {h}"));
         }
 
+        // Built as a VEC (R23-2): the content array carries a variable number
+        // of frames now — the develop target always, plus the opt-in style
+        // reference photo. Order is the contract the prompt above names.
+        let mut content = vec![
+            json!({ "type": "input_text", "text": instruction }),
+            json!({ "type": "input_image",
+                    "image_url": format!("data:image/jpeg;base64,{b64}"),
+                    "detail": "high" }),
+        ];
+        if let Some(rf) = ctx.reference_image {
+            let rb64 = base64::engine::general_purpose::STANDARD.encode(&rf.jpeg);
+            // Same detail tier as the frame beside it: the judge sends both of
+            // its frames at "high" for the same reason — a low-detail
+            // reference cannot answer a question about tonal depth.
+            content.push(json!({ "type": "input_image",
+                                 "image_url": format!("data:image/jpeg;base64,{rb64}"),
+                                 "detail": "high" }));
+        }
         let body = json!({
             "model": self.model,
             // The Responses API STORES responses (input images included) in
             // the key owner's account by default — under a key planted by a
-            // photo pack's .env, that is a photo-exfiltration channel.
+            // photo pack's .env, that is a photo-exfiltration channel. It
+            // covers the reference photo too: `store:false` is one flag for
+            // every frame in `content`.
             "store": false,
             "input": [{
                 "role": "user",
-                "content": [
-                    { "type": "input_text", "text": instruction },
-                    { "type": "input_image",
-                      "image_url": format!("data:image/jpeg;base64,{b64}"),
-                      "detail": "high" }
-                ]
+                "content": content
             }],
             "text": { "format": {
                 "type": "json_schema",
@@ -458,5 +486,136 @@ mod tests {
         assert!(!plain.contains("USER DIRECTION (a specific request"), "{plain}");
         assert!(!plain.contains("THIS DIRECTION OVERRIDES"), "{plain}");
         assert!(plain.contains("the as-shot Kelvin could not be read"), "{plain}");
+    }
+
+    fn cfg_for(url: &str) -> Config {
+        Config {
+            // Fixture placeholder, not a credential — the stub only inspects
+            // the request shape.
+            openai_api_key: Some("test-key".into()),
+            openai_model: "test-vision".into(),
+            openai_base_url: url.to_string(),
+            openai_image_model: "test-image".into(),
+            openai_image_quality: "auto".into(),
+            openai_image_max_px: 4_000_000,
+            image_provider: "api".into(),
+            image_effort: None,
+            analysis_provider: "oauth".into(),
+            analysis_model: "opus".into(),
+            analysis_effort: None,
+            claude_bin: "claude".into(),
+            analysis_api_key: None,
+            analysis_base_url: "http://127.0.0.1:1".into(),
+            python_bin: "python".into(),
+            denoise_model: "scunet_color_real_psnr".into(),
+            denoise_script: String::new(),
+            denoise_cache: String::new(),
+            segment_script: String::new(),
+            style_strength: 0.5,
+        }
+    }
+
+    fn meta_fixture() -> Meta {
+        Meta {
+            make: "T".into(),
+            model: "T".into(),
+            lens: None,
+            iso: Some(100),
+            shutter: None,
+            aperture: None,
+            focal_length_mm: None,
+            exposure_bias_ev: None,
+            date_time: None,
+            width: 100,
+            height: 100,
+            as_shot_wb_coeffs: [1.0; 4],
+        }
+    }
+
+    fn hist_fixture() -> Histogram {
+        Histogram {
+            luma: vec![1; 256],
+            r: vec![1; 256],
+            g: vec![1; 256],
+            b: vec![1; 256],
+            clip_black_pct: 0.0,
+            clip_white_pct: 0.0,
+            sample_pixels: 256,
+        }
+    }
+
+    /// R23-2 (feedback #6, "reference photos as well as the index"): the
+    /// reference IMAGE is an OPT-IN second frame on the propose request.
+    /// Pinned on the wire over a counted loopback endpoint, because the whole
+    /// point is what the paid call actually carries: one frame by default, two
+    /// when asked, the target FIRST (the prompt names them by position), and
+    /// `store:false` covering both.
+    #[test]
+    fn the_style_reference_photo_rides_as_a_second_input_image_only_when_asked() {
+        use crate::advisor::tests::{join_stub, stub_endpoint};
+        let reply = serde_json::json!({
+            "output": [{ "content": [{ "type": "output_text",
+                                       "text": "{\"exposure_ev\":0.2}" }] }]
+        })
+        .to_string();
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let images = |body: &Value| -> Vec<Value> {
+            body["input"][0]["content"]
+                .as_array()
+                .expect("content array")
+                .iter()
+                .filter(|c| c["type"] == "input_image")
+                .cloned()
+                .collect()
+        };
+
+        // Default: ONE image, exactly as every release before this one.
+        let (url, seen, handle) = stub_endpoint(vec![(200, "application/json", reply.clone())]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        let preview = Preview { jpeg: b"TARGETJPEG".to_vec() };
+        p.propose(&preview, &meta_fixture(), &hist_fixture(), &ProposeContext::default())
+            .expect("the stub reply parses");
+        join_stub(handle);
+        let body: Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+        assert_eq!(images(&body).len(), 1, "opt-in means OFF by default: {body}");
+        assert!(
+            !body["input"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("TWO IMAGES ARE ATTACHED"),
+            "…and the prompt must not promise a frame that is not there"
+        );
+
+        // Opted in: TWO images, target first, reference second.
+        let (url, seen, handle) = stub_endpoint(vec![(200, "application/json", reply)]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        let reference = Preview { jpeg: b"REFERENCEJPEG".to_vec() };
+        p.propose(
+            &preview,
+            &meta_fixture(),
+            &hist_fixture(),
+            &ProposeContext { reference_image: Some(&reference), ..Default::default() },
+        )
+        .expect("the stub reply parses");
+        join_stub(handle);
+        let body: Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+        let imgs = images(&body);
+        assert_eq!(imgs.len(), 2, "the reference photo rides along: {body}");
+        assert!(
+            imgs[0]["image_url"].as_str().unwrap().contains(&b64(b"TARGETJPEG")),
+            "IMAGE 1 is the photo being developed"
+        );
+        assert!(
+            imgs[1]["image_url"].as_str().unwrap().contains(&b64(b"REFERENCEJPEG")),
+            "IMAGE 2 is the style reference"
+        );
+        assert_eq!(imgs[1]["detail"], "high", "a low-detail reference cannot answer tonal depth");
+        assert_eq!(body["store"], false, "one flag covers EVERY frame — including the reference");
+        let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("IMAGE 1 is the RAW preview to develop")
+                && text.contains("IMAGE 2 is a FINISHED photo"),
+            "the prompt must tell the model which frame is which: {text}"
+        );
     }
 }

@@ -63,7 +63,14 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   develop sliders (tone, presence, curves, 8-band HSL, colour grading) with live
   before/after, give a text direction, export.
 - **Style retrieval** — learns from *similar* past edits you've made (k-NN over
-  EXIF + histogram) and offers them to the advisor as soft reference.
+  EXIF + histogram) and offers them to the advisor as soft reference. Build the
+  library from all three surfaces — the GUI's **AI panel › Style reference
+  library** (folder picker + background build with progress), the web info
+  panel, or `autoshop style-index <dir>` — and the panel says which library is
+  in use, how many of your edits it holds and how old it is. Every analysis
+  names the shots it actually leaned on in the rationale; an optional switch
+  also *shows* the vision model the single most similar past photo (off by
+  default — it bills a second image per call).
 - **Look matching (reverse-fit)** — `match` takes the same frame twice (your
   source and a finished rendition of it: a `reimagine` output, an exported JPEG,
   any reference of that shot) and *solves* for the `EditRecipe` that reproduces
@@ -132,7 +139,7 @@ autoshop auto    <src> [--denoise] [--guidance "..."]   # analyze + render, end-
 autoshop denoise <src> [--strength 0..1] [--model ...]  # AI denoise → clean 16-bit master
 autoshop batch   <dir> [--render] [--limit N]           # process a whole folder
 autoshop eval    <dir> [--limit N]           # compare AI edits vs your own .xmp
-autoshop style-index <dir>                   # build the "your taste" reference index
+autoshop style-index <dir>                   # build the "your taste" reference index (also in the GUI: AI panel › Style reference library)
 autoshop serve   <dir> [--port 8080]         # local web UI
 autoshop reimagine <raw> --prompt "..."      # experimental generative restyle
 autoshop match   <raw> <target> [--render] [--zoned] [--ai-judge]  # reverse-fit a look → editable recipe + XMP (no key; --ai-judge scores the match, needs key)

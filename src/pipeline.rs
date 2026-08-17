@@ -16,6 +16,66 @@ use crate::decode;
 use crate::recipe::EditRecipe;
 use crate::xmp;
 
+/// What ONE develop asks of the personal style library (R23-2).
+///
+/// A struct rather than two more parameters: `produce_recipe` was already at
+/// clippy's argument ceiling, and these two travel together by nature — the
+/// image switch is meaningless at strength 0, and both are answered by the
+/// same retrieval.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StyleRequest {
+    /// 0..1 — how far the proposal leans on the user's past edits (the GUI's
+    /// Style slider, `--style` on the CLI). 0 disables retrieval entirely.
+    pub strength: f32,
+    /// Also SHOW the model the single most similar past photo, as a second
+    /// input image. Opt-in and off by default: it is an extra image on every
+    /// call of a paid analysis (the GUI's checkbox discloses the cost).
+    pub send_reference_image: bool,
+}
+
+impl StyleRequest {
+    /// Text reference only — the shape every non-GUI surface uses.
+    pub fn strength(strength: f32) -> Self {
+        Self { strength, send_reference_image: false }
+    }
+}
+
+/// The long edge of the JPEG preview handed to the vision proposer. Named
+/// since R23-2 so the opt-in style REFERENCE photo goes through the same
+/// sizing as the photo being developed instead of a second hand-typed number.
+const ADVISOR_PREVIEW_EDGE: u32 = 1568;
+
+/// What ONE style retrieval produced — the prompt block, the blend targets,
+/// and (R23-2) the two DISCLOSURE facts the old two-tuple had nowhere to put:
+/// which shots answered, and where the nearest one lives.
+struct StyleRetrieval {
+    /// The soft text reference block, or `None` when nothing was retrieved.
+    reference: Option<String>,
+    targets: std::collections::BTreeMap<&'static str, f32>,
+    /// File names of the shots used, bounded (`style::neighbour_stems`).
+    stems: Vec<String>,
+    /// Absolute path of the NEAREST shot, when the index recorded one.
+    nearest: Option<String>,
+}
+
+/// Encode one past photo as the JPEG preview the vision model receives —
+/// the same decode → resize → JPEG path the photo being developed takes
+/// ([`ADVISOR_PREVIEW_EDGE`]), so the two frames arrive comparable.
+///
+/// Takes a decode permit: this is a SECOND full decode inside one analyze, and
+/// the process-wide cap exists precisely so concurrent decodes cannot stack
+/// their ~180 MB buffers.
+fn reference_preview(path: &Path) -> Result<Vec<u8>> {
+    let _permit = decode::DecodePermit::acquire();
+    let decoded = decode::decode_any(path)
+        .with_context(|| format!("decode the style reference photo {}", path.display()))?;
+    let img = decoded.preview_resized(ADVISOR_PREVIEW_EDGE);
+    let mut jpeg = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+        .context("encode the style reference preview as JPEG")?;
+    Ok(jpeg)
+}
+
 /// Run the full advise chain for one RAW: decode → propose (GPT or heuristic
 /// fallback) → Claude verify → optional one revision round. `verbose` prints the
 /// proposer/verifier lines (CLI uses true, the server uses false).
@@ -28,7 +88,7 @@ pub fn produce_recipe(
     verbose: bool,
     guidance: Option<&str>,
     base: Option<&EditRecipe>,
-    style_strength: f32,
+    style: StyleRequest,
     judge: bool,
 ) -> Result<(EditRecipe, Verdict, Vec<crate::rationale::Note>)> {
     // The third element (L12#2B): every DETERMINISTIC rationale fragment this
@@ -75,7 +135,7 @@ pub fn produce_recipe(
     });
     let guidance = refine_owned.as_deref().or(guidance);
 
-    let preview_img = decoded.preview_resized(1568);
+    let preview_img = decoded.preview_resized(ADVISOR_PREVIEW_EDGE);
     let mut jpeg = Vec::new();
     preview_img
         .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
@@ -88,53 +148,81 @@ pub fn produce_recipe(
     let decode::Decoded { meta, histogram, .. } = decoded;
 
     // Style influence: retrieve the user's edits on the most SIMILAR past shots
-    // (needs `autoshop style-index`). style_strength == 0 disables it entirely;
+    // (needs a built style library). strength == 0 disables it entirely;
     // otherwise we inject a soft text reference AND, at higher strength, gently
     // pull the FINAL recipe toward those historical means (the blend below).
-    // Central store first; the legacy cwd-relative file keeps an index built
-    // before the store existed working unchanged.
+    // `style::load_effective` owns the central-then-legacy walk for every
+    // surface (R23-2) — this used to be a third hand-written copy of it.
     let mut style_err: Option<String> = None;
-    let style_ix = if style_strength > 0.0 {
-        let central = crate::store::style_index_path();
-        match crate::style::StyleIndex::load(&central).or_else(|e| {
-            crate::style::StyleIndex::load(std::path::Path::new("out/style-index.json"))
-                // Keep the CENTRAL error — it carries the version-gate
-                // message naming the rebuild command.
-                .map_err(|_| e)
-        }) {
-            Ok(ix) => Some(ix),
-            Err(e) => {
-                // Surfaced ONCE on stderr, and only when an index file
-                // exists: the old `.ok()` swallowed the version-gate message,
-                // so a stale index silently disabled the style reference with
-                // nothing to say why. (No file at all is the normal
-                // fresh-install case — no noise there.) The windowed GUI has
-                // no console, so the same fact also rides the rationale
-                // below (L08 disclosure threading).
-                if central.exists() {
-                    static ONCE: std::sync::Once = std::sync::Once::new();
-                    ONCE.call_once(|| {
-                        eprintln!(
-                            "⚠ style reference unavailable ({e:#}) — the Style slider has \
-                             no effect until the index is rebuilt"
-                        );
-                    });
-                    style_err = Some(format!("{e:#}"));
-                }
-                None
-            }
+    let style_ix = match (style.strength > 0.0).then(crate::style::load_effective) {
+        Some(crate::style::EffectiveIndex::Loaded(ix, _)) => Some(ix),
+        Some(crate::style::EffectiveIndex::Unusable { err, .. }) => {
+            // Surfaced ONCE on stderr: the original `.ok()` swallowed the
+            // version-gate message, so a stale index silently disabled the
+            // style reference with nothing to say why. The windowed GUI has no
+            // console, so the same fact also rides the rationale below (L08
+            // disclosure threading).
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            let once_msg = err.clone();
+            ONCE.call_once(move || {
+                eprintln!(
+                    "⚠ style reference unavailable ({once_msg}) — the Style slider has \
+                     no effect until the index is rebuilt"
+                );
+            });
+            style_err = Some(err);
+            None
         }
-    } else {
-        None
+        // Nothing built yet, or nothing asked for. NOT silent any more: the
+        // rationale block after the AI chain discloses it (R23-2).
+        Some(crate::style::EffectiveIndex::Absent) | None => None,
     };
-    let style = style_ix.map(|ix| {
-        let ex = ix.retrieve(&meta, &histogram, 4, raw);
-        (ix.render_reference(&ex), crate::style::style_targets(&ex))
+    let retrieved = style_ix.as_ref().map(|ix| {
+        let ex = ix.retrieve(&meta, &histogram, crate::style::RETRIEVE_K, raw);
+        StyleRetrieval {
+            reference: ix.render_reference(&ex),
+            targets: crate::style::style_targets(&ex),
+            stems: crate::style::neighbour_stems(&ex),
+            // The nearest shot's own file, for the opt-in reference IMAGE. A
+            // pre-path index records none — that degrades with a note rather
+            // than silently sending nothing (see below).
+            nearest: ex.first().and_then(|e| e.path.clone()),
+        }
     });
-    let reference: Option<String> = style.as_ref().and_then(|(r, _)| r.clone());
+    let reference: Option<String> = retrieved.as_ref().and_then(|r| r.reference.clone());
     let ref_str = reference.as_deref();
     if verbose && ref_str.is_some() {
-        println!("style    : reference from similar past edits (strength {:.0}%)", style_strength * 100.0);
+        println!("style    : reference from similar past edits (strength {:.0}%)", style.strength * 100.0);
+    }
+    // R23-2 opt-in: SHOW the model the nearest past photo, not just its
+    // numbers. Fail-open in every arm — a missing or unreadable reference must
+    // degrade this develop to the text reference (which is the historical
+    // behaviour), never fail a paid analysis — and every degradation says so.
+    let mut ref_preview: Option<Preview> = None;
+    let mut ref_image_stem: Option<String> = None;
+    let mut ref_image_err: Option<String> = None;
+    if style.send_reference_image
+        && let Some(r) = &retrieved
+    {
+        match &r.nearest {
+            Some(p) => match reference_preview(Path::new(p)) {
+                Ok(jpeg) => {
+                    ref_image_stem = Some(stem(Path::new(p)).to_string());
+                    ref_preview = Some(Preview { jpeg });
+                }
+                Err(e) => ref_image_err = Some(format!("{e:#}")),
+            },
+            // No path recorded, yet exemplars WERE retrieved: a pre-R23 index.
+            // (Nothing retrieved at all is the no-reference note's business.)
+            None if !r.stems.is_empty() => {
+                ref_image_err = Some(
+                    "this style index was built before per-photo paths were recorded — \
+                     rebuild it to send a reference photo"
+                        .into(),
+                )
+            }
+            None => {}
+        }
     }
     if verbose
         && let Some(g) = guidance {
@@ -175,6 +263,10 @@ pub fn produce_recipe(
         guidance,
         hint: None,
         as_shot_k: anchor_k,
+        // Rides EVERY round of this analysis (the revision rounds spread this
+        // struct): a reference the first call saw and the revision did not
+        // would make the two rounds answer different questions.
+        reference_image: ref_preview.as_ref(),
     };
     let mut det_notes: Vec<crate::rationale::Note> = Vec::new();
     let (mut recipe, can_revise) = if cfg.openai_api_key.is_some() {
@@ -305,9 +397,9 @@ pub fn produce_recipe(
     // Distill toward the user's historical style: a gentle, capped pull of the
     // global sliders toward similar past edits. Capped at 60% so even max
     // strength never fully overrides the AI's scene-specific proposal.
-    if let Some((_, targets)) = &style {
+    if let Some(r) = &retrieved {
         let pre_blend = recipe.clone();
-        crate::style::blend_toward(&mut recipe, targets, style_strength.clamp(0.0, 1.0) * 0.6);
+        crate::style::blend_toward(&mut recipe, &r.targets, style.strength.clamp(0.0, 1.0) * 0.6);
         recipe.clamp();
         // The blend mutates the recipe AFTER the rationale was written and
         // AFTER the verdict above. When it actually changed something (a pull
@@ -324,7 +416,7 @@ pub fn produce_recipe(
                 &mut det_notes,
                 crate::rationale::Note::new(
                     crate::rationale::keys::STYLE_DISTILLED,
-                    vec![("pct", format!("{:.0}", style_strength.clamp(0.0, 1.0) * 0.6 * 100.0))],
+                    vec![("pct", format!("{:.0}", style.strength.clamp(0.0, 1.0) * 0.6 * 100.0))],
                 ),
             );
             // Degrade like the revision loop above: a transient verifier
@@ -346,19 +438,10 @@ pub fn produce_recipe(
             }
         }
     }
-    // L08: the stderr warning above is invisible in the windowed GUI — the
-    // rationale is the one channel all three surfaces show. Every develop
-    // that ASKED for style influence and silently got none says so here.
-    if let Some(e) = &style_err {
-        crate::rationale::push_note(
-            &mut recipe.rationale,
-            &mut det_notes,
-            crate::rationale::Note::new(
-                crate::rationale::keys::STYLE_UNAVAILABLE,
-                vec![("e", e.clone())],
-            ),
-        );
-    }
+    // (The style DISCLOSURE block used to sit here. It moved below the judge
+    // — R23-2: an adopted visual revision replaces `recipe` wholesale and
+    // clears `det_notes` with it, so every note written here was silently
+    // dropped on exactly the runs that changed the most.)
     // R20: the visual CLOSED LOOP — the first eye ever laid on the result.
     // The proposer emits numbers blind (it never sees what they render to)
     // and the verifier judges data-only by contract, so a plausible-but-off
@@ -492,12 +575,12 @@ pub fn produce_recipe(
                                 // original walked (style distillation above)
                                 // — otherwise adopting it would silently
                                 // undo the user's style pull (review R20-S2).
-                                if let Some((_, targets)) = &style {
+                                if let Some(sr) = &retrieved {
                                     let pre = r.clone();
                                     crate::style::blend_toward(
                                         &mut r,
-                                        targets,
-                                        style_strength.clamp(0.0, 1.0) * 0.6,
+                                        &sr.targets,
+                                        style.strength.clamp(0.0, 1.0) * 0.6,
                                     );
                                     r.clamp();
                                     candidate_distilled = r != pre;
@@ -542,7 +625,7 @@ pub fn produce_recipe(
                                                 "pct",
                                                 format!(
                                                     "{:.0}",
-                                                    style_strength.clamp(0.0, 1.0) * 0.6 * 100.0
+                                                    style.strength.clamp(0.0, 1.0) * 0.6 * 100.0
                                                 ),
                                             )],
                                         ),
@@ -616,6 +699,38 @@ pub fn produce_recipe(
         }
     }
 
+    // ── R23-2 style DISCLOSURE, after every wholesale recipe replacement ──
+    // The one channel all three surfaces show. Three facts, in reading order:
+    // which of the user's shots this develop leaned on (feedback #6's headline
+    // — "I have no idea which library it is referencing"), whether a reference
+    // PHOTO went along, and whether the whole mechanism came up empty.
+    if let Some(note) = retrieved.as_ref().and_then(|r| style_neighbours_note(&r.stems)) {
+        crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
+    }
+    if let Some(file) = &ref_image_stem {
+        crate::rationale::push_note(
+            &mut recipe.rationale,
+            &mut det_notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::STYLE_REF_IMAGE,
+                vec![("file", file.clone())],
+            ),
+        );
+    }
+    if let Some(e) = &ref_image_err {
+        crate::rationale::push_note(
+            &mut recipe.rationale,
+            &mut det_notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::STYLE_REF_IMAGE_FAILED,
+                vec![("e", e.clone())],
+            ),
+        );
+    }
+    if let Some(note) = style_gap_note(style.strength, ref_str, style_err.as_deref()) {
+        crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
+    }
+
     // Base look, stamped in ONE place for every surface: the proposal and the
     // verification above both ran over the camera's embedded preview — the
     // very base the curve approximates — so the AI's JSON round-trip never
@@ -668,6 +783,60 @@ pub fn produce_recipe(
         carry_over_unrepresentable(&mut recipe, b, Some(&mut det_notes));
     }
     Ok((recipe, verdict, det_notes))
+}
+
+/// "These are the shots it referenced" — the transparency half of feedback #6
+/// (R23-2). `None` when nothing was retrieved: the gap note below covers that
+/// case, and a "referenced 0 shots" line would be noise.
+///
+/// A pure function beside [`style_gap_note`] for the same reason: the
+/// production path reaches it only after minutes of paid network work.
+pub(crate) fn style_neighbours_note(stems: &[String]) -> Option<crate::rationale::Note> {
+    if stems.is_empty() {
+        return None;
+    }
+    Some(crate::rationale::Note::new(
+        crate::rationale::keys::STYLE_NEIGHBOURS,
+        vec![("files", stems.join(", ")), ("n", stems.len().to_string())],
+    ))
+}
+
+/// "This develop asked for personal style and got NOTHING" — the disclosure
+/// that closes feedback #6's three silent arms with ONE condition (R23-2).
+///
+/// The old test was "an index FILE exists and failed to load", which is why
+/// only one of the three arms ever said anything:
+///   a) no index file at all (fresh install)     → silent, and the GUI had no
+///      way to build one either;
+///   b) the index loaded but `retrieve` matched nothing, so `render_reference`
+///      returned `None` (`style.rs`)              → silent;
+///   c) an unusable file (version gate, corrupt) → the only arm that spoke.
+/// Keying off the FINAL reference covers all three: (a) and (b) are the same
+/// user-visible fact ("no reference for this photo") and share a note, while
+/// (c) keeps the loader's own message, which names what to fix.
+///
+/// A pure function so all three arms are testable without a paid call — the
+/// production path reaches this only after minutes of network work.
+pub(crate) fn style_gap_note(
+    strength: f32,
+    reference: Option<&str>,
+    load_err: Option<&str>,
+) -> Option<crate::rationale::Note> {
+    // Nothing was asked for, or the reference arrived: nothing to disclose.
+    // (A claim about a mechanism the user switched off is its own honesty bug.)
+    if strength <= 0.0 || reference.is_some() {
+        return None;
+    }
+    Some(match load_err {
+        Some(e) => crate::rationale::Note::new(
+            crate::rationale::keys::STYLE_UNAVAILABLE,
+            vec![("e", e.to_string())],
+        ),
+        None => crate::rationale::Note::new(
+            crate::rationale::keys::STYLE_NO_REFERENCE,
+            vec![("pct", format!("{:.0}", strength.clamp(0.0, 1.0) * 100.0))],
+        ),
+    })
 }
 
 /// Outcome of one judge-guided visual revision round (R20 closed loop).
@@ -3569,7 +3738,7 @@ mod tests {
             false,
             None,
             None,
-            0.0,
+            StyleRequest::default(),
             false,
         )
         .expect_err("no analysis key + api provider must refuse up front")
@@ -3578,6 +3747,88 @@ mod tests {
             e.contains("analysis") && e.contains("AFTER the paid proposal"),
             "the refusal names the reason, not a decode error: {e}"
         );
+    }
+
+    /// R23-2, feedback #6: the develop that ASKED for personal style and got
+    /// none must SAY so — in all three arms. Before this, the condition was
+    /// "an index file exists and failed to load", so two of the three were
+    /// silent: a fresh install (no library) and a retrieval that matched
+    /// nothing both left a Style slider that visibly did nothing.
+    ///
+    /// The arms are exercised at the seam they converge on, and the mapping
+    /// from each arm to its triple is pinned by the loader's own test
+    /// (`style::the_shared_status_read_reports_absent_built_and_unusable`)
+    /// plus `render_reference([]) == None` (`style.rs`).
+    #[test]
+    fn every_silent_style_arm_now_discloses_itself() {
+        use crate::rationale::{keys, render_one};
+        let note = |strength, reference, err| style_gap_note(strength, reference, err);
+
+        // Arm (a): no index file at all — `EffectiveIndex::Absent`, so no
+        // loader error, and no reference.
+        let a = note(0.65, None, None).expect("a fresh install must not stay silent");
+        assert_eq!(a.key, keys::STYLE_NO_REFERENCE);
+        let text = render_one(&a);
+        assert!(text.contains("65%"), "the slider position the user set: {text}");
+        assert!(
+            text.contains("Style reference library"),
+            "and where to fix it, in the GUI the user is looking at: {text}"
+        );
+
+        // Arm (b): the index LOADED, but `retrieve` matched nothing, so
+        // `render_reference` returned None. Same user-visible fact, same note.
+        let b = note(0.3, None, None).expect("a retrieval that matched nothing is not silent");
+        assert_eq!(b.key, keys::STYLE_NO_REFERENCE);
+
+        // Arm (c): a file exists and cannot be used — the loader's message
+        // survives, because it names what to rebuild.
+        let c = note(0.3, None, Some("style index … is version 2 (current 3)"))
+            .expect("an unusable index still discloses");
+        assert_eq!(c.key, keys::STYLE_UNAVAILABLE);
+        assert!(render_one(&c).contains("is version 2"), "the cause rides along");
+
+        // …and the two NEGATIVE controls, which is what stops this from
+        // becoming a note on every develop: a reference that arrived, and a
+        // slider the user turned off.
+        assert!(
+            note(0.65, Some("STYLE REFERENCE — …"), None).is_none(),
+            "no complaint when the reference is right there"
+        );
+        assert!(
+            note(0.0, None, None).is_none(),
+            "style switched OFF is not a failure to disclose"
+        );
+    }
+
+    /// R23-2, feedback #6's headline ("I have no idea which library it is
+    /// referencing"): a develop that DID get a reference names the shots it
+    /// leaned on. Driven through the same seam the pipeline uses, over stub
+    /// exemplars — the production path needs an index and a paid call.
+    #[test]
+    fn a_develop_names_the_past_shots_it_referenced() {
+        use crate::rationale::render_one;
+        use crate::style::StyleExemplar;
+        let ex = |stem: &str| StyleExemplar {
+            stem: stem.into(),
+            feat: vec![0.0; 14],
+            tag: "wide/mid/midday/landscape".into(),
+            settings: std::collections::BTreeMap::new(),
+            curve: None,
+            path: Some(format!("D:\\rolls\\{stem}.ARW")),
+            families: None,
+        };
+        let all = [ex("DSC0001"), ex("DSC0002"), ex("DSC0003")];
+        let refs: Vec<&StyleExemplar> = all.iter().collect();
+        let stems = crate::style::neighbour_stems(&refs);
+        let text = render_one(&style_neighbours_note(&stems).expect("a retrieval discloses itself"));
+        assert!(text.contains("DSC0001, DSC0002, DSC0003"), "the shots by name: {text}");
+        assert!(text.contains("the 3 most similar"), "…and how many answered: {text}");
+        assert!(
+            !text.contains("D:\\rolls"),
+            "file names, not the folder layout (this string is persisted and displayed): {text}"
+        );
+        // Nothing retrieved ⇒ no claim (the gap note owns that case).
+        assert!(style_neighbours_note(&[]).is_none());
     }
 
     /// L09#1: a missing parent is created up-front (the documented

@@ -185,6 +185,14 @@ pub(crate) enum ExportRoute {
 pub(crate) struct Prefs {
     pub(crate) gallery_dir: Option<PathBuf>,
     pub(crate) style_strength: f32,
+    /// R23-2: the opt-in style REFERENCE photo. `#[serde(default)]` on the
+    /// struct means an older prefs file decodes it as `false` — the same
+    /// answer as [`Prefs::default`], so an upgrade never silently starts
+    /// spending an extra image per analysis.
+    pub(crate) send_style_ref_image: bool,
+    /// The folder the style library was last built from (R23-2), so a rebuild
+    /// starts where the last build did.
+    pub(crate) style_src_dir: Option<PathBuf>,
     pub(crate) save_jpeg: bool,
     /// [`ExportFormat::pref_code`]; 0 defers to `save_jpeg` (migration).
     pub(crate) exp_format: u8,
@@ -214,6 +222,9 @@ impl Default for Prefs {
         Self {
             gallery_dir: None,
             style_strength: STYLE_STRENGTH_DEFAULT,
+            // OFF, like every other paid opt-in here (see `fit_ai_judge`).
+            send_style_ref_image: false,
+            style_src_dir: None,
             save_jpeg: false,
             exp_format: 0,
             exp_dest: 0, // ./out — the CLI/batch shape, unchanged for old prefs
@@ -504,6 +515,30 @@ pub(crate) enum Msg {
     /// A batch recipe paste finished — counts and per-photo details,
     /// rendered at landing (L12#4).
     Pasted(anyhow::Result<PasteOutcome>),
+    /// A style-library STATUS read finished (R23-2). Boxed like every other
+    /// large payload — `StyleIndexInfo` carries the scene histogram.
+    StyleInfo(Box<autoshop::style::StyleIndexInfo>),
+    /// The running style-library build advanced: `done` of `total` photos
+    /// decoded. Typed counts, worded at landing (L12#4) — same shape as
+    /// [`Msg::BatchProgress`].
+    StyleBuildProgress { done: usize, total: usize },
+    /// A style-library build finished — see [`StyleBuildOutcome`].
+    StyleBuilt(Box<StyleBuildOutcome>),
+}
+
+/// What building the style library did — FACTS, not prose (L12#4): the build
+/// runs for minutes, so its sentence is composed at LANDING in the language
+/// live then, never with the language captured at spawn.
+pub(crate) enum StyleBuildOutcome {
+    /// Indexed and published: how many of the user's edits, from where.
+    Saved { total: usize, dir: PathBuf },
+    /// The folder held no RAW with its `.xmp` sidecar beside it, so
+    /// `StyleIndex::save` REFUSED (the one empty-index guard, shared by the
+    /// CLI, the web handler and this button — writing an empty index would
+    /// truncate a good one in place). The previous library is untouched.
+    NothingIndexed { dir: PathBuf },
+    /// The build or the publish failed for any other reason.
+    Failed { err: String },
 }
 
 /// What the full-resolution mask refine did — FACTS, not prose (L12#4, the

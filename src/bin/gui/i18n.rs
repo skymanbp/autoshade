@@ -465,6 +465,45 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Style", "风格"),
     ("Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)",
         "个人风格强度：AI 提案向你过往 XMP 编辑习惯靠拢的程度（0 = 不参考）"),
+
+    // ── AI panel · style reference library (R23-2, feedback #6) ──────────────
+    ("⚠ no library", "⚠ 未建库"),
+    ("This slider does nothing until a style reference library is built — the section just below builds one.",
+        "在建好风格参考库之前，这个滑杆不起作用——下面那一节就是用来建库的。"),
+    ("Style reference library", "风格参考库"),
+    ("an unrecorded folder", "未记录的文件夹"),
+    ("{n} of your own edits · from {path}", "{n} 条你自己的编辑 · 来自 {path}"),
+    ("Library file: {path}", "库文件：{path}"),
+    ("built {hours}h ago", "{hours} 小时前建库"),
+    ("built {days}d ago", "{days} 天前建库"),
+    ("The style library could not be read ({err}) — rebuild it below.",
+        "风格参考库读取失败（{err}）——请在下面重建。"),
+    ("No library built yet — the Style slider above has nothing to lean on. Point this at the folder you edit in Lightroom (each RAW with its .xmp sidecar beside it); Autoshop keeps its own .xmp in the develop store, never beside your RAWs, so its output folder always yields nothing.",
+        "还没有建库——上面的风格滑杆没有可依据的记录。请指向你在 Lightroom 里编辑的文件夹（每个 RAW 旁边都有它的 .xmp）；Autoshop 自己的 .xmp 放在显影库里、从不放在 RAW 旁边，所以它的输出目录永远一张也入不了库。"),
+    ("reading the style library…", "正在读取风格参考库…"),
+    ("🗂 Pick folder…", "🗂 选择文件夹…"),
+    ("Choose the folder of your OWN edited RAWs — the ones with a Lightroom .xmp sidecar beside them. Each pair teaches Autoshop one of your finished looks. Indexing starts as soon as you choose.",
+        "选择放着你自己编辑过的 RAW 的文件夹——也就是旁边带 Lightroom .xmp 的那些。每一对都是你的一个成片风格样本。选好后立刻开始入库。"),
+    ("building…", "构建中…"),
+    ("🔄 Build / rebuild", "🔄 构建 / 重建"),
+    ("Index every RAW+.xmp pair in that folder (local compute, no API cost). Every RAW is decoded, so a large library takes minutes; the app stays usable and this button re-arms when it finishes. It cannot be cancelled — a build that indexes nothing is refused and leaves your existing library untouched.",
+        "把该文件夹里每一对 RAW+.xmp 都入库（本地计算，无 API 费用）。每张 RAW 都要解码，所以大库要几分钟；构建期间 App 仍可用，完成后本按钮重新可用。构建无法取消——一次什么都没入库的构建会被拒绝，你原有的库保持不动。"),
+    ("Pick a folder first", "请先选择文件夹"),
+    ("{done} / {total} photos", "{done} / {total} 张"),
+    ("Also give the model a reference photo", "同时给模型一张参考照片"),
+    ("WILL UPLOAD TWO IMAGES per analysis call: this photo, plus the ONE most similar shot from your style library, so the model can match your look by eye instead of only by numbers. COST: an analysis with two images is billed for two images instead of one — and a revision round sends both again. The reference is never stored by the provider (store:false), and the rationale names the photo that was used. Off = the numeric style reference only.",
+        "打开后每次分析调用会发出两张图：本图，加上风格参考库里最接近的那一张，让模型能按图对齐你的风格，而不是只靠数字。费用：带两张图的分析按两张图计费，而不是一张；修订轮也会再发一次两张。参考图不会被提供方保存（store:false），依据里会写出所用的那一张。关闭 = 只用数字化的风格参考。"),
+    ("Build a style library first — there is no reference photo to send",
+        "请先建好风格参考库——现在没有参考照片可发"),
+    ("Building the style library from {path} … every RAW is decoded, so a big folder takes minutes",
+        "正在从 {path} 构建风格参考库…每张 RAW 都要解码，大文件夹要几分钟"),
+    ("Building the style library… {done} / {total} photos",
+        "正在构建风格参考库… {done} / {total} 张"),
+    ("Style library built: {n} of your own edits from {path}",
+        "风格参考库已建成：来自 {path} 的 {n} 条你自己的编辑"),
+    ("Nothing to index in {path} — no RAW there has its .xmp sidecar beside it (Autoshop keeps its own .xmp in the develop store, never beside the RAW, so point this at the folder you edit in Lightroom). Your existing style library was left untouched.",
+        "{path} 里没有可入库的照片——那里没有一个 RAW 旁边带着它的 .xmp（Autoshop 自己的 .xmp 放在显影库里、从不放在 RAW 旁边，所以请指向你在 Lightroom 里编辑的文件夹）。你原有的风格参考库保持不动。"),
+    ("Building the style library failed: {err}", "风格参考库构建失败：{err}"),
     ("Before/After side by side", "原图/成片并排"),
     ("⬛ Single", "⬛ 单图"),
     ("The edit fills the canvas; hold B to quickly compare the original", "编辑图占满画布；按住 B 快速对比原图"),
@@ -1184,6 +1223,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [style reference unavailable ({e}) — the Style slider had no effect on this \
       develop; rebuild it with: autoshop style-index <folder>]",
         " [风格参考不可用（{e}）——本次显影中风格滑杆未起作用；用 autoshop style-index <文件夹> 重建]"),
+    (" [no style reference was available for this photo — the Style slider ({pct}%) had \
+      no effect on this develop. Build your style library in the AI panel → Style \
+      reference library: a folder of your own RAWs with their Lightroom .xmp sidecars \
+      beside them]",
+        " [本片没有可用的风格参考——风格滑杆（{pct}%）在这次显影中未起作用。请在 AI 面板 → 风格参考库里建库：一个放着你自己的 RAW、每个旁边带 Lightroom .xmp 的文件夹]"),
+    (" [style reference: your own edits on {files} — the {n} most similar shots in your \
+      style library]",
+        " [风格参考：你自己对 {files} 的编辑——风格参考库里最接近的 {n} 张]"),
+    (" [{file} also went to the vision model as a reference IMAGE — one extra image on \
+      each call of this analysis]",
+        " [{file} 还作为参考图一并给了视觉模型——本次分析的每次调用都多一张图]"),
+    (" [the reference photo could not be prepared ({e}) — this develop used the text \
+      reference only]",
+        " [参考图未能准备好（{e}）——本次显影只用了文字参考]"),
     ("\n⚠ the response did not preserve mask identities (a mask was renamed or \
       duplicated) — your masks were kept unchanged and the model's mask edits were \
       discarded",

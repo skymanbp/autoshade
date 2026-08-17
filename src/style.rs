@@ -36,6 +36,23 @@ const CURRENT_INDEX_VERSION: u32 = 3;
 const MAX_STYLE_INDEX_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STYLE_EXEMPLARS: usize = 50_000;
 
+/// How many similar past shots one develop leans on. Named since R23-2
+/// because the number is now DISCLOSED ("the 4 most similar shots"), so the
+/// retrieval and the sentence about it must read the same constant.
+pub const RETRIEVE_K: usize = 4;
+
+/// Disclosure bounds for [`neighbour_stems`]: the rationale is persisted,
+/// shown in three UIs and capped, so the "which photos did it reference?"
+/// answer is bounded at the source rather than trusting `RETRIEVE_K` and the
+/// user's file naming to stay small.
+const MAX_DISCLOSED_NEIGHBOURS: usize = 4;
+const MAX_STEM_CHARS: usize = 48;
+
+/// The legacy, cwd-relative index a pre-store build wrote. Kept readable so
+/// an index built before the central store existed keeps working; nothing
+/// writes here any more.
+pub const LEGACY_INDEX_PATH: &str = "out/style-index.json";
+
 /// Physical band for feature / normalization values (L04-3): every real
 /// dimension is a ln() of a physical quantity or a bounded ratio (|v| ≲ 200
 /// by construction — see `feature_vector`), so 1e3 leaves 5× headroom. A
@@ -237,8 +254,25 @@ pub struct StyleIndex {
 }
 
 impl StyleIndex {
-    /// Scan a folder for RAW+.xmp pairs (the user's own edits) and build the index.
+    /// Scan a folder for RAW+.xmp pairs (the user's own edits) and build the
+    /// index, reporting nothing but the historical stdout lines.
     pub fn build(dir: &Path) -> Result<StyleIndex> {
+        Self::build_reporting(dir, &|_, _| {})
+    }
+
+    /// [`build`](StyleIndex::build) with a progress callback — `(completed,
+    /// total)` after every photo, plus one `(0, total)` before the first
+    /// decode so a UI can show the size of the job it just started.
+    ///
+    /// Called on the CALLER's thread (from the result-collector loop), not
+    /// from a decode worker: that keeps the callback free of `Send + Sync`
+    /// bounds, which matters because the GUI's callback carries an mpsc
+    /// `Sender` (`Send`, NOT `Sync`). The stdout lines stay in the workers,
+    /// byte-identical to what the CLI has always printed.
+    pub fn build_reporting(
+        dir: &Path,
+        on_progress: &dyn Fn(usize, usize),
+    ) -> Result<StyleIndex> {
         let raws = pipeline::find_raws(dir)?;
         let pairs: Vec<_> = raws.iter().filter(|r| r.with_extension("xmp").exists()).collect();
         println!("building style index from {} RAW+.xmp pairs ...", pairs.len());
@@ -257,6 +291,7 @@ impl StyleIndex {
         let next = AtomicUsize::new(0);
         let done = AtomicUsize::new(0);
         let workers = pairs.len().clamp(1, decode::MAX_CONCURRENT_DECODES);
+        on_progress(0, pairs.len());
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel();
             for _ in 0..workers {
@@ -328,8 +363,11 @@ impl StyleIndex {
                 });
             }
             drop(tx); // workers hold the remaining senders; rx ends when they exit
+            let mut received = 0usize;
             for (i, ex) in rx {
                 slots[i] = ex;
+                received += 1;
+                on_progress(received, pairs.len());
             }
         });
         // Failed decodes left None slots — drop them in order, like the serial
@@ -623,6 +661,155 @@ taste; reference, do NOT copy verbatim, the scene differs): {}{}{}",
             family_note
         ))
     }
+}
+
+/// Which index file answered, and whether one could be used at all.
+///
+/// ONE loader for every surface (R23-2): the CLI, the web handler, the GUI's
+/// status line and `pipeline::produce_recipe` used to each spell the
+/// central-then-legacy walk themselves, and the pipeline's copy additionally
+/// decided "is this worth telling the user about?" from `central.exists()` —
+/// which is why a fresh install got a Style slider that silently did nothing.
+/// The three states here are exactly the three answers a surface needs.
+pub enum EffectiveIndex {
+    /// A usable index, and the file it came from (absolute).
+    Loaded(StyleIndex, std::path::PathBuf),
+    /// No index file anywhere — nothing has been built yet.
+    Absent,
+    /// A file EXISTS but cannot be used (version gate, corruption, size cap,
+    /// permissions). `err` is the loader's own message chain.
+    Unusable { path: std::path::PathBuf, err: String },
+}
+
+/// The user's style index: the central store first, the legacy cwd-relative
+/// file as a fallback (see [`LEGACY_INDEX_PATH`]).
+pub fn load_effective() -> EffectiveIndex {
+    load_effective_at(&crate::store::style_index_path(), Path::new(LEGACY_INDEX_PATH))
+}
+
+/// [`load_effective`] against explicit paths — the seam the tests drive (the
+/// real one reads a per-user store location that no test may depend on).
+pub fn load_effective_at(central: &Path, legacy: &Path) -> EffectiveIndex {
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    // Both loads are attempted before anything is CLASSIFIED: a corrupt
+    // central file with a good legacy one beside it must still serve the
+    // legacy index, exactly as it did before this function existed.
+    let central_err = match StyleIndex::load(central) {
+        Ok(ix) => return EffectiveIndex::Loaded(ix, abs(central)),
+        Err(e) => e,
+    };
+    let legacy_err = match StyleIndex::load(legacy) {
+        Ok(ix) => return EffectiveIndex::Loaded(ix, abs(legacy)),
+        Err(e) => e,
+    };
+    // Nothing answered. "A file exists but cannot be used" and "no library at
+    // all" are DIFFERENT facts: the first deserves the loader's error (it
+    // carries the version-gate rebuild instruction), the second is a fresh
+    // install that needs an entry point, not an error message.
+    if central.exists() {
+        EffectiveIndex::Unusable { path: abs(central), err: format!("{central_err:#}") }
+    } else if legacy.exists() {
+        EffectiveIndex::Unusable { path: abs(legacy), err: format!("{legacy_err:#}") }
+    } else {
+        EffectiveIndex::Absent
+    }
+}
+
+/// Everything a UI shows ABOUT the style library, as typed facts — the
+/// shared read behind the web's `/api/style-info` and the GUI's status line
+/// (R23-2: the GUI had no production-side entry at all, and the display logic
+/// existed only inside the web handler).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleIndexInfo {
+    /// The file that answered — or, when none did, the central path a build
+    /// would write.
+    pub path: std::path::PathBuf,
+    pub state: StyleIndexState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StyleIndexState {
+    Built {
+        /// How many of the user's own edits it holds.
+        total: usize,
+        version: u32,
+        /// The folder it was built FROM (`None` for indexes written before
+        /// the field existed).
+        source_dir: Option<String>,
+        /// The most common scene tags, most-frequent first, at most 6.
+        scenes: Vec<(String, usize)>,
+        /// How long ago the file was written, measured at read time. A
+        /// RELATIVE age on purpose: this tree carries no calendar library, and
+        /// "built 3 days ago" is the question a photographer is asking anyway.
+        age: Option<std::time::Duration>,
+    },
+    /// Nothing built yet.
+    Absent,
+    /// A file exists but cannot be used — the loader's message.
+    Unusable { err: String },
+}
+
+/// Read the style library's status (see [`StyleIndexInfo`]).
+pub fn index_info() -> StyleIndexInfo {
+    index_info_at(&crate::store::style_index_path(), Path::new(LEGACY_INDEX_PATH))
+}
+
+/// [`index_info`] against explicit paths — the tested seam.
+pub fn index_info_at(central: &Path, legacy: &Path) -> StyleIndexInfo {
+    match load_effective_at(central, legacy) {
+        EffectiveIndex::Loaded(ix, path) => {
+            let mut tags: BTreeMap<&str, usize> = BTreeMap::new();
+            for e in &ix.exemplars {
+                *tags.entry(e.tag.as_str()).or_default() += 1;
+            }
+            let mut scenes: Vec<(String, usize)> =
+                tags.into_iter().map(|(t, n)| (t.to_string(), n)).collect();
+            // Count first, then the tag itself: a pure count sort left ties in
+            // an order that could differ between two reads of the same file.
+            scenes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            scenes.truncate(6);
+            let age = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| std::time::SystemTime::now().duration_since(t).ok());
+            let state = StyleIndexState::Built {
+                total: ix.exemplars.len(),
+                version: ix.version,
+                source_dir: ix.source_dir.clone(),
+                scenes,
+                age,
+            };
+            StyleIndexInfo { path, state }
+        }
+        EffectiveIndex::Absent => StyleIndexInfo {
+            path: std::path::absolute(central).unwrap_or_else(|_| central.to_path_buf()),
+            state: StyleIndexState::Absent,
+        },
+        EffectiveIndex::Unusable { path, err } => {
+            StyleIndexInfo { path, state: StyleIndexState::Unusable { err } }
+        }
+    }
+}
+
+/// The file names of the exemplars ONE retrieval actually used — the answer
+/// to "which library is it referencing, and which shots?" (feedback #6, the
+/// user's stated top pain: the reference was invisible).
+///
+/// Stems only, never full paths: the rationale is persisted and shown in
+/// three UIs, and the folder layout is not the point. Bounded on both axes
+/// ([`MAX_DISCLOSED_NEIGHBOURS`], [`MAX_STEM_CHARS`]) so a long-named library
+/// cannot crowd out the rest of the rationale.
+pub fn neighbour_stems(ex: &[&StyleExemplar]) -> Vec<String> {
+    ex.iter()
+        .take(MAX_DISCLOSED_NEIGHBOURS)
+        .map(|e| {
+            let mut s: String = e.stem.chars().take(MAX_STEM_CHARS).collect();
+            if s.chars().count() < e.stem.chars().count() {
+                s.push('…');
+            }
+            s
+        })
+        .collect()
 }
 
 /// `(the settings label from [`REF_KEYS`]) → (the `EditRecipe` field name)`.
@@ -1157,6 +1344,115 @@ mod tests {
         let names =
             |v: &[&StyleExemplar]| v.iter().map(|e| e.stem.clone()).collect::<Vec<_>>();
         assert_eq!(names(&first), names(&second), "the ranking is deterministic");
+    }
+
+    /// R23-2: the ONE status read every surface shares, in all three states.
+    /// Driven through the explicit-path seam — the production entry reads a
+    /// per-user store location, and a test that depended on it would be
+    /// testing the developer's own library.
+    #[test]
+    fn the_shared_status_read_reports_absent_built_and_unusable() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-style-info-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let central = dir.join("style-index.json");
+        let legacy = dir.join("legacy-style-index.json");
+
+        // ── Absent: no file anywhere. NOT an error — this is the fresh
+        // install whose Style slider used to sit there doing nothing in
+        // silence, and the path reported is where a build WOULD write.
+        let info = index_info_at(&central, &legacy);
+        assert_eq!(info.state, StyleIndexState::Absent);
+        assert!(info.path.is_absolute(), "the UI shows a real path: {:?}", info.path);
+        assert!(matches!(load_effective_at(&central, &legacy), EffectiveIndex::Absent));
+
+        // ── Built: counts, version, source folder and the scene histogram.
+        let ex = |tag: &str, stem: &str| StyleExemplar {
+            stem: stem.into(),
+            feat: vec![0.0; NDIM],
+            tag: tag.into(),
+            settings: BTreeMap::new(),
+            curve: None,
+            path: None,
+            families: None,
+        };
+        let built = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![
+                ex("wide/mid/midday/landscape", "a"),
+                ex("wide/mid/midday/landscape", "b"),
+                ex("tele/bright/goldenish/portrait", "c"),
+            ],
+            source_dir: Some("D:\\photos\\edited".into()),
+        };
+        built.save(&central).expect("a non-empty index saves");
+        let info = index_info_at(&central, &legacy);
+        match &info.state {
+            StyleIndexState::Built { total, version, source_dir, scenes, age } => {
+                assert_eq!(*total, 3);
+                assert_eq!(*version, CURRENT_INDEX_VERSION);
+                assert_eq!(source_dir.as_deref(), Some("D:\\photos\\edited"));
+                assert_eq!(scenes[0], ("wide/mid/midday/landscape".to_string(), 2));
+                assert_eq!(scenes[1], ("tele/bright/goldenish/portrait".to_string(), 1));
+                assert!(
+                    age.is_some_and(|a| a < std::time::Duration::from_secs(600)),
+                    "a file written milliseconds ago must read as new: {age:?}"
+                );
+            }
+            other => panic!("expected Built, got {other:?}"),
+        }
+
+        // ── Unusable: the file exists and cannot be used. Distinguished from
+        // Absent, because only one of the two is worth an error message.
+        std::fs::write(&central, "{not json").unwrap();
+        match index_info_at(&central, &legacy).state {
+            StyleIndexState::Unusable { err } => {
+                assert!(err.contains("parse style index"), "{err}")
+            }
+            other => panic!("expected Unusable, got {other:?}"),
+        }
+        // …and a good LEGACY file beside a broken central one still answers
+        // (the precedence this refactor had to preserve).
+        built.save(&legacy).unwrap();
+        match load_effective_at(&central, &legacy) {
+            EffectiveIndex::Loaded(_, p) => assert_eq!(p, std::path::absolute(&legacy).unwrap()),
+            _ => panic!("the legacy fallback must still serve"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R23-2 (the user's top pain — "I have no idea which library it is
+    /// referencing"): the retrieval discloses the SHOTS it used, bounded.
+    #[test]
+    fn the_disclosed_neighbours_are_stems_capped_in_count_and_length() {
+        let mk = |stem: &str| StyleExemplar {
+            stem: stem.into(),
+            feat: vec![0.0; NDIM],
+            tag: "wide/mid/midday/landscape".into(),
+            settings: BTreeMap::new(),
+            curve: None,
+            // A full path exists on the exemplar; the disclosure must NOT use it.
+            path: Some(format!("D:\\rolls\\2024\\{stem}.ARW")),
+            families: None,
+        };
+        let long = "x".repeat(MAX_STEM_CHARS + 20);
+        let all = [mk("DSC0001"), mk("DSC0002"), mk("DSC0003"), mk("DSC0004"), mk(&long)];
+        let refs: Vec<&StyleExemplar> = all.iter().collect();
+        let got = neighbour_stems(&refs);
+        assert_eq!(got.len(), MAX_DISCLOSED_NEIGHBOURS, "count is bounded: {got:?}");
+        assert_eq!(got[0], "DSC0001");
+        assert!(
+            !got.iter().any(|s| s.contains("D:\\rolls")),
+            "a persisted, displayed rationale must not carry folder layout: {got:?}"
+        );
+        // The length cap engages on the 5th…-if it were in range; assert it
+        // directly on a single long stem so the bound is pinned either way.
+        let one = neighbour_stems(&[&mk(&long)]);
+        assert_eq!(one[0].chars().count(), MAX_STEM_CHARS + 1, "capped + ellipsis: {one:?}");
+        assert!(one[0].ends_with('…'), "truncation is visible: {one:?}");
+        assert!(neighbour_stems(&[]).is_empty(), "nothing retrieved ⇒ nothing claimed");
     }
 
     /// L04-3: the f32→f64 accumulator switch is a no-op on real data — the

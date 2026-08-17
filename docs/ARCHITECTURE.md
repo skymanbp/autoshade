@@ -509,6 +509,32 @@ settings, diff the AI recipe against them; if they're exported JPEGs, compare th
 AI render perceptually. Lets us measure "does the AI match *how the user*
 develops a shot?" and tune the advisor prompt accordingly.
 
+**Three surfaces, one loader (R23-2).** The library
+([`src/style.rs`](../src/style.rs)) is built from RAW+`.xmp` pairs by
+`autoshop style-index <dir>`, by the web info panel, and — since R23-2 — by the
+GUI's **AI panel › Style reference library** (folder picker → background worker
+with per-photo progress; no cancel, because `StyleIndex::build` has no
+cancellation checkpoints, so the button simply stays disabled until it lands).
+The index always publishes to the per-user store (`store::style_index_path`);
+the legacy cwd-relative `out/style-index.json` stays readable. Reading it is
+`style::load_effective` / `style::index_info` — ONE central-then-legacy walk
+returning three typed states (`Loaded` / `Absent` / `Unusable`), consumed by the
+pipeline, the web handler and the GUI status line alike. The empty-index refusal
+lives in `StyleIndex::save`, so no caller can truncate a good index with a
+failed build.
+
+Two disclosure rules follow from those states. A develop that ASKED for style
+and ended with no reference always says so in the rationale — the condition is
+"strength > 0 and the final reference is `None`", which covers a missing
+library, a retrieval that matched nothing and an unusable file in one place
+(before R23-2 only the last of the three spoke, so a fresh install had an inert
+Style slider and no explanation). And every analysis that DID get a reference
+names the shots it used, bounded to file stems. The optional
+reference-**image** switch (GUI only, off by default) additionally sends the
+nearest past photo as a second `input_image` on the propose call — the prompt
+names the two frames by position, `store:false` covers both, and the extra image
+is disclosed in the tooltip and in the rationale.
+
 ### 4.7 Pixel retouch / heal (optional) — V2
 
 A third, opt-in editing mode (`autoshop heal`, or the UI's **修图 · 去瑕疵** panel),
@@ -729,7 +755,7 @@ Toolchain in use: rustc/cargo **1.94.1** (verified locally).
 
 | # | Question | Status |
 |---|----------|--------|
-| 1 | **Image library path** (originals + finished edits) | resolved: passed per invocation (`batch <dir>`, `serve --dir`, `style-index <dir>`, the GUI folder picker) — no configured library root; develop state is keyed by each photo's absolute path in the per-user store |
+| 1 | **Image library path** (originals + finished edits) | resolved: passed per invocation (`batch <dir>`, `serve --dir`, `style-index <dir>`, the GUI folder picker) — no configured library root; develop state is keyed by each photo's absolute path in the per-user store. One exception since R23-2: the STYLE library's source folder is remembered in the GUI prefs (`style_src_dir`) so a rebuild need not re-find it — a convenience, not a library root; the index records the folder it was built from as well |
 | 2 | Camera / RAW format | resolved: Sony `.ARW` |
 | 3 | Output target | resolved: XMP sidecar **+** rendered, XMP-first |
 | 4 | AI roles | resolved: GPT=image, Claude=non-image+verify, unified framework |

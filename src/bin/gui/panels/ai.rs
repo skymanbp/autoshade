@@ -19,7 +19,16 @@
 //! 「第二十二至二十四轮计划」): the grade STRENGTH slider (default 0.65), the
 //! thinking-depth control, and the style-library entry with its reference-image
 //! switch. They are analysis-side, so they belong in `ai_analysis` beside
-//! Direction / Style — this package deliberately implements none of them.
+//! Direction / Style.
+//!
+//! R23-2 landed the third of those: [`AutoshopApp::ai_style_library`] — the
+//! desktop app's FIRST production-side entry for the style reference library
+//! (building existed only on the CLI and in the web panel, so the Style slider
+//! shipped permanently inert for anyone who double-clicks the exe), plus the
+//! transparency half of the same feedback item: which library, how big, how
+//! old, and which shots the last analysis actually leaned on. It sits INSIDE
+//! `ai_analysis`, directly under the slider it explains, rather than in a
+//! fold or in Settings — the status IS half the feature.
 
 use crate::*;
 
@@ -45,10 +54,11 @@ impl AutoshopApp {
     /// slider resets to means the dot and the reset can never disagree.
     ///
     /// Deliberately NOT in the set: `reimagine_prompt`, `fit_ai_judge`,
-    /// `zoned_fit`. Those belong to the two collapsed sub-areas and are
-    /// persisted PREFERENCES of paid verbs (`zoned_fit` even defaults to true),
-    /// so folding them in would light the dot on a fresh launch — the false
-    /// positive the ● exists to avoid.
+    /// `zoned_fit`, and (R23-2) `send_style_ref_image` / `style_src_dir`. Those
+    /// are persisted PREFERENCES of paid verbs, or library bookkeeping — the
+    /// same rule as `fit_ai_judge`, whose default-off state must not light the
+    /// dot either. The dot means "this PHOTO's AI inputs carry state", and a
+    /// remembered folder says nothing about this photo.
     pub(crate) fn ai_section_active(&self) -> bool {
         self.verdict.is_some()
             || !self.guidance.is_empty()
@@ -236,6 +246,205 @@ impl AutoshopApp {
                 STYLE_STRENGTH_DEFAULT,
                 tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)"),
             );
+            // R23-2: a slider that provably cannot do anything must not read as
+            // live. The old one showed 30% and a tooltip about "your past XMP
+            // editing habits" on a fresh install with no library at all — a
+            // control that was permanently inert with nothing saying so. Only
+            // when the status is KNOWN and negative (never while it is still
+            // being read, which would flash a false warning every launch).
+            if matches!(
+                self.style_info.as_ref().map(|i| &i.state),
+                Some(
+                    autoshop::style::StyleIndexState::Absent
+                        | autoshop::style::StyleIndexState::Unusable { .. }
+                )
+            ) {
+                ui.label(
+                    egui::RichText::new(tr(lang, "⚠ no library"))
+                        .color(ui.visuals().warn_fg_color)
+                        .small(),
+                )
+                .on_hover_text(tr(lang,
+                    "This slider does nothing until a style reference library is built — the section just below builds one.",
+                ));
+            }
+        });
+        self.ai_style_library(ui);
+    }
+
+    /// Sub-area 1b — the STYLE REFERENCE LIBRARY: what the Style slider above
+    /// actually leans on, and the only place in the desktop app that can build
+    /// it (R23-2, feedback #6).
+    ///
+    /// Two defects in one section. The library had no production-side entry
+    /// point outside the CLI and the web panel, so the slider above was
+    /// permanently inert for anyone who double-clicks the exe; and even with a
+    /// library built, nothing ever said WHICH one — the user's own words were
+    /// "I have no idea which library it is referencing". So the status line is
+    /// not decoration here, it is half the feature, and it sits directly under
+    /// the slider it explains rather than behind a fold.
+    fn ai_style_library(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        // Read the status ONCE per session (cached in `style_info`) — the file
+        // can reach 32 MB, and this draws every frame. Not in tests: a headless
+        // frame would spawn a worker reading the developer's own store, and the
+        // tests drive `style_info` directly instead.
+        if !cfg!(test) && self.style_info.is_none() && !self.style_info_loading {
+            self.start_style_info();
+        }
+        ui.add_space(SPACE_XS);
+        group_caption(ui, tr(lang, "Style reference library"));
+        // ── the status line: which library, how big, how old, and where.
+        match self.style_info.as_ref().map(|i| (i.path.clone(), i.state.clone())) {
+            Some((path, autoshop::style::StyleIndexState::Built { total, source_dir, age, .. })) => {
+                let from = source_dir.unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
+                ui.label(
+                    egui::RichText::new(trf(
+                        lang,
+                        "{n} of your own edits · from {path}",
+                        &[("n", &total.to_string()), ("path", &from)],
+                    ))
+                    .small(),
+                )
+                .on_hover_text(trf(
+                    lang,
+                    "Library file: {path}",
+                    &[("path", &abs_display(&path))],
+                ));
+                if let Some(age) = age {
+                    // Coarse buckets, no calendar arithmetic (this tree carries
+                    // no date library): "how stale is my library" is answered by
+                    // hours or days, and both spellings avoid a plural rule.
+                    const HOUR: u64 = 3600;
+                    let secs = age.as_secs();
+                    let line = if secs < 48 * HOUR {
+                        trf(lang, "built {hours}h ago", &[("hours", &(secs / HOUR).to_string())])
+                    } else {
+                        trf(lang, "built {days}d ago", &[("days", &(secs / (24 * HOUR)).to_string())])
+                    };
+                    ui.label(egui::RichText::new(line).weak().small());
+                }
+            }
+            Some((_, autoshop::style::StyleIndexState::Unusable { err })) => {
+                ui.label(
+                    egui::RichText::new(trf(
+                        lang,
+                        "The style library could not be read ({err}) — rebuild it below.",
+                        &[("err", &err)],
+                    ))
+                    .color(ui.visuals().warn_fg_color)
+                    .small(),
+                );
+            }
+            Some((_, autoshop::style::StyleIndexState::Absent)) => {
+                // The shared refusal's own wording (the CLI's `StyleIndex::save`
+                // and the web handler say the same): an Autoshop OUTPUT folder
+                // always yields nothing, because Autoshop's own .xmp lives in
+                // the develop store — that is the mistake this sentence exists
+                // to pre-empt, and it must not be reworded per surface.
+                ui.label(
+                    egui::RichText::new(tr(lang,
+                        "No library built yet — the Style slider above has nothing to lean on. Point this at the folder you edit in Lightroom (each RAW with its .xmp sidecar beside it); Autoshop keeps its own .xmp in the develop store, never beside your RAWs, so its output folder always yields nothing.",
+                    ))
+                    .small(),
+                );
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(tr(lang, "reading the style library…")).weak().small(),
+                );
+            }
+        }
+        // ── the folder picker + the build button.
+        ui.horizontal_wrapped(|ui| {
+            let building = self.style_build_inflight;
+            let mut pick = false;
+            let mut build: Option<PathBuf> = None;
+            ui.add_enabled_ui(!building, |ui| {
+                if ui
+                    // 🗂, the same glyph Settings uses for a folder action: the
+                    // embedded font subset covers it already (📂 is not in it).
+                    .button(tr(lang, "🗂 Pick folder…"))
+                    .on_hover_text(tr(lang,
+                        "Choose the folder of your OWN edited RAWs — the ones with a Lightroom .xmp sidecar beside them. Each pair teaches Autoshop one of your finished looks. Indexing starts as soon as you choose.",
+                    ))
+                    .clicked()
+                {
+                    pick = true;
+                }
+                // Rebuilding needs a folder: the remembered one, or one picked
+                // now. Enabled only when there IS one, so the button can never
+                // launch a build against nothing.
+                let have = self.style_src_dir.clone().filter(|d| d.is_dir());
+                let label = if building {
+                    tr(lang, "building…")
+                } else {
+                    tr(lang, "🔄 Build / rebuild")
+                };
+                let resp = ui
+                    .add_enabled(have.is_some(), egui::Button::new(label))
+                    .on_hover_text(if have.is_some() {
+                        tr(lang,
+                            "Index every RAW+.xmp pair in that folder (local compute, no API cost). Every RAW is decoded, so a large library takes minutes; the app stays usable and this button re-arms when it finishes. It cannot be cancelled — a build that indexes nothing is refused and leaves your existing library untouched.",
+                        )
+                    } else {
+                        tr(lang, "Pick a folder first")
+                    });
+                if resp.clicked() {
+                    build = have;
+                }
+            });
+            if let Some((done, total)) = self.style_build_progress {
+                ui.label(
+                    egui::RichText::new(trf(
+                        lang,
+                        "{done} / {total} photos",
+                        &[("done", &done.to_string()), ("total", &total.to_string())],
+                    ))
+                    .weak()
+                    .small(),
+                );
+            }
+            // rfd OUTSIDE the closures above (they borrow `ui`), and after the
+            // row is laid out: the dialog is modal and blocks this thread.
+            if pick {
+                let mut dialog = rfd::FileDialog::new();
+                // Reopen where the last build ran, when that folder still
+                // exists — a dialog pointed at a missing path lands wherever
+                // the OS decides (Explorer drops you in Documents).
+                if let Some(d) = self.style_src_dir.clone().filter(|d| d.is_dir()) {
+                    dialog = dialog.set_directory(d);
+                }
+                if let Some(dir) = dialog.pick_folder() {
+                    // Remembered on the PICK, not only on a successful build:
+                    // the rebuild button needs a folder before it can do
+                    // anything, and a build that then fails must not lose it.
+                    self.style_src_dir = Some(dir.clone());
+                    self.start_style_build(dir);
+                }
+            }
+            if let Some(dir) = build {
+                self.start_style_build(dir);
+            }
+        });
+        // ── the opt-in reference PHOTO (the "both" half of feedback #6: the
+        // index AND an actual picture).
+        let built = matches!(
+            self.style_info.as_ref().map(|i| &i.state),
+            Some(autoshop::style::StyleIndexState::Built { .. })
+        );
+        ui.add_enabled_ui(built, |ui| {
+            ui.checkbox(
+                &mut self.send_style_ref_image,
+                tr(lang, "Also give the model a reference photo"),
+            )
+            .on_hover_text(if built {
+                tr(lang,
+                    "WILL UPLOAD TWO IMAGES per analysis call: this photo, plus the ONE most similar shot from your style library, so the model can match your look by eye instead of only by numbers. COST: an analysis with two images is billed for two images instead of one — and a revision round sends both again. The reference is never stored by the provider (store:false), and the rationale names the photo that was used. Off = the numeric style reference only.",
+                )
+            } else {
+                tr(lang, "Build a style library first — there is no reference photo to send")
+            });
         });
     }
 

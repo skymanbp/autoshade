@@ -17,7 +17,10 @@ use image::GenericImageView;
 use autoshop::{decode, denoise, eval, fit, generative, pipeline, render, retouch, serve};
 use autoshop::advisor::Verdict;
 use autoshop::config::Config;
-use autoshop::pipeline::{default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe, write_xmp};
+use autoshop::pipeline::{
+    default_out, ensure_parent, find_raws, produce_recipe, stem, write_recipe, write_xmp,
+    StyleRequest,
+};
 use autoshop::recipe::EditRecipe;
 use autoshop::style::StyleIndex;
 
@@ -464,7 +467,7 @@ fn analyze_cmd(raw: &Path, out: Option<PathBuf>, guidance: Option<String>, style
     // (batch passes false — spend never multiplies silently).
     let style = style.unwrap_or(cfg.style_strength);
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style, true)?;
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, StyleRequest::strength(style), true)?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
@@ -649,7 +652,7 @@ fn auto_cmd(
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, style, true)?;
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, StyleRequest::strength(style), true)?;
     let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
@@ -1203,7 +1206,7 @@ fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Ver
     // paid vision calls — the closed loop is for the interactive surfaces
     // (review R20-M2).
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, cfg, false, None, None, cfg.style_strength, false)?;
+        produce_recipe(raw, cfg, false, None, None, StyleRequest::strength(cfg.style_strength), false)?;
     // A non-Accept verdict may not auto-save (user decision). In a headless
     // batch that means NO sidecars and NO deliverable: the photo stays
     // pending, the caller's summary names it, and a re-run re-attempts it —

@@ -41,6 +41,27 @@ pub(crate) struct AutoshopApp {
     /// shows instead. Cleared wherever `rationale` is reloaded from disk.
     pub(crate) rationale_notes: Vec<autoshop::rationale::Note>,
     pub(crate) style_strength: f32,
+    /// R23-2, feedback #6: also SHOW the vision model the nearest past photo,
+    /// not only its numbers. Persisted, and OFF by default — it puts a second
+    /// image on every call of a paid analysis (the checkbox says so).
+    pub(crate) send_style_ref_image: bool,
+    /// The folder the style library was last built FROM — prefilled into the
+    /// picker so a rebuild does not mean finding it again. Persisted.
+    pub(crate) style_src_dir: Option<PathBuf>,
+    /// The style library's status as last READ (`autoshop::style::index_info`),
+    /// cached: this is a disk read of a file that can reach 32 MB, so it must
+    /// never happen per frame. `None` = not read yet.
+    pub(crate) style_info: Option<autoshop::style::StyleIndexInfo>,
+    /// A status read is on a worker thread (keeps the first draw off the disk).
+    pub(crate) style_info_loading: bool,
+    /// A library BUILD is running. Its own flag, never the global `busy`:
+    /// building decodes every RAW in a folder and takes minutes, and freezing
+    /// the whole app for that would be worse than the missing entry point this
+    /// closes. Only the build button gates on it.
+    pub(crate) style_build_inflight: bool,
+    /// `(completed, total)` of the running build — typed facts, worded at draw
+    /// time (L12#4).
+    pub(crate) style_build_progress: Option<(usize, usize)>,
     pub(crate) hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance
     pub(crate) grade_region: usize,
     pub(crate) guidance: String, // free-text direction for the AI ("warmer, moodier")
@@ -1386,6 +1407,14 @@ impl Default for AutoshopApp {
             // model::STYLE_STRENGTH_DEFAULT for why the literal cannot live in
             // two Default impls.
             style_strength: STYLE_STRENGTH_DEFAULT,
+            // OFF: an extra image on a paid call is the user's opt-in, never a
+            // default (the same rule `fit_ai_judge` follows).
+            send_style_ref_image: false,
+            style_src_dir: None,
+            style_info: None,
+            style_info_loading: false,
+            style_build_inflight: false,
+            style_build_progress: None,
             hsl_tab: 0,
             grade_region: 0,
             guidance: String::new(),
@@ -1758,6 +1787,8 @@ impl eframe::App for AutoshopApp {
             &Prefs {
                 gallery_dir: self.gallery_dir.clone(),
                 style_strength: self.style_strength,
+                send_style_ref_image: self.send_style_ref_image,
+                style_src_dir: self.style_src_dir.clone(),
                 // Both written: exp_format is the truth, save_jpeg keeps a
                 // pre-阶段4 build reading this prefs file sane.
                 save_jpeg: self.exp_format == ExportFormat::Jpeg,

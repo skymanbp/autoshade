@@ -4332,3 +4332,195 @@
             "dedup keys on (text, kind), not text alone"
         );
     }
+
+    /// R23-2 (feedback #6): the AI panel now OWNS the style reference library —
+    /// its status, its build entry, and the honesty of the Style slider above
+    /// it. All three read the ONE cached status, so this pins the rendered
+    /// panel in each state rather than the predicate alone.
+    ///
+    /// The status is INJECTED: the production panel spawns a worker to read it
+    /// (the file reaches 32 MB), and a headless frame must not go to the
+    /// developer's own store for an answer.
+    #[test]
+    fn the_ai_panel_says_which_style_library_it_is_referencing() {
+        use autoshop::style::{StyleIndexInfo, StyleIndexState};
+        let info =
+            |state| Some(StyleIndexInfo { path: "C:/store/style-index.json".into(), state });
+
+        // ── Nothing built: the entry point, the pointer sentence, AND the
+        // slider's own warning — the defect was a slider showing 30% with
+        // nothing behind it and no way in the app to build one.
+        let mut app =
+            AutoshopApp { style_info: info(StyleIndexState::Absent), ..Default::default() };
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Style reference library"),
+            "the section must exist at all — otherwise this test proves nothing: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("No library built yet")),
+            "an unbuilt library must say so: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("folder you edit in Lightroom")),
+            "…and where to point it (an Autoshop output folder yields nothing): {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("no library")),
+            "the Style slider must not read as live when it provably is not: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("Pick folder")),
+            "the GUI build entry point — the whole missing surface: {seen:?}"
+        );
+
+        // ── Built: WHICH library, how big, how old. This is the answer to the
+        // user's "I have no idea which library it is referencing".
+        let mut app = AutoshopApp {
+            style_info: info(StyleIndexState::Built {
+                total: 412,
+                version: 3,
+                source_dir: Some("D:/photos/edited".into()),
+                scenes: vec![("wide/mid/midday/landscape".into(), 12)],
+                age: Some(std::time::Duration::from_secs(5 * 3600)),
+            }),
+            ..Default::default()
+        };
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t.contains("412") && t.contains("D:/photos/edited")),
+            "the count AND the folder it came from: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("built 5h ago")),
+            "and how stale it is: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|t| t.contains("no library")),
+            "no false warning beside the slider once a library exists: {seen:?}"
+        );
+
+        // ── Unusable: the loader's reason, not silence (this arm always spoke
+        // in the rationale; now the panel says it before an analysis is paid
+        // for).
+        let mut app = AutoshopApp {
+            style_info: info(StyleIndexState::Unusable {
+                err: "is version 2 (current 3)".into(),
+            }),
+            ..Default::default()
+        };
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(
+            seen.iter().any(|t| t.contains("is version 2 (current 3)")),
+            "the cause reaches the user: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.contains("no library")),
+            "and the slider is flagged: {seen:?}"
+        );
+    }
+
+    /// R23-2: the reference-PHOTO switch is off by default in BOTH defaults
+    /// (the app's and the prefs'), so neither a fresh install nor an upgraded
+    /// prefs file silently starts putting a second image on every paid call.
+    /// The wire-level proof that the switch is what adds the image lives in
+    /// `advisor::openai`'s stub-endpoint test.
+    #[test]
+    fn the_style_reference_photo_switch_is_off_in_both_defaults() {
+        assert!(
+            !AutoshopApp::default().send_style_ref_image,
+            "spending is opt-in — a fresh app must not send a second image"
+        );
+        assert!(
+            !Prefs::default().send_style_ref_image,
+            "a prefs file written before this key existed must decode to the SAME answer"
+        );
+        assert_eq!(Prefs::default().style_src_dir, None);
+        // …and the request the analyze worker builds carries the flag, so the
+        // checkbox cannot become decoration.
+        let app = AutoshopApp { send_style_ref_image: true, ..Default::default() };
+        let req = autoshop::pipeline::StyleRequest {
+            strength: app.style_strength,
+            send_reference_image: app.send_style_ref_image,
+        };
+        assert!(req.send_reference_image);
+        assert!(
+            !autoshop::pipeline::StyleRequest::strength(0.65).send_reference_image,
+            "every non-GUI surface stays on the text reference"
+        );
+    }
+
+    /// R23-2: the build landing — typed outcome in, sentence + state out
+    /// (L12#4). A minutes-long build must re-arm its button in every arm, and
+    /// only the SAVED arm may remember the folder or refresh the status.
+    #[test]
+    fn a_style_library_build_lands_as_a_typed_outcome_in_every_arm() {
+        let ctx = egui::Context::default();
+        let dir = std::path::PathBuf::from("D:/photos/edited");
+
+        // Saved: success toast, folder remembered (so a rebuild starts there),
+        // and a fresh status read armed — the panel must not keep the OLD
+        // counts.
+        let mut app = AutoshopApp {
+            style_build_inflight: true,
+            style_build_progress: Some((7, 9)),
+            ..Default::default()
+        };
+        app.tx
+            .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
+                total: 412,
+                dir: dir.clone(),
+            })))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert!(!app.style_build_inflight, "the button re-arms");
+        assert_eq!(app.style_build_progress, None, "the counter belongs to ONE build");
+        assert!(app.status.contains("412"), "{}", app.status);
+        assert_eq!(
+            app.style_src_dir.as_deref(),
+            Some(dir.as_path()),
+            "the folder is remembered"
+        );
+        assert!(app.style_info_loading, "a build invalidates the cached status");
+        assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Success)));
+
+        // Nothing indexed: the SHARED refusal wording (the CLI and the web say
+        // the same), an ERROR toast, and NOTHING remembered — the folder was
+        // the wrong kind of folder.
+        let mut app = AutoshopApp { style_build_inflight: true, ..Default::default() };
+        app.tx
+            .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::NothingIndexed {
+                dir: dir.clone(),
+            })))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert!(!app.style_build_inflight);
+        assert!(
+            app.status.contains("folder you edit in Lightroom")
+                && app.status.contains("left untouched"),
+            "the refusal must say where to point instead, and that the old library \
+             stands: {}",
+            app.status
+        );
+        assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)));
+        assert!(!app.style_info_loading, "a refused build changed nothing to re-read");
+
+        // Failed: the cause, an error toast, button re-armed.
+        let mut app = AutoshopApp { style_build_inflight: true, ..Default::default() };
+        app.tx
+            .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
+                err: "read the folder: access denied".into(),
+            })))
+            .unwrap();
+        app.poll_workers(&ctx);
+        assert!(!app.style_build_inflight);
+        assert!(app.status.contains("access denied"), "{}", app.status);
+        assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)));
+
+        // Progress ticks land as counts, not as a worker-built sentence.
+        let mut app = AutoshopApp { style_build_inflight: true, ..Default::default() };
+        app.tx.send(Msg::StyleBuildProgress { done: 40, total: 300 }).unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.style_build_progress, Some((40, 300)));
+        assert!(app.status.contains("40") && app.status.contains("300"), "{}", app.status);
+    }

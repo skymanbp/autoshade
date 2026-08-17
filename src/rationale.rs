@@ -133,6 +133,33 @@ pub mod keys {
     pub const STYLE_UNAVAILABLE: &str =
         " [style reference unavailable ({e}) — the Style slider had no effect on this \
          develop; rebuild it with: autoshop style-index <folder>]";
+    /// R23-2, feedback #6: the OTHER two silent arms. `STYLE_UNAVAILABLE`
+    /// above only ever fired when an index FILE existed and failed to load, so
+    /// a fresh install (no library at all) and a retrieval that matched
+    /// nothing both produced a Style slider that did nothing, silently, on
+    /// every surface. One note covers both — the condition is "asked for
+    /// style, ended up with no reference" — and it names the GUI entry point,
+    /// because the windowed app is where this is most often read.
+    /// (The arrow is `→`, not `›`: this template is RENDERED BY THE GUI, whose
+    /// embedded font subset is generated from the GUI sources — a character
+    /// only this module uses would draw as a tofu box there.)
+    pub const STYLE_NO_REFERENCE: &str =
+        " [no style reference was available for this photo — the Style slider ({pct}%) had \
+         no effect on this develop. Build your style library in the AI panel → Style \
+         reference library: a folder of your own RAWs with their Lightroom .xmp sidecars \
+         beside them]";
+    /// Which past shots this develop actually leaned on (R23-2 transparency).
+    pub const STYLE_NEIGHBOURS: &str =
+        " [style reference: your own edits on {files} — the {n} most similar shots in your \
+         style library]";
+    /// The opt-in reference IMAGE (off by default — it is an extra image on a
+    /// paid vision call).
+    pub const STYLE_REF_IMAGE: &str =
+        " [{file} also went to the vision model as a reference IMAGE — one extra image on \
+         each call of this analysis]";
+    pub const STYLE_REF_IMAGE_FAILED: &str =
+        " [the reference photo could not be prepared ({e}) — this develop used the text \
+         reference only]";
     pub const MASKS_NOT_PRESERVED: &str =
         "\n⚠ the response did not preserve mask identities (a mask was renamed or \
          duplicated) — your masks were kept unchanged and the model's mask edits were \

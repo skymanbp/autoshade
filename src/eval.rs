@@ -495,7 +495,15 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         // (either would bias the gap — and the judge is a paid vision call
         // per photo, unasked-for in a measurement run).
         let (ai, _verdict, _notes) =
-            match pipeline::produce_recipe(raw, &cfg, false, None, None, 0.0, false) {
+            match pipeline::produce_recipe(
+                raw,
+                &cfg,
+                false,
+                None,
+                None,
+                pipeline::StyleRequest::default(),
+                false,
+            ) {
             Ok(v) => v,
             Err(e) => {
                 println!("FAILED: {e}");

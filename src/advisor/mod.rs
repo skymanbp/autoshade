@@ -34,6 +34,15 @@ pub struct Preview {
     pub jpeg: Vec<u8>,
 }
 
+impl std::fmt::Debug for Preview {
+    /// The byte COUNT, never the bytes: [`ProposeContext`] derives `Debug` and
+    /// now holds a `Preview`, so a derived impl would put a whole base64-able
+    /// JPEG into any diagnostic that formats one.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Preview").field("jpeg_bytes", &self.jpeg.len()).finish()
+    }
+}
+
 pub(crate) const REMOTE_DIAGNOSTIC_MAX_BYTES: usize = 1024;
 
 /// `pub`, not `pub(crate)`: it is a field of the `pub` `AdvisorError::Http`,
@@ -263,6 +272,11 @@ pub struct ProposeContext<'a> {
     /// The verifier's / visual judge's revision instruction on a later round
     /// (UNTRUSTED model text — the provider fences it).
     pub hint: Option<&'a str>,
+    /// The single most similar past photo, as a JPEG preview, when the
+    /// photographer opted into SHOWING it to the model (R23-2, off by
+    /// default: it is a second image on every call of a paid analysis).
+    /// `None` = the text reference alone, which is the historical shape.
+    pub reference_image: Option<&'a Preview>,
     /// The photo's as-shot white balance in ABSOLUTE Kelvin, the anchor
     /// `temperature_k` is measured against (`None` = unknown, the engine's
     /// 5500 K fallback). The prompt states it because the model otherwise has

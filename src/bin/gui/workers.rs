@@ -505,6 +505,22 @@ impl AutoshopApp {
                         &[("done", &done.to_string()), ("total", &total.to_string())],
                     );
                 }
+                Msg::StyleInfo(info) => {
+                    self.style_info_loading = false;
+                    self.style_info = Some(*info);
+                }
+                Msg::StyleBuildProgress { done, total } => {
+                    self.style_build_progress = Some((done, total));
+                    // The panel's own line renders these counts; the status bar
+                    // gets them too, because a minutes-long job must be visible
+                    // from wherever the user is looking.
+                    self.status = trf(
+                        lang,
+                        "Building the style library… {done} / {total} photos",
+                        &[("done", &done.to_string()), ("total", &total.to_string())],
+                    );
+                }
+                Msg::StyleBuilt(outcome) => self.on_style_built(lang, *outcome),
                 Msg::Segmented(res) => self.on_segmented(lang, res),
                 Msg::MaskRefined(res) => self.on_mask_refined(lang, res),
                 Msg::Folder(boxed) => self.on_folder(lang, *boxed),
@@ -584,6 +600,14 @@ impl AutoshopApp {
             || self.settings.image_models.fetching
             || self.settings.analysis_models.fetching
             || !self.master_loads.is_empty()
+            // R23-2: the style-library build is NOT busy-gated (it runs for
+            // minutes and the app stays usable), so without it here the
+            // "building…" state would only repaint when a progress tick
+            // happens to arrive — a single slow 60 MP decode would freeze the
+            // counter for as long as it takes. Same reason the two model
+            // fetches are on this list.
+            || self.style_build_inflight
+            || self.style_info_loading
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -1666,6 +1690,49 @@ impl AutoshopApp {
                         self.fail(tr(lang, "analyze failed"), e);
                     }
                 }
+    }
+
+    /// `Msg::StyleBuilt` landing (R23-2): the typed outcome becomes a sentence
+    /// in the language live NOW (L12#4), the button re-arms, and a successful
+    /// build both remembers its folder (so a rebuild starts there) and triggers
+    /// a fresh status read — the panel must not keep showing the OLD counts.
+    fn on_style_built(&mut self, lang: Lang, outcome: StyleBuildOutcome) {
+        self.style_build_inflight = false;
+        self.style_build_progress = None;
+        match outcome {
+            StyleBuildOutcome::Saved { total, dir } => {
+                let t = trf(
+                    lang,
+                    "Style library built: {n} of your own edits from {path}",
+                    &[("n", &total.to_string()), ("path", &abs_display(&dir))],
+                );
+                self.status = t.clone();
+                self.toast(ToastKind::Success, t);
+                self.style_src_dir = Some(dir);
+                self.start_style_info();
+            }
+            // The shared guard's refusal, in the shared WORDING (serve.rs says
+            // the same thing to the web): the folder, why it yielded nothing,
+            // where to point instead, and that the old library still stands.
+            StyleBuildOutcome::NothingIndexed { dir } => {
+                let t = trf(
+                    lang,
+                    "Nothing to index in {path} — no RAW there has its .xmp sidecar beside it (Autoshop keeps its own .xmp in the develop store, never beside the RAW, so point this at the folder you edit in Lightroom). Your existing style library was left untouched.",
+                    &[("path", &abs_display(&dir))],
+                );
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t);
+            }
+            StyleBuildOutcome::Failed { err } => {
+                let t = trf(
+                    lang,
+                    "Building the style library failed: {err}",
+                    &[("err", &err)],
+                );
+                self.status = t.clone();
+                self.toast(ToastKind::Error, t);
+            }
+        }
     }
 
     /// `Msg::Segmented` landing — body extracted verbatim from the

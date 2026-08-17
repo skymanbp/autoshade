@@ -14,6 +14,11 @@ impl AutoshopApp {
             cc.storage.and_then(|s| eframe::get_value::<Prefs>(s, eframe::APP_KEY))
         {
             app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
+            app.send_style_ref_image = prefs.send_style_ref_image;
+            // Only a folder that still EXISTS is prefilled: a picker opened at
+            // a deleted path lands wherever the OS decides (the same rule the
+            // gallery restore above follows).
+            app.style_src_dir = prefs.style_src_dir.clone().filter(|d| d.is_dir());
             app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
             app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
             app.last_export_dir = prefs.last_export_dir.clone();
@@ -2033,6 +2038,98 @@ impl AutoshopApp {
         );
     }
 
+    /// Read the style library's status onto a worker thread (R23-2).
+    ///
+    /// Off the UI thread because the file it parses can reach 32 MB, and
+    /// CACHED in `style_info` because the panel that shows it draws every
+    /// frame. Re-run after a build; nothing else invalidates it (another
+    /// process rebuilding the shared index mid-session is the one staleness
+    /// this accepts — the alternative is a stat per frame forever).
+    pub(crate) fn start_style_info(&mut self) {
+        if self.style_info_loading {
+            return;
+        }
+        self.style_info_loading = true;
+        self.spawn_worker(
+            || Msg::StyleInfo(Box::new(autoshop::style::index_info())),
+            // A read that PANICS must still clear the flag, or the status line
+            // says "reading…" for the rest of the session. Absent is the
+            // honest fallback: no usable library was read.
+            |_e| {
+                Msg::StyleInfo(Box::new(autoshop::style::StyleIndexInfo {
+                    path: autoshop::store::style_index_path(),
+                    state: autoshop::style::StyleIndexState::Absent,
+                }))
+            },
+        );
+    }
+
+    /// Build (or rebuild) the style library from `dir` — the GUI's missing
+    /// production-side entry point (R23-2, feedback #6: building existed only
+    /// on the CLI and in the web panel, neither of which a user who
+    /// double-clicks the exe can reach).
+    ///
+    /// Background, with progress: `StyleIndex::build` decodes EVERY RAW in the
+    /// folder, minutes on a real library. NOT `busy`-gated — freezing the whole
+    /// app for that would be its own defect — so only this button gates on
+    /// `style_build_inflight`.
+    ///
+    /// NO cancel: `StyleIndex::build` has no cancellation checkpoints (its
+    /// decode workers run a scoped loop to completion), and an abandon-only ✕
+    /// like Analyze's would leave every core decoding for minutes with nothing
+    /// to show for it. The button stays disabled until the build lands and the
+    /// panel says so; closing the window during a build is safe — the index is
+    /// published tmp+rename (`StyleIndex::save`), so a killed process leaves
+    /// the previous library intact.
+    pub(crate) fn start_style_build(&mut self, dir: PathBuf) {
+        if self.style_build_inflight {
+            return;
+        }
+        self.style_build_inflight = true;
+        self.style_build_progress = None;
+        self.status = trf(
+            self.lang,
+            "Building the style library from {path} … every RAW is decoded, so a big folder takes minutes",
+            &[("path", &abs_display(&dir))],
+        );
+        // The progress channel is the app's own sender: `spawn_worker` delivers
+        // ONE terminal message, and this build has to report while it runs.
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.spawn_worker(
+            move || {
+                let progress = |done: usize, total: usize| {
+                    let _ = tx.send(Msg::StyleBuildProgress { done, total });
+                    // An mpsc send does not wake egui (see `spawn_worker`).
+                    ctx.request_repaint();
+                };
+                let index = match autoshop::style::StyleIndex::build_reporting(&dir, &progress) {
+                    Ok(ix) => ix,
+                    Err(e) => {
+                        return Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
+                            err: format!("{e:#}"),
+                        }))
+                    }
+                };
+                let total = index.exemplars.len();
+                // The empty-index refusal is NOT re-implemented here: `save`
+                // owns it for every caller (an empty write truncates a good
+                // index in place). The count only decides WHICH sentence the
+                // landing shows for the refusal it hands back.
+                match index.save(&autoshop::store::style_index_path()) {
+                    Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved { total, dir })),
+                    Err(_) if total == 0 => {
+                        Msg::StyleBuilt(Box::new(StyleBuildOutcome::NothingIndexed { dir }))
+                    }
+                    Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
+                        err: format!("{e:#}"),
+                    })),
+                }
+            },
+            |e| Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: e.to_string() })),
+        );
+    }
+
     pub(crate) fn start_analyze(&mut self, refine: bool) {
         let Some(path) = self.src_path.clone() else { return };
         // `busy` alone stopped guarding this the moment Analyze became
@@ -2048,7 +2145,14 @@ impl AutoshopApp {
         } else {
             tr(lang, "analyzing with AI (GPT + Claude)…").into()
         };
-        let style = self.style_strength;
+        // Both style inputs travel as one request (R23-2): the strength, and
+        // whether the nearest past photo goes along as a second image. Read
+        // HERE, on the UI thread, so the worker cannot pick up a toggle the
+        // user flipped after starting the call.
+        let style = autoshop::pipeline::StyleRequest {
+            strength: self.style_strength,
+            send_reference_image: self.send_style_ref_image,
+        };
         // Free-text direction ("warmer, moodier") steers the proposal; with
         // `refine` (its own button now — no pre-armed checkbox), the AI
         // ADJUSTS the current recipe instead of starting from scratch. A

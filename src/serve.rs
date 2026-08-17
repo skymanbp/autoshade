@@ -1286,30 +1286,23 @@ fn api_style_info(state: &AppState) -> Result<ResponseBox> {
     let abs = |p: &str| {
         std::path::absolute(p).map(|x| x.display().to_string()).unwrap_or_else(|_| p.to_string())
     };
-    // Style reference library status (built? how many edits? scene tags?).
-    // Central store first; a legacy cwd-relative index (built before the store
-    // existed) still counts — and we report whichever file actually answered.
-    let ix_path = crate::store::style_index_path();
-    let loaded = crate::style::StyleIndex::load(&ix_path)
-        .map(|ix| (ix, ix_path.display().to_string()))
-        .or_else(|_| {
-            crate::style::StyleIndex::load(Path::new("out/style-index.json"))
-                .map(|ix| (ix, abs("out/style-index.json")))
-        });
-    let style = match loaded {
-        Ok((ix, index_file)) => {
-            let mut tags: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
-            for e in &ix.exemplars {
-                *tags.entry(e.tag.clone()).or_default() += 1;
-            }
-            let mut top: Vec<_> = tags.into_iter().collect();
-            top.sort_by(|a, b| b.1.cmp(&a.1));
-            top.truncate(6);
-            let scenes: Vec<_> = top.into_iter().map(|(t, n)| json!({ "tag": t, "n": n })).collect();
-            json!({ "built": true, "total": ix.exemplars.len(), "scenes": scenes,
-                    "index_file": index_file, "source_dir": ix.source_dir })
+    // Style reference library status — read through the SHARED reader
+    // (`style::index_info`), which owns the central-then-legacy walk and the
+    // scene histogram for every surface. This handler used to be the only
+    // place that logic existed, which is why the GUI shipped without it
+    // (R23-2).
+    let info = crate::style::index_info();
+    let index_file = info.path.display().to_string();
+    let style = match info.state {
+        crate::style::StyleIndexState::Built { total, source_dir, scenes, .. } => {
+            let scenes: Vec<_> =
+                scenes.into_iter().map(|(t, n)| json!({ "tag": t, "n": n })).collect();
+            json!({ "built": true, "total": total, "scenes": scenes,
+                    "index_file": index_file, "source_dir": source_dir })
         }
-        Err(_) => json!({ "built": false }),
+        // Same two-key answer the web page has always parsed: `built:false`
+        // (the reason is the GUI's status line, which has room for it).
+        _ => json!({ "built": false }),
     };
     Ok(json_response(&json!({
         // Where the photos being browsed live (the "原图库"), where RENDERED
@@ -1739,8 +1732,18 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // surface as the GUI button — the visual closed loop is part of it
     // (batch surfaces pass false; the rationale disclosed in the response
     // carries the judge's score and any revision).
-    let (recipe, verdict, _notes) =
-        pipeline::produce_recipe(&raw, &cfg, false, guidance, refine_base.as_ref(), style, true)?;
+    // Text reference only: the opt-in reference PHOTO is a GUI switch (R23-2),
+    // and a browser session must not start spending an extra image per call
+    // through a field nothing in the page can see.
+    let (recipe, verdict, _notes) = pipeline::produce_recipe(
+        &raw,
+        &cfg,
+        false,
+        guidance,
+        refine_base.as_ref(),
+        pipeline::StyleRequest::strength(style),
+        true,
+    )?;
     // A non-Accept verdict may not auto-save (user decision): the verifier
     // itself judged the result not ready, so the develop on disk stays
     // untouched and the browser gets the proposal back as an UNSAVED edit —
