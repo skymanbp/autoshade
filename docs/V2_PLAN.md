@@ -60,7 +60,7 @@ Companion changes required by the schema addition (all `[verified]` against curr
 
 - **`Default`** — add `masks: Vec::new()` to `EditRecipe::default()` so `is_noop()`/round-trip tests still hold.
 - **`clamp()`** — extend to clamp each `LocalAdjustment` slider into the same ranges as globals (and `amount` to 0..1, exposure_ev to ±5/whatever local bound is confirmed — see [unverified] §7).
-- **Advisor JSON schema** — `edit_recipe_schema()` is strict-mode (`additionalProperties:false`, all props `required`) [verified: `src/advisor/openai.rs:124-149`]. Adding `masks` requires: append `"masks"` to `required`, add an array schema whose items mirror `LocalAdjustment` + the tagged `MaskGeometry` enum, with **every nested object's props also `required`**. This is a non-trivial, multi-level schema edit, not one line.
+- **Advisor JSON schema** — `edit_recipe_schema()` is strict-mode (`additionalProperties:false`, all props `required`) [verified: `src/advisor/openai.rs:124-149`]. *R23-1 update: that citation is stale — the schema is no longer hand-written in `openai.rs`; it is generated from the control registry in `src/advisor/catalogue.rs` (wire-identical, pinned byte-for-byte), so schema changes go through the registry now.* Adding `masks` requires: append `"masks"` to `required`, add an array schema whose items mirror `LocalAdjustment` + the tagged `MaskGeometry` enum, with **every nested object's props also `required`**. This is a non-trivial, multi-level schema edit, not one line.
 - **No other v2 schema additions** are proposed by the reports. Generative retouch (§5) deliberately lives **outside** `EditRecipe` — it returns pixels, not recipe fields — so it adds no recipe fields, only a new module + CLI surface.
 
 ---
@@ -166,7 +166,7 @@ New `src/style.rs`: `feature_vector(meta,hist) -> [f32;14]`, `Norm{mean,std}`, `
 
 ### 3c. Prompt integration
 
-Insert in `openai.rs::propose` exactly where `calibration` is appended (after line 67, before the `hint` block) [verified: `src/advisor/openai.rs:61-74`]. Block is explicitly **REFERENCE ONLY — do not copy**, lists each exemplar's derived tag (`[tele/bright/midday]`) + its `Some` settings. Plumbing: add a dedicated `reference: Option<&str>` param to `Advisor::propose` (parallel to existing `hint`, `src/advisor/mod.rs:83-91`), default-ignored by heuristic/claude providers. Do **not** reuse the `hint` channel (that's the verifier's revision note).
+Insert in `openai.rs::propose` exactly where `calibration` is appended (after line 67, before the `hint` block) [verified: `src/advisor/openai.rs:61-74`]. *R23-1 update: those line numbers predate the prompt rewrite — `propose_instruction` now assembles the request from the `catalogue.rs` registry (Direction first, guardrails after, style reference via `ProposeContext.reference`), and the reference block's strength-aware ceiling/floor wording lives in `src/style.rs::render_reference`.* Block is explicitly **REFERENCE ONLY — do not copy**, lists each exemplar's derived tag (`[tele/bright/midday]`) + its `Some` settings. Plumbing: add a dedicated `reference: Option<&str>` param to `Advisor::propose` (parallel to existing `hint`, `src/advisor/mod.rs:83-91`), default-ignored by heuristic/claude providers. Do **not** reuse the `hint` channel (that's the verifier's revision note).
 
 ### 3d. Wiring + retirement
 

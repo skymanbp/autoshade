@@ -370,6 +370,56 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **v0.29.0 RELEASED（2026-08-17，第二十三轮=17 条反馈三轮清账之 R23：AI 大
+  修）** — 锁定计划之 R23 全量落地，六个实现提交+一个轮末复审修复提交
+  （f0c7804→32cb378，cbae6bc 起累计 ~+8300/−1300），测试 467→518 lib/8 CLI
+  /89→99 GUI/2 合约双配置，clippy 0，audit_i18n 0。用户条目闭环：**#12**（LLM
+  知道并用全部工具：`src/advisor/catalogue.rs` 控件注册表 33 recipe+22 local，
+  E0027 穷举解构双钩强制——加字段不登记=编译错；schema/提示词目录/eval 标尺/
+  style 键四消费者同源派生，线上 schema 字节不变钉；HSL 7/9 元素修复不再弃
+  付费提案；WB 绝对/相对成对+as-shot 实值锚点；lens 三值语义 null=无意见/
+  数值=采纳/0=清零 + 局部 Hue(±100=±30°)/带符号 Sharpness 进 schema）；
+  **#6**（参考库=风格索引+图片参考「都要」：EffectiveIndex 单一读取器三壳收
+  编、AI 面板建库/进度/状态行、近邻披露 ≤4 stems、图片参考开关默认关+成本披
+  露；披露块移 judge 后=采纳修订不再吞掉不可用注记）；**#5**（AI 太保守：
+  GradeStrength 0..1 六闸同轴——提示词三档/temper 膝点缩放/护栏单边放开/
+  judge 目标 78/82/88/风格参考 ceiling↔floor/无 key 启发式；CALIBRATED=0.5
+  =护栏**数字**逐位复现点（旧版克制**措辞**属 ≤0.4 档，无单一档位完整复现旧
+  请求——轮末复审 MED-1 重述）；DEFAULT=0.65=用户拍板⑦，batch 无旗=沿用默认
+  也是拍板⑦的含义；白点保护 floor 移 soft-cap 后=任意强度不再被削，0.5+ 位
+  级不变）；**#13**（思考模式：think 信封 {scene,tool_plan,intended_look,
+  recipe,self_critique,pixel_tool_suggestions}，think:false 请求字节不变钉；
+  多轮 judge 收敛档内 1/2/3 轮上限=think**或**Committed 析取（三 tooltip 成
+  本披露 17 调用/10 带图同析取——轮末复审 MED-2）；batch/eval 结构性恒关）；
+  **#3/#16**（反推大修：诚实性批=置信族一次标定两端具名+ratio 拒绝披露+终局
+  do-no-harm 重置升状态行+分区置信从被采纳 zone 读；入口放开=同帧任意显影可
+  选（拍板⑤），比例失配警示点名裁剪优先（轮末复审 LOW-3）；联合值域桶 4 亮
+  度带×2 色度类=第二只独立读数——报告+置信帽+管线末端 fail-open 否决**仅此三
+  角色**（实测：不能当阶段闸，正确修正会让最差桶变差）；「反推瞎搞」案首次
+  可见=look_err 自评置信 0.52 被联合梯子压到 0.25 地板；勾选式深度反推（拍
+  板⑥）=persist 前判+至多一次引导重试，hint 只做闭列表动作选择器（Zoned/
+  Saturation±10 常量），采纳仅当复判 ≥；**v0.26.2「评分只作参考」定案在
+  深度路径上修订**：默认路径原样保留 v0.26.2 时序，勾选深度=用户显式授权
+  判在存前）。轮末独立 Opus 全量对抗复审 SHIP-WITH-FIXES（3M/6L/4N 零正确
+  性/安全/契约缺陷）→ 七根因一次修复批 32cb378（0.5 双轴重述×6 处+eval 注
+  释/成本披露析取+zh 70% 语义纠正/深度候选报告所有权=fit::compose_report 单
+  一注记派生路径+rescore 删除+CLI 同根缺陷同修+DeepFitOutcome 四态+FitReview
+  Plan 纯函数钉两次付费上限+被拒 zoned 候选栅格清理/同帧 doc 与裁剪归因/
+  hint 子串 less·over 移除（"lower"⊂"flower" 残留披露在码）/FIT_JOINT=off
+  四消费者枚举/白点 floor）。**登记的未验证项（诚实边界）**：联合梯子=合成
+  夹具标定 provisional，待 M-A 真实复现对复核；LocalHue/LocalSharpness 的
+  Lightroom 数值尺度 unverified（V2_PLAN §7 item 10 附关闭探针）；think 信
+  封字段生成顺序 unverified（serde_json 无 preserve_order，properties 恒字
+  母序，env 探针 AUTOSHOP_THINK_PROBE_KEY 在册）；**eval 分数跨 R23 不可比**
+  （提示词全档重写），147 张对照集重基线待 M-C。**行为变更（发版说明）**：
+  带蒙版新 recipe（hue/sharpness 非零）被旧 exe 硬拒（deny_unknown_fields
+  前向语义，无蒙版字节不变）；R21 已删版本登记簿结构臂对新 schema 失配=一次
+  性以**新号**重新保档（hwm 臂不动=同号永不复活，合约测试 2/2 绿）；深度反
+  推与高强度（>70%）各自独立把视觉复查上限提到 3 轮=worst 17 调用。素材欠
+  （用户）：M-A 反推复现对/M-C 147 张集路径/M-D #2 报错原文；R24（数据模型
+  +LR 差距 B 组）待 M-B sidecar 族。发版：tag v0.29.0，双 exe 字节验证见发
+  布流程。—— 下轮开工先读本条+第二十二至二十四轮锁定计划段。
+
 - **v0.28.0 RELEASED（2026-08-17，第二十二轮=用户 17 条反馈三轮清账之 R22：
   缺陷+UI）** — 锁定计划（上方第二十二至二十四轮段）之 R22 全量落地，七个实
   现提交+一个复审修复提交（3f13bd8→52c2400），33+ 文件，测试 449→467 lib
