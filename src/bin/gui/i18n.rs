@@ -614,7 +614,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // with a dialog-supplied path, which is now the Destination setting's
     // 「Ask every time」 value and the split button's ▾ half.
     ("Destination", "目标位置"),
-    ("./out folder", "./out 文件夹"),
+    // R24-5 M8: the destination used to be the literal 「./out folder」. The
+    // folder is a SETTING now (config::delivery_root), so the label names the
+    // role and the resolved absolute path is echoed beside it. 「成片」 is the
+    // word serve.rs's own status route already uses for this folder (成片库),
+    // and every glyph is in the shipped CJK subset (投递 is not).
+    ("Delivery folder", "成片文件夹"),
+    // The Settings row that MOVES that folder (M8). Every glyph here was
+    // checked against the shipped CJK subset before it was written — the
+    // whole-chain font gate (`embedded_fonts_cover_every_ui_symbol`) is what
+    // catches a 「递」 that would render as tofu.
+    ("Where finished files land: exports, AI/retouch pixel masters and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops are NOT here (see 「Develop store」 above).",
+        "成品文件的去处：导出、AI/修饰像素母版、提取出的风格提示词 —— 本窗口、CLI、网页端和批量渲染共用同一个。留空 = 默认的 ./out（相对于启动目录）。已保存的显影不在这里（见上方「显影库」）。"),
+    ("Browse…", "浏览…"),
+    ("Pick the delivery folder", "选择成片文件夹"),
     ("Last used folder", "上次用过的文件夹"),
     ("Ask every time", "每次都问"),
     ("a save dialog opens on every export", "每次导出都会打开保存对话框"),
@@ -730,7 +743,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "配方已保存 → {path}（XMP 仅适用于 RAW）"),
     ("recipe saved — but the Lightroom XMP failed: {err}",
         "配方已保存 — 但 Lightroom XMP 写入失败：{err}"),
-    // M6a export-side lossy-projection disclosure (util::mask_loss_line): the
+    // M6a export-side lossy-projection disclosure (util::xmp_loss_line): the
     // counts come from the writer's own per-mask verdicts, so these are pure
     // labels — an empty list prints nothing at all.
     ("the Lightroom XMP does not carry: {list} (recipe.json keeps all of it)",
@@ -744,6 +757,18 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // for exactly that reason.
     ("radial rotation ×{n}", "径向旋转 ×{n}"),
     ("recolour gains ×{n}", "重上色增益 ×{n}"),
+    // R24-5 M0: the same line NAMES the masks now (「which of my twelve?」 was
+    // the half a count could not answer), and grew a GLOBAL bucket beside the
+    // mask one — an active control the engine renders that the sidecar has no
+    // property for. The two labels below are the only members of that bucket
+    // today; the tier registry decides membership, not this list.
+    ("+{n} more", "另 {n} 个"),
+    ("(unnamed)", "（无名）"),
+    ("camera base curve", "相机基础曲线"),
+    ("lens profile correction", "镜头配置文件校正"),
+    // The import direction of the same fact (workers.rs, the Opened handler).
+    ("this Lightroom sidecar carries {n} global setting(s) the engine does not render (a save keeps them untouched): {list}",
+        "这份 Lightroom sidecar 里有 {n} 项本引擎不渲染的全局设置（保存时会原样保留）：{list}"),
     ("could not clear the saved edits: {err}", "无法清除已保存的编辑：{err}"),
     ("save postponed: this photo is being changed by another Autoshop process ({err}); your canvas remains unsaved — retry",
         "保存已推迟：另一个 Autoshop 进程正在修改这张照片（{err}）；画布上的编辑尚未保存 — 请稍后重试"),

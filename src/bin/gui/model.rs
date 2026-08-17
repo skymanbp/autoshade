@@ -123,8 +123,11 @@ impl ExportFormat {
 /// setting + one split button replaces the pair.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum ExportDest {
-    /// `./out` beside the working directory — what the CLI, the web surface
-    /// and the batch renderer have always used, and still the default.
+    /// The DELIVERY ROOT — what the CLI, the web surface and the batch
+    /// renderer all use, and still the default. `./out` beside the working
+    /// directory until Settings moves it (R24-5 M8,
+    /// [`autoshop::config::delivery_root`]); the label therefore names the
+    /// ROLE, and the resolved absolute path is echoed beside it.
     #[default]
     OutFolder,
     /// Wherever the last export landed (`last_export_dir`). With nothing
@@ -142,7 +145,7 @@ impl ExportDest {
     /// this fn's literals).
     pub(crate) fn label(self) -> &'static str {
         match self {
-            ExportDest::OutFolder => "./out folder",
+            ExportDest::OutFolder => "Delivery folder",
             ExportDest::LastUsed => "Last used folder",
             ExportDest::Ask => "Ask every time",
         }
@@ -820,6 +823,13 @@ pub(crate) struct SettingsForm {
     pub(crate) image_api_key: String,
     pub(crate) image_key_present: bool,
     pub(crate) image_effort: String,
+    /// The DELIVERY ROOT as the settings FILE spells it (R24-5 M8) — blank
+    /// means "the default `./out`", which is also how a blank SAVES (an
+    /// explicitly emptied field silences an `AUTOSHOP_OUT_DIR` in the
+    /// environment, the same rule the two effort fields follow). The panel
+    /// echoes the RESOLVED absolute path beside it, since that is the fact a
+    /// relative root leaves unanswered.
+    pub(crate) out_dir: String,
     pub(crate) status: String,
     /// Live pick-lists, one per endpoint (see [`ModelCatalogue`]). Each
     /// carries its own once-per-session auto-fetch guard: one global boolean
@@ -827,6 +837,42 @@ pub(crate) struct SettingsForm {
     /// eligible yet, so a key saved later in the session never got its probe.
     pub(crate) image_models: ModelCatalogue,
     pub(crate) analysis_models: ModelCatalogue,
+}
+
+/// One deferred action on a variant CARD (R24-5), performed by the single
+/// owner `AutoshopApp::dispatch_variant_action`.
+///
+/// Every one of these mutates the app while the drawing closures still borrow
+/// it, so the widget code returns a value and the caller acts after the
+/// layout closes — the strip's original five local `Option`s in one type. A
+/// single value also keeps the arms mutually exclusive by construction: one
+/// frame cannot switch a card and delete it.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum VariantAction {
+    /// Show card `i` on the canvas (lossless — each card keeps its own
+    /// base + recipe).
+    Switch(usize),
+    /// Drop card `i`. Arm-then-confirm lives in `delete_variant` itself.
+    Delete(usize),
+    /// Copy card `i`'s develop onto the ▣ Original card.
+    Apply(usize),
+    /// Open the rename box for the card with this ID (never an index: an
+    /// async push renumbers the strip under a stale index).
+    Rename(String),
+    /// Snapshot the LIVE canvas as the next numbered version.
+    SaveVersion,
+}
+
+/// Which surface is drawing a card's actions (R24-5). Both draw the same
+/// buttons through one owner; they differ only in which headless test seam
+/// records the result, and in the strip's exclusive right to the rename box —
+/// two `TextEdit`s over one buffer would fight for the caret every frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum VariantSurface {
+    /// The bottom variant strip.
+    Strip,
+    /// The Versions section's edit-state list.
+    List,
 }
 
 /// Pick radius (px) for on-image mask knobs — matches the crop handles' feel.

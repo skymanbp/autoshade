@@ -624,6 +624,17 @@ version is not the mirror of — undo history is per-variant by contract and no
 registry can bring a card back the way `.deleted-versions.json` keeps a
 deleted number burned — so the first click asks and the second deletes.
 
+Those three buttons are drawn by ONE owner (`variant_card_buttons`) and their
+clicks are performed by one more (`dispatch_variant_action`, taking a single
+`VariantAction` so the arms stay mutually exclusive by construction rather than
+by an `else if` chain's shape). The Versions section's edit-state list draws the
+same buttons through that owner and switches cards on a row click, so a card
+action means one thing on both surfaces; renaming stays on the strip alone,
+because two `TextEdit`s over one buffer fight for the caret every frame. The
+list's buttons take a second, indented line rather than joining the label row —
+a 320 px panel already holds a kind label, a name and a vocabulary note, and an
+unbounded row is how this side panel crept +8 px a frame twice before.
+
 `store::list_edits(src)` is the read side: a photo's whole edit-state list in
 one query — the strip's cards in strip order, then its version snapshots
 ascending with their advisory metadata attached (restricted to numbers that
@@ -652,7 +663,60 @@ disclosure and writes nothing. It rides `pipeline::write_xmp`'s return value to
 every surface: the GUI localises it into the save status line and a toast, the
 web reply carries it in the note it already had, and stderr gets one line from
 `write_xmp_doc` for the CLI. `recipe.json` remains the lossless sidecar, which
-is what the disclosure says.
+is what the disclosure says. Since v0.30.0 the GUI's line NAMES the masks
+rather than counting them (the CLI's has since M6a; 「which of my twelve?」 was
+the half a count could not answer).
+
+#### The five-tier control registry (v0.30.0)
+
+Two independent facts decide what a develop control IS — does the ENGINE render
+it, and does it reach the SIDECAR — and until R24 nothing wrote them down
+together, so 「the GUI offers a slider the engine ignores」 and 「the save
+silently drops what you are looking at」 were both unrepresentable claims.
+`advisor::catalogue::Tier` names one (renders x exports) combination each:
+
+| tier | engine renders | own `crs:` property | members today |
+|---|---|---|---|
+| `Rendered` | yes | yes | the ordinary controls (26 global, 20 local) |
+| `CarriedOnly` | no | yes | the mask `name` — a label, not an operator |
+| `PassThrough` | no | verbatim | none yet; reserved for the LR-only blocks the merge preserves (Transform, Calibration, the camera Look) |
+| `RenderedNotExported` | yes | no | `base_curve`, `lens_profile`; per mask `components`, `enabled`, `color_gains` |
+| `DerivedWriteOnly` | (yes) | no — only a derived value | `as_shot_k`/`as_shot_tint`, which reach the sidecar as `crs:Temperature`/`Tint` |
+
+`Control.tier` is `Option<Tier>`; `None` is not "unclassified" but "not a
+develop control" (the era stamp, the AI's own `rationale`/`confidence`, the
+solver's mask `role`), and such a row may never own a `crs:` property. The
+registry is enforced from three sides: adding a field to `EditRecipe` /
+`LocalAdjustment` already fails the build until it has a row (the `global_value`
+/ `local_value` destructures, R23-1), the row cannot be written without a tier
+(a struct literal has no optional fields), and the tests re-derive both halves
+of the claim — the EXPORT half from `Control::crs`, itself pinned against the
+XMP writer's `owned_attr_keys`, and the locals' RENDER half from the renderer's
+own activity gate, probed one-hot and by zeroing (which is what tells a
+multiplier like `amount` from an inert field).
+
+Two **inclusion laws** ride on it, one per surface, both read off the registry
+rather than transcribed from it: a control the AI is ASKED for
+(`!engine_only`), and a control the GUI can MUTATE (extracted from the GUI's own
+source at test time), must be one the engine renders — or a `CarriedOnly` entry
+on an explicit allow-list carrying its reason. A slider that moves a number and
+no pixel is the worst kind of bug here: it looks like it works, it survives a
+save, it reloads, and the photo never changes.
+
+The registry also generates the two disclosures the mask-side story was missing.
+Outbound, `xmp::global_export_losses` names the active `RenderedNotExported`
+controls — a photo whose look depends on its camera base curve or its
+lens-profile correction used to export a sidecar that renders visibly
+differently in Lightroom, silently — and they join the mask losses in the one
+save sentence. Inbound, `xmp::unmodelled_global_crs` names the `crs:` properties
+an imported sidecar carries on its own `rdf:Description` that this engine does
+not model at all (LR's global Texture, Grain, the Transform/Calibration blocks).
+The merge PRESERVES every one of them; what was missing was the sentence saying
+they are there, so a canvas that did not match Lightroom's render had no
+explanation on screen. Its universe is the COMPLEMENT of `owned_attr_keys`, so
+it needs no catalogue of Adobe property names to keep up to date: the day a
+batch teaches the engine `crs:Texture`, the key joins the owned set and leaves
+this list by itself.
 
 ### 4.6 Style / eval harness (M4)
 
@@ -705,7 +769,8 @@ spot-removals) and/or the user paints regions in the UI
 both feed the deterministic [`heal_image`](../src/retouch.rs) engine. Donors are
 auto-searched (the in-bounds neighbour whose surroundings best match the spot's
 border) unless an explicit source offset is given. Output is a pixel master in
-./out — **non-XMP** (pixel edits don't serialise to ACR) — and the develop
+the delivery root (see below) — **non-XMP** (pixel edits don't serialise to ACR)
+— and the develop
 records it as its pixel source in `<store>/develops/<key>/pixels.json`, so every
 later render, export and reopen applies the parametric recipe ON TOP of the
 healed pixels instead of silently reverting to the untouched source. It runs on
@@ -927,6 +992,44 @@ the user's own browser*, and the guarantees are:
 - **Header values carry no control bytes**, enforced in the constructor rather
   than by each call site remembering to percent-encode.
 - Keys are never returned: `GET /api/settings` answers `key_present: bool`.
+
+### 4.10 The delivery root (v0.30.0)
+
+Two folders, two jobs, and only one of them used to be a setting. The **develop
+store** (§4.5) holds the state — recipes, XMP, versions, mask rasters — under a
+per-user root that `AUTOSHOP_DATA_DIR` can move. The **delivery root** holds the
+finished files, and before R24-5 it was not a setting at all: `./out`, spelled
+literally in five places (the CLI deliverable name, the batch renderer's dedup
+spelling, the pixel masters, the extracted style prompt, the web download
+route), relative to whatever directory the app happened to be launched from —
+which is precisely why "where did my export go" had no good answer.
+
+`config::delivery_root()` is now the one reader, and `pipeline::default_out` the
+one funnel every deliverable name is claimed through. It resolves the settings
+file's `out_dir` over `AUTOSHOP_OUT_DIR` over the default `out`, memoised
+(`unique_out` probes it up to 999 times per claim) and dropped by
+`update_local_settings`, the one writer. An explicitly blank field is a real
+choice — "the default" — and silences the environment variable too, the same
+rule the two AI effort fields follow. The GUI exposes it in Settings beside the
+develop store, echoing the RESOLVED absolute path, and its export destination's
+「Delivery folder」 arm resolves through it, so this window, the CLI, the web
+surface and a batch render name one place.
+
+It is `Trust::Destination` in `config::SETTINGS`, unlike the read-only
+`AUTOSHOP_LEGACY_OUT` beside it: a planted value does not merely choose a
+folder, it decides where a stranger's developed photos are filed and (via
+`guard_readonly`'s own-output allowance) which directory stops counting as the
+read-only photo library. Neither a `.env` nor an ambient working-directory
+`autoshop.local.json` may supply it.
+
+Three things deliberately did NOT move with it, because they only ever shared
+the folder NAME: the develop store (its own setting since v0.13), `out/imported`
+where the web surface parks an uploaded SOURCE photo (library input, not a
+deliverable), and `store::legacy_out_roots` / `AUTOSHOP_LEGACY_OUT` (a read-only
+archaeology path pinned to where pre-v0.13 builds actually wrote, which a new
+setting cannot retroactively change). `guard_readonly` keeps the literal `./out`
+as an output area alongside the configured root, so repointing the root does not
+make a `match` on an older export suddenly refused.
 
 ## 5. Why Rust
 

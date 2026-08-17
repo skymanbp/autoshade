@@ -1116,6 +1116,51 @@ impl AutoshopApp {
         self.variant_name_buf = Some((photo, id, buf.clone(), buf));
     }
 
+    /// Perform one deferred variant action — **the one owner** (R24-5).
+    ///
+    /// The card actions are drawn by two surfaces now (the bottom strip and
+    /// the Versions section's edit-state list), and every one of them mutates
+    /// `self` while the drawing code still borrows it, so both surfaces defer.
+    /// Routing them through a single function is what keeps "what ＋ does"
+    /// from being two answers: the strip's own five-way `else if` chain was
+    /// already the shape this generalises, and copying it to a second caller
+    /// is exactly how the two would drift.
+    ///
+    /// The arms are mutually exclusive by construction — [`VariantAction`] is
+    /// one value — which preserves the chain's guarantee that one frame cannot
+    /// switch a card AND delete it.
+    pub(crate) fn dispatch_variant_action(&mut self, act: VariantAction, ctx: &egui::Context) {
+        match act {
+            VariantAction::Switch(i) => self.switch_variant(i, ctx),
+            VariantAction::Delete(i) => self.delete_variant(i, ctx),
+            VariantAction::Apply(i) => self.apply_to_original(i, ctx),
+            VariantAction::Rename(id) => {
+                // Opening a box COMMITS whichever one was open first — the
+                // mask panel's cross-commit rule, made structural by keying on
+                // the card's id (R24-3).
+                self.commit_variant_name_buf();
+                if let Some(photo) = self.src_path.clone() {
+                    let cur = self
+                        .variants
+                        .iter()
+                        .find(|v| v.id == id)
+                        .and_then(|v| v.name.clone())
+                        .unwrap_or_default();
+                    self.variant_name_buf = Some((photo, id, cur.clone(), cur));
+                }
+            }
+            // The buttons are already disabled while busy; the second read is
+            // defence in depth against a future caller path, at the cost of
+            // one bool. (`save_version` is the only arm that writes a file
+            // straight from the live canvas.)
+            VariantAction::SaveVersion => {
+                if !self.busy {
+                    self.save_version();
+                }
+            }
+        }
+    }
+
     /// Flush every typed-but-uncommitted NAME box — masks, versions, variant
     /// cards (U10; the 10+1 boundary rule).
     ///

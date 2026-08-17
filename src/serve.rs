@@ -700,6 +700,11 @@ fn api_upload(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // decoder's job at open time.
         return Ok(status_response(400, "the uploaded file is empty"));
     }
+    // NOT the delivery root (M8), deliberately: an upload is library INPUT —
+    // the SOURCE photo a develop is about to be made from — and it only ever
+    // shared the `out` folder name with the deliverables. Repointing the
+    // delivery root would otherwise file a stranger's upload into the user's
+    // finished-work folder. See `config::delivery_root`'s "does not cover".
     let dir = PathBuf::from("out").join("imported");
     std::fs::create_dir_all(&dir).context("create out/imported")?;
     // Same basename ≠ same photo: never truncate an existing import — pick
@@ -1306,13 +1311,16 @@ fn api_style_info(state: &AppState) -> Result<ResponseBox> {
     };
     Ok(json_response(&json!({
         // Where the photos being browsed live (the "原图库"), where RENDERED
-        // outputs land (the "成片库" = ./out), where the develop store keeps
-        // recipes / XMP / versions, and the style-library status. out_dir and
-        // store_dir are DIFFERENT places — the XMP has lived in the store since
-        // the sidecars moved out of ./out.
+        // outputs land (the "成片库" = the delivery root, `./out` unless the
+        // user moved it), where the develop store keeps recipes / XMP /
+        // versions, and the style-library status. out_dir and store_dir are
+        // DIFFERENT places — the XMP has lived in the store since the sidecars
+        // moved out of ./out. Reported through `config::delivery_root` (M8)
+        // rather than a second literal, so this page cannot name a folder the
+        // renderer no longer writes to.
         "working_dir": state.dir_display(),
         "working_count": state.count(),
-        "out_dir": abs("out"),
+        "out_dir": abs(&crate::config::delivery_root().display().to_string()),
         "store_dir": crate::store::store_root().display().to_string(),
         "style": style,
     })))
@@ -2158,11 +2166,13 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // different same-stem photo keeps the lowest separately-owned suffix.
     // Claims land before rendering, so failure cannot let a later run assign
     // this photo's name to another source.
+    // The delivery root (M8) — the same folder the CLI and the GUI's
+    // "Delivery folder" destination write to; `./out` until the user moves it.
     let out = registered_export_out(
         &raw,
         "developed",
         fmt_ext(&req),
-        Path::new("out"),
+        &crate::config::delivery_root(),
     )?;
     // Config SNAPSHOT: the read guard held across a multi-minute render
     // blocked every settings save (same rule as api_retouch/api_heal).

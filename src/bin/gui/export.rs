@@ -112,6 +112,20 @@ fn xmp_arm(
             "{dropped_masks} unsupported Lightroom correction(s) not applied"
         ));
     }
+    // R24-5 M0: and the GLOBAL half of that same disclosure, which this path
+    // never had — the sidecar's own crs: properties the engine does not model.
+    // Preserved by the merge, invisible in the render, and until now unsaid.
+    let carried = autoshop::xmp::unmodelled_global_crs(text);
+    if !carried.is_empty() {
+        let shown = carried.len().min(4);
+        let more = carried.len() - shown;
+        warns.push(format!(
+            "{} Lightroom global setting(s) kept but not rendered ({}{})",
+            carried.len(),
+            carried[..shown].join(", "),
+            if more > 0 { format!(", +{more} more") } else { String::new() }
+        ));
+    }
     if r.is_noop() {
         return None;
     }
@@ -160,7 +174,10 @@ fn clamp_disclosed(r: &mut EditRecipe, warns: &mut Vec<String>) {
 /// for anyone who picked it before their first export.
 pub(crate) fn export_dest_dir(dest: ExportDest, last: Option<&std::path::Path>) -> Option<PathBuf> {
     match dest {
-        ExportDest::OutFolder => Some(PathBuf::from("out")),
+        // The DELIVERY ROOT (M8), not a literal `./out`: this destination and
+        // the CLI / web / batch surfaces name one place, and Settings can move
+        // it. Unset, it resolves to the same `./out` this arm always returned.
+        ExportDest::OutFolder => Some(autoshop::config::delivery_root()),
         ExportDest::LastUsed => last.map(|d| d.to_path_buf()),
         ExportDest::Ask => None,
     }
@@ -978,7 +995,17 @@ impl AutoshopApp {
                             // M6a: the projection's own lossy edges — assembled
                             // from what the WRITER just skipped/degraded, so the
                             // counts describe this very file. Empty ⇒ silent.
-                            let mask_note = mask_loss_line(lang, &losses);
+                            // R24-5 M0 adds the GLOBAL half beside the mask
+                            // half: an active control the engine renders and
+                            // the sidecar has no property for (the camera base
+                            // curve, the lens-profile correction) used to leave
+                            // no trace at all, and the difference only showed up
+                            // in Lightroom's render.
+                            let mask_note = xmp_loss_line(
+                                lang,
+                                &losses,
+                                &autoshop::xmp::global_export_losses(&self.recipe),
+                            );
                             if let Some(m) = &mask_note {
                                 self.toast(ToastKind::Error, m.clone());
                             }

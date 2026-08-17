@@ -137,7 +137,95 @@ impl CrsKey {
             _ => None,
         }
     }
+
+    /// Does this control have a sidecar property of its OWN — one key (or key
+    /// family) that carries it out and reads it back?
+    pub fn is_owned(self) -> bool {
+        !matches!(self, CrsKey::None)
+    }
 }
+
+/// **The five-tier control registry** (R24-5 M0, feedback #15b).
+///
+/// Two independent facts decide what a control IS, and until now nothing wrote
+/// them down together: does the ENGINE render it, and does it reach the
+/// LIGHTROOM SIDECAR? [`Control::engine_only`] answers a third, different
+/// question (may the AI set it), and `CrsKey` answered half of the second —
+/// so "the GUI offers a slider the engine ignores" and "the save silently
+/// drops what you are looking at" were both unrepresentable claims. Each tier
+/// below names one (renders × exports) combination, and the disclosure
+/// surfaces are DERIVED from it (`xmp::global_export_losses`,
+/// `xmp::unmodelled_global_crs`) rather than restating a list.
+///
+/// Nothing here changes a control's behaviour: this round declares today's
+/// truth and asserts it. Moving a control BETWEEN tiers (the LR-gap batches
+/// B2–B5 — global Texture, Detail/Defringe, Transform/Calibration, mask
+/// geometry) is the work this registry exists to make reviewable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// The engine renders it AND it round-trips through its own `crs:`
+    /// property. What a user assumes every control is.
+    Rendered,
+    /// Round-trips through its own `crs:` property, and the engine renders
+    /// NOTHING from it. Legitimate only for controls that carry meaning rather
+    /// than pixels — every member must be listed in [`CARRIED_ONLY_GLOBAL`] /
+    /// [`CARRIED_ONLY_LOCAL`] with the reason, or the inclusion test fails.
+    CarriedOnly,
+    /// Carried through the sidecar verbatim and never interpreted — neither
+    /// engine nor reader gives it meaning. Reserved for the LR-only property
+    /// blocks the XMP merge already preserves (Transform, Calibration, the
+    /// camera Look): those are not recipe fields today, so the tier has NO
+    /// registry member yet, and the B4 batch is what gives it one.
+    PassThrough,
+    /// The engine renders it and the sidecar cannot carry it — what you see
+    /// here is NOT what Lightroom will show. The half of the disclosure story
+    /// that had no name: `xmp::global_export_losses` is generated from exactly
+    /// this tier.
+    RenderedNotExported,
+    /// Has no `crs:` property of its own; only a value DERIVED from it is
+    /// written (the stamped as-shot white balance, which reaches the sidecar
+    /// as `crs:Temperature`/`crs:Tint` when the user made no WB choice). It
+    /// therefore never reads back as itself.
+    DerivedWriteOnly,
+}
+
+impl Tier {
+    /// Does the develop engine's output change when this control changes?
+    pub fn renders(self) -> bool {
+        match self {
+            // DerivedWriteOnly is a rendering control too — its members are
+            // the as-shot WB the engine develops with when the recipe states
+            // no temperature of its own. The tier names its EXPORT shape,
+            // which is the fact that had no other home.
+            Tier::Rendered | Tier::RenderedNotExported | Tier::DerivedWriteOnly => true,
+            Tier::CarriedOnly | Tier::PassThrough => false,
+        }
+    }
+
+    /// Does this control own a `crs:` property that carries it out and back?
+    /// Cross-checked against [`Control::crs`] by the registry's own test, so
+    /// the tier can never claim an export shape the writer does not have.
+    pub fn owns_crs_key(self) -> bool {
+        match self {
+            Tier::Rendered | Tier::CarriedOnly | Tier::PassThrough => true,
+            Tier::RenderedNotExported | Tier::DerivedWriteOnly => false,
+        }
+    }
+}
+
+/// The `CarriedOnly` allow-list for [`RECIPE_CONTROLS`] — global controls a
+/// surface may set although the engine renders nothing from them, each with
+/// the reason. EMPTY today: every global with a `crs:` property of its own is
+/// rendered. (The default policy for future entries is SF4-C — Adobe-only
+/// operators we round-trip rather than approximate.)
+pub const CARRIED_ONLY_GLOBAL: &[(&str, &str)] = &[];
+
+/// The `CarriedOnly` allow-list for [`LOCAL_CONTROLS`].
+pub const CARRIED_ONLY_LOCAL: &[(&str, &str)] = &[(
+    "name",
+    "a label, not an operator: it round-trips as crs:CorrectionName/MaskName so \
+     a mask keeps its identity across Lightroom, and no pixel depends on it",
+)];
 
 /// One develop control: what it is called on the wire, what shape and band it
 /// takes, whether the AI may set it, where it lands in an XMP, and the one
@@ -166,6 +254,19 @@ pub struct Control {
     /// [`LOCAL_CONTROLS`]' row for it.
     pub engine_only: bool,
     pub crs: CrsKey,
+    /// WHAT this control is, on the (renders × exports) axes — see [`Tier`].
+    ///
+    /// `None` is not "unclassified": it means the row is NOT a develop control
+    /// at all but part of the response ENVELOPE (the era stamp) or the AI's own
+    /// provenance (`rationale`, `confidence`), or mask bookkeeping the solver
+    /// owns (`role`). A `None` row may never own a `crs:` property — asserted,
+    /// so the escape hatch cannot be used to dodge a classification.
+    ///
+    /// Adding a field to `EditRecipe` / `LocalAdjustment` already fails the
+    /// build until it has a row here (the [`global_value`] / [`local_value`]
+    /// destructures); this field makes the row itself incomplete until its
+    /// tier is decided, because a struct literal cannot omit it.
+    pub tier: Option<Tier>,
     /// One line for the model: what this control does.
     pub purpose: &'static str,
 }
@@ -203,6 +304,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "2",
         engine_only: false,
         crs: CrsKey::None,
+        tier: None,
         purpose: "schema + calibration-era stamp; return 2",
     },
     Control {
@@ -212,6 +314,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Exposure2012"),
+        tier: Some(Tier::Rendered),
         purpose: "global exposure in stops (EV)",
     },
     Control {
@@ -221,6 +324,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Contrast2012"),
+        tier: Some(Tier::Rendered),
         purpose: "global contrast about the midtone",
     },
     Control {
@@ -230,6 +334,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Highlights2012"),
+        tier: Some(Tier::Rendered),
         purpose: "recover (negative) or open up (positive) the BRIGHT tones",
     },
     Control {
@@ -239,6 +344,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Shadows2012"),
+        tier: Some(Tier::Rendered),
         purpose: "lift (positive) or deepen (negative) the DARK tones",
     },
     Control {
@@ -248,6 +354,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Whites2012"),
+        tier: Some(Tier::Rendered),
         purpose: "the WHITE point — how bright the brightest tones sit",
     },
     Control {
@@ -257,6 +364,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Blacks2012"),
+        tier: Some(Tier::Rendered),
         purpose: "the BLACK point — how deep the darkest tones sit",
     },
     Control {
@@ -266,6 +374,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "null = keep as-shot",
         engine_only: false,
         crs: CrsKey::Attr("Temperature"),
+        tier: Some(Tier::Rendered),
         purpose: "white balance as an ABSOLUTE colour temperature in Kelvin (a TARGET, not a \
                   shift): lower = cooler/bluer result, higher = warmer. null keeps the camera's \
                   as-shot WB",
@@ -277,6 +386,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Tint"),
+        tier: Some(Tier::Rendered),
         purpose: "green (negative) / magenta (positive) shift RELATIVE to the as-shot white \
                   balance — unlike temperature_k this one is a delta, not an absolute value",
     },
@@ -287,6 +397,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "null = unknown",
         engine_only: true,
         crs: CrsKey::None,
+        tier: Some(Tier::DerivedWriteOnly),
         purpose: "the camera's OWN white balance in absolute Kelvin, stamped per photo by the \
                   engine — the anchor temperature_k is measured against",
     },
@@ -297,6 +408,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "null = unknown",
         engine_only: true,
         crs: CrsKey::None,
+        tier: Some(Tier::DerivedWriteOnly),
         purpose: "the as-shot green/magenta companion of as_shot_k (display + XMP honesty only)",
     },
     Control {
@@ -306,6 +418,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Vibrance"),
+        tier: Some(Tier::Rendered),
         purpose: "saturation that protects the already-saturated colours",
     },
     Control {
@@ -315,6 +428,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Saturation"),
+        tier: Some(Tier::Rendered),
         purpose: "uniform saturation of every colour",
     },
     Control {
@@ -324,6 +438,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Clarity2012"),
+        tier: Some(Tier::Rendered),
         purpose: "midtone local contrast / punch",
     },
     Control {
@@ -333,6 +448,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Dehaze"),
+        tier: Some(Tier::Rendered),
         purpose: "atmospheric haze removal (negative ADDS haze)",
     },
     Control {
@@ -342,6 +458,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "every band 0",
         engine_only: false,
         crs: CrsKey::Family("{Hue,Saturation,Luminance}Adjustment<Band> (8 bands)"),
+        tier: Some(Tier::Rendered),
         purpose: "the 8-band colour mixer: `hue`, `saturation` and `luminance` are each an array \
                   of EXACTLY 8 numbers (-100..100) in the FIXED band order red, orange, yellow, \
                   green, aqua, blue, purple, magenta",
@@ -353,6 +470,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "every wheel 0, blending 50",
         engine_only: false,
         crs: CrsKey::Family("SplitToning* + ColorGrade*"),
+        tier: Some(Tier::Rendered),
         purpose: "3-wheel + global colour grading: per region (shadow/midtone/highlight/global) a \
                   `*_hue` 0..360, `*_sat` 0..100 and `*_lum` -100..100, plus `blending` 0..100 \
                   (region overlap) and `balance` -100..100 (shadow/highlight split)",
@@ -364,6 +482,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Sharpness"),
+        tier: Some(Tier::Rendered),
         purpose: "capture sharpening amount (0..150 here; a sidecar's 0..100 Sharpness × 1.5)",
     },
     Control {
@@ -373,6 +492,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("LuminanceSmoothing"),
+        tier: Some(Tier::Rendered),
         purpose: "global luminance noise reduction",
     },
     Control {
@@ -382,6 +502,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "null = no opinion (0 = zero the photographer's own value)",
         engine_only: false,
         crs: CrsKey::Attr("VignetteAmount"),
+        tier: Some(Tier::Rendered),
         purpose: "manual LENS vignette compensation — a radial gain in LINEAR light before any \
                   tonal work (a falloff correction, NOT a creative corner darkening); null means \
                   you have NO opinion and the photographer's own value stands",
@@ -393,6 +514,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "null = no opinion (the engine's own neutral is 50)",
         engine_only: false,
         crs: CrsKey::Attr("VignetteMidpoint"),
+        tier: Some(Tier::Rendered),
         purpose: "where the vignette compensation lands (lower reaches toward the centre); null \
                   means no opinion",
     },
@@ -403,6 +525,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "null = no opinion (0 = zero the photographer's own value)",
         engine_only: false,
         crs: CrsKey::Attr("LensManualDistortionAmount"),
+        tier: Some(Tier::Rendered),
         purpose: "manual geometric distortion correction (positive straightens BARREL, negative \
                   PINCUSHION); null means you have NO opinion and the photographer's own value \
                   stands",
@@ -414,6 +537,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("CropAngle"),
+        tier: Some(Tier::Rendered),
         purpose: "clockwise straighten angle in degrees, for a tilted horizon",
     },
     Control {
@@ -423,6 +547,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "null = the whole frame",
         engine_only: false,
         crs: CrsKey::Family("HasCrop + Crop{Left,Top,Right,Bottom}"),
+        tier: Some(Tier::Rendered),
         purpose: "the kept rectangle in normalised 0..1 frame coordinates; null keeps the full frame",
     },
     Control {
@@ -432,6 +557,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "empty = identity",
         engine_only: false,
         crs: CrsKey::Family("ToneCurvePV2012"),
+        tier: Some(Tier::Rendered),
         purpose: "master tone curve as {input,output} points, both 0..255 — the free-form \
                   alternative to the Contrast slider",
     },
@@ -442,6 +568,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "empty = identity",
         engine_only: false,
         crs: CrsKey::Family("ToneCurvePV2012Red"),
+        tier: Some(Tier::Rendered),
         purpose: "per-channel RED curve (same point form as tone_curve) for a deliberate colour \
                   cast in specific tones",
     },
@@ -452,6 +579,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "empty = identity",
         engine_only: false,
         crs: CrsKey::Family("ToneCurvePV2012Green"),
+        tier: Some(Tier::Rendered),
         purpose: "per-channel GREEN curve",
     },
     Control {
@@ -461,6 +589,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "empty = identity",
         engine_only: false,
         crs: CrsKey::Family("ToneCurvePV2012Blue"),
+        tier: Some(Tier::Rendered),
         purpose: "per-channel BLUE curve",
     },
     Control {
@@ -470,6 +599,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "empty = no base look",
         engine_only: true,
         crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
         purpose: "camera-matched base-look knots estimated per photo by the engine (calibration, \
                   never exported to XMP)",
     },
@@ -480,6 +610,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "empty = every component off",
         engine_only: true,
         crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
         purpose: "the in-camera lens profile read from the RAW's own metadata (calibration, never \
                   exported to XMP)",
     },
@@ -490,6 +621,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "empty = global only",
         engine_only: false,
         crs: CrsKey::Family("MaskGroupBasedCorrections"),
+        tier: Some(Tier::Rendered),
         purpose: "local (masked) adjustments — one entry per mask, controls listed below",
     },
     Control {
@@ -499,6 +631,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "\"\"",
         engine_only: false,
         crs: CrsKey::None,
+        tier: None,
         purpose: "one or two sentences explaining these choices, for the photographer to \
                   sanity-check",
     },
@@ -509,6 +642,7 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::None,
+        tier: None,
         purpose: "your own confidence in this develop, 0..1",
     },
 ];
@@ -525,6 +659,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "a linear gradient",
         engine_only: false,
         crs: CrsKey::Family("CorrectionMasks/Mask"),
+        tier: Some(Tier::Rendered),
         purpose: "WHERE this adjustment applies: kind=linear (zero_* = the no-effect edge, \
                   full_* = the full-effect edge, in 0..1 frame coords) for skies/horizons, or \
                   kind=radial (top/left/bottom/right + feather 0..1, roundness 0..1, flipped, \
@@ -539,6 +674,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "empty = the base geometry alone",
         engine_only: true,
         crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
         purpose: "extra Add/Subtract/Intersect shapes composed onto `mask` — engine-only by \
                   design: keep an existing mask's `name` byte-exact and they are preserved for you",
     },
@@ -549,6 +685,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "true",
         engine_only: true,
         crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
         purpose: "the per-mask eye toggle (mutes the mask without destroying its tuned Amount)",
     },
     // WHY `enabled` STAYS ENGINE-ONLY (R23-1b, weighed and declined).
@@ -574,6 +711,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "null = pure geometry",
         engine_only: false,
         crs: CrsKey::Family("CorrectionMasks/Mask/RangeMask"),
+        tier: Some(Tier::Rendered),
         purpose: "optional Range-Mask refinement INTERSECTED with the geometry: \
                   {kind:\"luminance\", lo_outer<=lo<=hi<=hi_outer in 0..1} keeps only that \
                   brightness band, {kind:\"color\", r,g,b 0..1 reference, amount 0..1 tolerance, \
@@ -586,6 +724,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "\"\"",
         engine_only: false,
         crs: CrsKey::Family("CorrectionName + MaskName"),
+        tier: Some(Tier::CarriedOnly),
         purpose: "the mask's IDENTITY, not decoration — when refining an edit that already has \
                   masks, return each existing name byte-exact or your mask edits are discarded",
     },
@@ -596,6 +735,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "1",
         engine_only: false,
         crs: CrsKey::Family("CorrectionAmount"),
+        tier: Some(Tier::Rendered),
         purpose: "master opacity of this mask's whole adjustment",
     },
     Control {
@@ -605,6 +745,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "false",
         engine_only: false,
         crs: CrsKey::Family("MaskInverted"),
+        tier: Some(Tier::Rendered),
         purpose: "invert the mask region",
     },
     Control {
@@ -614,6 +755,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalExposure2012"),
+        tier: Some(Tier::Rendered),
         purpose: "local exposure in stops",
     },
     Control {
@@ -623,6 +765,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalContrast2012"),
+        tier: Some(Tier::Rendered),
         purpose: "local contrast",
     },
     Control {
@@ -632,6 +775,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalHighlights2012"),
+        tier: Some(Tier::Rendered),
         purpose: "local highlights",
     },
     Control {
@@ -641,6 +785,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalShadows2012"),
+        tier: Some(Tier::Rendered),
         purpose: "local shadows",
     },
     Control {
@@ -650,6 +795,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalWhites2012"),
+        tier: Some(Tier::Rendered),
         purpose: "local white point",
     },
     Control {
@@ -659,6 +805,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalBlacks2012"),
+        tier: Some(Tier::Rendered),
         purpose: "local black point",
     },
     Control {
@@ -668,6 +815,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalClarity2012"),
+        tier: Some(Tier::Rendered),
         purpose: "local midtone contrast",
     },
     Control {
@@ -677,6 +825,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalDehaze"),
+        tier: Some(Tier::Rendered),
         purpose: "local haze removal",
     },
     Control {
@@ -686,6 +835,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalTexture"),
+        tier: Some(Tier::Rendered),
         purpose: "local FINE-detail contrast (smaller radius than clarity) — this control exists \
                   only per mask, there is no global Texture",
     },
@@ -696,6 +846,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalSharpness"),
+        tier: Some(Tier::Rendered),
         purpose: "local capture sharpening at the same radius as the global `sharpening` — but on \
                   ACR's own LOCAL scale, where the band is SIGNED: positive sharpens, NEGATIVE \
                   SOFTENS (blurs) inside the mask, which is how a background is thrown back",
@@ -707,6 +858,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalSaturation"),
+        tier: Some(Tier::Rendered),
         purpose: "local saturation",
     },
     Control {
@@ -716,6 +868,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalHue"),
+        tier: Some(Tier::Rendered),
         purpose: "local HUE ROTATION of every colour inside the mask (±100 = ±30°, the same scale \
                   as the global mixer's hue axis) — for turning one region's colour without \
                   touching the same colour elsewhere in the frame",
@@ -727,6 +880,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalTemperature"),
+        tier: Some(Tier::Rendered),
         purpose: "local warm/cool shift — a RELATIVE ±100 shift, NOT Kelvin (the global \
                   temperature_k is the only absolute one)",
     },
@@ -737,6 +891,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalTint"),
+        tier: Some(Tier::Rendered),
         purpose: "local green/magenta shift",
     },
     Control {
@@ -746,6 +901,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalLuminanceNoise"),
+        tier: Some(Tier::Rendered),
         purpose: "local luminance noise reduction — for a \"this region is noisy\" request",
     },
     Control {
@@ -755,6 +911,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "null = neutral",
         engine_only: true,
         crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
         purpose: "per-channel LINEAR-light gains for zone recolouring, written by the reverse-fit \
                   (engine-only: no classic-ACR counterpart exists)",
     },
@@ -765,6 +922,7 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         neutral: "custom",
         engine_only: true,
         crs: CrsKey::None,
+        tier: None,
         purpose: "which semantic zone produced this mask (engine-only stable identity)",
     },
 ];
@@ -1563,6 +1721,172 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(ai_order, schema_order, "required order follows the registry order");
+    }
+
+    /// R24-5 M0 — the tier a row CLAIMS must match the export shape the XMP
+    /// writer actually gives it.
+    ///
+    /// [`Control::crs`] is already pinned against `xmp::owned_attr_keys` by
+    /// `every_attr_the_registry_names_is_one_the_writer_writes`, so anchoring
+    /// the tier's export half to `crs` anchors it to the writer itself: a row
+    /// cannot claim `Rendered` while owning no sidecar property, and it cannot
+    /// claim `RenderedNotExported` while the writer emits a key for it. Only
+    /// the RENDER half is a free declaration — and the locals' half of that is
+    /// re-derived from the engine below.
+    #[test]
+    fn every_tier_matches_the_sidecar_shape_the_writer_gives_it() {
+        for (label, rows, allow) in [
+            ("EditRecipe", RECIPE_CONTROLS.as_slice(), CARRIED_ONLY_GLOBAL),
+            ("LocalAdjustment", LOCAL_CONTROLS.as_slice(), CARRIED_ONLY_LOCAL),
+        ] {
+            for c in rows {
+                match c.tier {
+                    Some(t) => assert_eq!(
+                        t.owns_crs_key(),
+                        c.crs.is_owned(),
+                        "{label}.{}: tier {t:?} and crs {:?} disagree about whether it \
+                         has a sidecar property of its own",
+                        c.name,
+                        c.crs
+                    ),
+                    // The escape hatch is for rows that are not controls
+                    // (the era stamp, the AI's provenance, the solver's mask
+                    // role). Anything the sidecar carries IS a control and
+                    // owes a tier — so `None` may never own a key.
+                    None => assert!(
+                        !c.crs.is_owned(),
+                        "{label}.{} has a sidecar property but no tier — a carried \
+                         control cannot opt out of being classified",
+                        c.name
+                    ),
+                }
+                // A CarriedOnly control renders nothing, so the only thing
+                // stopping it from being a slider that does nothing is this
+                // list. Membership is the agreement, spelled with its reason.
+                if c.tier == Some(Tier::CarriedOnly) {
+                    assert!(
+                        allow.iter().any(|(n, _)| *n == c.name),
+                        "{label}.{} is CarriedOnly but not on the allow-list — add it \
+                         with the reason it renders nothing, or give it a real tier",
+                        c.name
+                    );
+                }
+            }
+            // …and the allow-list may not name a control that is not (or no
+            // longer) CarriedOnly: a stale entry silently blesses whatever
+            // takes that name next.
+            for (n, why) in allow {
+                let c = rows
+                    .iter()
+                    .find(|c| c.name == *n)
+                    .unwrap_or_else(|| panic!("{label}: allow-list names unknown control {n}"));
+                assert_eq!(c.tier, Some(Tier::CarriedOnly), "{label}.{n} is not CarriedOnly");
+                assert!(!why.trim().is_empty(), "{label}.{n} has no stated reason");
+            }
+        }
+        // PassThrough is declared and deliberately unpopulated: the LR-only
+        // property blocks it describes (Transform, Calibration, the camera
+        // Look) are preserved by the XMP merge WITHOUT being recipe fields.
+        // The B4 batch is what gives this tier its first member; until then
+        // an accidental one would be a control nobody renders and nobody
+        // interprets.
+        assert!(
+            RECIPE_CONTROLS
+                .iter()
+                .chain(LOCAL_CONTROLS.iter())
+                .all(|c| c.tier != Some(Tier::PassThrough)),
+            "PassThrough gained a member — that is a B4 decision, not a refactor"
+        );
+    }
+
+    /// The LOCAL tiers' RENDER half, re-derived from the engine rather than
+    /// declared.
+    ///
+    /// The renderer's own answer to "does this mask touch a pixel" is the gate
+    /// at `render.rs`'s mask loop — `enabled && amount != 0 &&
+    /// engine_active(m)` — whose middle and inner terms mirror every `!= 0.0`
+    /// check inside `apply_masks`. So a control renders iff that gate's answer
+    /// DEPENDS on it, probed two ways because the gate is two-layered:
+    ///
+    ///   * one-hot: neutral everywhere but this control ⇒ the mask wakes up.
+    ///     Catches every slider `engine_active` itself weighs.
+    ///   * zeroing: an already-active mask with this control zeroed ⇒ the mask
+    ///     goes back to sleep. Catches the MULTIPLIERS, which change nothing on
+    ///     their own — `amount` is the case, and one-hot alone called it inert.
+    ///
+    /// Both directions are asserted: a slider the gate cannot notice at all is
+    /// a slider that does nothing, which is precisely what the inclusion law
+    /// below exists to forbid. Everything goes through serde, so the probe
+    /// cannot drift from the field names the registry is keyed by.
+    #[test]
+    fn local_tiers_agree_with_the_engines_own_activity_gate() {
+        // The render-side gate, spelled once (render.rs's mask loop).
+        fn gate(m: &LocalAdjustment) -> bool {
+            m.enabled && m.amount != 0.0 && crate::render::engine_active(m)
+        }
+        // An active baseline held up by TWO independent terms, so zeroing
+        // either one leaves the mask awake and only a real multiplier can put
+        // it back to sleep.
+        let baseline = LocalAdjustment {
+            enabled: true,
+            amount: 1.0,
+            exposure_ev: 1.0,
+            contrast: 1.0,
+            ..Default::default()
+        };
+        assert!(gate(&baseline), "premise: the baseline mask is active");
+        assert!(!gate(&LocalAdjustment::default()), "premise: a default mask is not");
+
+        for c in LOCAL_CONTROLS.iter().filter(|c| c.shape.is_scalar()) {
+            let with = |m: &LocalAdjustment, v: f32| -> LocalAdjustment {
+                let mut j = serde_json::to_value(m).expect("LocalAdjustment serializes");
+                j[c.name] = json!(v);
+                serde_json::from_value(j)
+                    .unwrap_or_else(|e| panic!("{} is not a plain number in serde: {e}", c.name))
+            };
+            let wakes_it = gate(&with(&LocalAdjustment::default(), 1.0));
+            let sleeps_without_it = !gate(&with(&baseline, 0.0));
+            let renders = wakes_it || sleeps_without_it;
+            let claimed = c.tier.is_some_and(Tier::renders);
+            assert_eq!(
+                claimed, renders,
+                "LocalAdjustment.{}: the registry says renders={claimed}, but the engine's \
+                 own gate says {renders} (one-hot wakes it: {wakes_it}; zeroing it puts an \
+                 active mask to sleep: {sleeps_without_it})",
+                c.name
+            );
+        }
+    }
+
+    /// **Inclusion law, AI half** (R24-5 M0): a control the model is ASKED for
+    /// must be one the engine renders — or an agreed CarriedOnly.
+    ///
+    /// Otherwise the schema spends a paid request soliciting a number that
+    /// changes no pixel, the eval ruler scores it, and the rationale explains
+    /// it — the exact failure the whole registry exists to make visible. Both
+    /// mirrors, derived from the registry on both sides (no transcribed list).
+    #[test]
+    fn every_control_the_ai_may_set_is_one_the_engine_renders() {
+        for (label, rows, allow) in [
+            ("EditRecipe", RECIPE_CONTROLS.as_slice(), CARRIED_ONLY_GLOBAL),
+            ("LocalAdjustment", LOCAL_CONTROLS.as_slice(), CARRIED_ONLY_LOCAL),
+        ] {
+            for c in rows.iter().filter(|c| !c.engine_only) {
+                let Some(t) = c.tier else {
+                    // Envelope rows (version / rationale / confidence) are in
+                    // the schema by design — they carry the response, not a
+                    // develop value. They may not own a sidecar key (asserted
+                    // above), which is what keeps this exemption narrow.
+                    continue;
+                };
+                assert!(
+                    t.renders() || allow.iter().any(|(n, _)| *n == c.name),
+                    "{label}.{}: the schema asks the model for a {t:?} control the engine \
+                     renders nothing from",
+                    c.name
+                );
+            }
+        }
     }
 
     /// The registry's stated bands ARE the bands `EditRecipe::clamp` enforces

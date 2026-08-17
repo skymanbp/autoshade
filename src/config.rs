@@ -60,6 +60,11 @@ pub struct LocalSettings {
     /// both resolve to the same OpenAI-compatible HTTP path, differing only in
     /// `image_base_url`/`image_api_key`. Absent ⇒ `"api"` (prior behaviour).
     pub image_provider: Option<String>,
+    /// The DELIVERY ROOT (R24-5 M8): the folder every rendered deliverable and
+    /// every pixel master lands in. Absent / blank ⇒ [`DEFAULT_DELIVERY_ROOT`],
+    /// i.e. the historical cwd-relative `./out` — so an upgrade changes
+    /// nothing. See [`delivery_root`] for what it does and does NOT cover.
+    pub out_dir: Option<String>,
 }
 
 /// Path to the local settings file — the per-user store root, so the SAME
@@ -452,8 +457,92 @@ pub fn update_local_settings(
         mutate(&mut cur);
         // One rule for both writers: see `reconcile_key_homes`.
         cur.reconcile_key_homes(&before);
-        save_local_settings(&cur)
+        let saved = save_local_settings(&cur);
+        // The delivery root is memoised (it is read on every output-name
+        // claim); this is the ONE writer of the file it is read from, so the
+        // memo is dropped here rather than being given a lifetime of its own.
+        // Dropped unconditionally: a save that failed PART way is exactly the
+        // case where the memo must not be trusted either.
+        invalidate_delivery_root();
+        saved
     })
+}
+
+/// The historical delivery root, and still the default: a cwd-relative
+/// `./out`. Spelled once so the "an unset setting changes nothing" promise is
+/// a constant, not a repeated literal.
+pub const DEFAULT_DELIVERY_ROOT: &str = "out";
+
+/// **The delivery root** — the one folder rendered deliverables and the pixel
+/// masters behind them are written to (R24-5 M8).
+///
+/// Before this it was not a setting at all: `pipeline::default_out` spelled
+/// `./out` literally, so the CLI, the batch renderer, the web download route
+/// and the GUI's "./out folder" destination each hardcoded the same
+/// cwd-relative path, and a user who wanted deliverables somewhere else had
+/// no answer but "launch the app from a different directory".
+///
+/// WHAT IT COVERS — everything `pipeline::default_out` names: the developed
+/// deliverable (`<stem>.developed.{tif,jpg}`), the reimagine / retouch / heal
+/// / clone pixel masters (`pipeline::unique_out`), the extracted style prompt
+/// (`<stem>.style.txt`), the `match` report and preview. All of those are
+/// "the files Autoshop produces FROM a photo", one semantic, one root.
+///
+/// WHAT IT DOES NOT COVER, deliberately — each of these is a DIFFERENT
+/// semantic that merely used to share the same folder name:
+///   * the develop store (recipes / XMP / versions / masks) — already
+///     per-user under [`crate::store::store_root`] since v0.13, and moving it
+///     is [`crate::store::store_root`]'s own setting (`AUTOSHOP_DATA_DIR`).
+///   * `out/imported` — where the WEB surface parks an uploaded SOURCE photo.
+///     That is library INPUT, not a deliverable; filing a stranger's upload
+///     under the user's delivery folder would mix the two.
+///   * the pre-v0.13 legacy `./out` migration roots
+///     (`store::legacy_out_roots`, `AUTOSHOP_LEGACY_OUT`) — a READ-only
+///     archaeology path pinned to where old builds actually wrote, which a
+///     new setting cannot retroactively change.
+///
+/// Memoised: it is consulted on every output-name claim (including
+/// `unique_out`'s up-to-999 probe loop) and resolving it reads a file.
+/// [`update_local_settings`] — the one writer — drops the memo.
+pub fn delivery_root() -> PathBuf {
+    if let Ok(g) = DELIVERY_ROOT_MEMO.read()
+        && let Some(p) = g.as_ref()
+    {
+        return p.clone();
+    }
+    let v = choose_delivery_root(
+        load_local_settings().out_dir.as_deref(),
+        resolve_env("AUTOSHOP_OUT_DIR"),
+    );
+    if let Ok(mut g) = DELIVERY_ROOT_MEMO.write() {
+        *g = Some(v.clone());
+    }
+    v
+}
+
+static DELIVERY_ROOT_MEMO: std::sync::RwLock<Option<PathBuf>> =
+    std::sync::RwLock::new(None);
+
+/// Drop the [`delivery_root`] memo. Called by the one settings writer.
+pub fn invalidate_delivery_root() {
+    if let Ok(mut g) = DELIVERY_ROOT_MEMO.write() {
+        *g = None;
+    }
+}
+
+/// The resolution itself, as a pure function of its two sources — so the
+/// precedence (file over environment over default), the blank-means-default
+/// rule and the zero-change guarantee are testable without touching a global.
+///
+/// Note `file` must already have been through [`LocalSettings::restricted_to`]
+/// (i.e. come from [`load_local_settings`]): the root is `Destination`, so an
+/// ambient file's value is gone before it reaches here.
+pub(crate) fn choose_delivery_root(file: Option<&str>, env: Option<String>) -> PathBuf {
+    let owned = file.map(str::to_string);
+    explicit_or_env(&owned, env)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| PathBuf::from(DEFAULT_DELIVERY_ROOT), PathBuf::from)
 }
 
 // Clone: the web server snapshots the config OUT of its RwLock before long AI
@@ -662,6 +751,15 @@ pub(crate) const SETTINGS: &[Setting] = &[
     // preference — the strictest reading would make it Destination, but that
     // would silently break the documented `.env` migration knob.
     env_only("AUTOSHOP_LEGACY_OUT", Trust::Preference),
+    // The DELIVERY ROOT (M8) is the exact opposite case, and lands on the
+    // other side of the same line: it names a directory every export and
+    // every pixel master is WRITTEN to. A planted one does not merely choose
+    // a folder — it decides where a stranger's developed photos are filed,
+    // and (via `guard_readonly`'s own-output allowance) which directory stops
+    // counting as the read-only photo library. "Names WHERE bytes are sent",
+    // so Destination: neither a `.env` nor an ambient `autoshop.local.json`
+    // may supply it.
+    bound("AUTOSHOP_OUT_DIR", Trust::Destination, |s| &mut s.out_dir),
     // --- foreign names this process or its children obey ------------------------
     env_only("PATH", Trust::Destination),
     // Both Python sidecars inherit the environment, and a `.env`'s
@@ -1217,6 +1315,10 @@ mod tests {
             image_gen_model: Some("gpt-image-2".into()),
             image_effort: Some("high".into()),
             analysis_effort: Some("high".into()),
+            // The second thing a planted file would take (M8): the folder
+            // every export and every pixel master is WRITTEN to. Destination,
+            // so it is stripped with the endpoints.
+            out_dir: Some("D:/attacker-drop".into()),
         };
         assert!(
             planted.names_beyond(Source::WorkingDirFile),
@@ -1228,6 +1330,7 @@ mod tests {
         assert_eq!(safe.analysis_base_url, None, "an ambient file chose the analysis endpoint");
         assert_eq!(safe.image_api_key, None, "an ambient file supplied the image key");
         assert_eq!(safe.analysis_api_key, None, "an ambient file supplied the analysis key");
+        assert_eq!(safe.out_dir, None, "an ambient file chose where the photos are written");
 
         // …and it is a scalpel, not a reset: everything else still applies, so
         // the pre-store cwd file keeps working as the migration affordance it
@@ -1247,6 +1350,46 @@ mod tests {
         // whole point of labelling `<temp>/autoshop` rather than trusting it.
         assert_eq!(SettingsOrigin::SharedRoot.source(), Source::WorkingDirFile);
         assert_eq!(SettingsOrigin::Central.source(), Source::Trusted);
+    }
+
+    /// R24-5 M8: the delivery root's resolution, as a pure function of its two
+    /// sources — precedence, the blank rule, and the promise an UNSET setting
+    /// makes (`./out`, byte for byte what every caller produced before there
+    /// was a setting at all).
+    #[test]
+    fn the_delivery_root_defaults_to_the_out_folder_it_replaced() {
+        // Nothing set anywhere ⇒ the historical path. This is the zero-change
+        // guarantee the whole migration rests on.
+        assert_eq!(choose_delivery_root(None, None), PathBuf::from("out"));
+        assert_eq!(DEFAULT_DELIVERY_ROOT, "out");
+
+        // The environment alone decides when the file is silent…
+        assert_eq!(
+            choose_delivery_root(None, Some("D:/deliver".into())),
+            PathBuf::from("D:/deliver")
+        );
+        // …and the file wins over it (the module's documented "later wins").
+        assert_eq!(
+            choose_delivery_root(Some("D:/from-file"), Some("D:/from-env".into())),
+            PathBuf::from("D:/from-file")
+        );
+        // An EXPLICITLY blank field is a real choice — "the default" — and it
+        // silences the environment too, exactly like the two effort fields.
+        // Without this, clearing the Settings box could never take effect.
+        assert_eq!(choose_delivery_root(Some(""), Some("D:/from-env".into())), PathBuf::from("out"));
+        assert_eq!(choose_delivery_root(Some("   "), None), PathBuf::from("out"));
+        // Surrounding whitespace from a paste is not part of a folder name.
+        assert_eq!(choose_delivery_root(Some("  D:/deliver "), None), PathBuf::from("D:/deliver"));
+
+        // And the live reader agrees with the pure one for this process.
+        assert_eq!(
+            delivery_root(),
+            choose_delivery_root(
+                load_local_settings().out_dir.as_deref(),
+                resolve_env("AUTOSHOP_OUT_DIR")
+            ),
+            "delivery_root() must be choose_delivery_root() over the real sources"
+        );
     }
 
     /// The ambient-`.env` guard must cover every variable that decides WHERE

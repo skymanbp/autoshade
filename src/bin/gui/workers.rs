@@ -880,6 +880,7 @@ impl AutoshopApp {
                                 saved,
                                 xmp_bad,
                                 dropped_masks,
+                                carried_globals,
                                 clamp: clamp_dropped,
                                 lr_unreadable,
                                 packet_unreadable,
@@ -919,6 +920,31 @@ impl AutoshopApp {
                                     lang,
                                     "{n} Lightroom mask(s) (brush/AI/depth) have no engine equivalent and were not imported — they stay in the sidecar untouched",
                                     &[("n", &dropped_masks.to_string())],
+                                );
+                                self.toast(ToastKind::Error, t);
+                            }
+                            // R24-5 M0, the GLOBAL half of the same story: the
+                            // sidecar's own crs: properties this engine does
+                            // not model. The merge keeps every one of them, so
+                            // nothing is lost — but the canvas will not match
+                            // Lightroom's render, and until now nothing said
+                            // why. Named, not counted: 「Texture」 is the whole
+                            // answer, 「3 settings」 is not. Capped like the
+                            // mask-loss line, for the same reason.
+                            if !carried_globals.is_empty() {
+                                let shown = carried_globals.len().min(4);
+                                let more = carried_globals.len() - shown;
+                                let mut list = carried_globals[..shown].join(", ");
+                                if more > 0 {
+                                    list.push_str(&format!(
+                                        ", {}",
+                                        trf(lang, "+{n} more", &[("n", &more.to_string())])
+                                    ));
+                                }
+                                let t = trf(
+                                    lang,
+                                    "this Lightroom sidecar carries {n} global setting(s) the engine does not render (a save keeps them untouched): {list}",
+                                    &[("n", &carried_globals.len().to_string()), ("list", &list)],
                                 );
                                 self.toast(ToastKind::Error, t);
                             }
@@ -1691,7 +1717,13 @@ impl AutoshopApp {
                                                     Ok((_, merge_note, losses)) => {
                                                         for m in merge_note
                                                             .into_iter()
-                                                            .chain(mask_loss_line(lang, &losses))
+                                                            .chain(xmp_loss_line(
+                                                                lang,
+                                                                &losses,
+                                                                &autoshop::xmp::global_export_losses(
+                                                                    &stamped,
+                                                                ),
+                                                            ))
                                                         {
                                                             self.toast(ToastKind::Error, m.clone());
                                                             s = format!("{s} — ⚠ {m}");

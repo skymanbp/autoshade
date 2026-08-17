@@ -277,19 +277,54 @@ pub(crate) fn mask_active(m: &autoshop::recipe::LocalAdjustment) -> bool {
     m.enabled && autoshop::render::engine_active(m)
 }
 
-/// The export-side lossy-projection disclosure (M6a), in the UI language: ONE
-/// line naming what the Lightroom sidecar just written does NOT carry, with a
-/// count per category. The verdicts come from the WRITER itself
-/// (`xmp::mask_export_losses`, threaded out of `pipeline::write_xmp`) — this
-/// only counts and translates them, so the projection rules live in exactly
-/// one place and the message can never describe a file that wasn't written.
+/// The export-side lossy-projection disclosure (M6a, widened by R24-5 M0), in
+/// the UI language: ONE line naming what the Lightroom sidecar just written
+/// does NOT carry. Two buckets, one sentence:
+///
+///   * the MASK bucket, per category — and it NAMES the masks now, not just
+///     counts them. "bitmap masks ×3" left the actionable half unsaid ("which
+///     of my twelve?"); the CLI's own `xmp::describe_mask_losses` has named
+///     them since M6a, and the window was the surface that did not.
+///   * the GLOBAL bucket, which did not exist at all: an active control the
+///     engine renders and the sidecar has no property for
+///     (`xmp::global_export_losses`, derived from the tier registry's
+///     `RenderedNotExported` rows).
+///
+/// Both verdicts come from the WRITER / the registry, never from a list kept
+/// here, so the message can never describe a file that was not written or a
+/// tier that has moved.
 ///
 /// `None` for a faithful projection: a save that lost nothing must not
 /// interrupt (the four import-side disclosures follow the same rule).
-pub(crate) fn mask_loss_line(lang: Lang, losses: &[autoshop::xmp::MaskLoss]) -> Option<String> {
+pub(crate) fn xmp_loss_line(
+    lang: Lang,
+    losses: &[autoshop::xmp::MaskLoss],
+    globals: &[&'static str],
+) -> Option<String> {
     use autoshop::xmp::MaskLossReason as R;
-    if losses.is_empty() {
+    if losses.is_empty() && globals.is_empty() {
         return None;
+    }
+    /// The masks in one category, named. Capped: a 64-mask recipe would make
+    /// an unreadable line, so the count stays the fact and the first few names
+    /// are the pointer (the same 4/「+N more」 shape `describe_mask_losses`
+    /// uses for the CLI).
+    fn named(lang: Lang, losses: &[autoshop::xmp::MaskLoss], reason: R) -> String {
+        let names: Vec<&str> =
+            losses.iter().filter(|l| l.reason == reason).map(|l| l.name.as_str()).collect();
+        let shown = names.len().min(4);
+        let more = names.len() - shown;
+        let list = names[..shown]
+            .iter()
+            // A mask may legitimately have no name; an empty slot in a
+            // comma list reads as a rendering bug.
+            .map(|n| if n.trim().is_empty() { tr(lang, "(unnamed)").to_string() } else { n.to_string() })
+            .collect::<Vec<_>>()
+            .join(", ");
+        match more {
+            0 => list,
+            _ => format!("{list}, {}", trf(lang, "+{n} more", &[("n", &more.to_string())])),
+        }
     }
     let mut parts: Vec<String> = Vec::new();
     // Fixed order (skips before degradations), and a literal key per arm so
@@ -300,12 +335,23 @@ pub(crate) fn mask_loss_line(lang: Lang, losses: &[autoshop::xmp::MaskLoss]) -> 
             continue;
         }
         let n = n.to_string();
-        parts.push(match reason {
+        let head = match reason {
             R::Bitmap => trf(lang, "bitmap masks ×{n}", &[("n", &n)]),
             R::Disabled => trf(lang, "muted masks ×{n}", &[("n", &n)]),
             R::ComponentsFlattened => trf(lang, "shape components flattened ×{n}", &[("n", &n)]),
             R::Rotation => trf(lang, "radial rotation ×{n}", &[("n", &n)]),
             R::Recolour => trf(lang, "recolour gains ×{n}", &[("n", &n)]),
+        };
+        parts.push(format!("{head} ({})", named(lang, losses, reason)));
+    }
+    // The global bucket. A control with no label of its own falls back to its
+    // registry name rather than vanishing — an unlabelled disclosure still
+    // says WHICH control, which is the whole point.
+    for g in globals {
+        parts.push(match *g {
+            "base_curve" => tr(lang, "camera base curve").to_string(),
+            "lens_profile" => tr(lang, "lens profile correction").to_string(),
+            other => other.to_string(),
         });
     }
     Some(trf(

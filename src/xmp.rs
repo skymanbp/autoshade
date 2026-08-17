@@ -294,6 +294,113 @@ pub fn describe_mask_losses(losses: &[MaskLoss]) -> Option<String> {
     ))
 }
 
+/// **Export-side disclosure, GLOBAL half** (R24-5 M0): the develop controls
+/// this recipe is CARRYING that the sidecar cannot express — an active
+/// control the engine renders and `owned_attrs` has no `crs:` property for.
+///
+/// The mask half of this story has existed since M6a ([`MaskLoss`]); the
+/// global half never did, so a photo whose look depends on its camera base
+/// curve or its lens-profile correction exported a sidecar that renders
+/// visibly differently in Lightroom, silently. Reopened in Autoshop it is
+/// fine — recipe.json keeps everything — which is exactly why the loss went
+/// unnoticed.
+///
+/// DERIVED, not listed: the members are the registry's `RenderedNotExported`
+/// rows ([`crate::advisor::catalogue::Tier`]), and "is it active" is a serde
+/// comparison against a default recipe — so moving a control between tiers
+/// (the B2–B5 batches) updates this disclosure by itself, and a new
+/// unexportable control cannot be added without appearing here.
+pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
+    use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+    let (Ok(live), Ok(neutral)) =
+        (serde_json::to_value(r), serde_json::to_value(EditRecipe::default()))
+    else {
+        return Vec::new();
+    };
+    RECIPE_CONTROLS
+        .iter()
+        .filter(|c| c.tier == Some(Tier::RenderedNotExported))
+        .filter(|c| live.get(c.name) != neutral.get(c.name))
+        .map(|c| c.name)
+        .collect()
+}
+
+/// **Import-side disclosure, GLOBAL half** (R24-5 M0): the `crs:` properties
+/// this sidecar carries on its own `rdf:Description` that Autoshop does not
+/// model at all — Lightroom's global Texture, PointColor, the Transform and
+/// Calibration blocks, Grain, Defringe, the camera Look.
+///
+/// The merge PRESERVES all of them (that is what `graft_into` is for), so
+/// nothing is destroyed; what was missing is the sentence saying they exist.
+/// Until now the only import-side global check was
+/// [`unparsable_crs_numbers`], whose universe IS [`owned_attr_keys`] — so a
+/// perfectly valid property we simply do not render was invisible to every
+/// disclosure surface, and the photo just looked different from Lightroom's
+/// render with no explanation on screen.
+///
+/// The universe is the COMPLEMENT of what we own, so it needs no catalogue of
+/// Adobe's property names to rot: the day a batch teaches the engine
+/// `crs:Texture`, the key joins `owned_attr_keys` and leaves this list.
+///
+/// Only the Description's OWN open tag is scanned — mask corrections live in
+/// a child element and have their own disclosure ([`unsupported_corrections`]),
+/// and mixing the two would report every `crs:Local*` key as an unmodelled
+/// global. Quote-aware: a mask name or a `crs:RawFileName` value may contain
+/// anything, `crs:Foo=` included.
+pub fn unmodelled_global_crs(xmp: &str) -> Vec<String> {
+    if xmp.len() > MAX_XMP_BYTES {
+        return Vec::new();
+    }
+    let Some(start) = find_crs_description(xmp) else { return Vec::new() };
+    let Some((gt, _)) = scan_tag_end(xmp, start) else { return Vec::new() };
+    let tag = &xmp[start..=gt];
+    let owned: std::collections::BTreeSet<String> = owned_attr_keys().into_iter().collect();
+    let mut found: std::collections::BTreeSet<String> = Default::default();
+    let b: Vec<char> = tag.chars().collect();
+    let mut quote: Option<char> = None;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+            }
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                i += 1;
+            }
+            None => {
+                // `crs:` must start a NAME, i.e. not be preceded by an
+                // identifier character (`xcrs:Foo` is a different prefix).
+                let starts = b[i..].starts_with(&['c', 'r', 's', ':'])
+                    && (i == 0 || !(b[i - 1].is_alphanumeric() || b[i - 1] == '-' || b[i - 1] == '_'));
+                if starts {
+                    let mut j = i + 4;
+                    while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == '_') {
+                        j += 1;
+                    }
+                    let name: String = b[i + 4..j].iter().collect();
+                    // An ATTRIBUTE, so `=` (possibly spaced) must follow.
+                    let mut k = j;
+                    while k < b.len() && b[k] == ' ' {
+                        k += 1;
+                    }
+                    if !name.is_empty() && b.get(k) == Some(&'=') && !owned.contains(&name) {
+                        found.insert(name);
+                    }
+                    i = j.max(i + 1);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
 /// Build the `<crs:MaskGroupBasedCorrections>` child element (empty string when
 /// there are no masks) PLUS the per-mask loss list the export-side disclosure
 /// is built from — one loop, so the XML and the claim about it cannot drift.
@@ -2778,6 +2885,106 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R24-5 M0, EXPORT direction: the sidecar cannot carry the camera base
+    /// curve or the lens-profile correction, and the user has to hear it —
+    /// silence there is a photo that renders differently in Lightroom for a
+    /// reason nothing on screen names.
+    ///
+    /// Derived from the tier registry, so this test also pins the derivation:
+    /// a neutral recipe discloses nothing, and the disclosed names are exactly
+    /// the `RenderedNotExported` rows that are actually set.
+    #[test]
+    fn the_export_names_the_globals_the_sidecar_cannot_carry() {
+        use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+        assert!(
+            global_export_losses(&EditRecipe::default()).is_empty(),
+            "a neutral recipe loses nothing — a save that lost nothing must not interrupt"
+        );
+        // The engine's own measurement of THIS photo: rendered, unexportable.
+        let with_base = EditRecipe {
+            base_curve: vec![[0.0, 0.0], [0.5, 0.55], [1.0, 1.0]],
+            ..Default::default()
+        };
+        assert_eq!(global_export_losses(&with_base), vec!["base_curve"]);
+        let both = EditRecipe {
+            lens_profile: crate::recipe::LensProfile {
+                vignette_on: true,
+                vignette: vec![1.0, 0.1],
+                ..Default::default()
+            },
+            ..with_base.clone()
+        };
+        assert_eq!(global_export_losses(&both), vec!["base_curve", "lens_profile"]);
+        // An ordinary rendered control is NOT a loss (it has its own crs key).
+        let exposed = EditRecipe { exposure_ev: 1.5, ..Default::default() };
+        assert!(global_export_losses(&exposed).is_empty());
+        // Premise: the tier this is derived from is populated. A registry
+        // where nobody is RenderedNotExported would make every case above
+        // pass for the wrong reason.
+        assert_eq!(
+            RECIPE_CONTROLS
+                .iter()
+                .filter(|c| c.tier == Some(Tier::RenderedNotExported))
+                .map(|c| c.name)
+                .collect::<Vec<_>>(),
+            vec!["base_curve", "lens_profile"],
+        );
+    }
+
+    /// R24-5 M0, IMPORT direction: a Lightroom sidecar's globals that Autoshop
+    /// does not model. The merge keeps them; this is the sentence that says
+    /// they are there — the global counterpart of the mask-side
+    /// `unsupported_corrections`, which had no partner until now.
+    #[test]
+    fn an_imported_sidecar_names_the_globals_the_engine_does_not_render() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <rdf:Description rdf:about=\"\" \
+                   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                   crs:Exposure2012=\"+1.00\" crs:Texture=\"+30\" \
+                   crs:GrainAmount=\"12\" crs:PerspectiveUpright=\"1\" \
+                   crs:RawFileName=\"crs:NotAnAttribute=1.ARW\"/></rdf:RDF></x:xmpmeta>";
+        let found = unmodelled_global_crs(doc);
+        assert!(found.contains(&"Texture".to_string()), "LR's global Texture: {found:?}");
+        assert!(found.contains(&"GrainAmount".to_string()), "{found:?}");
+        assert!(found.contains(&"PerspectiveUpright".to_string()), "{found:?}");
+        // A control we DO model is not "unmodelled" — the universe is the
+        // complement of `owned_attr_keys`, which is what stops this list from
+        // needing a catalogue of Adobe property names to keep up to date.
+        assert!(!found.contains(&"Exposure2012".to_string()), "{found:?}");
+        // Quote-aware: `crs:` inside an attribute VALUE is text, not a
+        // property (a RawFileName or a mask name may contain anything).
+        assert!(!found.contains(&"NotAnAttribute".to_string()), "{found:?}");
+
+        // Mask corrections live in a CHILD element and have their own
+        // disclosure; reporting every crs:Local* key as an unmodelled global
+        // would bury the real ones under sixty names.
+        let r = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment {
+                mask: crate::recipe::MaskGeometry::Linear {
+                    zero_x: 0.0,
+                    zero_y: 0.0,
+                    full_x: 0.0,
+                    full_y: 1.0,
+                },
+                enabled: true,
+                amount: 1.0,
+                exposure_ev: 0.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let ours = recipe_to_xmp(&r);
+        let found = unmodelled_global_crs(&ours);
+        assert!(
+            found.is_empty(),
+            "a sidecar WE wrote models everything in it by construction: {found:?}"
+        );
+        // Nothing to read ⇒ nothing to say (never a panic, never a warning).
+        assert!(unmodelled_global_crs("").is_empty());
+        assert!(unmodelled_global_crs("<not xml").is_empty());
+    }
 
     /// L03-3: the import gate must MATCH the disclosure sentence — a
     /// conflicting crs binding imports nothing, because the scanners would

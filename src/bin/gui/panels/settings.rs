@@ -28,6 +28,12 @@ impl AutoshopApp {
             image_api_key: String::new(),
             image_key_present: cfg.openai_api_key.is_some(),
             image_effort: cfg.image_effort.clone().unwrap_or_default(),
+            // The FILE's own spelling, not the resolved root: this is the
+            // field the user edits, and showing a resolved absolute path in it
+            // would silently turn "use the default" into a pinned folder on
+            // the next save. `load_local_settings` (not the raw file) so an
+            // ambient working-directory copy cannot pre-fill it either.
+            out_dir: autoshop::config::load_local_settings().out_dir.unwrap_or_default(),
             status: String::new(),
             image_models,
             analysis_models,
@@ -102,6 +108,12 @@ impl AutoshopApp {
             // clearing the field could never take effect.
             cur.analysis_effort = Some(form.analysis_effort.trim().to_string());
             cur.image_effort = Some(form.image_effort.trim().to_string());
+            // The delivery root (M8), same explicit-blank rule as the two
+            // efforts: an emptied field is a real choice ("the default
+            // ./out"), so it is STORED empty rather than skipped, or clearing
+            // it could never take effect. `update_local_settings` drops the
+            // memo, so the next export claim reads this value.
+            cur.out_dir = Some(form.out_dir.trim().to_string());
             // Secrets: only overwrite when a non-empty value was actually
             // typed — and a typed key is FOR the endpoint on screen beside
             // it, so record that home (`config::file_key_for` enforces it at
@@ -327,6 +339,44 @@ impl AutoshopApp {
         {
             self.start_import_legacy(dir);
         }
+        // --- the DELIVERY ROOT (R24-5 M8) ------------------------------------
+        // The counterpart to the develop store above: that folder holds the
+        // recipes, this one holds the finished files. It used to be the
+        // hardcoded cwd-relative `./out` in five places at once (the CLI, the
+        // batch renderer, the web download route, the GUI's destination
+        // setting, the style-prompt writer), which is why "where did my export
+        // go" had no answer but "wherever you launched the app from".
+        ui.separator();
+        ui.heading(tr(lang, "Delivery folder"));
+        let resolved = autoshop::config::delivery_root();
+        {
+            let f = &mut self.settings;
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut f.out_dir)
+                        .desired_width(FIELD_W_MAX.min(ui.available_width() - 90.0).max(80.0))
+                        .hint_text(autoshop::config::DEFAULT_DELIVERY_ROOT),
+                )
+                .on_hover_text(tr(
+                    lang,
+                    "Where finished files land: exports, AI/retouch pixel masters and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops are NOT here (see 「Develop store」 above).",
+                ));
+                if ui
+                    .button(tr(lang, "Browse…"))
+                    .on_hover_text(tr(lang, "Pick the delivery folder"))
+                    .clicked()
+                    && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                {
+                    f.out_dir = dir.display().to_string();
+                }
+            });
+        }
+        // The RESOLVED root, absolute: a relative setting (the default
+        // included) means nothing without saying which directory it is
+        // relative to — the same reason the export summary spells its target
+        // out in full. Reflects the SAVED value, so it only moves after
+        // 「Save settings」.
+        ui.label(egui::RichText::new(abs_display(&resolved)).small().weak());
         {
             let f = &mut self.settings;
             // Fetched ids belong to the endpoint recorded at fetch time; once

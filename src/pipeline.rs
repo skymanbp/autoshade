@@ -2135,10 +2135,20 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     if out_abs.starts_with(resolve_existing(&crate::store::store_root())) {
         return Ok(());
     }
-    if let Ok(own_out) = absolute(Path::new("out"))
-        && out_abs.starts_with(resolve_existing(&normalize(&own_out))) {
+    // OUR own output areas. Two entries, not one: the configured delivery
+    // root (M8) and the historical `./out`, which keeps holding the pixel
+    // masters an older develop already links to — a user who repoints the
+    // root must not find that `match`-ing on one of those old exports is
+    // suddenly refused. Both are `Destination`-trusted or literal, so no
+    // planted file can widen this allowance (see `config::SETTINGS`).
+    for own in [crate::config::delivery_root(), PathBuf::from(crate::config::DEFAULT_DELIVERY_ROOT)]
+    {
+        if let Ok(own_out) = absolute(&own)
+            && out_abs.starts_with(resolve_existing(&normalize(&own_out)))
+        {
             return Ok(());
         }
+    }
     if let Some(raw_dir) = raw_abs.parent()
         && out_abs.starts_with(raw_dir) {
             anyhow::bail!(
@@ -3161,9 +3171,14 @@ mod guard_tests {
     }
 }
 
-/// `./out/<stem>.<kind>.<ext>` — outputs never go beside the source RAW.
+/// `<delivery root>/<stem>.<kind>.<ext>` — outputs never go beside the source
+/// RAW. The root is [`crate::config::delivery_root`] (R24-5 M8), which
+/// defaults to the historical `./out`, so an unset setting produces exactly
+/// the path this function always produced. THE funnel: every deliverable and
+/// every pixel master is named through here or through [`BatchNames`], which
+/// itself calls it — so the setting has one consumption point, not five.
 pub fn default_out(raw: &Path, kind: &str, ext: &str) -> PathBuf {
-    PathBuf::from("out").join(format!("{}.{kind}.{ext}", stem(raw)))
+    crate::config::delivery_root().join(format!("{}.{kind}.{ext}", stem(raw)))
 }
 
 /// Batch-scope deliverable names. `default_out` keys deliverables by STEM
@@ -3182,16 +3197,17 @@ pub struct BatchNames {
     taken: std::collections::HashSet<String>,
     /// Disclosure lines, `"<final deliverable> ← <source photo>"`.
     pub renamed: Vec<String>,
-    /// Delivery ROOT for every claim. `None` = `./out`, i.e. exactly what
-    /// [`default_out`] gives — the CLI's shape, and what `Default::default()`
-    /// still produces byte for byte. The GUI passes the user's export
-    /// destination setting here so a batch render lands where its single
-    /// exports do (R22-7); the naming and dedup rules are untouched by it.
+    /// Delivery ROOT for every claim. `None` = whatever [`default_out`] gives
+    /// — the CLI's shape, i.e. the configured delivery root (M8), `./out`
+    /// unless the user moved it — and what `Default::default()` still
+    /// produces byte for byte. The GUI passes the user's export destination
+    /// setting here so a batch render lands where its single exports do
+    /// (R22-7); the naming and dedup rules are untouched by it.
     root: Option<PathBuf>,
 }
 
 impl BatchNames {
-    /// A batch that delivers into `dir` instead of `./out`.
+    /// A batch that delivers into `dir` instead of the delivery root.
     pub fn rooted(dir: PathBuf) -> Self {
         Self { root: Some(dir), ..Default::default() }
     }
@@ -3217,7 +3233,8 @@ impl BatchNames {
         let base = if n == 1 {
             default_out(raw, kind, ext)
         } else {
-            PathBuf::from("out").join(format!("{} ({n}).{kind}.{ext}", stem(raw)))
+            crate::config::delivery_root()
+                .join(format!("{} ({n}).{kind}.{ext}", stem(raw)))
         };
         match (&self.root, base.file_name()) {
             (Some(root), Some(name)) => root.join(name),
@@ -3832,6 +3849,53 @@ mod tests {
         assert!(!edited.is_noop());
     }
 
+    /// R24-5 M8: the delivery root is a SETTING, and every library-side
+    /// deliverable name is claimed through the one funnel that reads it.
+    ///
+    /// This pins the WIRING rather than a folder: it re-derives each name from
+    /// `config::delivery_root()` itself, so it holds whatever the setting says
+    /// and fails the moment a caller re-introduces a literal `"out"` — which
+    /// is exactly how the five hardcoded copies (CLI deliverable, batch
+    /// dedup spelling, pixel masters, style prompt, web download) drifted into
+    /// existence.
+    #[test]
+    fn every_deliverable_name_is_claimed_under_the_delivery_root() {
+        let root = crate::config::delivery_root();
+        let raw = Path::new("D:/Photography/Raw/2024/Trip/DSC0001.ARW");
+        // The deliverable, the `match` report, the style prompt and the
+        // preview all come off `default_out` — one funnel, one root.
+        for (kind, ext) in
+            [("developed", "tif"), ("matched", "json"), ("style", "txt"), ("preview", "jpg")]
+        {
+            assert_eq!(
+                default_out(raw, kind, ext),
+                root.join(format!("DSC0001.{kind}.{ext}")),
+                "{kind}.{ext} must be claimed under the delivery root"
+            );
+        }
+        // The batch dedup spelling is the one place that used to re-spell the
+        // parent directory instead of borrowing it (`(2)` names had their own
+        // `PathBuf::from("out")`), so a moved root would have split one batch
+        // across two folders.
+        let mut names = BatchNames::default();
+        let a = names.claim(Path::new("D:/roll-a/DSC0001.ARW"), "developed", "tif");
+        let b = names.claim(Path::new("D:/roll-b/DSC0001.ARW"), "developed", "tif");
+        assert_eq!(a, root.join("DSC0001.developed.tif"));
+        assert_eq!(b, root.join("DSC0001 (2).developed.tif"));
+        // An explicitly ROOTED batch (the GUI's export destination, R22-7)
+        // still overrides both — the setting is the DEFAULT, not a ceiling.
+        let mut rooted = BatchNames::rooted(PathBuf::from("D:/deliver"));
+        assert_eq!(
+            rooted.claim(raw, "developed", "tif"),
+            PathBuf::from("D:/deliver").join("DSC0001.developed.tif")
+        );
+        // And the read-only-library guard still counts the delivery root as
+        // ours: a `match` run on a file that lives there may write beside it.
+        let src = root.join("DSC0001.preview.jpg");
+        let dst = root.join("DSC0001.matched.json");
+        assert!(guard_readonly(&dst, &src).is_ok(), "the delivery root is always writable");
+    }
+
     #[test]
     fn outputs_always_default_outside_the_library() {
         let raw = Path::new("D:/Photography/Raw/2024/Trip/DSC0001.ARW");
@@ -3839,7 +3903,7 @@ mod tests {
         // XMP sidecars) lives in the photo's central develop dir, keyed by the
         // absolute path. Neither ever lands beside the RAW — the library stays
         // read-only by construction.
-        assert!(default_out(raw, "developed", "tif").starts_with("out"));
+        assert!(default_out(raw, "developed", "tif").starts_with(crate::config::delivery_root()));
         assert_eq!(xmp_target(raw), crate::store::develop_dir(raw).join("DSC0001.xmp"));
         assert!(guard_readonly(&xmp_target(raw), raw).is_ok(), "the store is always writable");
         // Same stem in a DIFFERENT folder → a different develop dir (the

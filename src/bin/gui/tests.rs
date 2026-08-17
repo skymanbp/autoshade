@@ -424,6 +424,110 @@
         );
     }
 
+    /// R24-5: the edit-state list's rows CARRY the card actions — the same
+    /// ＋ / ▣ / ✕ the strip draws, through the one owner
+    /// (`variant_card_buttons`), so 「what does ✕ do here」 cannot become two
+    /// answers. What this pins:
+    ///
+    ///   * per-row membership: ＋ and ▣ on the ACTIVE card only (both act on
+    ///     the live canvas), ✕ on any droppable card, none on a lone Original;
+    ///   * ▣ DISABLED rather than hidden on a pixel-state card — the R24-2
+    ///     judgement, and the reason it is a seam at all;
+    ///   * the panel does not grow: this section gained two widgets per row in
+    ///     a 320 px panel, and an unbounded row is how the side panel crept
+    ///     +8 px a frame twice before (R19, R22-3).
+    ///
+    /// The STRIP's own seams are untouched by a frame that draws both, which
+    /// is why `strip_apply` stays the strip's (`VariantSurface`).
+    #[test]
+    fn the_edit_state_rows_carry_the_card_actions_without_widening_the_panel() {
+        use crate::model::{Variant, VariantKind};
+        let mk = |kind, id: &str| Variant {
+            kind,
+            id: id.into(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: None,
+            thumb: None,
+        };
+        for (active, want) in [
+            // The Generated card is active: it offers ＋, a DISABLED ▣ (its
+            // look lives in its pixels), and ✕. The background Original
+            // offers nothing — it is neither the live canvas nor droppable.
+            (1usize, vec!["1:＋▣(off)✕"]),
+            // The Original is active: ＋ only. ▣ is hidden (it IS the
+            // negative) and the Original is never droppable; the background
+            // Generated keeps its ✕.
+            (0usize, vec!["0:＋", "1:✕"]),
+        ] {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            let mut app = AutoshopApp {
+                variants: vec![
+                    mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID),
+                    mk(VariantKind::Generated, "card-gen"),
+                ],
+                active,
+                versions: vec![1],
+                ..Default::default()
+            };
+            let mut widths = Vec::new();
+            for _ in 0..3 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1400.0, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                        let r = egui::SidePanel::left("controls")
+                            .default_width(320.0)
+                            .show(ctx, |ui| {
+                                egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
+                            });
+                        widths.push(r.response.rect.width());
+                    },
+                );
+            }
+            assert_eq!(app.edit_list_actions, want, "active={active}");
+            assert!(
+                (widths[0] - widths[2]).abs() < 0.5,
+                "active={active}: the controls panel must not grow ({widths:?})"
+            );
+        }
+
+        // A lone Original: nothing is droppable and nothing else exists, so
+        // the only action is ＋. (A ✕ here would offer to delete the photo's
+        // one edit state.)
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let mut app = AutoshopApp {
+            variants: vec![mk(VariantKind::Original, crate::model::ORIGINAL_VARIANT_ID)],
+            active: 0,
+            ..Default::default()
+        };
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| app.develop_panel(ui));
+                });
+            },
+        );
+        assert_eq!(app.edit_list_actions, vec!["0:＋"]);
+    }
+
     /// R24-3/R24-4, on the real panel: the strip's ACTIVE card carries the
     /// two new affordances — a name box and 「apply to Original」 — and a
     /// PIXEL-STATE card shows the apply button DISABLED (with the reverse-fit
@@ -1061,17 +1165,28 @@
     /// folder is re-created by the render rather than turning into a dialog).
     #[test]
     fn the_destination_setting_resolves_to_one_delivery_folder() {
-        use std::path::{Path, PathBuf};
+        use std::path::Path;
         let last = Path::new("D:/deliver/tripA");
+        // R24-5 M8: this arm resolves to the DELIVERY ROOT setting, not to a
+        // literal `./out` — the same one `pipeline::default_out` claims names
+        // under, so this window, the CLI, the web download route and a batch
+        // render name one folder. Re-derived here rather than spelled, so the
+        // assertion holds whatever the setting says (unset ⇒ `out`, which is
+        // what this arm always returned).
+        // (The default itself — "unset ⇒ ./out" — is pinned as a pure
+        // function in `config::the_delivery_root_defaults_to_the_out_folder_it_replaced`;
+        // asserting it again HERE would make this test fail for a developer
+        // who has AUTOSHOP_OUT_DIR set, which is not what it is about.)
+        let root = autoshop::config::delivery_root();
         assert_eq!(
             crate::export::export_dest_dir(ExportDest::OutFolder, None),
-            Some(PathBuf::from("out")),
+            Some(root.clone()),
             "the default is the CLI's and the batch renderer's own root"
         );
         assert_eq!(
             crate::export::export_dest_dir(ExportDest::OutFolder, Some(last)),
-            Some(PathBuf::from("out")),
-            "…and a remembered folder does not override an explicit ./out"
+            Some(root),
+            "…and a remembered folder does not override an explicit delivery root"
         );
         assert_eq!(
             crate::export::export_dest_dir(ExportDest::LastUsed, Some(last)),
@@ -4863,7 +4978,7 @@
                 ],
             ),
         ] {
-            let line = mask_loss_line(lang, &losses)
+            let line = xmp_loss_line(lang, &losses, &[])
                 .unwrap_or_else(|| panic!("{lang:?}: losses must produce a line"));
             for fragment in want {
                 assert!(line.contains(fragment), "{lang:?}: {fragment:?} missing from {line}");
@@ -4871,10 +4986,171 @@
             // The categories are joined, not overwritten: five fragments, five
             // separators-worth of one sentence.
             assert_eq!(line.matches('×').count(), 5, "{lang:?}: every category kept: {line}");
-            assert!(mask_loss_line(lang, &[]).is_none(), "{lang:?}: a faithful save is silent");
+            assert!(
+                xmp_loss_line(lang, &[], &[]).is_none(),
+                "{lang:?}: a faithful save is silent"
+            );
             // One category alone must not drag the others' labels in.
-            let one = mask_loss_line(lang, &[loss("sky", R::Bitmap)]).expect("one loss, one line");
+            let one =
+                xmp_loss_line(lang, &[loss("sky", R::Bitmap)], &[]).expect("one loss, one line");
             assert_eq!(one.matches('×').count(), 1, "{lang:?}: only the live category: {one}");
+
+            // R24-5 M0, upgrade (1): the masks are NAMED, not merely counted —
+            // "which of my twelve?" is the actionable half a count leaves out,
+            // and the CLI's own `describe_mask_losses` has answered it since
+            // M6a while the window did not.
+            assert!(line.contains("sky, subject"), "{lang:?}: the bitmap masks are named: {line}");
+            assert!(line.contains("parked"), "{lang:?}: the muted mask is named: {line}");
+            // A nameless mask still renders as a name, never as an empty slot.
+            let anon = xmp_loss_line(lang, &[loss("", R::Bitmap)], &[]).expect("a line");
+            assert!(
+                anon.contains(tr(lang, "(unnamed)")),
+                "{lang:?}: a nameless mask is labelled: {anon}"
+            );
+            // ...and the cap holds: five bitmap masks show four names + the rest.
+            let many: Vec<_> =
+                ["a", "b", "c", "d", "e"].iter().map(|n| loss(n, R::Bitmap)).collect();
+            let capped = xmp_loss_line(lang, &many, &[]).expect("a line");
+            assert!(capped.contains("a, b, c, d"), "{lang:?}: four names shown: {capped}");
+            assert!(!capped.contains(", e"), "{lang:?}: the fifth is folded away: {capped}");
+            assert!(
+                capped.contains(&trf(lang, "+{n} more", &[("n", "1")])),
+                "{lang:?}: and counted: {capped}"
+            );
+
+            // R24-5 M0, upgrade (2): the GLOBAL bucket, which did not exist.
+            // A recipe whose look depends on the camera base curve exported a
+            // sidecar that renders differently in Lightroom, silently.
+            let globals = xmp_loss_line(lang, &[], &["base_curve", "lens_profile"])
+                .expect("globals alone must produce a line");
+            assert!(globals.contains(tr(lang, "camera base curve")), "{lang:?}: {globals}");
+            assert!(globals.contains(tr(lang, "lens profile correction")), "{lang:?}: {globals}");
+            assert_eq!(globals.matches('×').count(), 0, "{lang:?}: no mask category: {globals}");
+            // Both buckets in ONE sentence - two toasts for one save would be
+            // two interruptions describing the same file.
+            let both =
+                xmp_loss_line(lang, &[loss("sky", R::Bitmap)], &["base_curve"]).expect("a line");
+            assert!(both.contains("sky") && both.contains(tr(lang, "camera base curve")));
+            // A control with no label of its own still names itself.
+            let raw = xmp_loss_line(lang, &[], &["some_future_control"]).expect("a line");
+            assert!(raw.contains("some_future_control"), "{lang:?}: {raw}");
+        }
+    }
+
+    /// **Inclusion law, GUI half** (R24-5 M0): every develop control this
+    /// window can MUTATE must be one the engine renders — or an agreed
+    /// `CarriedOnly` (`catalogue::CARRIED_ONLY_{GLOBAL,LOCAL}`).
+    ///
+    /// A slider that moves a number nothing renders is the worst kind of bug
+    /// here: it looks like it works, it survives a save, it reloads, and the
+    /// photo never changes. The AI half of this law lives in
+    /// `catalogue::every_control_the_ai_may_set_is_one_the_engine_renders`;
+    /// this is the same law over the other surface, and both sides are read
+    /// off the tier registry rather than transcribed from it.
+    ///
+    /// The settable set is EXTRACTED from the GUI's own source (the whole
+    /// module tree, walked at runtime like the font gate does — an
+    /// `include_str!` list would lose a new file silently), by the two textual
+    /// shapes a Rust mutation takes: `&mut <path>.<field>` and
+    /// `<path>.<field> =`. Known limits, stated rather than papered over: it
+    /// over-includes (any struct with a field named like a control — which
+    /// only makes the gate STRICTER), and a mutation reached purely through an
+    /// autoref method call (`…masks.push(x)`) is invisible to it. Names the
+    /// registry does not know are ignored: a new control cannot be one of
+    /// those, because `catalogue::global_value`/`local_value` fail the build
+    /// until it has a row.
+    #[test]
+    fn the_gui_only_offers_controls_the_engine_renders() {
+        use autoshop::advisor::catalogue::{
+            Tier, CARRIED_ONLY_GLOBAL, CARRIED_ONLY_LOCAL, LOCAL_CONTROLS, RECIPE_CONTROLS,
+        };
+        fn walk_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).expect("gui source dir listable") {
+                let p = e.expect("dir entry").path();
+                if p.is_dir() {
+                    walk_rs(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        // A field name ends at the first character that cannot be in an
+        // identifier; a path segment before the dot is whatever precedes it.
+        fn field_after(text: &str, at: usize) -> Option<&str> {
+            let rest = &text[at..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            (end > 0).then(|| &rest[..end])
+        }
+        let gui_src =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("bin").join("gui");
+        let mut sources = Vec::new();
+        walk_rs(&gui_src, &mut sources);
+        assert!(sources.len() >= 6, "expected the split module tree, found {}", sources.len());
+
+        let mut mutated: std::collections::BTreeSet<String> = Default::default();
+        for p in &sources {
+            // This file is the GATE, not a surface: its own fixtures build
+            // recipes field by field and would swamp the extraction.
+            if p.file_name().is_some_and(|n| n == "tests.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(p).expect("gui source readable");
+            let bytes = text.as_bytes();
+            for (i, _) in text.match_indices('.') {
+                let Some(name) = field_after(&text, i + 1) else { continue };
+                let after = i + 1 + name.len();
+                // `&mut …<name>` — the borrow every slider helper takes.
+                let borrowed = text[..i].trim_end().ends_with(|c: char| {
+                    c.is_ascii_alphanumeric() || c == '_' || c == ')' || c == ']'
+                }) && text[..i].rsplit_once("&mut ").is_some_and(|(_, tail)| {
+                    !tail.contains(['\n', ';', ',', '(']) && !tail.trim().is_empty()
+                });
+                // `… = ` (but not `==`, `>=`, `<=`, `!=`), `+=`, `-=`, `*=`.
+                let assigned = {
+                    let mut j = after;
+                    while bytes.get(j) == Some(&b' ') {
+                        j += 1;
+                    }
+                    match (bytes.get(j), bytes.get(j + 1)) {
+                        (Some(b'='), Some(c)) => *c != b'=',
+                        (Some(b'+' | b'-' | b'*'), Some(b'=')) => true,
+                        _ => false,
+                    }
+                };
+                if borrowed || assigned {
+                    mutated.insert(name.to_string());
+                }
+            }
+        }
+        // Premise: this window is a develop panel. Finding almost nothing
+        // means the extractor broke and every assertion below is vacuous.
+        for known in ["exposure_ev", "clarity", "saturation", "tone_curve", "texture", "amount"] {
+            assert!(
+                mutated.contains(known),
+                "the extractor missed `{known}`, which the develop panel plainly sets — \
+                 it is broken, and this gate would pass vacuously"
+            );
+        }
+
+        for (label, rows, allow) in [
+            ("EditRecipe", RECIPE_CONTROLS.as_slice(), CARRIED_ONLY_GLOBAL),
+            ("LocalAdjustment", LOCAL_CONTROLS.as_slice(), CARRIED_ONLY_LOCAL),
+        ] {
+            for c in rows.iter().filter(|c| mutated.contains(c.name)) {
+                // Envelope rows (the era stamp, the AI's rationale) carry no
+                // develop value and the GUI legitimately copies them around;
+                // they own no sidecar key, which is what keeps this narrow.
+                let Some(t) = c.tier else { continue };
+                assert!(
+                    t.renders() || allow.iter().any(|(n, _)| *n == c.name),
+                    "{label}.{}: the GUI sets a {t:?} control the engine renders nothing \
+                     from — a slider that moves a number and no pixel",
+                    c.name
+                );
+                assert_ne!(t, Tier::PassThrough, "{label}.{} is not for a surface to set", c.name);
+            }
         }
     }
 

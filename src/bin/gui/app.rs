@@ -332,6 +332,12 @@ pub(crate) struct AutoshopApp {
     /// the list makes.
     #[cfg(test)]
     pub(crate) edit_list_rows: Vec<String>,
+    /// Test seam (R24-5): what the edit-state list's ACTION line laid out per
+    /// card, as `"<i>:<glyphs>"` — the list surface has no rects of its own
+    /// (`strip_apply` stays the STRIP's, so a full frame drawing both cannot
+    /// silently retarget the older assertions).
+    #[cfg(test)]
+    pub(crate) edit_list_actions: Vec<String>,
     #[cfg(test)]
     pub(crate) reimagine_btn_rect: Option<egui::Rect>, // test seam: the ✨ Generate button's rect
     #[cfg(test)]
@@ -1603,6 +1609,8 @@ impl Default for AutoshopApp {
             strip_name_rect: None,
             #[cfg(test)]
             edit_list_rows: Vec::new(),
+            #[cfg(test)]
+            edit_list_actions: Vec::new(),
             #[cfg(test)]
             reimagine_btn_rect: None,
             #[cfg(test)]

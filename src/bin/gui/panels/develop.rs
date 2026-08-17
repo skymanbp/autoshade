@@ -276,11 +276,14 @@ impl AutoshopApp {
     pub(crate) fn variant_strip(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         let accent = self.theme.colors().accent_text; // Copy — safe in closures
-        let mut switch_to: Option<usize> = None;
-        let mut delete: Option<usize> = None;
-        let mut apply: Option<usize> = None;
-        let mut rename: Option<String> = None;
-        let mut save_version = false;
+        // ONE deferred action for the whole strip (R24-5): the five separate
+        // `Option`s this replaced were dispatched by an `else if` chain whose
+        // exclusivity was a property of the chain; a single value makes it a
+        // property of the TYPE, and it is the same value the edit-state list
+        // hands to the same owner. Last writer wins where the chain had a
+        // fixed priority — reachable only if two widgets were clicked in one
+        // frame, which one pointer cannot do.
+        let mut act: Option<VariantAction> = None;
         let busy = self.busy; // Copy — read before the card closures borrow self
         // The card column is centered by an EXPLICIT top pad, not by
         // cross-align: Align::Center positioned the row before its content
@@ -395,7 +398,7 @@ impl AutoshopApp {
                                 self.strip_thumb_rect = Some(resp.rect);
                             }
                             if resp.on_hover_text(tr(lang, "Click to switch to this variant (lossless)")).clicked() {
-                                switch_to = Some(i);
+                                act = Some(VariantAction::Switch(i));
                             }
                             ui.horizontal(|ui| {
                                 let label = egui::RichText::new(tr(lang, kind.label())).small();
@@ -469,98 +472,19 @@ impl AutoshopApp {
                                         self.strip_name_rect = Some(resp.rect);
                                     }
                                     if resp.clicked() {
-                                        rename = Some(card_id.clone());
+                                        act = Some(VariantAction::Rename(card_id.clone()));
                                     }
                                 } else if let Some(n) = &named {
                                     ui.label(egui::RichText::new(format!("「{n}」")).small().weak());
                                 }
-                                // R24-2 (user decision ②, in place of
-                                // save-as-you-go snapshots): a one-click
-                                // archive entry point ON the card whose
-                                // develop it snapshots. Active card only —
-                                // the button acts on the LIVE canvas, and
-                                // offering it on a background card would
-                                // promise a snapshot of something else.
-                                // A small_button in the existing label row:
-                                // the row is already at least interact_size.y
-                                // tall, so the strip's card-height arithmetic
-                                // (and its geometry test) is untouched.
-                                // Inert (visibly, not silently) while a photo
-                                // is still opening — the canvas then still
-                                // holds the OUTGOING photo's develop, and the
-                                // snapshot would land it in the incoming
-                                // photo's store. Same rule the Versions
-                                // section applies to its own copy.
-                                if active
-                                    && ui
-                                        .add_enabled(!busy, egui::Button::new("＋").small())
-                                        .on_hover_text(tr(lang, "Save all current develop parameters as a numbered snapshot (v<N>.recipe.json in this photo's develop store), reloadable anytime"))
-                                        .clicked()
-                                {
-                                    save_version = true;
-                                }
-                                // R24-3 (#7) 「apply to Original」, on the
-                                // ACTIVE card for the same reason ＋ is: it
-                                // copies the LIVE canvas. Two concepts the
-                                // hover keeps apart — it overwrites the ▣
-                                // Original CARD's develop parameters (its
-                                // pixels stay, this card stays), and Ctrl+S
-                                // is what afterwards makes that card's
-                                // develop the photo's SAVED develop.
-                                // A pixel-state card shows the button
-                                // DISABLED with the reason rather than
-                                // hiding it (the R24-2 save_version
-                                // judgement, same remedy): its look is in its
-                                // raster, so there is nothing parametric to
-                                // copy. Hidden entirely when this card IS the
-                                // negative, or when the strip has no
-                                // Original card to apply onto.
-                                if active
-                                    && kind != VariantKind::Original
-                                    && self.original_index().is_some()
-                                {
-                                    let can = kind.is_parametric();
-                                    let hover = if can {
-                                        tr(lang, "Copy this variant's develop onto the ▣ Original card — its baked pixels and this card both stay. One Ctrl+Z undoes it; Ctrl+S then saves it as this photo's develop")
-                                    } else {
-                                        tr(lang, "A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first")
-                                    };
-                                    let resp = ui
-                                        .add_enabled(
-                                            can && !busy,
-                                            egui::Button::new("▣").small(),
-                                        )
-                                        .on_hover_text(hover);
-                                    #[cfg(test)]
-                                    {
-                                        self.strip_apply = Some((resp.rect, can && !busy));
-                                    }
-                                    if resp.clicked() {
-                                        apply = Some(i);
-                                    }
-                                }
-                                // Any variant except the sole Original can be dropped.
-                                // ✕ — the ONE close/cancel glyph app-wide (the
-                                // old bare × was the fourth variant of it).
-                                // ARMED (R24-4): the first click asks, the
-                                // second deletes — the button says which,
-                                // because a deleted card cannot be brought
-                                // back (unlike a version, whose number the
-                                // registry keeps burned rather than the card
-                                // recoverable).
-                                let armed = self.variant_delete_confirm == Some(i);
-                                if self.variants.len() > 1
-                                    && kind != VariantKind::Original
-                                    && ui
-                                        .small_button(if armed { "✕?" } else { "✕" })
-                                        .on_hover_text(if armed {
-                                            tr(lang, "Click again to delete this variant — it cannot be brought back (Ctrl+Z does not cross variants)")
-                                        } else {
-                                            tr(lang, "Delete this variant")
-                                        })
-                                        .clicked()
-                                {
-                                    delete = Some(i);
+                                if let Some(a) = self.variant_card_buttons(
+                                    ui,
+                                    i,
+                                    active,
+                                    busy,
+                                    VariantSurface::Strip,
+                                ) {
+                                    act = Some(a);
                                 }
                             });
                             #[cfg(test)]
@@ -573,32 +497,124 @@ impl AutoshopApp {
                 });
             });
         });
-        if let Some(i) = switch_to {
-            self.switch_variant(i, ui.ctx());
-        } else if let Some(i) = delete {
-            self.delete_variant(i, ui.ctx());
-        } else if let Some(i) = apply {
-            self.apply_to_original(i, ui.ctx());
-        } else if let Some(id) = rename {
-            // Opening a box COMMITS whichever one was open first — the mask
-            // panel's cross-commit rule, made structural by keying on the
-            // card's id (R24-3).
-            self.commit_variant_name_buf();
-            if let Some(photo) = self.src_path.clone() {
-                let cur = self
-                    .variants
-                    .iter()
-                    .find(|v| v.id == id)
-                    .and_then(|v| v.name.clone())
-                    .unwrap_or_default();
-                self.variant_name_buf = Some((photo, id, cur.clone(), cur));
-            }
-        } else if save_version && !self.busy {
-            // The button above is already disabled while busy; the second
-            // read is defence in depth against a future caller path, at the
-            // cost of one bool.
-            self.save_version();
+        if let Some(a) = act {
+            self.dispatch_variant_action(a, ui.ctx());
         }
+    }
+
+    /// The card's ACTION buttons — ＋ archive, ▣ apply-to-Original, ✕ delete
+    /// — for whichever surface is drawing the card (R24-5).
+    ///
+    /// Extracted from `variant_strip` verbatim when the Versions section's
+    /// edit-state list grew the same three buttons: a card action must mean
+    /// one thing and be implemented once, or the two lists answer 「what does
+    /// ✕ do here」 differently the first time either is touched. The strip
+    /// keeps the rename box (see [`VariantSurface`]).
+    ///
+    /// Returns the deferred action; the caller performs it through
+    /// `dispatch_variant_action` after the layout closure has released `self`.
+    // `surface` decides only which headless seam records the row, so it is
+    // genuinely unused in a release build — the alternative (two near-copies
+    // of this function) is the thing the extraction exists to remove.
+    #[cfg_attr(not(test), allow(unused_variables))]
+    pub(crate) fn variant_card_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        active: bool,
+        busy: bool,
+        surface: VariantSurface,
+    ) -> Option<VariantAction> {
+        let lang = self.lang;
+        let kind = self.variants[i].kind;
+        let mut act: Option<VariantAction> = None;
+        // Which glyphs this row actually laid out — the list surface's test
+        // seam, since it has no rects of its own to assert on.
+        #[cfg(test)]
+        let mut drawn: Vec<&str> = Vec::new();
+        // R24-2 (user decision ②, in place of save-as-you-go snapshots): a
+        // one-click archive entry point ON the card whose develop it
+        // snapshots. Active card only — the button acts on the LIVE canvas,
+        // and offering it on a background card would promise a snapshot of
+        // something else. A small_button in the existing label row: the row is
+        // already at least interact_size.y tall, so the strip's card-height
+        // arithmetic (and its geometry test) is untouched.
+        // Inert (visibly, not silently) while a photo is still opening — the
+        // canvas then still holds the OUTGOING photo's develop, and the
+        // snapshot would land it in the incoming photo's store. Same rule the
+        // Versions section applies to its own copy.
+        if active {
+            #[cfg(test)]
+            drawn.push("＋");
+            if ui
+                .add_enabled(!busy, egui::Button::new("＋").small())
+                .on_hover_text(tr(lang, "Save all current develop parameters as a numbered snapshot (v<N>.recipe.json in this photo's develop store), reloadable anytime"))
+                .clicked()
+            {
+                act = Some(VariantAction::SaveVersion);
+            }
+        }
+        // R24-3 (#7) 「apply to Original」, on the ACTIVE card for the same
+        // reason ＋ is: it copies the LIVE canvas. Two concepts the hover keeps
+        // apart — it overwrites the ▣ Original CARD's develop parameters (its
+        // pixels stay, this card stays), and Ctrl+S is what afterwards makes
+        // that card's develop the photo's SAVED develop.
+        // A pixel-state card shows the button DISABLED with the reason rather
+        // than hiding it (the R24-2 save_version judgement, same remedy): its
+        // look is in its raster, so there is nothing parametric to copy.
+        // Hidden entirely when this card IS the negative, or when the strip
+        // has no Original card to apply onto.
+        if active && kind != VariantKind::Original && self.original_index().is_some() {
+            let can = kind.is_parametric();
+            let hover = if can {
+                tr(lang, "Copy this variant's develop onto the ▣ Original card — its baked pixels and this card both stay. One Ctrl+Z undoes it; Ctrl+S then saves it as this photo's develop")
+            } else {
+                tr(lang, "A generated variant's look lives in its pixels — there are no develop parameters to copy onto the ▣ Original card; run 「Reverse-fit」 first")
+            };
+            let resp =
+                ui.add_enabled(can && !busy, egui::Button::new("▣").small()).on_hover_text(hover);
+            #[cfg(test)]
+            drawn.push(if can && !busy { "▣" } else { "▣(off)" });
+            #[cfg(test)]
+            if surface == VariantSurface::Strip {
+                // The STRIP owns this seam: a full frame draws both surfaces,
+                // and letting the list overwrite it would silently retarget
+                // every existing assertion at the other widget.
+                self.strip_apply = Some((resp.rect, can && !busy));
+            }
+            if resp.clicked() {
+                act = Some(VariantAction::Apply(i));
+            }
+        }
+        // Any variant except the sole Original can be dropped.
+        // ✕ — the ONE close/cancel glyph app-wide (the old bare × was the
+        // fourth variant of it). ARMED (R24-4): the first click asks, the
+        // second deletes — the button says which, because a deleted card
+        // cannot be brought back (unlike a version, whose number the registry
+        // keeps burned rather than the card recoverable).
+        let armed = self.variant_delete_confirm == Some(i);
+        if self.variants.len() > 1
+            && kind != VariantKind::Original
+            && ui
+                .small_button(if armed { "✕?" } else { "✕" })
+                .on_hover_text(if armed {
+                    tr(lang, "Click again to delete this variant — it cannot be brought back (Ctrl+Z does not cross variants)")
+                } else {
+                    tr(lang, "Delete this variant")
+                })
+                .clicked()
+        {
+            act = Some(VariantAction::Delete(i));
+        }
+        #[cfg(test)]
+        if self.variants.len() > 1 && kind != VariantKind::Original {
+            drawn.push(if armed { "✕?" } else { "✕" });
+        }
+        #[cfg(test)]
+        if surface == VariantSurface::List {
+            self.edit_list_actions.push(format!("{i}:{}", drawn.join("")));
+        }
+        act
     }
 
     /// One develop-panel section — body extracted verbatim from
@@ -2073,6 +2089,9 @@ impl AutoshopApp {
         group_caption(ui, tr(lang, "Versions & Export"));
         let n_ver = self.versions.len();
         let n_ver_s = n_ver.to_string();
+        // Deferred like the strip's, and dispatched through the same owner
+        // after the section's closures release `self` (R24-5).
+        let mut act: Option<VariantAction> = None;
         egui::CollapsingHeader::new(section_title(&trf(lang, "Versions ({n})", &[("n", &n_ver_s)]), n_ver > 0))
             .id_salt("sec_versions")
             .default_open(false)
@@ -2093,13 +2112,29 @@ impl AutoshopApp {
                 // them, in the vocabulary the data model now uses: the
                 // taxonomy's binary (parametric vs pixel-state) and the
                 // orthogonal "hangs off a baked master" attribute are the
-                // two notes a row can carry (R24-1). The rows are a VIEW —
-                // every card action lives on the card itself in the strip,
-                // so there is exactly one place to click for each of them.
+                // two notes a row can carry (R24-1).
+                //
+                // R24-5: the rows are no longer a read-only view — each one
+                // carries the card's own ＋ / ▣ / ✕, drawn by the SAME owner
+                // the strip draws them with (`variant_card_buttons`), so the
+                // two surfaces cannot come to mean different things. Clicking
+                // a row switches to that card, exactly as clicking its
+                // thumbnail does. Renaming stays on the strip on purpose: two
+                // `TextEdit`s over one buffer fight for the caret every frame
+                // (see `VariantSurface`).
+                //
+                // The buttons take a SECOND line rather than joining the
+                // label row. A 320 px panel already holds a kind label, a
+                // 「name」 and a vocabulary note; three more widgets on that
+                // line is how a side panel starts growing per frame, which is
+                // a defect this repo has shipped twice (R19, R22-3) and now
+                // has width-stability tests for.
                 let n_var = self.variants.len();
+                let busy = self.busy;
                 #[cfg(test)]
                 {
                     self.edit_list_rows.clear();
+                    self.edit_list_actions.clear();
                 }
                 if n_var > 0 {
                     let accent = self.theme.colors().accent_text;
@@ -2112,38 +2147,86 @@ impl AutoshopApp {
                         .weak()
                         .small(),
                     );
-                    for (i, v) in self.variants.iter().enumerate() {
+                    let active_i = self.active;
+                    for i in 0..n_var {
+                        // Read the three facts the row shows BEFORE the layout
+                        // closure borrows `self` (Variant is not Clone, and
+                        // making it so for a display row would be the wrong
+                        // fix — the card's texture handle rides on it).
+                        let (kind, name, on_pixels) = {
+                            let v = &self.variants[i];
+                            (v.kind, v.name.clone(), v.origin.is_some())
+                        };
                         #[cfg(test)]
-                        self.edit_list_rows.push(format!("variant:{}", v.kind.store_str()));
-                        ui.horizontal(|ui| {
-                            let label = egui::RichText::new(tr(lang, v.kind.label())).small();
-                            ui.label(if i == self.active {
-                                label.strong().color(accent)
-                            } else {
-                                label
+                        self.edit_list_rows.push(format!("variant:{}", kind.store_str()));
+                        let hit = ui
+                            .horizontal(|ui| {
+                                let label = egui::RichText::new(tr(lang, kind.label())).small();
+                                ui.label(if i == active_i {
+                                    label.strong().color(accent)
+                                } else {
+                                    label
+                                });
+                                if let Some(n) = &name {
+                                    ui.label(egui::RichText::new(format!("「{n}」")).small());
+                                }
+                                if i == active_i {
+                                    ui.label(
+                                        egui::RichText::new(tr(lang, "· current"))
+                                            .weak()
+                                            .small(),
+                                    );
+                                }
+                                if !kind.is_parametric() {
+                                    ui.label(
+                                        egui::RichText::new(tr(lang, "· pixel-state (no XMP)"))
+                                            .weak()
+                                            .small(),
+                                    );
+                                } else if on_pixels {
+                                    ui.label(
+                                        egui::RichText::new(tr(lang, "· on baked pixels"))
+                                            .weak()
+                                            .small(),
+                                    );
+                                }
+                            })
+                            .response
+                            .interact(egui::Sense::click());
+                        // The whole label row is the switch target — the same
+                        // gesture the strip's thumbnail offers, on the row that
+                        // names the card. A BACKGROUND row only: re-selecting
+                        // the active card would run a switch (and its commit)
+                        // for no change.
+                        if i != active_i
+                            && hit
+                                .on_hover_text(tr(
+                                    lang,
+                                    "Click to switch to this variant (lossless)",
+                                ))
+                                .clicked()
+                        {
+                            act = Some(VariantAction::Switch(i));
+                        }
+                        // The card's own actions, one owner with the strip.
+                        // Indented under the label so the two lines read as
+                        // one row rather than as two entries.
+                        let has_actions =
+                            i == active_i || (n_var > 1 && kind != VariantKind::Original);
+                        if has_actions {
+                            ui.horizontal(|ui| {
+                                ui.add_space(SPACE_LG);
+                                if let Some(a) = self.variant_card_buttons(
+                                    ui,
+                                    i,
+                                    i == active_i,
+                                    busy,
+                                    VariantSurface::List,
+                                ) {
+                                    act = Some(a);
+                                }
                             });
-                            if let Some(n) = &v.name {
-                                ui.label(egui::RichText::new(format!("「{n}」")).small());
-                            }
-                            if i == self.active {
-                                ui.label(
-                                    egui::RichText::new(tr(lang, "· current")).weak().small(),
-                                );
-                            }
-                            if !v.kind.is_parametric() {
-                                ui.label(
-                                    egui::RichText::new(tr(lang, "· pixel-state (no XMP)"))
-                                        .weak()
-                                        .small(),
-                                );
-                            } else if v.origin.is_some() {
-                                ui.label(
-                                    egui::RichText::new(tr(lang, "· on baked pixels"))
-                                        .weak()
-                                        .small(),
-                                );
-                            }
-                        });
+                        }
                     }
                     ui.add_space(SPACE_XS);
                     ui.separator();
@@ -2350,6 +2433,11 @@ impl AutoshopApp {
                 }
                 }); // add_enabled_ui: inert while a photo is still opening
             });
+        // The edit-state list's card action, performed through the SAME owner
+        // the strip uses — after the section's closures have released `self`.
+        if let Some(a) = act {
+            self.dispatch_variant_action(a, ui.ctx());
+        }
         false
     }
 
