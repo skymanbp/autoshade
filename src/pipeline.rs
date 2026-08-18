@@ -2721,6 +2721,7 @@ mod guard_tests {
                     mask: MaskGeometry::Radial {
                         top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
                         feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
+                        midpoint: 50.0, mask_version: 2,
                     },
                     ..Default::default()
                 },
@@ -2937,6 +2938,8 @@ mod guard_tests {
             roundness: 0.0,
             flipped: false,
             angle,
+            midpoint: 50.0,
+            mask_version: 2,
         };
         let base = EditRecipe {
             masks: vec![LocalAdjustment {
@@ -3064,6 +3067,8 @@ mod guard_tests {
                 roundness: 0.0,
                 flipped: false,
                 angle: 0.0,
+                midpoint: 50.0,
+                mask_version: 2,
             },
             exposure_ev: 0.4,
             ..Default::default()
@@ -3158,6 +3163,8 @@ mod guard_tests {
                         roundness: 0.0,
                         flipped: false,
                         angle: 0.0,
+                        midpoint: 50.0,
+                        mask_version: 2,
                     },
                     exposure_ev: 1.0,
                     ..Default::default()
@@ -4306,6 +4313,8 @@ mod tests {
                 roundness: 0.0,
                 flipped: false,
                 angle: 0.0,
+                midpoint: 50.0,
+                mask_version: 2,
             },
             mode: MaskCombine::Subtract,
         };
@@ -4394,6 +4403,8 @@ mod tests {
                         roundness: 0.0,
                         flipped: false,
                         angle: 0.0,
+                        midpoint: 50.0,
+                        mask_version: 2,
                     },
                     mode: MaskCombine::Subtract,
                 }],

@@ -277,6 +277,35 @@ pub(crate) fn mask_active(m: &autoshop::recipe::LocalAdjustment) -> bool {
     m.enabled && autoshop::render::engine_active(m)
 }
 
+/// The angles a rotation disclosure can NAME, as one comma list — distinct
+/// (two masks tilted the same way say it once), in the order the verdicts were
+/// raised, and capped with the same `+N more` tail every other disclosure list
+/// uses. Shared by both directions: the writer drops OUR angle, the reader
+/// drops LIGHTROOM's, and the sentence is built the same way from either.
+///
+/// `None` when there is nothing to name. `0` is the payload's word for "no
+/// angle we could measure" — a `crs:Angle` that is present but unreadable, or
+/// a tilt that rounds away — and 「Rotation 0°」 would be a sentence that is
+/// wrong about the file. The caller falls back to its plain phrasing.
+fn rotation_degrees(lang: Lang, degs: impl Iterator<Item = i32>) -> Option<String> {
+    let mut seen: Vec<i32> = Vec::new();
+    for d in degs {
+        if d != 0 && !seen.contains(&d) {
+            seen.push(d);
+        }
+    }
+    if seen.is_empty() {
+        return None;
+    }
+    let shown = seen.len().min(4);
+    let mut list = seen[..shown].iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
+    let more = seen.len() - shown;
+    if more > 0 {
+        list.push_str(&format!(", {}", trf(lang, "+{n} more", &[("n", &more.to_string())])));
+    }
+    Some(list)
+}
+
 /// The export-side lossy-projection disclosure (M6a, widened by R24-5 M0), in
 /// the UI language: ONE line naming what the Lightroom sidecar just written
 /// does NOT carry. Two buckets, one sentence:
@@ -314,7 +343,7 @@ pub(crate) fn xmp_loss_line(
     /// uses for the CLI).
     fn named(lang: Lang, losses: &[autoshop::xmp::MaskLoss], reason: R) -> String {
         let names: Vec<&str> =
-            losses.iter().filter(|l| l.reason == reason).map(|l| l.name.as_str()).collect();
+            losses.iter().filter(|l| l.reason.same_kind(reason)).map(|l| l.name.as_str()).collect();
         let shown = names.len().min(4);
         let more = names.len() - shown;
         let list = names[..shown]
@@ -336,7 +365,10 @@ pub(crate) fn xmp_loss_line(
     // match below stays exhaustive so each arm keeps a literal key the i18n
     // audit can see.
     for reason in R::ALL {
-        let n = losses.iter().filter(|l| l.reason == reason).count();
+        // By KIND, not by `==`: `Rotation` carries the dropped angle, so two
+        // masks tilted differently are two values of one reason (and `ALL`'s
+        // placeholder payload equals neither).
+        let n = losses.iter().filter(|l| l.reason.same_kind(reason)).count();
         if n == 0 {
             continue;
         }
@@ -345,7 +377,26 @@ pub(crate) fn xmp_loss_line(
             R::Bitmap => trf(lang, "bitmap masks ×{n}", &[("n", &n)]),
             R::Disabled => trf(lang, "muted masks ×{n}", &[("n", &n)]),
             R::ComponentsFlattened => trf(lang, "shape components flattened ×{n}", &[("n", &n)]),
-            R::Rotation => trf(lang, "radial rotation ×{n}", &[("n", &n)]),
+            // R25 P5: the rotation loss SAYS THE ANGLE and says why. 「radial
+            // rotation ×1」 told a photographer that something about rotation
+            // was dropped, and left both actionable halves out — how much, and
+            // whether it was a bug. The degrees come from the writer's own
+            // verdict; when there is no angle to name (an unreadable one, or a
+            // tilt under half a degree) the plain count is still the truth.
+            R::Rotation(_) => match rotation_degrees(
+                lang,
+                losses.iter().filter_map(|l| match l.reason {
+                    R::Rotation(d) => Some(d),
+                    _ => None,
+                }),
+            ) {
+                Some(a) => trf(
+                    lang,
+                    "Rotation {a}° not written to XMP (crs:Angle sign/pivot unverified)",
+                    &[("a", &a)],
+                ),
+                None => trf(lang, "radial rotation ×{n}", &[("n", &n)]),
+            },
             R::Recolour => trf(lang, "recolour gains ×{n}", &[("n", &n)]),
         };
         parts.push(format!("{head} ({})", named(lang, losses, reason)));
@@ -480,7 +531,7 @@ pub(crate) fn xmp_import_line(
     // ONE label per bullet, in `ALL` order, names appended to whichever bullet
     // already exists — `InertLocal`, `UnknownLocalKey` and
     // `CurveRefineSaturation` are all "a knob we do not model" to a reader.
-    let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut parts: Vec<(String, Vec<String>)> = Vec::new();
     for reason in R::ALL {
         let names: Vec<String> = losses
             .iter()
@@ -503,19 +554,37 @@ pub(crate) fn xmp_import_line(
         // build here too. Grouping is on the TRANSLATED label, which is a
         // faithful key either way: two reasons sharing an English phrase share
         // its Chinese one.
-        let label = match reason {
+        let label: String = match reason {
             R::Unrepresentable => tr(
                 lang,
                 "AI / brush masks cannot be imported — Lightroom recomputes them from a digest",
-            ),
-            R::OutOfModel => tr(lang, "Beyond this engine's model"),
-            R::Rotation => tr(lang, "Rotation angle"),
-            R::BlendMode => tr(lang, "Blend mode"),
-            R::MultiComponent => tr(lang, "Extra shapes"),
-            R::ForeignRangeMask => tr(lang, "Range mask (foreign)"),
-            R::LocalCurve => tr(lang, "Local point curve"),
+            )
+            .into(),
+            R::OutOfModel => tr(lang, "Beyond this engine's model").into(),
+            // R25 P5, the import twin of the export line's rotation head: say
+            // the angle Lightroom wrote and why it did not survive, instead of
+            // a bare category. Falls back to the plain label when there is no
+            // angle to name (see `rotation_degrees`).
+            R::Rotation(_) => match rotation_degrees(
+                lang,
+                losses.iter().filter_map(|l| match l.reason {
+                    R::Rotation(d) => Some(d),
+                    _ => None,
+                }),
+            ) {
+                Some(a) => trf(
+                    lang,
+                    "Rotation {a}° read as 0 (crs:Angle sign/pivot unverified)",
+                    &[("a", &a)],
+                ),
+                None => tr(lang, "Rotation angle").into(),
+            },
+            R::BlendMode => tr(lang, "Blend mode").into(),
+            R::MultiComponent => tr(lang, "Extra shapes").into(),
+            R::ForeignRangeMask => tr(lang, "Range mask (foreign)").into(),
+            R::LocalCurve => tr(lang, "Local point curve").into(),
             R::CurveRefineSaturation | R::InertLocal(_) | R::UnknownLocalKey => {
-                tr(lang, "Unmodelled slider")
+                tr(lang, "Unmodelled slider").into()
             }
         };
         match parts.iter_mut().find(|(l, _)| *l == label) {
@@ -664,7 +733,9 @@ pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist
             let b = orig_norm_to_view(full_x, full_y, dims, deg, dist);
             MaskGeometry::Linear { zero_x: a.0, zero_y: a.1, full_x: b.0, full_y: b.1 }
         }
-        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, flipped, angle } => {
+        MaskGeometry::Radial {
+            top, left, bottom, right, feather, roundness, flipped, angle, midpoint, mask_version,
+        } => {
             let pts = [
                 orig_norm_to_view(left, top, dims, deg, dist),
                 orig_norm_to_view(right, top, dims, deg, dist),
@@ -690,6 +761,12 @@ pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist
                 roundness,
                 flipped,
                 angle,
+                // Carried through, not re-defaulted: this is a VIEW copy of
+                // the user's own geometry, and a copy that quietly swaps a
+                // field for its neutral is how a display path becomes a data
+                // loss the day someone stores its result.
+                midpoint,
+                mask_version,
             }
         }
     }

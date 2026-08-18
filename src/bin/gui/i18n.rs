@@ -841,6 +841,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // the opposite of what happened (R22 L5). The English labels are bare nouns
     // for exactly that reason.
     ("radial rotation ×{n}", "径向旋转 ×{n}"),
+    // R25 P5: when the writer CAN name the angle it dropped, it does — and it
+    // says why, because 「radial rotation ×1」 leaves a photographer unable to
+    // tell a deliberate limit from a bug. The bare label above stays as the
+    // fallback for a rotation with no nameable angle (`util::rotation_degrees`).
+    ("Rotation {a}° not written to XMP (crs:Angle sign/pivot unverified)",
+        "旋转 {a}° 未写入 XMP（crs:Angle 的符号与旋转基准未经实测）"),
     ("recolour gains ×{n}", "重上色增益 ×{n}"),
     // R24-5 M0: the same line NAMES the masks now (「which of my twelve?」 was
     // the half a count could not answer), and grew a GLOBAL bucket beside the
@@ -1345,6 +1351,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Imported {n} Lightroom mask(s), {m} feature(s) not modelled",
         "已导入 {n} 个 Lightroom 蒙版，{m} 项未建模"),
     ("Rotation angle", "旋转角度"),
+    // R25 P5, the import twin of the export line's angle-naming head. Same
+    // fallback rule: the bare label above serves a rotation whose angle we
+    // could not read (`util::rotation_degrees`).
+    ("Rotation {a}° read as 0 (crs:Angle sign/pivot unverified)",
+        "旋转 {a}° 按 0 读入（crs:Angle 的符号与旋转基准未经实测）"),
     ("Blend mode", "混合模式"),
     ("Extra shapes", "附加形状"),
     ("Range mask (foreign)", "值域蒙版（外部）"),

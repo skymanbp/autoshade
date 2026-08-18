@@ -114,7 +114,12 @@ fn mask_geom_xml(g: &MaskGeometry) -> Option<(&'static str, String)> {
         // reshape Lightroom masks on a guess), so a rotated radial exports as
         // its UNROTATED ellipse: the same superset-approximation stance the
         // radial placement takes under straighten. See MaskGeometry::Radial.
-        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, flipped, angle: _ } => {
+        // (The attribute itself is still not emitted: writing crs:Angle="0"
+        // would be this writer ASSERTING an orientation on a scale it cannot
+        // read, where saying nothing lets Lightroom apply its own default.)
+        MaskGeometry::Radial {
+            top, left, bottom, right, feather, roundness, flipped, angle: _, midpoint, mask_version,
+        } => {
             Some((
                 "Mask/CircularGradient",
                 {
@@ -123,9 +128,15 @@ fn mask_geom_xml(g: &MaskGeometry) -> Option<(&'static str, String)> {
                     // The old writer emitted the raw 0..1 value, which Lightroom
                     // read as a nearly hard edge — convert on the boundary.
                     let lr_feather = (feather.clamp(0.0, 1.0) * 100.0).round();
+                    // Midpoint / Version ride out exactly as they rode in (R25
+                    // P5): both sit on EVERY Lightroom radial, and a sidecar we
+                    // rewrite without them is a sidecar that lost two of the
+                    // file's own attributes to a reader that could not name
+                    // them. Neither is interpreted — see MaskGeometry::Radial.
                     format!(
                         " crs:Top=\"{top}\" crs:Left=\"{left}\" crs:Bottom=\"{bottom}\" crs:Right=\"{right}\" \
-crs:Feather=\"{lr_feather}\" crs:Roundness=\"{roundness}\" crs:Flipped=\"{flipped}\""
+crs:Feather=\"{lr_feather}\" crs:Roundness=\"{roundness}\" crs:Flipped=\"{flipped}\" \
+crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\""
                     )
                 },
             ))
@@ -208,8 +219,14 @@ pub enum MaskLossReason {
     /// geometry is projected (the render composes them all).
     ComponentsFlattened,
     /// A rotated radial exports as its UNROTATED ellipse (`crs:Angle`
-    /// semantics unverified — see [`mask_geom_xml`]).
-    Rotation,
+    /// semantics unverified — see [`mask_geom_xml`]). The payload is the
+    /// dropped angle in WHOLE DEGREES, so a disclosure can say how much
+    /// rotation the sidecar is missing instead of only that some is (R25 P5).
+    /// Rounding is the display's, not the model's: `recipe.json` keeps the
+    /// exact `f32`, and a half-degree tilt no reader could act on rounds to
+    /// `0` — which the prose channels read as "no angle worth naming" and
+    /// answer with their plain phrasing.
+    Rotation(i32),
     /// Per-channel recolour gains (`color_gains`) are engine-only: classic ACR
     /// has no counterpart, so the sidecar renders without them.
     Recolour,
@@ -227,14 +244,29 @@ impl MaskLossReason {
     /// `mask_loss_reason_all_covers_every_variant`, whose own exhaustive match
     /// is where a new variant lands next.
     ///
+    /// [`Rotation`] appears with a ZERO payload, exactly as the import twin's
+    /// `InertLocal` appears with an empty one: the payload is one mask's
+    /// angle, so no single value can stand for the variant. Grouping is by
+    /// [`same_kind`], never by `==`.
+    ///
     /// [`en`]: MaskLossReason::en
+    /// [`Rotation`]: MaskLossReason::Rotation
+    /// [`same_kind`]: MaskLossReason::same_kind
     pub const ALL: [MaskLossReason; 5] = [
         MaskLossReason::Bitmap,
         MaskLossReason::Disabled,
         MaskLossReason::ComponentsFlattened,
-        MaskLossReason::Rotation,
+        MaskLossReason::Rotation(0),
         MaskLossReason::Recolour,
     ];
+
+    /// Same VARIANT, payload ignored — the grouping key both prose channels
+    /// use, mirroring [`MaskImportReason::same_kind`]. Two masks rotated by
+    /// different amounts are one line in a sentence and two values under `==`,
+    /// and `ALL`'s placeholder payload matches neither of them.
+    pub fn same_kind(self, other: MaskLossReason) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
 
     /// English label for the prose channel (CLI stderr / web reply). The GUI
     /// renders the same variants in the UI language instead.
@@ -243,7 +275,7 @@ impl MaskLossReason {
             MaskLossReason::Bitmap => "bitmap mask(s) skipped",
             MaskLossReason::Disabled => "muted mask(s) skipped",
             MaskLossReason::ComponentsFlattened => "extra shape component(s) flattened",
-            MaskLossReason::Rotation => "radial rotation dropped",
+            MaskLossReason::Rotation(_) => "radial rotation dropped",
             MaskLossReason::Recolour => "recolour gains dropped",
         }
     }
@@ -292,8 +324,11 @@ pub enum MaskImportReason {
     OutOfModel,
     /// `crs:Angle` is non-zero: the radial imports as its UNROTATED ellipse
     /// (the angle's sign/pivot are unverified — the roundness rule, mirrored
-    /// from the export side's [`MaskLossReason::Rotation`]).
-    Rotation,
+    /// from the export side's [`MaskLossReason::Rotation`]). The payload is
+    /// the sidecar's angle in WHOLE DEGREES, or `0` when there was no angle
+    /// to name — the attribute was present but UNREADABLE (which still counts
+    /// as rotated: we cannot say it is zero), or it rounds away.
+    Rotation(i32),
     /// `crs:MaskBlendMode` is not the plain composition we already do, so the
     /// component contributes its base geometry only.
     BlendMode,
@@ -335,7 +370,7 @@ impl MaskImportReason {
     pub const ALL: [MaskImportReason; 10] = [
         MaskImportReason::Unrepresentable,
         MaskImportReason::OutOfModel,
-        MaskImportReason::Rotation,
+        MaskImportReason::Rotation(0),
         MaskImportReason::BlendMode,
         MaskImportReason::MultiComponent,
         MaskImportReason::ForeignRangeMask,
@@ -366,7 +401,7 @@ impl MaskImportReason {
         match self {
             MaskImportReason::Unrepresentable => "AI / brush correction(s) skipped",
             MaskImportReason::OutOfModel => "correction(s) beyond this engine's model skipped",
-            MaskImportReason::Rotation => "radial rotation(s) read as 0",
+            MaskImportReason::Rotation(_) => "radial rotation(s) read as 0",
             MaskImportReason::BlendMode => "non-default blend mode(s) ignored",
             MaskImportReason::MultiComponent => "extra shape component(s) dropped",
             MaskImportReason::ForeignRangeMask => "range mask(s) dropped",
@@ -462,7 +497,7 @@ pub fn describe_mask_losses(losses: &[MaskLoss]) -> Option<String> {
     for reason in MaskLossReason::ALL {
         let names: Vec<&str> = losses
             .iter()
-            .filter(|l| l.reason == reason)
+            .filter(|l| l.reason.same_kind(reason))
             .map(|l| l.name.as_str())
             .collect();
         if names.is_empty() {
@@ -820,7 +855,12 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
         if let MaskGeometry::Radial { angle, .. } = m.mask
             && angle != 0.0
         {
-            losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::Rotation });
+            // The angle rides ALONG with the verdict so the disclosure can
+            // say how much tilt the sidecar is missing. `as i32` saturates,
+            // so a corrupt angle degrades to 0 ("no angle worth naming")
+            // rather than wrapping into a number that is not the mask's.
+            let deg = angle.round() as i32;
+            losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::Rotation(deg) });
         }
         // Neutral gains change nothing, so they are no loss — the same
         // is-it-actually-doing-anything test `render::engine_active` applies
@@ -3194,7 +3234,12 @@ fn component_import_reasons(
     // the user learns to ignore" rule R24 applied to the export line. Present
     // but unreadable counts as rotated: we cannot say it is zero.
     if crs_str(tag, "Angle").is_some() && crs_f32(tag, "Angle").is_none_or(|v| v != 0.0) {
-        reasons.push(MaskImportReason::Rotation);
+        // The angle rides along so the disclosure can NAME it; an unreadable
+        // one is a rotation we cannot measure, and `0` is this payload's word
+        // for that (see the variant's doc). `as i32` saturates rather than
+        // wrapping.
+        let deg = crs_f32(tag, "Angle").map_or(0, |v| v.round() as i32);
+        reasons.push(MaskImportReason::Rotation(deg));
     }
     // `crs:MaskBlendMode` sits on every component Lightroom writes, and the
     // overwhelming majority carry the DEFAULT — the plain composition this
@@ -3393,6 +3438,12 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
 
 
         let g = &seg[p..];
+        // The component's OWN tag — `find_crs_value_at` returns a tag START,
+        // so this is the `<rdf:li …/>` that carries `crs:What`, and every
+        // geometry attribute Lightroom (and this writer) puts on it. Used by
+        // the two reads below whose attribute NAME recurs later in the
+        // correction; see there.
+        let geom_tag = next_xml_tag(seg, p).map_or(g, |(s, e, _)| &seg[s..=e]);
         // Lightroom's Feather is 0..100 (reference sidecars: 50 / 72 …); the
         // engine's is 0..1. Three writers share this attribute, disambiguated
         // by TEXT SHAPE:
@@ -3427,6 +3478,26 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
                 // engine angle (unverified sign/pivot — the roundness rule);
                 // the import reads the axis-aligned ellipse, as before.
                 angle: 0.0,
+                // R25 P5: the two attributes on every Lightroom radial that
+                // this reader could not see until now. OPTIONAL, not `?`:
+                // sidecars we wrote before this batch carry neither, and a
+                // missing one means "Lightroom's default", not "unreadable
+                // mask" (the ACR neutrals 50 / 2 — `crs:Version` is the
+                // component's own schema stamp, never our recipe's).
+                //
+                // Read from `geom_tag`, the ONE component's own tag, not from
+                // `g` (which runs to the end of the correction): `crs:Version`
+                // is the first geometry attribute whose NAME recurs further
+                // down — our own range-mask component carries
+                // `crs:Version="3"` (see `range_mask_xml`), so an unbounded
+                // scan would read the RANGE's schema stamp as the ellipse's.
+                // The older reads above stay on `g`: no attribute they ask for
+                // appears twice inside a correction, and re-scoping a working
+                // read on no evidence is how a batch grows a regression.
+                midpoint: crs_f32(geom_tag, "Midpoint").filter(|v| v.is_finite()).unwrap_or(50.0),
+                mask_version: crs_str(geom_tag, "Version")
+                    .and_then(|v| v.trim().parse::<u32>().ok())
+                    .unwrap_or(2),
             },
             p,
         )
@@ -4438,6 +4509,7 @@ mod tests {
                     mask: MaskGeometry::Radial {
                         top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
                         feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
+                        midpoint: 50.0, mask_version: 2,
                     },
                     name: "subject".into(),
                     shadows: 20.0,      // ÷100 → 0.2
@@ -5303,6 +5375,8 @@ mod tests {
             roundness: 0.0,
             flipped: false,
             angle,
+            midpoint: 50.0,
+            mask_version: 2,
         };
         let component = MaskComponent {
             geometry: MaskGeometry::Linear { zero_x: 0.1, zero_y: 0.1, full_x: 0.9, full_y: 0.9 },
@@ -5361,7 +5435,12 @@ mod tests {
             ("sky".to_string(), MaskLossReason::Bitmap),
             ("parked".to_string(), MaskLossReason::Disabled),
             ("combo".to_string(), MaskLossReason::ComponentsFlattened),
-            ("gold".to_string(), MaskLossReason::Rotation),
+            // …and the rotation verdict CARRIES the angle it dropped (R25
+            // P5): −12°, not merely "some rotation". The disclosure surfaces
+            // read the number off this payload, so a writer that raised the
+            // reason with the wrong angle fails HERE, at the source, rather
+            // than printing a plausible wrong number in the window.
+            ("gold".to_string(), MaskLossReason::Rotation(-12)),
             ("gold".to_string(), MaskLossReason::Recolour),
             ("Autoshop 6".to_string(), MaskLossReason::Bitmap),
         ];
@@ -5407,14 +5486,27 @@ mod tests {
                 MaskLossReason::Bitmap => 0,
                 MaskLossReason::Disabled => 1,
                 MaskLossReason::ComponentsFlattened => 2,
-                MaskLossReason::Rotation => 3,
+                MaskLossReason::Rotation(_) => 3,
                 MaskLossReason::Recolour => 4,
             }
         }
         for (i, r) in MaskLossReason::ALL.into_iter().enumerate() {
             assert_eq!(rank(r), i, "ALL must list every reason once, in rank order");
             assert!(!r.en().trim().is_empty(), "{r:?} has no label for the prose channel");
+            assert!(r.same_kind(r), "same_kind must be reflexive for {r:?}");
         }
+        // R25 P5: `Rotation` grew a payload, so the grouping key is the
+        // DISCRIMINANT — two masks tilted differently are one line in a
+        // sentence and two values under `==`, and `ALL`'s placeholder `0`
+        // equals neither of them. Same property the import twin relies on.
+        assert!(
+            MaskLossReason::Rotation(37).same_kind(MaskLossReason::Rotation(-12)),
+            "two tilted masks are one line"
+        );
+        assert!(
+            !MaskLossReason::Rotation(0).same_kind(MaskLossReason::Recolour),
+            "different variants are different lines"
+        );
         // Every reason the WRITER can raise reaches the prose. The mutation
         // this catches: a sixth reason raised by `masks_xml` and left out of
         // `ALL` would be silently invisible in the sentence.
@@ -5591,10 +5683,211 @@ mod tests {
             losses,
             vec![MaskImportLoss {
                 name: "Radial 1".into(),
-                reason: MaskImportReason::Rotation
+                // R25 P5: the verdict carries the sidecar's own angle, rounded
+                // to whole degrees for the sentence that prints it. 37.412506
+                // → 37; the recipe keeps nothing of it at all (the ellipse
+                // imports axis-aligned), which is exactly why the disclosure
+                // has to be able to say how much was set aside.
+                reason: MaskImportReason::Rotation(37)
             }],
-            "the rotation is named, and it is the ONLY loss"
+            "the rotation is named, with its angle, and it is the ONLY loss"
         );
+    }
+
+    // ── R25 P5: the geometry write-back (B5-B1) ──────────────────────────
+    //
+    // Same fixture policy as the block above — `lr_radial` reproduces
+    // Lightroom's own attribute set, order and value shapes for a radial
+    // component, with neutral identifiers. The two numbers that had to be
+    // REAL to be worth pinning (the out-of-frame corners) are the measured
+    // ones from the reference library.
+
+    /// `crs:Midpoint` and `crs:Version` sit on EVERY Lightroom radial, and
+    /// until this batch on neither side of this engine: not read, therefore
+    /// not kept, therefore deleted from the photographer's own sidecar the
+    /// first time Autoshop rewrote it. Both directions in one test, because
+    /// a read without a write is the worse half — it looks like it works.
+    ///
+    /// The values are deliberately NON-default (37 / 3): 50 / 2 are what a
+    /// reader that ignores both attributes also produces.
+    ///
+    /// MUTATION THIS CATCHES: default either field on the way in, or drop
+    /// either attribute on the way out, and 37 / 3 vanish.
+    #[test]
+    fn radial_midpoint_and_version_round_trip() {
+        let comp = lr_radial("0", "0")
+            .replace("crs:Midpoint=\"50\"", "crs:Midpoint=\"37\"")
+            .replace("crs:Version=\"2\"", "crs:Version=\"3\"");
+        let doc = lr_doc(&lr_correction("Radial 1", "", &comp));
+        let r = xmp_to_recipe(&doc);
+        let MaskGeometry::Radial { midpoint, mask_version, .. } = r.masks[0].mask else {
+            panic!("expected a radial, got {:?}", r.masks[0].mask);
+        };
+        assert_eq!(midpoint, 37.0, "crs:Midpoint is read, not defaulted");
+        assert_eq!(mask_version, 3, "crs:Version is read, not defaulted");
+        assert!(import_losses(&doc).is_empty(), "carrying a value is not losing it");
+
+        // …and out again, adjacent and in the writer's own order.
+        let out = recipe_to_xmp(&r);
+        assert!(
+            out.contains("crs:Midpoint=\"37\" crs:Version=\"3\""),
+            "both ride back out of the writer: {out}"
+        );
+        assert_eq!(
+            xmp_to_recipe(&out).masks[0].mask,
+            r.masks[0].mask,
+            "our own document re-reads to the same geometry"
+        );
+
+        // The collision the bounded read exists for: `range_mask_xml` writes
+        // `crs:Version="3"` on the RANGE component, which sits after the
+        // geometry inside the same correction. An unbounded scan reads that
+        // as the ellipse's schema stamp and quietly promotes every ranged
+        // radial from 2 to 3.
+        let ranged = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Radial {
+                    top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
+                    feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
+                    midpoint: 50.0, mask_version: 2,
+                },
+                range: Some(RangeMask::Luminance {
+                    lo_outer: 0.1,
+                    lo: 0.2,
+                    hi: 0.8,
+                    hi_outer: 0.9,
+                }),
+                name: "ranged".into(),
+                exposure_ev: 0.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let back = xmp_to_recipe(&recipe_to_xmp(&ranged));
+        let MaskGeometry::Radial { mask_version, .. } = back.masks[0].mask else {
+            panic!("expected a radial, got {:?}", back.masks[0].mask);
+        };
+        assert_eq!(mask_version, 2, "the range component's own Version is not the ellipse's");
+    }
+
+    /// The reference library holds radial corners on BOTH sides of the frame
+    /// — `crs:Bottom="1.802847"` in one file, `crs:Top="-0.153271"` in
+    /// another. ACR geometry is a centre+radii carrier, so this is ordinary,
+    /// not corruption: the reader already widened to ±8, and the WRITER must
+    /// not quietly pull them back to 0..1 on the way out (a clamp there
+    /// shortens the falloff of every off-frame gradient the user placed).
+    #[test]
+    fn out_of_frame_radial_corners_survive_a_round_trip() {
+        let comp = lr_radial("0", "0")
+            .replace("crs:Top=\"0.114928\"", "crs:Top=\"-0.153271\"")
+            .replace("crs:Bottom=\"0.802847\"", "crs:Bottom=\"1.802847\"");
+        let doc = lr_doc(&lr_correction("Radial 1", "", &comp));
+        let r = xmp_to_recipe(&doc);
+        let MaskGeometry::Radial { top, bottom, .. } = r.masks[0].mask else {
+            panic!("expected a radial, got {:?}", r.masks[0].mask);
+        };
+        assert_eq!(top, -0.153271, "a corner above the frame is a real value");
+        assert_eq!(bottom, 1.802847, "and so is one below it");
+        let out = recipe_to_xmp(&r);
+        assert!(out.contains("crs:Top=\"-0.153271\""), "written raw, not clamped: {out}");
+        assert!(out.contains("crs:Bottom=\"1.802847\""), "written raw, not clamped: {out}");
+        assert_eq!(xmp_to_recipe(&out).masks[0].mask, r.masks[0].mask, "and it is stable");
+    }
+
+    /// R25 P5: both rotation verdicts CARRY the angle, so a disclosure can
+    /// say how much tilt it set aside instead of only that some existed.
+    /// `0` is the payload's word for "no angle to name" — an unreadable
+    /// `crs:Angle`, or a tilt that rounds away — and the prose channels fall
+    /// back to their plain phrasing on it.
+    #[test]
+    fn the_rotation_loss_names_the_angle() {
+        let radial = |angle: f32| MaskGeometry::Radial {
+            top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
+            feather: 0.5, roundness: 0.0, flipped: false, angle,
+            midpoint: 50.0, mask_version: 2,
+        };
+        let with = |angle: f32| EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: radial(angle),
+                name: "tilted".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            mask_export_losses(&with(37.412506)),
+            vec![MaskLoss { name: "tilted".into(), reason: MaskLossReason::Rotation(37) }],
+            "the export verdict names the engine's own angle"
+        );
+        assert_eq!(
+            mask_export_losses(&with(-12.0)),
+            vec![MaskLoss { name: "tilted".into(), reason: MaskLossReason::Rotation(-12) }],
+            "including its sign"
+        );
+        assert_eq!(
+            mask_export_losses(&with(0.4)),
+            vec![MaskLoss { name: "tilted".into(), reason: MaskLossReason::Rotation(0) }],
+            "a tilt under half a degree is still a loss, with no angle worth naming"
+        );
+
+        // The import twin, on the sidecar's own value — the measured negative
+        // end of the reference library's range.
+        let imported = |angle: &str| {
+            import_losses(&lr_doc(&lr_correction("Radial 1", "", &lr_radial(angle, "0"))))
+        };
+        assert_eq!(
+            imported("-43.945287"),
+            vec![MaskImportLoss {
+                name: "Radial 1".into(),
+                reason: MaskImportReason::Rotation(-44)
+            }],
+            "the import verdict names Lightroom's angle"
+        );
+        assert_eq!(
+            imported("oblique"),
+            vec![MaskImportLoss {
+                name: "Radial 1".into(),
+                reason: MaskImportReason::Rotation(0)
+            }],
+            "an unreadable angle still counts as rotated — we cannot say it is zero"
+        );
+        assert!(imported("0").is_empty(), "and an unrotated radial loses nothing at all");
+    }
+
+    /// FORENSIC CONCLUSION, pinned so nobody tidies it away: the reference
+    /// sidecars carry `crs:Flipped="true"` BESIDE `crs:MaskInverted="false"`
+    /// on the same component. The two are independent — Flipped is the
+    /// ellipse's own gradient direction, MaskInverted is "everything except
+    /// this shape" — and docs/V2_PLAN.md §7 item 1 listed "which of them
+    /// decides inside vs outside" as an open question. It is answered: both,
+    /// about different things.
+    ///
+    /// MUTATION THIS CATCHES: deriving either from the other (the tidy-up an
+    /// unwary reader of the two names would make) breaks two of four rows.
+    #[test]
+    fn flipped_and_inverted_are_independent() {
+        for (flipped, inverted) in [(true, false), (false, true), (true, true), (false, false)] {
+            let comp = lr_radial("0", "0")
+                .replace("crs:Flipped=\"true\"", &format!("crs:Flipped=\"{flipped}\""))
+                .replace("crs:MaskInverted=\"false\"", &format!("crs:MaskInverted=\"{inverted}\""));
+            let doc = lr_doc(&lr_correction("Radial 1", "", &comp));
+            let r = xmp_to_recipe(&doc);
+            let MaskGeometry::Radial { flipped: got_f, .. } = r.masks[0].mask else {
+                panic!("expected a radial, got {:?}", r.masks[0].mask);
+            };
+            assert_eq!(got_f, flipped, "Flipped={flipped} Inverted={inverted}: the geometry flag");
+            assert_eq!(
+                r.masks[0].inverted, inverted,
+                "Flipped={flipped} Inverted={inverted}: the correction flag"
+            );
+            // …and they stay independent through OUR writer.
+            let back = xmp_to_recipe(&recipe_to_xmp(&r));
+            let MaskGeometry::Radial { flipped: round_f, .. } = back.masks[0].mask else {
+                panic!("expected a radial, got {:?}", back.masks[0].mask);
+            };
+            assert_eq!(round_f, flipped, "Flipped survives the projection unchanged");
+            assert_eq!(back.masks[0].inverted, inverted, "and so does MaskInverted");
+        }
     }
 
     /// The other half of §0: `crs:MaskBlendMode` is on every component
@@ -5828,7 +6121,7 @@ mod tests {
             match r {
                 MaskImportReason::Unrepresentable => 0,
                 MaskImportReason::OutOfModel => 1,
-                MaskImportReason::Rotation => 2,
+                MaskImportReason::Rotation(_) => 2,
                 MaskImportReason::BlendMode => 3,
                 MaskImportReason::MultiComponent => 4,
                 MaskImportReason::ForeignRangeMask => 5,
@@ -5843,15 +6136,20 @@ mod tests {
             assert!(!r.en().trim().is_empty(), "{r:?} has no label for the prose channel");
             assert!(r.same_kind(r), "same_kind must be reflexive for {r:?}");
         }
-        // The payload variant groups by KIND, not by value — the property the
-        // prose channels rely on to print one line for two sliders.
+        // The payload variantS group by KIND, not by value — the property the
+        // prose channels rely on to print one line for two sliders, and (since
+        // R25 P5) one line for two differently-tilted radials.
         assert!(
             MaskImportReason::InertLocal("LocalGrain")
                 .same_kind(MaskImportReason::InertLocal("LocalMoire")),
             "two unmodelled sliders are one line"
         );
         assert!(
-            !MaskImportReason::Rotation.same_kind(MaskImportReason::BlendMode),
+            MaskImportReason::Rotation(37).same_kind(MaskImportReason::Rotation(-44)),
+            "two tilted radials are one line"
+        );
+        assert!(
+            !MaskImportReason::Rotation(0).same_kind(MaskImportReason::BlendMode),
             "different variants are different lines"
         );
         // Exactly the two drop verdicts, and they are the ones
@@ -5929,6 +6227,33 @@ mod tests {
             // import worked, this says whether it was right.
             for l in &losses {
                 eprintln!("    {:?}  {}", l.reason, l.name);
+            }
+            // R25 P5: the two carried radial attributes, observed on the real
+            // files and then round-tripped through OUR writer. The assertion
+            // is the invariant that matters — a value we do not interpret must
+            // come back exactly as it went in — and the print is the evidence
+            // for the round report (before this batch every radial read 50/2
+            // because neither attribute was looked at).
+            let mine = xmp_to_recipe(&recipe_to_xmp(&xmp_to_recipe(&text)));
+            for (i, m) in xmp_to_recipe(&text).masks.iter().enumerate() {
+                let (
+                    MaskGeometry::Radial { midpoint, mask_version, .. },
+                    Some(LocalAdjustment {
+                        mask: MaskGeometry::Radial {
+                            midpoint: rt_mid, mask_version: rt_ver, ..
+                        },
+                        ..
+                    }),
+                ) = (&m.mask, mine.masks.get(i))
+                else {
+                    continue;
+                };
+                eprintln!("    radial {i}: Midpoint={midpoint} Version={mask_version}");
+                assert_eq!(
+                    (midpoint, mask_version),
+                    (rt_mid, rt_ver),
+                    "{name}: radial {i} lost a carried attribute in the round-trip"
+                );
             }
             assert_eq!(
                 imported + refused,
@@ -6229,6 +6554,7 @@ mod tests {
                     mask: MaskGeometry::Radial {
                         top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
                         feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
+                        midpoint: 50.0, mask_version: 2,
                     },
                     range: Some(RangeMask::Color { r: 0.9, g: 0.6, b: 0.2, amount: 0.5, px: 0.4, py: 0.7 }),
                     name: "subject".into(),
@@ -6773,6 +7099,8 @@ mod tests {
                     roundness: 0.0,
                     flipped: false,
                     angle: 0.0,
+                    midpoint: 50.0,
+                    mask_version: 2,
                 },
                 exposure_ev: 1.0,
                 ..Default::default()
@@ -6905,6 +7233,7 @@ mod tests {
                     mask: MaskGeometry::Radial {
                         top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
                         feather: 0.5, roundness: 0.0, flipped: true, angle: 0.0,
+                        midpoint: 50.0, mask_version: 2,
                     },
                     range: Some(RangeMask::Color { r: 0.9, g: 0.6, b: 0.2, amount: 0.5, px: 0.4, py: 0.7 }),
                     name: "subject".into(),
@@ -7075,9 +7404,9 @@ mod tests {
         let losses = import_losses(doc);
         assert_eq!(losses.len(), 4, "three refusals plus the rotation note: {losses:?}");
         assert_eq!(
-            losses.iter().filter(|l| l.reason == MaskImportReason::Rotation).count(),
+            losses.iter().filter(|l| l.reason == MaskImportReason::Rotation(12)).count(),
             1,
-            "crs:Angle=\"12\" is named, not silently discarded: {losses:?}"
+            "crs:Angle=\"12\" is named WITH ITS ANGLE, not silently discarded: {losses:?}"
         );
         assert!(
             !losses.iter().any(|l| l.reason == MaskImportReason::BlendMode),
@@ -7144,6 +7473,8 @@ mod tests {
                 roundness: 0.0,
                 flipped: false,
                 angle: 0.0,
+                midpoint: 50.0,
+                mask_version: 2,
             },
             name: "face".into(),
             exposure_ev: 0.4,

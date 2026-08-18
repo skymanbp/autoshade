@@ -4984,7 +4984,13 @@
             loss("subject", R::Bitmap),
             loss("parked", R::Disabled),
             loss("combo", R::ComponentsFlattened),
-            loss("gold", R::Rotation),
+            // A rotation with NO nameable angle (R25 P5's `0` payload: an
+            // angle that rounds away, or one the reader could not measure).
+            // This test owns the FALLBACK half of that branch — the plain
+            // 「radial rotation ×N」 category, which must survive the payload
+            // exactly as it read before. `the_rotation_warning_says_why` owns
+            // the other half.
+            loss("gold", R::Rotation(0)),
             loss("gold", R::Recolour),
         ];
         for (lang, want) in [
@@ -5086,7 +5092,11 @@
         let losses = vec![
             loss("brushed", R::Unrepresentable),
             loss("subtract only", R::OutOfModel),
-            loss("radial 1", R::Rotation),
+            // Zero payload = no angle to name; this test pins the plain
+            // 「Rotation angle」 label, which stays the fallback after R25 P5
+            // gave the reason a number to carry (`the_rotation_warning_says_why`
+            // pins the numbered sentence).
+            loss("radial 1", R::Rotation(0)),
             loss("radial 1", R::UnknownLocalKey),
             loss("gradient 2", R::BlendMode),
             loss("gradient 2", R::InertLocal("LocalGrain")),
@@ -5143,11 +5153,11 @@
                 "{lang:?}: a clean import says nothing"
             );
             // A nameless correction still renders as a name.
-            let anon = xmp_import_line(lang, 1, &[loss("", R::Rotation)]).expect("a line");
+            let anon = xmp_import_line(lang, 1, &[loss("", R::Rotation(0))]).expect("a line");
             assert!(anon.contains(tr(lang, "(unnamed)")), "{lang:?}: {anon}");
             // …and the cap holds, like every other disclosure list.
             let many: Vec<_> =
-                ["a", "b", "c", "d", "e"].iter().map(|n| loss(n, R::Rotation)).collect();
+                ["a", "b", "c", "d", "e"].iter().map(|n| loss(n, R::Rotation(0))).collect();
             let capped = xmp_import_line(lang, 0, &many).expect("a line");
             assert!(capped.contains("a, b, c, d"), "{lang:?}: four names shown: {capped}");
             assert!(!capped.contains(", e)"), "{lang:?}: the fifth is folded away: {capped}");
@@ -5155,6 +5165,87 @@
                 capped.contains(&trf(lang, "+{n} more", &[("n", "1")])),
                 "{lang:?}: and counted: {capped}"
             );
+        }
+    }
+
+    /// R25 P5. 「radial rotation ×1」 named a category and left out both halves
+    /// a photographer could act on: HOW MUCH tilt was set aside, and WHY. The
+    /// why matters because the answer is not a bug — `crs:Angle`'s sign and
+    /// pivot are unverified against a real Lightroom experiment, so the
+    /// engine refuses to guess — and a line that does not say so reads as one.
+    ///
+    /// Both directions, because both drop an angle: the writer drops OURS,
+    /// the reader drops LIGHTROOM's.
+    ///
+    /// MUTATION THIS CATCHES: print the reason without its payload and the
+    /// digits go; group the losses by `==` instead of by kind and two
+    /// differently-tilted masks split into two bullets (or, with `ALL`'s
+    /// placeholder `0`, vanish from the sentence entirely).
+    #[test]
+    fn the_rotation_warning_says_why() {
+        use autoshop::xmp::{
+            MaskImportLoss, MaskImportReason as I, MaskLoss, MaskLossReason as E,
+        };
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            // EXPORT: our own angle, on its way out of the sidecar.
+            let out = xmp_loss_line(
+                lang,
+                &[MaskLoss { name: "tilted".into(), reason: E::Rotation(37) }],
+                &[],
+            )
+            .expect("a rotation loss must produce a line");
+            assert!(out.contains("37"), "{lang:?}: the angle itself is missing: {out}");
+            assert!(
+                out.contains(&trf(
+                    lang,
+                    "Rotation {a}° not written to XMP (crs:Angle sign/pivot unverified)",
+                    &[("a", "37")],
+                )),
+                "{lang:?}: the sentence must say why: {out}"
+            );
+            assert!(out.contains("tilted"), "{lang:?}: and which mask: {out}");
+            // Two masks, two angles, ONE bullet — the grouping is by kind.
+            let two = xmp_loss_line(
+                lang,
+                &[
+                    MaskLoss { name: "a".into(), reason: E::Rotation(37) },
+                    MaskLoss { name: "b".into(), reason: E::Rotation(-12) },
+                ],
+                &[],
+            )
+            .expect("a line");
+            assert!(two.contains("37") && two.contains("-12"), "{lang:?}: both angles: {two}");
+            assert!(two.contains("a, b"), "{lang:?}: both masks, one bullet: {two}");
+            // No angle to name ⇒ the plain category, never 「Rotation 0°」.
+            let none =
+                xmp_loss_line(lang, &[MaskLoss { name: "a".into(), reason: E::Rotation(0) }], &[])
+                    .expect("a line");
+            assert!(
+                none.contains(&trf(lang, "radial rotation ×{n}", &[("n", "1")])),
+                "{lang:?}: the fallback stands: {none}"
+            );
+            assert!(!none.contains("0°"), "{lang:?}: an unmeasured angle is not zero: {none}");
+
+            // IMPORT: Lightroom's angle, on its way in.
+            let inn = xmp_import_line(
+                lang,
+                1,
+                &[MaskImportLoss { name: "Radial 1".into(), reason: I::Rotation(-44) }],
+            )
+            .expect("a rotation note must produce a line");
+            assert!(inn.contains("-44"), "{lang:?}: the angle itself is missing: {inn}");
+            assert!(
+                inn.contains(&trf(
+                    lang,
+                    "Rotation {a}° read as 0 (crs:Angle sign/pivot unverified)",
+                    &[("a", "-44")],
+                )),
+                "{lang:?}: the sentence must say why: {inn}"
+            );
+            // R24's rule holds on the new sentences too.
+            for line in [&out, &two, &none, &inn] {
+                assert!(!line.contains("::"), "{lang:?}: internal symbol in UI prose: {line}");
+            }
         }
     }
 
@@ -5504,6 +5595,7 @@
                     mask: autoshop::recipe::MaskGeometry::Radial {
                         top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
                         feather: 0.5, roundness: 0.0, flipped: false, angle: 15.0,
+                        midpoint: 50.0, mask_version: 2,
                     },
                     color_gains: Some([1.3, 1.0, 0.7]),
                     name: "gold".into(),
@@ -5743,6 +5835,7 @@
             mask: autoshop::recipe::MaskGeometry::Radial {
                 top: 0.2, left: 0.2, bottom: 0.8, right: 0.8,
                 feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
+                midpoint: 50.0, mask_version: 2,
             },
             name: name.into(),
             ..Default::default()

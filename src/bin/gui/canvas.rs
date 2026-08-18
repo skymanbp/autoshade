@@ -1597,6 +1597,8 @@ impl AutoshopApp {
                     roundness: 0.0,
                     flipped: false,
                     angle: 0.0,
+                    midpoint: 50.0,
+                    mask_version: 2,
                 }
             }
         };
@@ -1607,17 +1609,24 @@ impl AutoshopApp {
                 PlaceTarget::Redraw(i) if i < self.recipe.masks.len() => {
                     // Redraw replaces the AREA only — a radial's tuned feather /
                     // roundness / flipped / angle are slider+handle state, and
-                    // silently resetting them made ↻ Redraw destructive.
+                    // silently resetting them made ↻ Redraw destructive. The
+                    // two CARRIED Lightroom attributes (midpoint, mask_version)
+                    // ride the same rule for a stronger reason: nothing in this
+                    // app can even show them, so a redraw that reset an
+                    // imported mask's own Midpoint to 50 would be a loss with
+                    // no surface to notice it on (R25 P5).
                     let mut geom = geom;
                     if let (
                         autoshop::recipe::MaskGeometry::Radial {
-                            feather, roundness, flipped, angle, ..
+                            feather, roundness, flipped, angle, midpoint, mask_version, ..
                         },
                         autoshop::recipe::MaskGeometry::Radial {
                             feather: kept_f,
                             roundness: kept_r,
                             flipped: kept_fl,
                             angle: kept_a,
+                            midpoint: kept_m,
+                            mask_version: kept_v,
                             ..
                         },
                     ) = (&mut geom, &self.recipe.masks[i].mask)
@@ -1626,6 +1635,8 @@ impl AutoshopApp {
                         *roundness = *kept_r;
                         *flipped = *kept_fl;
                         *angle = *kept_a;
+                        *midpoint = *kept_m;
+                        *mask_version = *kept_v;
                     }
                     self.recipe.masks[i].mask = geom;
                     // A REDRAW kept the mask's existing (possibly nonzero)

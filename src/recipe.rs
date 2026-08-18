@@ -845,6 +845,12 @@ pub enum MaskGeometry {
     /// radial placement under straighten) because crs:Angle's sign/pivot
     /// semantics are unverified — mapping our angle onto it would rotate
     /// Lightroom masks on a guess.
+    ///
+    /// `midpoint` and `mask_version` are the two attributes Lightroom writes on
+    /// EVERY radial that this engine could not even read until R25 P5 — see
+    /// their own docs. Both are CARRIED: read from the sidecar, kept in
+    /// `recipe.json`, written back unchanged, and never consulted by
+    /// `mask_weight`.
     Radial {
         top: f32,
         left: f32,
@@ -855,6 +861,40 @@ pub enum MaskGeometry {
         flipped: bool,
         #[serde(default)]
         angle: f32,
+        /// Lightroom's `crs:Midpoint` (0..100, ACR default 50): where along the
+        /// radial falloff the half-strength point sits — a second shaping knob
+        /// beside `feather`. CARRIED ONLY: the engine's falloff is `feather`'s
+        /// alone, so honouring this would reshape every imported mask on a
+        /// guess (the roundness rule). Round-trips so a sidecar we rewrite
+        /// still says what Lightroom said.
+        ///
+        /// FRAME-INDEPENDENT: a ratio along the radial axis, not a coordinate,
+        /// so the `coord_era` migration (`render::orient_recipe_coords`) does
+        /// not touch it — the same reason a curve point is not migrated.
+        ///
+        /// KNOWN BOUNDARY: this field and `mask_version` are deliberately NOT
+        /// in the AI's mask-geometry schema (`advisor::catalogue`) — a model
+        /// cannot know a value it never saw, and a required property is a
+        /// property it would invent. The cost is that a REFINE returns the
+        /// geometry with both at their defaults, so an AI refine of an
+        /// imported Lightroom radial resets them. Left as a boundary rather
+        /// than fixed: no radial in the reference library carries a
+        /// non-default Midpoint, and teaching
+        /// `pipeline::carry_over_unrepresentable` about them means widening
+        /// its state-bearing predicate, which decides which masks take its
+        /// wholesale-revert path. The GUI's own ↻ Redraw DOES preserve them
+        /// (canvas.rs) — that path costs nothing to get right.
+        #[serde(default = "radial_midpoint_centre")]
+        midpoint: f32,
+        /// Lightroom's `crs:Version` on the mask component (2 in every
+        /// reference sidecar) — the geometry SCHEMA version Lightroom stamps,
+        /// not our recipe's. CARRIED verbatim and never interpreted: dropping
+        /// it made a rewritten sidecar claim a version Lightroom had not
+        /// written, and inventing a meaning for it would be worse. Not
+        /// clamped for the same reason — a value we do not read has no range
+        /// to enforce.
+        #[serde(default = "lightroom_mask_version")]
+        mask_version: u32,
     },
     /// Free-form raster mask — the carrier for AI subject/sky segmentation and
     /// any painted selection. `path` names an 8-bit image whose LUMINANCE is
@@ -866,6 +906,26 @@ pub enum MaskGeometry {
     /// §B retouch-master limitation). A missing/unreadable file renders the
     /// mask inert (weight 0) with a stderr warning rather than failing.
     Bitmap { path: String },
+}
+
+/// Serde default for [`MaskGeometry::Radial::midpoint`] — deliberately NOT the
+/// TYPE's default: `f32::default()` is 0.0, which on Lightroom's 0..100 scale
+/// is a legitimate, extreme value ("the falloff's half point sits at the very
+/// centre"), not "unset". A radial written before this field existed carries
+/// ACR's neutral 50, so that is what its absence has to read as — the same
+/// field-level-default-beats-container-default trap `coord_era_legacy`
+/// documents, and the reason `#[serde(default)]` alone is wrong here.
+/// Pinned by `radial_extras_are_dropped_by_an_older_reader_but_never_corrupt`.
+fn radial_midpoint_centre() -> f32 {
+    50.0
+}
+
+/// Serde default for [`MaskGeometry::Radial::mask_version`] — 2, the value
+/// every reference Lightroom sidecar carries, and again not the type's 0
+/// (which would claim a schema version nobody has ever written). Same
+/// rationale as [`radial_midpoint_centre`].
+fn lightroom_mask_version() -> u32 {
+    2
 }
 
 /// How one extra [`MaskComponent`] composes onto the coverage built so far
@@ -943,10 +1003,18 @@ fn clamp_geometry(g: &mut MaskGeometry) {
                 *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
             }
         }
-        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, angle, .. } => {
+        MaskGeometry::Radial { top, left, bottom, right, feather, roundness, angle, midpoint, .. } => {
             for v in [top, left, bottom, right] {
                 *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
             }
+            // Lightroom's Midpoint is 0..100. A corrupt one goes to its
+            // NEUTRAL rather than through `clamp` (which passes NaN straight
+            // through — see `Hsl::clamp`): this value is written back into a
+            // sidecar Lightroom reads, and "NaN" there is not a number it can
+            // parse. `mask_version` is deliberately NOT clamped — a value we
+            // never interpret has no range to enforce, and rewriting it would
+            // make our sidecar claim a version Lightroom never wrote.
+            *midpoint = if midpoint.is_finite() { midpoint.clamp(0.0, 100.0) } else { 50.0 };
             // feather/roundness are 0..1 fractions everywhere that reads
             // them (render, XMP); a stored 2.0 was a value the engine
             // silently treated as 1.0 but persistence kept.
@@ -2160,6 +2228,7 @@ mod tests {
                     mask: MaskGeometry::Radial {
                         top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
                         feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
+                        midpoint: 50.0, mask_version: 2,
                     },
                     range: Some(RangeMask::Color { r: 0.9, g: 0.6, b: 0.2, amount: 1.7, px: 0.5, py: 0.5 }),
                     name: "subject".into(),
@@ -2224,6 +2293,77 @@ mod tests {
         // A mask WITHOUT a "range" key (pre-range recipes) defaults to None.
         let old_mask = r#"{ "masks": [ { "name": "sky" } ] }"#;
         assert_eq!(serde_json::from_str::<EditRecipe>(old_mask).unwrap().masks[0].range, None);
+    }
+
+    /// R25 P5's forward-compatibility contract — the THIRD shape this
+    /// round produced, and the one that behaves least like the other two.
+    ///
+    ///   * a new `EditRecipe` field (P2–P4) → the top level denies unknown
+    ///     fields, so an older exe REFUSES the whole recipe.json, loudly;
+    ///   * a new `LocalAdjustment` field (P6) → same, for any recipe that
+    ///     has masks;
+    ///   * a new `MaskGeometry::Radial` field (here) → serde cannot deny
+    ///     unknown fields on an internally-tagged enum (the KNOWN BOUNDARY
+    ///     note on the type), so an older exe reads the mask FINE, drops
+    ///     these two keys, and writes the file back without them. Silent.
+    ///
+    /// This pins both halves of that: the drop must not corrupt anything
+    /// else, and what comes back must be Lightroom's neutrals — which is
+    /// also the pin on the FIELD-level serde defaults, since the type's own
+    /// defaults (0.0 / 0) would claim a midpoint at the extreme and a schema
+    /// version nobody has ever written.
+    ///
+    /// MUTATION THIS CATCHES: replace either `#[serde(default = "…")]` with
+    /// a bare `#[serde(default)]` and the two neutral asserts fail.
+    #[test]
+    fn radial_extras_are_dropped_by_an_older_reader_but_never_corrupt() {
+        let mine = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Radial {
+                    top: 0.3,
+                    left: 0.35,
+                    bottom: 0.7,
+                    right: 0.65,
+                    feather: 0.5,
+                    roundness: 0.25,
+                    flipped: true,
+                    angle: -12.0,
+                    midpoint: 37.0,
+                    mask_version: 3,
+                },
+                name: "subject".into(),
+                exposure_ev: 0.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&mine).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // The older reader's view of the same file: the two keys it has never
+        // heard of are simply not there.
+        let geom = doc["masks"][0]["mask"].as_object_mut().expect("a radial object");
+        assert!(geom.remove("midpoint").is_some(), "the writer emitted midpoint: {json}");
+        assert!(geom.remove("mask_version").is_some(), "the writer emitted mask_version: {json}");
+        let older: EditRecipe =
+            serde_json::from_value(doc).expect("an older exe must still READ the recipe");
+
+        let MaskGeometry::Radial {
+            top, left, bottom, right, feather, roundness, flipped, angle, midpoint, mask_version,
+        } = older.masks[0].mask
+        else {
+            panic!("expected a radial, got {:?}", older.masks[0].mask);
+        };
+        // Nothing else moved: this is a DROP, not a corruption.
+        assert_eq!(
+            (top, left, bottom, right, feather, roundness, flipped, angle),
+            (0.3, 0.35, 0.7, 0.65, 0.5, 0.25, true, -12.0),
+            "the rest of the geometry is untouched"
+        );
+        assert_eq!(older.masks[0].exposure_ev, 0.5, "and so is the adjustment");
+        // …and the dropped pair reads as LIGHTROOM's neutral, not the type's.
+        assert_eq!(midpoint, 50.0, "an absent Midpoint is ACR's 50, not f32::default()");
+        assert_eq!(mask_version, 2, "an absent Version is Lightroom's 2, not u32::default()");
     }
 
     #[test]

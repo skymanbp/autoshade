@@ -1857,7 +1857,16 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // clamped to fully feathered; both XMP directions now convert on the
         // boundary (xmp.rs). Test radial_roundness_is_a_documented_no_op pins
         // the roundness no-op until a real sidecar fixes the mapping.
-        MaskGeometry::Radial { top, left, bottom, right, feather, roundness: _, flipped, angle } => {
+        // `midpoint: _` joins it for the same reason (R25 P5): Lightroom's
+        // second falloff knob, carried through the recipe and the sidecar
+        // unchanged, with no published mapping onto this engine's `feather`.
+        // `mask_version: _` is Lightroom's own schema stamp and has no pixel
+        // meaning at all. Both are spelled out rather than swept into `..` so
+        // a field added to the geometry cannot reach the renderer unnoticed.
+        MaskGeometry::Radial {
+            top, left, bottom, right, feather, roundness: _, flipped, angle, midpoint: _,
+            mask_version: _,
+        } => {
             let cx = (left + right) / 2.0;
             let cy = (top + bottom) / 2.0;
             let rx = ((right - left) / 2.0).abs().max(1e-4);
@@ -3907,6 +3916,12 @@ fn orientation_mirrors(o: Orientation) -> bool {
 /// pixels sampled in normalised coordinates, not a coordinate — turning it
 /// would mean rewriting an image on disk that version snapshots and other
 /// recipes may share. The caller discloses this instead of pretending.
+///
+/// **Not migrated, and correctly so: `Radial::midpoint`** (R25 P5). It is a
+/// ratio along the ellipse's own falloff axis, not a point in the frame — the
+/// same status a tone-curve point has — so turning the frame leaves it
+/// meaning exactly what it meant. Said out loud because the next reader will
+/// scan this function for "every geometry field" and find one it skips.
 pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
     if matches!(o, Orientation::Normal | Orientation::Unknown) {
         return false;
@@ -6945,6 +6960,8 @@ mod tests {
             roundness: 0.0,
             flipped: false,
             angle: 0.0,
+            midpoint: 50.0,
+            mask_version: 2,
         };
         assert_eq!(mask_weight(&g, 0.0, 0.5, None), 0.0, "hard edge: boundary is outside");
         assert_eq!(mask_weight(&g, 0.5, 0.5, None), 1.0, "hard edge: centre is inside");
@@ -6985,6 +7002,8 @@ mod tests {
             roundness,
             flipped: false,
             angle: 0.0,
+            midpoint: 50.0,
+            mask_version: 2,
         };
         for i in 0..=10 {
             for j in 0..=10 {
@@ -7356,6 +7375,8 @@ mod tests {
             roundness: 0.0,
             flipped: false,
             angle: 37.0,
+            midpoint: 50.0,
+            mask_version: 2,
         };
         for o in [
             Orientation::HorizontalFlip,
@@ -7411,6 +7432,8 @@ mod tests {
                         roundness: 0.0,
                         flipped: false,
                         angle: 0.0,
+                        midpoint: 50.0,
+                        mask_version: 2,
                     },
                     ..Default::default()
                 }],

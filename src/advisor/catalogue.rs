@@ -1095,6 +1095,18 @@ pub const RECIPE_CONTROLS: [Control; 62] = [
 /// surfaces. `texture` used to be the clearest example and is no longer one:
 /// R25 B2 gave it a global row too, sharing this one's operator and radius.
 pub const LOCAL_CONTROLS: [Control; 24] = [
+    // KNOWN GRANULARITY LIMIT (stated, not abstracted away). `Tier` hangs on
+    // a Control ROW, and the whole geometry is one row — so the row says
+    // `Rendered` while three of `MaskGeometry::Radial`'s fields are not:
+    // `roundness` and (since R25 P5) `midpoint` are CARRIED — round-tripped
+    // through recipe.json and the sidecar, never consulted by `mask_weight`,
+    // because neither one's Lightroom scale has been measured; `angle` is the
+    // mirror case, RENDERED here and deliberately absent from the sidecar
+    // (`xmp::MaskLossReason::Rotation` discloses that, with the angle). A
+    // sub-field tier would be a new abstraction built for one row — the
+    // limitation is cheaper written down, and the two disclosure surfaces
+    // (`mask_export_losses`, `import_losses`) already name the real losses
+    // per mask, which is what a tier would only summarise.
     Control {
         name: "mask",
         shape: Shape::MaskGeometry,

@@ -521,6 +521,8 @@ mod tests {
                         roundness: 0.0,
                         flipped: false,
                         angle: 0.0,
+                        midpoint: 50.0,
+                        mask_version: 2,
                     },
                     name: format!("mask {i}"),
                     exposure_ev: 0.1,
