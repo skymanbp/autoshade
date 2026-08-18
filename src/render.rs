@@ -134,18 +134,28 @@ pub fn render_to_image_in(
     // sitting under the whole ~720 MB-per-plane develop chain below (A7
     // buffer-lifetime queue).
     crate::decode::guard_tiff_chain(raw_path)?;
-    let rawimage = {
+    let (rawimage, orientation) = {
         let src = RawSource::new(raw_path)
             .with_context(|| format!("open RAW {}", raw_path.display()))?;
         let decoder =
             get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", raw_path.display()))?;
         let params = RawDecodeParams { image_index: 0 };
+        // Which way is up comes from the EXIF metadata, NOT `RawImage
+        // .orientation` — rawler 0.7.2 hard-codes that field to `Normal` for
+        // every decoder but DNG/QTK, which is why every portrait ARW rendered
+        // and exported sideways. See `decode::raw_orientation_of`. Read
+        // INSIDE this scope so the RawSource still lives; metadata only, no
+        // second sensor read.
+        let md = decoder
+            .raw_metadata(&src, &params)
+            .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+        let orientation = crate::decode::raw_orientation_of(&md);
         // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
-        decoder
+        let raw = decoder
             .raw_image(&src, &params, false)
-            .map_err(|e| anyhow!("raw_image: {e}"))?
+            .map_err(|e| anyhow!("raw_image: {e}"))?;
+        (raw, orientation)
     };
-    let orientation = rawimage.orientation;
 
     let wide = working != ExportColorSpace::Srgb;
     let mut dev = RawDevelop::default();
@@ -3758,6 +3768,141 @@ pub(crate) fn oriented(img: DynamicImage, o: Orientation) -> DynamicImage {
     }
 }
 
+/// [`oriented`]'s coordinate twin: where a NORMALISED point of the sensor
+/// frame lands in the display frame.
+///
+/// Derived from [`oriented`] itself, state by state, so the two can never
+/// disagree — `image`'s `rotate90` is CLOCKWISE, mapping pixel `(x, y)` of a
+/// `W×H` frame to `(H−1−y, x)` of the `H×W` result, i.e. `(u, v) → (1−v, u)`
+/// normalised; `Transpose`/`Transverse` compose that with the horizontal flip
+/// exactly as `oriented` does. Every state is its own bijection of the unit
+/// square, which is what makes the era-0 → era-1 recipe migration lossless
+/// and round-trippable (`orient_point_round_trips_through_its_inverse`).
+///
+/// Points OUTSIDE [0,1] are mapped by the same affine rule — mask gradients
+/// legitimately live off-frame (ACR geometry), and clamping them here would
+/// silently shorten a gradient's falloff.
+pub fn orient_point(o: Orientation, u: f32, v: f32) -> (f32, f32) {
+    match o {
+        Orientation::Normal | Orientation::Unknown => (u, v),
+        Orientation::HorizontalFlip => (1.0 - u, v),
+        Orientation::Rotate180 => (1.0 - u, 1.0 - v),
+        Orientation::VerticalFlip => (u, 1.0 - v),
+        Orientation::Transpose => (v, u),
+        Orientation::Rotate90 => (1.0 - v, u),
+        Orientation::Transverse => (1.0 - v, 1.0 - u),
+        Orientation::Rotate270 => (v, 1.0 - u),
+    }
+}
+
+/// Does this orientation MIRROR the frame (an odd number of reflections)?
+/// The four reversing states are the ones whose `to_flips` triple has an odd
+/// parity, and they are the only ones that flip the SIGN of a rotation angle
+/// — the ellipse-`angle` half of [`orient_recipe_coords`].
+fn orientation_mirrors(o: Orientation) -> bool {
+    matches!(
+        o,
+        Orientation::HorizontalFlip
+            | Orientation::VerticalFlip
+            | Orientation::Transpose
+            | Orientation::Transverse
+    )
+}
+
+/// Rewrite a recipe's stored GEOMETRY from the sensor frame into the display
+/// frame — the deterministic, bijective half of the `coord_era` 0 → 1
+/// migration (`pipeline::migrate_recipe_coord_frame` owns the gating).
+///
+/// Moves the crop rectangle, every mask geometry (base + components) and the
+/// Range-Mask colour sample point through [`orient_point`]. Returns `false`
+/// for the identity orientations, so the caller can tell "nothing to do" from
+/// "moved".
+///
+/// **Ellipse angle.** `MaskGeometry::Radial`'s `top/left/bottom/right` is a
+/// centre+radii carrier, not a true bounding box, and `angle` rotates the
+/// ellipse inside it (see `mask_weight`). Mapping the two corners through
+/// `orient_point` already swaps the radii for the four transposing states,
+/// which is exactly equivalent to leaving them alone and adding ±90° to the
+/// angle — an ellipse rotated a quarter turn IS the same ellipse with its
+/// axes exchanged. So a pure ROTATION needs no angle change at all; a
+/// MIRROR needs the angle negated, because a reflection reverses the sense of
+/// rotation. Verified algebraically against `mask_weight`'s own quadratic
+/// form and pinned by `rotated_radial_mask_covers_the_rotated_pixels`.
+///
+/// **Not migrated: `MaskGeometry::Bitmap`.** A raster mask is a FILE of
+/// pixels sampled in normalised coordinates, not a coordinate — turning it
+/// would mean rewriting an image on disk that version snapshots and other
+/// recipes may share. The caller discloses this instead of pretending.
+pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
+    if matches!(o, Orientation::Normal | Orientation::Unknown) {
+        return false;
+    }
+    let mirrors = orientation_mirrors(o);
+    if let Some(c) = r.crop.as_mut() {
+        let (x0, y0) = orient_point(o, c.left, c.top);
+        let (x1, y1) = orient_point(o, c.right, c.bottom);
+        *c = Crop {
+            left: x0.min(x1),
+            right: x0.max(x1),
+            top: y0.min(y1),
+            bottom: y0.max(y1),
+        };
+    }
+    let turn = |g: &mut MaskGeometry| match g {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+            (*zero_x, *zero_y) = orient_point(o, *zero_x, *zero_y);
+            (*full_x, *full_y) = orient_point(o, *full_x, *full_y);
+        }
+        MaskGeometry::Radial { top, left, bottom, right, angle, .. } => {
+            let (x0, y0) = orient_point(o, *left, *top);
+            let (x1, y1) = orient_point(o, *right, *bottom);
+            (*left, *right) = (x0.min(x1), x0.max(x1));
+            (*top, *bottom) = (y0.min(y1), y0.max(y1));
+            if mirrors {
+                *angle = -*angle;
+            }
+        }
+        // Raster masks carry no coordinates — see the doc comment.
+        MaskGeometry::Bitmap { .. } => {}
+    };
+    for m in r.masks.iter_mut() {
+        turn(&mut m.mask);
+        for c in m.components.iter_mut() {
+            turn(&mut c.geometry);
+        }
+        // The colour Range Mask's `(px, py)` is Lightroom's sample MARKER —
+        // cosmetic, but it is a point in the original frame like any other,
+        // and leaving it behind would put the marker on the wrong subject.
+        if let Some(RangeMask::Color { px, py, .. }) = m.range.as_mut() {
+            (*px, *py) = orient_point(o, *px, *py);
+        }
+    }
+    true
+}
+
+/// Does this recipe hold any geometry the `coord_era` migration would move?
+/// Used for the disclosure: a recipe with nothing but global sliders is
+/// re-stamped in silence, because nothing about it changed.
+pub fn recipe_has_frame_coords(r: &EditRecipe) -> bool {
+    r.crop.is_some()
+        || r.masks.iter().any(|m| {
+            let parametric = |g: &MaskGeometry| !matches!(g, MaskGeometry::Bitmap { .. });
+            parametric(&m.mask)
+                || m.components.iter().any(|c| parametric(&c.geometry))
+                || matches!(m.range, Some(RangeMask::Color { .. }))
+        })
+}
+
+/// Does this recipe carry a RASTER mask — the one geometry the `coord_era`
+/// migration cannot turn (see [`orient_recipe_coords`])? Drives the honest
+/// half of the migration's disclosure.
+pub fn recipe_has_raster_masks(r: &EditRecipe) -> bool {
+    r.masks.iter().any(|m| {
+        matches!(m.mask, MaskGeometry::Bitmap { .. })
+            || m.components.iter().any(|c| matches!(c.geometry, MaskGeometry::Bitmap { .. }))
+    })
+}
+
 /// In-place horizontal flip that stays in the image's OWN pixel type.
 /// Calling `flip_horizontal_in_place(&mut DynamicImage)` goes through the
 /// GenericImage adapter, whose Pixel is Rgba<u8> — that QUANTIZED f32/u16
@@ -7044,6 +7189,276 @@ mod tests {
             let got: Vec<usize> = out.iter().map(|p| p[0] as usize).collect();
             assert_eq!(&got[..], &map[..], "{o:?} pixel mapping");
         }
+    }
+
+    /// THE SEAM the whole coordinate migration rests on: `orient_point` must
+    /// be the exact coordinate twin of `oriented`'s PIXEL transform, for all
+    /// eight states. Derived from the pixel map above (which is itself derived
+    /// from the EXIF definitions, never from the image crate), so a future
+    /// edit to either function that drifts from the other fails HERE rather
+    /// than silently displacing every saved mask.
+    #[test]
+    fn orient_point_is_the_coordinate_twin_of_the_pixel_transform() {
+        const W: u32 = 5;
+        const H: u32 = 3;
+        let src = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(W, H, |x, y| {
+            image::Rgb([x as u8, y as u8, 0])
+        }));
+        for o in [
+            Orientation::Normal,
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Transverse,
+            Orientation::Rotate270,
+        ] {
+            let dst = oriented(src.clone(), o).to_rgb8();
+            let (dw, dh) = (dst.width(), dst.height());
+            for y in 0..H {
+                for x in 0..W {
+                    // Pixel CENTRES: the only points whose normalised image is
+                    // unambiguous under a bin edge.
+                    let (u, v) =
+                        orient_point(o, (x as f32 + 0.5) / W as f32, (y as f32 + 0.5) / H as f32);
+                    let (dx, dy) = ((u * dw as f32) as u32, (v * dh as f32) as u32);
+                    let px = dst.get_pixel(dx.min(dw - 1), dy.min(dh - 1));
+                    assert_eq!(
+                        (px[0] as u32, px[1] as u32),
+                        (x, y),
+                        "{o:?}: source ({x},{y}) should land at ({dx},{dy})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every state is a BIJECTION of the plane, and the migration is therefore
+    /// reversible — the property that lets an era-0 recipe be turned exactly
+    /// once with no accumulated drift.
+    #[test]
+    fn orient_point_round_trips_through_its_inverse() {
+        // Six of the eight are involutions; the quarter turns are each
+        // other's inverse.
+        let pairs = [
+            (Orientation::Normal, Orientation::Normal),
+            (Orientation::Unknown, Orientation::Unknown),
+            (Orientation::HorizontalFlip, Orientation::HorizontalFlip),
+            (Orientation::VerticalFlip, Orientation::VerticalFlip),
+            (Orientation::Rotate180, Orientation::Rotate180),
+            (Orientation::Transpose, Orientation::Transpose),
+            (Orientation::Transverse, Orientation::Transverse),
+            (Orientation::Rotate90, Orientation::Rotate270),
+            (Orientation::Rotate270, Orientation::Rotate90),
+        ];
+        for (o, inv) in pairs {
+            // Off-frame points included: mask gradients legitimately live
+            // outside [0,1] and must survive the round trip too.
+            for (u, v) in [(0.0f32, 0.0f32), (0.13, 0.87), (1.0, 0.0), (-0.4, 1.6)] {
+                let (a, b) = orient_point(o, u, v);
+                let back = orient_point(inv, a, b);
+                assert!(
+                    (back.0 - u).abs() < 1e-6 && (back.1 - v).abs() < 1e-6,
+                    "{o:?} then {inv:?} moved ({u},{v}) to {back:?}"
+                );
+            }
+        }
+    }
+
+    /// The `angle` half of the radial rule, checked against `mask_weight`
+    /// itself rather than against the derivation: a turned ELLIPSE must cover
+    /// exactly the turned PIXELS. This is what makes "rotate the two corners,
+    /// negate the angle only for mirrors" more than an assertion.
+    #[test]
+    fn rotated_radial_mask_covers_the_rotated_pixels() {
+        use crate::recipe::LocalAdjustment;
+        let base = MaskGeometry::Radial {
+            top: 0.15,
+            left: 0.30,
+            bottom: 0.55,
+            right: 0.90,
+            feather: 0.4,
+            roundness: 0.0,
+            flipped: false,
+            angle: 37.0,
+        };
+        for o in [
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Transverse,
+            Orientation::Rotate270,
+        ] {
+            let mut r = EditRecipe {
+                masks: vec![LocalAdjustment { mask: base.clone(), ..Default::default() }],
+                ..Default::default()
+            };
+            assert!(orient_recipe_coords(&mut r, o));
+            let turned = &r.masks[0].mask;
+            for i in 0..=20 {
+                for j in 0..=20 {
+                    let (u, v) = (i as f32 / 20.0, j as f32 / 20.0);
+                    let (u2, v2) = orient_point(o, u, v);
+                    let before = mask_weight(&base, u, v, None);
+                    let after = mask_weight(turned, u2, v2, None);
+                    assert!(
+                        (before - after).abs() < 1e-4,
+                        "{o:?}: weight at ({u},{v}) was {before}, at the turned point ({u2},{v2}) it is {after}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The recipe-level migration: crop and every parametric geometry move,
+    /// the round trip is exact, and a Normal photo is untouched.
+    #[test]
+    fn orient_recipe_coords_moves_geometry_and_round_trips() {
+        use crate::recipe::{LocalAdjustment, MaskComponent};
+        let seed = || EditRecipe {
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Linear {
+                    zero_x: 0.5,
+                    zero_y: 0.0,
+                    full_x: 0.5,
+                    full_y: 0.45,
+                },
+                components: vec![MaskComponent {
+                    geometry: MaskGeometry::Radial {
+                        top: 0.1,
+                        left: 0.2,
+                        bottom: 0.6,
+                        right: 0.7,
+                        feather: 0.5,
+                        roundness: 0.0,
+                        flipped: false,
+                        angle: 0.0,
+                    },
+                    ..Default::default()
+                }],
+                range: Some(RangeMask::Color {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.9,
+                    amount: 0.5,
+                    px: 0.25,
+                    py: 0.75,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Normal / Unknown: not a single field moves, and the caller is told
+        // nothing happened.
+        for o in [Orientation::Normal, Orientation::Unknown] {
+            let mut r = seed();
+            assert!(!orient_recipe_coords(&mut r, o), "{o:?} must report no move");
+            assert_eq!(r, seed(), "{o:?} must not touch a single coordinate");
+        }
+        // The portrait ARW case, and back.
+        let mut r = seed();
+        assert!(orient_recipe_coords(&mut r, Orientation::Rotate270));
+        assert_ne!(r, seed(), "a quarter turn must actually move the geometry");
+        // Hand-derived: Rotate270 maps (u,v) -> (v, 1-u), so the crop's
+        // left/right come from top/bottom and its top/bottom from 1-right,
+        // 1-left.
+        let t = r.crop.expect("crop survives");
+        for (got, want, what) in [
+            (t.left, 0.2, "left"),
+            (t.right, 0.9, "right"),
+            (t.top, 1.0 - 0.8, "top"),
+            (t.bottom, 1.0 - 0.1, "bottom"),
+        ] {
+            assert!((got - want).abs() < 1e-6, "crop {what}: {got} != {want} ({t:?})");
+        }
+        assert!(orient_recipe_coords(&mut r, Orientation::Rotate90));
+        let back = seed();
+        let (c, c0) = (r.crop.unwrap(), back.crop.unwrap());
+        assert!(
+            (c.left - c0.left).abs() < 1e-6
+                && (c.top - c0.top).abs() < 1e-6
+                && (c.right - c0.right).abs() < 1e-6
+                && (c.bottom - c0.bottom).abs() < 1e-6,
+            "crop round trip: {c:?} vs {c0:?}"
+        );
+        let (
+            MaskGeometry::Linear { zero_x, zero_y, full_x, full_y },
+            MaskGeometry::Linear { zero_x: a, zero_y: b, full_x: cx, full_y: cy },
+        ) = (&r.masks[0].mask, &back.masks[0].mask)
+        else {
+            panic!("linear geometry survives")
+        };
+        assert!(
+            (zero_x - a).abs() < 1e-6
+                && (zero_y - b).abs() < 1e-6
+                && (full_x - cx).abs() < 1e-6
+                && (full_y - cy).abs() < 1e-6,
+            "linear round trip"
+        );
+        let Some(RangeMask::Color { px, py, .. }) = r.masks[0].range else {
+            panic!("range survives")
+        };
+        assert!((px - 0.25).abs() < 1e-6 && (py - 0.75).abs() < 1e-6, "range point round trip");
+    }
+
+    /// A raster mask is an image FILE: the migration must leave its path alone
+    /// and REPORT it, never quietly claim to have turned it.
+    #[test]
+    fn raster_masks_are_reported_not_turned() {
+        use crate::recipe::LocalAdjustment;
+        let mut r = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: "sky.png".into() },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(recipe_has_raster_masks(&r));
+        assert!(!recipe_has_frame_coords(&r), "a raster-only recipe has no turnable coordinate");
+        let before = r.clone();
+        orient_recipe_coords(&mut r, Orientation::Rotate270);
+        assert_eq!(r, before, "the raster path must survive byte-for-byte");
+    }
+
+    /// Real-machine probe, never run in CI (it allocates gigabytes): the
+    /// PORTRAIT branch's transient on a 61 MP frame — the one orientation
+    /// state that was unreachable for an ARW until v0.30.0, so its cost had
+    /// never actually been paid on a Sony file.
+    ///
+    /// `orient_f32` casts to and from `Rgb32F` with zero copies
+    /// (`bytemuck::cast_vec`), so the whole transient is `oriented`'s own
+    /// `rotate270`: one fresh output frame while the source is still alive.
+    /// 61 MP x 3 channels x 4 bytes = 732 MB per frame, so the accounting
+    /// predicts a ~1.46 GB peak and no third copy. Measure with:
+    ///
+    /// ```text
+    /// cargo test --lib -- --ignored --exact render::tests::portrait_rotation_peak_on_a_61mp_frame
+    /// ```
+    ///
+    /// and read the printed before/after RSS, or wrap the test binary in
+    /// `Start-Process -PassThru -Wait` and read `PeakWorkingSet64`.
+    #[test]
+    #[ignore = "real-machine probe: allocates ~1.5 GB"]
+    fn portrait_rotation_peak_on_a_61mp_frame() {
+        // 9504 x 6336 = the A7R IV sensor, landscape; Rotate270 turns it
+        // portrait, which is exactly what an orientation-8 ARW now does.
+        let (w, h) = (9504usize, 6336usize);
+        let px = w * h;
+        let frame_bytes = px * 3 * 4;
+        let data: Vec<[f32; 3]> = vec![[0.5, 0.5, 0.5]; px];
+        eprintln!(
+            "one frame = {:.0} MB ({px} px); predicted peak = {:.0} MB (source + rotated copy)",
+            frame_bytes as f64 / 1e6,
+            2.0 * frame_bytes as f64 / 1e6
+        );
+        let (out, ow, oh) = orient_f32(data, w, h, Orientation::Rotate270);
+        assert_eq!((ow, oh), (h, w), "the frame must come back portrait");
+        assert_eq!(out.len(), px);
+        assert_eq!(out.capacity() * 12, frame_bytes, "no third copy was made");
     }
 
     #[test]

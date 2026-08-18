@@ -657,6 +657,14 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     if let Some(base) = recipe_path.parent() {
         autoshop::store::resolve_mask_paths(&mut recipe, base);
     }
+    // A recipe FILE may predate the coordinate-frame era, so its crop and
+    // masks may be drawn against the sensor frame of a rotated RAW. Migrated
+    // HERE, where the file is read — `render_source_checked` below is the
+    // shared render funnel and also serves recipes that arrived from a
+    // browser (already display-frame), which must never be turned.
+    if let Some(c) = pipeline::migrate_recipe_coord_frame(raw, &mut recipe) {
+        println!("note: {}", pipeline::coord_migration_note(c));
+    }
     // Untrusted input, like any other recipe source: an enormous finite
     // exposure (hand-edited JSON) otherwise reaches powf unbounded.
     let dropped = recipe.clamp();

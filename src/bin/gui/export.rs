@@ -62,6 +62,14 @@ pub(crate) fn resolve_snapshot_develop(
         if let Some(base) = from.parent() {
             autoshop::store::resolve_mask_paths(&mut r, base);
         }
+        // The batch twin of the open path's coordinate-frame migration: this
+        // is the only place a batch export reads a recipe FILE, and without it
+        // a portrait RAW exported with its crop and masks on the wrong axis
+        // while the interactive open showed them correctly — the exact
+        // cross-surface divergence `warns` exists to close.
+        if let Some(c) = autoshop::pipeline::migrate_recipe_coord_frame(p, &mut r) {
+            warns.push(autoshop::pipeline::coord_migration_note(c));
+        }
         return Ok(Some((r, "recipe.json")));
     }
     if let Some(err) = &snap.recipe_err {

@@ -3810,15 +3810,36 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 - 所有图上交互经 `ViewXform`（屏幕↔全幅归一化，gui/model.rs）；工具互斥
   分发在 `after_view`（gui/canvas.rs；crop > placing > wb_pick >
   range_pick > clone > paint > box-select）。
-- **EXIF 方向在链条最前端**（55e7e07 起）：引擎 `orient_f32` 在 develop
-  之前转正 f32 缓冲，decode 端 `preview_only`/`decode_raw` 用同一
-  `render::oriented`（pub(crate)）转正内嵌预览——GUI 显示帧 == 引擎
-  original 帧，任何 RAW 方向下蒙版/裁剪/拉直坐标一致。rawler 的 ARW
-  内嵌预览本身**不带**转正（crate 源码实证）。
+- **EXIF 方向在链条最前端**（55e7e07 起结构就位，**v0.30.0 起对 ARW 才真正
+  生效**）：引擎 `orient_f32` 在 develop 之前转正 f32 缓冲，decode 端
+  `preview_only`/`decode_raw` 用同一 `render::oriented`（pub(crate)）转正内嵌
+  预览——GUI 显示帧 == 引擎 original 帧。rawler 的 ARW 内嵌预览本身
+  **不带**转正（crate 源码实证）。
+  → **方向值的唯一来源 = `decode::raw_orientation_of`（EXIF IFD0 tag 0x0112）**：
+  rawler 0.7.2 在 `rawimage.rs:389/478` 把 `RawImage.orientation` **硬写死为
+  `Normal`**（`//cam.orientation, // TODO fixme`），DNG/QTK 之外全部解码器如此——
+  所以 v0.29.x 以前竖拍 ARW 在显示/显影/导出全链都是横的。三个消费点
+  （render.rs 渲染钩、decode.rs 的 Meta 尺寸 + 预览转正、`camera_rendition`）
+  均改读该访问器；缺 tag 回 `Normal`，rawler 自己的 `from_tiff` 回 `Unknown`，
+  二者在像素/坐标/尺寸三条链上均为 no-op（断言在
+  `unknown_and_normal_are_the_same_no_op`）。GUI 缩略图磁盘缓存盐 v2→v3
+  （gui/util.rs），否则旧缓存继续端出歪图。
 - `develop_preview`（render.rs）跑 `apply_recipe_wb` + `apply_develop`；
   **不应用裁剪**（GUI 用 uv 窗显示、导出端真裁）。**几何链**由 GUI `redevelop`
   在 develop_preview 之后依次调引擎 `apply_lens_distortion`（C2 畸变）→
   `rotate_straighten`（拉直）完成（导出路径同函数、同顺序）。
+- **坐标帧代 `EditRecipe.coord_era`（v0.30.0 新字段）**：0 = v0.29.x 及以前写的
+  配方，其 crop/masks 存在**传感器帧**（1 = EXIF 显示帧）。载入时由
+  `pipeline::migrate_recipe_coord_frame` 一次性纯旋转双射迁移（`render::
+  orient_point` = `oriented` 像素变换的坐标孪生）。**故意不复用 `version`**：
+  `version` 是基调曲线的 provenance 且被有意地在配方间**移植**（paste_recipe_for /
+  produce_recipe / photo_calibration / 退出保存重盖），把坐标帧搂进同一个整数会让
+  “目标照片的 era-2”盖到已是显示帧的几何上→下次载入会**再转一次**。
+  新字段对旧 exe 前向不兼容（`deny_unknown_fields`，同 color_gains/role/hue
+  先例，已登记在发版说明）。迁移**只挂在读文件的载入点**（GUI 开图 /
+  变体条 / 版本快照 / 批量导出 / api_recipe / CLI apply）；HTTP 请求体与 AI 返回
+  的配方在边界上直接盖为当代帧（`serve::live_frame_recipe` / `advisor::openai`）。
+  **栅格蒙版（手绘/AI 分割）是图片文件，不迁移，改为向用户披露**。
 - **坐标空间约定（④起，C2 扩展）**：original →（畸变校正）→ corrected →
   （旋转+内接裁剪）→ view；`recipe.crop` 存 view 空间；masks/画笔/吸管/
   region 存 original 空间——gui/util.rs `view_norm_to_orig /

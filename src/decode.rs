@@ -446,6 +446,46 @@ fn decode_baked(path: &Path) -> Result<Decoded> {
     Ok(Decoded { preview, meta, histogram, embedded_xmp: None })
 }
 
+/// The RAW's EXIF orientation (IFD0 tag 0x0112) — the ONE source of truth for
+/// which way is up, and the only value any consumer may read.
+///
+/// **Not** `RawImage.orientation`: rawler 0.7.2 hard-codes that field to
+/// `Orientation::Normal` in both `RawImage` constructors
+/// (`rawimage.rs:389` and `rawimage.rs:478`, verbatim
+/// `orientation: Orientation::Normal, //cam.orientation, // TODO fixme`), so
+/// every decoder except DNG and QTK — ARW included — reported "Normal" for a
+/// portrait frame and the whole chain rendered it sideways. The real value
+/// rides in `RawMetadata.exif`, which rawler DOES populate from tag 0x0112
+/// (`exif.rs:16` `pub orientation: Option<u16>`, filled at `exif.rs:124`);
+/// the A7RIV portrait samples read `Some(8)` = `Rotate270`.
+///
+/// An absent tag answers `Normal`. rawler's own `Orientation::from_tiff`
+/// answers `Unknown` for that case, but the two are indistinguishable to
+/// every consumer: `to_flips()` and [`crate::render::oriented`] treat
+/// `Unknown` exactly as `Normal`. That equivalence is asserted, not assumed —
+/// see `unknown_and_normal_are_the_same_no_op`.
+pub fn raw_orientation_of(md: &rawler::decoders::RawMetadata) -> rawler::Orientation {
+    md.exif
+        .orientation
+        .map(rawler::Orientation::from_u16)
+        .unwrap_or(rawler::Orientation::Normal)
+}
+
+/// [`raw_orientation_of`] for a path we have not decoded yet: metadata only,
+/// no sensor decompression and no preview extraction. Errors only when the
+/// file cannot be opened or has no decoder — a RAW without the tag is
+/// `Normal`, not a failure.
+pub fn raw_orientation(path: &Path) -> Result<rawler::Orientation> {
+    guard_tiff_chain(path)?;
+    let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
+    let decoder =
+        get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", path.display()))?;
+    let md = decoder
+        .raw_metadata(&src, &RawDecodeParams { image_index: 0 })
+        .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+    Ok(raw_orientation_of(&md))
+}
+
 /// Does this EXIF orientation swap width and height in the display frame?
 fn orientation_transposes(o: rawler::Orientation) -> bool {
     matches!(
@@ -668,6 +708,10 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
     let md = decoder
         .raw_metadata(&src, &params)
         .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+    // Which way is up: EXIF tag 0x0112 off the metadata already in hand, NOT
+    // the dummy raw's hard-coded field (see [`raw_orientation_of`]). Free —
+    // `md` is decoded one line above.
+    let orientation = raw_orientation_of(&md);
 
     // `dummy = true`: populate dimensions / WB / levels without decompressing
     // the full sensor data — we only need the structural metadata here.
@@ -707,8 +751,8 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
         // DISPLAY-frame dims, agreeing with the oriented preview below:
         // sensor width/height made every rotated (portrait) shot's aspect —
         // and the style index's portrait feature — read as landscape.
-        width: if orientation_transposes(raw.orientation) { raw.height } else { raw.width },
-        height: if orientation_transposes(raw.orientation) { raw.width } else { raw.height },
+        width: if orientation_transposes(orientation) { raw.height } else { raw.width },
+        height: if orientation_transposes(orientation) { raw.width } else { raw.height },
         // Sony stores only 3 WB multipliers, so rawler leaves the 4th (second
         // green) as NaN. Replace any non-finite coeff with the neutral 1.0 —
         // otherwise serde_json refuses to serialise Meta when we hand it to the
@@ -726,8 +770,8 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
 
     // Orient the preview into the display frame (embedded previews are stored
     // in sensor orientation; see preview_only for the full rationale). Uses
-    // the dummy raw's orientation, which is already decoded above for Meta.
-    let preview = crate::render::oriented(preview, raw.orientation);
+    // the EXIF orientation resolved above — the same value Meta's dims used.
+    let preview = crate::render::oriented(preview, orientation);
     // The DELIVERED pixels are the embedded preview, and its dims are the
     // camera's choice — they can differ from the sensor math above (a DNG
     // can report 4024×6048 while its preview is 4000×6000). These numbers
@@ -858,8 +902,10 @@ pub fn preview_only(path: &Path) -> Result<DynamicImage> {
 /// decodes the JPEG bytes verbatim — verified in the crate source), so they
 /// are oriented here with the render engine's own function: masks, crop and
 /// straighten are all defined against the displayed preview and must mean the
-/// same thing in the full-res render. The dummy `raw_image` that carries the
-/// orientation decodes metadata only — no sensor decompression.
+/// same thing in the full-res render. The orientation comes from
+/// [`raw_orientation_of`] on the RAW's metadata — strictly cheaper than the
+/// dummy `raw_image` this used to build, and the only field of it we ever
+/// read was the one rawler hard-codes.
 fn camera_rendition(path: &Path) -> Result<Option<DynamicImage>> {
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
@@ -884,11 +930,10 @@ fn camera_rendition(path: &Path) -> Result<Option<DynamicImage>> {
     } else {
         return Ok(None);
     };
-    let orientation = decoder
-        .raw_image(&src, &params, true)
-        .map_err(|e| anyhow!("raw_image(dummy): {e}"))?
-        .orientation;
-    Ok(Some(crate::render::oriented(img, orientation)))
+    let md = decoder
+        .raw_metadata(&src, &params)
+        .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+    Ok(Some(crate::render::oriented(img, raw_orientation_of(&md))))
 }
 
 /// The camera's OWN rendition only — `None` for a non-RAW or a RAW that
@@ -1436,5 +1481,93 @@ mod tests {
             Orientation::Rotate90,
             target
         )));
+    }
+
+    /// THE INTERFACE that was broken: rawler 0.7.2 hard-codes
+    /// `RawImage.orientation` to `Normal` for every decoder but DNG/QTK, so
+    /// the value must come off the EXIF metadata. This pins the mapping
+    /// itself — `Some(8)` is the portrait ARW's tag and it MUST become
+    /// `Rotate270`, not `Normal`.
+    #[test]
+    fn raw_orientation_reads_the_exif_tag_not_rawlers_constant() {
+        let md = |tag: Option<u16>| rawler::decoders::RawMetadata {
+            exif: rawler::exif::Exif { orientation: tag, ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(raw_orientation_of(&md(Some(8))), rawler::Orientation::Rotate270);
+        assert_eq!(raw_orientation_of(&md(Some(6))), rawler::Orientation::Rotate90);
+        assert_eq!(raw_orientation_of(&md(Some(1))), rawler::Orientation::Normal);
+        // No tag at all: our answer is Normal where rawler's own
+        // `Orientation::from_tiff` would say Unknown — pinned as the SAME
+        // no-op by `unknown_and_normal_are_the_same_no_op` below.
+        assert_eq!(raw_orientation_of(&md(None)), rawler::Orientation::Normal);
+        // An out-of-range tag value is rawler's Unknown, which is also a
+        // no-op — a corrupt 0x0112 must never rotate anything.
+        assert_eq!(raw_orientation_of(&md(Some(99))), rawler::Orientation::Unknown);
+    }
+
+    /// The DNG semantic difference, ASSERTED rather than assumed: rawler's
+    /// `from_tiff` answers `Unknown` for a missing tag while
+    /// [`raw_orientation_of`] answers `Normal`, and the whole chain is only
+    /// safe because the two are the same NO-OP everywhere they are consumed —
+    /// the pixel transform, the coordinate transform, and the width/height
+    /// swap.
+    #[test]
+    fn unknown_and_normal_are_the_same_no_op() {
+        use rawler::Orientation::{Normal, Unknown};
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(7, 3, |x, y| {
+            image::Rgb([x as u8, y as u8, 0])
+        }));
+        assert_eq!(
+            crate::render::oriented(img.clone(), Unknown).to_rgb8().into_raw(),
+            crate::render::oriented(img, Normal).to_rgb8().into_raw(),
+            "pixels"
+        );
+        for (u, v) in [(0.0f32, 0.0f32), (0.25, 0.75), (1.0, 1.0), (-0.5, 1.7)] {
+            assert_eq!(
+                crate::render::orient_point(Unknown, u, v),
+                crate::render::orient_point(Normal, u, v),
+                "coordinates at ({u}, {v})"
+            );
+        }
+        assert_eq!(orientation_transposes(Unknown), orientation_transposes(Normal), "dims");
+    }
+
+    /// Real-machine probe, never run in CI: point AUTOSHOP_ORIENT_PROBE_RAW at
+    /// a RAW whose IFD0 tag 0x0112 is 8 (a portrait Sony ARW) and this asserts
+    /// the WHOLE chain — the accessor answers `Rotate270`, and `decode_raw`
+    /// hands back a PORTRAIT frame (height > width). The two constant tests
+    /// above hand-feed the enum and so cannot see a broken link between the
+    /// file and the pipeline; this is the one that can.
+    #[test]
+    #[ignore = "real-machine probe: set AUTOSHOP_ORIENT_PROBE_RAW to a portrait RAW"]
+    fn portrait_raw_reaches_the_pipeline_as_rotate270() {
+        let Ok(path) = std::env::var("AUTOSHOP_ORIENT_PROBE_RAW") else {
+            panic!("set AUTOSHOP_ORIENT_PROBE_RAW to a RAW with EXIF orientation 8");
+        };
+        let p = std::path::Path::new(&path);
+        assert_eq!(
+            raw_orientation(p).expect("read orientation"),
+            rawler::Orientation::Rotate270,
+            "EXIF tag 0x0112 = 8 must reach the pipeline as Rotate270"
+        );
+        let d = decode_raw(p).expect("decode");
+        eprintln!(
+            "{}: EXIF 0x0112 = 8 → Rotate270, decoded frame {}x{}",
+            p.display(),
+            d.meta.width,
+            d.meta.height
+        );
+        assert!(
+            d.meta.height > d.meta.width,
+            "a portrait RAW must decode to a portrait frame, got {}x{}",
+            d.meta.width,
+            d.meta.height
+        );
+        assert_eq!(
+            (d.preview.width() as usize, d.preview.height() as usize),
+            (d.meta.width, d.meta.height),
+            "Meta dims must describe the delivered preview"
+        );
     }
 }

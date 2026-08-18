@@ -474,6 +474,37 @@ histogram with clipping stats, and EXIF (camera/lens/ISO/shutter/aperture/
 as-shot WB). Baked sources (PNG/TIFF/JPEG) skip this and load directly via the
 `image` crate with neutral metadata.
 
+**Which way is up comes from EXIF, not from `RawImage` (v0.30.0).** rawler
+0.7.2 hard-codes `RawImage.orientation` to `Normal` for every decoder except
+DNG and QTK (`rawimage.rs:389` and `:478`, verbatim `orientation:
+Orientation::Normal, //cam.orientation, // TODO fixme`), so until v0.30.0 a
+portrait ARW was displayed, developed and exported sideways even though the
+orientation stage had been at the head of the chain since 55e7e07. The real
+value rides in `RawMetadata.exif` (IFD0 tag `0x0112`), and
+`decode::raw_orientation_of` is now the single accessor all three consumers
+read — the render/export hook in `render_to_image_in`, `decode_raw`'s display
+dimensions and preview transpose, and `camera_rendition`. A missing tag answers
+`Normal` where rawler's own `from_tiff` answers `Unknown`; the two are the same
+no-op on the pixel, coordinate and dimension chains, which is asserted rather
+than assumed (`unknown_and_normal_are_the_same_no_op`).
+
+Because the frame finally turns, **recipes saved before v0.30.0 hold their crop
+and mask coordinates in the SENSOR frame**. `EditRecipe.coord_era` records
+which frame a recipe's geometry is drawn in (0 = sensor, 1 = display), and
+`pipeline::migrate_recipe_coord_frame` turns an era-0 recipe exactly once at
+load through `render::orient_point` — the coordinate twin of the pixel
+transform, a bijection per orientation state, so the migration is lossless and
+reversible. It is deliberately a NEW field rather than a `version` bump:
+`version` is the base curve's provenance and is *transplanted* between recipes
+on purpose (paste, the Analyze writer, `photo_calibration`, the quit-time
+re-stamp), so folding a coordinate frame into it would let a target photo's
+era-2 stamp land on geometry that is already display-frame and get it turned a
+second time. The migration hooks only the paths that read a recipe FILE (GUI
+open, the variant strip, version snapshots, batch export, `api_recipe`, CLI
+`apply`); recipes arriving from the browser or from the model are stamped
+current-frame at their boundary instead. Raster (painted / AI-segmented) masks
+are image files, not coordinates: they are left alone and the user is told so.
+
 **One dispatch, enforced at the gate (R22).** "A RAW" has a single definition
 app-wide (`decode::is_raw`), and the two ways into pixels are separate by
 construction: a RAW must be demosaiced by the develop engine, a baked raster is

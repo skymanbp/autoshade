@@ -1591,6 +1591,13 @@ impl AutoshopApp {
                 // survived to a single rendered frame.
                 let relook =
                     autoshop::pipeline::repair_pre_era_base_curve(&src, &mut r).is_some();
+                // …and the coordinate frame, for the same reason and from the
+                // same file: a `v<N>.recipe.json` written before v0.30.0 holds
+                // its crop and masks in the SENSOR frame of a rotated RAW.
+                // Ungated by the generated strip above (a pixel-state card
+                // still has geometry) and toasted rather than folded into the
+                // status line, so the raster caveat has room.
+                let reframe = autoshop::pipeline::migrate_recipe_coord_frame(&src, &mut r);
                 self.recipe = r;
                 self.resync_recipe_display();
                 self.dirty = true;
@@ -1607,6 +1614,9 @@ impl AutoshopApp {
                         )
                         .to_string(),
                     );
+                }
+                if let Some(c) = reframe {
+                    self.toast(ToastKind::Success, coord_migration_sentence(lang, c));
                 }
                 self.status = if relook {
                     // The GUI's OWN sentence, localized: the engine note is

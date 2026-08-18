@@ -1155,9 +1155,12 @@ pub(crate) fn thumb_cache_file(src: &std::path::Path) -> Option<PathBuf> {
     let dir = autoshop::store::store_root().join("thumbs");
     let mut h = std::collections::hash_map::DefaultHasher::new();
     // Decoder-generation salt: bump when decode semantics change what a
-    // thumb LOOKS like (v2 = EXIF orientation applied to baked images) — an
-    // unchanged file otherwise keeps serving its stale sideways thumbnail.
-    2u32.hash(&mut h);
+    // thumb LOOKS like (v2 = EXIF orientation applied to baked images;
+    // v3 = the same for RAW, where the orientation FIRST TAKES EFFECT — every
+    // v2 cache entry for a portrait ARW is a sideways thumbnail, because
+    // rawler reported `Normal` for it) — an unchanged file otherwise keeps
+    // serving its stale sideways thumbnail.
+    3u32.hash(&mut h);
     std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf()).hash(&mut h);
     meta.modified().ok().hash(&mut h);
     meta.len().hash(&mut h);

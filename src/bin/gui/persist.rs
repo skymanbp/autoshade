@@ -515,7 +515,46 @@ pub(crate) fn resolve_saved_develop(
         }
         SavedDevelop::Nothing => {}
     }
+    // COORDINATE FRAME, for whichever arm produced a recipe — and NOT gated on
+    // `skip_repair` or on `stamp`, unlike the curve repair above:
+    //   * `skip_repair` exists to dodge a RAW DECODE + develop; this reads EXIF
+    //     metadata only, and the two callers that set it (a generated canvas,
+    //     a nav-stash) still render this recipe's crop and masks;
+    //   * the XMP arms need no gate of their own — `xmp_to_recipe` builds on
+    //     `EditRecipe::default()`, which is era-current, so an imported
+    //     Lightroom sidecar (whose coordinates ARE display-frame, because
+    //     Lightroom reads tag 0x0112 itself) is a no-op here by construction;
+    //   * the `Unreadable` fallback arm carries a real restored recipe too.
+    if let Some(c) =
+        src.and_then(|p| autoshop::pipeline::migrate_recipe_coord_frame(p, &mut recipe))
+    {
+        open_note = merge_note(open_note, coord_migration_sentence(lang, c));
+    }
     ResolvedSaved { recipe, restored, stamp, open_note, unresolved }
+}
+
+/// The GUI's OWN localized sentence for a coordinate-frame migration — the
+/// engine's [`autoshop::pipeline::coord_migration_note`] is for the CLI/HTTP
+/// surfaces, exactly like the base-curve pair. Two sentences, not one with a
+/// conditional clause: the raster half is a DIFFERENT fact (work the migration
+/// could not do) and must not be buried inside the success line.
+pub(crate) fn coord_migration_sentence(
+    lang: Lang,
+    c: autoshop::pipeline::CoordMigration,
+) -> String {
+    let mut s: String = tr(
+        lang,
+        "this photo's saved crop and masks were rotated to match the RAW's EXIF orientation — earlier versions displayed rotated RAWs sideways, so their coordinates were stored against the sideways frame",
+    )
+    .into();
+    if c.rasters_left {
+        s.push_str(" · ");
+        s.push_str(tr(
+            lang,
+            "its painted / AI raster masks are image files, not coordinates, and could NOT be rotated — check them and re-generate if they no longer fit",
+        ));
+    }
+    s
 }
 
 /// Stamp the photo's camera-matched calibration onto the canvas recipe:
@@ -642,6 +681,15 @@ pub(crate) fn strip_from_record(
             if v.kind.is_parametric() {
                 let _ = autoshop::pipeline::repair_pre_era_base_curve(p, &mut v.recipe);
             }
+            // The coordinate frame, for EVERY card including the pixel-state
+            // ones: a generated variant carries no base curve (hence the
+            // parametric gate above) but it does carry the crop and the masks
+            // the user drew, and `variants.json` is a FILE that can predate
+            // the orientation fix like any other. NOT disclosed per card —
+            // the frame is a property of the PHOTO, and the open path's own
+            // migration says it once for all of them (N identical toasts for
+            // one fact was the noise the strip's other corrections avoid).
+            let _ = autoshop::pipeline::migrate_recipe_coord_frame(p, &mut v.recipe);
         }
     }
     strip

@@ -484,6 +484,14 @@ impl OpenAiProvider {
         let lens = take_lens_opinion(&mut parsed);
         let repaired = repair_hsl_axis_lengths(&mut parsed);
         let mut recipe: EditRecipe = serde_json::from_value(parsed)?;
+        // The model's JSON is not a FILE: `coord_era`'s serde default means
+        // "written before the field existed", i.e. sensor-frame coordinates,
+        // and a model response carries no such history — every crop or mask it
+        // proposes is drawn against the DISPLAY frame it was shown. Stamped
+        // here, at the one boundary where model JSON becomes an `EditRecipe`
+        // (analyze and refine both land here), so the load-time migration can
+        // never turn an AI-authored mask that was already the right way up.
+        recipe.coord_era = crate::recipe::COORD_ERA;
         super::project_remote_recipe_text(&mut recipe, &[key]);
         if !repaired.is_empty() {
             // Repaired, but never silently: the mixer bands the model meant

@@ -1484,6 +1484,146 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
     )
 }
 
+/// What [`migrate_recipe_coord_frame`] did, for the caller's disclosure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoordMigration {
+    /// The EXIF orientation the geometry was turned by.
+    pub orientation: rawler::Orientation,
+    /// The recipe also carries RASTER (painted / AI-segmented) masks, which
+    /// are image files and cannot be turned by a coordinate rewrite — the one
+    /// honest gap in an otherwise lossless migration.
+    pub rasters_left: bool,
+}
+
+/// Answers already computed this run, keyed like the curve memo: reading a
+/// RAW's orientation costs a full `RawSource::new` (rawler slurps the whole
+/// file, 60–120 MB for a 61 MP ARW), and the strip-card and batch-export
+/// paths ask per recipe, not per photo.
+fn orient_memo() -> &'static std::sync::Mutex<std::collections::HashMap<CurveMemoKey, rawler::Orientation>>
+{
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, rawler::Orientation>>,
+    > = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Bring a saved recipe's geometry into the DISPLAY frame — the load-time
+/// half of [`crate::recipe::COORD_ERA`].
+///
+/// Every recipe written up to v0.29.x stored its crop rectangle and mask
+/// geometries against the frame the app actually drew, and for a
+/// rotated/flipped RAW that was the SENSOR frame: rawler 0.7.2 reports
+/// `Orientation::Normal` for everything but DNG/QTK, so a portrait ARW was
+/// displayed sideways and the user drew on a sideways canvas. Now that
+/// `render::orient_f32` turns the frame for real, those coordinates land on
+/// the wrong axis unless they are turned with it.
+///
+/// Tri-state, the [`repair_pre_era_base_curve`] discipline:
+///   * already era-current, or a photo with no rotation → stamp, no note;
+///   * turned → stamp AND say so;
+///   * the orientation could NOT be read (unreadable/locked RAW) → nothing is
+///     stamped and nothing is moved, so the next reader retries. Stamping on
+///     an inability would declare the coordinates migrated when they are not,
+///     and no later reader could tell.
+pub fn migrate_recipe_coord_frame(raw: &Path, r: &mut EditRecipe) -> Option<CoordMigration> {
+    if r.coord_era >= crate::recipe::COORD_ERA {
+        return None;
+    }
+    // A baked image is not a RAW: `decode::load_image` has applied its EXIF
+    // orientation since long before this era, so its saved coordinates are
+    // already display-frame. Stamp and stop — asking rawler would only fail.
+    if !crate::decode::is_raw(raw) {
+        r.coord_era = crate::recipe::COORD_ERA;
+        return None;
+    }
+    let key = (raw.to_path_buf(), curve_ident(raw));
+    let cached = orient_memo().lock().ok().and_then(|m| m.get(&key).copied());
+    let orientation = match cached {
+        Some(o) => o,
+        None => {
+            // Inabilities are NOT cached — a locked file must be retried, the
+            // same rule the curve memo follows.
+            let o = crate::decode::raw_orientation(raw).ok()?;
+            match orient_memo().lock() {
+                Ok(mut m) => *m.entry(key).or_insert(o),
+                Err(_) => o,
+            }
+        }
+    };
+    let rasters_left = crate::render::recipe_has_raster_masks(r);
+    let moved = crate::render::orient_recipe_coords(r, orientation);
+    // The stamp lands either way once the orientation is KNOWN: a Normal
+    // photo's coordinates are already display-frame, and leaving it era-0
+    // would pay the metadata read again on every future load.
+    r.coord_era = crate::recipe::COORD_ERA;
+    // Nothing to say when nothing moved — an unrotated photo, or a recipe
+    // whose only content is global sliders.
+    (moved && (crate::render::recipe_has_frame_coords(r) || rasters_left))
+        .then_some(CoordMigration { orientation, rasters_left })
+}
+
+/// Everything a saved recipe must be brought through before it becomes a live
+/// one — the ONE call every load and every re-save shares, so a new migration
+/// cannot be wired into some surfaces and forgotten on others (the defect
+/// class `render_source_checked`'s comment describes: two surfaces of the same
+/// build disagreeing about the same file).
+#[derive(Debug, Clone, Default)]
+pub struct LoadMigration {
+    /// The washed pre-era base curve was re-estimated; the engine's sentence.
+    pub relook: Option<String>,
+    /// The geometry was turned into the display frame.
+    pub reframe: Option<CoordMigration>,
+}
+
+impl LoadMigration {
+    /// Did anything change? (Drives ● / thumb invalidation at the call sites
+    /// that only need "is this recipe different now".)
+    pub fn any(&self) -> bool {
+        self.relook.is_some() || self.reframe.is_some()
+    }
+
+    /// The chained ENGINE sentence for the CLI / HTTP surfaces. The GUI has
+    /// its own localized pair — these two facts are disclosed separately
+    /// everywhere, because they are unrelated corrections.
+    pub fn note(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(n) = &self.relook {
+            parts.push(n.clone());
+        }
+        if let Some(c) = &self.reframe {
+            parts.push(coord_migration_note(*c));
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+}
+
+/// The engine (English, CLI/HTTP) sentence for a coordinate-frame migration.
+pub fn coord_migration_note(c: CoordMigration) -> String {
+    let base = "this photo's saved crop and masks were moved to match the RAW's EXIF \
+                orientation: earlier versions displayed rotated RAWs sideways, so their \
+                coordinates were stored against the sideways frame"
+        .to_string();
+    if c.rasters_left {
+        format!(
+            "{base}; its painted/AI raster mask(s) are image files and could NOT be turned — \
+             check and re-generate them"
+        )
+    } else {
+        base
+    }
+}
+
+/// [`repair_pre_era_base_curve`] + [`migrate_recipe_coord_frame`], in that
+/// order — the load-time migration funnel. Order is not arbitrary: the repair
+/// reads the photo's PIXELS (decode + neutral develop) while the reframe reads
+/// only its metadata, and the repair's early-out is the cheaper of the two.
+pub fn migrate_loaded_recipe(raw: &Path, r: &mut EditRecipe) -> LoadMigration {
+    LoadMigration {
+        relook: repair_pre_era_base_curve(raw, r),
+        reframe: migrate_recipe_coord_frame(raw, r),
+    }
+}
+
 /// The photo's saved recipe (central store first, then legacy), parsed once —
 /// the calibration-stamping snapshot both fields must come from.
 ///
@@ -3747,6 +3887,71 @@ mod tests {
         assert!(repair_pre_era_base_curve(&raw, &mut r).is_none());
         assert_eq!(r.base_curve, washed, "an inability must not touch the curve");
         assert_eq!(r.version, 1, "nor launder the stamp");
+    }
+
+    /// The coordinate-frame migration's three gates, none of which needs a
+    /// readable RAW to exercise.
+    #[test]
+    fn coord_frame_migration_gates() {
+        use crate::recipe::{Crop, COORD_ERA};
+
+        // (1) An ERA-CURRENT recipe is never looked at again — not even to
+        // stat the photo. This is what keeps a browser- or AI-authored crop,
+        // and every recipe this build writes, from being turned twice.
+        let mut current = EditRecipe {
+            coord_era: COORD_ERA,
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            ..Default::default()
+        };
+        let before = current.clone();
+        assert!(migrate_recipe_coord_frame(Path::new("no-such-file-ever.arw"), &mut current)
+            .is_none());
+        assert_eq!(current, before, "an era-current recipe must be untouched");
+
+        // (2) A BAKED image was oriented at decode long before this era, so
+        // its saved coordinates are already display-frame: stamped, silently,
+        // without asking rawler anything.
+        let mut baked = EditRecipe { coord_era: 0, ..Default::default() };
+        assert!(migrate_recipe_coord_frame(Path::new("photo.jpg"), &mut baked).is_none());
+        assert_eq!(baked.coord_era, COORD_ERA, "a non-RAW is stamped, not left to retry");
+
+        // (3) An UNREADABLE RAW is an inability, not an answer: nothing moves
+        // AND nothing is stamped, so the next reader retries. Stamping here
+        // would declare the coordinates migrated when they are not, and no
+        // later reader could tell.
+        let mut legacy = EditRecipe {
+            coord_era: 0,
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            ..Default::default()
+        };
+        let untouched = legacy.clone();
+        assert!(migrate_recipe_coord_frame(Path::new("no-such-file-ever.arw"), &mut legacy)
+            .is_none());
+        assert_eq!(legacy, untouched, "an inability must not move or stamp anything");
+    }
+
+    /// The two load-time migrations are INDEPENDENT facts and are disclosed
+    /// as such — a photo can need one, the other, both or neither, and the
+    /// GUI picks a different sentence for each.
+    #[test]
+    fn load_migration_reports_its_two_halves_separately() {
+        let none = LoadMigration::default();
+        assert!(!none.any() && none.note().is_none());
+        let curve_only = LoadMigration { relook: Some("relooked".into()), reframe: None };
+        assert!(curve_only.any());
+        assert_eq!(curve_only.note().as_deref(), Some("relooked"));
+        let frame = CoordMigration {
+            orientation: rawler::Orientation::Rotate270,
+            rasters_left: false,
+        };
+        let both = LoadMigration { relook: Some("relooked".into()), reframe: Some(frame) };
+        let note = both.note().expect("a note");
+        assert!(note.starts_with("relooked · "), "{note}");
+        assert!(note.contains("EXIF orientation"), "{note}");
+        // The raster gap is SAID, never folded into the success sentence.
+        let with_rasters = CoordMigration { rasters_left: true, ..frame };
+        assert!(coord_migration_note(with_rasters).contains("could NOT be turned"));
+        assert!(!coord_migration_note(frame).contains("could NOT be turned"));
     }
 
     #[test]

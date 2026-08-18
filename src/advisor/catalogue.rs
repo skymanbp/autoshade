@@ -296,7 +296,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 33] = [
+pub const RECIPE_CONTROLS: [Control; 34] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -306,6 +306,22 @@ pub const RECIPE_CONTROLS: [Control; 33] = [
         crs: CrsKey::None,
         tier: None,
         purpose: "schema + calibration-era stamp; return 2",
+    },
+    Control {
+        name: "coord_era",
+        shape: Shape::Integer,
+        range: None,
+        neutral: "1",
+        // ENGINE-ONLY on purpose: this says which FRAME `crop` and the mask
+        // geometries are drawn in, and the model only ever sees the display
+        // frame — asking it would invite a wrong answer about a fact it
+        // cannot observe. Stamped where the model's JSON becomes a recipe
+        // (`advisor::openai`), exactly like the other measured stamps.
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: None,
+        purpose: "engine bookkeeping: which coordinate frame crop/masks are stored in \
+                  (0 = the pre-v0.30 sensor frame, 1 = the EXIF display frame)",
     },
     Control {
         name: "exposure_ev",
@@ -1350,6 +1366,7 @@ impl GlobalValue<'_> {
 pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>> {
     let EditRecipe {
         version,
+        coord_era,
         exposure_ev,
         contrast,
         highlights,
@@ -1385,6 +1402,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
     } = r;
     Some(match name {
         "version" => GlobalValue::Int(*version),
+        "coord_era" => GlobalValue::Int(*coord_era),
         "exposure_ev" => GlobalValue::Num(*exposure_ev),
         "contrast" => GlobalValue::Num(*contrast),
         "highlights" => GlobalValue::Num(*highlights),
@@ -2016,7 +2034,10 @@ mod tests {
         // expression and `carry_over_unrepresentable` learned to honour it.
         assert_eq!(
             names(&RECIPE_CONTROLS, Some(true)).into_iter().collect::<Vec<_>>(),
-            vec!["as_shot_k", "as_shot_tint", "base_curve", "lens_profile"]
+            // `coord_era` (v0.30.0) joined for a reason of its own: it is not
+            // a measurement and not staged work but a FRAME declaration the
+            // model cannot observe — it only ever sees the display frame.
+            vec!["as_shot_k", "as_shot_tint", "base_curve", "coord_era", "lens_profile"]
         );
         assert_eq!(
             names(&LOCAL_CONTROLS, Some(true)).into_iter().collect::<Vec<_>>(),

@@ -28,6 +28,23 @@ pub struct EditRecipe {
     /// `pipeline::repair_pre_era_base_curve`.
     pub version: u32,
 
+    /// Which COORDINATE FRAME `crop` and every `masks` geometry are expressed
+    /// in — see [`COORD_ERA`]. Absent in any recipe written before v0.30.0,
+    /// which is exactly what `0` (the SENSOR frame) means.
+    ///
+    /// This is deliberately NOT folded into [`version`](Self::version).
+    /// `version` is the CURVE's provenance and is transplanted between
+    /// recipes on purpose — `paste_recipe_for` (gui/persist.rs), the Analyze
+    /// writer (`pipeline::produce_recipe`), the quit-time generated-variant
+    /// re-stamp (gui/actions.rs) and `photo_calibration` all copy the TARGET
+    /// photo's `version` onto a recipe whose geometry came from somewhere
+    /// else. A coordinate frame is intrinsic to the geometry and must never
+    /// travel with a curve: stamping a saved era-2 `version` onto a recipe
+    /// whose masks are already in the display frame would make the next load
+    /// rotate them a second time. Two independent facts, two fields.
+    #[serde(default = "coord_era_legacy")]
+    pub coord_era: u32,
+
     // --- Tone ---------------------------------------------------------------
     /// Global exposure in stops (EV). 0.0 = unchanged.
     pub exposure_ev: f32,
@@ -161,10 +178,34 @@ pub struct EditRecipe {
 /// later load tell the two apart; nothing else in the file could.
 pub const CALIB_ERA: u32 = 2;
 
+/// The current COORDINATE-FRAME era, stamped into every recipe we write.
+///
+/// Era 0 = every recipe written up to v0.29.x. rawler 0.7.2 reports
+/// `Orientation::Normal` for every non-DNG RAW (`decode::raw_orientation_of`
+/// has the crate-source citation), so a portrait ARW was displayed, developed
+/// and exported in its SENSOR frame — and the crop rectangle and mask
+/// geometries the user drew on it were stored against that sideways canvas.
+/// Era 1 = the display frame the EXIF orientation actually asks for, which is
+/// what `render::orient_f32` now produces and what the C2 coordinate contract
+/// ("masks live in the ORIGINAL frame") has always claimed.
+///
+/// For a `Normal`-oriented photo the two frames are identical, so the era
+/// only ever changes what a rotated/flipped RAW's saved geometry means.
+pub const COORD_ERA: u32 = 1;
+
+/// Serde default for [`EditRecipe::coord_era`] — deliberately NOT the
+/// container's `Default::default()` value: a file with no `coord_era` key was
+/// written before the field existed, and every one of those holds SENSOR-frame
+/// coordinates. Pinned by `absent_coord_era_reads_as_the_legacy_frame`.
+fn coord_era_legacy() -> u32 {
+    0
+}
+
 impl Default for EditRecipe {
     fn default() -> Self {
         Self {
             version: CALIB_ERA,
+            coord_era: COORD_ERA,
             exposure_ev: 0.0,
             contrast: 0.0,
             highlights: 0.0,
@@ -1211,6 +1252,12 @@ impl EditRecipe {
                 // an older build is still "no edits" and must still clear
                 // rather than pin a permanent edited badge.
                 version: EditRecipe::default().version,
+                // Same rule for the coordinate-frame stamp: a legacy recipe
+                // whose only difference from neutral is "written before the
+                // orientation fix" holds no user edit, and counting it as one
+                // would make a neutral legacy recipe.json outrank the XMP
+                // beside it (`SavedDevelop::NoopOnly` precedence).
+                coord_era: EditRecipe::default().coord_era,
                 base_curve: Vec::new(),
                 // The as-shot WB anchor is the same kind of stamped
                 // calibration — a fresh-open stamp must still count as no-op.
@@ -1839,6 +1886,37 @@ mod tests {
         // A v1 recipe JSON (no "masks" key) still deserializes, masks default empty.
         let v1 = r#"{ "exposure_ev": 0.5, "rationale": "x", "confidence": 0.9 }"#;
         assert!(serde_json::from_str::<EditRecipe>(v1).unwrap().masks.is_empty());
+    }
+
+    /// THE CONTRACT the whole coordinate migration is gated on, and the one
+    /// serde subtlety in it: `EditRecipe` carries a CONTAINER-level
+    /// `#[serde(default)]`, which fills every missing field from
+    /// `Default::default()` — and `Default::default().coord_era` is
+    /// [`COORD_ERA`], the CURRENT frame. The field-level
+    /// `#[serde(default = "coord_era_legacy")]` must OVERRIDE that, or every
+    /// pre-v0.30 recipe would decode as "already migrated" and a portrait
+    /// RAW's saved masks would stay on the wrong axis forever.
+    #[test]
+    fn absent_coord_era_reads_as_the_legacy_frame() {
+        let legacy = r#"{"version":2,"contrast":7.0}"#;
+        assert_eq!(
+            serde_json::from_str::<EditRecipe>(legacy).unwrap().coord_era,
+            0,
+            "a file with no coord_era key predates the field: SENSOR frame"
+        );
+        assert_eq!(
+            EditRecipe::default().coord_era,
+            COORD_ERA,
+            "a freshly built recipe is authored in the display frame"
+        );
+        // And it round-trips: what we write, we read back unchanged.
+        let json = serde_json::to_string(&EditRecipe::default()).unwrap();
+        assert!(json.contains("\"coord_era\":1"), "{json}");
+        assert_eq!(serde_json::from_str::<EditRecipe>(&json).unwrap().coord_era, COORD_ERA);
+        // A legacy recipe whose only difference from neutral is the missing
+        // stamp is still "no edits" — otherwise a neutral legacy recipe.json
+        // would outrank the XMP beside it.
+        assert!(serde_json::from_str::<EditRecipe>(r#"{"version":2}"#).unwrap().is_noop());
         // A mask WITHOUT a "range" key (pre-range recipes) defaults to None.
         let old_mask = r#"{ "masks": [ { "name": "sky" } ] }"#;
         assert_eq!(serde_json::from_str::<EditRecipe>(old_mask).unwrap().masks[0].range, None);

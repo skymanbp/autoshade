@@ -1028,15 +1028,19 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
         // Bare raster names stay bare — api_develop/api_export re-anchor them
         // before rendering.
         //
-        // The pre-era base-curve repair happens BEFORE the browser gets a
-        // copy: everything the web then does — preview, export, download,
-        // save — is driven by the object it holds, so serving the file
-        // verbatim handed the washed curve to every one of them (and the
-        // client would have written it straight back on the next save).
-        // Re-serialised only when the repair actually fired; an untouched
+        // The load-time migrations happen BEFORE the browser gets a copy:
+        // everything the web then does — preview, export, download, save — is
+        // driven by the object it holds, so serving the file verbatim handed
+        // the washed curve (and, since v0.30.0, the sensor-frame crop/masks of
+        // a rotated RAW) to every one of them, and the client would have
+        // written it straight back on the next save. This is also the ONLY
+        // place the web reads a recipe FILE: the request bodies are stamped
+        // display-frame on arrival (`live_frame_recipe`), so hooking the
+        // render funnels instead would have turned browser-authored geometry.
+        // Re-serialised only when a migration actually fired; an untouched
         // recipe still goes out byte-for-byte, forward-schema fields and all.
         if let Ok(mut r) = serde_json::from_str::<EditRecipe>(&text)
-            && let Some(note) = crate::pipeline::repair_pre_era_base_curve(raw, &mut r)
+            && let Some(note) = crate::pipeline::migrate_loaded_recipe(raw, &mut r).note()
             && let Ok(fixed) = serde_json::to_string(&r)
         {
             // SAID, not just done: the photo renders differently than it did
@@ -1421,9 +1425,30 @@ struct Region {
     right: f32,
     bottom: f32,
 }
+/// A recipe that arrives over HTTP is authored in the LIVE display frame —
+/// the browser edits the oriented preview — so it is stamped
+/// [`crate::recipe::COORD_ERA`] on the way in, whatever the body said.
+///
+/// `EditRecipe::coord_era`'s serde default means "this JSON predates the
+/// field", which is true of a FILE and false of a request body: the web UI
+/// builds a neutral recipe client-side on Reset, and without this a save of
+/// that recipe would land on disk claiming sensor-frame coordinates and the
+/// next GUI open would turn a crop that was already the right way up.
+/// Attached at the FIELD, not the handlers, so a new recipe-bearing endpoint
+/// cannot forget it.
+fn live_frame_recipe<'de, D>(d: D) -> std::result::Result<EditRecipe, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut r = EditRecipe::deserialize(d)?;
+    r.coord_era = crate::recipe::COORD_ERA;
+    Ok(r)
+}
+
 #[derive(Deserialize)]
 struct DevelopReq {
     id: usize,
+    #[serde(deserialize_with = "live_frame_recipe")]
     recipe: EditRecipe,
     /// Export/download only: run AI denoise first (ignored by live preview).
     #[serde(default)]
@@ -1441,6 +1466,7 @@ struct DevelopReq {
 #[derive(Deserialize)]
 struct XmpReq {
     id: usize,
+    #[serde(deserialize_with = "live_frame_recipe")]
     recipe: EditRecipe,
     /// Browser-session master to RECORD as the develop's pixel source on
     /// save (the GUI rule) — else the healed pixels evaporate on reopen.
