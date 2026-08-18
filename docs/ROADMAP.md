@@ -370,6 +370,64 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **v0.30.0 RELEASED（2026-08-17，第二十四轮=17 条反馈三轮清账收官之 R24：数
+  据模型+方向根修+梯子定稿）** — 锁定计划之 R24 全量落地+素材自采反哺的两个
+  计划外根修，六个实现提交（2e6a841 谓词+版本命名出处 / 7804e2f 应用到原图
+  +ActiveWrite 写入面收敛 / 3449305 五档注册表+投递根 / 334f90a 轮末复审修复
+  批 / 45c16dc 方向根修+坐标迁移 / e300a3a 联合梯子真实对定稿+M-D），测试
+  518→543 lib/8 CLI/99→114 GUI/2+2 合约双配置，clippy 0，audit_i18n 0。
+  **17 条反馈全部条目至此代码面收官**。本轮闭环：**#8**（版本命名+出处：
+  variants.json v=1 additive 加 id/name+flatten 双向捕获；`.version-meta.json`
+  咨询边车照 R21 非世代纪律，名字随号死烧号永不继承=合约二进制
+  repro_version_names_follow_their_number；「＋存为版本」上卡=拍板②替代品；
+  save_version Generated 守卫）；**#7**（应用到原图：参数覆盖 Original 卡、
+  像素与源卡都留、一步 Ctrl+Z、像素态禁用带理由、Generated 快照载回底片的无
+  标定真缺陷同修=reconcile_snapshot_calibration 双向单属主）；**#1**（词汇谓
+  词 is_parametric 穷举收编 6 处+写入面 4+1 收归 store::variants_member
+  ActiveWrite 四臂单属主（CLI 反推重开「▣原片」失真类从此有编译面出口；
+  Analyze 写 Strip 顺手关闭在册跨面残留）+list_edits 合成视图+编辑态分组列
+  表；变体卡改名 (photo,card-id) 键控+delete_variant 布防确认）；**#15b 基座
+  +M8**（五档 tier 注册表 57 行全分类+两条包含断言从注册表/GUI 源码派生+披
+  露三方向全派生——导出蒙版具名/导出全局=相机基调与镜头档首次有声/导入全局
+  =补集宇宙自清空且**属性形+元素形双拼**；投递根 config::delivery_root 一等
+  设置 Destination 信任+funnel 钉线；B2-B5+INERT_LOCAL 放宽待 M-B Defringe
+  素材=用户 LR 补做）。**计划外根修①方向（#17 真闭环）**：rawler 0.7.2 对除
+  DNG/QTK 外全部解码器把 RawImage.orientation 写死 Normal（上游源码
+  `//cam.orientation, // TODO fixme`）→ 全库竖构图 RAW 缩略图/画布/导出三面
+  横躺自 v0.11 起、且反推同帧检查误报「裁剪/非同帧」；修=decode::
+  raw_orientation_of 单一 EXIF 访问器+三消费点收编+缓存盐 2→3；**存量坐标迁
+  移（用户拍板=加载时自动旋转）**：新字段 coord_era（0=传感器帧/1=显示帧；
+  字段级 serde default 压过容器级=否则旧文件全读成已迁移，专测钉；不复用
+  version=它在四个主路径位点被有意移植，单整数装不下两个生命周期）；六个读
+  文件载入点走单一 LoadMigration 漏斗，模型 JSON/HTTP 体/XMP 三个出生点边界
+  盖当代章；orient_point 像素孪生逐州推导+61MP 旋转峰值实测 1384MB；栅格蒙
+  版不迁移改披露。**⚠ 前向：v0.29 exe 拒读 v0.30 保存的任何 recipe.json**
+  （coord_era 顶层字段+deny_unknown_fields 既定姿态，app 内部数据无 XMP 影
+  响）。**计划外根修②联合梯子定稿（R23 provisional 债销账）**：六对 EXIF 确
+  认同帧真实对实测（方向修后重跑）——用户口中「瞎搞」的天体合成对联合读数
+  0.141 在旧线 0.25 下无警示还报 0.578 置信；新常数 JOINT_FAR_ERR=0.10（夹
+  逼：上界=A1 必触/下界=canyon-gold 0.093 策略性拒绝不受指控留 8% 余量=下一
+  真实失败对到手第一个复议的数）+SLOPE=7.5（(1−floor)/FAR 绑定保留，真实对
+  从顶端独立佐证同向）+真实锚点进**编译期** const assert；**同帧警示置信帽
+  0.5 新增**（40 组纯裁剪自配对实验：框取差异凭空造 sat±23/EV±0.45、最大残
+  差 0.0854→conf 0.488=帽值出处；是帽不是地板=LR 导出裁剪是工具提示自邀工作
+  流）；域依赖发现（联合读数随求解域变，梯子按 CLI 域=故障报告域标定）入挂
+  具 doc。M-D 处置：denoise exit-0 **四组合实跑否证不可复现**（补合约测试
+  钉性质）；光栅门文案去内部符号（测试钉「必含文件名必不含 ::」）；AI
+  Denoise 补 segment 同族能力探针+zh 逐字同形。**素材自采四条全录**（零付费
+  零写库）：M-A 六对（stem 同名 116 只有 54 真同帧=EXIF 时间戳教训）；M-B
+  160 XMP 取证含载荷性阴性结果（Add/Subtract 全顶层、组内组件 0/428——B 批
+  设计据此，Defringe 全库 0 待用户 LR 补做）；M-C=整个 Raw 树恰 147 对，15
+  张小样已跑（数字见 scratchpad mc-eval-15-sample）；M-D 两臂文案表在案。
+  **登记不修**：LOW-2 Analyze 继承 refuse_unresolved_strip=与 Ctrl+S 一致化
+  设计；N3 崩溃窗孤儿 meta 行不可达已滤；straighten≠0 时 crop 迁移一阶近似；
+  web「RAW 不可读仍回存」窄残留实际不可达；LR sidecar 对迁移坐标的对齐待真
+  实验证。**后续登记**：底部变体条物理合并（共享属主已铺=删除+重钉小活，待
+  用户裁布局）；SF9-B 版本捕获像素；M-C 全量 147 重基线待小样判读后拍板；
+  B2-B5 待 Defringe。发版：feat+tag v0.30.0，资产字节验证见发布印章。——
+  三轮清账（R22 v0.28.0 / R23 v0.29.0 / R24 v0.30.0）至此收官，下轮开工先读
+  本条。
+
 - **v0.29.0 RELEASED（2026-08-17，第二十三轮=17 条反馈三轮清账之 R23：AI 大
   修）** — 锁定计划之 R23 全量落地，六个实现提交+一个轮末复审修复提交
   （f0c7804→32cb378，cbae6bc 起累计 ~+8300/−1300），测试 467→518 lib/8 CLI
