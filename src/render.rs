@@ -1929,8 +1929,16 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             let ry = ((bottom - top) / 2.0).abs().max(1e-4);
             // Rotation (engine convention, recipe.rs `MaskGeometry::Radial`):
             // rotate the SAMPLE POINT about the bbox centre by −angle, in
-            // normalised frame coords — equivalent to rotating the ellipse
-            // by +angle (counter-clockwise, y-down screen sense).
+            // normalised frame coords — equivalent to rotating the ELLIPSE by
+            // +angle, which on screen (x right, y DOWN) is CLOCKWISE.
+            // MEASURED, not derived: a synthetic one-radial recipe rendered by
+            // the released binary at angle +30 puts the darkest row at
+            // x = 150 → 450 at rows 147 → 249, i.e. the band descends — right
+            // end DOWN — and at −30 it ascends (E1-verdict §4a, R25 P9).
+            // The matrix below is `R(+θ)` applied to the point, which IS
+            // counter-clockwise in a y-UP maths frame; this comment used to
+            // carry that reading while explicitly claiming the y-down screen
+            // sense, so it named the direction backwards. Code unchanged.
             let (mut px, mut py) = (nx - cx, ny - cy);
             if *angle != 0.0 {
                 let (s, c) = (-angle.to_radians()).sin_cos();

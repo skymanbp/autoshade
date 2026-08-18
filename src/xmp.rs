@@ -96,12 +96,34 @@ fn guid(seed: &str) -> String {
     format!("{a:016X}{b:016X}")
 }
 
+/// The ONE inversion bit an XMP radial carries, out of the TWO this recipe
+/// spells (R25 P9). `MaskGeometry::Radial::flipped` and `LocalAdjustment::
+/// inverted` are separate flags here and `mask_weight` × the weight loop
+/// compose them by XOR (render.rs), so their XOR — and only their XOR — is the
+/// fact about the photograph. Lightroom has no such pair: it writes the single
+/// bit TWICE, as `crs:MaskInverted` on the component and `crs:Flipped` as that
+/// value's complement (census of the user's library: 201/201 radials
+/// anti-correlated, 0 exceptions; re-derived here on the 7 M-B sidecars, 23/23).
+/// So the projection has to collapse, and this is where it collapses.
+///
+/// Linear gradients get their direction from Zero→Full and Lightroom writes no
+/// `crs:Flipped` on one at all (27/27 in the same sidecars), so the `matches!`
+/// covers exactly the geometry that has the second flag.
+fn lr_net_inverted(m: &LocalAdjustment) -> bool {
+    m.inverted ^ matches!(m.mask, MaskGeometry::Radial { flipped: true, .. })
+}
+
 /// `(crs:What value, extra geometry attributes)` for a mask geometry, or
 /// `None` for geometries classic ACR XMP cannot express (raster bitmaps —
 /// the writer skips those corrections; the render still applies them).
 /// Coordinates are written raw (unclamped) — ACR gradients legitimately use
 /// values outside [0,1].
-fn mask_geom_xml(g: &MaskGeometry) -> Option<(&'static str, String)> {
+///
+/// `net_inverted` is [`lr_net_inverted`] for the correction this geometry
+/// belongs to — the radial arm needs it to write `crs:Flipped`, and the caller
+/// writes the SAME bit into `crs:MaskInverted`, so the pair leaves here in the
+/// only shape Lightroom itself ever writes.
+fn mask_geom_xml(g: &MaskGeometry, net_inverted: bool) -> Option<(&'static str, String)> {
     match g {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => Some((
             "Mask/Gradient",
@@ -117,8 +139,14 @@ fn mask_geom_xml(g: &MaskGeometry) -> Option<(&'static str, String)> {
         // (The attribute itself is still not emitted: writing crs:Angle="0"
         // would be this writer ASSERTING an orientation on a scale it cannot
         // read, where saying nothing lets Lightroom apply its own default.)
+        // `flipped: _` — NOT written straight out any more (R25 P9). See
+        // `lr_flipped` below: this recipe's flip is half of an XOR, and the
+        // attribute it used to be copied into is Lightroom's complement of
+        // `crs:MaskInverted`, so copying it emitted pairs Lightroom never
+        // writes and Lightroom rendered them inverted.
         MaskGeometry::Radial {
-            top, left, bottom, right, feather, roundness, flipped, angle: _, midpoint, mask_version,
+            top, left, bottom, right, feather, roundness, flipped: _, angle: _, midpoint,
+            mask_version,
         } => {
             Some((
                 "Mask/CircularGradient",
@@ -128,6 +156,22 @@ fn mask_geom_xml(g: &MaskGeometry) -> Option<(&'static str, String)> {
                     // The old writer emitted the raw 0..1 value, which Lightroom
                     // read as a nearly hard edge — convert on the boundary.
                     let lr_feather = (feather.clamp(0.0, 1.0) * 100.0).round();
+                    // `crs:Flipped` is the COMPLEMENT of the correction's
+                    // `crs:MaskInverted`, which the caller writes from the same
+                    // `net_inverted` — 201/201 radials in the user's library and
+                    // 23/23 in the M-B sidecars carry exactly that pair, and
+                    // NEITHER of the other two combinations occurs even once.
+                    //
+                    // Emitting the observed pair is what makes this projection
+                    // safe under BOTH readings of the attribute: whether
+                    // Lightroom's renderer consults `Flipped` or `MaskInverted`,
+                    // an anti-correlated pair says the same thing to it. The old
+                    // writer copied `flipped` here while `MaskInverted` came from
+                    // `inverted`, so a mask the user had flipped in this app left
+                    // as `Flipped="false" MaskInverted="false"` — a combination
+                    // Lightroom never writes, and the one it reads as "not
+                    // inverted", i.e. the flip was dropped on the way out.
+                    let lr_flipped = !net_inverted;
                     // Midpoint / Version ride out exactly as they rode in (R25
                     // P5): both sit on EVERY Lightroom radial, and a sidecar we
                     // rewrite without them is a sidecar that lost two of the
@@ -135,7 +179,7 @@ fn mask_geom_xml(g: &MaskGeometry) -> Option<(&'static str, String)> {
                     // them. Neither is interpreted — see MaskGeometry::Radial.
                     format!(
                         " crs:Top=\"{top}\" crs:Left=\"{left}\" crs:Bottom=\"{bottom}\" crs:Right=\"{right}\" \
-crs:Feather=\"{lr_feather}\" crs:Roundness=\"{roundness}\" crs:Flipped=\"{flipped}\" \
+crs:Feather=\"{lr_feather}\" crs:Roundness=\"{roundness}\" crs:Flipped=\"{lr_flipped}\" \
 crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\""
                     )
                 },
@@ -453,6 +497,19 @@ pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
 /// [`MaskImportReason::ALL`] order and names the corrections, so the line is
 /// actionable ("which of my 12 masks?") — the import twin of
 /// [`describe_mask_losses`].
+///
+/// REGISTERED, NOT FIXED (R25 P9) — **only the GUI calls this.** The callers are
+/// `bin/gui/export.rs` and `bin/gui/persist.rs`; `src/main.rs` calls neither, so
+/// a CLI import prints nothing at all about what the sidecar lost, and
+/// `eval.rs` uses `unsupported_corrections`, which counts DROPS only
+/// ([`MaskImportReason::is_drop`]) and cannot see a degradation like
+/// `MultiComponent` either.
+/// TRIGGER: any `autoshop apply` on a photo with a Lightroom sidecar whose
+/// masks do not import whole.
+/// WHERE IT GOES: nowhere — the losses are computed and discarded.
+/// This is a CHANNEL gap (the CLI has no disclosure surface for masks at all),
+/// not a parser defect, so closing it means designing where a CLI run says it
+/// — out of scope for a fix batch.
 pub fn describe_import_losses(imported: usize, losses: &[MaskImportLoss]) -> Option<String> {
     if losses.is_empty() {
         return None;
@@ -886,9 +943,13 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
         }
         let corr_id = guid(&format!("corr-{i}-{name}"));
         let mask_id = guid(&format!("mask-{i}-{name}"));
+        // The single inversion bit both attributes below carry (R25 P9) — the
+        // geometry's `crs:Flipped` is its complement, the correction's
+        // `crs:MaskInverted` is it. Computed ONCE so the two can never drift.
+        let net_inv = lr_net_inverted(m);
         // Raster (bitmap) masks have no classic-XMP encoding — skip this
         // correction; the deterministic render still applies it (§A tradeoff).
-        let Some((what, geom)) = mask_geom_xml(&m.mask) else {
+        let Some((what, geom)) = mask_geom_xml(&m.mask, net_inv) else {
             losses.push(MaskLoss { name, reason: MaskLossReason::Bitmap });
             continue;
         };
@@ -994,7 +1055,11 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
             mname = xml_attr_escape(&format!("{name} mask")),
 
 
-            inv = m.inverted,
+            // NOT `m.inverted`: a radial's flip is the other half of the same
+            // bit (R25 P9, `lr_net_inverted`). Leaving the flip out here is
+            // what silently dropped it on export — Lightroom has one inversion
+            // flag per correction and this is it.
+            inv = net_inv,
             mask_id = mask_id,
             geom = geom,
         ));
@@ -3634,6 +3699,14 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
         Err(()) => return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel),
     };
 
+    // The ONE component whose shape actually arrives (`base_geometry_at`), by
+    // its tag text — this loop walks `mask_block`, whose offsets are not the
+    // `seg` offsets the selector returns. Two byte-identical components would
+    // both compare equal, which is harmless: they say the same thing.
+    let imported_tag = base_geometry_at(seg)
+        .and_then(|p| next_xml_tag(seg, p))
+        .map(|(s, e, _)| &seg[s..=e]);
+
     let mut at = 0;
     while let Some((start, end, _)) = next_xml_tag(mask_block, at) {
         let tag = &mask_block[start..=end];
@@ -3646,7 +3719,24 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
                 "Mask/Gradient" | "Mask/CircularGradient" => {
                     geometry_count += 1;
                     match verdict {
-                        Ok(rs) => reasons.extend(rs),
+                        // R25 P9: `Rotation` is a claim ABOUT THE SHAPE THAT
+                        // ARRIVED — "radial rotation(s) read as 0" — so it may
+                        // only come from the component that arrived. It used to
+                        // come from all of them: `DSC08960` told the user about
+                        // four rotations, and three of the four described
+                        // radials that never entered the recipe at all (蒙版 5
+                        // contributed two on its own). What covers a DROPPED
+                        // shape is `MultiComponent`, which says exactly that.
+                        //
+                        // `BlendMode` deliberately stays component-wide: "one
+                        // non-default blend mode was ignored" is true of a
+                        // dropped subtract component, and it is the v0.31.1
+                        // disclosure for precisely that case — scoping it to
+                        // the base, which by definition carries the DEFAULT
+                        // mode, would silence it on every file that has one.
+                        Ok(rs) => reasons.extend(rs.into_iter().filter(|r| {
+                            imported_tag == Some(tag) || !matches!(r, MaskImportReason::Rotation(_))
+                        })),
                         Err(()) => geometry_unusable = true,
                     }
                 }
@@ -3662,6 +3752,24 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
                 // mask the file does not describe. Still refused (R24
                 // decision: bitmap masks are not exportable either), now with
                 // a sentence that says why.
+                //
+                // REGISTERED, NOT FIXED (R25 P9) — this flag PRE-EMPTS the
+                // shape accounting below: the `unknown_component` return fires
+                // before `MultiComponent` is pushed, so a correction that mixes
+                // brush components WITH parametric geometry is disclosed only
+                // as "AI / brush correction(s) skipped" and the parametric
+                // shapes it also held are never counted anywhere.
+                // TRIGGER: any correction carrying both a `Mask/Paint` /
+                // `Mask/Aggregate` / `Mask/Image` component and a
+                // `Mask/Gradient` / `Mask/CircularGradient` one.
+                // WHERE IT GOES: `_DSC9583` Mask 2 (4 radials + Aggregate +
+                // 14 Paint) and Mask 7 (2 gradients + Aggregate + 3 Paint) —
+                // 6 representable shapes in one file, refused correctly per
+                // the R24 decision but unaccounted for in the sentence the
+                // user reads. Fixing it is a DISCLOSURE-GRANULARITY design
+                // question (does the user want to hear about shapes inside a
+                // correction that was right to refuse whole?), not a parser
+                // bug, so it is not folded into this batch.
                 _ => unknown_component = true,
             }
         }
@@ -3710,6 +3818,63 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
 
 
 
+/// The BASE geometry component of a correction — the byte offset of its tag
+/// start within `seg`, or `None` if the correction carries no parametric
+/// geometry at all.
+///
+/// A correction may hold SEVERAL geometry components: Lightroom's Add/Subtract
+/// stack, where one shape is the BASE and the rest compose onto it via
+/// `crs:MaskBlendMode` (default = the base, `"1"` + `MaskValue="0"` = subtract,
+/// the encoding v0.31.1 taught this reader to accept). This engine imports ONE
+/// shape and discloses the rest, so which one it takes IS what the photo looks
+/// like.
+///
+/// R25 P9 — it used to take the wrong one, twice over:
+///  * the choice was made by KIND. `parse_one_correction` tried
+///    `Mask/Gradient` before `Mask/CircularGradient`, so ANY linear anywhere in
+///    the correction beat EVERY radial regardless of position. `DSC08960`
+///    蒙版 5 is `[CircularGradient, CircularGradient, Gradient]` — a plain
+///    3-shape union, every component at the default blend mode — and imported
+///    as the TRAILING linear with both radials gone.
+///  * and it ignored `crs:MaskBlendMode`, which is the worse half. `DSC08960`
+///    蒙版 3 and `_DSC9583` Mask 9 are both `[CircularGradient(base),
+///    Gradient(MaskBlendMode="1" MaskValue="0")]`: the importer kept the
+///    SUBTRACT shape and dropped the base, i.e. it rendered the region
+///    Lightroom uses to carve away from the mask as the ENTIRE mask. That is
+///    not a truncation of the user's intent, it is an inversion of it.
+///
+/// So: prefer the first component at the DEFAULT blend mode (the base), and
+/// only when every component is subtractive fall back to the first component at
+/// all — a correction made of nothing but subtractions has no base to find, and
+/// some shape beats no shape.
+///
+/// Scanned over the whole correction segment, like the reads in
+/// `parse_one_correction`: `crs:What="Mask/…"` occurs only inside
+/// `crs:CorrectionMasks` within one correction.
+fn base_geometry_at(seg: &str) -> Option<usize> {
+    let (mut first, mut first_base) = (None, None);
+    let mut at = 0;
+    while let Some((s, e, _)) = next_xml_tag(seg, at) {
+        at = e + 1;
+        let tag = &seg[s..=e];
+        if tag.starts_with("</") {
+            continue;
+        }
+        let Some((_, raw)) = xml_attribute_raw(tag, "crs:What") else { continue };
+        if !matches!(xml_unescape(raw).as_ref(), "Mask/Gradient" | "Mask/CircularGradient") {
+            continue;
+        }
+        first = first.or(Some(s));
+        // Absent counts as default: Lightroom writes the attribute on every
+        // component it emits, and a component without one is not asserting a
+        // composition (the same reading `component_import_reasons` takes).
+        if crs_str(tag, "MaskBlendMode").is_none_or(|m| m.as_ref() == "0") {
+            first_base = first_base.or(Some(s));
+        }
+    }
+    first_base.or(first)
+}
+
 /// One `crs:What="Correction"` segment → a [`LocalAdjustment`]. Slider scales
 /// invert the writer's: exposure ×4 (a power-of-two rescale, exact in binary
 /// FP), every other slider ×100 snapped to 4 decimals so `"0.3" → 30.0` lands
@@ -3718,8 +3883,14 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
     let q100 =
         |k: &str| crs_f32(seg, k).map_or(0.0, |v| (v * 100.0 * 10_000.0).round() / 10_000.0);
     // The geometry component decides the mask shape; a correction with no
-    // parametric geometry is not representable here.
-    let (mask, geom_at) = if let Some(p) = find_crs_value_at(seg, "What", "Mask/Gradient") {
+    // parametric geometry is not representable here. `base_geometry_at` picks
+    // WHICH component that is when there are several — read its doc, the choice
+    // used to invert the user's intent.
+    let p = base_geometry_at(seg)?;
+    let base_tag = next_xml_tag(seg, p).map_or(&seg[p..], |(s, e, _)| &seg[s..=e]);
+    let base_is_linear = xml_attribute_raw(base_tag, "crs:What")
+        .is_some_and(|(_, raw)| xml_unescape(raw).as_ref() == "Mask/Gradient");
+    let (mask, geom_at) = if base_is_linear {
 
 
         let g = &seg[p..];
@@ -3732,16 +3903,16 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
             },
             p,
         )
-    } else if let Some(p) = find_crs_value_at(seg, "What", "Mask/CircularGradient") {
+    } else {
 
 
         let g = &seg[p..];
-        // The component's OWN tag — `find_crs_value_at` returns a tag START,
-        // so this is the `<rdf:li …/>` that carries `crs:What`, and every
-        // geometry attribute Lightroom (and this writer) puts on it. Used by
-        // the two reads below whose attribute NAME recurs later in the
-        // correction; see there.
-        let geom_tag = next_xml_tag(seg, p).map_or(g, |(s, e, _)| &seg[s..=e]);
+        // The component's OWN tag — `base_geometry_at` returns a tag START, so
+        // this is the `<rdf:li …/>` that carries `crs:What`, and every geometry
+        // attribute Lightroom (and this writer) puts on it. Used by the two
+        // reads below whose attribute NAME recurs later in the correction; see
+        // there.
+        let geom_tag = base_tag;
         // Lightroom's Feather is 0..100 (reference sidecars: 50 / 72 …); the
         // engine's is 0..1. Three writers share this attribute, disambiguated
         // by TEXT SHAPE:
@@ -3771,7 +3942,38 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
                 right: crs_f32(g, "Right")?,
                 feather,
                 roundness: crs_f32(g, "Roundness")?,
-                flipped: crs_str(g, "Flipped").as_deref() == Some("true"),
+                // NOT `crs:Flipped` (R25 P9 — the defect this batch closed).
+                //
+                // This engine composes `Radial::flipped` and
+                // `LocalAdjustment::inverted` by XOR (render.rs `mask_weight`
+                // and the weight loop). Lightroom does not have that pair: it
+                // writes ONE inversion bit twice, `crs:MaskInverted` and its
+                // complement `crs:Flipped`. Census of the user's library —
+                // 201/201 radials anti-correlated, no exceptions; re-derived on
+                // the 7 M-B sidecars, 23/23 (16 `Flipped=true MaskInverted=
+                // false`, 7 the mirror). Reading BOTH into our two flags XORed
+                // a value with its own complement, so the net came out `true`
+                // for EVERY imported Lightroom radial regardless of what the
+                // file said — Autoshop inverted masks Lightroom does not.
+                // Measured cost on `DSC09568`, tone-matched RMS against the
+                // real Lightroom export: 0.1099 as imported → 0.0751 with this
+                // fixed, and 0.1901 → 0.0869 in blue (E1-verdict §6 defect 2).
+                //
+                // So the inversion comes from `crs:MaskInverted` ALONE (read
+                // into `inverted` below) and this stays false on import. The
+                // flag itself is untouched: it is still OUR field, still
+                // rendered, still the GUI's Flip checkbox, and a `recipe.json`
+                // that carries `flipped: true` renders exactly as before.
+                //
+                // KNOWN BOUNDARY — a sidecar THIS APP wrote at ≤ v0.31.1 with a
+                // flipped radial spelled it `Flipped="true" MaskInverted=
+                // "false"`, which now re-imports as not-inverted. That is not a
+                // new loss: Lightroom already read that pair as not-inverted,
+                // so the old sidecar never carried the flip to Lightroom
+                // either. Both directions now agree with Lightroom, which is
+                // the whole point. Sidecars written from v0.31.2 on round-trip
+                // their net exactly (`mask_geom_xml`).
+                flipped: false,
                 // A Lightroom crs:Angle is deliberately NOT mapped onto our
                 // engine angle (unverified sign/pivot — the roundness rule);
                 // the import reads the axis-aligned ellipse, as before.
@@ -3799,8 +4001,6 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
             },
             p,
         )
-    } else {
-        return None;
     };
     // Optional range component. Its head repeats `MaskInverted="true"` as part
     // of the intersect ENCODING (see `range_mask_xml`), so user intent is read
@@ -4865,7 +5065,16 @@ mod tests {
     #[test]
     fn radial_feather_converts_both_ways_and_keeps_legacy_own_scale() {
         // LR-style integer feather imports onto the engine's 0..1 scale…
-        let li = r#"crs:What="Mask/CircularGradient" crs:Top="0.2" crs:Left="0.2" crs:Bottom="0.8" crs:Right="0.8" crs:Feather="72" crs:Roundness="0" crs:Flipped="false""#;
+        //
+        // R25 P9: wrapped in a real `<rdf:li …/>`. It used to be a bare
+        // attribute run, which worked only because the geometry was located by
+        // substring; `base_geometry_at` scans TAGS, because choosing the base
+        // out of several components means reading each component's own
+        // `crs:MaskBlendMode` and that is a per-tag question. Every production
+        // caller already hands whole markup — `classify_correction`, the only
+        // one, tag-scans the same block itself — so the fixture was the thing
+        // that did not look like a sidecar.
+        let li = r#"<rdf:li crs:What="Mask/CircularGradient" crs:Top="0.2" crs:Left="0.2" crs:Bottom="0.8" crs:Right="0.8" crs:Feather="72" crs:Roundness="0" crs:Flipped="false"/>"#;
         let m = parse_one_correction(li).expect("radial parses");
         let MaskGeometry::Radial { feather, .. } = m.mask else { panic!("radial") };
         assert!((feather - 0.72).abs() < 1e-6, "LR 72 → 0.72, got {feather}");
@@ -6092,7 +6301,12 @@ mod tests {
         assert_eq!(angle, 0.0, "crs:Angle is disclosed, not guessed at");
         assert_eq!(top, 0.114928, "the geometry is the file's, verbatim");
         assert_eq!(feather, 1.0, "crs:Feather=100 is Lightroom's 0..100 scale");
-        assert!(flipped, "crs:Flipped rides along");
+        // R25 P9: `crs:Flipped="true"` beside `crs:MaskInverted="false"` is
+        // Lightroom's NOT-inverted spelling — one bit written twice — so the
+        // mask must arrive with neither flag set. It used to arrive flipped,
+        // which inverted it.
+        assert!(!flipped, "crs:Flipped is not a second inversion flag");
+        assert!(!r.masks[0].inverted, "and MaskInverted=false is the file's actual verdict");
         assert_eq!(r.masks[0].exposure_ev, 0.4, "0.1 × 4 stops");
         assert_eq!(unsupported_corrections(&doc), 0, "nothing was refused");
         let losses = import_losses(&doc);
@@ -6271,19 +6485,48 @@ mod tests {
         assert!(imported("0").is_empty(), "and an unrotated radial loses nothing at all");
     }
 
-    /// FORENSIC CONCLUSION, pinned so nobody tidies it away: the reference
-    /// sidecars carry `crs:Flipped="true"` BESIDE `crs:MaskInverted="false"`
-    /// on the same component. The two are independent — Flipped is the
-    /// ellipse's own gradient direction, MaskInverted is "everything except
-    /// this shape" — and docs/V2_PLAN.md §7 item 1 listed "which of them
-    /// decides inside vs outside" as an open question. It is answered: both,
-    /// about different things.
+    /// FORENSIC CONCLUSION, REVISED IN R25 P9 — read the revision, it is the
+    /// interesting part.
     ///
-    /// MUTATION THIS CATCHES: deriving either from the other (the tidy-up an
-    /// unwary reader of the two names would make) breaks two of four rows.
+    /// R24 observed that the reference sidecars carry `crs:Flipped="true"`
+    /// BESIDE `crs:MaskInverted="false"` on the same component, concluded the
+    /// two were INDEPENDENT (different concepts, both real), and this test
+    /// pinned all four combinations importing to distinct flags. The
+    /// observation was right and is unchanged; the CONCLUSION was wrong, and
+    /// what falsified it was sample size. R24 saw one cell of a 2×2. The R25
+    /// census walked the user's whole library — 201 radials — and found
+    /// `Flipped` and `MaskInverted` PERFECTLY ANTI-CORRELATED: 155 `(true,
+    /// false)`, 46 `(false, true)`, and ZERO of either matching pair. The two
+    /// M-B batches agree on the raw bytes and are not in conflict: "the fields
+    /// are not mirror copies of each other" (R24) and "their values are always
+    /// opposite" (R25) are both true of the same files. Only the reading
+    /// "therefore they mean different things" does not survive.
+    ///
+    /// So Lightroom writes ONE inversion bit TWICE. This engine has TWO flags
+    /// composed by XOR (`Radial::flipped` in `mask_weight`, `inverted` in the
+    /// weight loop, render.rs), and importing both halves of Lightroom's
+    /// redundant pair XORed a value with its own complement: the net came out
+    /// `true` for EVERY imported Lightroom radial whatever the file said.
+    /// Measured on `DSC09568` against the real Lightroom export, tone-matched
+    /// RMS 0.1099 → 0.0751 (blue 0.1901 → 0.0869) once the flip was dropped
+    /// (E1-verdict §6 defect 2).
+    ///
+    /// MUTATION THIS CATCHES: putting `crs:Flipped` back into the geometry
+    /// flag re-inverts every Lightroom radial (rows 1 and 2 below), and
+    /// writing our own `flipped` straight back out re-emits a pair Lightroom
+    /// never writes (the last assertion).
     #[test]
-    fn flipped_and_inverted_are_independent() {
-        for (flipped, inverted) in [(true, false), (false, true), (true, true), (false, false)] {
+    fn lightroom_spells_one_inversion_bit_twice() {
+        // The two pairs Lightroom actually writes, then the two it never does.
+        // For the observed pairs the net is `MaskInverted`; for the impossible
+        // ones the tie is broken in favour of `MaskInverted`, which is the
+        // attribute this reader trusts (see the importer's comment).
+        for (flipped, inverted, net) in [
+            (true, false, false), // 155 of 201 in the library
+            (false, true, true),  //  46 of 201
+            (true, true, true),   //   0 of 201 — resolved, not guessed
+            (false, false, false), //  0 of 201
+        ] {
             let comp = lr_radial("0", "0")
                 .replace("crs:Flipped=\"true\"", &format!("crs:Flipped=\"{flipped}\""))
                 .replace("crs:MaskInverted=\"false\"", &format!("crs:MaskInverted=\"{inverted}\""));
@@ -6292,18 +6535,88 @@ mod tests {
             let MaskGeometry::Radial { flipped: got_f, .. } = r.masks[0].mask else {
                 panic!("expected a radial, got {:?}", r.masks[0].mask);
             };
-            assert_eq!(got_f, flipped, "Flipped={flipped} Inverted={inverted}: the geometry flag");
+            assert!(
+                !got_f,
+                "Flipped={flipped} Inverted={inverted}: crs:Flipped must not reach the render flag"
+            );
             assert_eq!(
                 r.masks[0].inverted, inverted,
-                "Flipped={flipped} Inverted={inverted}: the correction flag"
+                "Flipped={flipped} Inverted={inverted}: MaskInverted is the inversion"
             );
-            // …and they stay independent through OUR writer.
-            let back = xmp_to_recipe(&recipe_to_xmp(&r));
-            let MaskGeometry::Radial { flipped: round_f, .. } = back.masks[0].mask else {
-                panic!("expected a radial, got {:?}", back.masks[0].mask);
+            assert_eq!(
+                lr_net_inverted(&r.masks[0]),
+                net,
+                "Flipped={flipped} Inverted={inverted}: net inversion"
+            );
+            // …and OUR writer re-emits the pair Lightroom would have written
+            // for that net, so the two rows Lightroom really uses round-trip
+            // byte-for-byte and the two it never writes are normalised onto
+            // the nearest row it does.
+            let xmp = recipe_to_xmp(&r);
+            assert!(
+                xmp.contains(&format!("crs:MaskInverted=\"{net}\"")),
+                "Flipped={flipped} Inverted={inverted}: MaskInverted must carry the net"
+            );
+            assert!(
+                xmp.contains(&format!("crs:Flipped=\"{}\"", !net)),
+                "Flipped={flipped} Inverted={inverted}: crs:Flipped is its complement"
+            );
+            assert_eq!(
+                lr_net_inverted(&xmp_to_recipe(&xmp).masks[0]),
+                net,
+                "Flipped={flipped} Inverted={inverted}: the net survives the round trip"
+            );
+        }
+    }
+
+    /// R25 P9, the other direction: a mask THIS APP flipped (the GUI's Flip
+    /// checkbox — `flipped: true`, `inverted: false`) used to export as
+    /// `crs:Flipped="false" crs:MaskInverted="false"`, a combination Lightroom
+    /// never writes and reads as NOT inverted. The flip was dropped at the
+    /// border, silently, in the one direction the user cannot check from
+    /// inside this app.
+    ///
+    /// MUTATION THIS CATCHES: any writer that copies `flipped` into
+    /// `crs:Flipped` instead of deriving both attributes from the net.
+    #[test]
+    fn our_own_flip_leaves_as_lightrooms_own_inversion() {
+        for (flipped, inverted) in [(true, false), (false, true), (true, true), (false, false)] {
+            let m = LocalAdjustment {
+                mask: MaskGeometry::Radial {
+                    top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
+                    feather: 0.5, roundness: 0.0, flipped, angle: 0.0,
+                    midpoint: 50.0, mask_version: 2,
+                },
+                inverted,
+                exposure_ev: -0.5,
+                ..Default::default()
             };
-            assert_eq!(round_f, flipped, "Flipped survives the projection unchanged");
-            assert_eq!(back.masks[0].inverted, inverted, "and so does MaskInverted");
+            let net = flipped ^ inverted;
+            let xmp = recipe_to_xmp(&EditRecipe { masks: vec![m], ..Default::default() });
+            // Both attributes read off the SAME component tag — the pair is
+            // the claim, and two whole-document `contains` could each be
+            // satisfied by a different component.
+            let p = find_crs_value_at(&xmp, "What", "Mask/CircularGradient")
+                .expect("the radial must be emitted");
+            let (s, e, _) = next_xml_tag(&xmp, p).expect("its component tag");
+            let tag = &xmp[s..=e];
+            assert_eq!(
+                crs_str(tag, "MaskInverted").as_deref(),
+                Some(if net { "true" } else { "false" }),
+                "flipped={flipped} inverted={inverted}: the net must reach crs:MaskInverted"
+            );
+            assert_eq!(
+                crs_str(tag, "Flipped").as_deref(),
+                Some(if net { "false" } else { "true" }),
+                "flipped={flipped} inverted={inverted}: and its complement crs:Flipped — a \
+                 matching pair is one Lightroom never writes, and it is what makes this \
+                 projection safe under BOTH readings of which attribute Lightroom consults"
+            );
+            assert_eq!(
+                lr_net_inverted(&xmp_to_recipe(&xmp).masks[0]),
+                net,
+                "flipped={flipped} inverted={inverted}: the rendered result must survive"
+            );
         }
     }
 
@@ -6978,6 +7291,138 @@ mod tests {
         );
     }
 
+    /// R25 P9. A correction with several geometry components imports ONE shape
+    /// and discloses the rest, and the one it takes must be the BASE — the
+    /// first component in the file, which is what Lightroom's Add/Subtract
+    /// stack composes onto. It used to be decided by KIND instead: the reader
+    /// tried `Mask/Gradient` before `Mask/CircularGradient`, so a trailing
+    /// linear beat a leading radial and the imported mask was a shape the
+    /// correction merely happened to also contain.
+    ///
+    /// Measured on the user's library, not invented: `DSC08960` 蒙版 5 is
+    /// `[CircularGradient, CircularGradient, Gradient]` and imported as that
+    /// trailing LINEAR with both radials gone; `_DSC9583` Mask 9 is
+    /// `[CircularGradient, Gradient]` and did the same. The loss was DISCLOSED
+    /// throughout (`MultiComponent`, and the dropped radials' own
+    /// `Rotation(…)` notes) — so this was never the silent drop it looked
+    /// like from the recipe alone — but the surviving shape was the wrong one.
+    ///
+    /// MUTATION THIS CATCHES: restoring the kind-ordered `if let` chain flips
+    /// row 1 back to a linear; ignoring `crs:MaskBlendMode` in the selector
+    /// flips rows 3 and 4, the two that are inversions of intent rather than
+    /// truncations of it.
+    #[test]
+    fn a_multi_component_correction_imports_its_base_geometry() {
+        // A subtract component, spelled the way Lightroom spells it (the pair
+        // v0.31.1 taught this reader to read: mode "1" WITH MaskValue "0").
+        let subtract = |c: String| {
+            c.replace("crs:MaskValue=\"1\"", "crs:MaskValue=\"0\"")
+        };
+        let radial = || lr_radial("0", "0");
+        for (label, comps, want_radial) in [
+            // Kind order used to decide: a TRAILING linear beat a leading
+            // radial. `DSC08960` 蒙版 5's real structure, all three at the
+            // default blend mode — a plain union.
+            ("radial, radial, linear (union)", vec![radial(), radial(), lr_gradient("0")], true),
+            ("linear, radial (union)", vec![lr_gradient("0"), radial()], false),
+            // Blend mode decides over document order: `DSC08960` 蒙版 3 and
+            // `_DSC9583` Mask 9 are both a base radial + a SUBTRACT linear, and
+            // the importer kept the shape Lightroom carves away WITH.
+            ("radial base, linear subtract", vec![radial(), subtract(lr_gradient("1"))], true),
+            ("linear subtract, radial base", vec![subtract(lr_gradient("1")), radial()], true),
+            // Nothing but subtractions has no base to find, so the first
+            // component stands in — some shape beats no shape.
+            (
+                "all subtract",
+                vec![subtract(lr_gradient("1")), subtract(lr_radial("0", "1"))],
+                false,
+            ),
+        ] {
+            let doc = lr_doc(&lr_correction("Stacked 1", "", &comps.concat()));
+            let r = xmp_to_recipe(&doc);
+            assert_eq!(r.masks.len(), 1, "{label}: one correction imports one shape");
+            let got_radial = matches!(r.masks[0].mask, MaskGeometry::Radial { .. });
+            assert_eq!(
+                got_radial, want_radial,
+                "{label}: wrong base — got {:?}",
+                r.masks[0].mask
+            );
+            // …and the components left behind are still named, which is the
+            // half of the contract that was already working.
+            let losses = import_losses(&doc);
+            assert!(
+                losses.iter().any(|l| l.reason == MaskImportReason::MultiComponent),
+                "{label}: the dropped component must be disclosed: {losses:?}"
+            );
+        }
+    }
+
+    /// R25 P9, Fix B — the disclosure has to describe the shape that ARRIVED.
+    /// `Rotation` says "radial rotation(s) read as 0", and
+    /// `classify_correction` collected it from EVERY geometry component: on
+    /// `DSC08960` three of the four rotation notes named radials that never
+    /// entered the recipe (蒙版 5 contributed two by itself). What covers a
+    /// dropped shape is `MultiComponent`, which says exactly that.
+    ///
+    /// `BlendMode` deliberately stays component-wide — see the filter's own
+    /// comment: on a dropped subtract component the sentence is true, and it is
+    /// the v0.31.1 disclosure for precisely that case.
+    ///
+    /// MUTATION THIS CATCHES: dropping the filter puts the unimported radial's
+    /// rotation back; widening it to `BlendMode` silences the subtract note.
+    #[test]
+    fn only_the_imported_geometrys_rotation_is_disclosed() {
+        // Base = an UNROTATED linear; the dropped radial carries the angle.
+        let comps = format!("{}{}", lr_gradient("0"), lr_radial("37.412506", "0"));
+        let doc = lr_doc(&lr_correction("Stacked 1", "", &comps));
+        let reasons: Vec<_> = import_losses(&doc).into_iter().map(|l| l.reason).collect();
+        assert!(
+            matches!(r_kind(&doc), MaskKindForTest::Linear),
+            "the unrotated linear is the base here"
+        );
+        assert!(
+            !reasons.iter().any(|r| matches!(r, MaskImportReason::Rotation(_))),
+            "a dropped radial's rotation must not be reported as read: {reasons:?}"
+        );
+        assert!(
+            reasons.contains(&MaskImportReason::MultiComponent),
+            "the dropped shape is disclosed as a dropped shape: {reasons:?}"
+        );
+        // The mirror: when the ROTATED radial is the base, the note is true and
+        // must still fire.
+        let comps = format!("{}{}", lr_radial("37.412506", "0"), lr_gradient("0"));
+        let doc = lr_doc(&lr_correction("Stacked 1", "", &comps));
+        let reasons: Vec<_> = import_losses(&doc).into_iter().map(|l| l.reason).collect();
+        assert!(
+            reasons.contains(&MaskImportReason::Rotation(37)),
+            "the imported radial's own rotation is a real loss: {reasons:?}"
+        );
+        // And a dropped SUBTRACT component keeps its own note (v0.31.1).
+        let comps = format!(
+            "{}{}",
+            lr_radial("0", "0"),
+            lr_gradient("1").replace("crs:MaskValue=\"1\"", "crs:MaskValue=\"0\"")
+        );
+        let doc = lr_doc(&lr_correction("Stacked 1", "", &comps));
+        let reasons: Vec<_> = import_losses(&doc).into_iter().map(|l| l.reason).collect();
+        assert!(
+            reasons.contains(&MaskImportReason::BlendMode),
+            "a dropped subtract component is still a composition we could not do: {reasons:?}"
+        );
+    }
+
+    enum MaskKindForTest {
+        Linear,
+        Other,
+    }
+
+    fn r_kind(doc: &str) -> MaskKindForTest {
+        match xmp_to_recipe(doc).masks.first().map(|m| &m.mask) {
+            Some(MaskGeometry::Linear { .. }) => MaskKindForTest::Linear,
+            _ => MaskKindForTest::Other,
+        }
+    }
+
     /// R25 P1, the import twin of `mask_loss_reason_all_covers_every_variant`:
     /// both disclosure surfaces ITERATE `MaskImportReason::ALL` (here and the
     /// GUI's `xmp_import_line`), so the list is the one place a reason can be
@@ -7361,6 +7806,117 @@ mod tests {
         }
         assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
         eprintln!("{files} sidecar(s), {total_imported} mask(s) imported in total");
+    }
+
+    /// FORENSIC REGRESSION for R25 P9, on the real files — the census this
+    /// batch's fix rests on, re-derived from the bytes every time it runs
+    /// rather than quoted from a document. Same directory and same silent-skip
+    /// rule as the two probes around it.
+    ///
+    /// Three claims, in order of how much they cost if false:
+    ///  1. `crs:Flipped` is the COMPLEMENT of `crs:MaskInverted` on every
+    ///     radial in the fixtures (16 `(true,false)` + 7 `(false,true)` = 23/23
+    ///     across the 7 M-B sidecars, matching 201/201 over the whole library).
+    ///     A fixture set that ever shows a MATCHING pair falsifies the model
+    ///     this batch is built on, and this test is where that would surface.
+    ///  2. No imported radial carries `flipped` — the inversion is read from
+    ///     `crs:MaskInverted` alone. Before this batch the two were XORed and
+    ///     the net came out `true` on every radial in every one of these files
+    ///     (asserted below as the anti-regression: `!net_before == net_now`
+    ///     would have to hold for the 16, which it does not).
+    ///  3. Our writer hands the file its own pair back, attribute for
+    ///     attribute — so a Lightroom → Autoshop → Lightroom trip renders the
+    ///     same mask at both ends.
+    #[test]
+    fn real_lightroom_radials_carry_one_inversion_bit_spelled_twice() {
+        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+        };
+        let (mut files, mut radials) = (0usize, 0usize);
+        let (mut flip_true, mut flip_false) = (0usize, 0usize);
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.to_string_lossy().to_lowercase().contains(".xmp") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("{}: fixture unreadable ({e})", p.display()));
+            files += 1;
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            // Scoped the way the importer scopes: this document's OWN
+            // corrections. `crs:RetouchAreas` carries `Mask/*` components of
+            // its own and is not a correction.
+            let scope = crs_own_scope(&text);
+            let block = owned_element_body(scope.as_ref(), "crs:MaskGroupBasedCorrections")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            // CLAIM 1 — the census, on this file's bytes.
+            let mut at = 0usize;
+            let mut per_file = 0usize;
+            while let Some((s, e, _)) = next_xml_tag(block, at) {
+                at = e + 1;
+                let tag = &block[s..=e];
+                if xml_attribute_raw(tag, "crs:What").map(|(_, v)| xml_unescape(v))
+                    != Some("Mask/CircularGradient".into())
+                {
+                    continue;
+                }
+                let f = crs_str(tag, "Flipped").map(|v| v.as_ref() == "true");
+                let i = crs_str(tag, "MaskInverted").map(|v| v.as_ref() == "true");
+                let (Some(f), Some(i)) = (f, i) else {
+                    panic!("{name}: a radial without both flags — {f:?} / {i:?}");
+                };
+                assert_ne!(
+                    f, i,
+                    "{name}: radial {per_file} carries Flipped={f} MaskInverted={i} — a MATCHING \
+                     pair, which no radial in the 201-mask library census does. The one-bit model \
+                     R25 P9 is built on does not hold on this file; do not paper over it."
+                );
+                if f { flip_true += 1 } else { flip_false += 1 }
+                per_file += 1;
+                radials += 1;
+            }
+            // CLAIMS 2 and 3 — what the importer and the writer do with them.
+            let imported = xmp_to_recipe(&text);
+            let round = xmp_to_recipe(&recipe_to_xmp(&imported));
+            let mut seen = 0usize;
+            for (i, m) in imported.masks.iter().enumerate() {
+                let MaskGeometry::Radial { flipped, .. } = m.mask else { continue };
+                assert!(
+                    !flipped,
+                    "{name}: mask {i} imported flipped — crs:Flipped reached the render flag"
+                );
+                let rt = round.masks.get(i).unwrap_or_else(|| panic!("{name}: mask {i} vanished"));
+                assert_eq!(
+                    lr_net_inverted(m),
+                    lr_net_inverted(rt),
+                    "{name}: mask {i} changed its inversion in the round trip"
+                );
+                seen += 1;
+            }
+            eprintln!(
+                "{name}: {per_file} radial(s) in the file, {seen} imported, all anti-correlated"
+            );
+        }
+        assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
+        assert!(radials > 0, "no radial reached the census: {dir}");
+        // The anti-regression, stated as the arithmetic that made the defect
+        // visible: XORing the two flags gives `true` on EVERY radial here,
+        // whatever the file says, because they are complements. That is what
+        // the old importer did, and why it inverted the `Flipped=true` ones.
+        eprintln!(
+            "{radials} radial(s): {flip_true} Flipped=true (Lightroom does NOT invert these — \
+             the {flip_true} the old importer inverted), {flip_false} Flipped=false"
+        );
+        assert_eq!(flip_true + flip_false, radials);
+        assert!(
+            flip_true > 0,
+            "the fixtures hold no NOT-inverted radial, so they cannot witness the defect"
+        );
     }
 
     /// FORENSIC REGRESSION for the B2 GLOBALS, same directory and same
@@ -8438,7 +8994,29 @@ mod tests {
             ..Default::default()
         };
         let back = xmp_to_recipe(&recipe_to_xmp(&r));
-        assert_eq!(back.masks, r.masks);
+        // R25 P9: ONE field does not come back where it went in. Lightroom
+        // spells a radial's inversion ONCE (`crs:MaskInverted`, with
+        // `crs:Flipped` as its complement) where this recipe spells it as the
+        // XOR of two flags, so the projection collapses `flipped` into
+        // `inverted`. The XOR is the whole of what the pixels see (render.rs
+        // `mask_weight` and the weight loop) and it survives exactly; WHICH of
+        // our two flags carries it is not a fact about the photograph.
+        // Written as an expected value rather than a relaxed comparison so
+        // every other field still has to match to the bit.
+        let mut expect = r.masks.clone();
+        let MaskGeometry::Radial { flipped, .. } = &mut expect[1].mask else {
+            panic!("mask 1 is the radial");
+        };
+        *flipped = false;
+        expect[1].inverted = true;
+        assert_eq!(back.masks, expect);
+        for (i, (was, now)) in r.masks.iter().zip(&back.masks).enumerate() {
+            assert_eq!(
+                lr_net_inverted(was),
+                lr_net_inverted(now),
+                "mask {i}: the net inversion is the part that must survive"
+            );
+        }
     }
 
     #[test]

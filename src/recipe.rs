@@ -937,8 +937,12 @@ pub enum MaskGeometry {
     /// unmeasured (docs/V2_PLAN.md §7 item 1), which is exactly why it is
     /// carried verbatim rather than converted.
     ///
-    /// `angle` (degrees, ENGINE convention: counter-clockwise about the bbox
-    /// centre in normalised frame coords, 0 = axis-aligned) IS rendered and
+    /// `angle` (degrees, ENGINE convention: CLOCKWISE on screen about the bbox
+    /// centre, 0 = axis-aligned — normalised frame coords are y-DOWN, so the
+    /// very same rotation reads counter-clockwise in a y-UP maths frame, which
+    /// is the reading this line used to print while claiming the screen one.
+    /// Measured on the released binary's own output, not derived: E1-verdict
+    /// §4a, R25 P9) IS rendered and
     /// GUI-editable, but is OUR OWN field, not `crs:Angle`: the XMP writer
     /// emits the UNROTATED ellipse (the same superset-approximation stance as
     /// radial placement under straighten) because crs:Angle's sign/pivot
