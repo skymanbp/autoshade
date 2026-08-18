@@ -312,6 +312,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Detail", "细节 · Detail"),
     ("Sharpening", "锐化"),
     ("Noise Reduction", "降噪"),
+    // R25 B3 — the eight CarriedOnly detail axes. Qualified labels for the
+    // same reason the Effects block below states: the bare 「Detail」 is
+    // already the section title, and 「Amount」 is already mask strength.
+    ("Sharpen radius", "锐化半径"),
+    ("Sharpen detail", "锐化细节"),
+    // 「边缘保护」 would be the natural gloss, but 护 (U+62A4) is outside the
+    // embedded font subset — and the Chinese UI must not depend on the
+    // machine having a CJK font.
+    ("Sharpen masking", "边缘蒙版"),
+    ("Noise detail", "降噪细节"),
+    ("Noise contrast", "降噪对比"),
+    ("Colour noise reduction", "彩色降噪"),
+    ("Colour noise detail", "彩噪细节"),
+    ("Colour noise smoothness", "彩噪平滑度"),
     // R23-1b: the two new PER-MASK sliders. Distinct labels from the global
     // 「锐化」/「色相」 on purpose — these are the local, signed/rotating forms,
     // and the tooltips carry the difference.
@@ -364,8 +378,29 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Lens vignetting", "镜头暗角"),
     ("Midpoint", "中点"),
     ("Distortion", "畸变"),
-    ("Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. De-fringe in a later batch.",
-        "暗角：正值提亮四角（补偿衰减），负值压暗；在线性光下的径向增益。畸变：正值修桶形（广角外凸），负值修枕形（长焦内缩）；自动缩放填满画幅，蒙版/画笔仍按校正后的图像定位。预览/导出/XMP 一致。去紫边留待后续批次。"),
+    // R25 B3 — the manual CA pair (RENDERED here) and the carried half of the
+    // same panel. 「自动横向色差」 would be the literal gloss, but 横 (U+6A2A)
+    // is outside the embedded font subset.
+    ("Chromatic aberration (manual)", "手动色差"),
+    ("Red / cyan", "红 / 青"),
+    ("Blue / yellow", "蓝 / 黄"),
+    ("Auto lateral CA", "自动色差校正"),
+    ("Defringe", "去边"),
+    // The six de-fringe controls. 「紫 · …」/「绿 · …」 keeps Adobe's two
+    // colour groups visible in one column without a caption per group, and
+    // the bare 「强度」 stays reserved for mask strength.
+    ("Purple amount", "紫 · 强度"),
+    ("Purple hue low", "紫 · 色相下限"),
+    ("Purple hue high", "紫 · 色相上限"),
+    ("Green amount", "绿 · 强度"),
+    ("Green hue low", "绿 · 色相下限"),
+    ("Green hue high", "绿 · 色相上限"),
+    // R25 B3: the tail of this line used to promise 「De-fringe in a later
+    // batch」 / 「去紫边留待后续批次」. The batch is this one — de-fringe now
+    // round-trips, so the sentence states what it actually does instead of
+    // when it might arrive.
+    ("Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA renders here too; the auto-CA switch and de-fringe are carried to Lightroom without being rendered.",
+        "暗角：正值提亮四角（补偿衰减），负值压暗；在线性光下的径向增益。畸变：正值修桶形（广角外凸），负值修枕形（长焦内缩）；自动缩放填满画幅，蒙版/画笔仍按校正后的图像定位。预览/导出/XMP 一致。手动色差本机也渲染；自动色差校正与去边仅随 XMP 带出，本机不渲染。"),
     // CROP_ASPECTS display names (ratio values are not localized).
     ("Free", "自由"),
     ("Original", "原始"),
@@ -1049,6 +1084,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Discard & quit", "放弃并退出"),
     ("Cancel", "取消"),
     ("Develop store", "显影库 · Develop store"),
+    // R25: the read-only segmentation-sidecar row (closing R22-1 as the
+    // security ruling it is — see panels/settings.rs).
+    ("Segmentation sidecar", "分割边车"),
+    ("This path can only be set by environment variable, because it is executed",
+        "此路径只能用环境变量设置，因为它会被当作程序启动"),
     ("Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHOP_DATA_DIR environment variable.",
         "已保存显影的存放地：配方、Lightroom XMP、版本快照与蒙版栅格 — 每张照片一个文件夹，按其绝对路径键控。可用 AUTOSHOP_DATA_DIR 环境变量改存放位置。"),
     // R22-8 · SF8-C: the row shows the OPEN photo's hash subdirectory, so it

@@ -1593,13 +1593,15 @@ fn region_to_original(
         corners.push((g.right, y));
     }
     let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    // One composed profile for the whole sweep (manual CA folded in, R25 B3).
+    let geom = render::geometry_profile(rec);
     for (vx, vy) in corners {
         let (ox, oy) = render::view_to_original_norm(
             vx,
             vy,
             dims,
             rec.straighten_deg,
-            &rec.lens_profile,
+            &geom,
             rec.lens_distortion,
         );
         l = l.min(ox);
@@ -1630,8 +1632,11 @@ fn view_geometry_active(rec: &EditRecipe) -> bool {
     // a CA-only profile with knots above 1 zooms the shared frame by the
     // composite fill (L04-2), so a browser-painted mask unwarped as
     // identity would land on the wrong pixels.
+    // The COMPOSED profile (R25 B3): manual CA rides the same per-channel
+    // knots, so a manual value that pushes a channel past 1 zooms the frame
+    // exactly like a profile knot does.
     rec.straighten_deg != 0.0
-        || render::geometry_moves_frame(&rec.lens_profile, rec.lens_distortion)
+        || render::geometry_moves_frame(&render::geometry_profile(rec), rec.lens_distortion)
 }
 
 /// Un-warp a browser-painted mask from the DISPLAYED (post-geometry) frame
@@ -1652,6 +1657,7 @@ fn unwarp_mask(bytes: &[u8], view: Option<&EditRecipe>, raw: &Path) -> Option<Ve
         return None;
     }
     let mut out = image::RgbaImage::new(w, h);
+    let geom = render::geometry_profile(rec);
     for y in 0..h {
         for x in 0..w {
             let (vx, vy) = render::original_to_view_norm(
@@ -1659,7 +1665,7 @@ fn unwarp_mask(bytes: &[u8], view: Option<&EditRecipe>, raw: &Path) -> Option<Ve
                 (y as f32 + 0.5) / h as f32,
                 dims,
                 rec.straighten_deg,
-                &rec.lens_profile,
+                &geom,
                 rec.lens_distortion,
             );
             // Outside the displayed frame = the user could not paint there =
@@ -1966,9 +1972,9 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // the frame stays uncropped for whole-frame slider feedback, same policy).
     // The web pane previously skipped ALL of it — a recipe with distortion or
     // straighten previewed one framing and exported another.
-    if req.recipe.lens_profile.geometry_active() || req.recipe.lens_distortion != 0.0 {
-        after =
-            render::apply_lens_geometry(&after, &req.recipe.lens_profile, req.recipe.lens_distortion);
+    let geom = render::geometry_profile(&req.recipe);
+    if geom.geometry_active() || req.recipe.lens_distortion != 0.0 {
+        after = render::apply_lens_geometry(&after, &geom, req.recipe.lens_distortion);
     }
     if req.recipe.straighten_deg != 0.0 {
         after = render::rotate_straighten(&after, req.recipe.straighten_deg);

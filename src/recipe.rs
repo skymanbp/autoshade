@@ -107,6 +107,44 @@ pub struct EditRecipe {
     /// 0..=100, luminance noise reduction.
     pub noise_reduction: f32,
 
+    // --- Detail: the CARRIED shaping axes (R25 B3) ---------------------------
+    // Eight more Adobe-only operators under policy SF4-C, same contract as the
+    // effects block below: round-tripped through their own `crs:` keys, never
+    // approximated. They shape the two sliders above — Lightroom's sharpening
+    // has a radius / detail / edge-masking triple around its amount, its
+    // luminance NR has a detail / contrast pair, and its COLOUR NR is a third
+    // operator this engine does not have at all. Each carries its reason in
+    // `advisor::catalogue::CARRIED_ONLY_GLOBAL`.
+    //
+    // NEUTRAL AT ZERO, like the effects: zero means "the sidecar said nothing"
+    // and the writer emits a key only when it is non-zero, so an absent key
+    // stays absent and Lightroom keeps its own default (Radius 1.0, Detail 25,
+    // Luminance Detail 50, Colour NR 25/50/50) instead of one we invented.
+    /// Sharpening radius, 0..=3.0 (0 = absent; ACR default 1.0 and its band is
+    /// 0.5..3.0). The one DECIMAL key in this block — Lightroom writes
+    /// `crs:SharpenRadius="+1.0"`, verified in all seven of the user's
+    /// sidecars. → `crs:SharpenRadius`.
+    pub sharpen_radius: f32,
+    /// Sharpening detail / halo suppression, 0..=100 (ACR default 25).
+    /// → `crs:SharpenDetail`.
+    pub sharpen_detail: f32,
+    /// Sharpening edge mask, 0..=100. → `crs:SharpenEdgeMasking`.
+    pub sharpen_mask: f32,
+    /// Luminance NR detail, 0..=100 (ACR default 50).
+    /// → `crs:LuminanceNoiseReductionDetail`.
+    pub nr_detail: f32,
+    /// Luminance NR contrast, 0..=100. → `crs:LuminanceNoiseReductionContrast`.
+    pub nr_contrast: f32,
+    /// CHROMA noise reduction amount, 0..=100 (ACR default 25) — an operator
+    /// this engine has none of. → `crs:ColorNoiseReduction`.
+    pub color_nr: f32,
+    /// Chroma NR detail, 0..=100 (ACR default 50).
+    /// → `crs:ColorNoiseReductionDetail`.
+    pub color_nr_detail: f32,
+    /// Chroma NR smoothness, 0..=100 (ACR default 50).
+    /// → `crs:ColorNoiseReductionSmoothness`.
+    pub color_nr_smooth: f32,
+
     // --- Lens corrections (manual) -------------------------------------------
     /// Lens vignette compensation, -100..=100: positive brightens corners
     /// (compensates falloff), negative darkens. Applied as a radial gain in
@@ -122,6 +160,60 @@ pub struct EditRecipe {
     /// applied after develop, before straighten — see `render::distort_norm`
     /// for the model. → `crs:LensManualDistortionAmount`.
     pub lens_distortion: f32,
+    /// Manual lateral CA, red/cyan axis, -100..=100 (R25 B3). RENDERED: the
+    /// engine already resamples red and blue at their own radius for the
+    /// in-camera profile's CA knots (`render::apply_lens_geometry`), and this
+    /// pair is a CONSTANT factor folded onto that same per-channel LUT — a
+    /// lateral CA scales the channel linearly with radius, so a constant
+    /// factor is its exact shape, not an approximation of one. Positive
+    /// magnifies the red channel relative to green. The slider→scale
+    /// calibration is OURS (`render::MANUAL_CA_PER_UNIT`); Adobe's is
+    /// unpublished. → `crs:ChromaticAberrationR`.
+    pub ca_r: f32,
+    /// Manual lateral CA, blue/yellow axis, -100..=100.
+    /// → `crs:ChromaticAberrationB`.
+    pub ca_b: f32,
+    /// Lightroom's "Remove chromatic aberration" switch — an INSTRUCTION to
+    /// Adobe's own lateral-CA solver, not a parameter, so it is carried and
+    /// never interpreted (SF4-C). Verified in the user's library:
+    /// `crs:AutoLateralCA="0"` on six sidecars and `="1"` on one.
+    /// → `crs:AutoLateralCA`.
+    pub auto_lateral_ca: bool,
+
+    // --- De-fringe: CARRIED, and the one block with NON-ZERO neutrals -------
+    // Lightroom writes all six keys on every sidecar (verified: 7 of 7 in the
+    // user's library carry `DefringePurpleAmount="0"` with the hue windows at
+    // 30/70 and 40/60), so "absent" is not a state this block has in the wild
+    // and its honest neutral is ADOBE'S DEFAULT, not zero. Two consequences,
+    // both deliberate:
+    //
+    //   * the READER falls back to these defaults, not to 0 — `crs_f32`
+    //     answers `None` for an absent key and taking that as 0 would import
+    //     a hue window of 0..0 from a document that never mentioned one, so
+    //     an untouched photo would stop being a no-op;
+    //   * the WRITER emits all six unconditionally, the shape Lightroom
+    //     itself writes.
+    //
+    // `is_noop` is `*self == EditRecipe::default()`, so it stays correct by
+    // construction — and it is pinned both ways, on a sidecar carrying the six
+    // defaults and on one carrying no de-fringe keys at all
+    // (`xmp::tests::a_real_defringe_block_imports_as_a_noop`).
+    /// Purple de-fringe amount, 0..=20. → `crs:DefringePurpleAmount`.
+    pub defringe_purple: f32,
+    /// Purple hue window, low end, 0..=100 (ACR default 30).
+    /// → `crs:DefringePurpleHueLo`.
+    pub defringe_purple_lo: f32,
+    /// Purple hue window, high end, 0..=100 (ACR default 70).
+    /// → `crs:DefringePurpleHueHi`.
+    pub defringe_purple_hi: f32,
+    /// Green de-fringe amount, 0..=20. → `crs:DefringeGreenAmount`.
+    pub defringe_green: f32,
+    /// Green hue window, low end, 0..=100 (ACR default 40).
+    /// → `crs:DefringeGreenHueLo`.
+    pub defringe_green_lo: f32,
+    /// Green hue window, high end, 0..=100 (ACR default 60).
+    /// → `crs:DefringeGreenHueHi`.
+    pub defringe_green_hi: f32,
 
     // --- Effects: CARRIED to Lightroom, rendered by nothing here (R25 B2) ----
     // Nine Adobe-only operators under the SF4-C policy: we round-trip them
@@ -274,9 +366,30 @@ impl Default for EditRecipe {
             color_grade: ColorGrade::default(),
             sharpening: 0.0,
             noise_reduction: 0.0,
+            sharpen_radius: 0.0,
+            sharpen_detail: 0.0,
+            sharpen_mask: 0.0,
+            nr_detail: 0.0,
+            nr_contrast: 0.0,
+            color_nr: 0.0,
+            color_nr_detail: 0.0,
+            color_nr_smooth: 0.0,
             lens_vignette: 0.0,
             lens_vignette_mid: 50.0,
             lens_distortion: 0.0,
+            ca_r: 0.0,
+            ca_b: 0.0,
+            auto_lateral_ca: false,
+            // The one NON-ZERO neutral block in this struct — Adobe's own
+            // defaults, because Lightroom writes all six keys on every
+            // sidecar and a hue window of 0..0 is not a state any real
+            // document expresses (see the field docs).
+            defringe_purple: 0.0,
+            defringe_purple_lo: 30.0,
+            defringe_purple_hi: 70.0,
+            defringe_green: 0.0,
+            defringe_green_lo: 40.0,
+            defringe_green_hi: 60.0,
             post_crop_vignette: 0.0,
             post_crop_vignette_mid: 0.0,
             post_crop_vignette_feather: 0.0,
@@ -1050,9 +1163,44 @@ impl EditRecipe {
         self.color_grade.clamp();
         self.sharpening = c(self.sharpening, 0.0, 150.0);
         self.noise_reduction = c(self.noise_reduction, 0.0, 100.0);
+        // The carried detail axes (R25 B3). The radius keeps its DECIMAL —
+        // Lightroom's own band is 0.5..3.0 in tenths and `crs:SharpenRadius`
+        // is written with one, so rounding it here would quantise the value
+        // the sidecar carries. The other seven are integer sliders.
+        // ONE decimal, the grid `crs:SharpenRadius="+1.0"` is written on —
+        // rounded here rather than only at the writer, so what the panel
+        // shows and what the sidecar carries are the same number (the same
+        // rule `post_crop_vignette_style` states below).
+        self.sharpen_radius = (c(self.sharpen_radius, 0.0, 3.0) * 10.0).round() / 10.0;
+        for v in [
+            &mut self.sharpen_detail,
+            &mut self.sharpen_mask,
+            &mut self.nr_detail,
+            &mut self.nr_contrast,
+            &mut self.color_nr,
+            &mut self.color_nr_detail,
+            &mut self.color_nr_smooth,
+        ] {
+            *v = c(*v, 0.0, 100.0);
+        }
         self.lens_vignette = c(self.lens_vignette, -100.0, 100.0);
         self.lens_vignette_mid = c(self.lens_vignette_mid, 0.0, 100.0);
         self.lens_distortion = c(self.lens_distortion, -100.0, 100.0);
+        self.ca_r = c(self.ca_r, -100.0, 100.0);
+        self.ca_b = c(self.ca_b, -100.0, 100.0);
+        // De-fringe: Adobe's own bands (amount 0..20, hue windows 0..100).
+        // A hand-edited file cannot push a value outside them and reach the
+        // sidecar, exactly as for the effects below.
+        self.defringe_purple = c(self.defringe_purple, 0.0, 20.0);
+        self.defringe_green = c(self.defringe_green, 0.0, 20.0);
+        for v in [
+            &mut self.defringe_purple_lo,
+            &mut self.defringe_purple_hi,
+            &mut self.defringe_green_lo,
+            &mut self.defringe_green_hi,
+        ] {
+            *v = c(*v, 0.0, 100.0);
+        }
         // The carried effects (R25 B2): bands are Adobe's own, so a
         // hand-edited value can never reach the sidecar outside them.
         self.post_crop_vignette = c(self.post_crop_vignette, -100.0, 100.0);

@@ -516,9 +516,10 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
 
 /// **Import-side disclosure, GLOBAL half** (R24-5 M0): the `crs:` properties
 /// this sidecar carries on its own `rdf:Description` that Autoshop does not
-/// model at all — PointColor, the Transform and Calibration blocks, Defringe,
-/// the camera Look. (Global Texture and Grain headed that list until R25 B2
-/// modelled them, which is the list SHRINKING by itself — see the paragraph
+/// model at all — PointColor, the Transform and Calibration blocks, the
+/// camera Look. (Global Texture and Grain headed that list until R25 B2
+/// modelled them, and the whole Defringe block left it in B3 — the list
+/// SHRINKING by itself, see the paragraph
 /// on the complement below, and the fixture note in
 /// `an_imported_sidecar_names_the_globals_the_engine_does_not_render`.)
 ///
@@ -898,8 +899,40 @@ fn owned_attrs(r: &EditRecipe) -> String {
     // recipe sharpening is 0..150; crs Sharpness is 0..100 — rescale + clamp.
     let sharp = ((r.sharpening * 2.0 / 3.0).round() as i64).clamp(0, 100);
     attr(&mut a, "Sharpness", &sharp.to_string());
+    // SharpenRadius is the one DECIMAL key in the detail block, and the one
+    // Lightroom writes with an explicit `+`: `crs:SharpenRadius="+1.0"` in all
+    // seven of the user's sidecars (the integer neighbours are bare —
+    // `SharpenDetail="25"`, `SharpenEdgeMasking="0"`). Emitted only when set,
+    // so an absent radius stays absent and Lightroom keeps its own 1.0.
+    if r.sharpen_radius != 0.0 {
+        attr(&mut a, "SharpenRadius", &format!("{:+.1}", r.sharpen_radius));
+    }
+    for (key, v) in [("SharpenDetail", r.sharpen_detail), ("SharpenEdgeMasking", r.sharpen_mask)] {
+        if v != 0.0 {
+            attr(&mut a, key, &(v.round() as i64).to_string());
+        }
+    }
     let nr = (r.noise_reduction.round() as i64).clamp(0, 100);
     attr(&mut a, "LuminanceSmoothing", &nr.to_string());
+    // The rest of the R25 B3 carried detail axes, in Lightroom's own key
+    // order (verified against the user's sidecars: Sharpness, SharpenRadius,
+    // SharpenDetail, SharpenEdgeMasking, LuminanceSmoothing, then the colour
+    // NR trio). Same per-key "only when non-zero" rule as the B2 effects —
+    // and the same reason: zero here means "the sidecar said nothing", and
+    // the companions Lightroom itself omits when the amount is zero
+    // (ColorNoiseReductionDetail / Smoothness are absent from the two files
+    // whose ColorNoiseReduction is 0) must stay absent from ours too.
+    for (key, v) in [
+        ("LuminanceNoiseReductionDetail", r.nr_detail),
+        ("LuminanceNoiseReductionContrast", r.nr_contrast),
+        ("ColorNoiseReduction", r.color_nr),
+        ("ColorNoiseReductionDetail", r.color_nr_detail),
+        ("ColorNoiseReductionSmoothness", r.color_nr_smooth),
+    ] {
+        if v != 0.0 {
+            attr(&mut a, key, &(v.round() as i64).to_string());
+        }
+    }
 
     // Manual lens-vignette correction. `VignetteAmount` name verified against
     // the user's sidecars (present, =0, in 140 of them); the Midpoint companion
@@ -917,6 +950,44 @@ fn owned_attrs(r: &EditRecipe) -> String {
     // the same number may correct a somewhat different physical strength.
     if r.lens_distortion != 0.0 {
         attr(&mut a, "LensManualDistortionAmount", &signed(r.lens_distortion));
+    }
+
+    // Manual lateral CA (R25 B3), same only-when-set policy. UNSIGNED: these
+    // are the legacy PV2010 integer keys, so they belong to the
+    // `Sharpness="40"` family rather than the `Contrast2012="+22"` one. No
+    // sidecar in the user's library carries either key (Lightroom's PV2012
+    // panel replaced the pair with de-fringe and the auto switch), so the
+    // spelling follows the family convention rather than a measurement — and
+    // an absent key is what every one of those files already has.
+    for (key, v) in [("ChromaticAberrationR", r.ca_r), ("ChromaticAberrationB", r.ca_b)] {
+        if v != 0.0 {
+            attr(&mut a, key, &(v.round() as i64).to_string());
+        }
+    }
+    // Adobe's auto-CA switch, written as the 0/1 flag Lightroom writes
+    // (`crs:AutoLateralCA="0"` on six of the user's sidecars, `="1"` on the
+    // seventh) — and only when ON, so a recipe that never met the key does
+    // not start asserting "off" into someone's document.
+    if r.auto_lateral_ca {
+        attr(&mut a, "AutoLateralCA", "1");
+    }
+
+    // De-fringe (R25 B3): all six keys, UNCONDITIONALLY, which is the shape
+    // Lightroom itself writes — 7 of 7 of the user's sidecars carry the whole
+    // block with the amounts at 0 and the hue windows at Adobe's 30/70 and
+    // 40/60. Writing only the non-default ones would emit a hue window with
+    // no amount beside it (or the reverse), a shape no real document has.
+    // Unsigned integers: `DefringePurpleAmount="3"`, never `"+3"` — the
+    // `Sharpness` family again.
+    for (key, v) in [
+        ("DefringePurpleAmount", r.defringe_purple),
+        ("DefringePurpleHueLo", r.defringe_purple_lo),
+        ("DefringePurpleHueHi", r.defringe_purple_hi),
+        ("DefringeGreenAmount", r.defringe_green),
+        ("DefringeGreenHueLo", r.defringe_green_lo),
+        ("DefringeGreenHueHi", r.defringe_green_hi),
+    ] {
+        attr(&mut a, key, &(v.round() as i64).to_string());
     }
 
     // The nine CARRIED effects (R25 B2): Lightroom renders them, we do not,
@@ -1188,9 +1259,31 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
         "ColorGradeBlending",
         "Sharpness",
         "LuminanceSmoothing",
+        // The R25 B3 carried detail axes + the manual CA pair + the auto-CA
+        // switch + the six de-fringe keys. Same reason as the B2 block below:
+        // owning a key is what makes the merge STRIP it before rewriting, and
+        // it is also what takes the key OUT of `unmodelled_global_crs` (whose
+        // universe is the complement of this list).
+        "SharpenRadius",
+        "SharpenDetail",
+        "SharpenEdgeMasking",
+        "LuminanceNoiseReductionDetail",
+        "LuminanceNoiseReductionContrast",
+        "ColorNoiseReduction",
+        "ColorNoiseReductionDetail",
+        "ColorNoiseReductionSmoothness",
         "VignetteAmount",
         "VignetteMidpoint",
         "LensManualDistortionAmount",
+        "ChromaticAberrationR",
+        "ChromaticAberrationB",
+        "AutoLateralCA",
+        "DefringePurpleAmount",
+        "DefringePurpleHueLo",
+        "DefringePurpleHueHi",
+        "DefringeGreenAmount",
+        "DefringeGreenHueLo",
+        "DefringeGreenHueHi",
         // The R25 B2 carried effects. Owning a key is what makes the merge
         // STRIP it before rewriting — without these nine the writer's own
         // values would land beside Lightroom's originals as duplicate
@@ -2328,13 +2421,18 @@ fn find_crs_value_at(xmp: &str, key: &str, wanted: &str) -> Option<usize> {
 /// note, web X-Recipe-Warning, store derived-snapshot trace). String-typed
 /// owned keys are exempt.
 pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
-    const STRINGY: [&str; 6] = [
+    const STRINGY: [&str; 7] = [
         "Version",
         "ProcessVersion",
         "WhiteBalance",
         "HasCrop",
         "ToneCurveName2012",
         "HasSettings",
+        // A FLAG, not a number (R25 B3). Lightroom writes 0/1, but "true" is
+        // the other spelling a crs boolean takes in the wild and the reader
+        // accepts both — naming it here as unparsable would be a disclosure
+        // about a value that imported perfectly.
+        "AutoLateralCA",
     ];
     if xmp.len() > MAX_XMP_BYTES {
         return vec!["XMP document exceeds the 16 MiB limit".to_string()];
@@ -3287,6 +3385,9 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     // carrying Temperature without the mode is still a stated value.)
     let custom_wb = crs_str(scope, "WhiteBalance").as_deref() != Some("As Shot");
     let f = |k: &str| crs_f32(scope, k).unwrap_or(0.0);
+    // The engine's own neutrals, for the ONE block whose neutral is not zero
+    // (de-fringe, R25 B3) — `f`'s zero fallback would invent a hue window.
+    let dflt = EditRecipe::default();
 
     let mut hsl = Hsl::default();
     for (i, band) in crate::recipe::HSL_BANDS.iter().enumerate() {
@@ -3366,9 +3467,43 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         // crs Sharpness is 0..100, recipe sharpening 0..150 (writer scales ×⅔).
         sharpening: f("Sharpness") * 1.5,
         noise_reduction: f("LuminanceSmoothing"),
+        // The eight CARRIED detail axes (R25 B3). `f` answers 0 for an absent
+        // key, which IS this block's neutral — an untouched sidecar still
+        // imports as a no-op, and one that names a real sharpening radius
+        // brings the whole triple with it.
+        sharpen_radius: f("SharpenRadius"),
+        sharpen_detail: f("SharpenDetail"),
+        sharpen_mask: f("SharpenEdgeMasking"),
+        nr_detail: f("LuminanceNoiseReductionDetail"),
+        nr_contrast: f("LuminanceNoiseReductionContrast"),
+        color_nr: f("ColorNoiseReduction"),
+        color_nr_detail: f("ColorNoiseReductionDetail"),
+        color_nr_smooth: f("ColorNoiseReductionSmoothness"),
         lens_vignette: f("VignetteAmount"),
         lens_vignette_mid: crs_f32(scope, "VignetteMidpoint").unwrap_or(50.0),
         lens_distortion: f("LensManualDistortionAmount"),
+        ca_r: f("ChromaticAberrationR"),
+        ca_b: f("ChromaticAberrationB"),
+        // A FLAG: Lightroom writes 0/1, and "true" is the other spelling in
+        // the wild for a crs boolean — both are accepted, anything else (and
+        // absence) is off.
+        auto_lateral_ca: matches!(
+            crs_str(scope, "AutoLateralCA").as_deref().map(str::trim),
+            Some("1") | Some("true") | Some("True")
+        ),
+        // De-fringe, the ONE block that falls back to ADOBE'S DEFAULT rather
+        // than to zero. `f` answers 0 for an absent key, and taking that here
+        // would import a hue window of 0..0 from a document that never
+        // mentioned one — the photo would stop being a no-op, and the next
+        // save would write that invented window into the sidecar beside the
+        // RAW. `EditRecipe::default()` holds Adobe's 30/70 and 40/60, so a
+        // document with no de-fringe block comes back exactly neutral.
+        defringe_purple: crs_f32(scope, "DefringePurpleAmount").unwrap_or(dflt.defringe_purple),
+        defringe_purple_lo: crs_f32(scope, "DefringePurpleHueLo").unwrap_or(dflt.defringe_purple_lo),
+        defringe_purple_hi: crs_f32(scope, "DefringePurpleHueHi").unwrap_or(dflt.defringe_purple_hi),
+        defringe_green: crs_f32(scope, "DefringeGreenAmount").unwrap_or(dflt.defringe_green),
+        defringe_green_lo: crs_f32(scope, "DefringeGreenHueLo").unwrap_or(dflt.defringe_green_lo),
+        defringe_green_hi: crs_f32(scope, "DefringeGreenHueHi").unwrap_or(dflt.defringe_green_hi),
         // Adobe applies CropAngle only under HasCrop="True" (see the crop
         // comment below) — importing a stale angle from a DISABLED crop
         // activated a straighten Adobe itself does not render.
@@ -4231,6 +4366,282 @@ mod tests {
         assert_eq!(xmp_to_recipe(&cleared).texture, 0.0);
     }
 
+    /// R25 B3: the eight carried DETAIL axes and the manual CA pair
+    /// round-trip, each in the spelling Lightroom itself uses.
+    ///
+    /// The spellings are FIRST-HAND, from all seven sidecars in the user's
+    /// library: `SharpenRadius="+1.0"` carries an explicit sign and one
+    /// decimal, while every integer neighbour is bare (`SharpenDetail="25"`,
+    /// `SharpenEdgeMasking="0"`, `ColorNoiseReduction="25"`). Getting that
+    /// backwards is not cosmetic — it is the difference between a sidecar
+    /// Lightroom reads as its own and one it merely tolerates.
+    #[test]
+    fn detail_subcontrols_round_trip() {
+        let r = EditRecipe {
+            sharpen_radius: 1.0,
+            sharpen_detail: 25.0,
+            sharpen_mask: 12.0,
+            nr_detail: 50.0,
+            nr_contrast: 8.0,
+            color_nr: 25.0,
+            color_nr_detail: 50.0,
+            color_nr_smooth: 50.0,
+            ca_r: 14.0,
+            ca_b: -9.0,
+            auto_lateral_ca: true,
+            ..Default::default()
+        };
+        let xmp = recipe_to_xmp(&r);
+        for want in [
+            r#"crs:SharpenRadius="+1.0""#,
+            r#"crs:SharpenDetail="25""#,
+            r#"crs:SharpenEdgeMasking="12""#,
+            r#"crs:LuminanceNoiseReductionDetail="50""#,
+            r#"crs:LuminanceNoiseReductionContrast="8""#,
+            r#"crs:ColorNoiseReduction="25""#,
+            r#"crs:ColorNoiseReductionDetail="50""#,
+            r#"crs:ColorNoiseReductionSmoothness="50""#,
+            r#"crs:ChromaticAberrationR="14""#,
+            r#"crs:ChromaticAberrationB="-9""#,
+            r#"crs:AutoLateralCA="1""#,
+        ] {
+            assert!(xmp.contains(want), "{want} missing from: {xmp}");
+        }
+        let back = xmp_to_recipe(&xmp);
+        for (name, live, want) in [
+            ("sharpen_radius", back.sharpen_radius, r.sharpen_radius),
+            ("sharpen_detail", back.sharpen_detail, r.sharpen_detail),
+            ("sharpen_mask", back.sharpen_mask, r.sharpen_mask),
+            ("nr_detail", back.nr_detail, r.nr_detail),
+            ("nr_contrast", back.nr_contrast, r.nr_contrast),
+            ("color_nr", back.color_nr, r.color_nr),
+            ("color_nr_detail", back.color_nr_detail, r.color_nr_detail),
+            ("color_nr_smooth", back.color_nr_smooth, r.color_nr_smooth),
+            ("ca_r", back.ca_r, r.ca_r),
+            ("ca_b", back.ca_b, r.ca_b),
+        ] {
+            assert_eq!(live, want, "{name} did not survive the round trip");
+        }
+        assert!(back.auto_lateral_ca, "the auto-CA flag must come back on");
+        // A neutral recipe writes NONE of them: an absent key is how
+        // Lightroom is told to keep its own default (Radius 1.0, Detail 25,
+        // Colour NR 25/50/50), and inventing a zero for each would be a
+        // change to the photo, not a faithful silence.
+        let neutral = recipe_to_xmp(&EditRecipe::default());
+        for key in [
+            "SharpenRadius",
+            "SharpenDetail",
+            "SharpenEdgeMasking",
+            "LuminanceNoiseReduction",
+            "ColorNoiseReduction",
+            "ChromaticAberration",
+            "AutoLateralCA",
+        ] {
+            assert!(!neutral.contains(key), "{key} must be absent from a neutral sidecar");
+        }
+        // …and the merge STRIPS them, so a cleared value cannot linger at
+        // Lightroom's old number beside ours.
+        let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+                  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+                  <rdf:Description rdf:about=\"\"\n    \
+                  xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
+                  crs:SharpenRadius=\"+1.0\" crs:ColorNoiseReduction=\"25\" \
+                  crs:AutoLateralCA=\"1\" crs:HasSettings=\"True\">\n  \
+                  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n";
+        assert_eq!(xmp_to_recipe(lr).color_nr, 25.0, "premise: the LR values import");
+        assert!(xmp_to_recipe(lr).auto_lateral_ca, "premise: so does the flag");
+        let cleared = merged_doc(lr, &EditRecipe::default()).expect("a plain LR sidecar merges");
+        for key in ["SharpenRadius", "ColorNoiseReduction", "AutoLateralCA"] {
+            assert!(!cleared.contains(key), "{key} survived a clear: {cleared}");
+        }
+    }
+
+    /// R25 B3 (policy SF4-C): de-fringe round-trips through BOTH spellings
+    /// Lightroom writes — the `rdf:Description` attribute form and the
+    /// property-ELEMENT form.
+    ///
+    /// `crs_str` already reads both (that is why the reader adds no third
+    /// scanning arm), and this is the test that keeps it that way. Positive
+    /// amounts are UNSIGNED: `DefringePurpleAmount="3"`, never `"+3"` — the
+    /// `Sharpness="40"` family, not the `Contrast2012="+22"` one.
+    #[test]
+    fn defringe_round_trips_both_serialization_forms() {
+        let r = EditRecipe {
+            defringe_purple: 3.0,
+            defringe_purple_lo: 39.0,
+            defringe_purple_hi: 79.0,
+            ..Default::default()
+        };
+        let xmp = recipe_to_xmp(&r);
+        assert!(xmp.contains(r#"crs:DefringePurpleAmount="3""#), "unsigned, like Sharpness: {xmp}");
+        assert!(!xmp.contains(r#"DefringePurpleAmount="+3""#), "no `+` on this family");
+        let back = xmp_to_recipe(&xmp);
+        assert_eq!(
+            (back.defringe_purple, back.defringe_purple_lo, back.defringe_purple_hi),
+            (3.0, 39.0, 79.0)
+        );
+        // The ELEMENT form, in the wild on photoprism's canon_eos_6d fixture
+        // family (alphabetical, one child per key).
+        let elem = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+                    <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+                    <rdf:Description rdf:about=\"\"\n    \
+                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\n   \
+                    <crs:DefringeGreenAmount>5</crs:DefringeGreenAmount>\n   \
+                    <crs:DefringeGreenHueHi>66</crs:DefringeGreenHueHi>\n   \
+                    <crs:DefringeGreenHueLo>44</crs:DefringeGreenHueLo>\n   \
+                    <crs:DefringePurpleAmount>7</crs:DefringePurpleAmount>\n  \
+                    </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n";
+        let e = xmp_to_recipe(elem);
+        assert_eq!(
+            (e.defringe_green, e.defringe_green_lo, e.defringe_green_hi, e.defringe_purple),
+            (5.0, 44.0, 66.0, 7.0),
+            "the element form must read exactly like the attribute form"
+        );
+        // The purple WINDOW was not named by that document — it must fall
+        // back to Adobe's default, not to the zero `crs_f32` answers.
+        assert_eq!(
+            (e.defringe_purple_lo, e.defringe_purple_hi),
+            (30.0, 70.0),
+            "an unnamed hue window is Adobe's default, never 0..0"
+        );
+    }
+
+    /// R25 B3: a NON-default hue window survives — the case the fallback
+    /// above must not swallow.
+    ///
+    /// 39/79 is the real shape from a Lightroom preset (`lightA1`): the
+    /// amount at 3 with the window moved off 30/70. If the reader ever
+    /// "normalised" a window it did not recognise, this is what would be
+    /// silently rewritten to Adobe's default on the next save.
+    #[test]
+    fn nondefault_hue_bounds_survive() {
+        let lr = "<rdf:Description rdf:about=\"\" \
+                  xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                  crs:DefringePurpleAmount=\"3\" crs:DefringePurpleHueLo=\"39\" \
+                  crs:DefringePurpleHueHi=\"79\"/>";
+        let r = xmp_to_recipe(lr);
+        assert_eq!((r.defringe_purple_lo, r.defringe_purple_hi), (39.0, 79.0));
+        let round = xmp_to_recipe(&recipe_to_xmp(&r));
+        assert_eq!(
+            (round.defringe_purple, round.defringe_purple_lo, round.defringe_purple_hi),
+            (3.0, 39.0, 79.0),
+            "a moved window must not snap back to 30/70 on a save"
+        );
+        // The green half of the same document said nothing, so it comes back
+        // as Adobe's 40/60 — and that is what gets written, which is the
+        // shape every real sidecar has.
+        assert_eq!((round.defringe_green_lo, round.defringe_green_hi), (40.0, 60.0));
+        assert!(recipe_to_xmp(&r).contains(r#"crs:DefringeGreenHueLo="40""#));
+    }
+
+    /// R25 B3: the whole de-fringe block is written UNCONDITIONALLY, and a
+    /// document carrying exactly Adobe's defaults imports as a NO-OP.
+    ///
+    /// Both halves of the non-zero-neutral decision in one place. The first
+    /// is the shape Lightroom writes — 7 of 7 of the user's sidecars carry
+    /// all six keys with the amounts at 0 — so a recipe that says nothing
+    /// still produces a document that looks like one Lightroom made. The
+    /// second is what stops that from making every photo "edited": the six
+    /// values are `EditRecipe::default()`'s own, so `is_noop` still answers
+    /// yes. A reader that took `crs_f32`'s absent-key zero instead would
+    /// import a 0..0 hue window and fail this, which is exactly the bug the
+    /// fallback exists to prevent.
+    #[test]
+    fn a_real_defringe_block_imports_as_a_noop() {
+        let neutral = recipe_to_xmp(&EditRecipe::default());
+        for want in [
+            r#"crs:DefringePurpleAmount="0""#,
+            r#"crs:DefringePurpleHueLo="30""#,
+            r#"crs:DefringePurpleHueHi="70""#,
+            r#"crs:DefringeGreenAmount="0""#,
+            r#"crs:DefringeGreenHueLo="40""#,
+            r#"crs:DefringeGreenHueHi="60""#,
+        ] {
+            assert!(neutral.contains(want), "{want} missing — the block is unconditional: {neutral}");
+        }
+        // The real shape, verbatim from the user's library (DSC08761 line 139
+        // onward), on an otherwise empty document.
+        let real = "<rdf:Description rdf:about=\"\" \
+                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                    crs:DefringePurpleAmount=\"0\" crs:DefringePurpleHueLo=\"30\" \
+                    crs:DefringePurpleHueHi=\"70\" crs:DefringeGreenAmount=\"0\" \
+                    crs:DefringeGreenHueLo=\"40\" crs:DefringeGreenHueHi=\"60\"/>";
+        assert!(
+            xmp_to_recipe(real).is_noop(),
+            "a sidecar carrying only Adobe's own de-fringe defaults is not an edit"
+        );
+        // …and so is a document that never mentions de-fringe at all — the
+        // OTHER direction of the same fallback.
+        let silent = "<rdf:Description rdf:about=\"\" \
+                      xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"/>";
+        assert!(xmp_to_recipe(silent).is_noop(), "no de-fringe keys is no edit either");
+        // A REAL de-fringe, by contrast, is one.
+        let edited = real.replace("crs:DefringePurpleAmount=\"0\"", "crs:DefringePurpleAmount=\"3\"");
+        assert!(!xmp_to_recipe(&edited).is_noop(), "an actual de-fringe IS an edit");
+    }
+
+    /// R25 B3, the complement arm: the detail block, the CA pair and
+    /// de-fringe have all LEFT `unmodelled_global_crs` — with no edit to that
+    /// function, because its universe is the complement of `owned_attr_keys`.
+    ///
+    /// This is the same "the list shrinks by itself" property B2 proved for
+    /// Texture, and it is the reason the writer and the reader had to land in
+    /// one commit: a key we read but never write would still be foreign
+    /// property, named here and duplicated by the merge.
+    #[test]
+    fn unmodelled_list_no_longer_names_the_detail_block() {
+        let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+                  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+                  <rdf:Description rdf:about=\"\"\n    \
+                  xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
+                  crs:SharpenRadius=\"+1.0\" crs:SharpenDetail=\"25\" \
+                  crs:SharpenEdgeMasking=\"0\" crs:LuminanceNoiseReductionDetail=\"50\" \
+                  crs:LuminanceNoiseReductionContrast=\"0\" crs:ColorNoiseReduction=\"25\" \
+                  crs:ColorNoiseReductionDetail=\"50\" crs:ColorNoiseReductionSmoothness=\"50\" \
+                  crs:AutoLateralCA=\"1\" crs:ChromaticAberrationR=\"0\" \
+                  crs:ChromaticAberrationB=\"0\" crs:DefringePurpleAmount=\"3\" \
+                  crs:DefringePurpleHueLo=\"39\" crs:DefringePurpleHueHi=\"79\" \
+                  crs:DefringeGreenAmount=\"0\" crs:DefringeGreenHueLo=\"40\" \
+                  crs:DefringeGreenHueHi=\"60\" crs:PointColor=\"0\" \
+                  crs:HasSettings=\"True\">\n  \
+                  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n";
+        let found = unmodelled_global_crs(lr);
+        for gone in [
+            "SharpenRadius",
+            "SharpenDetail",
+            "SharpenEdgeMasking",
+            "LuminanceNoiseReductionDetail",
+            "LuminanceNoiseReductionContrast",
+            "ColorNoiseReduction",
+            "ColorNoiseReductionDetail",
+            "ColorNoiseReductionSmoothness",
+            "AutoLateralCA",
+            "ChromaticAberrationR",
+            "ChromaticAberrationB",
+            "DefringePurpleAmount",
+            "DefringePurpleHueLo",
+            "DefringePurpleHueHi",
+            "DefringeGreenAmount",
+            "DefringeGreenHueLo",
+            "DefringeGreenHueHi",
+        ] {
+            assert!(
+                !found.contains(&gone.to_string()),
+                "{gone} is modelled since R25 B3 and must have left the list: {found:?}"
+            );
+        }
+        // The premise: the scan really did run and still names what we do
+        // NOT model, or the seventeen assertions above prove nothing.
+        assert!(
+            found.contains(&"PointColor".to_string()),
+            "an unmodelled global must still be named: {found:?}"
+        );
+        // …and the values arrived rather than merely stopping being foreign.
+        let r = xmp_to_recipe(lr);
+        assert_eq!((r.sharpen_radius, r.color_nr, r.defringe_purple), (1.0, 25.0, 3.0));
+        assert!(r.auto_lateral_ca);
+    }
+
     /// R25 B2 (policy SF4-C): the nine carried effects reach the sidecar and
     /// the engine renders nothing from them.
     ///
@@ -5033,6 +5444,7 @@ mod tests {
         };
         let mut seen_texture = 0usize;
         let mut seen_effects = 0usize;
+        let mut seen_auto_ca = 0usize;
         for e in entries.flatten() {
             let p = e.path();
             if !p.to_string_lossy().to_lowercase().contains(".xmp") {
@@ -5054,6 +5466,52 @@ mod tests {
                 r.grain_size,
                 r.grain_rough,
             );
+            // The B3 block, same forensic line: what the eight detail axes,
+            // the CA pair and the six de-fringe keys actually came back as.
+            eprintln!(
+                "    detail {}/{}/{} · nr {}/{} · colour nr {}/{}/{} · ca {}/{} auto {} · \
+                 defringe {}/{}/{} {}/{}/{}",
+                r.sharpen_radius,
+                r.sharpen_detail,
+                r.sharpen_mask,
+                r.nr_detail,
+                r.nr_contrast,
+                r.color_nr,
+                r.color_nr_detail,
+                r.color_nr_smooth,
+                r.ca_r,
+                r.ca_b,
+                r.auto_lateral_ca,
+                r.defringe_purple,
+                r.defringe_purple_lo,
+                r.defringe_purple_hi,
+                r.defringe_green,
+                r.defringe_green_lo,
+                r.defringe_green_hi,
+            );
+            // The de-fringe block is the ONE with a non-zero neutral, and
+            // every file in this library carries it at Adobe's defaults — so
+            // the fallback is exercised on real bytes here, not only on the
+            // synthetic fixtures. A reader that took `crs_f32`'s absent-key
+            // zero would land on 0/0 and fail this on all seven.
+            assert_eq!(
+                (
+                    r.defringe_purple_lo,
+                    r.defringe_purple_hi,
+                    r.defringe_green_lo,
+                    r.defringe_green_hi
+                ),
+                (30.0, 70.0, 40.0, 60.0),
+                "{name}: the real de-fringe hue windows must import as themselves"
+            );
+            // Two named forensic cases from the first-hand scan of these
+            // files: every one writes `SharpenRadius="+1.0"`, and DSC09034 is
+            // the only one whose auto-CA switch is on.
+            assert_eq!(r.sharpen_radius, 1.0, "{name}: crs:SharpenRadius=\"+1.0\" must import as 1.0");
+            if name.starts_with("DSC09034") {
+                assert!(r.auto_lateral_ca, "{name}: crs:AutoLateralCA=\"1\" must import as on");
+                seen_auto_ca += 1;
+            }
             // The named case, asserted exactly.
             if name.starts_with("DSC09568") {
                 assert_eq!(r.texture, 26.0, "{name}: crs:Texture=\"+26\" must import as 26");
@@ -5075,11 +5533,25 @@ mod tests {
                     (r.post_crop_vignette, r.grain),
                     "{name}: a carried effect was lost on merge"
                 );
+                assert_eq!(
+                    (round.sharpen_radius, round.color_nr, round.auto_lateral_ca),
+                    (r.sharpen_radius, r.color_nr, r.auto_lateral_ca),
+                    "{name}: a B3 carried detail value was lost on merge"
+                );
+                assert_eq!(
+                    (round.defringe_purple_lo, round.defringe_green_hi),
+                    (r.defringe_purple_lo, r.defringe_green_hi),
+                    "{name}: the de-fringe hue windows were lost on merge"
+                );
             }
         }
         assert!(
             seen_texture > 0,
             "DSC09568.xmp was not in {dir} — the named forensic case never ran"
+        );
+        assert!(
+            seen_auto_ca > 0,
+            "DSC09034.xmp was not in {dir} — the B3 auto-CA forensic case never ran"
         );
         eprintln!("{seen_effects} sidecar(s) carried a non-neutral B2 effect");
     }

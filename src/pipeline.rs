@@ -1332,6 +1332,34 @@ pub(crate) fn carry_over_unrepresentable(
     recipe.grain = base.grain;
     recipe.grain_size = base.grain_size;
     recipe.grain_rough = base.grain_rough;
+    // R25 B3 widened the block by fifteen: the eight carried detail axes, the
+    // auto-CA switch and the six de-fringe keys. Same argument, one sharper
+    // edge — de-fringe's neutral is ADOBE'S DEFAULT, not zero, so a dropped
+    // hue window would not merely lose a value, it would write 0/0 into the
+    // sidecar and change what Lightroom renders.
+    recipe.sharpen_radius = base.sharpen_radius;
+    recipe.sharpen_detail = base.sharpen_detail;
+    recipe.sharpen_mask = base.sharpen_mask;
+    recipe.nr_detail = base.nr_detail;
+    recipe.nr_contrast = base.nr_contrast;
+    recipe.color_nr = base.color_nr;
+    recipe.color_nr_detail = base.color_nr_detail;
+    recipe.color_nr_smooth = base.color_nr_smooth;
+    recipe.auto_lateral_ca = base.auto_lateral_ca;
+    recipe.defringe_purple = base.defringe_purple;
+    recipe.defringe_purple_lo = base.defringe_purple_lo;
+    recipe.defringe_purple_hi = base.defringe_purple_hi;
+    recipe.defringe_green = base.defringe_green;
+    recipe.defringe_green_lo = base.defringe_green_lo;
+    recipe.defringe_green_hi = base.defringe_green_hi;
+    // The manual CA pair rides too, and it is the ONE pair here that RENDERS.
+    // It is `engine_only` for a reason of its own (catalogue.rs: a 1–3 px
+    // edge artefact the advisor's ~1024 px preview cannot show), which means
+    // the schema never asks for it and it has no other way home — exactly the
+    // carried case, minus the tier. `carried_effects_survive_a_refine` covers
+    // it explicitly, since the derivation there is by `Tier::CarriedOnly`.
+    recipe.ca_r = base.ca_r;
+    recipe.ca_b = base.ca_b;
     recipe.clamp(); // the size caps still apply after re-attaching
 }
 
@@ -2745,26 +2773,48 @@ mod guard_tests {
     /// fails on the first one that `carry_over_unrepresentable` does not copy.
     #[test]
     fn carried_effects_survive_a_refine() {
-        use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+        use crate::advisor::catalogue::{global_value, Shape, Tier, RECIPE_CONTROLS};
+        // The CarriedOnly rows, PLUS the two engine-only rows that render
+        // (`ca_r`/`ca_b`, R25 B3). The derivation cannot reach those from the
+        // tier — they are `Rendered` — but they are in exactly the same
+        // position: the schema never asks for them, so this block is their
+        // only way home. Naming them here keeps the pair from being the one
+        // field the widening test cannot see.
         let carried: Vec<&str> = RECIPE_CONTROLS
             .iter()
-            .filter(|c| c.tier == Some(Tier::CarriedOnly))
+            .filter(|c| c.tier == Some(Tier::CarriedOnly) || matches!(c.name, "ca_r" | "ca_b"))
             .map(|c| c.name)
             .collect();
-        assert!(!carried.is_empty(), "premise: the tier has members since B2");
+        assert!(carried.len() > 9, "premise: B3 widened the tier past B2's nine");
+        for pair in ["ca_r", "ca_b"] {
+            assert!(carried.contains(&pair), "the rendered-but-engine-only pair must be probed");
+        }
         // A base holding a non-neutral value for every one of them, built
-        // through serde so a renamed field cannot slip past.
-        let mut json = serde_json::to_value(EditRecipe::default()).expect("recipe serialises");
+        // through serde so a renamed field cannot slip past. Probed BY SHAPE:
+        // B3 put a `Shape::Bool` on the list (`auto_lateral_ca`), and 3.0 is
+        // not a value a bool deserialises from.
+        let neutral = EditRecipe::default();
+        let mut json = serde_json::to_value(&neutral).expect("recipe serialises");
         for name in &carried {
-            json[*name] = serde_json::json!(3.0);
+            let shape = RECIPE_CONTROLS
+                .iter()
+                .find(|c| c.name == *name)
+                .map(|c| c.shape)
+                .expect("a registry row");
+            json[*name] = match shape {
+                Shape::Bool => serde_json::json!(true),
+                _ => serde_json::json!(3.0),
+            };
         }
         let mut base: EditRecipe =
             serde_json::from_value(json).expect("the probe values are in range");
         base.clamp();
         for name in &carried {
+            // Against the DEFAULT, not against zero: de-fringe's neutral is
+            // Adobe's own 30/70/40/60, so "moved" cannot mean "non-zero".
             assert_ne!(
-                crate::advisor::catalogue::global_value(&base, name).and_then(|v| v.scalar()),
-                Some(0.0),
+                global_value(&base, name),
+                global_value(&neutral, name),
                 "{name}: the probe must actually move the control"
             );
         }
@@ -2773,8 +2823,8 @@ mod guard_tests {
         carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
         for name in &carried {
             assert_eq!(
-                crate::advisor::catalogue::global_value(&proposed, name).and_then(|v| v.scalar()),
-                crate::advisor::catalogue::global_value(&base, name).and_then(|v| v.scalar()),
+                global_value(&proposed, name),
+                global_value(&base, name),
                 "{name}: a Refine deleted a carried value the model was never asked for"
             );
         }

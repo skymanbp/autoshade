@@ -1093,12 +1093,17 @@ pub(crate) fn build_preview(
     show_clipping: bool,
 ) -> PreviewDone {
     let mut after = autoshop::render::develop_preview(&base, &recipe);
-    if recipe.lens_profile.geometry_active() || recipe.lens_distortion != 0.0 {
-        after = autoshop::render::apply_lens_geometry(
-            &after,
-            &recipe.lens_profile,
-            recipe.lens_distortion,
-        );
+    {
+        // The COMPOSED profile (R25 B3): the manual CA pair folds onto the
+        // same per-channel radius knots, so reading the raw profile here
+        // would skip it on any photo with no in-camera CA data of its own.
+        // Scoped, because the Cow borrows `recipe` and `recipe` is MOVED into
+        // the result below (a borrow held by a value with a destructor lives
+        // to the end of its scope).
+        let geom = autoshop::render::geometry_profile(&recipe);
+        if geom.geometry_active() || recipe.lens_distortion != 0.0 {
+            after = autoshop::render::apply_lens_geometry(&after, &geom, recipe.lens_distortion);
+        }
     }
     if recipe.straighten_deg != 0.0 {
         after = autoshop::render::rotate_straighten(&after, recipe.straighten_deg);

@@ -405,6 +405,41 @@ impl AutoshopApp {
                 .weak(),
             );
         }
+        // --- the SEGMENTATION SIDECAR path (R25, closing R22-1) --------------
+        // R22 left "a settings row for the sidecar path" to R23; R23 and R24
+        // did not do it, and this is why. `AUTOSHOP_SEGMENT_SCRIPT` names a
+        // file that goes straight into `Command::new`, so `config.rs`
+        // registers it `env_only(..., Trust::Destination)`: neither a `.env`
+        // nor an ambient `autoshop.local.json` beside someone's photos may
+        // supply it. Adding a picker here would write it into the trusted
+        // settings file and hand every later launch a program chosen in a
+        // dialog — the opposite of that ruling.
+        //
+        // So this is READ-ONLY on purpose, and it says why. The two facts a
+        // user actually needs are which file is resolved and whether it is
+        // there; the existing 「did not ship the python sidecar」 line (the one
+        // the two 🤖 buttons already show) is the answer for the missing case,
+        // so the missing arm is not a second wording of the same thing.
+        ui.separator();
+        ui.heading(tr(lang, "Segmentation sidecar"));
+        let seg = autoshop::config::Config::load().segment_script;
+        let seg_path = std::path::PathBuf::from(&seg);
+        ui.label(egui::RichText::new(abs_display(&seg_path)).small().weak()).on_hover_text(tr(
+            lang,
+            "This path can only be set by environment variable, because it is executed",
+        ));
+        // `segment_helper_available` is the SAME predicate the two AI-select
+        // buttons gate on (one `exists()` per process), so this row and those
+        // buttons can never disagree about whether the helper is there.
+        if !segment_helper_available() {
+            ui.label(
+                egui::RichText::new(tr(lang,
+                    "this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
+                ))
+                .small()
+                .weak(),
+            );
+        }
         {
             let f = &mut self.settings;
             // Fetched ids belong to the endpoint recorded at fetch time; once

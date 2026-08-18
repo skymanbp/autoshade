@@ -460,6 +460,12 @@ pub(crate) struct OverlayKey {
     // which `base` already keys).
     pub(crate) profile_dist_on: bool,
     pub(crate) profile_ca_on: bool,
+    // …and on the MANUAL CA pair (R25 B3), by VALUE. The two bools above say
+    // whether the profile's CA is on, never how far anything is turned, and
+    // the manual pair rides the same per-channel knots — so without this,
+    // dragging Red/cyan re-warped the photo while the coverage wash kept the
+    // warp it was built under.
+    pub(crate) manual_ca: (f32, f32),
 }
 
 /// Messages from worker threads back to the UI. The large payloads are boxed so

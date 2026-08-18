@@ -221,6 +221,8 @@ impl AutoshopApp {
         // masks-cleared pixel reference. Keep it separately in OverlayKey.
         pre.straighten_deg = 0.0;
         pre.lens_distortion = 0.0;
+        pre.ca_r = 0.0;
+        pre.ca_b = 0.0;
         pre.crop = None;
         let lp = &self.recipe.lens_profile;
         let key = OverlayKey {
@@ -237,6 +239,7 @@ impl AutoshopApp {
             lens_distortion: self.recipe.lens_distortion,
             profile_dist_on: lp.distortion_on && !lp.distortion.is_empty(),
             profile_ca_on: lp.ca_on && !lp.ca_r.is_empty() && !lp.ca_b.is_empty(),
+            manual_ca: (self.recipe.ca_r, self.recipe.ca_b),
         };
         if self.overlay_key.as_ref() == Some(&key) && self.mask_overlay_tex.is_some() {
             return;
@@ -285,13 +288,15 @@ impl AutoshopApp {
             reference
         };
         let mut cov = image::DynamicImage::ImageLuma8(autoshop::render::mask_coverage(&mask, cov_ref));
-        if self.recipe.lens_profile.geometry_active() || self.recipe.lens_distortion != 0.0 {
+        // The COMPOSED profile (R25 B3) — manual CA rides the same knots.
+        let cov_geom = autoshop::render::geometry_profile(&self.recipe);
+        if cov_geom.geometry_active() || self.recipe.lens_distortion != 0.0 {
             // The coverage overlay must follow the SAME geometric chain as the
             // rendered pixels — profile distortion included, or the red wash
             // drifts off its mask near the frame edges.
             cov = autoshop::render::apply_lens_geometry(
                 &cov,
-                &self.recipe.lens_profile,
+                &cov_geom,
                 self.recipe.lens_distortion,
             );
         }
@@ -332,7 +337,10 @@ impl AutoshopApp {
             dims,
             self.recipe.straighten_deg,
             LensArg {
-                profile: self.recipe.lens_profile.clone(),
+                // COMPOSED (R25 B3): every interaction map downstream of this
+                // bundle must see the same profile the pixels went through,
+                // manual CA included.
+                profile: autoshop::render::geometry_profile(&self.recipe).into_owned(),
                 amount: self.recipe.lens_distortion,
             },
         )
@@ -1682,7 +1690,16 @@ impl AutoshopApp {
                 && !(self.recipe.lens_profile.ca_r.is_empty()
                     && self.recipe.lens_profile.ca_b.is_empty()),
         );
-        let xform_now = (self.recipe.straighten_deg, self.recipe.lens_distortion, profile_geom);
+        let xform_now = (
+            self.recipe.straighten_deg,
+            self.recipe.lens_distortion,
+            profile_geom,
+            (self.recipe.ca_r, self.recipe.ca_b),
+        );
+        // The identity key, spelled ONCE (it grew a fourth member with the
+        // manual CA pair in R25 B3, and it is compared in four places).
+        const IDENTITY_XFORM: (f32, f32, (bool, bool), (f32, f32)) =
+            (0.0, 0.0, (false, false), (0.0, 0.0));
         let stale_xform = self.mask_tex.is_some() && self.mask_tex_xform != xform_now;
         if self.mask_dirty || stale_xform {
             // Fast path (the common no-geometry case): the change since the
@@ -1690,7 +1707,7 @@ impl AutoshopApp {
             // sub-rectangle. Brushing used to clone and re-upload the WHOLE
             // canvas on every pointer move (at an 8192 working preview that
             // is a ~270 MB round trip per frame).
-            if xform_now == (0.0, 0.0, (false, false)) && !stale_xform && self.mask_dirty {
+            if xform_now == IDENTITY_XFORM && !stale_xform && self.mask_dirty {
                 let rect = self.mask_dirty_rect;
                 if let (Some(m), Some(tex), Some([x0, y0, x1, y1])) =
                     (&self.mask_paint, &mut self.mask_tex, rect)
@@ -1721,7 +1738,7 @@ impl AutoshopApp {
             // (the stroke's final shape lands on the release frame, when the
             // pointer is no longer down).
             if !stale_xform
-                && xform_now != (0.0, 0.0, (false, false))
+                && xform_now != IDENTITY_XFORM
                 && self.mask_tex.is_some()
                 && ctx.input(|i| i.pointer.any_down())
                 && self.mask_tex_built.elapsed() < std::time::Duration::from_millis(120)
@@ -1729,15 +1746,18 @@ impl AutoshopApp {
                 return; // mask_dirty stays armed; retried next frame
             }
             if let Some(m) = &self.mask_paint {
-                let ci = if xform_now != (0.0, 0.0, (false, false)) {
+                let ci = if xform_now != IDENTITY_XFORM {
                     // Alpha-preserving RGBA twins: the RGB16 photo paths
                     // flatten transparency to opaque, which turned the whole
                     // canvas into a red wash under any active geometry.
                     let mut img = m.clone();
-                    if xform_now.1 != 0.0 || profile_geom != (false, false) {
+                    if xform_now.1 != 0.0
+                        || profile_geom != (false, false)
+                        || xform_now.3 != (0.0, 0.0)
+                    {
                         img = autoshop::render::apply_lens_geometry_rgba(
                             &img,
-                            &self.recipe.lens_profile,
+                            &autoshop::render::geometry_profile(&self.recipe),
                             xform_now.1,
                         );
                     }

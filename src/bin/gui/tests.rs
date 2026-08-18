@@ -5983,6 +5983,170 @@
         }
     }
 
+    /// R25 B3: the Detail section really lays out its eleven controls — the
+    /// two the engine renders and the eight it carries — and the Lens section
+    /// its manual CA pair, the auto switch and the six de-fringe rows.
+    ///
+    /// Both languages, because the Chinese labels are where a font-subset gap
+    /// or a copied key shows up, and because 「彩噪细节」 vs 「锐化细节」 is
+    /// exactly the kind of pair a single careless reuse would collapse.
+    #[test]
+    fn the_detail_section_groups_sharpen_and_noise() {
+        for (lang, rows) in [
+            (
+                crate::i18n::Lang::En,
+                [
+                    "Sharpening",
+                    "Sharpen radius",
+                    "Sharpen detail",
+                    "Sharpen masking",
+                    "Noise Reduction",
+                    "Noise detail",
+                    "Noise contrast",
+                    "Colour noise reduction",
+                    "Colour noise detail",
+                    "Colour noise smoothness",
+                    "Chromatic aberration (manual)",
+                    "Red / cyan",
+                    "Blue / yellow",
+                    "Auto lateral CA",
+                    "Defringe",
+                    "Purple amount",
+                    "Purple hue low",
+                    "Purple hue high",
+                    "Green amount",
+                    "Green hue low",
+                    "Green hue high",
+                ],
+            ),
+            (
+                crate::i18n::Lang::Zh,
+                [
+                    "锐化",
+                    "锐化半径",
+                    "锐化细节",
+                    "边缘蒙版",
+                    "降噪",
+                    "降噪细节",
+                    "降噪对比",
+                    "彩色降噪",
+                    "彩噪细节",
+                    "彩噪平滑度",
+                    "手动色差",
+                    "红 / 青",
+                    "蓝 / 黄",
+                    "自动色差校正",
+                    "去边",
+                    "紫 · 强度",
+                    "紫 · 色相下限",
+                    "紫 · 色相上限",
+                    "绿 · 强度",
+                    "绿 · 色相下限",
+                    "绿 · 色相上限",
+                ],
+            ),
+        ] {
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            for row in rows {
+                assert!(
+                    seen.iter().any(|t| t == row),
+                    "{lang:?}: the {row:?} control is missing from the develop panel: {seen:?}"
+                );
+            }
+        }
+        // …and the eight carried detail axes light the Detail ● (the section
+        // holds two families since B3, and its dot is the OR of them).
+        let mut app = AutoshopApp::default();
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(seen.iter().any(|t| t == "Detail"), "premise: the header is drawn: {seen:?}");
+        assert!(!seen.iter().any(|t| t == "Detail  ●"), "premise: a rest recipe lights nothing");
+        app.recipe.color_nr = 25.0;
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Detail  ●"),
+            "a carried detail axis must not be an invisible adjustment: {seen:?}"
+        );
+        // The same for the Lens section and the de-fringe half of its family.
+        let mut app = AutoshopApp::default();
+        app.recipe.defringe_purple = 3.0;
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Lens  ●"),
+            "a de-fringe value must light the Lens dot: {seen:?}"
+        );
+    }
+
+    /// R25 (closing R22-1): Settings SHOWS the segmentation sidecar path and
+    /// offers no way to change it.
+    ///
+    /// The row exists because the alternative — a folder picker — would write
+    /// a `Command::new` target into the trusted settings file, which is what
+    /// `config::SETTINGS` registers the variable `env_only(Trust::Destination)`
+    /// to forbid. So the NEGATIVE half is the point: the heading and the
+    /// resolved path are drawn, and no 「Browse…」 button appears beside them
+    /// (the delivery-root row above has one, which is what makes the absence
+    /// here a decision rather than an oversight).
+    #[test]
+    fn the_settings_panel_shows_the_sidecar_path_without_offering_to_change_it() {
+        for (lang, heading, browse) in [
+            (crate::i18n::Lang::En, "Segmentation sidecar", "Browse…"),
+            (crate::i18n::Lang::Zh, "分割边车", "浏览…"),
+        ] {
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.settings_ui(ui));
+            let at = seen.iter().position(|t| t == heading).unwrap_or_else(|| {
+                panic!("{lang:?}: the sidecar heading was not drawn: {seen:?}")
+            });
+            // The resolved path follows the heading — a row with a heading and
+            // nothing under it discloses nothing.
+            assert!(
+                seen[at + 1..].iter().any(|t| t.contains("segment.py")),
+                "{lang:?}: no resolved sidecar path under the heading: {seen:?}"
+            );
+            // The delivery root's picker proves the panel CAN draw one here.
+            assert!(
+                seen.iter().any(|t| t == browse),
+                "{lang:?}: the delivery-root Browse button is gone — the negative \
+                 assertion below would then prove nothing: {seen:?}"
+            );
+            assert!(
+                seen[at + 1..].iter().all(|t| t != browse),
+                "{lang:?}: a picker appeared beside the executed sidecar path: {seen:?}"
+            );
+        }
+    }
+
+    /// R25 B3: the Lens tooltip no longer promises de-fringe for "a later
+    /// batch" — this IS the later batch.
+    ///
+    /// The promise sat in the panel from the round that shipped the manual
+    /// lens sliders. A negative assertion alone would pass on a panel that
+    /// drew nothing at all, so the positive half comes first.
+    #[test]
+    fn the_lens_tooltip_no_longer_promises_defringe_later() {
+        for (lang, promise) in [
+            (crate::i18n::Lang::En, "De-fringe in a later batch"),
+            (crate::i18n::Lang::Zh, "去紫边留待后续批次"),
+        ] {
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            let lens_header = if lang == crate::i18n::Lang::En { "Lens" } else { "镜头 · Lens" };
+            assert!(
+                seen.iter().any(|t| t == lens_header),
+                "{lang:?}: the Lens section was not drawn — this proves nothing: {seen:?}"
+            );
+            assert!(
+                seen.iter().any(|t| t.contains("XMP")),
+                "{lang:?}: the lens explainer line itself is missing: {seen:?}"
+            );
+            assert!(
+                !seen.iter().any(|t| t.contains(promise)),
+                "{lang:?}: the retired {promise:?} promise is still on screen: {seen:?}"
+            );
+        }
+    }
+
     /// R25 P0-0.3: the ONE control the ● deliberately ignores stays ignored
     /// after the predicate became a derivation — `lens_vignette_mid` renders
     /// nothing while the amount is at rest (`catalogue::DOT_EXEMPT` carries the

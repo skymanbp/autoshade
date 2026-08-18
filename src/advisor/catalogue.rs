@@ -260,6 +260,50 @@ pub const CARRIED_ONLY_GLOBAL: &[(&str, &str)] = &[
     ),
     ("grain_size", "a shaping axis of the unpublished grain generator above"),
     ("grain_rough", "a shaping axis of the unpublished grain generator above"),
+    // ── R25 B3: the detail axes, the auto-CA switch and de-fringe ──────────
+    (
+        "sharpen_radius",
+        "our sharpening radius is a σ model NORMALISED by resolution (render.rs, V2 §4c), so \
+         one absolute pixel radius would mean two different strengths on the preview and on a \
+         61 MP export — which is precisely the defect V2 §4c was written to remove",
+    ),
+    (
+        "sharpen_detail",
+        "Adobe's halo-suppression curve is unpublished; there is no number in our unsharp mask \
+         that stands for it",
+    ),
+    ("sharpen_mask", "same unpublished shaping family as sharpen_detail"),
+    (
+        "nr_detail",
+        "our luminance NR is a bilateral-lite (V2 §4d) with no detail / contrast shaping axes \
+         at all — there is nothing here for this value to turn",
+    ),
+    ("nr_contrast", "the second axis of the shaping model our NR does not have"),
+    (
+        "color_nr",
+        "this engine has NO chroma noise reduction whatsoever; inventing one to honour the \
+         slider would put an operator we made up between the photographer and their picture",
+    ),
+    ("color_nr_detail", "a shaping axis of the chroma NR this engine does not have"),
+    ("color_nr_smooth", "a shaping axis of the chroma NR this engine does not have"),
+    (
+        "auto_lateral_ca",
+        "an INSTRUCTION — 「run Adobe's own lateral-CA solver」 — not a parameter. We have no \
+         such solver, and there is no value to approximate: the manual ca_r / ca_b pair beside \
+         it is the part that IS a parameter, and that one renders",
+    ),
+    (
+        "defringe_purple",
+        "the de-fringe hue windows are Adobe's own 0..100 scale, and the mapping from that \
+         scale to an actual hue angle is unpublished AND unmeasured (no sidecar in the user's \
+         library carries a non-default one) — the core unknown of the whole operator, which is \
+         exactly the kind of debt this project keeps refusing to guess at",
+    ),
+    ("defringe_purple_lo", "same operator as defringe_purple: the hue scale is unpublished"),
+    ("defringe_purple_hi", "same operator as defringe_purple: the hue scale is unpublished"),
+    ("defringe_green", "same operator as defringe_purple: the hue scale is unpublished"),
+    ("defringe_green_lo", "same operator as defringe_purple: the hue scale is unpublished"),
+    ("defringe_green_hi", "same operator as defringe_purple: the hue scale is unpublished"),
 ];
 
 /// The `CarriedOnly` allow-list for [`LOCAL_CONTROLS`].
@@ -348,7 +392,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 44] = [
+pub const RECIPE_CONTROLS: [Control; 61] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -574,6 +618,91 @@ pub const RECIPE_CONTROLS: [Control; 44] = [
         tier: Some(Tier::Rendered),
         purpose: "global luminance noise reduction",
     },
+    // The eight CARRIED detail axes (R25 B3, policy SF4-C) — the shaping
+    // knobs around the two sliders above. `engine_only` AND
+    // `Tier::CarriedOnly`, reasons in [`CARRIED_ONLY_GLOBAL`].
+    Control {
+        name: "sharpen_radius",
+        shape: Shape::Number,
+        // 0 = absent; Lightroom's own band starts at 0.5, so the stated band
+        // has to reach the neutral or `clamp` and the registry disagree.
+        range: Some((0.0, 3.0)),
+        neutral: "0 = absent (Lightroom's own default is 1.0)",
+        engine_only: true,
+        crs: CrsKey::Attr("SharpenRadius"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the radius Lightroom sharpens at, in pixels",
+    },
+    Control {
+        name: "sharpen_detail",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 25)",
+        engine_only: true,
+        crs: CrsKey::Attr("SharpenDetail"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how far Lightroom's sharpening suppresses its own halos",
+    },
+    Control {
+        name: "sharpen_mask",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("SharpenEdgeMasking"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how far Lightroom confines its sharpening to edges",
+    },
+    Control {
+        name: "nr_detail",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 50)",
+        engine_only: true,
+        crs: CrsKey::Attr("LuminanceNoiseReductionDetail"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the detail-preservation axis of Lightroom's luminance NR",
+    },
+    Control {
+        name: "nr_contrast",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("LuminanceNoiseReductionContrast"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the contrast-preservation axis of Lightroom's luminance NR",
+    },
+    Control {
+        name: "color_nr",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 25)",
+        engine_only: true,
+        crs: CrsKey::Attr("ColorNoiseReduction"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "CHROMA noise reduction — an operator this engine does not have at all",
+    },
+    Control {
+        name: "color_nr_detail",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 50)",
+        engine_only: true,
+        crs: CrsKey::Attr("ColorNoiseReductionDetail"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the detail axis of the chroma NR above",
+    },
+    Control {
+        name: "color_nr_smooth",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 50)",
+        engine_only: true,
+        crs: CrsKey::Attr("ColorNoiseReductionSmoothness"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the smoothness axis of the chroma NR above",
+    },
     Control {
         name: "lens_vignette",
         shape: Shape::NullableNumber,
@@ -608,6 +737,113 @@ pub const RECIPE_CONTROLS: [Control; 44] = [
         purpose: "manual geometric distortion correction (positive straightens BARREL, negative \
                   PINCUSHION); null means you have NO opinion and the photographer's own value \
                   stands",
+    },
+    // Manual lateral CA (R25 B3) — RENDERED, and the FOURTH kind of
+    // `engine_only` (see the field's doc): not staged work, not stamped
+    // calibration, but a control the AI must not be asked for. Lateral CA is
+    // a one-to-three-pixel edge artefact; the advisor sees a ~1024 px preview,
+    // where it is physically not there, so a required schema field could only
+    // ever be a guess — and, being required, that guess would come back as 0
+    // and delete the photographer's own value on every Refine (the exact
+    // defect `LensOpinion` exists for). It rides
+    // `pipeline::carry_over_unrepresentable` instead.
+    Control {
+        name: "ca_r",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("ChromaticAberrationR"),
+        tier: Some(Tier::Rendered),
+        purpose: "manual lateral CA on the red / cyan axis — folded onto the same per-channel \
+                  radius LUT the in-camera profile's CA uses",
+    },
+    Control {
+        name: "ca_b",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("ChromaticAberrationB"),
+        tier: Some(Tier::Rendered),
+        purpose: "manual lateral CA on the blue / yellow axis",
+    },
+    Control {
+        name: "auto_lateral_ca",
+        shape: Shape::Bool,
+        // A FLAG, not a band — `Shape::is_scalar` is false, so
+        // `stated_ranges_are_the_ranges_clamp_enforces` does not probe it and
+        // there is no range to state.
+        range: None,
+        neutral: "false",
+        engine_only: true,
+        crs: CrsKey::Attr("AutoLateralCA"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "Lightroom's 「Remove chromatic aberration」 switch — an instruction to Adobe's \
+                  own solver, carried and never interpreted",
+    },
+    // De-fringe (R25 B3, policy SF4-C): six carried keys, and the one block
+    // whose neutral is Adobe's default rather than zero — see the fields' own
+    // doc in `recipe.rs` for why absence is not a state this block has.
+    Control {
+        name: "defringe_purple",
+        shape: Shape::Number,
+        range: Some((0.0, 20.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("DefringePurpleAmount"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how hard Lightroom removes purple fringing",
+    },
+    Control {
+        name: "defringe_purple_lo",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "30 (Adobe's own default — this block has no absent state)",
+        engine_only: true,
+        crs: CrsKey::Attr("DefringePurpleHueLo"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the low end of the purple hue window de-fringe acts in",
+    },
+    Control {
+        name: "defringe_purple_hi",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "70 (Adobe's own default)",
+        engine_only: true,
+        crs: CrsKey::Attr("DefringePurpleHueHi"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the high end of the purple hue window",
+    },
+    Control {
+        name: "defringe_green",
+        shape: Shape::Number,
+        range: Some((0.0, 20.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("DefringeGreenAmount"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how hard Lightroom removes green fringing",
+    },
+    Control {
+        name: "defringe_green_lo",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "40 (Adobe's own default)",
+        engine_only: true,
+        crs: CrsKey::Attr("DefringeGreenHueLo"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the low end of the green hue window",
+    },
+    Control {
+        name: "defringe_green_hi",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "60 (Adobe's own default)",
+        engine_only: true,
+        crs: CrsKey::Attr("DefringeGreenHueHi"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "the high end of the green hue window",
     },
     // The nine CARRIED effects (R25 B2, policy SF4-C). Every one is
     // `engine_only` AND `Tier::CarriedOnly`: Lightroom renders them, we
@@ -1282,10 +1518,11 @@ impl Family {
     /// Does the AI ever see this family? DERIVED — a family is AI-visible iff
     /// at least one member is a control the schema asks for.
     ///
-    /// The `effects` family (R25 B2) is the first with none: its nine members
-    /// are `engine_only` Adobe-only operators, so putting it in the thinking
-    /// envelope's `control` enum would ask the model to plan with tools the
-    /// recipe schema then refuses to accept. It is still a family, because the
+    /// The `effects` family (R25 B2) was the first with none, and B3 added
+    /// `detail_effects` and `lens_effects` beside it: their members are
+    /// `engine_only`, so putting them in the thinking envelope's `control`
+    /// enum would ask the model to plan with tools the recipe schema then
+    /// refuses to accept. They are still families, because the
     /// develop panel's ● is derived from this table — and deriving the answer
     /// (rather than adding a hand-set flag) is what stops the two facts from
     /// drifting apart. `every_ai_visible_control_belongs_to_exactly_one_family`
@@ -1295,9 +1532,9 @@ impl Family {
     }
 }
 
-/// The 11 families the global controls partition into — 10 the AI plans with
-/// plus the engine-only `effects` grouping (see [`Family::ai_visible`]).
-pub const CONTROL_FAMILIES: [Family; 11] = [
+/// The 13 families the global controls partition into — 10 the AI plans with
+/// plus three engine-only groupings (see [`Family::ai_visible`]).
+pub const CONTROL_FAMILIES: [Family; 13] = [
     Family {
         name: "tone",
         covers: "exposure, contrast and the four tonal bands (highlights / shadows / whites / blacks)",
@@ -1373,6 +1610,48 @@ pub const CONTROL_FAMILIES: [Family; 11] = [
             "grain",
             "grain_size",
             "grain_rough",
+        ],
+    },
+    Family {
+        // R25 B3. A SEPARATE family from `detail` rather than eight new
+        // members on it, because a family is all-AI-visible or all-engine-only
+        // (`every_ai_visible_control_belongs_to_exactly_one_family`) and
+        // `detail`'s two sliders are tools the model really does plan with.
+        // The develop panel's Detail ● is the OR of the two — the section
+        // holds both halves, so its dot has to.
+        name: "detail_effects",
+        covers: "the sharpening radius / detail / edge-mask triple and the noise-reduction \
+                 shaping axes — Adobe-only operators Autoshop carries through the sidecar \
+                 without rendering",
+        members: &[
+            "sharpen_radius",
+            "sharpen_detail",
+            "sharpen_mask",
+            "nr_detail",
+            "nr_contrast",
+            "color_nr",
+            "color_nr_detail",
+            "color_nr_smooth",
+        ],
+    },
+    Family {
+        // The Lens section's engine-only half, same split and same reason.
+        // MIXED TIERS on purpose: `ca_r`/`ca_b` are `Rendered` and the rest
+        // are `CarriedOnly`. The family split is about who the AI may PLAN
+        // with, not about what renders — grouping is what lights one ●.
+        name: "lens_effects",
+        covers: "the manual chromatic-aberration pair (rendered here), Lightroom's auto-CA \
+                 switch and its de-fringe block (carried, not rendered)",
+        members: &[
+            "ca_r",
+            "ca_b",
+            "auto_lateral_ca",
+            "defringe_purple",
+            "defringe_purple_lo",
+            "defringe_purple_hi",
+            "defringe_green",
+            "defringe_green_lo",
+            "defringe_green_hi",
         ],
     },
 ];
@@ -1606,6 +1885,7 @@ the globals):\n{}",
 pub enum GlobalValue<'a> {
     Num(f32),
     OptNum(Option<f32>),
+    Bool(bool),
     Int(u32),
     Text(&'a str),
     Curve(&'a [CurvePoint]),
@@ -1661,9 +1941,26 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         color_grade,
         sharpening,
         noise_reduction,
+        sharpen_radius,
+        sharpen_detail,
+        sharpen_mask,
+        nr_detail,
+        nr_contrast,
+        color_nr,
+        color_nr_detail,
+        color_nr_smooth,
         lens_vignette,
         lens_vignette_mid,
         lens_distortion,
+        ca_r,
+        ca_b,
+        auto_lateral_ca,
+        defringe_purple,
+        defringe_purple_lo,
+        defringe_purple_hi,
+        defringe_green,
+        defringe_green_lo,
+        defringe_green_hi,
         post_crop_vignette,
         post_crop_vignette_mid,
         post_crop_vignette_feather,
@@ -1707,9 +2004,26 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "color_grade" => GlobalValue::Grade(color_grade),
         "sharpening" => GlobalValue::Num(*sharpening),
         "noise_reduction" => GlobalValue::Num(*noise_reduction),
+        "sharpen_radius" => GlobalValue::Num(*sharpen_radius),
+        "sharpen_detail" => GlobalValue::Num(*sharpen_detail),
+        "sharpen_mask" => GlobalValue::Num(*sharpen_mask),
+        "nr_detail" => GlobalValue::Num(*nr_detail),
+        "nr_contrast" => GlobalValue::Num(*nr_contrast),
+        "color_nr" => GlobalValue::Num(*color_nr),
+        "color_nr_detail" => GlobalValue::Num(*color_nr_detail),
+        "color_nr_smooth" => GlobalValue::Num(*color_nr_smooth),
         "lens_vignette" => GlobalValue::Num(*lens_vignette),
         "lens_vignette_mid" => GlobalValue::Num(*lens_vignette_mid),
         "lens_distortion" => GlobalValue::Num(*lens_distortion),
+        "ca_r" => GlobalValue::Num(*ca_r),
+        "ca_b" => GlobalValue::Num(*ca_b),
+        "auto_lateral_ca" => GlobalValue::Bool(*auto_lateral_ca),
+        "defringe_purple" => GlobalValue::Num(*defringe_purple),
+        "defringe_purple_lo" => GlobalValue::Num(*defringe_purple_lo),
+        "defringe_purple_hi" => GlobalValue::Num(*defringe_purple_hi),
+        "defringe_green" => GlobalValue::Num(*defringe_green),
+        "defringe_green_lo" => GlobalValue::Num(*defringe_green_lo),
+        "defringe_green_hi" => GlobalValue::Num(*defringe_green_hi),
         "post_crop_vignette" => GlobalValue::Num(*post_crop_vignette),
         "post_crop_vignette_mid" => GlobalValue::Num(*post_crop_vignette_mid),
         "post_crop_vignette_feather" => GlobalValue::Num(*post_crop_vignette_feather),
@@ -2335,25 +2649,50 @@ mod tests {
             // The nine R25 B2 EFFECTS joined for a third reason again: they
             // are `Tier::CarriedOnly` Adobe-only operators (policy SF4-C), so
             // a number from the model would move no pixel in this engine.
+            // R25 B3 added fifteen more of that third kind (the detail axes,
+            // the auto-CA switch, de-fringe) plus a FOURTH kind: `ca_r`/`ca_b`
+            // RENDER, and are engine-only anyway — lateral CA is a 1–3 px edge
+            // artefact and the advisor's ~1024 px preview cannot show it, so a
+            // required schema field could only ever return a guess (and, being
+            // required, would return 0 and delete the photographer's own value
+            // on every Refine).
             vec![
                 "as_shot_k",
                 "as_shot_tint",
+                "auto_lateral_ca",
                 "base_curve",
+                "ca_b",
+                "ca_r",
+                "color_nr",
+                "color_nr_detail",
+                "color_nr_smooth",
                 "coord_era",
+                "defringe_green",
+                "defringe_green_hi",
+                "defringe_green_lo",
+                "defringe_purple",
+                "defringe_purple_hi",
+                "defringe_purple_lo",
                 "grain",
                 "grain_rough",
                 "grain_size",
                 "lens_profile",
+                "nr_contrast",
+                "nr_detail",
                 "post_crop_vignette",
                 "post_crop_vignette_feather",
                 "post_crop_vignette_hl",
                 "post_crop_vignette_mid",
                 "post_crop_vignette_round",
                 "post_crop_vignette_style",
+                "sharpen_detail",
+                "sharpen_mask",
+                "sharpen_radius",
             ]
         );
-        // …and every one of the nine really is on the CarriedOnly allow-list,
-        // so "engine-only" here can never quietly mean "staged work" again.
+        // …and every one of the twenty-four really is on the CarriedOnly
+        // allow-list, so "engine-only" here can never quietly mean "staged
+        // work" again.
         for (n, _) in CARRIED_ONLY_GLOBAL {
             assert!(
                 global_control(n).is_some_and(|c| c.engine_only),
@@ -2629,6 +2968,14 @@ mod tests {
     /// adjustment this dot exists to prevent. The random draw moves `texture`
     /// as well, so the widened arm is actually exercised rather than agreed
     /// with vacuously.
+    ///
+    /// **B3 decision (R25, the detail axes / manual CA / de-fringe)**: those
+    /// fifteen-plus-two rows did NOT join `detail` or `lens`. They are
+    /// engine-only, and a family is all-AI-visible or all-engine-only, so
+    /// they went into `detail_effects` / `lens_effects` and the two SECTIONS
+    /// take the OR of their pair. That is why this test stayed green through
+    /// B3 while the dots did widen — the widening is asserted where it now
+    /// lives, in the GUI's `the_detail_section_groups_sharpen_and_noise`.
     #[test]
     fn the_family_dots_match_the_hand_written_predicates_they_replaced() {
         // splitmix64, so the sequence is deterministic and the low bits are

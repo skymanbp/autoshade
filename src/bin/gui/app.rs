@@ -222,7 +222,12 @@ pub(crate) struct AutoshopApp {
     pub(crate) mask_paint: Option<image::RgbaImage>,  // painted overlay (red where painted), at preview res
     pub(crate) mask_tex: Option<egui::TextureHandle>, // overlay texture
     pub(crate) mask_dirty: bool,                      // re-upload the overlay
-    pub(crate) mask_tex_xform: (f32, f32, (bool, bool)), // (straighten, distortion, (profile distortion, profile CA)) at build
+    // (straighten, distortion, (profile distortion, profile CA), (ca_r, ca_b)) at build.
+    // The manual CA pair is part of the KEY, not just of the composed profile
+    // it feeds: the two bools say whether CA is on, never how far, so moving
+    // ca_r from +5 to +50 compared equal and the overlay kept the old warp
+    // (the L13-9 defect, one field over).
+    pub(crate) mask_tex_xform: (f32, f32, (bool, bool), (f32, f32)),
     // Union of the brush segments painted since the last texture upload
     // (canvas px, [x0,y0,x1,y1] half-open). With no geometry active, only
     // this sub-rectangle is uploaded (set_partial) — brushing used to clone
@@ -1560,7 +1565,7 @@ impl Default for AutoshopApp {
             mask_dirty_rect: None,
             mask_tex_built: Instant::now(),
             mask_dirty: false,
-            mask_tex_xform: (0.0, 0.0, (false, false)),
+            mask_tex_xform: (0.0, 0.0, (false, false), (0.0, 0.0)),
             paint_last: None,
             fill_prompt: String::new(),
             fill_quality: 0,

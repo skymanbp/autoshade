@@ -275,8 +275,12 @@ pub fn render_to_image_in(
     // original frame). The map depends only on the radius normalised by the
     // half-diagonal, so it is orientation-invariant and identical between the
     // small preview and this full render.
-    if recipe.lens_profile.geometry_active() || recipe.lens_distortion != 0.0 {
-        dynimg = apply_lens_geometry(&dynimg, &recipe.lens_profile, recipe.lens_distortion);
+    // `geometry_profile`, not `recipe.lens_profile`: the manual CA pair rides
+    // the same per-channel knots (R25 B3), and reading the raw profile here
+    // would skip it on a photo with no in-camera CA data.
+    let geom = geometry_profile(recipe);
+    if geom.geometry_active() || recipe.lens_distortion != 0.0 {
+        dynimg = apply_lens_geometry(&dynimg, &geom, recipe.lens_distortion);
     }
 
     // --- straighten: rotate + auto-crop BEFORE the user crop, in display
@@ -367,9 +371,11 @@ pub fn render_baked_to_image(
     let mut dynimg = DynamicImage::ImageRgb16(out);
 
     // Lens geometry, then straighten, before the user crop — same order as
-    // the RAW path (the geometric chain is original → corrected → view).
-    if recipe.lens_profile.geometry_active() || recipe.lens_distortion != 0.0 {
-        dynimg = apply_lens_geometry(&dynimg, &recipe.lens_profile, recipe.lens_distortion);
+    // the RAW path (the geometric chain is original → corrected → view), and
+    // the same composed profile (manual CA included).
+    let geom = geometry_profile(recipe);
+    if geom.geometry_active() || recipe.lens_distortion != 0.0 {
+        dynimg = apply_lens_geometry(&dynimg, &geom, recipe.lens_distortion);
     }
     if recipe.straighten_deg != 0.0 {
         dynimg = rotate_straighten(&dynimg, recipe.straighten_deg);
@@ -679,6 +685,57 @@ pub fn geometry_moves_frame(profile: &crate::recipe::LensProfile, amount: f32) -
             && !profile.ca_r.is_empty()
             && !profile.ca_b.is_empty()
             && profile.ca_r.iter().chain(&profile.ca_b).any(|k| *k > 1.0))
+}
+
+/// Radial scale one unit of `ca_r` / `ca_b` asks for (R25 B3).
+///
+/// ±100 therefore means ±0.2 % of the half-diagonal — about ±7 px at the
+/// corner of a 6000×4000 frame, where real lateral CA is one to three. That
+/// is OUR calibration and it is stated as such: Adobe never published what
+/// its own ±100 means, and no sidecar in the user's library carries a
+/// non-zero `crs:ChromaticAberrationR/B` to measure one from (the PV2012
+/// panel replaced the pair with de-fringe + the auto switch). It is sized to
+/// cover the artefact with headroom rather than to match an unknown, and it
+/// stays inside the ±2 % band [`crate::recipe::LensProfile::clamp`] holds
+/// profile CA knots to, so a manual value can never ask for a scale the
+/// engine would refuse from a camera.
+pub const MANUAL_CA_PER_UNIT: f32 = 2.0e-5;
+
+/// THE lens profile every geometry consumer must use: the in-camera one with
+/// the recipe's MANUAL CA folded into its per-channel radius knots.
+///
+/// Manual CA is not a second operator — a lateral CA scales a channel
+/// linearly with radius, so its factor is CONSTANT in radius, which is
+/// exactly what one knot means to [`profile_knot_interp`]. Folding it in here
+/// rather than threading two more arguments through
+/// [`apply_lens_geometry`] / [`lens_geom_norm`] / [`geometry_moves_frame`] is
+/// what keeps the C2 contract intact for free: every consumer divides by the
+/// SAME composite fill ([`geometry_fill_scale`]), so masks, overlays and the
+/// colour dropper cannot drift against the pixels when a manual value pushes
+/// a channel past 1.
+///
+/// BORROWED when the pair is at rest — the common case allocates nothing and
+/// renders bit-identically to the pre-B3 engine.
+///
+/// When the profile's own CA is switched OFF, its knots do NOT participate:
+/// the manual pair stands alone (a user who unticked 「Chromatic aberration」
+/// asked for the camera's correction to stop, not to be scaled).
+pub fn geometry_profile(r: &EditRecipe) -> Cow<'_, crate::recipe::LensProfile> {
+    if r.ca_r == 0.0 && r.ca_b == 0.0 {
+        return Cow::Borrowed(&r.lens_profile);
+    }
+    let p = &r.lens_profile;
+    let profile_ca_on = p.ca_on && !p.ca_r.is_empty() && !p.ca_b.is_empty();
+    let fold = |knots: &[f32], slider: f32| -> Vec<f32> {
+        let f = 1.0 + slider * MANUAL_CA_PER_UNIT;
+        if profile_ca_on { knots.iter().map(|k| k * f).collect() } else { vec![f] }
+    };
+    Cow::Owned(crate::recipe::LensProfile {
+        ca_r: fold(&p.ca_r, r.ca_r),
+        ca_b: fold(&p.ca_b, r.ca_b),
+        ca_on: true,
+        ..p.clone()
+    })
 }
 
 /// The delivery space's primaries.
@@ -9337,6 +9394,173 @@ mod tests {
             a.pixels().zip(b.pixels()).all(|(p, q)| p.0[1] == q.0[1]),
             "green must be byte-identical when the fill is exactly 1"
         );
+    }
+
+    /// R25 B3: the manual CA pair really moves the red channel's sampling
+    /// radius — and moves NOTHING else when it asks for a shrink.
+    ///
+    /// A NEGATIVE ca_r is the sharp case: every channel factor lands at or
+    /// below 1, so [`geometry_fill_scale`] is exactly 1.0 and green and blue
+    /// come out byte for byte identical to the CA-off render, leaving red as
+    /// the only thing that moved. (The positive direction cannot make that
+    /// claim and must not pretend to: an overshooting channel zooms the whole
+    /// frame through the composite fill, which is the L04-2 contract, and it
+    /// is asserted below rather than dodged.)
+    #[test]
+    fn manual_ca_shifts_the_red_channel_radius() {
+        // Concentric rings: a pattern that is a function of RADIUS, so a
+        // radial rescale of one channel is visible and a translation-only bug
+        // could not fake it. All three channels identical at the source.
+        let target = DynamicImage::ImageRgb16(ImageBuffer::from_fn(161, 161, |x, y| {
+            let (dx, dy) = (x as f32 - 80.0, y as f32 - 80.0);
+            let r = (dx * dx + dy * dy).sqrt();
+            let v = (((r * 0.7).sin() * 0.5 + 0.5) * 60000.0) as u16;
+            Rgb([v; 3])
+        }));
+        let off = EditRecipe::default();
+        let shrink = EditRecipe { ca_r: -100.0, ..Default::default() };
+        let grow = EditRecipe { ca_r: 100.0, ..Default::default() };
+
+        // The composed profile is what carries it — a photo with no in-camera
+        // CA data of its own still gets one.
+        assert!(!geometry_profile(&off).geometry_active(), "premise: a rest recipe adds nothing");
+        assert!(geometry_profile(&shrink).geometry_active(), "the manual pair alone is geometry");
+
+        let base = apply_lens_geometry(&target, &geometry_profile(&off), 0.0).to_rgb16();
+        let out = apply_lens_geometry(&target, &geometry_profile(&shrink), 0.0).to_rgb16();
+        assert!(
+            out.pixels().zip(base.pixels()).all(|(p, q)| p.0[1] == q.0[1] && p.0[2] == q.0[2]),
+            "a shrinking manual CA must leave green and blue byte-identical"
+        );
+        assert!(
+            out.pixels().zip(base.pixels()).any(|(p, q)| p.0[0] != q.0[0]),
+            "…and it must actually move red"
+        );
+        // The DIRECTION, at one named pixel: ca_r < 0 means red samples at a
+        // SMALLER radius, so the far-off-centre red is the source from nearer
+        // the middle. SUB-PIXEL by construction — ±100 is 0.2 % of the radius
+        // and no test frame makes that a whole pixel — so the expectation is
+        // the source's own bilinear value at the shrunk coordinate, which on
+        // the centre row (dy = 0) is a plain lerp along x.
+        let src = target.to_rgb16();
+        let f = 1.0 + (-100.0) * MANUAL_CA_PER_UNIT;
+        let (x, y) = (158u32, 80u32);
+        let sx = 80.0 + ((x as f32) - 80.0) * f;
+        let (i0, frac) = (sx.floor() as u32, sx - sx.floor());
+        let want = src.get_pixel(i0, y).0[0] as f32 * (1.0 - frac)
+            + src.get_pixel(i0 + 1, y).0[0] as f32 * frac;
+        let got = out.get_pixel(x, y).0[0] as f32;
+        assert!(
+            (got - want).abs() < 64.0,
+            "red at x={x} should be the source at the shrunk radius {sx}: got {got}, want {want}"
+        );
+        // …and that really is a MOVE, not a rounding: the unshifted source
+        // pixel is far away on this ring pattern.
+        let unshifted = src.get_pixel(x, y).0[0] as f32;
+        assert!(
+            (got - unshifted).abs() > 1000.0,
+            "the probe pixel must sit on a steep part of the ring pattern"
+        );
+
+        // The other direction is the documented frame zoom, not a silent one:
+        // an overshooting channel makes `geometry_moves_frame` true, which is
+        // what keeps every coordinate map in step (C2).
+        assert!(
+            geometry_moves_frame(&geometry_profile(&grow), 0.0),
+            "a magnifying manual CA zooms the frame through the composite fill"
+        );
+        assert!(
+            !geometry_moves_frame(&geometry_profile(&shrink), 0.0),
+            "…and a shrinking one does not move the shared frame at all"
+        );
+    }
+
+    /// R25 B3: the pair at rest costs NOTHING — no allocation, no engine
+    /// change, and a render byte for byte what v0.30 produced.
+    #[test]
+    fn ca_zero_is_bit_identical_to_no_ca() {
+        use crate::recipe::LensProfile;
+        let profile = LensProfile {
+            distortion: (0..16).map(|i| 1.0008 - 0.02 * (i as f32 / 15.0).powi(2)).collect(),
+            distortion_on: true,
+            ca_r: vec![0.999; 16],
+            ca_b: vec![1.001; 16],
+            ca_on: true,
+            ..Default::default()
+        };
+        let r = EditRecipe { lens_profile: profile.clone(), ..Default::default() };
+        assert!(
+            matches!(geometry_profile(&r), std::borrow::Cow::Borrowed(_)),
+            "a recipe with ca_r = ca_b = 0 must borrow the in-camera profile unchanged"
+        );
+        assert_eq!(*geometry_profile(&r), profile, "…and it is that profile, not a copy of one");
+        let ramp = DynamicImage::ImageRgb16(ImageBuffer::from_fn(160, 90, |x, y| {
+            Rgb([(x as u16) * 300, (x as u16) * 300 + (y as u16), (y as u16) * 500])
+        }));
+        let a = apply_lens_geometry(&ramp, &geometry_profile(&r), 0.0).to_rgb16();
+        let b = apply_lens_geometry(&ramp, &profile, 0.0).to_rgb16();
+        assert!(a.pixels().zip(b.pixels()).all(|(p, q)| p.0 == q.0), "the render must not move");
+        // A profile whose CA the user switched OFF stays off: the manual pair
+        // stands alone rather than scaling knots nobody asked for.
+        let off = EditRecipe {
+            lens_profile: LensProfile { ca_on: false, ..profile },
+            ca_r: -50.0,
+            ..Default::default()
+        };
+        let composed = geometry_profile(&off);
+        assert_eq!(composed.ca_r.len(), 1, "the disabled profile knots must not participate");
+        assert!((composed.ca_r[0] - (1.0 + -50.0 * MANUAL_CA_PER_UNIT)).abs() < 1e-9);
+        assert_eq!(composed.ca_b, vec![1.0], "the untouched axis is exactly neutral");
+    }
+
+    /// R25 B3: every CARRIED control renders NOTHING — the whole claim
+    /// `Tier::CarriedOnly` makes, re-derived from the registry so a row that
+    /// changes tier without gaining an engine stage fails here.
+    #[test]
+    fn carried_detail_renders_nothing() {
+        use crate::advisor::catalogue::{global_value, Shape, Tier, RECIPE_CONTROLS};
+        let img = DynamicImage::ImageRgb16(ImageBuffer::from_fn(64, 48, |x, y| {
+            Rgb([(x as u16) * 900, (y as u16) * 1200, ((x + y) as u16) * 500])
+        }));
+        let neutral_recipe = EditRecipe::default();
+        let neutral = develop_preview(&img, &neutral_recipe).to_rgb16();
+        let mut probed = 0usize;
+        for c in RECIPE_CONTROLS.iter().filter(|c| c.tier == Some(Tier::CarriedOnly)) {
+            // Through serde, so a renamed field cannot slip past — and BY
+            // SHAPE, because B3 put a flag on this tier.
+            let mut json = serde_json::to_value(&neutral_recipe).expect("recipe serialises");
+            json[c.name] = match c.shape {
+                Shape::Bool => serde_json::json!(true),
+                _ => serde_json::json!(c.range.map(|(_, hi)| hi).unwrap_or(1.0)),
+            };
+            let mut r: EditRecipe = serde_json::from_value(json)
+                .unwrap_or_else(|e| panic!("{}: probe value rejected: {e}", c.name));
+            r.clamp();
+            assert_ne!(
+                global_value(&r, c.name),
+                global_value(&neutral_recipe, c.name),
+                "{}: the probe must actually move the control",
+                c.name
+            );
+            let out = develop_preview(&img, &r).to_rgb16();
+            assert!(
+                out.pixels().zip(neutral.pixels()).all(|(p, q)| p.0 == q.0),
+                "{}: a CarriedOnly control moved a pixel — it is not carried, it renders",
+                c.name
+            );
+            // The GEOMETRIC stage runs after `develop_preview`, so inertness
+            // there needs its own word: a carried control must not reach the
+            // composed lens profile either (the manual CA pair is the only
+            // thing on that path, and it is `Rendered`).
+            assert_eq!(
+                *geometry_profile(&r),
+                *geometry_profile(&neutral_recipe),
+                "{}: a CarriedOnly control changed the composed lens geometry",
+                c.name
+            );
+            probed += 1;
+        }
+        assert!(probed >= 24, "premise: B2's nine plus B3's fifteen, got {probed}");
     }
 
     /// L04-2: the C2 coordinate contract — the GUI's normalised maps carry

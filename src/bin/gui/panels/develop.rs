@@ -258,7 +258,12 @@ impl AutoshopApp {
             };
             (
                 fam("presence"),
-                fam("detail"),
+                // R25 B3: the Detail section holds BOTH halves — the two
+                // sliders the AI plans with and the eight carried shaping
+                // axes — so its ● is the OR of the two families. They are
+                // separate families because one is AI-visible and one is not
+                // (see `CONTROL_FAMILIES`), not because the panel splits them.
+                fam("detail") || fam("detail_effects"),
                 fam("hsl"),
                 fam("color_grade"),
                 fam("curves"),
@@ -914,10 +919,31 @@ impl AutoshopApp {
             .default_open(false)
             .show(ui, |ui| {
                 {
+                    // The SAME disclosure line the Effects section uses (R25
+                    // B3): eight of the eleven controls here move a number and
+                    // no pixel in this app, and every one of them says so on
+                    // the head line of its own tooltip.
+                    let carried = tr(lang, "Carried to Lightroom, not rendered here");
                     let r = &mut self.recipe;
                     changed |= Self::slider(ui, lang, tr(lang, "Sharpening"), &mut r.sharpening, 0.0, 150.0, 0.0);
+                    // Lightroom's radius band is 0.5..3.0; 0 is our "absent",
+                    // so the track starts there. `Fine` (0.1 snap, one shown
+                    // decimal), NOT the width rule's `Frac`: the sidecar key
+                    // is written to ONE decimal (`+1.0`), so a 0.01 track
+                    // would show a number the file cannot carry and the value
+                    // would change under the user on the next read.
+                    changed |= Self::slider_impl(ui, lang, tr(lang, "Sharpen radius"), &mut r.sharpen_radius, 0.0, 3.0, 0.0, SliderFeel::Fine, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Sharpen detail"), &mut r.sharpen_detail, 0.0, 100.0, 0.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Sharpen masking"), &mut r.sharpen_mask, 0.0, 100.0, 0.0, carried);
+                    ui.add_space(SPACE_SM);
                     changed |=
                         Self::slider(ui, lang, tr(lang, "Noise Reduction"), &mut r.noise_reduction, 0.0, 100.0, 0.0);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Noise detail"), &mut r.nr_detail, 0.0, 100.0, 0.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Noise contrast"), &mut r.nr_contrast, 0.0, 100.0, 0.0, carried);
+                    ui.add_space(SPACE_SM);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Colour noise reduction"), &mut r.color_nr, 0.0, 100.0, 0.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Colour noise detail"), &mut r.color_nr_detail, 0.0, 100.0, 0.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Colour noise smoothness"), &mut r.color_nr_smooth, 0.0, 100.0, 0.0, carried);
                 }
                 // AI denoise as an ACTIVE op: run now, see it on canvas —
                 // export-time denoise (the Export section toggle) stays for
@@ -1029,10 +1055,13 @@ impl AutoshopApp {
         // `exp_quality` in dev_export) PLUS the in-camera profile's two
         // rendered components, which are not registry rows of their own:
         // `lens_profile` is one engine-only carrier and belongs to no family.
+        // R25 B3 added `lens_effects` — the manual CA pair (rendered), the
+        // auto-CA switch and the six de-fringe keys (carried). Same OR as the
+        // Detail section above, same reason.
         let lens_active = CONTROL_FAMILIES
             .iter()
-            .find(|f| f.name == "lens")
-            .is_some_and(|f| family_is_active(f, &self.recipe))
+            .filter(|f| f.name == "lens" || f.name == "lens_effects")
+            .any(|f| family_is_active(f, &self.recipe))
             || self.recipe.lens_profile.vignette_active()
             || self.recipe.lens_profile.geometry_active();
         egui::CollapsingHeader::new(section_title(tr(lang, "Lens"), lens_active))
@@ -1117,9 +1146,51 @@ impl AutoshopApp {
                 changed |= Self::slider(ui, lang, tr(lang, "Lens vignetting"), &mut self.recipe.lens_vignette, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Midpoint"), &mut self.recipe.lens_vignette_mid, 0.0, 100.0, 50.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Distortion"), &mut self.recipe.lens_distortion, -100.0, 100.0, 0.0);
+                // --- manual lateral CA (R25 B3) -------------------------
+                // RENDERED, so NO disclosure line: these two fold onto the
+                // very per-channel radius LUT the profile CA above uses
+                // (`render::geometry_profile`), and the preview, the export
+                // and the sidecar all agree. The pair sits under the
+                // distortion slider because it is the same kind of thing —
+                // an optical defect, not a mood.
+                ui.add_space(SPACE_SM);
+                ui.label(egui::RichText::new(tr(lang, "Chromatic aberration (manual)")).weak().small());
+                {
+                    let r = &mut self.recipe;
+                    changed |= Self::slider(ui, lang, tr(lang, "Red / cyan"), &mut r.ca_r, -100.0, 100.0, 0.0);
+                    changed |= Self::slider(ui, lang, tr(lang, "Blue / yellow"), &mut r.ca_b, -100.0, 100.0, 0.0);
+                }
+                // …and the CARRIED half of the same panel: Adobe's auto
+                // switch and the whole de-fringe block. Every one of these
+                // says on its own tooltip that it moves no pixel here.
+                let carried = tr(lang, "Carried to Lightroom, not rendered here");
+                if ui
+                    .checkbox(&mut self.recipe.auto_lateral_ca, tr(lang, "Auto lateral CA"))
+                    .on_hover_text(carried)
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.add_space(SPACE_SM);
+                ui.label(egui::RichText::new(tr(lang, "Defringe")).weak().small());
+                {
+                    let r = &mut self.recipe;
+                    // Adobe's own bands and Adobe's own neutrals: the amounts
+                    // rest at 0, the hue windows at 30/70 and 40/60 (this is
+                    // the one block in the recipe whose neutral is not zero,
+                    // and the reset target has to say so or double-click
+                    // would invent a 0..0 window).
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Purple amount"), &mut r.defringe_purple, 0.0, 20.0, 0.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Purple hue low"), &mut r.defringe_purple_lo, 0.0, 100.0, 30.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Purple hue high"), &mut r.defringe_purple_hi, 0.0, 100.0, 70.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Green amount"), &mut r.defringe_green, 0.0, 20.0, 0.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Green hue low"), &mut r.defringe_green_lo, 0.0, 100.0, 40.0, carried);
+                    changed |= Self::slider_hinted(ui, lang, tr(lang, "Green hue high"), &mut r.defringe_green_hi, 0.0, 100.0, 60.0, carried);
+                }
+                ui.add_space(SPACE_SM);
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. De-fringe in a later batch.",
+                        "Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA renders here too; the auto-CA switch and de-fringe are carried to Lightroom without being rendered.",
                     ))
                     .weak()
                     .small(),
