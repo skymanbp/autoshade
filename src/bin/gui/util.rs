@@ -330,9 +330,12 @@ pub(crate) fn xmp_loss_line(
         }
     }
     let mut parts: Vec<String> = Vec::new();
-    // Fixed order (skips before degradations), and a literal key per arm so
-    // the i18n audit sees every one of them.
-    for reason in [R::Bitmap, R::Disabled, R::ComponentsFlattened, R::Rotation, R::Recolour] {
+    // The ORDER (skips before degradations) and the membership are the
+    // writer's own `MaskLossReason::ALL`, not a second copy of it — a reason
+    // raised by the writer and missing here would be counted by nobody. The
+    // match below stays exhaustive so each arm keeps a literal key the i18n
+    // audit can see.
+    for reason in R::ALL {
         let n = losses.iter().filter(|l| l.reason == reason).count();
         if n == 0 {
             continue;

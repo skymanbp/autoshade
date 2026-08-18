@@ -1172,6 +1172,67 @@ pub const CONTROL_FAMILIES: [Family; 10] = [
 /// is a deliberate edit here rather than a silent hole in the partition.
 pub const NOT_A_TOOL: [&str; 3] = ["version", "rationale", "confidence"];
 
+/// The controls [`family_is_active`] does NOT count — a non-neutral value that
+/// changes no pixel anywhere, so lighting the develop panel's ● for it would
+/// promise an edit the preview, the export and Lightroom all render
+/// identically. One entry, with the reason, on the [`CARRIED_ONLY_GLOBAL`]
+/// pattern: an exemption without a stated reason is indistinguishable from an
+/// oversight.
+pub const DOT_EXEMPT: &[(&str, &str)] = &[(
+    "lens_vignette_mid",
+    "the engine builds the manual falloff LUT only when the AMOUNT is non-zero \
+     — `(r.lens_vignette != 0.0).then(|| manual_vignette_lut(…))`, render.rs — \
+     and the XMP carries VignetteMidpoint under the same zero amount, so a \
+     moved Midpoint alone changes no pixel in the preview, the export or \
+     Lightroom. Whenever it DOES matter, `lens_vignette != 0.0` has already lit \
+     the dot (R22 #16, re-checked R25)",
+)];
+
+/// Is any control in this family standing away from its neutral state?
+///
+/// The develop panel's ● per section — "a collapsed active adjustment is never
+/// invisible" — DERIVED from the family table instead of a hand-written field
+/// tuple per section. Four of those tuples had already drifted one field short
+/// of their section by R22 #16, and every LR-gap batch that adds a control adds
+/// another chance to forget one; a family that gains a member now gains the dot
+/// with it.
+///
+/// Neutral means "as [`EditRecipe::default`] has it", read through
+/// [`global_value`] so a renamed or retyped field cannot slip past — with the
+/// two structured look objects answering for THEMSELVES (see
+/// [`value_is_active`]) and [`DOT_EXEMPT`] left out.
+pub fn family_is_active(f: &Family, r: &EditRecipe) -> bool {
+    let neutral = EditRecipe::default();
+    f.members
+        .iter()
+        .filter(|m| !DOT_EXEMPT.iter().any(|(n, _)| n == *m))
+        .any(|m| match (global_value(r, m), global_value(&neutral, m)) {
+            (Some(live), Some(base)) => value_is_active(live, base),
+            // Unreachable: `every_ai_visible_control_belongs_to_exactly_one_
+            // family` proves the members ARE registry rows. A typo'd member
+            // must not claim activity it cannot read.
+            _ => false,
+        })
+}
+
+/// "Away from neutral", per shape: plain inequality against the default recipe,
+/// except for the two structured look objects, which are asked their OWN
+/// question.
+///
+/// `Hsl::is_neutral` / `ColorGrade::is_neutral` are the gates the renderer and
+/// the XMP writer skip on, and the grade's is deliberately NOT inequality: a
+/// wheel turned to a hue at zero saturation, or Blending moved on its own,
+/// changes no pixel (recipe.rs states it). Comparing the whole object would
+/// therefore light a ● over a section that renders identically — the same
+/// mistake [`DOT_EXEMPT`] exists to prevent for the lens midpoint.
+fn value_is_active(live: GlobalValue<'_>, neutral: GlobalValue<'_>) -> bool {
+    match live {
+        GlobalValue::Hsl(h) => !h.is_neutral(),
+        GlobalValue::Grade(cg) => !cg.is_neutral(),
+        other => other != neutral,
+    }
+}
+
 /// The THINKING ENVELOPE (R23-4, six fields since R23-1b): the model states
 /// what it sees, which tool families it will use and why, and the look it is
 /// aiming for BEFORE it writes the numbers — then critiques its own answer
@@ -2209,6 +2270,145 @@ mod tests {
             assert!(prompt.contains(f.name), "{} is missing from the think prompt", f.name);
             assert!(prompt.contains(f.covers), "{}'s coverage line is missing", f.name);
         }
+    }
+
+    /// R25 P0-0.3: the ● exemption is one named control with one stated
+    /// reason — the same shape [`CARRIED_ONLY_GLOBAL`] uses, and for the same
+    /// reason: an exemption that names a control nobody has, or gives no
+    /// account of itself, is indistinguishable from a control that was
+    /// forgotten.
+    #[test]
+    fn dot_exempt_names_exist_and_state_a_reason() {
+        for (name, why) in DOT_EXEMPT {
+            let c = global_control(name)
+                .unwrap_or_else(|| panic!("DOT_EXEMPT names unknown control {name}"));
+            assert!(!why.trim().is_empty(), "{name} is exempt with no stated reason");
+            // Exempting a control no family claims would be an exemption from
+            // nothing — `family_is_active` only ever walks family members.
+            assert!(
+                CONTROL_FAMILIES.iter().any(|f| f.members.contains(&c.name)),
+                "{name} belongs to no family, so nothing was exempting it"
+            );
+            // …and it really is left out of its family's verdict.
+            let f = CONTROL_FAMILIES
+                .iter()
+                .find(|f| f.members.contains(&c.name))
+                .expect("checked above");
+            let mut moved = EditRecipe::default();
+            let neutral = EditRecipe::default();
+            match name {
+                &"lens_vignette_mid" => moved.lens_vignette_mid = 12.0,
+                other => panic!("{other} has no exemption probe — add one with the entry"),
+            }
+            assert_ne!(
+                global_value(&moved, name),
+                global_value(&neutral, name),
+                "{name}: the probe must actually move the control"
+            );
+            assert!(!family_is_active(f, &moved), "{name} must not light the {} dot", f.name);
+        }
+    }
+
+    /// R25 P0 risk gate: [`family_is_active`] REPLACED five hand-written field
+    /// tuples in the develop panel, so it has to be the same predicate, not a
+    /// better one. The oracle here is those tuples verbatim (GUI HEAD before
+    /// R25, `panels/develop.rs:240-252` + `:969-972`), run against 200
+    /// pseudo-random recipes that move every field each section reads —
+    /// including the `lens_vignette_mid` exemption, which is the one place the
+    /// two algorithms COULD differ if the exemption were dropped.
+    ///
+    /// It stays in the tree deliberately: when a family gains a member (the
+    /// B2–B5 batches do exactly that), this test fails and names the section
+    /// whose dot just widened — which is a decision worth stating, not drift.
+    #[test]
+    fn the_family_dots_match_the_hand_written_predicates_they_replaced() {
+        // splitmix64, so the sequence is deterministic and the low bits are
+        // not the counter's.
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = *seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let fam = |name: &str| {
+            CONTROL_FAMILIES.iter().find(|f| f.name == name).expect("a declared family")
+        };
+        let (mut lit, mut exempt_probes) = ([0usize; 6], 0usize);
+        for i in 0..200 {
+            // A sparse draw: mostly neutral, so the interesting cases (exactly
+            // one field off zero) actually occur instead of every section
+            // being active on every round.
+            fn pick(seed: &mut u64) -> f32 {
+                let v = next(seed);
+                if v.is_multiple_of(3) { ((v >> 8) % 201) as f32 - 100.0 } else { 0.0 }
+            }
+            let s = &mut s;
+            let mut r = EditRecipe {
+                clarity: pick(s),
+                dehaze: pick(s),
+                vibrance: pick(s),
+                saturation: pick(s),
+                sharpening: pick(s).abs(),
+                noise_reduction: pick(s).abs(),
+                lens_vignette: pick(s),
+                lens_vignette_mid: if next(s).is_multiple_of(2) { 50.0 } else { (next(s) % 101) as f32 },
+                lens_distortion: pick(s),
+                ..Default::default()
+            };
+            r.hsl.hue[(next(s) % 8) as usize] = pick(s);
+            r.color_grade.shadow_sat = pick(s).abs();
+            r.color_grade.shadow_hue = (next(s) % 361) as f32;
+            r.color_grade.blending = (next(s) % 101) as f32;
+            r.color_grade.global_lum = pick(s);
+            if next(s).is_multiple_of(3) {
+                r.tone_curve = vec![CurvePoint { input: 0, output: 0 }];
+            }
+            if next(s).is_multiple_of(5) {
+                r.blue_curve = vec![CurvePoint { input: 255, output: 200 }];
+            }
+            // The predicates as the panel wrote them, verbatim.
+            let presence =
+                r.clarity != 0.0 || r.dehaze != 0.0 || r.vibrance != 0.0 || r.saturation != 0.0;
+            let detail = r.sharpening != 0.0 || r.noise_reduction != 0.0;
+            let hsl = !r.hsl.is_neutral();
+            let grade = !r.color_grade.is_neutral();
+            let curves = !r.tone_curve.is_empty()
+                || !r.red_curve.is_empty()
+                || !r.green_curve.is_empty()
+                || !r.blue_curve.is_empty();
+            let lens = r.lens_vignette != 0.0 || r.lens_distortion != 0.0;
+            for (k, (label, old, new)) in [
+                ("presence", presence, family_is_active(fam("presence"), &r)),
+                ("detail", detail, family_is_active(fam("detail"), &r)),
+                ("hsl", hsl, family_is_active(fam("hsl"), &r)),
+                ("color_grade", grade, family_is_active(fam("color_grade"), &r)),
+                ("curves", curves, family_is_active(fam("curves"), &r)),
+                ("lens", lens, family_is_active(fam("lens"), &r)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(old, new, "recipe #{i}: the {label} dot changed meaning — {r:?}");
+                lit[k] += usize::from(new);
+            }
+            // The midpoint exemption is the one case the two algorithms could
+            // differ on, so it has to OCCUR: a moved midpoint with the amount
+            // at rest.
+            if r.lens_vignette == 0.0 && r.lens_distortion == 0.0 && r.lens_vignette_mid != 50.0 {
+                exempt_probes += 1;
+                assert!(!lens, "premise: the panel's own predicate ignores the midpoint");
+            }
+        }
+        // A draw that never lit (or never left dark) a section would agree with
+        // anything — the equality above would prove nothing about it.
+        for (k, label) in
+            ["presence", "detail", "hsl", "color_grade", "curves", "lens"].iter().enumerate()
+        {
+            assert!(lit[k] > 0 && lit[k] < 200, "{label}: the draw was degenerate ({} lit)", lit[k]);
+        }
+        assert!(exempt_probes > 0, "no recipe moved the midpoint alone — the exemption is untested");
     }
 
     /// The envelope wraps the recipe schema VERBATIM and adds four thinking

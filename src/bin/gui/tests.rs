@@ -5618,6 +5618,85 @@
         );
     }
 
+    /// R25 P0-0.4: the five section ● predicates are the control registry's
+    /// families now, not five hand-written field tuples — so a control that
+    /// joins a family joins its section's dot, which is the drift R22 #16 had
+    /// to repair four times by hand.
+    ///
+    /// Four steps per section, the shape `the_local_masks_dot_matches_its_row_
+    /// dots` uses: prove the header was DRAWN (or the negative below proves
+    /// nothing), prove it carries no ●, move ONE control the family owns, and
+    /// see the ● appear. The control moved is read off `CONTROL_FAMILIES`
+    /// rather than named here, so this test cannot drift from the table
+    /// either.
+    #[test]
+    fn section_dots_follow_the_registry_families() {
+        use autoshop::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
+        /// (family, the header the panel draws for it, a move inside it)
+        type Case = (&'static str, &'static str, fn(&mut autoshop::recipe::EditRecipe));
+        let cases: [Case; 5] = [
+            ("presence", "Presence", |r| r.dehaze = 40.0),
+            ("detail", "Detail", |r| r.noise_reduction = 25.0),
+            ("hsl", "Color Mixer (HSL)", |r| r.hsl.saturation[3] = -30.0),
+            ("color_grade", "Color Grading", |r| r.color_grade.highlight_sat = 20.0),
+            ("curves", "Curves", |r| {
+                r.green_curve = vec![autoshop::recipe::CurvePoint { input: 128, output: 140 }]
+            }),
+        ];
+        for (family, header, mutate) in cases {
+            let f = CONTROL_FAMILIES
+                .iter()
+                .find(|f| f.name == family)
+                .unwrap_or_else(|| panic!("{family} is not a declared family"));
+            let mut app = AutoshopApp::default();
+            assert!(!family_is_active(f, &app.recipe), "{family}: a fresh recipe is neutral");
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == header),
+                "{family}: the {header} header was not drawn — this test proves nothing: {seen:?}"
+            );
+            assert!(
+                !seen.iter().any(|t| t == &format!("{header}  ●")),
+                "{family}: a neutral section must not claim an adjustment: {seen:?}"
+            );
+            mutate(&mut app.recipe);
+            assert!(family_is_active(f, &app.recipe), "premise: the move woke the family up");
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == &format!("{header}  ●")),
+                "{family}: a moved control must light {header}: {seen:?}"
+            );
+        }
+    }
+
+    /// R25 P0-0.3: the ONE control the ● deliberately ignores stays ignored
+    /// after the predicate became a derivation — `lens_vignette_mid` renders
+    /// nothing while the amount is at rest (`catalogue::DOT_EXEMPT` carries the
+    /// full reason), and deriving the dot from the `lens` family would have
+    /// silently started lighting it.
+    #[test]
+    fn lens_midpoint_alone_still_lights_no_dot() {
+        let mut app = AutoshopApp::default();
+        app.recipe.lens_vignette_mid = 90.0;
+        assert_eq!(app.recipe.lens_vignette, 0.0, "premise: the amount is at rest");
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Lens"),
+            "the Lens header was not drawn — this test proves nothing: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|t| t == "Lens  ●"),
+            "a midpoint that changes no pixel must not claim a lens correction: {seen:?}"
+        );
+        // …and the amount, which DOES render, still lights it.
+        app.recipe.lens_vignette = -35.0;
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Lens  ●"),
+            "a real vignette correction must light the section: {seen:?}"
+        );
+    }
+
     /// R22 #16h (verification, no behaviour change): the export-side MaskLoss
     /// disclosure rides `toast()`, so repeating the SAME save must not stack
     /// copies — the dedup refreshes the live toast and moves it to the BACK of

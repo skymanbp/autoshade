@@ -2,6 +2,10 @@
 
 use crate::*;
 
+// The section ● predicate and the table it reads (R25 P0) — see
+// `develop_panel` and `dev_lens`.
+use autoshop::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
+
 impl AutoshopApp {
     /// One labelled slider; double-click resets to `default` (the Lightroom
     /// gesture), hover + ↑/↓ nudges by a domain-appropriate step (Shift ×10 —
@@ -237,18 +241,22 @@ impl AutoshopApp {
         // A section whose values are non-neutral shows a ● so a collapsed
         // active adjustment is never invisible. Flags are snapshot up front —
         // Copy bools, so no borrow spans the section closures (E0500).
+        //
+        // The five predicates are DERIVED from the control registry's families
+        // (R25 P0): each was a hand-written field tuple that had to be widened
+        // by hand whenever its section gained a control, and R22 #16 had
+        // already found four of them one field short. `family_is_active` reads
+        // the same table the AI's tool plan is built from, so a control that
+        // joins a family joins its dot.
         let (presence_active, detail_active, hsl_active, grade_active, curves_active) = {
             let r = &self.recipe;
-            (
-                r.clarity != 0.0 || r.dehaze != 0.0 || r.vibrance != 0.0 || r.saturation != 0.0,
-                r.sharpening != 0.0 || r.noise_reduction != 0.0,
-                !r.hsl.is_neutral(),
-                !r.color_grade.is_neutral(),
-                !r.tone_curve.is_empty()
-                    || !r.red_curve.is_empty()
-                    || !r.green_curve.is_empty()
-                    || !r.blue_curve.is_empty(),
-            )
+            let fam = |name: &str| {
+                CONTROL_FAMILIES
+                    .iter()
+                    .find(|f| f.name == name)
+                    .is_some_and(|f| family_is_active(f, r))
+            };
+            (fam("presence"), fam("detail"), fam("hsl"), fam("color_grade"), fam("curves"))
         };
         changed |= self.dev_tone_wb(ui);
         changed |= self.dev_presence(ui, presence_active);
@@ -956,18 +964,16 @@ impl AutoshopApp {
 
         // --- 镜头校正: in-camera profile + manual corrections -----------------
         ui.add_space(SPACE_MD);
-        // Field set: the section's two manual sliders + the in-camera profile's
-        // two rendered components. `lens_vignette_mid` is the deliberate
-        // omission (R22 #16 re-checked it): the engine builds the manual falloff
-        // LUT only when the AMOUNT is non-zero — `(r.lens_vignette !=
-        // 0.0).then(|| manual_vignette_lut(…))`, render.rs — and the XMP carries
-        // VignetteMidpoint under the same zero amount, so a moved Midpoint alone
-        // changes no pixel in the preview, the export or Lightroom. Whenever it
-        // DOES matter, `lens_vignette != 0.0` has already lit the dot; listing
-        // it could therefore only add a ● over a section that renders
-        // identically. Same rule as `exp_quality` in dev_export.
-        let lens_active = self.recipe.lens_vignette != 0.0
-            || self.recipe.lens_distortion != 0.0
+        // Field set: the registry's `lens` family (the section's two manual
+        // sliders — `lens_vignette_mid` is exempt, and the reason now lives
+        // with the exemption in `catalogue::DOT_EXEMPT`; same rule as
+        // `exp_quality` in dev_export) PLUS the in-camera profile's two
+        // rendered components, which are not registry rows of their own:
+        // `lens_profile` is one engine-only carrier and belongs to no family.
+        let lens_active = CONTROL_FAMILIES
+            .iter()
+            .find(|f| f.name == "lens")
+            .is_some_and(|f| family_is_active(f, &self.recipe))
             || self.recipe.lens_profile.vignette_active()
             || self.recipe.lens_profile.geometry_active();
         egui::CollapsingHeader::new(section_title(tr(lang, "Lens"), lens_active))

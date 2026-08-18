@@ -264,12 +264,23 @@ fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u6
 }
 
 /// Bytes per SOURCE pixel the baked develop chain holds ON TOP of the decoded
-/// buffer at its peak (`render_baked_to_image`): the f32 planes
-/// (`Vec<[f32; 3]>`, 12 B/px, alive to the end of the fn), the packed 16-bit
-/// frame (6 B/px) and the fresh full-size output the geometric resamplers
-/// allocate (6 B/px) — all while the decoded source is still borrowed
-/// underneath. 12 + 6 + 6 = 24. If a further full-frame stage joins that
-/// chain, this constant must grow with it.
+/// buffer at its peak (`render_baked_to_image`). The f32 planes
+/// (`Vec<[f32; 3]>`, 12 B/px) are alive from the transcode to the end of the
+/// function; what rides ALONGSIDE them is what varies, and the peak is the
+/// worst of those moments — enumerated as data (not prose) by
+/// `develop_peak_accounts_for_every_pass`, which is where a new stage lands.
+///
+/// Three of those moments tie at 24: a spatial pass (12 + the luma plane 4 +
+/// `blur_plane`'s two chained planes 8), a geometric resample (12 + the Rgb16
+/// frame 6 + the resampler's fresh output 6) and the AI-denoise round trip.
+/// The chain has been tuned to that ceiling deliberately (the A7 batch), so
+/// "12 + 6 + 6" is one path to 24 rather than the whole account.
+///
+/// A further full-frame stage raises this constant only if it is alive AT THE
+/// SAME TIME as the planes: three SEQUENTIAL unsharp passes (clarity, texture,
+/// sharpening) each drop their two planes before the next allocates
+/// (`render.rs`'s memory note on `apply_masks`), so adding one costs nothing
+/// here. A stage that holds a new buffer concurrently costs its full width.
 const PIPELINE_BYTES_PER_PIXEL: u64 = 24;
 
 /// [`decode_peak_bytes`] plus the develop chain's own full-frame buffers —
@@ -1491,6 +1502,51 @@ mod tests {
         let err = embedded_xmp(&big).unwrap_err().to_string();
         assert!(err.contains("larger than"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R25 P0: the accounting BEHIND [`PIPELINE_BYTES_PER_PIXEL`], written as
+    /// data so a new full-frame stage has somewhere to land and the constant
+    /// can never be a number without a derivation.
+    ///
+    /// Each row is one moment of `render::render_baked_to_image` and the
+    /// per-SOURCE-pixel bytes it holds ON TOP of the decoded buffer (which
+    /// [`decode_peak_bytes`] charges separately). Re-read from the render
+    /// source, not from the old comment: `img.to_rgb16()` is a 6 B/px staging
+    /// copy dropped right after the transcode; `unsharp_luma_weighted` /
+    /// `noise_reduce_luma` hold one luma plane while `blur_plane` chains two
+    /// more (`box_blur_v` allocates its output before the previous buffer is
+    /// dropped); `rgb16_source` BORROWS an already-Rgb16 frame, and
+    /// `rotate_straighten` writes an INSCRIBED (never larger) output, so a
+    /// resampler costs exactly one fresh frame.
+    ///
+    /// The one 61 MP peak measured on real hardware in R24
+    /// (`render::tests::portrait_rotation_peak_on_a_61mp_frame`, 1384 MB) is
+    /// the RAW path's `orient_f32` — source + rotated copy, a different
+    /// function this gate does not cover — and it landed BELOW its own
+    /// 1464 MB prediction, so it neither raises nor lowers the number here.
+    #[test]
+    fn develop_peak_accounts_for_every_pass() {
+        use image::metadata::Orientation;
+        let stages: [(&str, u64); 6] = [
+            ("transcode: to_rgb16 staging 6 + the f32 planes 12", 6 + 12),
+            ("spatial pass: planes 12 + luma 4 + blur_plane's two chained planes 8", 12 + 4 + 8),
+            ("pack: planes 12 + the packed u16 frame 6", 12 + 6),
+            ("geometry: planes 12 + the frame 6 + the resampler's fresh output 6", 12 + 6 + 6),
+            ("crop: planes 12 + the frame 6 + the (never larger) cropped copy 6", 12 + 6 + 6),
+            ("AI denoise: planes 12 + the sidecar's decoded output 6 + its to_rgb16 6", 12 + 6 + 6),
+        ];
+        let (worst, peak) =
+            stages.iter().max_by_key(|(_, b)| *b).copied().expect("the table is not empty");
+        assert_eq!(
+            PIPELINE_BYTES_PER_PIXEL, peak,
+            "the constant must be the WORST moment of the chain — {worst}"
+        );
+        // …and the gate really charges it, per SOURCE pixel, on top of the
+        // decode (which is 0 here so the arithmetic is visible).
+        assert_eq!(
+            develop_peak_bytes(0, Orientation::NoTransforms, 1_000_000),
+            1_000_000 * peak
+        );
     }
 
     /// L02: the develop entry charges downstream bytes-per-pixel — the same

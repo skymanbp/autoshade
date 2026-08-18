@@ -216,6 +216,26 @@ pub enum MaskLossReason {
 }
 
 impl MaskLossReason {
+    /// Every reason, in the order the prose channels group them (skips before
+    /// degradations) — the ONE list both disclosure surfaces iterate
+    /// ([`describe_mask_losses`] and the GUI's `xmp_loss_line`).
+    ///
+    /// Those two used to carry a hand-written array each. [`en`]'s exhaustive
+    /// match stops the BUILD when a variant is added, but an iteration array
+    /// does not: the new reason would be raised by the writer, counted by
+    /// nobody and printed by neither surface. Pinned by
+    /// `mask_loss_reason_all_covers_every_variant`, whose own exhaustive match
+    /// is where a new variant lands next.
+    ///
+    /// [`en`]: MaskLossReason::en
+    pub const ALL: [MaskLossReason; 5] = [
+        MaskLossReason::Bitmap,
+        MaskLossReason::Disabled,
+        MaskLossReason::ComponentsFlattened,
+        MaskLossReason::Rotation,
+        MaskLossReason::Recolour,
+    ];
+
     /// English label for the prose channel (CLI stderr / web reply). The GUI
     /// renders the same variants in the UI language instead.
     pub fn en(self) -> &'static str {
@@ -264,13 +284,7 @@ pub fn describe_mask_losses(losses: &[MaskLoss]) -> Option<String> {
         return None;
     }
     let mut parts: Vec<String> = Vec::new();
-    for reason in [
-        MaskLossReason::Bitmap,
-        MaskLossReason::Disabled,
-        MaskLossReason::ComponentsFlattened,
-        MaskLossReason::Rotation,
-        MaskLossReason::Recolour,
-    ] {
+    for reason in MaskLossReason::ALL {
         let names: Vec<&str> = losses
             .iter()
             .filter(|l| l.reason == reason)
@@ -2124,22 +2138,52 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
     bad
 }
 
+/// The band a `crs:` number must land in to be a value this app can import —
+/// DERIVED from the control registry (`catalogue::RECIPE_CONTROLS`) rather than
+/// restated here. A new attribute key used to need an edit in TWO places, this
+/// table and [`owned_attr_keys`]; miss this one and the key still imports, but
+/// [`unparsable_crs_numbers`] never checks it, so a nonsense value arrives as a
+/// silent clamp with no disclosure. Now the writer's list is the only edit.
+///
+/// Three residues stay spelled out, because the registry states no field for
+/// them:
+///
+///   * **the sidecar's own SCALE** — `crs:Sharpness` is ACR's 0..100 while the
+///     `sharpening` row documents the recipe's 0..150 (the writer scales ×⅔,
+///     the reader ×1.5). What decides whether a DOCUMENT is readable is the
+///     document's band, so this one key keeps its own.
+///   * **the colour-grade wheels** — one registry row (`color_grade`) stands
+///     for 14 attributes, so the per-wheel bands come off the field NAME
+///     (`ColorGrade::clamp`: hue 0..360, sat + blending 0..100, lum + balance
+///     ±100), keyed through [`COLOR_GRADE_CRS`] so a new wheel inherits them.
+///   * **the crop rectangle** — one row for four 0..1 coordinates
+///     (`Crop::clamp`); `CropAngle` is a scalar row of its own and derives.
+///
+/// Everything else falls to ±100 — what `Hsl::clamp` enforces for the 24 mixer
+/// attributes and what every remaining signed slider uses.
 fn crs_number_is_in_recipe_range(key: &str, value: f32) -> bool {
-    let (lo, hi) = match key {
-        "Temperature" => (2000.0, 40000.0),
-        "Exposure2012" => (-5.0, 5.0),
-        "Sharpness" | "LuminanceSmoothing" | "VignetteMidpoint"
-        | "SplitToningShadowSaturation" | "SplitToningHighlightSaturation"
-        | "ColorGradeMidtoneSat" | "ColorGradeGlobalSat" | "ColorGradeBlending" => {
+    use crate::advisor::catalogue::{COLOR_GRADE_CRS, RECIPE_CONTROLS};
+    let grade_band = |field: &str| {
+        if field.ends_with("_hue") {
+            (0.0, 360.0)
+        } else if field.ends_with("_sat") || field == "blending" {
             (0.0, 100.0)
+        } else {
+            (-100.0, 100.0)
         }
-        "SplitToningShadowHue"
-        | "SplitToningHighlightHue"
-        | "ColorGradeMidtoneHue"
-        | "ColorGradeGlobalHue" => (0.0, 360.0),
-        "CropTop" | "CropLeft" | "CropBottom" | "CropRight" => (0.0, 1.0),
-        "CropAngle" => (-45.0, 45.0),
-        _ => (-100.0, 100.0),
+    };
+    let (lo, hi) = if key == "Sharpness" {
+        (0.0, 100.0)
+    } else if let Some(band) =
+        RECIPE_CONTROLS.iter().find(|c| c.crs.attr() == Some(key)).and_then(|c| c.range)
+    {
+        band
+    } else if let Some((field, _)) = COLOR_GRADE_CRS.iter().find(|(_, k)| *k == key) {
+        grade_band(field)
+    } else if matches!(key, "CropTop" | "CropLeft" | "CropBottom" | "CropRight") {
+        (0.0, 1.0)
+    } else {
+        (-100.0, 100.0)
     };
     (lo..=hi).contains(&value)
 }
@@ -3831,6 +3875,100 @@ mod tests {
         assert!(mask_export_losses(&faithful).is_empty(), "an exportable mask loses nothing");
         assert!(describe_mask_losses(&[]).is_none(), "an empty list has nothing to say");
         assert!(mask_export_losses(&EditRecipe::default()).is_empty(), "no masks, no losses");
+    }
+
+    /// R25 P0-0.6: both disclosure surfaces ITERATE `MaskLossReason::ALL`
+    /// (here and the GUI's `xmp_loss_line`), so the list is the one place a
+    /// reason can be forgotten — and the match below is where a new variant
+    /// stops the build, with `ALL` the next thing it has to satisfy.
+    #[test]
+    fn mask_loss_reason_all_covers_every_variant() {
+        // Adding a variant makes THIS match non-exhaustive; the arm you write
+        // carries the next rank, and the two asserts then fail until `ALL`
+        // lists the newcomer in that position.
+        fn rank(r: MaskLossReason) -> usize {
+            match r {
+                MaskLossReason::Bitmap => 0,
+                MaskLossReason::Disabled => 1,
+                MaskLossReason::ComponentsFlattened => 2,
+                MaskLossReason::Rotation => 3,
+                MaskLossReason::Recolour => 4,
+            }
+        }
+        for (i, r) in MaskLossReason::ALL.into_iter().enumerate() {
+            assert_eq!(rank(r), i, "ALL must list every reason once, in rank order");
+            assert!(!r.en().trim().is_empty(), "{r:?} has no label for the prose channel");
+        }
+        // Every reason the WRITER can raise reaches the prose. The mutation
+        // this catches: a sixth reason raised by `masks_xml` and left out of
+        // `ALL` would be silently invisible in the sentence.
+        let losses: Vec<MaskLoss> = MaskLossReason::ALL
+            .into_iter()
+            .map(|reason| MaskLoss { name: format!("m{}", rank(reason)), reason })
+            .collect();
+        let line = describe_mask_losses(&losses).expect("five losses ⇒ a line");
+        for r in MaskLossReason::ALL {
+            assert!(line.contains(r.en()), "{r:?} never reaches the prose: {line}");
+            assert!(line.contains(&format!("m{}", rank(r))), "{r:?} loses its mask name: {line}");
+        }
+    }
+
+    /// R25 P0-0.1: the bands `unparsable_crs_numbers` judges a document by ARE
+    /// the control registry's, not a second hand-written copy — so a new
+    /// attribute row arrives with its check already wired, and the two
+    /// documented residues (the sidecar's own Sharpness scale, the families
+    /// one row cannot state) are the only hand-written numbers left.
+    #[test]
+    fn import_bands_are_the_registry_bands() {
+        use crate::advisor::catalogue::RECIPE_CONTROLS;
+        let mut checked = 0;
+        for c in RECIPE_CONTROLS.iter() {
+            let (Some(key), Some((lo, hi))) = (c.crs.attr(), c.range) else { continue };
+            checked += 1;
+            if key == "Sharpness" {
+                // The one key on the DOCUMENT's scale rather than the recipe's:
+                // ACR writes 0..100 and the reader multiplies by 1.5.
+                assert!(crs_number_is_in_recipe_range(key, 100.0), "a full ACR Sharpness is legal");
+                assert!(!crs_number_is_in_recipe_range(key, 101.0), "…and 101 is not");
+                assert_eq!(100.0 * 1.5, hi, "the sidecar band × the reader's scale is the row's");
+                continue;
+            }
+            // A full span outside each end (never a multiple of the bound: for
+            // 2000..40000, `lo * 10` lands back INSIDE).
+            let span = (hi - lo).max(1.0);
+            assert!(crs_number_is_in_recipe_range(key, lo), "{key}: {lo} is the row's own floor");
+            assert!(crs_number_is_in_recipe_range(key, hi), "{key}: {hi} is the row's own ceiling");
+            assert!(!crs_number_is_in_recipe_range(key, hi + span), "{key}: above {hi} is out");
+            assert!(!crs_number_is_in_recipe_range(key, lo - span), "{key}: below {lo} is out");
+        }
+        assert!(checked >= 15, "the registry stopped naming attribute rows: {checked}");
+        // The three residues the registry cannot state, each derived from the
+        // clamp that enforces it.
+        for (key, inside, outside) in [
+            ("SplitToningShadowHue", 359.0, 361.0),   // ColorGrade::clamp hue 0..360
+            ("ColorGradeGlobalSat", 100.0, -1.0),     //                  sat 0..100
+            ("ColorGradeBlending", 0.0, 101.0),       //             blending 0..100
+            ("SplitToningBalance", -100.0, -101.0),   //              balance ±100
+            ("ColorGradeShadowLum", 100.0, 101.0),    //                  lum ±100
+            ("CropRight", 1.0, 1.5),                  // Crop::clamp 0..1
+            ("HueAdjustmentRed", -100.0, 101.0),      // Hsl::clamp ±100
+        ] {
+            assert!(crs_number_is_in_recipe_range(key, inside), "{key}: {inside} must be legal");
+            assert!(!crs_number_is_in_recipe_range(key, outside), "{key}: {outside} must not be");
+        }
+        // …and the derivation is what the DISCLOSURE reads: a Contrast2012
+        // outside the `contrast` row's band is named, one inside is not.
+        let doc = |v: &str| {
+            format!(
+                "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                 xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                 <rdf:Description rdf:about=\"\" \
+                 xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                 crs:Contrast2012=\"{v}\"/></rdf:RDF></x:xmpmeta>"
+            )
+        };
+        assert!(unparsable_crs_numbers(&doc("150")).iter().any(|k| k == "Contrast2012"));
+        assert!(unparsable_crs_numbers(&doc("50")).is_empty(), "an in-band value says nothing");
     }
 
     #[test]
