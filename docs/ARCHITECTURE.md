@@ -578,9 +578,18 @@ number, which is never re-issued), mask rasters, `pixels.json`
 link) and, since v0.22.0, `variants.json` — the GUI's variant strip
 (background variants' kind/recipe/raster origin + the active card's
 three-valued kind, each card since v0.30.0 also carrying an opaque stable
-`id` and an optional `name`, both additive at `v=1`: the record is not
-`deny_unknown_fields`, so an older build reads a newer strip and simply
-ignores the pair), which is what lets a 「反推 Reverse-fit」 or 「AI 生成」
+`id` and an optional `name`, both additive at `v=1` in BOTH directions: the
+record is not `deny_unknown_fields`, so an older build reads a newer strip
+without refusing it, and a `#[serde(flatten)]` capture-all on `VariantsRecord`
+/ `VariantEntry` carries members it does not know back out again — which is
+what makes the read-modify-write arm of `store::variants_member`
+(`ActiveWrite::Kind`, used by the CLI `match` and the reverse-fit worker) safe
+to run against a strip a newer build wrote. Read tolerance alone would have
+had that arm publish a truncated record over the newer file. A writer that
+OWNS the whole strip (`ActiveWrite::Strip`, the GUI) authors the record from
+its live cards and replaces it wholesale, by contract; an empty capture-all
+serialises to nothing, so files that use no future member are byte-identical
+to what earlier builds wrote), which is what lets a 「反推 Reverse-fit」 or 「AI 生成」
 card survive a reopen and lets the quit dialog's Save-all genuinely save
 background variants instead of livelocking.
 

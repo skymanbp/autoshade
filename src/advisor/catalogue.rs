@@ -1814,10 +1814,36 @@ mod tests {
     ///     goes back to sleep. Catches the MULTIPLIERS, which change nothing on
     ///     their own — `amount` is the case, and one-hot alone called it inert.
     ///
-    /// Both directions are asserted: a slider the gate cannot notice at all is
-    /// a slider that does nothing, which is precisely what the inclusion law
-    /// below exists to forbid. Everything goes through serde, so the probe
-    /// cannot drift from the field names the registry is keyed by.
+    /// For the SCALARS both directions are asserted: a slider the gate cannot
+    /// notice at all is a slider that does nothing, which is precisely what
+    /// the inclusion law below exists to forbid. Everything goes through
+    /// serde, so the probe cannot drift from the field names the registry is
+    /// keyed by.
+    ///
+    /// WHAT THIS TEST COVERS, exactly (R24 round-end LOW-3 — the earlier
+    /// `is_scalar` filter left three of the four local `RenderedNotExported`
+    /// rows unprobed and their render half a free declaration):
+    ///
+    ///   * `Shape::Number` / `NullableNumber` — probed both ways, above.
+    ///   * `Shape::Bool` — probed ONE way. `enabled` is a term of the gate
+    ///     itself, so flipping it is decisive; `inverted` moves WHERE the
+    ///     adjustment lands and never whether the mask is awake, so the gate
+    ///     is structurally blind to it and its silence proves nothing. Hence:
+    ///     a flag the gate DOES weigh must be claimed as rendering, and one it
+    ///     cannot see is left to its own test (`inverted`:
+    ///     `render::tests::mask_coverage_reports_the_engine_weight`, which
+    ///     asserts the coverage map flips end for end).
+    ///   * `Shape::EngineCarrier` (`components`, `color_gains`) — NOT probed
+    ///     here: neither is a JSON scalar the one-hot/zeroing probe can write,
+    ///     and `components` needs a raster on disk to compose. Their render
+    ///     half is backed by their own tests —
+    ///     `render::tests::mask_components_compose_add_subtract_intersect` and
+    ///     `render::tests::a_missing_component_raster_makes_the_whole_adjustment_inert`
+    ///     for `components`; for `color_gains`,
+    ///     `fit_zoned::tests::zone_dials_turn_a_pale_sky_golden_through_the_engine`,
+    ///     which renders a recipe whose ONLY colour term is `color_gains`
+    ///     through `develop_preview` and asserts the masked pixels move (there
+    ///     is no test named for `color_gains` inside `render.rs` itself).
     #[test]
     fn local_tiers_agree_with_the_engines_own_activity_gate() {
         // The render-side gate, spelled once (render.rs's mask loop).
@@ -1837,17 +1863,38 @@ mod tests {
         assert!(gate(&baseline), "premise: the baseline mask is active");
         assert!(!gate(&LocalAdjustment::default()), "premise: a default mask is not");
 
-        for c in LOCAL_CONTROLS.iter().filter(|c| c.shape.is_scalar()) {
-            let with = |m: &LocalAdjustment, v: f32| -> LocalAdjustment {
-                let mut j = serde_json::to_value(m).expect("LocalAdjustment serializes");
-                j[c.name] = json!(v);
-                serde_json::from_value(j)
-                    .unwrap_or_else(|e| panic!("{} is not a plain number in serde: {e}", c.name))
+        for c in LOCAL_CONTROLS.iter() {
+            // The two probe values for this shape: what "set" and "neutral"
+            // mean as JSON. Anything else is out of this probe's reach and
+            // says so in the doc above.
+            let (set, neutral) = match c.shape {
+                Shape::Number | Shape::NullableNumber => (json!(1.0), json!(0.0)),
+                Shape::Bool => (json!(true), json!(false)),
+                _ => continue,
             };
-            let wakes_it = gate(&with(&LocalAdjustment::default(), 1.0));
-            let sleeps_without_it = !gate(&with(&baseline, 0.0));
+            let with = |m: &LocalAdjustment, v: &serde_json::Value| -> LocalAdjustment {
+                let mut j = serde_json::to_value(m).expect("LocalAdjustment serializes");
+                j[c.name] = v.clone();
+                serde_json::from_value(j).unwrap_or_else(|e| {
+                    panic!("{} does not accept its own {:?} probe value in serde: {e}", c.name, c.shape)
+                })
+            };
+            let wakes_it = gate(&with(&LocalAdjustment::default(), &set));
+            let sleeps_without_it = !gate(&with(&baseline, &neutral));
             let renders = wakes_it || sleeps_without_it;
             let claimed = c.tier.is_some_and(Tier::renders);
+            if c.shape == Shape::Bool {
+                // ONE-WAY (see the doc): the gate weighs `enabled` and cannot
+                // see `inverted`, so a flag it DOES notice must be claimed as
+                // rendering, while its silence is not evidence of inertness.
+                assert!(
+                    !renders || claimed,
+                    "LocalAdjustment.{}: the engine's gate answers differently when this flag \
+                     flips, but the registry does not claim it renders",
+                    c.name
+                );
+                continue;
+            }
             assert_eq!(
                 claimed, renders,
                 "LocalAdjustment.{}: the registry says renders={claimed}, but the engine's \
@@ -1856,6 +1903,17 @@ mod tests {
                 c.name
             );
         }
+        // The Bool arm above must really have PROBED `enabled` — an empty or
+        // shape-filtered loop would make it vacuous, which is exactly the
+        // defect being fixed. `enabled` is the one flag the gate reads.
+        assert!(
+            !gate(&LocalAdjustment { enabled: false, ..baseline.clone() }),
+            "premise for the Bool arm: muting an active mask must put it to sleep"
+        );
+        assert!(
+            LOCAL_CONTROLS.iter().any(|c| c.name == "enabled" && c.shape == Shape::Bool),
+            "`enabled` must stay a Bool row, or the Bool arm probes nothing"
+        );
     }
 
     /// **Inclusion law, AI half** (R24-5 M0): a control the model is ASKED for

@@ -1708,25 +1708,46 @@ impl AutoshopApp {
                                                 match autoshop::pipeline::write_xmp(&p, &stamped) {
                                                     // Regenerated-not-merged AND
                                                     // the M6a projection losses:
-                                                    // same disclosure as Ctrl+S
-                                                    // (toast + status). Analyze
-                                                    // is where AI bitmap masks
-                                                    // arrive, so this landing
-                                                    // needs the export-side line
-                                                    // as much as the save does.
+                                                    // the same disclosure as
+                                                    // Ctrl+S, in the same two
+                                                    // voices. Analyze is where
+                                                    // AI bitmap masks arrive, so
+                                                    // this landing needs the
+                                                    // export-side line as much
+                                                    // as the save does.
                                                     Ok((_, merge_note, losses)) => {
-                                                        for m in merge_note
-                                                            .into_iter()
-                                                            .chain(xmp_loss_line(
-                                                                lang,
-                                                                &losses,
-                                                                &autoshop::xmp::global_export_losses(
-                                                                    &stamped,
-                                                                ),
-                                                            ))
-                                                        {
+                                                        // A regenerated-not-merged
+                                                        // sidecar always
+                                                        // interrupts: it dropped
+                                                        // the user's own
+                                                        // Lightroom properties.
+                                                        if let Some(m) = merge_note {
                                                             self.toast(ToastKind::Error, m.clone());
                                                             s = format!("{s} — ⚠ {m}");
+                                                        }
+                                                        // The projection's own
+                                                        // losses, with Ctrl+S's
+                                                        // interrupt rule (MED-2 —
+                                                        // engine calibration is
+                                                        // said quietly, a user's
+                                                        // own mask is not).
+                                                        let globals =
+                                                            autoshop::xmp::global_export_losses(
+                                                                &stamped,
+                                                            );
+                                                        if let Some(m) =
+                                                            xmp_loss_line(lang, &losses, &globals)
+                                                        {
+                                                            if xmp_loss_interrupts(&losses, &globals)
+                                                            {
+                                                                self.toast(
+                                                                    ToastKind::Error,
+                                                                    m.clone(),
+                                                                );
+                                                                s = format!("{s} — ⚠ {m}");
+                                                            } else {
+                                                                s = format!("{s} · {m}");
+                                                            }
                                                         }
                                                     }
                                                     Err(e) => {

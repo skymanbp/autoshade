@@ -357,9 +357,20 @@ impl AutoshopApp {
                         .desired_width(FIELD_W_MAX.min(ui.available_width() - 90.0).max(80.0))
                         .hint_text(autoshop::config::DEFAULT_DELIVERY_ROOT),
                 )
-                .on_hover_text(tr(
-                    lang,
-                    "Where finished files land: exports, AI/retouch pixel masters and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops are NOT here (see 「Develop store」 above).",
+                .on_hover_text(format!(
+                    "{}\n\n{}",
+                    tr(
+                        lang,
+                        "Where finished files land: exports, AI/retouch pixel masters and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops are NOT here (see 「Develop store」 above).",
+                    ),
+                    // R24 round-end LOW-3: choosing a folder inside the photo
+                    // library RETIRES that folder's read-only protection
+                    // (`guard_readonly` allows the delivery root before it
+                    // refuses the RAW's own folder), and nothing said so.
+                    tr(
+                        lang,
+                        "Pointing it inside your photo library removes that folder's read-only protection: Autoshop refuses to write beside your originals, but never into its own delivery folder.",
+                    ),
                 ));
                 if ui
                     .button(tr(lang, "Browse…"))
@@ -377,6 +388,23 @@ impl AutoshopApp {
         // out in full. Reflects the SAVED value, so it only moves after
         // 「Save settings」.
         ui.label(egui::RichText::new(abs_display(&resolved)).small().weak());
+        // The DYNAMIC half of the warning above: this window knows which photo
+        // is open, so it can say that THIS root and THAT photo's folder
+        // overlap rather than leaving the user to notice. Reads the typed
+        // field (the choice being made now); blank falls back to the saved
+        // resolution, which is what a blank field will resolve to.
+        let typed = self.settings.out_dir.trim();
+        let chosen = if typed.is_empty() { resolved } else { std::path::PathBuf::from(typed) };
+        if delivery_root_shadows_photo(&chosen, self.src_path.as_deref()) {
+            ui.label(
+                egui::RichText::new(tr(
+                    lang,
+                    "⚠ This folder and the open photo's folder are inside one another — the photo's folder is no longer protected as read-only, so a render can land beside your originals.",
+                ))
+                .small()
+                .weak(),
+            );
+        }
         {
             let f = &mut self.settings;
             // Fetched ids belong to the endpoint recorded at fetch time; once

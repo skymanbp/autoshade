@@ -582,6 +582,23 @@ pub(crate) fn reconcile_snapshot_calibration(
     let (knots, lens, as_shot) = calibration();
     let stamped = !knots.is_empty();
     stamp_calibration(r, &knots, &lens, as_shot);
+    if stamped {
+        // The era stamp rides WITH the curve — the paste rule every other
+        // stamper follows (`pipeline::stamp_fit_calibration`,
+        // `fresh_photo_calibration`, `produce_recipe`'s fresh arm). These
+        // knots are THIS build's own estimate, so the recipe's calibration
+        // provenance is this build's era.
+        //
+        // The OPEN path reaches the same state structurally rather than by
+        // assignment: its `stamp_calibration` runs on `EditRecipe::default()`
+        // or an XMP restore, and both are `CALIB_ERA` already. A SNAPSHOT is
+        // the one input that arrives carrying an older era, and leaving era-1
+        // over a freshly estimated curve made the caller's
+        // `repair_pre_era_base_curve` re-estimate it (memo-cheap, and it
+        // returns the same knots — so no double estimate was ever observed)
+        // and then announce a re-estimate that had not happened.
+        r.version = autoshop::recipe::CALIB_ERA;
+    }
     stamped
 }
 

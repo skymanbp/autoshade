@@ -195,12 +195,14 @@
         // minted one on the way in, or the versions taken from that card
         // could never be attributed again.
         let legacy = autoshop::store::VariantsRecord {
+            extra: Default::default(),
             v: 1,
             active_kind: "original".into(),
             active_pos: 0,
             active_id: None,
             active_name: None,
             others: vec![autoshop::store::VariantEntry {
+                extra: Default::default(),
                 kind: "generated".into(),
                 recipe: EditRecipe::default(),
                 origin: None,
@@ -701,6 +703,33 @@
         assert!(onto_pixels.base_curve.is_empty(), "baked pixels carry the look already");
         assert_eq!(onto_pixels.lens_profile, autoshop::recipe::LensProfile::default());
         assert_eq!(onto_pixels.as_shot_k, None, "…and a baked white balance");
+
+        // R24 round-end NIT-4: the era stamp rides WITH the curve, the same
+        // rule `pipeline::stamp_fit_calibration` and the open path follow. A
+        // snapshot is the only input that arrives carrying an OLDER era, and
+        // an era-1 stamp over knots THIS build just estimated made the
+        // caller's `repair_pre_era_base_curve` "re-estimate" a curve that was
+        // already fresh — and say so on screen.
+        let mut legacy = EditRecipe { version: 1, contrast: 7.0, ..Default::default() };
+        assert!(crate::persist::reconcile_snapshot_calibration(&mut legacy, false, cal));
+        assert_eq!(
+            legacy.version,
+            autoshop::recipe::CALIB_ERA,
+            "a freshly estimated curve carries this build's era"
+        );
+        assert!(
+            !autoshop::pipeline::base_curve_looks_pre_era(legacy.version, &legacy.base_curve),
+            "…so the pre-era repair declines it instead of announcing a re-estimate"
+        );
+        // A calibration that produced NO knots stamps no curve, so it makes no
+        // era claim either.
+        let mut none = EditRecipe { version: 1, ..Default::default() };
+        assert!(!crate::persist::reconcile_snapshot_calibration(&mut none, false, || (
+            Vec::new(),
+            autoshop::recipe::LensProfile::default(),
+            None
+        )));
+        assert_eq!(none.version, 1, "no curve stamped, no era restated");
     }
 
     /// R24-2: 「＋ Save as version」 on a PIXEL-STATE card wrote a near-empty
@@ -3264,12 +3293,14 @@
         // fully saved strip re-reports as unsaved (the original regression,
         // re-expressed against the v0.22 mirror).
         app.saved_strip = Some(autoshop::store::VariantsRecord {
+            extra: Default::default(),
             active_id: None,
             active_name: None,
             v: 1,
             active_kind: VariantKind::Original.store_str().to_string(),
             active_pos: 0,
             others: vec![autoshop::store::VariantEntry {
+                extra: Default::default(),
                 id: None,
                 name: None,
                 kind: VariantKind::Original.store_str().to_string(),
@@ -5035,6 +5066,114 @@
             let raw = xmp_loss_line(lang, &[], &["some_future_control"]).expect("a line");
             assert!(raw.contains("some_future_control"), "{lang:?}: {raw}");
         }
+    }
+
+    /// R24 round-end MED-2: the same sentence, said in two different VOICES.
+    ///
+    /// `base_curve` is stamped on every RAW open, so the global bucket is
+    /// non-empty on essentially every RAW — and an Error toast plus a status ⚠
+    /// on every single Ctrl+S breaks this surface's own rule ("a save that
+    /// lost nothing must not interrupt") in spirit: the loss is real but
+    /// universal and unactionable, and alarm that always fires is alarm that
+    /// stops being read. The judgement is the registry's `engine_only` bit —
+    /// the engine's own per-photo measurement vs something the user chose.
+    #[test]
+    fn engine_calibration_losses_are_disclosed_without_interrupting_the_save() {
+        use autoshop::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+        use autoshop::xmp::{MaskLoss, MaskLossReason as R};
+
+        // Premise, from the registry rather than from memory: every global
+        // the export can lose today IS engine calibration.
+        let rows: Vec<_> = RECIPE_CONTROLS
+            .iter()
+            .filter(|c| c.tier == Some(Tier::RenderedNotExported))
+            .collect();
+        assert_eq!(rows.len(), 2, "the tier's membership moved — re-read this test");
+        assert!(
+            rows.iter().all(|c| c.engine_only),
+            "premise: today's unexportable globals are all engine measurements"
+        );
+
+        // The quiet arm: the real, universal case — a stamped base curve.
+        assert!(
+            !xmp_loss_interrupts(&[], &["base_curve"]),
+            "a stamped camera base curve must not raise an error toast on every save"
+        );
+        assert!(
+            !xmp_loss_interrupts(&[], &["base_curve", "lens_profile"]),
+            "…nor both halves of the same calibration"
+        );
+        // …and it is still SAID: quiet is not silent.
+        assert!(
+            xmp_loss_line(crate::i18n::Lang::En, &[], &["base_curve"]).is_some(),
+            "the sentence survives; only the interruption goes"
+        );
+
+        // The interrupting arm (1): a user's own mask, whatever the globals.
+        let sky = MaskLoss { name: "sky".into(), reason: R::Bitmap };
+        assert!(xmp_loss_interrupts(std::slice::from_ref(&sky), &[]));
+        assert!(
+            xmp_loss_interrupts(std::slice::from_ref(&sky), &["base_curve"]),
+            "one actionable loss puts the toast back for the whole line"
+        );
+
+        // The interrupting arm (2): a global that is NOT engine calibration —
+        // what the LR-gap batches (B2–B5) will add. Modelled by a control that
+        // really is `engine_only: false` and by an unknown name, which must
+        // fall to the interrupting side rather than be vouched for.
+        assert!(
+            RECIPE_CONTROLS.iter().any(|c| c.name == "clarity" && !c.engine_only),
+            "premise for the probe below"
+        );
+        assert!(
+            xmp_loss_interrupts(&[], &["clarity"]),
+            "a control the USER set is actionable — it interrupts"
+        );
+        assert!(
+            xmp_loss_interrupts(&[], &["some_future_control"]),
+            "a name with no registry row cannot be vouched for as calibration"
+        );
+        assert!(
+            xmp_loss_interrupts(&[], &["base_curve", "clarity"]),
+            "mixed: one user-chosen member is enough"
+        );
+        // Nothing lost, nothing said, nothing to interrupt.
+        assert!(!xmp_loss_interrupts(&[], &[]));
+    }
+
+    /// R24 round-end LOW-3: choosing a delivery root inside the photo library
+    /// silently retires that folder's read-only protection —
+    /// `pipeline::guard_readonly` allows anything under the delivery root
+    /// BEFORE it refuses the source RAW's own folder. `Trust::Destination`
+    /// stops a PLANTED root from doing this; the user picking one in Settings
+    /// had nothing on screen saying what it costs. This pins the dynamic arm
+    /// (the one that knows which photo is open) — lexical, filesystem-free,
+    /// and symmetric: containment either way is the same loss.
+    #[test]
+    fn a_delivery_root_that_overlaps_the_open_photos_folder_is_warned_about() {
+        // Constructed paths only — the predicate must never touch the disk.
+        let lib = std::env::temp_dir().join("autoshop-lowr3-library");
+        let trip = lib.join("TripA");
+        let photo = trip.join("DSC1.ARW");
+        let p = Some(photo.as_path());
+
+        assert!(delivery_root_shadows_photo(&trip, p), "the photo's own folder");
+        assert!(delivery_root_shadows_photo(&lib, p), "an ancestor: the whole library");
+        assert!(
+            delivery_root_shadows_photo(&trip.join("exports"), p),
+            "nested inside the photo's folder: that subtree stops being protected"
+        );
+        assert!(
+            delivery_root_shadows_photo(&lib.join("TripB").join("..").join("TripA"), p),
+            "`..` is folded lexically — the same rule guard_readonly applies"
+        );
+
+        assert!(!delivery_root_shadows_photo(&lib.join("TripB"), p), "a sibling folder is fine");
+        assert!(
+            !delivery_root_shadows_photo(&std::env::temp_dir().join("autoshop-lowr3-out"), p),
+            "a folder outside the library is the normal case and must stay quiet"
+        );
+        assert!(!delivery_root_shadows_photo(&trip, None), "no photo open, nothing to say");
     }
 
     /// **Inclusion law, GUI half** (R24-5 M0): every develop control this

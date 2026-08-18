@@ -586,6 +586,7 @@ impl AutoshopApp {
             return None;
         }
         Some(autoshop::store::VariantsRecord {
+            extra: Default::default(),
             v: 1,
             active_kind: ak.store_str().to_string(),
             active_pos: self.active,
@@ -595,6 +596,7 @@ impl AutoshopApp {
                 .enumerate()
                 .filter(|(i, _)| *i != self.active)
                 .map(|(_, v)| autoshop::store::VariantEntry {
+                    extra: Default::default(),
                     kind: v.kind.store_str().to_string(),
                     recipe: v.recipe.clone(),
                     origin: v.origin.clone(),
@@ -1162,13 +1164,15 @@ impl AutoshopApp {
     }
 
     /// Flush every typed-but-uncommitted NAME box — masks, versions, variant
-    /// cards (U10; the 10+1 boundary rule).
+    /// cards (U10; the N+1 boundary rule).
     ///
-    /// ONE owner on purpose: ten boundaries each hand-copying the growing
-    /// list is how a box silently stops being flushed the day a third kind
-    /// of name appears (R24-2 added the second by copying, R24-3 the third).
-    /// Every entry point that persists, navigates, snapshots or quits calls
-    /// THIS; the "+1" is each box's own lost-focus commit.
+    /// ONE owner on purpose: ELEVEN production boundaries each hand-copying
+    /// the growing list is how a box silently stops being flushed the day a
+    /// third kind of name appears (R24-2 added the second by copying, R24-3
+    /// the third). Every entry point that persists, navigates, snapshots or
+    /// quits calls THIS; the "+1" is each box's own lost-focus commit — three
+    /// of those, one per box, in `panels/develop.rs`. (Counts re-verified at
+    /// the R24 round-end review; the doc had said ten.)
     pub(crate) fn commit_pending_names(&mut self) {
         self.commit_mask_name_buf();
         self.commit_version_name_buf();

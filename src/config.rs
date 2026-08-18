@@ -504,19 +504,38 @@ pub const DEFAULT_DELIVERY_ROOT: &str = "out";
 /// Memoised: it is consulted on every output-name claim (including
 /// `unique_out`'s up-to-999 probe loop) and resolving it reads a file.
 /// [`update_local_settings`] — the one writer — drops the memo.
+///
+/// A MISS resolves under the WRITE lock, held across the file read (R24
+/// round-end LOW-1). Releasing it first left a window: an
+/// [`invalidate_delivery_root`] landing between this load and this store put
+/// the pre-save root back into an empty memo, and nothing invalidates it
+/// again — one settings save could be ignored for the rest of the process.
+/// The lock serialises miss against invalidate; the second check inside it
+/// also collapses a first-call thundering herd into one read. No deadlock
+/// order to respect: [`load_local_settings`] takes no lock of its own (only
+/// [`save_local_settings`] does), so the settings-file lock is never wanted
+/// from inside this one.
 pub fn delivery_root() -> PathBuf {
     if let Ok(g) = DELIVERY_ROOT_MEMO.read()
         && let Some(p) = g.as_ref()
     {
         return p.clone();
     }
-    let v = choose_delivery_root(
-        load_local_settings().out_dir.as_deref(),
-        resolve_env("AUTOSHOP_OUT_DIR"),
-    );
-    if let Ok(mut g) = DELIVERY_ROOT_MEMO.write() {
-        *g = Some(v.clone());
+    let resolve = || {
+        choose_delivery_root(
+            load_local_settings().out_dir.as_deref(),
+            resolve_env("AUTOSHOP_OUT_DIR"),
+        )
+    };
+    // A poisoned memo resolves WITHOUT memoising rather than pinning a root
+    // behind a lock nobody can take again — the same "degrade, never pin"
+    // rule the read arm above follows.
+    let Ok(mut g) = DELIVERY_ROOT_MEMO.write() else { return resolve() };
+    if let Some(p) = g.as_ref() {
+        return p.clone(); // another caller won the race and already resolved
     }
+    let v = resolve();
+    *g = Some(v.clone());
     v
 }
 

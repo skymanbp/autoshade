@@ -626,6 +626,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // catches a 「递」 that would render as tofu.
     ("Where finished files land: exports, AI/retouch pixel masters and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops are NOT here (see 「Develop store」 above).",
         "成品文件的去处：导出、AI/修饰像素母版、提取出的风格提示词 —— 本窗口、CLI、网页端和批量渲染共用同一个。留空 = 默认的 ./out（相对于启动目录）。已保存的显影不在这里（见上方「显影库」）。"),
+    // R24 round-end LOW-3: what choosing a folder INSIDE the photo library
+    // costs. 「保护」 cannot be spelled here (护 is not in the shipped CJK
+    // subset, and neither are 拦 / 防 / 规), so both sentences say the thing
+    // itself — the folder stops being 「只读」 — which is also the plainer
+    // wording. Every glyph checked against assets/fonts before writing.
+    ("Pointing it inside your photo library removes that folder's read-only protection: Autoshop refuses to write beside your originals, but never into its own delivery folder.",
+        "把它指向照片库里的文件夹，就等于让那个文件夹不再「只读」：Autoshop 不会在你的原片旁边写文件，但从不拒绝写进自己的成片文件夹。"),
+    ("⚠ This folder and the open photo's folder are inside one another — the photo's folder is no longer protected as read-only, so a render can land beside your originals.",
+        "⚠ 这个文件夹和当前打开照片所在的文件夹互相包含 —— 那个文件夹不再「只读」，渲染出来的文件会写在你的原片旁边。"),
     ("Browse…", "浏览…"),
     ("Pick the delivery folder", "选择成片文件夹"),
     ("Last used folder", "上次用过的文件夹"),

@@ -296,6 +296,9 @@ pub(crate) fn mask_active(m: &autoshop::recipe::LocalAdjustment) -> bool {
 ///
 /// `None` for a faithful projection: a save that lost nothing must not
 /// interrupt (the four import-side disclosures follow the same rule).
+///
+/// WHETHER the line interrupts is [`xmp_loss_interrupts`]' decision, not this
+/// function's: the sentence is the same either way.
 pub(crate) fn xmp_loss_line(
     lang: Lang,
     losses: &[autoshop::xmp::MaskLoss],
@@ -359,6 +362,40 @@ pub(crate) fn xmp_loss_line(
         "the Lightroom XMP does not carry: {list} (recipe.json keeps all of it)",
         &[("list", &parts.join(" · "))],
     ))
+}
+
+/// Does the loss line [`xmp_loss_line`] just produced deserve to INTERRUPT the
+/// save — an Error toast plus a ⚠ on the status line — or is it a note that
+/// belongs in the quiet channel beside it (R24 round-end MED-2)?
+///
+/// The rule the disclosure broke: "a save that lost nothing must not
+/// interrupt". `base_curve` is stamped onto the canvas by every RAW OPEN
+/// (`persist::stamp_calibration`), so `RenderedNotExported` is active on
+/// essentially every RAW — and every single Ctrl+S therefore raised an error
+/// toast about a loss that is real, universal and impossible to act on. Alarm
+/// on every save is alarm the user learns to ignore, and the mask half (which
+/// they CAN act on) went with it.
+///
+/// The judgement comes from a bit the registry already carries, not from a new
+/// tier or a list kept here: `engine_only` means the value is the ENGINE's own
+/// per-photo measurement (the camera base curve, the in-camera lens profile) —
+/// nothing the user chose, so nothing they can undo. When every global loss is
+/// one of those, the sentence still gets said, quietly. One member that is a
+/// user's own choice (the LR-gap batches B2–B5 will add them) puts the toast
+/// back for the whole line.
+///
+/// MASK losses always interrupt: every one of them is a mask the user made.
+pub(crate) fn xmp_loss_interrupts(
+    losses: &[autoshop::xmp::MaskLoss],
+    globals: &[&'static str],
+) -> bool {
+    !losses.is_empty()
+        || globals.iter().any(|g| {
+            // A name with no registry row is not something this can vouch for
+            // as engine calibration — treat the unknown as the user's, which
+            // is the interrupting side.
+            autoshop::advisor::catalogue::global_control(g).is_none_or(|c| !c.engine_only)
+        })
 }
 
 /// The recipe field behind a curve-editor channel index.
@@ -625,6 +662,37 @@ pub(crate) fn effort_picker(
     ));
 }
 
+/// Does a delivery root and the OPEN photo's folder sit inside one another —
+/// in either direction (R24 round-end LOW-3)?
+///
+/// Why it matters: `pipeline::guard_readonly` refuses to write into the source
+/// RAW's folder ("the photo library is read-only") — but it allows anything
+/// under the delivery root FIRST. Pointing the root into the library therefore
+/// SILENTLY retires that protection for the overlap: an ancestor root retires
+/// it for the whole photo folder, a root nested inside the photo's folder for
+/// that subtree. A planted root cannot do this (`AUTOSHOP_OUT_DIR` is
+/// `Trust::Destination`, so neither a `.env` nor an ambient settings file may
+/// supply it) — but the user choosing it in Settings had nothing on screen
+/// saying what it costs.
+///
+/// LEXICAL and filesystem-free (it runs per frame in a Settings panel):
+/// `std::path::absolute` + `pipeline::normalize_lexical`, no `canonicalize`.
+/// So it is an ADVISORY warning — it will not see a junction or a case-flipped
+/// alias, both of which the guard's own canonical comparison does. A warning
+/// that misses an exotic spelling is worth having; a per-frame `canonicalize`
+/// on a network path is not.
+pub(crate) fn delivery_root_shadows_photo(
+    root: &std::path::Path,
+    photo: Option<&std::path::Path>,
+) -> bool {
+    let Some(dir) = photo.and_then(std::path::Path::parent) else { return false };
+    let lexical = |p: &std::path::Path| {
+        std::path::absolute(p).ok().map(|a| autoshop::pipeline::normalize_lexical(&a))
+    };
+    let (Some(root), Some(dir)) = (lexical(root), lexical(dir)) else { return false };
+    root.starts_with(&dir) || dir.starts_with(&root)
+}
+
 /// A [`StashEntry`]'s strip as a persistable record — the quit dialog's
 /// Save-all writes one per stashed photo so background variants survive the
 /// quit (before v0.22 they were "unsavable" and pinned the dialog forever).
@@ -636,6 +704,7 @@ pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshop::store::Var
         return None;
     }
     Some(autoshop::store::VariantsRecord {
+        extra: Default::default(),
         v: 1,
         active_kind: st.kind.store_str().to_string(),
         active_pos: st.active_pos,
@@ -643,6 +712,7 @@ pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshop::store::Var
             .others
             .iter()
             .map(|sv| autoshop::store::VariantEntry {
+                extra: Default::default(),
                 kind: sv.kind.store_str().to_string(),
                 recipe: sv.recipe.clone(),
                 origin: sv.origin.clone(),

@@ -342,19 +342,36 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
 /// Adobe's property names to rot: the day a batch teaches the engine
 /// `crs:Texture`, the key joins `owned_attr_keys` and leaves this list.
 ///
-/// Only the Description's OWN open tag is scanned — mask corrections live in
-/// a child element and have their own disclosure ([`unsupported_corrections`]),
-/// and mixing the two would report every `crs:Local*` key as an unmodelled
-/// global. Quote-aware: a mask name or a `crs:RawFileName` value may contain
-/// anything, `crs:Foo=` included.
+/// BOTH SPELLINGS, because Lightroom really writes both: the Description's own
+/// open-tag ATTRIBUTES, and its top-level PROPERTY-ELEMENT children
+/// (`<crs:Texture>+30</crs:Texture>` — the form [`crs_str`] reads and
+/// [`merge_recipe_into_xmp`]'s element strip removes, "in plenty of real
+/// sidecars"). An attribute-only scan answered EMPTY for an element-form
+/// sidecar, which is the shape of a Lightroom catalog export.
+///
+/// Only THIS Description's own attributes and own top-level children are
+/// scanned — mask corrections live inside a child element and have their own
+/// disclosure ([`unsupported_corrections`]), a creative Look nests someone
+/// else's settings block, and mixing either in would report every
+/// `crs:Local*` / baked profile key as an unmodelled global. Quote-aware: a
+/// mask name or a `crs:RawFileName` value may contain anything, `crs:Foo=`
+/// included.
 pub fn unmodelled_global_crs(xmp: &str) -> Vec<String> {
     if xmp.len() > MAX_XMP_BYTES {
         return Vec::new();
     }
     let Some(start) = find_crs_description(xmp) else { return Vec::new() };
-    let Some((gt, _)) = scan_tag_end(xmp, start) else { return Vec::new() };
+    let Some((gt, self_closing)) = scan_tag_end(xmp, start) else { return Vec::new() };
     let tag = &xmp[start..=gt];
-    let owned: std::collections::BTreeSet<String> = owned_attr_keys().into_iter().collect();
+    // The universe is the complement of what we OWN, and ownership has two
+    // halves: the attribute keys the writer emits and the element-only
+    // properties that have no attribute spelling at all
+    // ([`OWNED_ELEMENT_ONLY`]). Leaving the second half out would have this
+    // disclosure name our own tone curves as Lightroom-only properties.
+    let owned: std::collections::BTreeSet<String> = owned_attr_keys()
+        .into_iter()
+        .chain(OWNED_ELEMENT_ONLY.iter().map(|k| (*k).to_string()))
+        .collect();
     let mut found: std::collections::BTreeSet<String> = Default::default();
     let b: Vec<char> = tag.chars().collect();
     let mut quote: Option<char> = None;
@@ -375,11 +392,16 @@ pub fn unmodelled_global_crs(xmp: &str) -> Vec<String> {
             None => {
                 // `crs:` must start a NAME, i.e. not be preceded by an
                 // identifier character (`xcrs:Foo` is a different prefix).
+                let name_char = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.');
                 let starts = b[i..].starts_with(&['c', 'r', 's', ':'])
-                    && (i == 0 || !(b[i - 1].is_alphanumeric() || b[i - 1] == '-' || b[i - 1] == '_'));
+                    && (i == 0 || !name_char(b[i - 1]));
                 if starts {
                     let mut j = i + 4;
-                    while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == '_') {
+                    // `-` and `.` are legal XML name characters (NCName). No
+                    // Adobe key uses either TODAY, so this changes no current
+                    // output — it is here so a future `crs:Foo-Bar` is named
+                    // in full instead of being reported as `Foo`.
+                    while j < b.len() && (b[j].is_ascii_alphanumeric() || matches!(b[j], '_' | '-' | '.')) {
                         j += 1;
                     }
                     let name: String = b[i + 4..j].iter().collect();
@@ -398,8 +420,62 @@ pub fn unmodelled_global_crs(xmp: &str) -> Vec<String> {
             }
         }
     }
+
+    // The ELEMENT half, walked with the same primitives `crs_str` uses
+    // (`next_xml_tag` + `element_close_start`) rather than a second XML
+    // scanner. Every non-self-closing child is JUMPED OVER whole, so nothing
+    // nested inside one is ever read as this Description's own property.
+    if !self_closing
+        && let Some(close) = find_matching_close(xmp, gt + 1)
+    {
+        let mut from = gt + 1;
+        while let Some((s, e, child_self_closing)) = next_xml_tag(xmp, from) {
+            if s >= close {
+                break; // past this Description's own body
+            }
+            let child = &xmp[s..=e];
+            if child.starts_with("</") {
+                // Only reachable on markup this walk cannot account for (the
+                // opens above are all skipped past their own close).
+                from = e + 1;
+                continue;
+            }
+            let name = tag_name(child);
+            if let Some(bare) = name.strip_prefix("crs:")
+                && !bare.is_empty()
+                && !owned.contains(bare)
+            {
+                found.insert(bare.to_string());
+            }
+            from = if child_self_closing {
+                e + 1
+            } else {
+                match element_close_start(xmp, name, e).and_then(|c| scan_tag_end(xmp, c)) {
+                    Some((close_gt, _)) => close_gt + 1,
+                    // A child that never closes: the rest of the body is not
+                    // accountable, and guessing would report a mask's own
+                    // items as globals.
+                    None => break,
+                }
+            };
+        }
+    }
     found.into_iter().collect()
 }
+
+/// The `crs:` properties this writer owns that have NO attribute spelling —
+/// the four tone curves and the mask block, which reach the sidecar only as
+/// child elements. [`owned_attr_keys`] is the ATTRIBUTE writer's universe and
+/// names none of them, so every scanner asking "is this ELEMENT ours?" must
+/// union the two lists (the merge's own element strip builds exactly this
+/// union — see [`merge_recipe_into_xmp`]).
+pub(crate) const OWNED_ELEMENT_ONLY: [&str; 5] = [
+    "ToneCurvePV2012",
+    "ToneCurvePV2012Red",
+    "ToneCurvePV2012Green",
+    "ToneCurvePV2012Blue",
+    "MaskGroupBasedCorrections",
+];
 
 /// Build the `<crs:MaskGroupBasedCorrections>` child element (empty string when
 /// there are no masks) PLUS the per-mask loss list the export-side disclosure
@@ -1776,19 +1852,15 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
             r.masks.len()
         ));
     }
-    let mut owned_elements: std::collections::HashSet<String> = [
-        "ToneCurvePV2012",
-        "ToneCurvePV2012Red",
-        "ToneCurvePV2012Green",
-        "ToneCurvePV2012Blue",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .chain(owned_attr_keys())
-    .collect();
-    if !preserve_masks {
-        owned_elements.insert("MaskGroupBasedCorrections".to_string());
-    }
+    // [`OWNED_ELEMENT_ONLY`] is the shared list (the import-side disclosure
+    // reads the same one), minus the mask block on the arm that keeps the
+    // base's foreign masks verbatim.
+    let owned_elements: std::collections::HashSet<String> = OWNED_ELEMENT_ONLY
+        .iter()
+        .filter(|k| !(preserve_masks && **k == "MaskGroupBasedCorrections"))
+        .map(|k| (*k).to_string())
+        .chain(owned_attr_keys())
+        .collect();
 
 
     // TOP LEVEL ONLY (see `top_level_owned_spans`): the previous flat scan
@@ -2973,6 +3045,19 @@ mod tests {
                 exposure_ev: 0.5,
                 ..Default::default()
             }],
+            // Element-form children of OUR OWN making: the four tone curves
+            // have no attribute spelling, so `owned_attr_keys` cannot exclude
+            // them and only `OWNED_ELEMENT_ONLY` keeps the element arm below
+            // from naming our own curves as Lightroom-only properties.
+            tone_curve: vec![
+                crate::recipe::CurvePoint { input: 0, output: 0 },
+                crate::recipe::CurvePoint { input: 128, output: 140 },
+                crate::recipe::CurvePoint { input: 255, output: 255 },
+            ],
+            red_curve: vec![
+                crate::recipe::CurvePoint { input: 0, output: 0 },
+                crate::recipe::CurvePoint { input: 255, output: 250 },
+            ],
             ..Default::default()
         };
         let ours = recipe_to_xmp(&r);
@@ -2984,6 +3069,74 @@ mod tests {
         // Nothing to read ⇒ nothing to say (never a panic, never a warning).
         assert!(unmodelled_global_crs("").is_empty());
         assert!(unmodelled_global_crs("<not xml").is_empty());
+    }
+
+    /// R24 round-end MED-1: the same disclosure for the PROPERTY-ELEMENT
+    /// spelling. `crs_str` reads that form "for exactly that reason" and the
+    /// merge strips it, because Lightroom writes it in plenty of real
+    /// sidecars — but this scanner walked the Description's open TAG only, so
+    /// an element-form catalog export disclosed nothing at all and the photo
+    /// just rendered differently from Lightroom with no sentence on screen.
+    #[test]
+    fn the_import_disclosure_reads_property_element_globals_too() {
+        let head = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                    xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">";
+        let tail = "</rdf:RDF></x:xmpmeta>";
+        // (a) Pure element form — the shape that returned EMPTY before.
+        let element = format!(
+            "{head}<rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
+             <crs:Exposure2012>+1.00</crs:Exposure2012>\
+             <crs:Texture>+30</crs:Texture>\
+             <crs:GrainAmount>12</crs:GrainAmount>\
+             <crs:PerspectiveUpright>1</crs:PerspectiveUpright>\
+             </rdf:Description>{tail}"
+        );
+        let found = unmodelled_global_crs(&element);
+        assert_eq!(
+            found,
+            vec!["GrainAmount", "PerspectiveUpright", "Texture"],
+            "element-form globals must be named exactly once, and never the modelled Exposure2012"
+        );
+
+        // (b) MIXED: Lightroom splits the same Description across both forms.
+        let mixed = format!(
+            "{head}<rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:Exposure2012=\"+1.00\" crs:Texture=\"+30\">\
+             <crs:GrainAmount>12</crs:GrainAmount>\
+             </rdf:Description>{tail}"
+        );
+        assert_eq!(unmodelled_global_crs(&mixed), vec!["GrainAmount", "Texture"]);
+
+        // (c) The two exclusions the element walk must keep: a mask block's
+        // `crs:Local*` items (their own disclosure) and a creative Look's
+        // baked parameters (someone else's settings block, nested inside a
+        // child) are NOT this Description's globals. `Look` itself IS one.
+        let nested = format!(
+            "{head}<rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
+             <crs:Texture>+30</crs:Texture>\
+             <crs:Look><rdf:Description><crs:Parameters><rdf:Description>\
+             <crs:LookClarity2012>+50</crs:LookClarity2012>\
+             </rdf:Description></crs:Parameters></rdf:Description></crs:Look>\
+             <crs:MaskGroupBasedCorrections><rdf:Seq><rdf:li>\
+             <rdf:Description crs:LocalExposure2012=\"0.5\" crs:LocalTexture=\"20\"/>\
+             </rdf:li></rdf:Seq></crs:MaskGroupBasedCorrections>\
+             </rdf:Description>{tail}"
+        );
+        assert_eq!(unmodelled_global_crs(&nested), vec!["Look", "Texture"]);
+
+        // (d) NIT-1: `-` and `.` are legal XML name characters. No Adobe key
+        // uses either today, so this pins the reading rather than a change:
+        // the whole name is reported, not the prefix before the hyphen.
+        assert_eq!(
+            unmodelled_global_crs(
+                "<rdf:Description xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                 crs:Foo-Bar=\"1\" crs:Plain=\"2\"/>"
+            ),
+            vec!["Foo-Bar", "Plain"]
+        );
     }
 
     /// L03-3: the import gate must MATCH the disclosure sentence — a

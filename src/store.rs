@@ -1547,6 +1547,16 @@ pub fn variants_path(src: &Path) -> PathBuf {
 /// predates them reads a record carrying them and ignores both — the strip
 /// comes back complete, minus the names. `skip_serializing_if` keeps a strip
 /// with neither byte-identical to what earlier builds wrote.
+///
+/// `extra` makes that promise hold in the WRITE direction too (R24 round-end
+/// MED-3). Ignoring an unknown field on the way in is only half of additive:
+/// [`variants_member`]'s `ActiveWrite::Kind` arm is a READ-MODIFY-WRITE, so
+/// without a capture-all an older build would read a newer strip, drop every
+/// field it did not know, and publish the truncated record back over the
+/// user's file. Serde's flatten catches them instead and they round-trip
+/// verbatim. An empty map serialises to NOTHING, so a strip that uses no
+/// future field is still byte-identical to what earlier builds wrote (pinned
+/// by `variant_ids_and_names_are_additive_in_both_directions`).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariantEntry {
     pub kind: String,
@@ -1559,6 +1569,9 @@ pub struct VariantEntry {
     /// The user's own name for this rendition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Every member a FUTURE build adds, carried verbatim (see above).
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The strip minus the active variant (whose develop recipe.json owns),
@@ -1579,6 +1592,10 @@ pub struct VariantsRecord {
     pub active_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_name: Option<String>,
+    /// Record-level capture-all — [`VariantEntry::extra`]'s reason, at the
+    /// level `ActiveWrite::Kind` actually rewrites.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn known_variant_kind(kind: &str) -> bool {
@@ -1610,6 +1627,9 @@ pub fn variants_record_bytes(src: &Path, rec: &VariantsRecord) -> std::io::Resul
         others: Vec::with_capacity(rec.others.len()),
         active_id: rec.active_id.clone(),
         active_name: rec.active_name.clone().map(|n| capped_name(&n)),
+        // Verbatim, both levels: this rebuild is what a read-modify-write
+        // passes through, and dropping the capture-all here would defeat it.
+        extra: rec.extra.clone(),
     };
     for e in &rec.others {
         let origin = match &e.origin {
@@ -1627,6 +1647,7 @@ pub fn variants_record_bytes(src: &Path, rec: &VariantsRecord) -> std::io::Resul
             origin,
             id: e.id.clone(),
             name: e.name.clone().map(|n| capped_name(&n)),
+            extra: e.extra.clone(),
         });
     }
     serde_json::to_vec_pretty(&stored).map_err(std::io::Error::other)
@@ -5871,6 +5892,7 @@ mod tests {
 
     fn strip_record(kind: &str) -> VariantsRecord {
         VariantsRecord {
+            extra: Default::default(),
             active_id: None,
             active_name: None,
             v: 1,
@@ -5893,12 +5915,14 @@ mod tests {
         let master = dev.join("card-b.png");
         std::fs::write(&master, b"png").unwrap();
         let rec = VariantsRecord {
+            extra: Default::default(),
             v: 1,
             active_kind: "original".into(),
             active_pos: 1,
             active_id: Some("card-a".into()),
             active_name: Some("我的底片".into()),
             others: vec![VariantEntry {
+                extra: Default::default(),
                 kind: "generated".into(),
                 recipe: EditRecipe { contrast: 12.0, ..Default::default() },
                 origin: Some(master.clone()),
@@ -5938,6 +5962,53 @@ mod tests {
             matches!(variants_member(&raw, ActiveWrite::Kind("fitted")).unwrap(), CommitMember::Keep),
             "a record that already says so is left alone"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// R24 round-end MED-3: the additive contract in the WRITE direction.
+    ///
+    /// `ActiveWrite::Kind` is a READ-MODIFY-WRITE of someone else's file. Read
+    /// tolerance alone ("not `deny_unknown_fields`, so an old build ignores a
+    /// new field") only protects the reader: without a capture-all this arm
+    /// parsed a newer strip, dropped every member it did not know, and
+    /// published the truncated record back — the CLI `match` on a photo whose
+    /// strip a newer GUI wrote would silently delete that GUI's data. Costs
+    /// nothing today (no such field exists yet); the day one does, this test
+    /// is what says it survives.
+    #[test]
+    fn a_read_modify_write_of_the_strip_keeps_fields_this_build_never_heard_of() {
+        let (dir, raw, dev) = commit_fixture("active-additive");
+        // A record from a hypothetical FUTURE build: unknown members at BOTH
+        // levels (the record and an entry), beside the ones we do know.
+        std::fs::write(
+            variants_path(&raw),
+            br#"{
+              "v": 1,
+              "active_kind": "original",
+              "active_pos": 0,
+              "active_id": "card-a",
+              "active_rating": 5,
+              "active_stack": {"of": 3, "pick": 1},
+              "others": [
+                {"kind":"generated","recipe":{},"id":"card-b","flagged":true}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let CommitMember::Write(bytes) =
+            variants_member(&raw, ActiveWrite::Kind("fitted")).unwrap()
+        else {
+            panic!("a strip whose active kind changed must be rewritten");
+        };
+        let back: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back["active_kind"], "fitted", "premise: the write did its own job");
+        assert_eq!(back["active_id"], "card-a", "…without disturbing the known members");
+        // The whole point: unknown members, both levels, byte-for-byte.
+        assert_eq!(back["active_rating"], 5, "record-level unknown member survived: {back}");
+        assert_eq!(back["active_stack"], serde_json::json!({"of": 3, "pick": 1}), "{back}");
+        assert_eq!(back["others"][0]["flagged"], true, "entry-level unknown member: {back}");
+        assert_eq!(back["others"][0]["id"], "card-b");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }
@@ -5995,12 +6066,14 @@ mod tests {
         write_variants(
             &raw,
             &VariantsRecord {
+                extra: Default::default(),
                 v: 1,
                 active_kind: "fitted".into(),
                 active_pos: 1,
                 active_id: Some("card-fit".into()),
                 active_name: Some("dusk".into()),
                 others: vec![VariantEntry {
+                    extra: Default::default(),
                     kind: "original".into(),
                     recipe: EditRecipe::default(),
                     origin: None,
@@ -6902,6 +6975,7 @@ mod tests {
             ..Default::default()
         });
         let rec = VariantsRecord {
+            extra: Default::default(),
             active_id: None,
             active_name: None,
             v: 1,
@@ -6909,6 +6983,7 @@ mod tests {
             active_pos: 2,
             others: vec![
                 VariantEntry {
+                    extra: Default::default(),
                     id: None,
                     name: None,
                     kind: "original".into(),
@@ -6916,6 +6991,7 @@ mod tests {
                     origin: None,
                 },
                 VariantEntry {
+                    extra: Default::default(),
                     id: None,
                     name: None,
                     kind: "generated".into(),
@@ -6984,6 +7060,7 @@ mod tests {
 
         clear_variants(&photo).expect_err("clearing over an unresolved strip must refuse");
         let rec = VariantsRecord {
+            extra: Default::default(),
             active_id: None,
             active_name: None,
             v: 1,
@@ -7100,12 +7177,14 @@ mod tests {
         write_variants(
             &photo,
             &VariantsRecord {
+                extra: Default::default(),
                 v: 1,
                 active_kind: "original".into(),
                 active_pos: 0,
                 active_id: Some("card-a".into()),
                 active_name: Some(long.clone()),
                 others: vec![VariantEntry {
+                    extra: Default::default(),
                     kind: "generated".into(),
                     recipe: EditRecipe::default(),
                     origin: None,
@@ -7126,12 +7205,14 @@ mod tests {
         // BACKWARD: a strip that uses neither field serializes exactly as an
         // older build wrote it — no `"id": null` noise, no diff on disk.
         let bare = VariantsRecord {
+            extra: Default::default(),
             v: 1,
             active_kind: "original".into(),
             active_pos: 0,
             active_id: None,
             active_name: None,
             others: vec![VariantEntry {
+                extra: Default::default(),
                 kind: "fitted".into(),
                 recipe: EditRecipe::default(),
                 origin: None,

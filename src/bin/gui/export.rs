@@ -155,8 +155,12 @@ fn clamp_disclosed(r: &mut EditRecipe, warns: &mut Vec<String>) {
 /// authority the single export, the batch render, the toolbar summary and the
 /// Export section's echo all read (R22-7).
 ///
-/// Touches NO filesystem, deliberately. The toolbar hover resolves this on
-/// every frame, and a per-frame `is_dir()` is the very thing `pixels_on_disk`
+/// PROBES no filesystem, deliberately — no `is_dir()`, no `exists()`, no
+/// `canonicalize`. (Not "touches nothing": the `OutFolder` arm reads the
+/// delivery root, and resolving THAT reads the settings file once per process
+/// on a cold memo — `config::delivery_root`, which owns the memo and its
+/// invalidation.) The toolbar hover resolves this on every frame, and a
+/// per-frame `is_dir()` is the very thing `pixels_on_disk`
 /// exists to avoid for the ● indicator. It also keeps display and behaviour
 /// identical: a remembered folder that has since been deleted is shown, and
 /// then RE-CREATED by the render (`start_render_to` create_dir_all's its
@@ -1001,12 +1005,19 @@ impl AutoshopApp {
                             // curve, the lens-profile correction) used to leave
                             // no trace at all, and the difference only showed up
                             // in Lightroom's render.
-                            let mask_note = xmp_loss_line(
-                                lang,
-                                &losses,
-                                &autoshop::xmp::global_export_losses(&self.recipe),
-                            );
-                            if let Some(m) = &mask_note {
+                            //
+                            // WHETHER it interrupts is `xmp_loss_interrupts`'
+                            // call (R24 round-end MED-2): a base curve every
+                            // RAW open stamps is a real loss the user cannot
+                            // act on, and an error toast on every single
+                            // Ctrl+S is how the mask half — which they CAN act
+                            // on — stopped being read.
+                            let globals = autoshop::xmp::global_export_losses(&self.recipe);
+                            let interrupts = xmp_loss_interrupts(&losses, &globals);
+                            let mask_note = xmp_loss_line(lang, &losses, &globals);
+                            if let Some(m) = &mask_note
+                                && interrupts
+                            {
                                 self.toast(ToastKind::Error, m.clone());
                             }
                             let base = trf(
@@ -1019,7 +1030,14 @@ impl AutoshopApp {
                                 None => base,
                             };
                             if let Some(m) = mask_note {
-                                s.push_str(&format!(" — ⚠ {m}"));
+                                // The quiet channel is the one the pixel-link
+                                // and re-look notes already use on this very
+                                // line: a middle dot, no ⚠.
+                                s.push_str(&if interrupts {
+                                    format!(" — ⚠ {m}")
+                                } else {
+                                    format!(" · {m}")
+                                });
                             }
                             s
                         }
