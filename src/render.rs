@@ -1772,7 +1772,17 @@ fn apply_masks(
                 // Per-channel curves right after the master one, before
                 // saturation — `apply_develop`'s stage 1 → 1b → 3 order, so a
                 // full-coverage mask carrying a curve lands where the same
-                // curve set globally would.
+                // curve set globally would, to within one 8-bit code.
+                // APPROXIMATELY, and measured (R25 P8): the two paths compose
+                // the same LUTs but not the same arithmetic — this one fuses
+                // the stages per pixel and always finishes through
+                // `apply_sat_vibrance`, whose factor-1 identity
+                // (`l + (c - l)`) is not bit-exact in the deep shadows. Worst
+                // observed 1.5e-5 of a code over 2686 of 17751 channels
+                // (`mask_curves_at_full_coverage_match_the_global_curves_
+                // within_one_code`, which owns the tolerance). The clarity and
+                // texture twins ARE bit-exact; this one is not, and the
+                // sentence used to claim it was.
                 if let Some((luts, active)) = &rgb_curve_luts {
                     for ch in 0..3 {
                         if active[ch] {
@@ -8366,6 +8376,117 @@ mod tests {
             frame_bits_fnv64(&global),
             frame_bits_fnv64(&local),
             "full-coverage local texture must equal global texture bit-for-bit"
+        );
+    }
+
+    /// R25 P8: the honest version of the claim beside the fused curve stage.
+    ///
+    /// `render.rs`'s "a full-coverage mask carrying a curve lands where the
+    /// same curve set globally would" was written as an ORDER argument (stage
+    /// 1 -> 1b -> 3, mirrored) and reads as a bit-exactness one, like the
+    /// clarity and texture twins above. It is not: the two paths compose the
+    /// same LUTs through different arithmetic — the global chain runs the
+    /// master curve over the whole frame and then the per-channel pass over it
+    /// again, while the mask fuses both into one pixel step and blends the
+    /// result at weight 1 — so the last bit of a deep-shadow code can differ.
+    /// Measured on this frame: the numbers this test prints.
+    ///
+    /// The tolerance IS the claim now. One 8-bit code is the finest thing an
+    /// export, a preview or a Lightroom comparison can show, so a difference
+    /// under it is invisible everywhere the promise is made — and a difference
+    /// OVER it means the two paths have really come apart, which is what this
+    /// catches and a comment could not.
+    #[test]
+    fn mask_curves_at_full_coverage_match_the_global_curves_within_one_code() {
+        use crate::recipe::CurvePoint;
+        let pts = |v: &[(u8, u8)]| -> Vec<CurvePoint> {
+            v.iter().map(|(i, o)| CurvePoint { input: *i, output: *o }).collect()
+        };
+        let main = pts(&[(0, 0), (64, 40), (192, 210), (255, 255)]);
+        let red = pts(&[(0, 10), (255, 250)]);
+        let green = pts(&[(0, 0), (128, 120), (255, 255)]);
+        let blue = pts(&[(0, 5), (128, 140), (255, 255)]);
+        // NOT `detail_frame`: its three channels sit within 0.06 of each
+        // other, and the difference this test measures lives in the fused
+        // path's unconditional `apply_sat_vibrance` at factor 1 — where
+        // `l + (r - l)` returns `r` exactly whenever the channel is near the
+        // luma. A frame with real chroma spread and real deep shadows is what
+        // makes the two paths' arithmetic differ at all; on a flat one this
+        // test would pass by measuring nothing.
+        let (w, h) = (61usize, 97usize);
+        let data: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let t = i as f32 / (w * h) as f32;
+                [t * t, 1.0 - t, (0.5 - t).abs() * 1.8 + 0.002]
+            })
+            .collect();
+        let mut global = data.clone();
+        apply_develop(
+            &mut global,
+            w,
+            h,
+            &EditRecipe {
+                tone_curve: main.clone(),
+                red_curve: red.clone(),
+                green_curve: green.clone(),
+                blue_curve: blue.clone(),
+                ..Default::default()
+            },
+        );
+        let mut local = data.clone();
+        apply_develop(
+            &mut local,
+            w,
+            h,
+            &EditRecipe {
+                masks: vec![LocalAdjustment {
+                    // The degenerate Linear gradient every full-coverage
+                    // comparison in this module uses: weight 1 everywhere.
+                    mask: MaskGeometry::Linear {
+                        zero_x: 0.5,
+                        zero_y: 0.5,
+                        full_x: 0.5,
+                        full_y: 0.5,
+                    },
+                    amount: 1.0,
+                    main_curve: main,
+                    red_curve: red,
+                    green_curve: green,
+                    blue_curve: blue,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        assert_ne!(
+            frame_bits_fnv64(&data),
+            frame_bits_fnv64(&global),
+            "the curves must move this frame, or the comparison is vacuous"
+        );
+        let (mut worst, mut differing) = (0.0f32, 0usize);
+        for (g, l) in global.iter().zip(&local) {
+            for c in 0..3 {
+                let d = (g[c] - l[c]).abs();
+                if d > 0.0 {
+                    differing += 1;
+                }
+                worst = worst.max(d);
+            }
+        }
+        let channels = global.len() * 3;
+        eprintln!(
+            "curve equivalence: {differing}/{channels} channel(s) differ, worst {:.6} LSB",
+            worst * 255.0
+        );
+        // The drift has to OCCUR, or the tolerance is agreed with vacuously —
+        // which is exactly how the old comment survived: on a low-chroma frame
+        // the two paths really are bit-identical and nothing contradicts a
+        // claim of bit-exactness.
+        assert!(differing > 0, "no channel differed — this frame does not exercise the fused path");
+        assert!(
+            worst <= 1.0 / 255.0,
+            "the fused mask curve stage drifted past one 8-bit code: worst {:.6} LSB over              {differing}/{channels} channel(s)",
+            worst * 255.0
         );
     }
 

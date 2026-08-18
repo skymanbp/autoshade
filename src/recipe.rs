@@ -45,6 +45,30 @@ pub struct EditRecipe {
     #[serde(default = "coord_era_legacy")]
     pub coord_era: u32,
 
+    /// Which SET OF CONTROLS this recipe was written against — see
+    /// [`SCHEMA_ERA`]. Absent in any recipe written before v0.31.0, which is
+    /// exactly what `0` means.
+    ///
+    /// The fact nothing else in the file could state: R25 gave the writer
+    /// twenty-seven new `crs:` keys (global Texture, the carried effects, the
+    /// detail axes, the manual CA pair, the de-fringe block), and every recipe
+    /// written before them deserialises with those fields at their serde
+    /// defaults. A default nobody read is NOT a photographer's decision, and
+    /// the XMP merge cannot tell the two apart from the value alone: stripping
+    /// `crs:Texture="-20"` out of someone's sidecar because a v0.30
+    /// `recipe.json` "says" 0 is deleting an edit, not honouring one
+    /// (`xmp::era_suppressed_attr_keys`).
+    ///
+    /// Deliberately NOT folded into [`version`](Self::version) or
+    /// [`coord_era`](Self::coord_era), for the reason spelled out above: those
+    /// two are the CURVE's provenance and the GEOMETRY's frame, and `version`
+    /// in particular is transplanted between recipes on purpose. Which keys a
+    /// recipe has ever seen is a third, independent fact — the four-fields-in-
+    /// one-integer move is exactly what made the pre-`coord_era` migration
+    /// unrecoverable.
+    #[serde(default = "schema_era_legacy")]
+    pub schema_era: u32,
+
     // --- Tone ---------------------------------------------------------------
     /// Global exposure in stops (EV). 0.0 = unchanged.
     pub exposure_ev: f32,
@@ -365,11 +389,38 @@ fn coord_era_legacy() -> u32 {
     0
 }
 
+/// The current CONTROL-SET era, stamped into every recipe this build writes.
+///
+/// Era 0 = every recipe written up to v0.30.x, whose JSON has no key for the
+/// twenty-seven `crs:` properties R25 added to the writer — global `texture`,
+/// the nine carried effects, the eight detail axes, the manual CA pair, the
+/// auto-CA switch and the six de-fringe keys. Serde fills those fields from
+/// [`EditRecipe::default`], so an era-0 recipe SAYS "texture 0, no grain,
+/// Adobe's own de-fringe windows" without ever having read a document.
+/// Era 1 = written by a build that has all twenty-seven, so its values for
+/// them are statements.
+///
+/// The one consumer is [`crate::xmp::era_suppressed_attr_keys`]: on an era-0
+/// recipe the merge neither strips nor re-emits a key still sitting at that
+/// untouched default, so the base document's own bytes stand.
+pub const SCHEMA_ERA: u32 = 1;
+
+/// Serde default for [`EditRecipe::schema_era`] — deliberately NOT the
+/// container's `Default::default()` value, the same field-level-beats-
+/// container-level trap [`coord_era_legacy`] documents: a file with no
+/// `schema_era` key was written before the field existed, and every one of
+/// those predates the R25 keys. Pinned by
+/// `absent_schema_era_reads_as_the_legacy_control_set`.
+fn schema_era_legacy() -> u32 {
+    0
+}
+
 impl Default for EditRecipe {
     fn default() -> Self {
         Self {
             version: CALIB_ERA,
             coord_era: COORD_ERA,
+            schema_era: SCHEMA_ERA,
             exposure_ev: 0.0,
             contrast: 0.0,
             highlights: 0.0,
@@ -1647,6 +1698,12 @@ impl EditRecipe {
                 // would make a neutral legacy recipe.json outrank the XMP
                 // beside it (`SavedDevelop::NoopOnly` precedence).
                 coord_era: EditRecipe::default().coord_era,
+                // …and for the control-set stamp. "This recipe predates the
+                // R25 keys" is provenance about the SCHEMA, not an edit: a
+                // neutral v0.30 recipe.json must still clear the ● and must
+                // still lose the `SavedDevelop::NoopOnly` precedence contest
+                // to a sidecar that holds real edits.
+                schema_era: EditRecipe::default().schema_era,
                 base_curve: Vec::new(),
                 // The as-shot WB anchor is the same kind of stamped
                 // calibration — a fresh-open stamp must still count as no-op.
@@ -2313,6 +2370,44 @@ mod tests {
         // A v1 recipe JSON (no "masks" key) still deserializes, masks default empty.
         let v1 = r#"{ "exposure_ev": 0.5, "rationale": "x", "confidence": 0.9 }"#;
         assert!(serde_json::from_str::<EditRecipe>(v1).unwrap().masks.is_empty());
+    }
+
+    /// The SAME serde subtlety as `absent_coord_era_reads_as_the_legacy_frame`
+    /// above, for the control-set stamp — and it earns its own test rather than
+    /// a line in that one, because it gates a different consequence: the XMP
+    /// merge's decision to strip a key or leave it (`xmp::era_suppressed_
+    /// attr_keys`). Get this default backwards and every v0.30 `recipe.json`
+    /// decodes as "written against the current control set", so an ordinary
+    /// Ctrl+S deletes `crs:Texture`, the Grain block and the detail axes out
+    /// of the photographer's own Lightroom sidecar.
+    #[test]
+    fn absent_schema_era_reads_as_the_legacy_control_set() {
+        let legacy = r#"{"version":2,"contrast":7.0}"#;
+        assert_eq!(
+            serde_json::from_str::<EditRecipe>(legacy).unwrap().schema_era,
+            0,
+            "a file with no schema_era key predates the R25 keys"
+        );
+        // The FIELD-level default must beat the CONTAINER-level one, which is
+        // `Default::default()` — i.e. the current era. This is the assertion
+        // that fails if the `#[serde(default = "schema_era_legacy")]`
+        // attribute is ever dropped, and nothing else in the tree would.
+        assert_eq!(
+            EditRecipe::default().schema_era,
+            SCHEMA_ERA,
+            "a freshly built recipe is authored against the current control set"
+        );
+        assert_ne!(schema_era_legacy(), EditRecipe::default().schema_era);
+        // …and it round-trips: what we write, we read back unchanged.
+        let json = serde_json::to_string(&EditRecipe::default()).unwrap();
+        assert!(json.contains("\"schema_era\":1"), "{json}");
+        assert_eq!(serde_json::from_str::<EditRecipe>(&json).unwrap().schema_era, SCHEMA_ERA);
+        // PROVENANCE, not an edit: a neutral v0.30 recipe.json must still read
+        // as "no edits", or it would out-rank the XMP beside it
+        // (`SavedDevelop::NoopOnly` precedence) and blank a canvas on open.
+        let neutral_legacy: EditRecipe = serde_json::from_str(r#"{"version":2}"#).unwrap();
+        assert_eq!(neutral_legacy.schema_era, 0, "premise: it really is era 0");
+        assert!(neutral_legacy.is_noop(), "the era stamp is not an edit");
     }
 
     /// THE CONTRACT the whole coordinate migration is gated on, and the one

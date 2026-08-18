@@ -651,17 +651,16 @@ impl AutoshopApp {
         let lang = self.lang;
         let mut changed = false;
 
-        let tone_active = {
-            let r = &self.recipe;
-            r.temperature_k.is_some()
-                || r.tint != 0.0
-                || r.exposure_ev != 0.0
-                || r.contrast != 0.0
-                || r.highlights != 0.0
-                || r.shadows != 0.0
-                || r.whites != 0.0
-                || r.blacks != 0.0
-        };
+        // DERIVED from the registry like the five section dots in
+        // `develop_panel` (R25 P8 closed the last two hand-written ones). This
+        // section holds BOTH the tone family and the white-balance one — the
+        // panel groups them, the registry does not — so its ● is the OR, the
+        // same shape the Detail and Lens sections already use for their own
+        // pairs.
+        let tone_active = CONTROL_FAMILIES
+            .iter()
+            .filter(|f| f.name == "tone" || f.name == "white_balance")
+            .any(|f| family_is_active(f, &self.recipe));
 
         ui.add_space(SPACE_MD); // same section fence as every sibling
         // #14b: the FIRST of the panel's group captions. The two existing group
@@ -1301,7 +1300,13 @@ impl AutoshopApp {
 
         // --- 裁剪 + 拉直: recipe.crop / straighten_deg (export + XMP paths) ---
         ui.add_space(SPACE_MD);
-        let crop_active = self.recipe.crop.is_some() || self.recipe.straighten_deg != 0.0;
+        // The `framing` family IS this section — crop rectangle plus
+        // straighten angle — so the dot is read straight off the registry
+        // (R25 P8, the same derivation as every other section's).
+        let crop_active = CONTROL_FAMILIES
+            .iter()
+            .filter(|f| f.name == "framing")
+            .any(|f| family_is_active(f, &self.recipe));
         egui::CollapsingHeader::new(section_title(tr(lang, "Crop"), crop_active))
             .id_salt("sec_crop")
             .default_open(false)

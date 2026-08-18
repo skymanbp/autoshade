@@ -346,6 +346,17 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
 /// `as_shot_k`/`as_shot_tint` follow the lens-profile rule: per-photo
 /// calibration (auto-WB varies shot to shot), re-resolved for the target —
 /// never inherited from the source photo.
+///
+/// `passthrough` is per-photo too, but it is resolved BEFORE this function
+/// rather than in it (`start_paste`, R25 P8): the map is Lightroom's own
+/// Transform / Calibration block read off ONE document, and the answer for a
+/// foreign target is "we know nothing", not "look up what the target's last
+/// save happened to record". An empty map is what makes that literal — the
+/// merge strips only keys the recipe carries, so the target's own block stays
+/// in the target's own sidecar, byte for byte. Reading the target's saved
+/// recipe.json instead would have been strictly worse: that copy can be STALE
+/// against the sidecar the photographer has edited in Lightroom since, and a
+/// paste would then rewrite the old values back over the new ones.
 pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe {
     let mut r = pasted.clone();
     if !autoshop::decode::is_raw(target) {

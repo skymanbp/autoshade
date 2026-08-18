@@ -1017,6 +1017,14 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
 /// [`owned_attr_keys`] and must cover every key this can ever emit.
 fn owned_attrs(r: &EditRecipe) -> String {
     let mut a = String::new();
+    // The SCHEMA-ERA gate's emission half (R25 P8). It has to sit beside the
+    // strip half in [`merge_strip_keys`] and agree with it exactly: strip
+    // without emit deletes the base's value, emit without strip leaves two
+    // copies of the same attribute in one tag. `era_suppressed_attr_keys`
+    // returns the ONE set both consult — empty for every current-era recipe,
+    // so this costs nothing on the ordinary path.
+    let era_gated = era_suppressed_attr_keys(r);
+    let ungated = |key: &str| !era_gated.contains(key);
 
     // ProcessVersion 15.4 / Version 15.5.1 are the verified current values from
     // the user's real sidecar (not the research's guessed 11.0/15.0).
@@ -1060,8 +1068,12 @@ fn owned_attrs(r: &EditRecipe) -> String {
     // Global Texture (R25 B2) — the last Basic-panel slider that had no key.
     // UNCONDITIONAL like its four neighbours above: Lightroom writes
     // `crs:Texture="+26"` in the signed form (verified in the user's library),
-    // and a recipe that says 0 is stating a value, not omitting one.
-    attr(&mut a, "Texture", &signed(r.texture));
+    // and a recipe that says 0 is stating a value, not omitting one — UNLESS
+    // it is an era-0 recipe that never had the field at all, which is the one
+    // case where 0 states nothing (see the gate above).
+    if ungated("Texture") {
+        attr(&mut a, "Texture", &signed(r.texture));
+    }
 
     // Per-colour HSL / Color mixer (8 ACR bands). Emit only when non-neutral so
     // a plain global recipe still produces a minimal, v1-compatible sidecar.
@@ -1104,11 +1116,11 @@ fn owned_attrs(r: &EditRecipe) -> String {
     // seven of the user's sidecars (the integer neighbours are bare —
     // `SharpenDetail="25"`, `SharpenEdgeMasking="0"`). Emitted only when set,
     // so an absent radius stays absent and Lightroom keeps its own 1.0.
-    if r.sharpen_radius != 0.0 {
+    if r.sharpen_radius != 0.0 && ungated("SharpenRadius") {
         attr(&mut a, "SharpenRadius", &format!("{:+.1}", r.sharpen_radius));
     }
     for (key, v) in [("SharpenDetail", r.sharpen_detail), ("SharpenEdgeMasking", r.sharpen_mask)] {
-        if v != 0.0 {
+        if v != 0.0 && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
@@ -1129,7 +1141,7 @@ fn owned_attrs(r: &EditRecipe) -> String {
         ("ColorNoiseReductionDetail", r.color_nr_detail),
         ("ColorNoiseReductionSmoothness", r.color_nr_smooth),
     ] {
-        if v != 0.0 {
+        if v != 0.0 && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
@@ -1160,7 +1172,7 @@ fn owned_attrs(r: &EditRecipe) -> String {
     // spelling follows the family convention rather than a measurement — and
     // an absent key is what every one of those files already has.
     for (key, v) in [("ChromaticAberrationR", r.ca_r), ("ChromaticAberrationB", r.ca_b)] {
-        if v != 0.0 {
+        if v != 0.0 && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
@@ -1168,7 +1180,7 @@ fn owned_attrs(r: &EditRecipe) -> String {
     // (`crs:AutoLateralCA="0"` on six of the user's sidecars, `="1"` on the
     // seventh) — and only when ON, so a recipe that never met the key does
     // not start asserting "off" into someone's document.
-    if r.auto_lateral_ca {
+    if r.auto_lateral_ca && ungated("AutoLateralCA") {
         attr(&mut a, "AutoLateralCA", "1");
     }
 
@@ -1187,7 +1199,12 @@ fn owned_attrs(r: &EditRecipe) -> String {
         ("DefringeGreenHueLo", r.defringe_green_lo),
         ("DefringeGreenHueHi", r.defringe_green_hi),
     ] {
-        attr(&mut a, key, &(v.round() as i64).to_string());
+        // The era gate releases these six together or not at all (see
+        // `era_suppressed_attr_keys`), so this per-key test can never split
+        // the block the paragraph above insists on writing whole.
+        if ungated(key) {
+            attr(&mut a, key, &(v.round() as i64).to_string());
+        }
     }
 
     // The nine CARRIED effects (R25 B2): Lightroom renders them, we do not,
@@ -1207,7 +1224,7 @@ fn owned_attrs(r: &EditRecipe) -> String {
         ("PostCropVignetteAmount", r.post_crop_vignette),
         ("PostCropVignetteRoundness", r.post_crop_vignette_round),
     ] {
-        if v != 0.0 {
+        if v != 0.0 && ungated(key) {
             attr(&mut a, key, &signed(v));
         }
     }
@@ -1220,7 +1237,13 @@ fn owned_attrs(r: &EditRecipe) -> String {
         ("GrainSize", r.grain_size),
         ("GrainFrequency", r.grain_rough),
     ] {
-        if v != 0.0 {
+        // `ungated` is redundant for every ZERO-neutral key here — a value
+        // that passed `v != 0.0` has already left the default the gate keys
+        // on — and it is written all the same, on both loops and on every
+        // R25 key below and above: the gate is the LAW for these
+        // twenty-seven, and a law spelled at only the sites that need it
+        // today is a law the next default change quietly repeals.
+        if v != 0.0 && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
@@ -2247,10 +2270,21 @@ fn crs_scope_inner(doc: &str) -> Option<String> {
             if depth == 0
                 && let Some((s, open_name, nested)) = open.take()
             {
-                if name != open_name {
-                    return None;
-                }
-                if !nested || KEEP_NESTED.contains(&open_name.as_str()) {
+                // CROSSED NAMES (`<crs:Look>…</crs:Foo>`): the tag counts
+                // balance, the names do not, so this child is markup we cannot
+                // account for. It is DROPPED, not bailed on — R25 P8. Bailing
+                // returned `None`, and `crs_own_scope`'s `None` hands the
+                // scanners THE WHOLE DOCUMENT, which promotes a creative
+                // Look's baked `crs:Clarity2012` to a user slider value: the
+                // precise defect this function exists to prevent, reachable
+                // through its own error path. The writer's mirror
+                // (`top_level_owned_spans`) does not bail on this shape at all
+                // — it only tracks OWNED children — so the merge went ahead
+                // while the read went wrong, and the asymmetry was the bug.
+                // Dropping is the safe direction for a READ scope: the worst
+                // it can do is leave a property unread, and it can never let a
+                // nested settings block answer for the top level.
+                if name == open_name && (!nested || KEEP_NESTED.contains(&open_name.as_str())) {
                     out.push('\n');
                     out.push_str(&body[s..=gt2]);
                 }
@@ -2364,9 +2398,88 @@ pub struct MergeOutcome {
 /// ⇒ stripped and rewritten verbatim. Either way exactly one copy survives,
 /// which is the duplicate-attribute rule the strip exists for.
 fn merge_strip_keys(r: &EditRecipe) -> Vec<String> {
+    let era_gated = era_suppressed_attr_keys(r);
     owned_attr_keys()
         .into_iter()
         .filter(|k| !PASSTHROUGH_CRS.contains(&k.as_str()) || r.passthrough.contains_key(k))
+        .filter(|k| !era_gated.contains(k.as_str()))
+        .collect()
+}
+
+/// The crs ATTRIBUTE keys R25 added to this writer's ownership, paired with the
+/// registry row that carries each — DERIVED, never hand-copied, because a
+/// hand-copied list of twenty-seven spellings is a list that drifts.
+///
+/// Two arms, and the second is why this cannot simply be "the CarriedOnly
+/// rows":
+///
+///   * every `Tier::CarriedOnly` attribute row — the nine B2 effects, the eight
+///     B3 detail axes, the auto-CA switch and the six de-fringe keys (24). The
+///     tier is R25's own invention and has no pre-R25 members, so it IS the
+///     batch.
+///   * `texture`, `ca_r`, `ca_b` (3) — R25 keys whose control RENDERS, so the
+///     tier cannot name them. Spelled out with the reason rather than inferred
+///     from a date nothing in the tree records.
+///
+/// The B4 PASS-THROUGH sixteen are deliberately absent: they have a stronger
+/// law of their own in [`merge_strip_keys`] (present in the map ⇒ ours to
+/// rewrite, absent ⇒ never touched), which already answers the question this
+/// gate exists for, and answers it for every era.
+///
+/// Pinned at exactly twenty-seven by
+/// `the_era_gate_is_the_twenty_seven_keys_r25_added`.
+fn r25_attr_keys() -> Vec<(&'static str, &'static str)> {
+    use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+    /// The R25 keys the tier cannot name, because their control renders.
+    const RENDERED_R25: [&str; 3] = ["texture", "ca_r", "ca_b"];
+    RECIPE_CONTROLS
+        .iter()
+        .filter(|c| c.tier == Some(Tier::CarriedOnly) || RENDERED_R25.contains(&c.name))
+        .filter_map(|c| c.crs.attr().map(|k| (c.name, k)))
+        .collect()
+}
+
+/// The keys a merge must neither STRIP nor EMIT for `r`, because `r` has never
+/// seen them — the [`crate::recipe::SCHEMA_ERA`] gate.
+///
+/// **The defect this closes** (R25 P8, one root cause with the mask-block arm
+/// in [`merge_recipe_into_xmp`]): a `recipe.json` written by v0.30 has no key
+/// for any of the twenty-seven above, so serde fills them from
+/// [`EditRecipe::default`] and the recipe "says" texture 0, no grain, no
+/// sharpening radius. Owning a key means the merge STRIPS it before writing
+/// ours back, and the writer omits a slider at rest — so an ordinary Ctrl+S on
+/// such a recipe deleted `crs:Texture="-20"`, the whole Grain block and the
+/// PostCrop/SharpenRadius keys out of the photographer's own Lightroom sidecar,
+/// silently, with nothing on screen. Measured on the reference library: three
+/// of seven files lost nine keys each. "This file has never held that key" is
+/// not "the photographer cleared it", and only the era stamp can tell them
+/// apart.
+///
+/// PER KEY, not per recipe, and that is not a softening — it is what keeps the
+/// gate from becoming the next silent loss. An era-0 recipe whose Texture the
+/// user has just dragged to +20 differs from the untouched default, and that
+/// value IS a statement: suppressing it would mean a legacy photo could never
+/// write Texture to its sidecar again, permanently, because nothing ever
+/// re-stamps the era of a file. So the gate covers only keys still sitting
+/// exactly where serde left them.
+///
+/// The de-fringe six move as ONE BLOCK: the writer emits all six or none
+/// (`owned_attrs` states why — a hue window with no amount beside it is a shape
+/// no real document has), so a gate that released three of them would publish
+/// exactly that shape.
+fn era_suppressed_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&'static str> {
+    use crate::advisor::catalogue::global_value;
+    if r.schema_era >= crate::recipe::SCHEMA_ERA {
+        return Default::default();
+    }
+    let neutral = EditRecipe::default();
+    let keys = r25_attr_keys();
+    let untouched = |name: &str| global_value(r, name) == global_value(&neutral, name);
+    let defringe = |name: &str| name.starts_with("defringe");
+    let defringe_untouched = keys.iter().filter(|(n, _)| defringe(n)).all(|(n, _)| untouched(n));
+    keys.iter()
+        .filter(|(n, _)| if defringe(n) { defringe_untouched } else { untouched(n) })
+        .map(|(_, k)| *k)
         .collect()
 }
 
@@ -2454,14 +2567,41 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
     // Ordered so the extra parse is only paid where it decides something: a
     // maskless recipe short-circuits (the old arm, unchanged), and a base with
     // nothing to preserve never reaches the comparison at all.
-    let preserve_masks = summary.preserve_original
+    //
+    // R25 P8 — the SECOND half of that trap, and the reason the predicate
+    // moved off `summary.preserve_original` entirely. That flag is set by
+    // `MaskSummary::record`, i.e. only when the import was LOSSY, and it was
+    // never anything more than a stand-in for "the base has a mask block":
+    // while every Lightroom block produced defects the two were the same
+    // boolean. P1 made LR blocks import cleanly, and the stand-in came apart —
+    // a base whose masks import PERFECTLY, merged with a recipe that has none
+    // (a v0.30 `recipe.json` predates mask import; every one of them is
+    // maskless), reported preserve_original false, stripped the block and
+    // published nothing in its place. Measured on the reference library: four
+    // corrections destroyed on one file, eight on another, with an empty note
+    // list because the disclosure below was gated on the same flag. So the
+    // question is asked directly — DOES THE BASE HAVE A BLOCK — and the
+    // answer decides both the preserve and the note.
+    let preserve_masks = summary.corrections > 0
         && (r.masks.is_empty() || r.masks == xmp_to_recipe(existing).masks);
-    if summary.preserve_original && !preserve_masks {
+    if summary.corrections > 0 && !preserve_masks {
+        // Two shapes, because the trigger now has two shapes. The defect
+        // clause was written when only a LOSSY block could reach here and
+        // would have read "carries 0 thing(s) this build cannot represent" on
+        // a block we understood perfectly — a sentence that says nothing true.
+        // What is always true is the count of corrections being replaced.
+        let base = if summary.defects > 0 {
+            format!(
+                "the merge base's mask block carries {} correction(s), {} thing(s) of which this \
+                 build cannot represent",
+                summary.corrections, summary.defects
+            )
+        } else {
+            format!("the merge base's mask block carries {} correction(s)", summary.corrections)
+        };
         notes.push(format!(
-            "the merge base's mask block carries {} thing(s) this build cannot represent — \
-             it is not in the new file, which carries this develop's {} edited mask(s) instead \
-             (the base file itself is not modified)",
-            summary.defects,
+            "{base} — it is not in the new file, which carries this develop's {} edited mask(s) \
+             instead (the base file itself is not modified)",
             r.masks.len()
         ));
     }
@@ -2999,16 +3139,33 @@ struct MaskSummary {
     /// Corrections that produced no mask, EXACTLY (past the display cap too):
     /// [`unsupported_corrections`]' answer.
     dropped: usize,
-    /// Every defect, exactly — `losses.len()` before the cap.
+    /// Every defect, exactly — `losses.len()` before the cap. Also the
+    /// answer to "was this import LOSSY", which a separate `preserve_original`
+    /// boolean used to carry: it was set on exactly this condition, so the two
+    /// could only ever agree, and the merge keyed on the boolean until R25 P8
+    /// found it was standing in for a different question entirely (see
+    /// `corrections` below). One fact, one field.
     defects: usize,
-    preserve_original: bool,
+    /// How many `crs:What="Correction"` entries the BASE document's mask block
+    /// holds, whatever became of them. The merge's preserve arm and its
+    /// disclosure both key off THIS — "does the photographer have a mask block
+    /// here", which is what the old boolean was mistaken for; see
+    /// [`merge_recipe_into_xmp`] for how the two came apart in R25 P1. A block
+    /// that opens and never closes counts as one: there IS a block, we simply
+    /// cannot count what is in it.
+    corrections: usize,
 }
 
 impl MaskSummary {
     /// The ONE door a defect enters by, so the list and the two counters
-    /// cannot drift: named, counted, and — either way, drop or note — the
-    /// merge is told to keep the base's own mask block, because what we
-    /// imported is not equal to what the file holds.
+    /// cannot drift: named, and counted — drop or note.
+    ///
+    /// It used to raise a `preserve_original` flag here as well, which the
+    /// merge read as "keep the base's own mask block". That was true only
+    /// while a Lightroom block ALWAYS produced a defect; R25 P1 made those
+    /// blocks import cleanly and the flag started answering "no block to
+    /// keep" for a file full of them. The merge asks its own question now
+    /// (`MaskSummary::corrections`), and a defect is just a defect.
     fn record(&mut self, name: &str, reason: MaskImportReason) {
         /// A sentence, not a log.
         const MAX_IMPORT_LOSSES: usize = 256;
@@ -3020,7 +3177,6 @@ impl MaskSummary {
             self.dropped = self.dropped.saturating_add(1);
         }
         self.defects = self.defects.saturating_add(1);
-        self.preserve_original = true;
         if self.losses.len() < MAX_IMPORT_LOSSES {
             self.losses.push(MaskImportLoss {
                 name: name.chars().take(MAX_NAME_CHARS).collect(),
@@ -3035,14 +3191,18 @@ fn mask_summary(xmp: &str, authored_by_autoshop: bool) -> MaskSummary {
         Ok(Some(block)) => mask_summary_from_block(block, authored_by_autoshop),
         Ok(None) => MaskSummary::default(),
         // The group OPENS but never closes: whatever corrections it holds
-        // cannot be counted, so the one honest summary is "a loss, preserve
-        // the original" — the old literal finder reported this exact document
-        // as zero losses AND preserve_original false, which both hid the
+        // cannot be counted, so the one honest summary is "a loss, and there
+        // is a block here" — the old literal finder reported this exact
+        // document as zero losses and no block at all, which both hid the
         // drop from the GUI toast and told the merge it was free to delete
         // the block from the user's own sidecar.
         Err(()) => {
             let mut summary = MaskSummary::default();
             summary.record("Correction 1", MaskImportReason::OutOfModel);
+            // There IS a block — that is exactly what we just failed to read
+            // the end of — so the merge must keep the user's bytes rather
+            // than replace an unreadable block with nothing.
+            summary.corrections = 1;
             summary
         }
     }
@@ -3110,7 +3270,14 @@ fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSumma
     }
     if seen == 0 && find_crs_value_at(block, "What", "Correction").is_some() {
         summary.record("Correction 1", MaskImportReason::OutOfModel);
+        // An attribute-form group is a group: the scanner above walked past
+        // it, but the document really does carry corrections and the merge's
+        // preserve arm has to know.
+        seen = 1;
     }
+    // The fact the merge keys off, counted the same way every disclosure in
+    // this module is: by the ONE pass that read the block.
+    summary.corrections = seen;
     summary
 }
 
@@ -6204,6 +6371,339 @@ mod tests {
         );
     }
 
+    /// A `recipe.json` in the shape v0.30 wrote them: today's serialisation
+    /// MINUS `schema_era` and minus every field R25 added a `crs:` key for.
+    /// Built by deletion rather than by hand so the fixture cannot quietly
+    /// stop being a subset of what the app really writes — and read back
+    /// through the real serde path, because the whole point is what the FIELD
+    /// DEFAULTS do with an absent key.
+    fn as_v0_30_recipe(r: &EditRecipe) -> EditRecipe {
+        let mut v = serde_json::to_value(r).expect("serialise");
+        let obj = v.as_object_mut().expect("a recipe is an object");
+        assert!(obj.remove("schema_era").is_some(), "the era stamp must have been there to remove");
+        for (name, _) in r25_attr_keys() {
+            assert!(obj.remove(name).is_some(), "{name} is a recipe field");
+        }
+        serde_json::from_value(v).expect("deserialise")
+    }
+
+    /// A Lightroom sidecar carrying the R25 globals and no masks — the shape
+    /// the B2 / B3 keys actually arrive in (values from the reference
+    /// library: a negative Texture, the one signed decimal in the detail
+    /// block, a real post-crop vignette, a grain triple, and the de-fringe
+    /// block at Adobe's own defaults with one non-zero amount).
+    fn lr_globals_doc() -> String {
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">\n\
+         \x20<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+         \x20 <rdf:Description rdf:about=\"\"\n\
+         \x20   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+         \x20   crs:Version=\"15.5.1\"\n\
+         \x20   crs:ProcessVersion=\"15.4\"\n\
+         \x20   crs:Exposure2012=\"+0.35\"\n\
+         \x20   crs:Texture=\"-20\"\n\
+         \x20   crs:SharpenRadius=\"+1.0\"\n\
+         \x20   crs:SharpenDetail=\"25\"\n\
+         \x20   crs:PostCropVignetteAmount=\"-17\"\n\
+         \x20   crs:PostCropVignetteMidpoint=\"50\"\n\
+         \x20   crs:GrainAmount=\"30\"\n\
+         \x20   crs:GrainSize=\"25\"\n\
+         \x20   crs:GrainFrequency=\"50\"\n\
+         \x20   crs:DefringePurpleAmount=\"3\"\n\
+         \x20   crs:DefringePurpleHueLo=\"30\"\n\
+         \x20   crs:DefringePurpleHueHi=\"70\"\n\
+         \x20   crs:DefringeGreenAmount=\"0\"\n\
+         \x20   crs:DefringeGreenHueLo=\"40\"\n\
+         \x20   crs:DefringeGreenHueHi=\"60\"\n\
+         \x20   crs:HasSettings=\"True\"/>\n\
+         \x20</rdf:RDF>\n\
+         </x:xmpmeta>\n"
+            .to_string()
+    }
+
+    /// **THE R25 P8 TRAP, mask half** (data-destruction class), and the exact
+    /// scenario measured on the reference library: DSC09034 lost four
+    /// corrections and DSC09642 lost eight, with an empty note list.
+    ///
+    /// P1 made Lightroom's own masks import CLEANLY, and the merge's preserve
+    /// arm was keyed on a `MaskSummary::preserve_original` flag that only a
+    /// LOSSY import ever set (it is gone now; `defects > 0` is what it meant). A v0.30 `recipe.json` is maskless by construction (that
+    /// build could not import one), so the pair "clean base + maskless
+    /// recipe" answered "nothing to preserve", and an ordinary Ctrl+S stripped
+    /// the block and wrote nothing in its place.
+    ///
+    /// MUTATION THIS CATCHES: put the old flag's condition —
+    /// `summary.defects > 0`, which is exactly when `preserve_original` was
+    /// raised — back into either the preserve or the note test, and this goes
+    /// red on both assertions at once: the block vanishes AND nothing says so.
+    #[test]
+    fn a_clean_lightroom_mask_block_survives_a_recipe_that_never_saw_it() {
+        let doc = lr_doc(&format!(
+            "{}{}",
+            lr_correction("Radial 1", "", &lr_radial("0", "0")),
+            lr_correction("Gradient 1", "", &lr_gradient("0")),
+        ));
+        let imported = xmp_to_recipe(&doc);
+        assert_eq!(imported.masks.len(), 2, "premise: the masks import");
+        assert!(
+            import_losses(&doc).is_empty(),
+            "premise: and they import CLEANLY — that is what broke the old flag: {:?}",
+            import_losses(&doc)
+        );
+
+        // The v0.30 recipe.json beside that sidecar: no masks, no era stamp.
+        let legacy = EditRecipe { masks: Vec::new(), ..as_v0_30_recipe(&imported) };
+        assert_eq!(legacy.schema_era, 0, "an absent key is what makes it legacy");
+
+        let start = doc.find("<crs:MaskGroupBasedCorrections>").expect("block");
+        let end = doc.find("</crs:MaskGroupBasedCorrections>").expect("block close")
+            + "</crs:MaskGroupBasedCorrections>".len();
+        let original = &doc[start..end];
+        let out = merge_recipe_into_xmp(&doc, &legacy).expect("mergeable");
+        assert!(
+            out.doc.contains(original),
+            "the photographer's own mask block must survive VERBATIM:\n{}",
+            out.doc
+        );
+        assert_eq!(
+            out.doc.matches("<crs:MaskGroupBasedCorrections>").count(),
+            1,
+            "exactly one mask group in the output"
+        );
+        assert!(out.notes.is_empty(), "nothing was replaced: {:?}", out.notes);
+    }
+
+    /// The disclosure half of the same rule, on a base the importer
+    /// understands COMPLETELY. Before P8 this arm could not be reached at all
+    /// (the note was gated on that same lossy-import flag), so replacing perfectly
+    /// readable Lightroom corrections was a silent success — and the sentence
+    /// itself had to change, because "carries 0 thing(s) this build cannot
+    /// represent" is what the old wording says about a clean block.
+    #[test]
+    fn replacing_a_clean_mask_block_names_what_it_replaced() {
+        let doc = lr_doc(&lr_correction("Radial 1", "", &lr_radial("0", "0")));
+        assert!(import_losses(&doc).is_empty(), "premise: a clean base");
+        let mut r = xmp_to_recipe(&doc);
+        r.masks[0].exposure_ev = 1.25; // the user moved it: the develop is newest
+        let out = merge_recipe_into_xmp(&doc, &r).expect("mergeable");
+        assert_eq!(out.notes.len(), 1, "the replacement is disclosed: {:?}", out.notes);
+        assert!(
+            out.notes[0].contains("1 correction(s)")
+                && !out.notes[0].contains("0 thing(s)")
+                && out.notes[0].contains("1 edited mask(s)"),
+            "the note counts what was there, not a defect count of zero: {}",
+            out.notes[0]
+        );
+    }
+
+    /// **THE R25 P8 TRAP, globals half** (data-destruction class): three of the
+    /// seven reference sidecars lost nine keys each to this, silently.
+    ///
+    /// Owning a key means the merge STRIPS it and the writer puts ours back —
+    /// and the writer omits a slider at rest. A v0.30 `recipe.json` has no
+    /// field for any of the twenty-seven keys R25 added, so serde fills them
+    /// from `EditRecipe::default()` and the recipe "says" texture 0, no grain,
+    /// no radius. Stripping on that reading deleted `crs:Texture="-20"`, the
+    /// whole Grain block and the PostCrop / SharpenRadius keys out of the
+    /// photographer's Lightroom file on an ordinary Ctrl+S.
+    ///
+    /// MUTATION THIS CATCHES: return an empty set from
+    /// `era_suppressed_attr_keys` (or drop its `schema_era` test) and every
+    /// value below goes to the writer's default.
+    #[test]
+    fn a_v0_30_recipe_does_not_strip_the_keys_it_never_had() {
+        let doc = lr_globals_doc();
+        let imported = xmp_to_recipe(&doc);
+        assert_eq!(imported.texture, -20.0, "premise: the fixture really carries them");
+        assert_eq!((imported.grain, imported.sharpen_radius), (30.0, 1.0));
+
+        let legacy = as_v0_30_recipe(&imported);
+        assert_eq!(legacy.schema_era, 0);
+        assert_eq!(legacy.texture, 0.0, "premise: serde filled the absent field with the default");
+
+        let out = merge_recipe_into_xmp(&doc, &legacy).expect("mergeable");
+        for spelling in [
+            "crs:Texture=\"-20\"",
+            "crs:SharpenRadius=\"+1.0\"",
+            "crs:SharpenDetail=\"25\"",
+            "crs:PostCropVignetteAmount=\"-17\"",
+            "crs:PostCropVignetteMidpoint=\"50\"",
+            "crs:GrainAmount=\"30\"",
+            "crs:GrainSize=\"25\"",
+            "crs:GrainFrequency=\"50\"",
+            "crs:DefringePurpleAmount=\"3\"",
+        ] {
+            assert!(out.doc.contains(spelling), "{spelling} was deleted from the user's file");
+        }
+        // Suppressing the strip WITHOUT suppressing the write is the other way
+        // to get this wrong: one tag, two answers.
+        for key in ["Texture", "GrainAmount", "DefringePurpleAmount", "DefringePurpleHueLo"] {
+            assert_eq!(
+                out.doc.matches(&format!("crs:{key}=")).count(),
+                1,
+                "crs:{key} must appear exactly once"
+            );
+        }
+        assert_eq!(xmp_to_recipe(&out.doc).texture, -20.0, "…and it reads back as itself");
+        assert!(out.notes.is_empty(), "nothing was lost, so nothing to disclose: {:?}", out.notes);
+    }
+
+    /// The CONTROL for the test above, and the reason the gate is an era stamp
+    /// rather than a new policy: a CURRENT-era recipe that says texture 0 is
+    /// STATING a value, and the merge must still publish it over the base's.
+    /// Whatever else this batch changed, it did not change what a save means.
+    #[test]
+    fn a_current_era_recipe_still_owns_every_key_it_states() {
+        let doc = lr_globals_doc();
+        let mut r = xmp_to_recipe(&doc);
+        assert_eq!(r.schema_era, crate::recipe::SCHEMA_ERA, "an import is current-era");
+        r.texture = 0.0;
+        r.grain = 0.0;
+        let out = merge_recipe_into_xmp(&doc, &r).expect("mergeable");
+        assert!(out.doc.contains("crs:Texture=\"0\""), "the cleared slider publishes: {}", out.doc);
+        assert!(!out.doc.contains("crs:GrainAmount="), "a zero grain is an omitted key");
+        assert_eq!(xmp_to_recipe(&out.doc).texture, 0.0);
+    }
+
+    /// The gate is PER KEY, and this is the case that forces it: a legacy
+    /// recipe whose Texture the user has just dragged. Nothing ever re-stamps
+    /// a file's era, so a whole-recipe gate would mean a v0.30 photo could
+    /// never write Texture to its sidecar again — the same silent divergence
+    /// class this round is closing, re-introduced by the fix for it.
+    #[test]
+    fn an_edited_key_leaves_the_era_gate_even_on_a_legacy_recipe() {
+        let doc = lr_globals_doc();
+        let mut legacy = as_v0_30_recipe(&xmp_to_recipe(&doc));
+        legacy.texture = 20.0; // the user moved THIS slider and nothing else
+        let out = merge_recipe_into_xmp(&doc, &legacy).expect("mergeable");
+        assert!(out.doc.contains("crs:Texture=\"+20\""), "the edit reaches the file: {}", out.doc);
+        assert_eq!(out.doc.matches("crs:Texture=").count(), 1, "and only once");
+        // Its untouched neighbours are still protected — the gate did not open
+        // for the whole recipe.
+        assert!(out.doc.contains("crs:GrainAmount=\"30\""), "the grain block stands");
+    }
+
+    /// The de-fringe six move as ONE block or not at all: the writer emits all
+    /// six unconditionally because a hue window with no amount beside it is a
+    /// shape no real document has, and a per-key gate that released three of
+    /// them would publish exactly that.
+    #[test]
+    fn the_era_gate_releases_the_de_fringe_block_whole() {
+        let doc = lr_globals_doc();
+        let mut legacy = as_v0_30_recipe(&xmp_to_recipe(&doc));
+        legacy.defringe_purple = 5.0; // one key of the six
+        let out = merge_recipe_into_xmp(&doc, &legacy).expect("mergeable");
+        for key in [
+            "DefringePurpleAmount",
+            "DefringePurpleHueLo",
+            "DefringePurpleHueHi",
+            "DefringeGreenAmount",
+            "DefringeGreenHueLo",
+            "DefringeGreenHueHi",
+        ] {
+            assert_eq!(
+                out.doc.matches(&format!("crs:{key}=")).count(),
+                1,
+                "crs:{key} must be written exactly once when the block moves"
+            );
+        }
+        assert!(out.doc.contains("crs:DefringePurpleAmount=\"5\""), "{}", out.doc);
+    }
+
+    /// The era gate's universe, DERIVED and pinned: exactly the twenty-seven
+    /// attribute keys R25 gave this writer. A hand-copied list would drift;
+    /// this asserts the derivation produces the list, so a new `CarriedOnly`
+    /// row arrives inside the gate and a row promoted OUT of the tier leaves
+    /// it — with the count as the tripwire either way.
+    #[test]
+    fn the_era_gate_is_the_twenty_seven_keys_r25_added() {
+        let mut keys: Vec<&str> = r25_attr_keys().into_iter().map(|(_, k)| k).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "AutoLateralCA",
+                "ChromaticAberrationB",
+                "ChromaticAberrationR",
+                "ColorNoiseReduction",
+                "ColorNoiseReductionDetail",
+                "ColorNoiseReductionSmoothness",
+                "DefringeGreenAmount",
+                "DefringeGreenHueHi",
+                "DefringeGreenHueLo",
+                "DefringePurpleAmount",
+                "DefringePurpleHueHi",
+                "DefringePurpleHueLo",
+                "GrainAmount",
+                "GrainFrequency",
+                "GrainSize",
+                "LuminanceNoiseReductionContrast",
+                "LuminanceNoiseReductionDetail",
+                "PostCropVignetteAmount",
+                "PostCropVignetteFeather",
+                "PostCropVignetteHighlightContrast",
+                "PostCropVignetteMidpoint",
+                "PostCropVignetteRoundness",
+                "PostCropVignetteStyle",
+                "SharpenDetail",
+                "SharpenEdgeMasking",
+                "SharpenRadius",
+                "Texture",
+            ]
+        );
+        // Every one of them is a key this writer OWNS — a gated key the merge
+        // never strips anyway would be a rule about nothing.
+        let owned = owned_attr_keys();
+        for k in &keys {
+            assert!(owned.contains(&(*k).to_string()), "{k} is not an owned attribute");
+        }
+        // And the gate really is EMPTY for a current-era recipe: the ordinary
+        // save path pays nothing and changes nothing.
+        assert!(era_suppressed_attr_keys(&EditRecipe::default()).is_empty());
+        assert_eq!(
+            era_suppressed_attr_keys(&EditRecipe { schema_era: 0, ..Default::default() }).len(),
+            27,
+            "an untouched legacy recipe suppresses all twenty-seven"
+        );
+    }
+
+    /// R25 P8, the READ / WRITE asymmetry: a document whose top-level child
+    /// opens and closes under DIFFERENT names balances its tag counts but
+    /// crosses its names. `top_level_owned_spans` (the writer's strip) does
+    /// not even notice — it tracks OWNED children only — so the merge went
+    /// ahead, while `crs_scope_inner` bailed, and a bailed scope hands every
+    /// scanner the WHOLE document: the creative Look's baked `crs:Clarity2012`
+    /// was then read as the photographer's own slider, which is the one thing
+    /// the scope function exists to prevent.
+    #[test]
+    fn a_crossed_name_look_is_dropped_from_the_scope_not_promoted_by_it() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core\">\n\
+             \x20<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             \x20 <rdf:Description rdf:about=\"\"\n\
+             \x20   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+             \x20   crs:Exposure2012=\"+0.35\"\n\
+             \x20   crs:HasSettings=\"True\">\n\
+             \x20  <crs:Look>\n\
+             \x20   <rdf:Description>\n\
+             \x20    <crs:Clarity2012>+50</crs:Clarity2012>\n\
+             \x20   </rdf:Description>\n\
+             \x20  </crs:Foo>\n\
+             \x20 </rdf:Description>\n\
+             \x20</rdf:RDF>\n\
+             </x:xmpmeta>\n";
+        let r = xmp_to_recipe(doc);
+        assert_eq!(r.exposure_ev, 0.35, "the top level's own settings still import");
+        assert_eq!(
+            r.clarity, 0.0,
+            "the Look's baked clarity is NOT this photographer's slider: {doc}"
+        );
+        // The writer really does go ahead on this document — which is what
+        // made the reader's bail an asymmetry rather than a shared refusal.
+        assert!(
+            merge_recipe_into_xmp(doc, &EditRecipe::default()).is_some(),
+            "premise: the merge does not refuse this shape"
+        );
+    }
+
     /// The other side of the same rule: the moment the user edits a mask, the
     /// develop in hand IS the newest intent, so it publishes — and the base's
     /// block going is a disclosed note, never a silence.
@@ -6511,7 +7011,14 @@ mod tests {
             if !p.to_string_lossy().to_lowercase().contains(".xmp") {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            // NAMED, never skipped (R25 P8). `else { continue }` here meant a
+            // sidecar this probe could not read simply left the count — and a
+            // forensic probe whose files quietly stop arriving is a green
+            // test that measures nothing. A `.xmp` in the fixture directory
+            // that will not read as UTF-8 is a fact about the fixtures the
+            // round report has to hear.
+            let text = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("{}: fixture unreadable ({e})", p.display()));
             files += 1;
             let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
             // The block's OWN corrections, counted the way the reader scopes
@@ -6635,7 +7142,14 @@ mod tests {
             if !p.to_string_lossy().to_lowercase().contains(".xmp") {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            // NAMED, never skipped (R25 P8). `else { continue }` here meant a
+            // sidecar this probe could not read simply left the count — and a
+            // forensic probe whose files quietly stop arriving is a green
+            // test that measures nothing. A `.xmp` in the fixture directory
+            // that will not read as UTF-8 is a fact about the fixtures the
+            // round report has to hear.
+            let text = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("{}: fixture unreadable ({e})", p.display()));
             let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
             let r = xmp_to_recipe(&text);
             eprintln!(
@@ -6741,6 +7255,84 @@ mod tests {
         eprintln!("{seen_effects} sidecar(s) carried a non-neutral B2 effect");
     }
 
+    /// FORENSIC REGRESSION for **the R25 P8 root cause**, on the seven real
+    /// sidecars and in the exact shape the defect takes in the field: a v0.30
+    /// `recipe.json` (no `schema_era`, no field for any of the twenty-seven
+    /// R25 keys, no masks — that build could not import one) saved back over
+    /// the Lightroom file it came from.
+    ///
+    /// Same directory and same silent-skip rule as the probes above. This is
+    /// where the numbers in the round report come from: before the fix, four
+    /// corrections were destroyed on DSC09034, eight on DSC09642, and nine
+    /// global keys on each of the three files that carry them — every one of
+    /// them silently, with an empty note list.
+    #[test]
+    fn real_lightroom_sidecars_survive_a_v0_30_recipe() {
+        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+        };
+        let (mut files, mut masks_held, mut keys_held) = (0usize, 0usize, 0usize);
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.to_string_lossy().to_lowercase().contains(".xmp") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("{}: fixture unreadable ({e})", p.display()));
+            files += 1;
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let live = xmp_to_recipe(&text);
+            let legacy = EditRecipe { masks: Vec::new(), ..as_v0_30_recipe(&live) };
+            assert_eq!(legacy.schema_era, 0);
+            let Some(out) = merge_recipe_into_xmp(&text, &legacy) else {
+                panic!("{name}: the reference sidecars are all mergeable");
+            };
+
+            // 1) The mask block, byte for byte.
+            let block = text
+                .find("<crs:MaskGroupBasedCorrections>")
+                .zip(text.find("</crs:MaskGroupBasedCorrections>"))
+                .map(|(s, e)| &text[s..e + "</crs:MaskGroupBasedCorrections>".len()]);
+            if let Some(original) = block {
+                let corrections = original.matches("crs:What=\"Correction\"").count();
+                assert!(
+                    out.doc.contains(original),
+                    "{name}: {corrections} correction(s) did not survive a v0.30 save"
+                );
+                masks_held += corrections;
+            }
+
+            // 2) Every one of the twenty-seven keys the recipe never had: the
+            //    VALUE the document arrived with must read back unchanged.
+            let round = xmp_to_recipe(&out.doc);
+            for (control, key) in r25_attr_keys() {
+                let (before, after) = (
+                    crate::advisor::catalogue::global_value(&live, control),
+                    crate::advisor::catalogue::global_value(&round, control),
+                );
+                assert_eq!(before, after, "{name}: crs:{key} changed on a v0.30 save");
+                if text.contains(&format!("crs:{key}=")) {
+                    assert_eq!(
+                        out.doc.matches(&format!("crs:{key}=")).count(),
+                        1,
+                        "{name}: crs:{key} must appear exactly once"
+                    );
+                    keys_held += 1;
+                }
+            }
+            // 3) …and none of it is a silent success by way of an empty file.
+            assert!(out.notes.is_empty(), "{name}: nothing was replaced: {:?}", out.notes);
+        }
+        assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
+        eprintln!(
+            "{files} sidecar(s): {masks_held} correction(s) and {keys_held} R25 key(s) held \
+             through a v0.30-shaped save"
+        );
+    }
+
     /// FORENSIC REGRESSION for the B4 PASS-THROUGH blocks, same directory and
     /// same silent-skip rule as the two probes above.
     ///
@@ -6767,7 +7359,14 @@ mod tests {
             if !p.to_string_lossy().to_lowercase().contains(".xmp") {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            // NAMED, never skipped (R25 P8). `else { continue }` here meant a
+            // sidecar this probe could not read simply left the count — and a
+            // forensic probe whose files quietly stop arriving is a green
+            // test that measures nothing. A `.xmp` in the fixture directory
+            // that will not read as UTF-8 is a fact about the fixtures the
+            // round report has to hear.
+            let text = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("{}: fixture unreadable ({e})", p.display()));
             files += 1;
             let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
             let r = xmp_to_recipe(&text);

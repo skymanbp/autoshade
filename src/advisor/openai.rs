@@ -492,6 +492,14 @@ impl OpenAiProvider {
         // (analyze and refine both land here), so the load-time migration can
         // never turn an AI-authored mask that was already the right way up.
         recipe.coord_era = crate::recipe::COORD_ERA;
+        // R25 P8, the same argument for the CONTROL-SET stamp: `schema_era`'s
+        // serde default means "this JSON predates the R25 keys", which is a
+        // statement about a FILE. The model was shown THIS build's control
+        // list, so every number it returns — including a `texture` of 0 — is a
+        // statement about the current set. Left at the legacy default, the AI's
+        // own zero would be read as "never seen" and the XMP merge would leave
+        // the photographer's old `crs:Texture` standing over it.
+        recipe.schema_era = crate::recipe::SCHEMA_ERA;
         super::project_remote_recipe_text(&mut recipe, &[key]);
         if !repaired.is_empty() {
             // Repaired, but never silently: the mixer bands the model meant

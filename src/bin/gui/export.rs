@@ -203,6 +203,58 @@ pub(crate) fn export_dest_dir(dest: ExportDest, last: Option<&std::path::Path>) 
     }
 }
 
+/// What a paste CARRIES, decided in one place: the clipboard recipe shaped for
+/// the photo it came FROM and for any OTHER photo.
+///
+/// Pulled out of `start_paste` (R25 P8) because this is a data-safety rule and
+/// `start_paste` cannot be exercised without spawning the write worker — the
+/// two strips below were live for releases with nothing asserting either.
+pub(crate) struct PastePayload {
+    /// For the clipboard's OWN photo: everything it copied. Pasting back onto
+    /// itself used to silently destroy valid AI selections, so this arm keeps
+    /// the per-photo state that the foreign arm has to drop.
+    pub own: EditRecipe,
+    /// For any OTHER photo: the user's EDIT, and nothing that belongs to the
+    /// source document.
+    pub foreign: EditRecipe,
+    /// Bitmap masks in the payload, for the caller's toast (they are dropped
+    /// from `foreign`, and a silent drop is what the toast exists to prevent).
+    pub bitmap_masks: usize,
+}
+
+/// The two payloads for `src`. `paste_geometry` off strips crop + straighten
+/// from BOTH arms — composition rarely transfers between frames, and that
+/// includes back onto the source.
+pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePayload {
+    let mut own = src;
+    if !paste_geometry {
+        own.crop = None;
+        own.straighten_deg = 0.0;
+    }
+    let mut foreign = own.clone();
+    // Bitmap masks reference per-photo rasters keyed to the SOURCE stem —
+    // pasted onto ANOTHER photo they point at the wrong file (and classic XMP
+    // cannot carry them, so recipe.json and .xmp would disagree).
+    let bitmap_masks = foreign
+        .masks
+        .iter()
+        .filter(|m| matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }))
+        .count();
+    foreign.masks.retain(|m| !matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }));
+    // The R25 B4 PASS-THROUGH map is PER-DOCUMENT state, not a setting (R25
+    // P8). Nothing in this app can author it — it is filled by reading one
+    // photo's sidecar and by nothing else — so carrying it to another photo
+    // copies the SOURCE's Upright solution and camera profile name into a
+    // develop that would write them into the TARGET's file beside a RAW they
+    // were never solved for, and the read-only Transform / Calibration section
+    // would show the wrong photo's values on the canvas the moment the paste
+    // landed. Silent by design, unlike the bitmap masks above: an empty map
+    // STRIPS nothing (`xmp::merge_strip_keys`), so every target's own block
+    // survives untouched in its own sidecar and there is no loss to report.
+    foreign.passthrough.clear();
+    PastePayload { own, foreign, bitmap_masks }
+}
+
 impl AutoshopApp {
     /// One-line echo of the current delivery settings for the Export hover —
     /// e.g. "JPEG · 2560 px · q95 · sRGB (universal) · → D:\deliver" — so the
@@ -1153,39 +1205,19 @@ impl AutoshopApp {
         if targets.is_empty() {
             return;
         }
-        let mut recipe = src;
-        if !self.paste_geometry {
-            recipe.crop = None;
-            recipe.straighten_deg = 0.0;
-        }
-        // Bitmap masks reference per-photo rasters keyed to the SOURCE stem —
-        // pasted onto ANOTHER photo they point at the wrong file (and classic
-        // XMP cannot carry them, so recipe.json and .xmp would disagree).
-        // Strip them for foreign targets, visibly — but the photo the
-        // clipboard CAME FROM keeps its own masks (pasting back onto itself
-        // used to silently destroy valid AI selections).
-        let recipe_full = recipe.clone();
+        let PastePayload { own: recipe_full, foreign: recipe, bitmap_masks: n_bitmap } =
+            paste_payload(src, self.paste_geometry);
         let copied_from = self.copied_from.clone();
-        let n_bitmap = recipe
-            .masks
-            .iter()
-            .filter(|m| matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }))
-            .count();
         let has_foreign_target = targets.iter().any(|t| Some(t) != copied_from.as_ref());
-        if n_bitmap > 0 {
-            recipe
-                .masks
-                .retain(|m| !matches!(m.mask, autoshop::recipe::MaskGeometry::Bitmap { .. }));
-            if has_foreign_target {
-                self.toast(
-                    ToastKind::Error,
-                    trf(
-                        self.lang,
-                        "{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
-                        &[("n", &n_bitmap.to_string())],
-                    ),
-                );
-            }
+        if n_bitmap > 0 && has_foreign_target {
+            self.toast(
+                ToastKind::Error,
+                trf(
+                    self.lang,
+                    "{n} bitmap mask(s) not pasted — their rasters belong to the source photo (re-run AI select on each target)",
+                    &[("n", &n_bitmap.to_string())],
+                ),
+            );
         }
         // If the open photo is one of the targets, take the paste live in the
         // editor too (undo-able through the usual committed-snapshot step).

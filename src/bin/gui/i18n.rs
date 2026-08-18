@@ -436,7 +436,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Calibration", "校准"),
     ("Perspective correction", "透视校正"),
     ("Camera calibration", "相机校准"),
-    ("Camera profile", "镜头配置文件"),
+    // 「相机」, not 「镜头」: this is `crs:CameraProfile`, the colour profile
+    // the photographer picked in Lightroom's own profile browser. The
+    // 「镜头配置文件」 entry further down is a different thing entirely — the
+    // LENS correction profile the engine applies from camera metadata — and
+    // the two had the same Chinese name, which pointed the user at the wrong
+    // panel to go looking for either.
+    ("Camera profile", "相机配置文件"),
     ("Carried through to the sidecar unchanged; Autoshop never interprets these",
         "原样带出到边车文件；Autoshop 从不解读这些值"),
 

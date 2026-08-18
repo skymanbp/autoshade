@@ -1427,7 +1427,10 @@ struct Region {
 }
 /// A recipe that arrives over HTTP is authored in the LIVE display frame —
 /// the browser edits the oriented preview — so it is stamped
-/// [`crate::recipe::COORD_ERA`] on the way in, whatever the body said.
+/// [`crate::recipe::COORD_ERA`] on the way in, whatever the body said. It is
+/// stamped [`crate::recipe::SCHEMA_ERA`] for the same reason (R25 P8): the
+/// page was served THIS build's control set, so the body's silence about a
+/// key is this build's silence, not a v0.30 file's.
 ///
 /// `EditRecipe::coord_era`'s serde default means "this JSON predates the
 /// field", which is true of a FILE and false of a request body: the web UI
@@ -1442,6 +1445,7 @@ where
 {
     let mut r = EditRecipe::deserialize(d)?;
     r.coord_era = crate::recipe::COORD_ERA;
+    r.schema_era = crate::recipe::SCHEMA_ERA;
     Ok(r)
 }
 

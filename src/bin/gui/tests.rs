@@ -3,6 +3,60 @@
 // change by one byte). `super::*` still resolves to the root.
     use super::*;
 
+    /// R25 P8: what a paste is allowed to CARRY.
+    ///
+    /// The pass-through map is per-DOCUMENT state — Lightroom's Transform /
+    /// Upright block and the camera profile name, read off ONE photo's sidecar
+    /// and authored by nothing in this app. Carried to another photo it is
+    /// provenance pollution with teeth: the target's next save would write the
+    /// SOURCE's Upright solution into the file beside a RAW it was never
+    /// solved for, and the read-only Transform / Calibration section would
+    /// show the wrong photo's values the moment the paste landed.
+    ///
+    /// The clipboard's OWN photo keeps it, on the bitmap-mask rule beside it:
+    /// there the map really is that photo's own state.
+    #[test]
+    fn a_paste_carries_the_edit_and_not_the_source_documents_own_state() {
+        use crate::export::paste_payload;
+        let mut src = EditRecipe {
+            exposure_ev: 0.75,
+            straighten_deg: 3.0,
+            crop: Some(autoshop::recipe::Crop {
+                top: 0.1,
+                left: 0.1,
+                bottom: 0.9,
+                right: 0.9,
+            }),
+            ..Default::default()
+        };
+        src.passthrough = [("PerspectiveVertical", "-35"), ("CameraProfile", "Adobe Standard")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        src.masks.push(autoshop::recipe::LocalAdjustment {
+            mask: autoshop::recipe::MaskGeometry::Bitmap { path: "sky.png".into() },
+            ..Default::default()
+        });
+
+        let p = paste_payload(src.clone(), true);
+        assert!(
+            p.foreign.passthrough.is_empty(),
+            "another photo's Upright block must not ride along: {:?}",
+            p.foreign.passthrough
+        );
+        assert_eq!(p.own.passthrough, src.passthrough, "the source photo keeps its own");
+        assert_eq!(p.foreign.exposure_ev, 0.75, "the EDIT is what a paste is for");
+        // The rule this one was modelled on, still holding.
+        assert_eq!(p.bitmap_masks, 1, "the raster mask is counted for the toast");
+        assert!(p.foreign.masks.is_empty(), "…and dropped from the foreign payload");
+        assert_eq!(p.own.masks.len(), 1, "…while the clipboard's own photo keeps it");
+        // Geometry off strips BOTH arms: composition rarely transfers between
+        // frames, and that includes back onto the source.
+        let g = paste_payload(src, false);
+        assert_eq!((g.own.crop.is_some(), g.own.straighten_deg), (false, 0.0));
+        assert_eq!((g.foreign.crop.is_some(), g.foreign.straighten_deg), (false, 0.0));
+    }
+
     /// L16-2: the batch resolver surfaces the disclosures the OPEN path
     /// would — a silent-neutral XMP value must reach the batch outcome.
     #[test]

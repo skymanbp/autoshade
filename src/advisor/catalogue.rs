@@ -400,7 +400,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 62] = [
+pub const RECIPE_CONTROLS: [Control; 63] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -426,6 +426,25 @@ pub const RECIPE_CONTROLS: [Control; 62] = [
         tier: None,
         purpose: "engine bookkeeping: which coordinate frame crop/masks are stored in \
                   (0 = the pre-v0.30 sensor frame, 1 = the EXIF display frame)",
+    },
+    Control {
+        name: "schema_era",
+        shape: Shape::Integer,
+        range: None,
+        neutral: "1",
+        // ENGINE-ONLY for the same reason as `coord_era`, and a sharper one:
+        // this says which controls the recipe has ever SEEN, which is a fact
+        // about the file it came from. A model asked for it could only guess,
+        // and a wrong guess makes the XMP merge either strip a key it should
+        // have left alone or leave one it should have replaced. Stamped where
+        // model JSON becomes a recipe (`advisor::openai`) and where a request
+        // body does (`serve::live_frame_recipe`) — neither is a FILE, so
+        // neither predates anything.
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: None,
+        purpose: "engine bookkeeping: which control set this recipe was written against \
+                  (0 = before the R25 carried keys existed, 1 = current)",
     },
     Control {
         name: "exposure_ev",
@@ -2022,6 +2041,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
     let EditRecipe {
         version,
         coord_era,
+        schema_era,
         exposure_ev,
         contrast,
         highlights,
@@ -2086,6 +2106,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
     Some(match name {
         "version" => GlobalValue::Int(*version),
         "coord_era" => GlobalValue::Int(*coord_era),
+        "schema_era" => GlobalValue::Int(*schema_era),
         "exposure_ev" => GlobalValue::Num(*exposure_ev),
         "contrast" => GlobalValue::Num(*contrast),
         "highlights" => GlobalValue::Num(*highlights),
@@ -2849,6 +2870,12 @@ mod tests {
                 "post_crop_vignette_mid",
                 "post_crop_vignette_round",
                 "post_crop_vignette_style",
+                // R25 P8: `schema_era` joins for `coord_era`'s reason exactly
+                // — a declaration ABOUT the file the recipe came from, which
+                // the model has never seen and could only guess at. A wrong
+                // guess here decides whether an XMP merge strips a key or
+                // leaves it, so the guess would be a data question.
+                "schema_era",
                 "sharpen_detail",
                 "sharpen_mask",
                 "sharpen_radius",
@@ -3140,6 +3167,16 @@ mod tests {
     /// take the OR of their pair. That is why this test stayed green through
     /// B3 while the dots did widen — the widening is asserted where it now
     /// lives, in the GUI's `the_detail_section_groups_sharpen_and_noise`.
+    ///
+    /// **P8 decision (R25, `tone_active` / `crop_active`)**: the last two
+    /// hand-written predicates in the panel became derivations too, so the
+    /// oracle GREW two rows rather than shrinking by them — the point of this
+    /// test is that the derivation reproduces the tuples, and a tuple with no
+    /// row here is a tuple nothing compares. `tone` is the OR of two families
+    /// (`tone` + `white_balance`) because the panel's section holds both, on
+    /// the Detail section's precedent; `framing` is one family and one
+    /// section. Both were verified BEFORE the swap: the predicates below are
+    /// the panel's own text at `develop.rs:634-643` and `:1304`.
     #[test]
     fn the_family_dots_match_the_hand_written_predicates_they_replaced() {
         // splitmix64, so the sequence is deterministic and the low bits are
@@ -3155,7 +3192,7 @@ mod tests {
         let fam = |name: &str| {
             CONTROL_FAMILIES.iter().find(|f| f.name == name).expect("a declared family")
         };
-        let (mut lit, mut exempt_probes, mut texture_probes) = ([0usize; 6], 0usize, 0usize);
+        let (mut lit, mut exempt_probes, mut texture_probes) = ([0usize; 8], 0usize, 0usize);
         for i in 0..200 {
             // A sparse draw: mostly neutral, so the interesting cases (exactly
             // one field off zero) actually occur instead of every section
@@ -3166,6 +3203,23 @@ mod tests {
             }
             let s = &mut s;
             let mut r = EditRecipe {
+                // The P8 additions: the two sections whose predicates were
+                // still hand-written until this batch.
+                exposure_ev: pick(s) / 20.0,
+                contrast: pick(s),
+                highlights: pick(s),
+                shadows: pick(s),
+                whites: pick(s),
+                blacks: pick(s),
+                tint: pick(s),
+                temperature_k: next(s).is_multiple_of(4).then_some(5500.0),
+                straighten_deg: pick(s) / 4.0,
+                crop: next(s).is_multiple_of(6).then_some(Crop {
+                    top: 0.1,
+                    left: 0.1,
+                    bottom: 0.9,
+                    right: 0.9,
+                }),
                 clarity: pick(s),
                 dehaze: pick(s),
                 texture: pick(s), // B2: new to `presence` — see the doc above
@@ -3189,6 +3243,17 @@ mod tests {
             if next(s).is_multiple_of(5) {
                 r.blue_curve = vec![CurvePoint { input: 255, output: 200 }];
             }
+            // R25 P8: the red and green arms of the `curves` oracle below were
+            // DEAD — the draw moved the master and the blue channel only, so
+            // two of the four disjuncts agreed with the derivation vacuously
+            // and a `curves` family that lost either member would still have
+            // passed. Different moduli so the four are independent.
+            if next(s).is_multiple_of(7) {
+                r.red_curve = vec![CurvePoint { input: 0, output: 15 }];
+            }
+            if next(s).is_multiple_of(11) {
+                r.green_curve = vec![CurvePoint { input: 128, output: 140 }];
+            }
             // The predicates as the panel wrote them, verbatim — plus the ONE
             // term B2 added on purpose (`texture`, see the doc above).
             let presence = r.clarity != 0.0
@@ -3204,6 +3269,17 @@ mod tests {
                 || !r.green_curve.is_empty()
                 || !r.blue_curve.is_empty();
             let lens = r.lens_vignette != 0.0 || r.lens_distortion != 0.0;
+            // `develop.rs:634-643`, verbatim: the Tone & WB section's dot.
+            let tone = r.temperature_k.is_some()
+                || r.tint != 0.0
+                || r.exposure_ev != 0.0
+                || r.contrast != 0.0
+                || r.highlights != 0.0
+                || r.shadows != 0.0
+                || r.whites != 0.0
+                || r.blacks != 0.0;
+            // `develop.rs:1304`, verbatim: the Crop section's.
+            let framing = r.crop.is_some() || r.straighten_deg != 0.0;
             for (k, (label, old, new)) in [
                 ("presence", presence, family_is_active(fam("presence"), &r)),
                 ("detail", detail, family_is_active(fam("detail"), &r)),
@@ -3211,6 +3287,12 @@ mod tests {
                 ("color_grade", grade, family_is_active(fam("color_grade"), &r)),
                 ("curves", curves, family_is_active(fam("curves"), &r)),
                 ("lens", lens, family_is_active(fam("lens"), &r)),
+                (
+                    "tone",
+                    tone,
+                    family_is_active(fam("tone"), &r) || family_is_active(fam("white_balance"), &r),
+                ),
+                ("framing", framing, family_is_active(fam("framing"), &r)),
             ]
             .into_iter()
             .enumerate()
@@ -3240,7 +3322,9 @@ mod tests {
         // A draw that never lit (or never left dark) a section would agree with
         // anything — the equality above would prove nothing about it.
         for (k, label) in
-            ["presence", "detail", "hsl", "color_grade", "curves", "lens"].iter().enumerate()
+            ["presence", "detail", "hsl", "color_grade", "curves", "lens", "tone", "framing"]
+                .iter()
+                .enumerate()
         {
             assert!(lit[k] > 0 && lit[k] < 200, "{label}: the draw was degenerate ({} lit)", lit[k]);
         }
