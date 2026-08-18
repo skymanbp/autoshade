@@ -285,7 +285,7 @@ Tooling note for the build harness [verified, not a Claude bug]: on this machine
 | `saturation` | `Saturation` | integer | identity −100..100 [verified] |
 | `clarity` | `Clarity2012` | integer | identity −100..100 [verified] |
 | `dehaze` | `Dehaze` | real | identity −100..100; absent in older sidecars — on read, score absent as neutral 0 [verified: XMP.pm real; exiftool forum] |
-| `sharpening` | `Sharpness` | integer | recipe 0..150 vs crs **0..100** — **rescale/clamp on write** [verified: Sharpness range 0..100 Adobe/exiv2; recipe 0..150 src/recipe.rs:59] |
+| `sharpening` | `Sharpness` | integer | identity 0..150 — **no rescale**; clamp only [verified v0.31.1: 15 real sidecars carry `crs:Sharpness="150"` (2 repos, NIKON Z 6 + Z 30, `crs:Version` 15.3 + 17.2), max of 566 observed occurrences. The earlier "crs 0..100, rescale ×⅔ on write" row was WRONG: it came from a third-party Lua slider table (`RobColeLr/…/DevelopSettings.lua` L165 min=0 max=100), not from Adobe, and the sidecars contradict it. 150 is the Detail > Sharpening Amount slider's UI maximum] |
 | `noise_reduction` | `LuminanceSmoothing` | integer | 0..100; **easily-missed key** — must be written or NR is silently dropped [verified: standard crs, Report 5] |
 | `straighten_deg` | `CropAngle` | real | degrees; recipe = clockwise-positive — verify sign on one known image before trusting [verified key; sign [unverified]] |
 | `crop.{left,top,right,bottom}` | `CropLeft/Top/Right/Bottom` | real | normalised [0,1], (0,0) top-left → identity; only applied when `HasCrop="True"` [verified: identity mapping; HasCrop gate] |
@@ -315,7 +315,7 @@ Tooling note for the build harness [verified, not a Claude bug]: on this machine
     crs:Dehaze="{-100_100}"
     crs:Vibrance="{-100_100}"
     crs:Saturation="{-100_100}"
-    crs:Sharpness="{0_100}"
+    crs:Sharpness="{0_150}"
     crs:LuminanceSmoothing="{0_100}"
     crs:HasCrop="{True|False}"
     crs:CropTop="{0.0_1.0}"
@@ -423,7 +423,7 @@ user's own files; no `exiftool` was needed (a sidecar was read directly).
 ### 9.3 Real `crs:` values — corrects §5/§8 guesses [verified: `<library>\Raw\2023\23-06-Cornwall-Raw\DSC08724.xmp`]
 Use these, **not** the guessed constants in §5's template / §8's table:
 - `crs:ProcessVersion="15.4"` (NOT `"11.0"` — closes §8 #10), `crs:Version="15.5.1"`, `crs:CompatibleVersion="234881024"`.
-- Sliders are **signed integers with an explicit `+`**: `Contrast2012="+22"`, `Highlights2012="+7"`, `Shadows2012="-6"`, `Tint="+13"`, `Dehaze="+18"`, `Vibrance="+5"`, `Saturation="+13"`. `Exposure2012="0.00"` is decimal EV. `Sharpness="40"` plain 0..100 int; `LuminanceSmoothing="0"` present. → §5's signed-int / 0..100 conversions are right; the writer must emit the leading `+` for positives.
+- Sliders are **signed integers with an explicit `+`**: `Contrast2012="+22"`, `Highlights2012="+7"`, `Shadows2012="-6"`, `Tint="+13"`, `Dehaze="+18"`, `Vibrance="+5"`, `Saturation="+13"`. `Exposure2012="0.00"` is decimal EV. `Sharpness="40"` plain unsigned int; `LuminanceSmoothing="0"` present. → §5's signed-int convention is right and the writer must emit the leading `+` for positives. *(v0.31.1: the "0..100" this bullet used to assert about `Sharpness` was an inference from one sample sitting at 40, not a measurement of the band. The band is 0..150 — see the §8 table row.)*
 - `Temperature="5650"` is written **even when `WhiteBalance="As Shot"`** → refines §8 #14: `Temperature` is emitted as an absolute Kelvin regardless of WB mode in this corpus.
 - Crop: `HasCrop="False"`, `CropTop/Left="0"`, `CropBottom/Right="1"`, `CropAngle="0"` → confirms 0..1 fractions + `HasCrop` gate (closes §8 #8). `CropAngle` sign still [unverified] (no tilted sample in this file).
 - **Tone curve correction:** real `ToneCurvePV2012` = `"0, 0"`,`"67, 61"`,`"189, 210"`,`"224, 255"` — the **last point need NOT be `"255, 255"`** (§5's template wrongly mandates it). Endpoints can be interior; only "starts at x=0, monotonic in x" holds.

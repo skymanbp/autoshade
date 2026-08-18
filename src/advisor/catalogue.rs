@@ -633,7 +633,14 @@ pub const RECIPE_CONTROLS: [Control; 63] = [
         engine_only: false,
         crs: CrsKey::Attr("Sharpness"),
         tier: Some(Tier::Rendered),
-        purpose: "capture sharpening amount (0..150 here; a sidecar's 0..100 Sharpness × 1.5)",
+        // This row's band is ALSO the sidecar's, since v0.31.1: `crs:Sharpness`
+        // stores Lightroom's Amount slider 1:1 and that slider's UI maximum is
+        // 150, not 100 (15 real sidecars carry `Sharpness="150"`; web survey
+        // 2026-08-18, see `xmp::xmp_to_recipe`). So `crs_number_is_in_recipe_range`
+        // derives this key like every other one — the hand-written scale
+        // residue it used to need is gone.
+        purpose: "capture sharpening amount, 1:1 with Lightroom's Detail > Sharpening Amount \
+                  slider and with `crs:Sharpness` (both 0..150)",
     },
     Control {
         name: "noise_reduction",
@@ -1134,9 +1141,16 @@ pub const LOCAL_CONTROLS: [Control; 28] = [
         engine_only: false,
         crs: CrsKey::Family("CorrectionMasks/Mask"),
         tier: Some(Tier::Rendered),
+        // `roundness` is told as "leave it at 0" on purpose. Its domain is
+        // Lightroom's ±100 slider (v0.31.1), but this engine carries the value
+        // without rendering it — so a model that authored a real one would
+        // write a number into the sidecar that Lightroom honours and the
+        // preview does not, i.e. it would invent a WYSIWYG gap. Saying 0 keeps
+        // the AI where every radial in the reference library already sits.
         purpose: "WHERE this adjustment applies: kind=linear (zero_* = the no-effect edge, \
                   full_* = the full-effect edge, in 0..1 frame coords) for skies/horizons, or \
-                  kind=radial (top/left/bottom/right + feather 0..1, roundness 0..1, flipped, \
+                  kind=radial (top/left/bottom/right + feather 0..1, roundness 0 — a carried \
+                  Lightroom value this engine does not render, so leave it at 0 — flipped, \
                   and angle in DEGREES counter-clockwise about the ellipse centre, 0 = \
                   axis-aligned — rotate it to follow an oblique subject) for subjects and \
                   vignettes",

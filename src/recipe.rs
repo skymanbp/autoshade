@@ -925,9 +925,18 @@ pub enum MaskGeometry {
     /// Radial/elliptical gradient. Maps to ACR `What="Mask/CircularGradient"`.
     /// `feather` IS engine-rendered (clamped to 0..1). `roundness` is **carried
     /// only** — persisted, XMP round-tripped and accepted from the AI, but NOT
-    /// rendered: the engine draws a pure ellipse. Its scale and sign are
-    /// unverified (docs/V2_PLAN.md §7 item 1), so honouring it would reshape
+    /// rendered: the engine draws a pure ellipse. Honouring it would reshape
     /// imported and AI-authored masks on a guess; see `mask_weight` in render.rs.
+    ///
+    /// Its DOMAIN is no longer a guess, though: `crs:Roundness` is Lightroom's
+    /// ±100 integer slider (all 24 radials in the harvested real-sidecar corpus
+    /// write a bare signed integer, every one of them at the default `0`), not
+    /// the 0..1 aspect ratio this field was once clamped to. v0.31.1 widened
+    /// the clamp and the importer's gate to ±100 so a user who moved that
+    /// slider keeps their mask; what the number MEANS in pixels is still
+    /// unmeasured (docs/V2_PLAN.md §7 item 1), which is exactly why it is
+    /// carried verbatim rather than converted.
+    ///
     /// `angle` (degrees, ENGINE convention: counter-clockwise about the bbox
     /// centre in normalised frame coords, 0 = axis-aligned) IS rendered and
     /// GUI-editable, but is OUR OWN field, not `crs:Angle`: the XMP writer
@@ -1105,11 +1114,16 @@ fn clamp_geometry(g: &mut MaskGeometry) {
             // never interpret has no range to enforce, and rewriting it would
             // make our sidecar claim a version Lightroom never wrote.
             *midpoint = if midpoint.is_finite() { midpoint.clamp(0.0, 100.0) } else { 50.0 };
-            // feather/roundness are 0..1 fractions everywhere that reads
-            // them (render, XMP); a stored 2.0 was a value the engine
-            // silently treated as 1.0 but persistence kept.
+            // `feather` is a 0..1 fraction everywhere that reads it (render,
+            // XMP); a stored 2.0 was a value the engine silently treated as
+            // 1.0 but persistence kept.
             *feather = feather.clamp(0.0, 1.0);
-            *roundness = roundness.clamp(0.0, 1.0);
+            // `roundness` is NOT on that scale. It is Lightroom's ±100 slider,
+            // carried and never interpreted (see `MaskGeometry::Radial`), so
+            // the clamp is the SIDECAR's band — the old 0..1 clamp would have
+            // crushed a real `crs:Roundness="-30"` to 0 on the way back out,
+            // which is how a carried value stops being carried. v0.31.1.
+            *roundness = roundness.clamp(-100.0, 100.0);
             // Rotation wraps — ±180° covers every ellipse orientation twice
             // over (the shape has 180° symmetry), and an unbounded stored
             // angle would feed sin/cos a huge argument for no extra shapes.

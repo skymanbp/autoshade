@@ -4,7 +4,7 @@
 //!
 //! Key names, value conventions, and structure were verified against a real ACR
 //! sidecar from the user's own library (`DSC08724.xmp`): `ProcessVersion=15.4`,
-//! signed-integer sliders, `Sharpness` on 0..100, tone curve as an `rdf:Seq` of
+//! signed-integer sliders, `Sharpness` on 0..150, tone curve as an `rdf:Seq` of
 //! `"x, y"` strings (see `docs/M1_PLAN.md` §5 and §9). We emit only the keys we
 //! set; Lightroom fills the rest from defaults.
 
@@ -1109,8 +1109,10 @@ fn owned_attrs(r: &EditRecipe) -> String {
         attr(&mut a, "ColorGradeBlending", &uns(cg.blending));
     }
 
-    // recipe sharpening is 0..150; crs Sharpness is 0..100 — rescale + clamp.
-    let sharp = ((r.sharpening * 2.0 / 3.0).round() as i64).clamp(0, 100);
+    // 1:1 with the Detail > Sharpening "Amount" slider, whose UI maximum IS
+    // 150 — see the reader for the evidence that retired the old ×⅔ rescale.
+    // Round + clamp to the same band the recipe row states, no scale change.
+    let sharp = (r.sharpening.round() as i64).clamp(0, 150);
     attr(&mut a, "Sharpness", &sharp.to_string());
     // SharpenRadius is the one DECIMAL key in the detail block, and the one
     // Lightroom writes with an explicit `+`: `crs:SharpenRadius="+1.0"` in all
@@ -2902,13 +2904,9 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
 /// [`unparsable_crs_numbers`] never checks it, so a nonsense value arrives as a
 /// silent clamp with no disclosure. Now the writer's list is the only edit.
 ///
-/// Three residues stay spelled out, because the registry states no field for
+/// Two residues stay spelled out, because the registry states no field for
 /// them:
 ///
-///   * **the sidecar's own SCALE** — `crs:Sharpness` is ACR's 0..100 while the
-///     `sharpening` row documents the recipe's 0..150 (the writer scales ×⅔,
-///     the reader ×1.5). What decides whether a DOCUMENT is readable is the
-///     document's band, so this one key keeps its own.
 ///   * **the colour-grade wheels** — one registry row (`color_grade`) stands
 ///     for 14 attributes, so the per-wheel bands come off the field NAME
 ///     (`ColorGrade::clamp`: hue 0..360, sat + blending 0..100, lum + balance
@@ -2929,9 +2927,7 @@ fn crs_number_is_in_recipe_range(key: &str, value: f32) -> bool {
             (-100.0, 100.0)
         }
     };
-    let (lo, hi) = if key == "Sharpness" {
-        (0.0, 100.0)
-    } else if let Some(band) =
+    let (lo, hi) = if let Some(band) =
         RECIPE_CONTROLS.iter().find(|c| c.crs.attr() == Some(key)).and_then(|c| c.range)
     {
         band
@@ -3465,12 +3461,43 @@ fn component_import_reasons(
     let expected_mode = if what == "Mask/RangeMask" { "1" } else { "0" };
     let expected_value = if what == "Mask/RangeMask" { 0.0 } else { 1.0 };
 
-    // A muted component, or one painted at a partial value, changes what the
-    // mask covers — values we can read but have no model for, so they still
-    // refuse. (Compare the two below, which are knobs, not coverage.)
-    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true"))
-        || !optional_number_is(tag, "MaskValue", expected_value)
-    {
+    // A muted component changes what the mask covers — a value we can read but
+    // have no model for, so it still refuses. (Compare the knobs below, which
+    // are composition, not coverage.)
+    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true")) {
+        return Err(());
+    }
+    // Lightroom's SUBTRACT is encoded as a PAIR, and `MaskValue="0"` is HALF of
+    // it — not an opacity of zero. Census of every GitHub-indexed `.xmp`
+    // carrying `crs:MaskBlendMode` (157 files, 479 attribute instances,
+    // 2026-08-18; re-derived with a real XML parser, 0 parse failures):
+    //
+    //   MaskBlendMode="1"  ⇒  MaskValue="0"    26 / 26, no exceptions
+    //   MaskBlendMode="0"  ⇒  MaskValue="1"   436 of 453 (16 are 0, one 0.662178)
+    //   MaskBlendMode="1"  with MaskValue="1"   0 / 479
+    //
+    // `MaskInverted` is orthogonal — inversion occurs only with mode 0 in that
+    // corpus, so inverting and subtracting are separate encodings, not one.
+    //
+    // So a zero MaskValue UNDER a non-default blend mode says "this shape is
+    // subtracted", where the same zero on its own says "this shape is muted".
+    // Reading the pair as a mute took the whole correction down (the geometry
+    // arm turns `Err` into `OutOfModel`), which threw away a mask the file
+    // draws perfectly well in order to avoid a composition we merely cannot
+    // do — and the composition already has its own disclosure, three lines
+    // down. What we must NEVER do is treat the 0 as a strength and multiply it
+    // in: that would silently neutralise a mask the file says is fully
+    // painted. Nothing here reads `MaskValue` as a magnitude; the adjustment's
+    // strength comes from `crs:CorrectionAmount` alone (see
+    // `parse_one_correction`).
+    //
+    // `expected_value != 0.0` keeps our own `Mask/RangeMask` encoding
+    // (`MaskBlendMode="1"` + `MaskValue="0"`, which IS this app's intersect
+    // spelling) out of the branch — it is already the expected pair there.
+    let subtracted = expected_value != 0.0
+        && crs_str(tag, "MaskBlendMode").is_some_and(|mode| mode.as_ref() != expected_mode)
+        && crs_f32(tag, "MaskValue").is_some_and(|v| v.abs() <= 1e-6);
+    if !subtracted && !optional_number_is(tag, "MaskValue", expected_value) {
         return Err(());
     }
     let mut reasons: Vec<MaskImportReason> = Vec::new();
@@ -3514,6 +3541,30 @@ fn component_import_reasons(
             }
         }
         "Mask/CircularGradient" => {
+            // `crs:Roundness` is a ±100 INTEGER slider, not a 0..1 aspect
+            // ratio. Direct observation, 2026-08-18: every one of the 24
+            // radials in the harvested real-sidecar corpus writes it as a bare
+            // signed integer, all of them `"0"` (its default), alongside
+            // `Feather="+100"` and `Midpoint="+50"` on the same 0..100-style
+            // integer footing — while the ONE attribute in those components
+            // that really is a 0..1 real, `Feather` inside `crs:RetouchAreas`,
+            // is a different field entirely (`0.388672`). ExifTool types the
+            // whole `%sCorrectionMask` family as `real`, so the type says
+            // nothing; the VALUES say ±100. The old `(0.0..=1.0)` gate was the
+            // "bbox aspect" reading, and it refused the WHOLE correction — a
+            // Lightroom user who touched this slider lost the mask, silently.
+            //
+            // Widened to the observed slider domain. No CONVERSION is applied
+            // and none is needed: `roundness` is carried, never rendered (see
+            // `MaskGeometry::Radial`), so the number rides through the recipe
+            // and back into the sidecar unchanged. That is also what settles
+            // the one value both readings could claim — `1`. Feather HAS to
+            // disambiguate 0..1 from 0..100 because feather is rendered and a
+            // wrong guess reshapes the photo; roundness has nothing to
+            // disambiguate FOR, so a legacy `"0.25"` we once wrote comes back
+            // as 0.25 and a Lightroom `"1"` comes back as 1, each written out
+            // exactly as it arrived. Whichever scale either meant, the file
+            // gets its own number back.
             if !matches!(
                 crs_str(tag, "MaskInverted").as_deref(),
                 None | Some("true") | Some("false")
@@ -3523,7 +3574,7 @@ fn component_import_reasons(
             ) || !["Top", "Left", "Bottom", "Right"]
                 .iter()
                 .all(|key| crs_f32(tag, key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
-                || !crs_f32(tag, "Roundness").is_some_and(|v| (0.0..=1.0).contains(&v))
+                || !crs_f32(tag, "Roundness").is_some_and(|v| (-100.0..=100.0).contains(&v))
             {
                 return Err(());
             }
@@ -3959,8 +4010,16 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         grain_rough: f("GrainFrequency"),
         hsl,
         color_grade,
-        // crs Sharpness is 0..100, recipe sharpening 0..150 (writer scales ×⅔).
-        sharpening: f("Sharpness") * 1.5,
+        // 1:1. Lightroom's Detail > Sharpening "Amount" slider runs 0..150 and
+        // `crs:Sharpness` stores that UI number unscaled — 15 real sidecars in
+        // 2 unrelated repositories, 2 camera bodies and 2 Lightroom generations
+        // carry `crs:Sharpness="150"` (`crs:Version` 15.3/17.2), the maximum in
+        // 566 observed occurrences (web survey, 2026-08-18). The reader's old
+        // ×1.5 and the writer's ×⅔ were both built on a 0..100 ceiling that
+        // does not exist: `Sharpness="40"` used to import as 60, `"150"` came
+        // in as 225 and was clamped back to 150 while ALSO being reported as
+        // an unparsable number, and a rendered 60 was written back as 40.
+        sharpening: f("Sharpness"),
         noise_reduction: f("LuminanceSmoothing"),
         // The eight CARRIED detail axes (R25 B3). `f` answers 0 for an absent
         // key, which IS this block's neutral — an untouched sidecar still
@@ -4982,6 +5041,73 @@ mod tests {
         for key in ["SharpenRadius", "ColorNoiseReduction", "AutoLateralCA"] {
             assert!(!cleared.contains(key), "{key} survived a clear: {cleared}");
         }
+    }
+
+    /// v0.31.1: `crs:Sharpness` is Lightroom's Detail > Sharpening **Amount**
+    /// slider stored 1:1, and that slider's UI maximum is **150**, not 100.
+    ///
+    /// EVIDENCE (web survey of GitHub-hosted `.xmp`, 2026-08-18; 566
+    /// `crs:Sharpness` occurrences across 636 files, histogram maximum 150):
+    /// fifteen REAL sidecars carry `crs:Sharpness="150"` — fourteen from
+    /// `maxbordogna/finger_counting` (`tiff:Model="NIKON Z 6"`,
+    /// `crs:Version="15.3"` / `ProcessVersion="11.0"`) and one from
+    /// `ninjahisser/Fotos` (`NIKON Z 30`, `crs:Version="17.2"` /
+    /// `ProcessVersion="15.4"`), the latter with the value sitting inside the
+    /// Detail attribute group beside `SharpenRadius="+1.0"` /
+    /// `SharpenDetail="25"` / `SharpenEdgeMasking="0"` in a file that names its
+    /// own raw. Two repositories, two camera bodies, two Lightroom
+    /// generations. The sidecar values are also copied here as TEXT ONLY —
+    /// no harvested file enters this repository.
+    ///
+    /// The 0..100 belief was load-bearing in four places, all deleted with it:
+    /// the reader's ×1.5, the writer's ×⅔, the `Sharpness` special case in
+    /// `crs_number_is_in_recipe_range`, and an assertion that PINNED
+    /// `100 × 1.5 == 150` as an invariant. This test is the replacement pin —
+    /// it fails on every one of those four.
+    #[test]
+    fn a_full_lightroom_sharpening_amount_imports_as_itself() {
+        // The maximum a real Lightroom writes. Synthetic document, real value.
+        let doc = |v: &str| {
+            format!(
+                "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF \
+                 xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+                 <rdf:Description rdf:about=\"\"\n    \
+                 xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
+                 crs:Sharpness=\"{v}\" crs:SharpenRadius=\"+1.0\" crs:SharpenDetail=\"25\"\n    \
+                 crs:SharpenEdgeMasking=\"0\" crs:HasSettings=\"True\">\n  \
+                 </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n"
+            )
+        };
+        // 1. A full 150 arrives as 150. Under the old reader it was 225,
+        //    clamped back to 150 by luck — and under the old BAND it was also
+        //    reported as an unparsable number, i.e. the app told the user a
+        //    perfectly ordinary Lightroom file was broken.
+        let full = xmp_to_recipe(&doc("150"));
+        assert_eq!(full.sharpening, 150.0, "a full Lightroom Amount is 150 here too");
+        assert!(
+            unparsable_crs_numbers(&doc("150")).is_empty(),
+            "150 is an ordinary value, not a defect: {:?}",
+            unparsable_crs_numbers(&doc("150"))
+        );
+        // 2. The user's own library value. 40 in, 40 out — it used to be 60.
+        assert_eq!(xmp_to_recipe(&doc("40")).sharpening, 40.0);
+        // 3. WYSIWYG on the way back out: what the engine renders is what the
+        //    sidecar says. A rendered 60 used to be written back as 40.
+        let sixty = EditRecipe { sharpening: 60.0, ..Default::default() };
+        assert!(
+            recipe_to_xmp(&sixty).contains(r#"crs:Sharpness="60""#),
+            "{}",
+            recipe_to_xmp(&sixty)
+        );
+        // …and 150 survives a full round trip, which the old ×⅔ writer could
+        // not do at all: it had no way to SAY 150.
+        assert!(recipe_to_xmp(&full).contains(r#"crs:Sharpness="150""#));
+        assert_eq!(xmp_to_recipe(&recipe_to_xmp(&full)).sharpening, 150.0);
+        // 4. The band still has a ceiling, and it is the row's: 151 is out.
+        assert!(
+            unparsable_crs_numbers(&doc("151")).iter().any(|k| k == "Sharpness"),
+            "past the slider's own maximum is still disclosed"
+        );
     }
 
     /// R25 B3 (policy SF4-C): de-fringe round-trips through BOTH spellings
@@ -6195,6 +6321,9 @@ mod tests {
         assert_eq!(unsupported_corrections(&doc), 0);
         // …and a mode we cannot reproduce is a NOTE on an imported mask, not
         // a refusal: the shape is still exactly what the file draws.
+        // (`lr_gradient` pairs the mode with `MaskValue="1"`; that pair does
+        // not occur in the wild — see the next test, which uses the one that
+        // does — but it isolates the blend-mode arm on its own.)
         let subtract = lr_doc(&lr_correction("Gradient 1", "", &lr_gradient("1")));
         let r2 = xmp_to_recipe(&subtract);
         assert_eq!(r2.masks.len(), 1, "a Subtract component still has a shape");
@@ -6205,6 +6334,123 @@ mod tests {
                 reason: MaskImportReason::BlendMode
             }]
         );
+    }
+
+    /// v0.31.1: Lightroom's SUBTRACT is the PAIR `crs:MaskBlendMode="1"` +
+    /// `crs:MaskValue="0"`, and the second half is an ENCODING, not an opacity.
+    ///
+    /// EVIDENCE (complete census of the GitHub-code-search-indexed population
+    /// of `.xmp` files containing `crs:MaskBlendMode` — 157 files, 479
+    /// attribute instances, verified twice, by regex and by
+    /// `xml.etree.ElementTree`, 0 parse failures, 2026-08-18):
+    /// `MaskBlendMode="1"` co-occurs with `MaskValue="0"` in 26 of 26
+    /// instances, and `MaskBlendMode="1"` with `MaskValue="1"` in 0 of 479.
+    /// The attribute never sits on the `crs:What="Correction"` element — it is
+    /// always a per-component value, which is where this reader looks.
+    ///
+    /// The importer read that zero as "muted", refused the component, and the
+    /// geometry arm turned the refusal into `OutOfModel` — the user's whole
+    /// correction, thrown away to avoid a composition we could simply have
+    /// disclosed. Now the base shape imports and `BlendMode` names what did
+    /// not. The zero is never multiplied into anything; strength comes from
+    /// `crs:CorrectionAmount`, which this test also pins.
+    ///
+    /// MUTATION THIS CATCHES: reading `MaskValue` as an opacity (the mask
+    /// arrives at strength 0), and dropping the `subtracted` guard (the whole
+    /// correction disappears again).
+    #[test]
+    fn a_real_lightroom_subtract_component_keeps_its_geometry() {
+        // The real pair, on a component this reader has a model for.
+        let subtract = lr_radial("0", "1").replace("crs:MaskValue=\"1\"", "crs:MaskValue=\"0\"");
+        let doc = lr_doc(&lr_correction("Radial 1", "", &subtract));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the shape the file draws must survive: {:?}", r.masks);
+        assert_eq!(unsupported_corrections(&doc), 0, "and the correction is not counted lost");
+        assert_eq!(
+            import_losses(&doc),
+            vec![MaskImportLoss {
+                name: "Radial 1".into(),
+                reason: MaskImportReason::BlendMode
+            }],
+            "exactly one note: the composition, not the geometry"
+        );
+        // The geometry is the file's own, and the zero did NOT become a
+        // strength: `CorrectionAmount="1"` is still the master opacity.
+        let MaskGeometry::Radial { top, left, .. } = r.masks[0].mask else {
+            panic!("expected a radial, got {:?}", r.masks[0].mask);
+        };
+        assert_eq!((top, left), (0.114928, 0.590368), "the real coordinates arrived");
+        assert_eq!(r.masks[0].amount, 1.0, "MaskValue=0 is an encoding, never a pre-multiplier");
+        assert_eq!(r.masks[0].contrast, 43.0, "and the sliders are untouched by it");
+
+        // The guard is a PAIR. A zero MaskValue with the DEFAULT blend mode is
+        // the muted component it always was, and still refuses.
+        let muted = lr_radial("0", "0").replace("crs:MaskValue=\"1\"", "crs:MaskValue=\"0\"");
+        let muted_doc = lr_doc(&lr_correction("Radial 1", "", &muted));
+        assert!(xmp_to_recipe(&muted_doc).masks.is_empty(), "a muted component still refuses");
+        assert_eq!(unsupported_corrections(&muted_doc), 1);
+
+        // …and so does a genuinely PARTIAL value, blend mode or not — that is
+        // coverage we can read and have no model for. (0.662178 is the one
+        // non-0/1 MaskValue in the whole 479-instance census.)
+        for blend in ["0", "1"] {
+            let partial = lr_radial("0", blend)
+                .replace("crs:MaskValue=\"1\"", "crs:MaskValue=\"0.662178\"");
+            let partial_doc = lr_doc(&lr_correction("Radial 1", "", &partial));
+            assert!(
+                xmp_to_recipe(&partial_doc).masks.is_empty(),
+                "MaskBlendMode={blend}: a partial MaskValue is not the subtract encoding"
+            );
+        }
+    }
+
+    /// v0.31.1: `crs:Roundness` is Lightroom's ±100 integer slider, so a user
+    /// who moved it no longer loses the mask.
+    ///
+    /// EVIDENCE (direct observation of the harvested real-sidecar corpus,
+    /// 2026-08-18): all 24 `Mask/CircularGradient` components write Roundness
+    /// as a bare signed integer, every one at its default `0`, beside
+    /// `Feather="+100"` and `Midpoint="+50"` — integers on a 0..100-style
+    /// footing, not 0..1 reals. The importer's old `(0.0..=1.0)` gate was the
+    /// "bbox aspect ratio" reading of the field, and being a GEOMETRY check it
+    /// refused the entire correction.
+    ///
+    /// The value is CARRIED, not converted (`mask_weight` never reads it), so
+    /// the ambiguous `1` needs no ruling: whatever scale it was written on, it
+    /// is written back as `1`. That is the difference from `feather`, which is
+    /// rendered and therefore must guess.
+    #[test]
+    fn a_lightroom_roundness_slider_is_carried_not_refused() {
+        let with = |v: &str| {
+            lr_doc(&lr_correction(
+                "Radial 1",
+                "",
+                &lr_radial("0", "0").replace("crs:Roundness=\"0\"", &format!("crs:Roundness=\"{v}\"")),
+            ))
+        };
+        // Both signs of the real slider, the ambiguous 1, and a value only our
+        // own legacy writer could have produced.
+        for (text, want) in [("-30", -30.0), ("+45", 45.0), ("1", 1.0), ("0.25", 0.25)] {
+            let doc = with(text);
+            let r = xmp_to_recipe(&doc);
+            assert_eq!(r.masks.len(), 1, "Roundness={text} must not cost the mask: {:?}", r.masks);
+            assert!(import_losses(&doc).is_empty(), "Roundness={text}: carrying it loses nothing");
+            let MaskGeometry::Radial { roundness, .. } = r.masks[0].mask else {
+                panic!("expected a radial, got {:?}", r.masks[0].mask);
+            };
+            assert_eq!(roundness, want, "Roundness={text}: carried verbatim, never rescaled");
+            // …and it goes back out as the same number, through the clamp.
+            let back = xmp_to_recipe(&recipe_to_xmp(&r));
+            let MaskGeometry::Radial { roundness: round2, .. } = back.masks[0].mask else {
+                panic!("expected a radial, got {:?}", back.masks[0].mask);
+            };
+            assert_eq!(round2, want, "Roundness={text} did not survive our own writer");
+        }
+        // The gate still has ends: past the slider's own range is unreadable
+        // geometry, and that IS a refusal.
+        let wild = with("101");
+        assert!(xmp_to_recipe(&wild).masks.is_empty(), "101 is off the Lightroom slider");
+        assert_eq!(unsupported_corrections(&wild), 1);
     }
 
     /// A `crs:Local*` slider this engine has no model for used to cost the
@@ -7168,9 +7414,15 @@ mod tests {
             );
             // The B3 block, same forensic line: what the eight detail axes,
             // the CA pair and the six de-fringe keys actually came back as.
+            // `sharpening` leads it since v0.31.1 — the ×1.5 that used to sit
+            // on this read was the batch's headline defect, and the value it
+            // produces is the number this probe exists to show. Six of the
+            // seven reference files carry `crs:Sharpness="40"` and one carries
+            // `"35"`; before the fix they imported as 60 and 52.5.
             eprintln!(
-                "    detail {}/{}/{} · nr {}/{} · colour nr {}/{}/{} · ca {}/{} auto {} · \
-                 defringe {}/{}/{} {}/{}/{}",
+                "    sharpening {} · detail {}/{}/{} · nr {}/{} · colour nr {}/{}/{} · \
+                 ca {}/{} auto {} · defringe {}/{}/{} {}/{}/{}",
+                r.sharpening,
                 r.sharpen_radius,
                 r.sharpen_detail,
                 r.sharpen_mask,
@@ -7420,9 +7672,13 @@ mod tests {
 
     /// R25 P0-0.1: the bands `unparsable_crs_numbers` judges a document by ARE
     /// the control registry's, not a second hand-written copy — so a new
-    /// attribute row arrives with its check already wired, and the two
-    /// documented residues (the sidecar's own Sharpness scale, the families
-    /// one row cannot state) are the only hand-written numbers left.
+    /// attribute row arrives with its check already wired, and the families one
+    /// row cannot state are the only hand-written numbers left.
+    ///
+    /// v0.31.1 removed the third residue. `Sharpness` needed its own band only
+    /// because the reader scaled it; now that the key is 1:1 with the recipe
+    /// row, the row's own 0..150 IS the document's band — the special case died
+    /// of the evidence, which is the shape a correct derivation should take.
     #[test]
     fn import_bands_are_the_registry_bands() {
         use crate::advisor::catalogue::RECIPE_CONTROLS;
@@ -7430,14 +7686,9 @@ mod tests {
         for c in RECIPE_CONTROLS.iter() {
             let (Some(key), Some((lo, hi))) = (c.crs.attr(), c.range) else { continue };
             checked += 1;
-            if key == "Sharpness" {
-                // The one key on the DOCUMENT's scale rather than the recipe's:
-                // ACR writes 0..100 and the reader multiplies by 1.5.
-                assert!(crs_number_is_in_recipe_range(key, 100.0), "a full ACR Sharpness is legal");
-                assert!(!crs_number_is_in_recipe_range(key, 101.0), "…and 101 is not");
-                assert_eq!(100.0 * 1.5, hi, "the sidecar band × the reader's scale is the row's");
-                continue;
-            }
+            // `Sharpness` used to be excepted here, on a hand-written 0..100
+            // sidecar band — v0.31.1 deleted the exception along with the
+            // scale it stood for, so this key now derives like every other.
             // A full span outside each end (never a multiple of the bound: for
             // 2000..40000, `lo * 10` lands back INSIDE).
             let span = (hi - lo).max(1.0);
@@ -7533,7 +7784,7 @@ mod tests {
             highlights: -12.0,
             temperature_k: Some(5600.0),
             tint: 3.0,
-            sharpening: 45.0, // -> Sharpness 30
+            sharpening: 45.0, // -> Sharpness 45, 1:1
             tone_curve: vec![
                 CurvePoint { input: 0, output: 0 },
                 CurvePoint { input: 255, output: 255 },
@@ -7549,7 +7800,9 @@ mod tests {
         assert!(xmp.contains(r#"crs:Highlights2012="-12""#));
         assert!(xmp.contains(r#"crs:WhiteBalance="Custom""#));
         assert!(xmp.contains(r#"crs:Temperature="5600""#));
-        assert!(xmp.contains(r#"crs:Sharpness="30""#)); // 45 * 2/3
+        // 1:1 since v0.31.1 — a rendered 45 is written as 45. It used to be
+        // written as 30, i.e. what the user saw was not what the sidecar said.
+        assert!(xmp.contains(r#"crs:Sharpness="45""#));
         assert!(xmp.contains("<crs:ToneCurvePV2012>"));
         assert!(xmp.contains("<rdf:li>0, 0</rdf:li>"));
         // rationale is XML-escaped in the comment
@@ -8102,7 +8355,10 @@ mod tests {
                 balance: 15.0,
                 ..Default::default()
             },
-            sharpening: 45.0, // → crs 30 → ×1.5 → 45 exactly
+            // → crs 45 → back as 45. Exact for a different reason than before
+            // v0.31.1: not "45 happens to survive ×⅔ then ×1.5", but "there is
+            // no scale in either direction any more".
+            sharpening: 45.0,
             noise_reduction: 20.0,
             lens_vignette: 35.0,
             lens_vignette_mid: 60.0,
@@ -8228,7 +8484,9 @@ mod tests {
         assert_eq!(r.tint, 0.0, "as-shot tint is not an edit");
         assert_eq!(r.exposure_ev, 0.65);
         assert_eq!(r.contrast, 22.0);
-        assert_eq!(r.sharpening, 60.0); // crs 40 × 1.5
+        // 1:1 since v0.31.1. This is the value the user's own seven reference
+        // sidecars carry, and it used to import as 60.
+        assert_eq!(r.sharpening, 40.0);
         assert!(r.tone_curve.is_empty(), "identity curve must collapse");
         // A Custom-WB foreign sidecar DOES import its Kelvin + tint.
         let custom = lr.replace("As Shot", "Custom");

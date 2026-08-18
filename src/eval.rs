@@ -62,9 +62,16 @@ enum Source {
 }
 
 /// One comparable control: what to call it, which ACR attribute carries the
-/// user's own value, the unit conversion between the two, and how to read the
-/// AI's side. Built by [`rows`] from the control registry, so a control that
-/// becomes AI-visible later enters the ruler without a second edit here.
+/// user's own value, and how to read the AI's side. Built by [`rows`] from the
+/// control registry, so a control that becomes AI-visible later enters the
+/// ruler without a second edit here.
+///
+/// There is NO unit conversion left on this struct. It carried a per-row
+/// `scale` for exactly one control — `sharpening`, on the belief that
+/// `crs:Sharpness` was ACR's 0..100 against the recipe's 0..150 — and that
+/// belief was disproved in v0.31.1 (real sidecars carry `Sharpness="150"`; see
+/// `xmp::xmp_to_recipe`). Every row is now 1:1 by construction, so the field is
+/// gone rather than left as a column of 1.0s that invites the next scale guess.
 #[derive(Debug, Clone)]
 struct Row {
     /// Report label: a registry field name, or `hsl.<axis>.<band>` /
@@ -72,9 +79,6 @@ struct Row {
     metric: String,
     /// The `crs:` attribute the user's value is read from.
     crs: String,
-    /// crs value × `scale` = recipe units (crs Sharpness 0..100 → recipe
-    /// sharpening 0..150).
-    scale: f32,
     rule: Rule,
     source: Source,
     /// True for the four `*_hue` wheels: hue is CIRCULAR, so 350° vs 10° is a
@@ -131,8 +135,6 @@ fn rows() -> Vec<Row> {
             out.push(Row {
                 metric: c.name.to_string(),
                 crs: attr.to_string(),
-                // crs Sharpness is 0..100; recipe sharpening is 0..150.
-                scale: if c.name == "sharpening" { 1.5 } else { 1.0 },
                 rule: match c.name {
                     "temperature_k" | "tint" => Rule::Wb,
                     "straighten_deg" => Rule::CropGated,
@@ -148,7 +150,6 @@ fn rows() -> Vec<Row> {
                     out.push(Row {
                         metric: f.metric,
                         crs: f.crs,
-                        scale: 1.0,
                         rule: Rule::Plain,
                         source: Source::HslCell { axis: f.axis, band: f.band },
                         circular: false,
@@ -160,7 +161,6 @@ fn rows() -> Vec<Row> {
                     out.push(Row {
                         metric: format!("color_grade.{field}"),
                         crs: attr.to_string(),
-                        scale: 1.0,
                         rule: Rule::Plain,
                         source: Source::Grade(field),
                         circular: field.ends_with("_hue"),
@@ -205,11 +205,13 @@ fn neutral(row: &Row, r: &EditRecipe) -> f32 {
 }
 
 /// The user's value for one row, or `None` when this sidecar does not state it.
+/// Read STRAIGHT: every `crs:` attribute on the ruler carries the same number
+/// the recipe field does (see [`Row`] for the one exception that used to exist).
 fn user_value(row: &Row, scope: &str, user_wb: bool, has_crop: bool) -> Option<f32> {
     match row.rule {
         Rule::Wb if !user_wb => None,
         Rule::CropGated if !has_crop => None,
-        _ => crs_f32(scope, &row.crs).map(|v| v * row.scale),
+        _ => crs_f32(scope, &row.crs),
     }
 }
 
@@ -788,7 +790,11 @@ mod tests {
         assert_eq!(get(SAMPLE, "shadows"), Some(-6.0));
         assert_eq!(get(SAMPLE, "dehaze"), Some(18.0));
         assert_eq!(get(SAMPLE, "temperature_k"), Some(5650.0));
-        assert_eq!(get(SAMPLE, "sharpening"), Some(60.0)); // 40 * 1.5
+        // v0.31.1: 40, not 60. The ruler used to multiply the user's
+        // `crs:Sharpness` by 1.5 to reach "recipe units"; `crs:Sharpness` IS
+        // recipe units. Every earlier `sharpening` row in an eval report —
+        // the R25 M-C 147-photo baseline included — read the user 1.5× high.
+        assert_eq!(get(SAMPLE, "sharpening"), Some(40.0));
         assert_eq!(crs_f32(SAMPLE, "Nonexistent"), None);
     }
 

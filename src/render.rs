@@ -1902,10 +1902,12 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             (((nx - zero_x) * vx + (ny - zero_y) * vy) / len2).clamp(0.0, 1.0)
         }
         // `roundness` is carried but deliberately NOT rendered — pure ellipse,
-        // see `MaskGeometry::Radial` in recipe.rs. Nothing in the repo fixes its
-        // scale or sign (the advisor schema declares a bare number; docs/
-        // V2_PLAN.md §7 item 1 lists the radial ranges as unverified; every
-        // radial in the reference Lightroom sidecars carries Roundness="0").
+        // see `MaskGeometry::Radial` in recipe.rs. Its DOMAIN is now known
+        // (Lightroom's ±100 integer slider — v0.31.1 widened the importer and
+        // the clamp to match), but its pixel MEANING is not: nothing in the
+        // repo fixes how a Roundness of +40 reshapes the ellipse (docs/
+        // V2_PLAN.md §7 item 1; every radial in the reference Lightroom
+        // sidecars carries Roundness="0", so there is nothing to calibrate on).
         // The sibling `feather` HAD the same guessing bug — Lightroom writes it
         // 0..100 and xmp.rs used to import the value raw, so Feather="72"
         // clamped to fully feathered; both XMP directions now convert on the
