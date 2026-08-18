@@ -501,8 +501,12 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   SF9-B 版本捕获像素不做；保存侧蒙版丢失红 toast 保持不降级；蒙版 Temp/Tint 照 LR
   留 Color 组。**素材欠（用户侧一次 6 合 1 LR 实验即可全取）**：Defringe 紫 +3 /
   绿 +2 → 加一个径向旋 +30° → 该蒙版 Hue +50 / Sharpness −40 → 复制该径向做
-  Subtract → 打开 Auto CA → Ctrl+S 存 sidecar。发版：feat+tag v0.31.0，资产字节
-  验证见发布印章（待发版戳）。
+  Subtract → 打开 Auto CA → Ctrl+S 存 sidecar。发版：feat 012d420，tag
+  v0.31.0→012d420，assets 回下载字节验证=本地逐位相等：cli
+  e4de58dc2b92a1a625595d5f6d8a06a0d284ca1655c01992f5df2a2c45c599ef
+  =29,145,146 B / gui
+  05d04b70eed24cd0f1e7b8328f055142b4a0aa10e5039aadbea5517beffc9c71
+  =38,613,218 B；`--version` 自证 0.31.0。
 
   **90° 手动旋转设计骨架（v0.32 首项，本轮拍板推迟，骨架入库以免再丢）**
 
