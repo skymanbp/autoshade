@@ -248,7 +248,7 @@ impl AutoshopApp {
         // already found four of them one field short. `family_is_active` reads
         // the same table the AI's tool plan is built from, so a control that
         // joins a family joins its dot.
-        let (presence_active, detail_active, hsl_active, grade_active, curves_active) = {
+        let (presence_active, detail_active, hsl_active, grade_active, curves_active, effects_active) = {
             let r = &self.recipe;
             let fam = |name: &str| {
                 CONTROL_FAMILIES
@@ -256,7 +256,17 @@ impl AutoshopApp {
                     .find(|f| f.name == name)
                     .is_some_and(|f| family_is_active(f, r))
             };
-            (fam("presence"), fam("detail"), fam("hsl"), fam("color_grade"), fam("curves"))
+            (
+                fam("presence"),
+                fam("detail"),
+                fam("hsl"),
+                fam("color_grade"),
+                fam("curves"),
+                // R25 B2: the `effects` family has no AI-visible member, so it
+                // reaches the model nowhere — it exists in the table for
+                // exactly this, the section's own ●.
+                fam("effects"),
+            )
         };
         changed |= self.dev_tone_wb(ui);
         changed |= self.dev_presence(ui, presence_active);
@@ -264,6 +274,7 @@ impl AutoshopApp {
         changed |= self.dev_hsl(ui, hsl_active);
         changed |= self.dev_grading(ui, grade_active);
         changed |= self.dev_detail(ui, detail_active);
+        changed |= self.dev_effects(ui, effects_active);
         changed |= self.dev_lens(ui);
         changed |= self.dev_crop(ui);
         changed |= self.dev_masks(ui);
@@ -750,6 +761,12 @@ impl AutoshopApp {
             .default_open(true)
             .show(ui, |ui| {
                 let r = &mut self.recipe;
+                // Lightroom's Basic-panel order inside Presence is Texture →
+                // Clarity → Dehaze, and the engine runs them in that order too
+                // (R25 B2 put the global texture stage between clarity and
+                // saturation). The label reuses the existing per-mask
+                // 「Texture / 纹理」 entry — same operator, same word.
+                changed |= Self::slider(ui, lang, tr(lang, "Texture"), &mut r.texture, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Clarity"), &mut r.clarity, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Dehaze"), &mut r.dehaze, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Vibrance"), &mut r.vibrance, -100.0, 100.0, 0.0);
@@ -956,6 +973,48 @@ impl AutoshopApp {
         changed
     }
 
+    /// 效果 — the nine `Tier::CarriedOnly` globals (R25 B2): Lightroom's
+    /// post-crop vignette and film grain.
+    ///
+    /// Every slider here moves a number and NO pixel in this app, which
+    /// `ARCHITECTURE.md` calls the worst kind of bug there is — so each one
+    /// says so in its own tooltip, on the head line, before the drag grammar.
+    /// The values are real and they are not decoration: they round-trip
+    /// through the sidecar, so a Lightroom edit survives an Autoshop save
+    /// instead of being stripped by the merge.
+    fn dev_effects(&mut self, ui: &mut egui::Ui, effects_active: bool) -> bool {
+        let lang = self.lang;
+        let mut changed = false;
+
+        ui.add_space(SPACE_MD);
+        // ONE disclosure line, shared by all nine (see `slider_hinted`: the
+        // helpers return `bool`, so a caller cannot chain its own tooltip, and
+        // two stacked bubbles over one widget is not a disclosure).
+        let carried = tr(lang, "Carried to Lightroom, not rendered here");
+        egui::CollapsingHeader::new(section_title(tr(lang, "Effects"), effects_active))
+            .id_salt("sec_effects")
+            .default_open(false)
+            .show(ui, |ui| {
+                let r = &mut self.recipe;
+                ui.label(egui::RichText::new(tr(lang, "Post-crop vignetting")).weak().small());
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignette amount"), &mut r.post_crop_vignette, -100.0, 100.0, 0.0, carried);
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Midpoint"), &mut r.post_crop_vignette_mid, 0.0, 100.0, 0.0, carried);
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignette feather"), &mut r.post_crop_vignette_feather, 0.0, 100.0, 0.0, carried);
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignette roundness"), &mut r.post_crop_vignette_round, -100.0, 100.0, 0.0, carried);
+                // An operator INDEX (1/2/3), not a band: the ≥20-width rule in
+                // `slider_hinted` would give this 0.01 steps and two decimals,
+                // which is not a thing Adobe's Style can be.
+                changed |= Self::slider_impl(ui, lang, tr(lang, "Vignette style"), &mut r.post_crop_vignette_style, 0.0, 3.0, 0.0, SliderFeel::Int, carried);
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Vignette highlights"), &mut r.post_crop_vignette_hl, 0.0, 100.0, 0.0, carried);
+                ui.add_space(SPACE_SM);
+                ui.label(egui::RichText::new(tr(lang, "Grain")).weak().small());
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Grain amount"), &mut r.grain, 0.0, 100.0, 0.0, carried);
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Grain size"), &mut r.grain_size, 0.0, 100.0, 0.0, carried);
+                changed |= Self::slider_hinted(ui, lang, tr(lang, "Grain roughness"), &mut r.grain_rough, 0.0, 100.0, 0.0, carried);
+            });
+        changed
+    }
+
     /// One develop-panel section — body extracted verbatim from
     /// develop_panel (round-12 decomposition; spacing included).
     fn dev_lens(&mut self, ui: &mut egui::Ui) -> bool {
@@ -1049,7 +1108,13 @@ impl AutoshopApp {
                     );
                     ui.separator();
                 }
-                changed |= Self::slider(ui, lang, tr(lang, "Vignette"), &mut self.recipe.lens_vignette, -100.0, 100.0, 0.0);
+                // 「Lens vignetting」, not 「Vignette」 (R25 B2): the Effects
+                // section above now carries Lightroom's POST-CROP vignette,
+                // and two sections labelled 暗角 with different operators
+                // behind them is a name collision, not a shorthand. This one
+                // is a falloff CORRECTION in linear light before any tonal
+                // work; that one is a creative darkening after the crop.
+                changed |= Self::slider(ui, lang, tr(lang, "Lens vignetting"), &mut self.recipe.lens_vignette, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Midpoint"), &mut self.recipe.lens_vignette_mid, 0.0, 100.0, 50.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Distortion"), &mut self.recipe.lens_distortion, -100.0, 100.0, 0.0);
                 ui.label(

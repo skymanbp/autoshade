@@ -1313,6 +1313,25 @@ pub(crate) fn carry_over_unrepresentable(
     if base.lens_profile != Default::default() {
         recipe.lens_profile = base.lens_profile.clone();
     }
+    // The nine CARRIED effects (R25 B2) ride too, and they have no other way
+    // home: they are `engine_only`, so the response schema cannot restate
+    // them, and unlike the calibration nothing re-stamps them per photo. A
+    // refine that dropped them would strip the photographer's imported
+    // Lightroom grain / post-crop vignette from the recipe AND — because we
+    // own those keys now, so the merge strips before rewriting — from the
+    // sidecar beside the RAW on the very next save. That is data loss, not a
+    // missing feature. `carried_effects_survive_a_refine` re-derives the field
+    // list from `Tier::CarriedOnly`, so the B3/B4 rows fail loudly here until
+    // this block is widened with them.
+    recipe.post_crop_vignette = base.post_crop_vignette;
+    recipe.post_crop_vignette_mid = base.post_crop_vignette_mid;
+    recipe.post_crop_vignette_feather = base.post_crop_vignette_feather;
+    recipe.post_crop_vignette_round = base.post_crop_vignette_round;
+    recipe.post_crop_vignette_style = base.post_crop_vignette_style;
+    recipe.post_crop_vignette_hl = base.post_crop_vignette_hl;
+    recipe.grain = base.grain;
+    recipe.grain_size = base.grain_size;
+    recipe.grain_rough = base.grain_rough;
     recipe.clamp(); // the size caps still apply after re-attaching
 }
 
@@ -2010,7 +2029,7 @@ pub fn write_xmp(
     let target = xmp_target(raw);
     // MERGE, never regenerate over Lightroom's work (A11): the base is the
     // sidecar Lightroom itself writes (beside the RAW) when one exists — its
-    // LR-only properties (global Texture, camera profile / Look, LR
+    // LR-only properties (the camera profile / Look, PointColor, LR
     // lens-profile data, foreign namespaces) survive our save, so the file
     // the user copies back beside the RAW keeps them. Else the previous
     // projection at the destination, which carries forward whatever an
@@ -2092,7 +2111,7 @@ pub fn write_xmp_at(
 ///
 /// A base the splicer cannot account for falls back to a FRESH document rather
 /// than failing the save — but that fallback DROPS exactly what the merge
-/// exists to protect: `crs:Texture`, the camera profile / creative `Look`,
+/// exists to protect: the camera profile / creative `Look`, `crs:PointColor`,
 /// Lightroom's own lens-profile block, foreign namespaces, the xpacket
 /// wrapper. Doing it silently re-entered the A11 data loss through the back
 /// door: the user saw a plain "saved" and found their Lightroom work gone the
@@ -2129,14 +2148,16 @@ fn write_xmp_doc(
         // The note names the file whose properties are LOST — the base — and
         // is honest about what happened to it: a base at the output path is
         // genuinely replaced by the regeneration; a base beside the RAW is
-        // not touched at all, only unrepresented in the new file. "Texture,
-        // camera profile / Look, LR lens-profile data" are EXAMPLES of what a
+        // not touched at all, only unrepresented in the new file. "The camera
+        // profile / Look, LR lens-profile data" are EXAMPLES of what a
         // Lightroom base carries, not a claim about this one — a ratings-only
-        // sidecar loses its ratings the same way.
+        // sidecar loses its ratings the same way. (Lightroom's Texture used to
+        // head that list; R25 B2 models it, so a regenerated file DOES carry
+        // it and naming it here would have made the disclosure false.)
         notes.push(if bp == out {
             format!(
                 "the existing sidecar at {} could not be merged — it was regenerated, \
-                 so properties it carried (e.g. Lightroom's Texture, camera profile / \
+                 so properties it carried (e.g. Lightroom's camera profile / \
                  Look, LR lens-profile data) are not in the new file",
                 out.display()
             )
@@ -2144,7 +2165,7 @@ fn write_xmp_doc(
             format!(
                 "the sidecar at {} could not be merged — the new file at {} was \
                  regenerated without the properties it carried (e.g. Lightroom's \
-                 Texture, camera profile / Look, LR lens-profile data, ratings); \
+                 camera profile / Look, LR lens-profile data, ratings); \
                  the sidecar itself is untouched",
                 bp.display(),
                 out.display()
@@ -2709,6 +2730,57 @@ mod guard_tests {
         assert!(matches!(proposed.masks[1].mask, MaskGeometry::Linear { .. }));
     }
 
+    /// R25 B2: every `Tier::CarriedOnly` global survives a Refine.
+    ///
+    /// These are the one class of recipe value with NO other way back: the
+    /// schema never asks the model for them (they are `engine_only`), and
+    /// unlike `base_curve` / `lens_profile` / the WB anchor nothing re-stamps
+    /// them per photo. Since B2 also made the XMP writer OWN their keys, the
+    /// merge strips them from the Lightroom sidecar before rewriting — so a
+    /// dropped value is not "the app forgot", it is the photographer's own
+    /// grain and post-crop vignette deleted from the file beside their RAW.
+    ///
+    /// The field list is re-derived from the registry through serde, not
+    /// transcribed: the B3/B4 batches add more CarriedOnly rows, and this
+    /// fails on the first one that `carry_over_unrepresentable` does not copy.
+    #[test]
+    fn carried_effects_survive_a_refine() {
+        use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+        let carried: Vec<&str> = RECIPE_CONTROLS
+            .iter()
+            .filter(|c| c.tier == Some(Tier::CarriedOnly))
+            .map(|c| c.name)
+            .collect();
+        assert!(!carried.is_empty(), "premise: the tier has members since B2");
+        // A base holding a non-neutral value for every one of them, built
+        // through serde so a renamed field cannot slip past.
+        let mut json = serde_json::to_value(EditRecipe::default()).expect("recipe serialises");
+        for name in &carried {
+            json[*name] = serde_json::json!(3.0);
+        }
+        let mut base: EditRecipe =
+            serde_json::from_value(json).expect("the probe values are in range");
+        base.clamp();
+        for name in &carried {
+            assert_ne!(
+                crate::advisor::catalogue::global_value(&base, name).and_then(|v| v.scalar()),
+                Some(0.0),
+                "{name}: the probe must actually move the control"
+            );
+        }
+        // What the model returns: a fresh recipe with no such fields at all.
+        let mut proposed = EditRecipe { exposure_ev: 0.4, ..Default::default() };
+        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        for name in &carried {
+            assert_eq!(
+                crate::advisor::catalogue::global_value(&proposed, name).and_then(|v| v.scalar()),
+                crate::advisor::catalogue::global_value(&base, name).and_then(|v| v.scalar()),
+                "{name}: a Refine deleted a carried value the model was never asked for"
+            );
+        }
+        assert_eq!(proposed.exposure_ev, 0.4, "…without undoing the refine itself");
+    }
+
     /// R23-1b: the lens trio is IN the strict schema now, so the carry-over
     /// stopped being unconditional — and both halves of that have to hold at
     /// once, which is exactly what made the change a trap.
@@ -2830,7 +2902,7 @@ mod guard_tests {
         let dev = crate::store::develop_dir(&raw);
         let _ = std::fs::remove_dir_all(&dev);
         // Lightroom's sidecar beside the RAW, carrying a property we do not
-        // model (Texture) — the exact thing regeneration used to destroy.
+        // model (PointColor) — the exact thing regeneration used to destroy.
         let lr = dir.join("_pipe_xmp_merge.xmp");
         std::fs::write(
             &lr,
@@ -2838,7 +2910,7 @@ mod guard_tests {
              <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
              <rdf:Description rdf:about=\"\"\n    \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
-             crs:Texture=\"+21\"\n    crs:Exposure2012=\"+1.00\"\n    \
+             crs:PointColor=\"0\"\n    crs:Exposure2012=\"+1.00\"\n    \
              crs:HasSettings=\"True\">\n  </rdf:Description>\n \
              </rdf:RDF>\n</x:xmpmeta>\n",
         )
@@ -2846,7 +2918,7 @@ mod guard_tests {
         let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
         let (out, _, _) = write_xmp(&raw, &r).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("crs:Texture=\"+21\""), "LR-only property survives the save");
+        assert!(text.contains("crs:PointColor=\"0\""), "LR-only property survives the save");
         assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "…with OUR value");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2874,7 +2946,7 @@ mod guard_tests {
              <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
              <rdf:Description rdf:about=\"\"\n    \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
-             crs:Texture=\"+21\" crs:HasSettings=\"True\">\n   \
+             crs:PointColor=\"0\" crs:HasSettings=\"True\">\n   \
              <crs:MaskGroupBasedCorrections><rdf:Seq>\n    \
              <rdf:li><rdf:Description crs:What=\"Correction\" \
              crs:CorrectionActive=\"true\">\n     \
@@ -2905,7 +2977,7 @@ mod guard_tests {
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("Mask/CircularGradient"), "the develop's mask is published");
         assert!(!text.contains("Mask/Brush"), "the foreign block is not resurrected");
-        assert!(text.contains("crs:Texture=\"+21\""), "LR-only globals still survive");
+        assert!(text.contains("crs:PointColor=\"0\""), "LR-only globals still survive");
         let note = note.expect("the replaced block must be disclosed");
         assert!(note.contains("mask block carries"), "the note names the loss: {note}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3030,30 +3102,30 @@ mod guard_tests {
             &lr,
             "<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-             crs:Texture=\"+21\"></rdf:Description>\n",
+             crs:PointColor=\"0\"></rdf:Description>\n",
         )
         .unwrap();
         let (out, note, _) = write_xmp(&raw, &r).unwrap();
         assert!(note.is_none(), "a merge that worked has nothing to disclose: {note:?}");
-        assert!(std::fs::read_to_string(&out).unwrap().contains("crs:Texture=\"+21\""));
+        assert!(std::fs::read_to_string(&out).unwrap().contains("crs:PointColor=\"0\""));
 
         // An UNTERMINATED description is markup the splicer cannot account
-        // for: the save still succeeds, the Texture is gone, and the caller is
+        // for: the save still succeeds, the PointColor is gone, and the caller is
         // told exactly that.
         std::fs::write(
             &lr,
             "<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-             crs:Texture=\"+21\">\n",
+             crs:PointColor=\"0\">\n",
         )
         .unwrap();
         let (out, note, _) = write_xmp(&raw, &r).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
-        assert!(!text.contains("crs:Texture"), "…by regenerating, so the LR property is gone");
+        assert!(!text.contains("crs:PointColor"), "…by regenerating, so the LR property is gone");
         let note = note.expect("the loss must be disclosed, not silent");
         assert!(note.contains("regenerated"), "the note names what happened: {note}");
-        assert!(note.contains("Texture"), "…and what it cost: {note}");
+        assert!(note.contains("camera profile"), "…and what it cost: {note}");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
@@ -3096,7 +3168,7 @@ mod guard_tests {
         let _ = std::fs::remove_dir_all(&dev_png);
         std::fs::write(
             dir.join("_pipe_note_baked.xmp"),
-            "<rdf:Description rdf:about=\"\" xmlns:crs=\"c\" crs:Texture=\"+21\">\n",
+            "<rdf:Description rdf:about=\"\" xmlns:crs=\"c\" crs:PointColor=\"0\">\n",
         )
         .unwrap();
         let (_, note, _) = write_xmp(&png, &r).unwrap();
@@ -3189,7 +3261,7 @@ mod guard_tests {
             &lr3,
             "<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-             crs:Texture=\"+21\">\n",
+             crs:PointColor=\"0\">\n",
         )
         .unwrap();
         let (_, note, _) = write_xmp(&raw3, &r).unwrap();
@@ -3221,13 +3293,13 @@ mod guard_tests {
         let _ = std::fs::remove_dir_all(&dev);
         let lr = dir.join("_pipe_oversized.xmp");
 
-        // First save: a mergeable Lightroom base whose Texture lands in the
+        // First save: a mergeable Lightroom base whose PointColor lands in the
         // projection — the carried-forward property the second save must keep.
         std::fs::write(
             &lr,
             "<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-             crs:Texture=\"+21\"></rdf:Description>\n",
+             crs:PointColor=\"0\"></rdf:Description>\n",
         )
         .unwrap();
         let r1 = EditRecipe { exposure_ev: 0.5, ..Default::default() };
@@ -3248,7 +3320,7 @@ mod guard_tests {
         // forward what the first merge preserved, and the save must succeed.
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
-        assert!(text.contains("crs:Texture=\"+21\""), "the projection base carried forward");
+        assert!(text.contains("crs:PointColor=\"0\""), "the projection base carried forward");
         // Doing it SILENTLY was the defect.
         let note = note.expect("an unreadable Lightroom sidecar must be disclosed");
         assert!(

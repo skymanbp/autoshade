@@ -5835,6 +5835,154 @@
         }
     }
 
+    /// R25 B2: the global Texture slider lights the Presence ●.
+    ///
+    /// The four-step variant of `section_dots_follow_the_registry_families`
+    /// for the ONE control that widened a section's dot this round — asserted
+    /// here as well as in the registry's own oracle test because the derived
+    /// predicate and the PANEL that reads it are two different things, and B2
+    /// is the batch where a section's dot changed meaning.
+    #[test]
+    fn texture_lights_the_presence_dot() {
+        let mut app = AutoshopApp::default();
+        assert_eq!(app.recipe.texture, 0.0, "premise: a fresh recipe is neutral");
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Presence"),
+            "the Presence header was not drawn — this test proves nothing: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|t| t == "Presence  ●"),
+            "a neutral section must not claim an adjustment: {seen:?}"
+        );
+        // …and the slider itself is there to move (a field with no widget is
+        // reachable only by the AI and the XMP reader).
+        assert!(seen.iter().any(|t| t == "Texture"), "no Texture slider in Presence: {seen:?}");
+        app.recipe.texture = 26.0;
+        let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+        assert!(
+            seen.iter().any(|t| t == "Presence  ●"),
+            "a moved Texture must light Presence: {seen:?}"
+        );
+    }
+
+    /// R25 B2: the Effects section draws all nine carried controls, in both
+    /// languages, and says in the panel that this app renders none of them.
+    ///
+    /// A slider that moves a number and no pixel is the worst kind of bug
+    /// here (`ARCHITECTURE.md`), so the nine are only defensible WITH the
+    /// disclosure — which makes the disclosure part of the feature, not a
+    /// nicety. It rides each slider's tooltip (not drawn in a frame), so the
+    /// pinning here is the layout and the two group captions; the tooltip
+    /// STRING is pinned by the i18n gate (`scripts/audit_i18n.py` fails on an
+    /// unregistered key) and by its single definition in `dev_effects`.
+    #[test]
+    fn the_effects_section_lays_out_its_nine_controls() {
+        for (lang, header, midpoint, rows) in [
+            (
+                crate::i18n::Lang::En,
+                "Effects",
+                "Midpoint",
+                [
+                    "Post-crop vignetting",
+                    "Vignette amount",
+                    "Vignette feather",
+                    "Vignette roundness",
+                    "Vignette style",
+                    "Vignette highlights",
+                    "Grain",
+                    "Grain amount",
+                    "Grain size",
+                    "Grain roughness",
+                ],
+            ),
+            (
+                crate::i18n::Lang::Zh,
+                "效果",
+                "中点",
+                [
+                    "裁剪后暗角",
+                    "暗角数量",
+                    "暗角羽化",
+                    "暗角圆度",
+                    "暗角样式",
+                    "暗角高光",
+                    "胶片噪点",
+                    "噪点数量",
+                    "噪点大小",
+                    "噪点密度",
+                ],
+            ),
+        ] {
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == header),
+                "{lang:?}: the {header} section was not drawn: {seen:?}"
+            );
+            for row in rows {
+                assert!(
+                    seen.iter().any(|t| t == row),
+                    "{lang:?}: the Effects section has no {row:?} row: {seen:?}"
+                );
+            }
+            // The ninth control REUSES the existing 「Midpoint / 中点」 key
+            // (deliberate — it is the same word for the same idea, and the
+            // qualifier belongs on the collision, which is the vignette
+            // AMOUNT). A presence check would pass on the Lens section's own
+            // Midpoint alone, so count both.
+            assert_eq!(
+                seen.iter().filter(|t| *t == midpoint).count(),
+                2,
+                "{lang:?}: expected a {midpoint:?} row in BOTH Effects and Lens: {seen:?}"
+            );
+            // Neutral: no ●. Then ONE carried value lights it — the same
+            // four-step proof the other sections get, for the family whose
+            // members the AI never sees.
+            assert!(
+                !seen.iter().any(|t| t == &format!("{header}  ●")),
+                "{lang:?}: a neutral Effects section must claim nothing: {seen:?}"
+            );
+            app.recipe.grain = 30.0;
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == &format!("{header}  ●")),
+                "{lang:?}: an imported Lightroom grain must light Effects: {seen:?}"
+            );
+        }
+    }
+
+    /// R25 B2: the Lens section's vignette slider is 「Lens vignetting」 now,
+    /// never the bare 「Vignette」 — the Effects section above carries
+    /// Lightroom's POST-CROP vignette, a different operator at a different
+    /// stage, and one word over both was a name collision.
+    ///
+    /// A negative assertion needs a premise or it passes on an empty frame:
+    /// the positive half runs first, in both languages.
+    #[test]
+    fn the_lens_vignette_is_no_longer_called_just_vignette() {
+        for (lang, renamed, collision, post_crop) in [
+            (crate::i18n::Lang::En, "Lens vignetting", "Vignette", "Post-crop vignetting"),
+            (crate::i18n::Lang::Zh, "镜头暗角", "暗角", "裁剪后暗角"),
+        ] {
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert!(
+                seen.iter().any(|t| t == renamed),
+                "{lang:?}: the renamed lens slider was not drawn — this proves nothing: {seen:?}"
+            );
+            assert!(
+                seen.iter().any(|t| t == post_crop),
+                "{lang:?}: the post-crop caption it disambiguates FROM is missing: {seen:?}"
+            );
+            assert!(
+                !seen.iter().any(|t| t == collision),
+                "{lang:?}: the bare {collision:?} label is back, and now names two \
+                 different operators: {seen:?}"
+            );
+        }
+    }
+
     /// R25 P0-0.3: the ONE control the ● deliberately ignores stays ignored
     /// after the predicate became a derivation — `lens_vignette_mid` renders
     /// nothing while the amount is at rest (`catalogue::DOT_EXEMPT` carries the

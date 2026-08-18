@@ -14,8 +14,10 @@
 //! [`apply_dehaze`]). LOCAL-mask clarity/dehaze/texture ARE engine-rendered
 //! since R22 (local temperature/tint since batch #2-B) — see [`apply_masks`]
 //! for the pass order and the two documented residues vs the global chain.
-//! Local `texture` has no global counterpart to align with, so its radius is
-//! our own calibration.
+//! `texture` gained its GLOBAL stage in R25 B2 and the two share one radius
+//! model (0.5% of the short edge, floored at 2 px) — still our own
+//! calibration, Adobe's being unpublished, but now one calibration instead of
+//! a local-only one with nothing to align against.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -1204,6 +1206,20 @@ fn apply_develop_with_rasters(
         let radius = ((0.02 * w.min(h) as f32).round() as usize).max(8);
         unsharp_luma(data, w, h, radius, r.clarity / 100.0, true);
     }
+    // 3b) texture — the SAME unsharp operator at a small radius and with no
+    //     midtone mask, so it works fine detail across the whole tonal range
+    //     where clarity works midtone volume (R25 B2). Placed between clarity
+    //     and saturation for ACR's Basic-panel order, and sharing the mask
+    //     path's radius model verbatim (`apply_masks`, the `m.texture` arm) —
+    //     one calibration, so "Texture +30" means the same structure globally
+    //     and inside a mask, at a 1280 px preview and at 61 MP.
+    //     `unsharp_luma` is `unsharp_luma_weighted` at weight 1, so this adds
+    //     no new mechanism, and it runs and DROPS its planes before the next
+    //     stage like the other two spatial passes.
+    if r.texture != 0.0 {
+        let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
+        unsharp_luma(data, w, h, radius, r.texture / 100.0, false);
+    }
     // 3) saturation / vibrance.
     let (sat, vib) = (r.saturation / 100.0, r.vibrance / 100.0);
     if sat != 0.0 || vib != 0.0 {
@@ -1707,11 +1723,12 @@ fn apply_masks(
         if m.texture != 0.0 {
             // Texture = the same unsharp operator at a SMALL radius and with no
             // midtone mask, so it works fine detail across the whole tonal
-            // range where clarity works midtone volume. There is no global
-            // Texture stage to align with and Adobe's model is proprietary, so
-            // 0.5% of the short edge (floored at 2 px) is OUR calibration — the
-            // same honesty stance as `manual_vignette_lut`: the XMP carries the
-            // raw slider value, so Lightroom re-renders it with its own model.
+            // range where clarity works midtone volume. The GLOBAL texture
+            // stage (R25 B2, `apply_develop` stage 3b) uses this very formula,
+            // so the two are one calibration — 0.5% of the short edge, floored
+            // at 2 px, still OURS because Adobe's model is proprietary. Same
+            // honesty stance as `manual_vignette_lut`: the XMP carries the raw
+            // slider value, so Lightroom re-renders it with its own model.
             let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
             unsharp_luma_weighted(data, w, h, radius, m.texture / 100.0, false, spatial_weight);
         }
@@ -8115,10 +8132,11 @@ mod tests {
 
     #[test]
     fn mask_texture_at_full_coverage_equals_the_unweighted_operator() {
-        // Texture has NO global counterpart to compare against (EditRecipe has
-        // no `texture` field — only LocalAdjustment does), so the reference is
-        // the bare operator at texture's own calibration: small radius
-        // (0.5% of the short edge, floored at 2 px) and NO midtone mask.
+        // The bare operator at texture's own calibration: small radius
+        // (0.5% of the short edge, floored at 2 px) and NO midtone mask —
+        // which since R25 B2 is also what the GLOBAL texture stage runs, and
+        // `global_texture_at_full_coverage_equals_the_masked_operator` below
+        // closes that loop directly.
         // Bit-exact, measured: 0 differing channels of 9216.
         let (data, w, h) = detail_frame();
         let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
@@ -8154,6 +8172,87 @@ mod tests {
             frame_bits_fnv64(&reference),
             frame_bits_fnv64(&local),
             "full-coverage local texture must equal the unweighted operator bit-for-bit"
+        );
+    }
+
+    /// R25 B2: the strongest pin this batch can offer. R22 gave the mask
+    /// texture slider an operator and had to compare it against a hand-rolled
+    /// `unsharp_luma` call, because `EditRecipe` had no `texture` field to
+    /// compare with — the comment on the test above said exactly that. Now it
+    /// does, and a full-coverage mask must be BIT-IDENTICAL to the global
+    /// stage: same radius model, same amount scale, same absent midtone mask.
+    ///
+    /// Change either radius formula and this fails, which is the point: the
+    /// two are one calibration, not two that happen to agree today.
+    #[test]
+    fn global_texture_at_full_coverage_equals_the_masked_operator() {
+        let (data, w, h) = detail_frame();
+        let mut global = data.clone();
+        apply_develop(&mut global, w, h, &EditRecipe { texture: 50.0, ..Default::default() });
+        let mut local = data.clone();
+        apply_develop(
+            &mut local,
+            w,
+            h,
+            &EditRecipe {
+                masks: vec![LocalAdjustment {
+                    // The degenerate Linear gradient every full-coverage
+                    // comparison in this module uses: weight 1 everywhere.
+                    mask: MaskGeometry::Linear {
+                        zero_x: 0.5,
+                        zero_y: 0.5,
+                        full_x: 0.5,
+                        full_y: 0.5,
+                    },
+                    amount: 1.0,
+                    texture: 50.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        assert_ne!(
+            frame_bits_fnv64(&data),
+            frame_bits_fnv64(&global),
+            "global texture must move this frame, or the comparison is vacuous"
+        );
+        assert_eq!(
+            frame_bits_fnv64(&global),
+            frame_bits_fnv64(&local),
+            "full-coverage local texture must equal global texture bit-for-bit"
+        );
+    }
+
+    /// R25 B2, the global twin of `mask_texture_halo_is_narrower_than_mask_
+    /// clarity_halo`: the two radii are the whole reason both sliders exist,
+    /// and the global pair must keep the same separation the masked pair has.
+    #[test]
+    fn texture_halo_is_narrower_than_clarity_halo() {
+        let (w, h) = (128usize, 64usize);
+        // 0.35/0.65 keeps both plateaus inside the midtone mask, which would
+        // zero clarity's effect at 0.0 and 1.0.
+        let edge: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let v = if i % w < w / 2 { 0.35f32 } else { 0.65 };
+                [v, v, v]
+            })
+            .collect();
+        let halo_of = |r: EditRecipe| -> usize {
+            let mut out = edge.clone();
+            apply_develop(&mut out, w, h, &r);
+            let row = (h / 2) * w;
+            (0..w)
+                .filter(|x| (out[row + x][0] - edge[row + x][0]).abs() > 1e-3)
+                .map(|x| x.abs_diff(w / 2))
+                .max()
+                .unwrap_or(0)
+        };
+        let clarity = halo_of(EditRecipe { clarity: 60.0, ..Default::default() });
+        let texture = halo_of(EditRecipe { texture: 60.0, ..Default::default() });
+        assert!(texture >= 2, "texture must actually reach the edge: {texture}");
+        assert!(
+            texture * 2 < clarity,
+            "texture halo ({texture}px) must be far narrower than clarity's ({clarity}px)"
         );
     }
 

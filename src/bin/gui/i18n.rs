@@ -357,7 +357,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Per-channel radius correction: removes red/blue colour fringing at edges",
         "分通道半径校正：去除边缘的红/蓝色边"),
     ("No in-camera lens correction data in this file", "此文件不含机内镜头校正数据"),
-    ("Vignette", "暗角"),
+    // R25 B2: was ("Vignette", "暗角"). The Effects section now carries
+    // Lightroom's POST-CROP vignette, so the bare word named two different
+    // operators in two sections — a collision, renamed at the source rather
+    // than disambiguated in one place and left ambiguous in the other.
+    ("Lens vignetting", "镜头暗角"),
     ("Midpoint", "中点"),
     ("Distortion", "畸变"),
     ("Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. De-fringe in a later batch.",
@@ -365,6 +369,26 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // CROP_ASPECTS display names (ratio values are not localized).
     ("Free", "自由"),
     ("Original", "原始"),
+
+    // ── Develop · Effects (R25 B2 — the nine CarriedOnly globals) ────────────
+    // Every label is QUALIFIED on purpose: the bare 「Amount」/「Style」/
+    // 「Detail」 keys already exist (mask strength, the AI style library, the
+    // Detail section title) and reusing one would translate two unrelated
+    // controls with one word. 「胶片噪点」/「噪点密度」 rather than 颗粒/粗糙:
+    // those four hanzi are outside the embedded font subset, and the Chinese
+    // UI must not depend on the machine having a CJK font.
+    ("Effects", "效果"),
+    ("Post-crop vignetting", "裁剪后暗角"),
+    ("Vignette amount", "暗角数量"),
+    ("Vignette roundness", "暗角圆度"),
+    ("Vignette feather", "暗角羽化"),
+    ("Vignette highlights", "暗角高光"),
+    ("Vignette style", "暗角样式"),
+    ("Grain", "胶片噪点"),
+    ("Grain amount", "噪点数量"),
+    ("Grain size", "噪点大小"),
+    ("Grain roughness", "噪点密度"),
+    ("Carried to Lightroom, not rendered here", "本机不渲染，仅随 XMP 带出"),
 
     // ── Develop · Local Masks (add + AI segmentation) ────────────────────────
     ("Local Masks ({n})", "局部蒙版 ({n})"),

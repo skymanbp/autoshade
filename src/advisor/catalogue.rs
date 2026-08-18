@@ -215,10 +215,52 @@ impl Tier {
 
 /// The `CarriedOnly` allow-list for [`RECIPE_CONTROLS`] — global controls a
 /// surface may set although the engine renders nothing from them, each with
-/// the reason. EMPTY today: every global with a `crs:` property of its own is
-/// rendered. (The default policy for future entries is SF4-C — Adobe-only
-/// operators we round-trip rather than approximate.)
-pub const CARRIED_ONLY_GLOBAL: &[(&str, &str)] = &[];
+/// the reason.
+///
+/// **Policy SF4-C** (decided 2026-08-18, R25): membership is limited to
+/// ADOBE-ONLY OPERATORS — a control whose model Adobe has not published and
+/// whose approximation would put our invention into the photographer's
+/// picture. A control we simply have not got around to rendering does NOT
+/// belong here; it belongs in a batch. The first nine members are the R25 B2
+/// effects, and each reason below states the operator, not the schedule.
+pub const CARRIED_ONLY_GLOBAL: &[(&str, &str)] = &[
+    (
+        "post_crop_vignette",
+        "a post-crop vignette must be applied AFTER the crop, and this engine's crop is the \
+         LAST stage (render.rs); the vignette it already has is the pre-crop, single composed \
+         radial gain, and splitting that apart would break the \"compose once, never truncate \
+         per pass\" invariant the gain stage is built on",
+    ),
+    (
+        "post_crop_vignette_mid",
+        "same operator as post_crop_vignette: it lands after a crop this engine applies last",
+    ),
+    (
+        "post_crop_vignette_feather",
+        "same operator as post_crop_vignette: it lands after a crop this engine applies last",
+    ),
+    (
+        "post_crop_vignette_round",
+        "same operator as post_crop_vignette: it lands after a crop this engine applies last",
+    ),
+    (
+        "post_crop_vignette_style",
+        "the three Styles (Highlight Priority / Colour Priority / Paint Overlay) are an \
+         unpublished FAMILY OF OPERATORS, not one parameter — there is nothing here to \
+         approximate with a number",
+    ),
+    (
+        "post_crop_vignette_hl",
+        "a shaping axis of the unpublished Style operators above",
+    ),
+    (
+        "grain",
+        "Adobe's film-grain generator is unpublished; approximating it means adding noise WE \
+         invented to the photographer's picture, which is worse than not doing it",
+    ),
+    ("grain_size", "a shaping axis of the unpublished grain generator above"),
+    ("grain_rough", "a shaping axis of the unpublished grain generator above"),
+];
 
 /// The `CarriedOnly` allow-list for [`LOCAL_CONTROLS`].
 pub const CARRIED_ONLY_LOCAL: &[(&str, &str)] = &[(
@@ -246,12 +288,22 @@ pub struct Control {
     /// `pipeline::carry_over_unrepresentable` re-attaches it after a refine.
     ///
     /// Since R23-1b every remaining one is a PERMANENT design marker, not
-    /// staged work: the stamped calibration (`as_shot_k`, `as_shot_tint`,
-    /// `base_curve`, `lens_profile`) is the engine's own measurement of this
-    /// photo, and `components` / `color_gains` / `role` are mask state with no
-    /// classic-ACR spelling (recipe.rs states the first as an explicit design
-    /// decision). `enabled` stays here for a reason of its own — see
-    /// [`LOCAL_CONTROLS`]' row for it.
+    /// staged work, and there are now three kinds. The stamped calibration
+    /// (`as_shot_k`, `as_shot_tint`, `base_curve`, `lens_profile`) is the
+    /// engine's own measurement of this photo; `components` / `color_gains` /
+    /// `role` are mask state with no classic-ACR spelling (recipe.rs states
+    /// the first as an explicit design decision); and the nine R25 B2 EFFECTS
+    /// are Adobe-only operators under policy SF4-C — asking the model for a
+    /// number that moves no pixel here would spend a paid request on a slider
+    /// only Lightroom can honour. `enabled` stays here for a reason of its own
+    /// — see [`LOCAL_CONTROLS`]' row for it.
+    ///
+    /// Every engine-only row needs a HOME for its value across a refine: the
+    /// response cannot restate it, so either the pipeline re-stamps it
+    /// (`version`/`coord_era`/the calibration) or
+    /// `pipeline::carry_over_unrepresentable` copies it from the base
+    /// (the mask state, the lens trio, the carried effects). A row with
+    /// neither is a value the first Refine silently deletes.
     pub engine_only: bool,
     pub crs: CrsKey,
     /// WHAT this control is, on the (renders × exports) axes — see [`Tier`].
@@ -296,7 +348,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 34] = [
+pub const RECIPE_CONTROLS: [Control; 44] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -468,6 +520,17 @@ pub const RECIPE_CONTROLS: [Control; 34] = [
         purpose: "atmospheric haze removal (negative ADDS haze)",
     },
     Control {
+        name: "texture",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Attr("Texture"),
+        tier: Some(Tier::Rendered),
+        purpose: "FINE detail — skin, foliage, fabric — without clarity's midtone volume \
+                  (negative smooths it away)",
+    },
+    Control {
         name: "hsl",
         shape: Shape::Hsl,
         range: None,
@@ -545,6 +608,103 @@ pub const RECIPE_CONTROLS: [Control; 34] = [
         purpose: "manual geometric distortion correction (positive straightens BARREL, negative \
                   PINCUSHION); null means you have NO opinion and the photographer's own value \
                   stands",
+    },
+    // The nine CARRIED effects (R25 B2, policy SF4-C). Every one is
+    // `engine_only` AND `Tier::CarriedOnly`: Lightroom renders them, we
+    // round-trip them, and this engine deliberately approximates neither.
+    // Their reasons live in [`CARRIED_ONLY_GLOBAL`], which the tier test
+    // requires an entry in.
+    Control {
+        name: "post_crop_vignette",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("PostCropVignetteAmount"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "creative corner darkening applied AFTER the crop (Lightroom renders it; \
+                  carried through the sidecar unchanged)",
+    },
+    Control {
+        name: "post_crop_vignette_mid",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 50)",
+        engine_only: true,
+        crs: CrsKey::Attr("PostCropVignetteMidpoint"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how far toward the centre the post-crop vignette reaches",
+    },
+    Control {
+        name: "post_crop_vignette_feather",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 50)",
+        engine_only: true,
+        crs: CrsKey::Attr("PostCropVignetteFeather"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how soft the post-crop vignette's edge is",
+    },
+    Control {
+        name: "post_crop_vignette_round",
+        shape: Shape::Number,
+        range: Some((-100.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("PostCropVignetteRoundness"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how circular (positive) or rectangular (negative) the post-crop vignette is",
+    },
+    Control {
+        name: "post_crop_vignette_style",
+        shape: Shape::Number,
+        range: Some((0.0, 3.0)),
+        neutral: "0 = absent (Lightroom's own default is 1, Highlight Priority)",
+        engine_only: true,
+        crs: CrsKey::Attr("PostCropVignetteStyle"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "WHICH post-crop vignette operator Adobe applies: 1 = Highlight Priority, \
+                  2 = Colour Priority, 3 = Paint Overlay",
+    },
+    Control {
+        name: "post_crop_vignette_hl",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("PostCropVignetteHighlightContrast"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how far the post-crop vignette spares the highlights inside it",
+    },
+    Control {
+        name: "grain",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0",
+        engine_only: true,
+        crs: CrsKey::Attr("GrainAmount"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "film-grain amount (Lightroom renders it; carried through the sidecar unchanged)",
+    },
+    Control {
+        name: "grain_size",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 25)",
+        engine_only: true,
+        crs: CrsKey::Attr("GrainSize"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how coarse each grain particle is",
+    },
+    Control {
+        name: "grain_rough",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0 = absent (Lightroom's own default is 50)",
+        engine_only: true,
+        crs: CrsKey::Attr("GrainFrequency"),
+        tier: Some(Tier::CarriedOnly),
+        purpose: "how irregular the grain pattern is",
     },
     Control {
         name: "straighten_deg",
@@ -664,9 +824,11 @@ pub const RECIPE_CONTROLS: [Control; 34] = [
 ];
 
 /// Every field of [`LocalAdjustment`], in DECLARATION order — the nested
-/// schema mirror. Its field set is NOT a subset of the global one (`texture`
-/// exists only here; `temperature` is a relative shift, not Kelvin), which is
-/// exactly why the drift had two independent surfaces.
+/// schema mirror. Its field set is NOT a subset of the global one
+/// (`temperature` is a relative shift, not Kelvin; `hue` rotates every colour
+/// rather than one band), which is exactly why the drift had two independent
+/// surfaces. `texture` used to be the clearest example and is no longer one:
+/// R25 B2 gave it a global row too, sharing this one's operator and radius.
 pub const LOCAL_CONTROLS: [Control; 24] = [
     Control {
         name: "mask",
@@ -852,8 +1014,11 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         engine_only: false,
         crs: CrsKey::Family("LocalTexture"),
         tier: Some(Tier::Rendered),
-        purpose: "local FINE-detail contrast (smaller radius than clarity) — this control exists \
-                  only per mask, there is no global Texture",
+        // R25 B2 gave this control its global twin, and the two share ONE
+        // radius model — so the sentence that used to say "there is no global
+        // Texture" now says the opposite, in the same place the model reads.
+        purpose: "local FINE-detail contrast (smaller radius than clarity) — the masked form of \
+                  the global `texture`, same scale and same radius",
     },
     Control {
         name: "sharpness",
@@ -1091,13 +1256,14 @@ fn local_adjustment_schema() -> Value {
 // ── control FAMILIES + the thinking envelope (R23-4, feedback #13) ──────────
 
 /// One FAMILY of develop controls — the vocabulary the thinking mode writes
-/// its `tool_plan` in.
+/// its `tool_plan` in, and (since R25 P0) the source of the develop panel's
+/// per-section ●.
 ///
-/// NOT one row per field: 33 global controls × `{use, why}` would multiply the
-/// response (and its cost) for no gain, while the reported defect is that whole
-/// CLASSES of tool go unconsidered ("it never touches hsl or color_grade"),
-/// which is a question about families. `members` are [`RECIPE_CONTROLS`] names
-/// and the partition is pinned BOTH ways by
+/// NOT one row per field: every global control × `{use, why}` would multiply
+/// the response (and its cost) for no gain, while the reported defect is that
+/// whole CLASSES of tool go unconsidered ("it never touches hsl or
+/// color_grade"), which is a question about families. `members` are
+/// [`RECIPE_CONTROLS`] names and the partition is pinned BOTH ways by
 /// `every_ai_visible_control_belongs_to_exactly_one_family`, so a control added
 /// to the registry cannot quietly fall outside the plan the model is asked to
 /// make.
@@ -1112,8 +1278,26 @@ pub struct Family {
     pub members: &'static [&'static str],
 }
 
-/// The 10 families the AI-visible global controls partition into.
-pub const CONTROL_FAMILIES: [Family; 10] = [
+impl Family {
+    /// Does the AI ever see this family? DERIVED — a family is AI-visible iff
+    /// at least one member is a control the schema asks for.
+    ///
+    /// The `effects` family (R25 B2) is the first with none: its nine members
+    /// are `engine_only` Adobe-only operators, so putting it in the thinking
+    /// envelope's `control` enum would ask the model to plan with tools the
+    /// recipe schema then refuses to accept. It is still a family, because the
+    /// develop panel's ● is derived from this table — and deriving the answer
+    /// (rather than adding a hand-set flag) is what stops the two facts from
+    /// drifting apart. `every_ai_visible_control_belongs_to_exactly_one_family`
+    /// additionally pins that a family is ALL visible or ALL engine-only.
+    pub fn ai_visible(&self) -> bool {
+        self.members.iter().any(|m| global_control(m).is_some_and(|c| !c.engine_only))
+    }
+}
+
+/// The 11 families the global controls partition into — 10 the AI plans with
+/// plus the engine-only `effects` grouping (see [`Family::ai_visible`]).
+pub const CONTROL_FAMILIES: [Family; 11] = [
     Family {
         name: "tone",
         covers: "exposure, contrast and the four tonal bands (highlights / shadows / whites / blacks)",
@@ -1125,9 +1309,13 @@ pub const CONTROL_FAMILIES: [Family; 10] = [
         members: &["temperature_k", "tint"],
     },
     Family {
+        // R25 B2: `texture` joined this family with the engine stage that
+        // renders it. The develop panel's Presence ● widened with it — a
+        // decision, which is why `the_family_dots_match_the_hand_written_
+        // predicates_they_replaced` had to be edited to say so.
         name: "presence",
-        covers: "vibrance, saturation, clarity and dehaze",
-        members: &["vibrance", "saturation", "clarity", "dehaze"],
+        covers: "vibrance, saturation, clarity, dehaze and texture",
+        members: &["vibrance", "saturation", "clarity", "dehaze", "texture"],
     },
     Family {
         name: "hsl",
@@ -1164,6 +1352,28 @@ pub const CONTROL_FAMILIES: [Family; 10] = [
         name: "masks",
         covers: "local (masked) adjustments — dodging, burning, holding a sky back",
         members: &["masks"],
+    },
+    Family {
+        // The ONE family with no AI-visible member (R25 B2). It exists so the
+        // develop panel's Effects section gets its ● from the same table every
+        // other section does — see [`Family::ai_visible`], which keeps it out
+        // of the thinking envelope's `control` enum and out of the prompt: a
+        // family whose every member is engine-only is a GROUPING, not a tool
+        // the model can plan with.
+        name: "effects",
+        covers: "the post-crop vignette and the film grain — Adobe-only operators Autoshop \
+                 carries through the sidecar without rendering",
+        members: &[
+            "post_crop_vignette",
+            "post_crop_vignette_mid",
+            "post_crop_vignette_feather",
+            "post_crop_vignette_round",
+            "post_crop_vignette_style",
+            "post_crop_vignette_hl",
+            "grain",
+            "grain_size",
+            "grain_rough",
+        ],
     },
 ];
 
@@ -1256,8 +1466,11 @@ fn value_is_active(live: GlobalValue<'_>, neutral: GlobalValue<'_>) -> bool {
 /// so a JSON object's keys serialize sorted, exactly as the recipe schema's
 /// own properties already do.
 pub fn think_envelope_schema() -> Value {
-    let families: Vec<Value> =
-        CONTROL_FAMILIES.iter().map(|f| Value::String(f.name.to_string())).collect();
+    let families: Vec<Value> = CONTROL_FAMILIES
+        .iter()
+        .filter(|f| f.ai_visible())
+        .map(|f| Value::String(f.name.to_string()))
+        .collect();
     let tools: Vec<Value> = crate::advisor::PixelTool::ALL
         .iter()
         .map(|(n, _)| Value::String((*n).to_string()))
@@ -1316,6 +1529,7 @@ pub fn think_envelope_schema() -> Value {
 pub fn think_prompt() -> String {
     let list: String = CONTROL_FAMILIES
         .iter()
+        .filter(|f| f.ai_visible())
         .map(|f| format!("  • {} — {}\n", f.name, f.covers))
         .collect();
     format!(
@@ -1442,6 +1656,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         saturation,
         clarity,
         dehaze,
+        texture,
         hsl,
         color_grade,
         sharpening,
@@ -1449,6 +1664,15 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         lens_vignette,
         lens_vignette_mid,
         lens_distortion,
+        post_crop_vignette,
+        post_crop_vignette_mid,
+        post_crop_vignette_feather,
+        post_crop_vignette_round,
+        post_crop_vignette_style,
+        post_crop_vignette_hl,
+        grain,
+        grain_size,
+        grain_rough,
         straighten_deg,
         crop,
         tone_curve,
@@ -1478,6 +1702,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "saturation" => GlobalValue::Num(*saturation),
         "clarity" => GlobalValue::Num(*clarity),
         "dehaze" => GlobalValue::Num(*dehaze),
+        "texture" => GlobalValue::Num(*texture),
         "hsl" => GlobalValue::Hsl(hsl),
         "color_grade" => GlobalValue::Grade(color_grade),
         "sharpening" => GlobalValue::Num(*sharpening),
@@ -1485,6 +1710,15 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "lens_vignette" => GlobalValue::Num(*lens_vignette),
         "lens_vignette_mid" => GlobalValue::Num(*lens_vignette_mid),
         "lens_distortion" => GlobalValue::Num(*lens_distortion),
+        "post_crop_vignette" => GlobalValue::Num(*post_crop_vignette),
+        "post_crop_vignette_mid" => GlobalValue::Num(*post_crop_vignette_mid),
+        "post_crop_vignette_feather" => GlobalValue::Num(*post_crop_vignette_feather),
+        "post_crop_vignette_round" => GlobalValue::Num(*post_crop_vignette_round),
+        "post_crop_vignette_style" => GlobalValue::Num(*post_crop_vignette_style),
+        "post_crop_vignette_hl" => GlobalValue::Num(*post_crop_vignette_hl),
+        "grain" => GlobalValue::Num(*grain),
+        "grain_size" => GlobalValue::Num(*grain_size),
+        "grain_rough" => GlobalValue::Num(*grain_rough),
         "straighten_deg" => GlobalValue::Num(*straighten_deg),
         "crop" => GlobalValue::Crop(crop.as_ref()),
         "tone_curve" => GlobalValue::Curve(tone_curve),
@@ -2098,8 +2332,35 @@ mod tests {
             // `coord_era` (v0.30.0) joined for a reason of its own: it is not
             // a measurement and not staged work but a FRAME declaration the
             // model cannot observe — it only ever sees the display frame.
-            vec!["as_shot_k", "as_shot_tint", "base_curve", "coord_era", "lens_profile"]
+            // The nine R25 B2 EFFECTS joined for a third reason again: they
+            // are `Tier::CarriedOnly` Adobe-only operators (policy SF4-C), so
+            // a number from the model would move no pixel in this engine.
+            vec![
+                "as_shot_k",
+                "as_shot_tint",
+                "base_curve",
+                "coord_era",
+                "grain",
+                "grain_rough",
+                "grain_size",
+                "lens_profile",
+                "post_crop_vignette",
+                "post_crop_vignette_feather",
+                "post_crop_vignette_hl",
+                "post_crop_vignette_mid",
+                "post_crop_vignette_round",
+                "post_crop_vignette_style",
+            ]
         );
+        // …and every one of the nine really is on the CarriedOnly allow-list,
+        // so "engine-only" here can never quietly mean "staged work" again.
+        for (n, _) in CARRIED_ONLY_GLOBAL {
+            assert!(
+                global_control(n).is_some_and(|c| c.engine_only),
+                "{n} is CarriedOnly but still in the schema — the model would be asked for a \
+                 number this engine renders nothing from"
+            );
+        }
         assert_eq!(
             names(&LOCAL_CONTROLS, Some(true)).into_iter().collect::<Vec<_>>(),
             vec!["color_gains", "components", "enabled", "role"]
@@ -2230,10 +2491,29 @@ mod tests {
                     !owned.contains(m),
                     "{m} is claimed by two families — the plan would ask about it twice"
                 );
+                // A member must be a registry ROW even when it is engine-only
+                // (the AI-visible equality below cannot see those, and a
+                // typo'd name would just silently claim nothing).
+                let c = global_control(m)
+                    .unwrap_or_else(|| panic!("family {} names unknown control {m}", f.name));
+                // A family is ALL AI-visible or ALL engine-only (R25 B2). A
+                // MIXED one would be advertised to the model by
+                // `Family::ai_visible` while some of its members are absent
+                // from the schema — a plan the recipe cannot execute.
+                assert_eq!(
+                    !c.engine_only,
+                    f.ai_visible(),
+                    "family {} mixes AI-visible and engine-only members ({m})",
+                    f.name
+                );
                 owned.push(m);
             }
         }
-        let owned: BTreeSet<String> = owned.into_iter().map(str::to_string).collect();
+        let owned: BTreeSet<String> = owned
+            .into_iter()
+            .filter(|m| global_control(m).is_some_and(|c| !c.engine_only))
+            .map(str::to_string)
+            .collect();
         let tools: BTreeSet<String> = names(&RECIPE_CONTROLS, Some(false))
             .into_iter()
             .filter(|n| !NOT_A_TOOL.contains(&n.as_str()))
@@ -2251,7 +2531,10 @@ mod tests {
                 "{n} is excluded from the plan but is not an AI-visible control"
             );
         }
-        // The schema's enum IS the family list, and the prompt names each one.
+        // The schema's enum IS the AI-VISIBLE family list, and the prompt
+        // names each one. The engine-only `effects` grouping (R25 B2) is in
+        // neither: the model cannot plan with a family whose every member the
+        // recipe schema refuses.
         let schema = think_envelope_schema();
         let enum_values: Vec<&str> = schema["properties"]["tool_plan"]["items"]["properties"]
             ["control"]["enum"]
@@ -2260,16 +2543,33 @@ mod tests {
             .iter()
             .map(|v| v.as_str().expect("enum values are strings"))
             .collect();
+        let planned: Vec<&str> =
+            CONTROL_FAMILIES.iter().filter(|f| f.ai_visible()).map(|f| f.name).collect();
         assert_eq!(
-            enum_values,
-            CONTROL_FAMILIES.iter().map(|f| f.name).collect::<Vec<_>>(),
-            "the schema enum must be the family table, in its order"
+            enum_values, planned,
+            "the schema enum must be the AI-visible family table, in its order"
         );
         let prompt = think_prompt();
-        for f in &CONTROL_FAMILIES {
+        for f in CONTROL_FAMILIES.iter().filter(|f| f.ai_visible()) {
             assert!(prompt.contains(f.name), "{} is missing from the think prompt", f.name);
             assert!(prompt.contains(f.covers), "{}'s coverage line is missing", f.name);
         }
+        for f in CONTROL_FAMILIES.iter().filter(|f| !f.ai_visible()) {
+            assert!(
+                !prompt.contains(f.covers),
+                "{}: an engine-only family reached the think prompt — the model would plan \
+                 with tools the recipe schema then rejects",
+                f.name
+            );
+        }
+        // …and the split is not vacuous in either direction: this round
+        // introduced the first engine-only family, and a future edit that
+        // emptied one side would make half the assertions above prove nothing.
+        assert!(
+            CONTROL_FAMILIES.iter().any(|f| f.ai_visible())
+                && CONTROL_FAMILIES.iter().any(|f| !f.ai_visible()),
+            "both halves of the ai_visible split must be populated"
+        );
     }
 
     /// R25 P0-0.3: the ● exemption is one named control with one stated
@@ -2320,6 +2620,15 @@ mod tests {
     /// It stays in the tree deliberately: when a family gains a member (the
     /// B2–B5 batches do exactly that), this test fails and names the section
     /// whose dot just widened — which is a decision worth stating, not drift.
+    ///
+    /// **B2 decision (R25, `texture`)**: the global Texture slider joined
+    /// `presence`, so the Presence ● now lights for it too. The oracle below
+    /// was widened BY HAND to say so — deliberately, not to make a red test
+    /// green: a photo whose only edit is Texture +26 renders differently, and
+    /// a collapsed section that claimed nothing would be exactly the invisible
+    /// adjustment this dot exists to prevent. The random draw moves `texture`
+    /// as well, so the widened arm is actually exercised rather than agreed
+    /// with vacuously.
     #[test]
     fn the_family_dots_match_the_hand_written_predicates_they_replaced() {
         // splitmix64, so the sequence is deterministic and the low bits are
@@ -2335,7 +2644,7 @@ mod tests {
         let fam = |name: &str| {
             CONTROL_FAMILIES.iter().find(|f| f.name == name).expect("a declared family")
         };
-        let (mut lit, mut exempt_probes) = ([0usize; 6], 0usize);
+        let (mut lit, mut exempt_probes, mut texture_probes) = ([0usize; 6], 0usize, 0usize);
         for i in 0..200 {
             // A sparse draw: mostly neutral, so the interesting cases (exactly
             // one field off zero) actually occur instead of every section
@@ -2348,6 +2657,7 @@ mod tests {
             let mut r = EditRecipe {
                 clarity: pick(s),
                 dehaze: pick(s),
+                texture: pick(s), // B2: new to `presence` — see the doc above
                 vibrance: pick(s),
                 saturation: pick(s),
                 sharpening: pick(s).abs(),
@@ -2368,9 +2678,13 @@ mod tests {
             if next(s).is_multiple_of(5) {
                 r.blue_curve = vec![CurvePoint { input: 255, output: 200 }];
             }
-            // The predicates as the panel wrote them, verbatim.
-            let presence =
-                r.clarity != 0.0 || r.dehaze != 0.0 || r.vibrance != 0.0 || r.saturation != 0.0;
+            // The predicates as the panel wrote them, verbatim — plus the ONE
+            // term B2 added on purpose (`texture`, see the doc above).
+            let presence = r.clarity != 0.0
+                || r.dehaze != 0.0
+                || r.vibrance != 0.0
+                || r.saturation != 0.0
+                || r.texture != 0.0;
             let detail = r.sharpening != 0.0 || r.noise_reduction != 0.0;
             let hsl = !r.hsl.is_neutral();
             let grade = !r.color_grade.is_neutral();
@@ -2400,6 +2714,17 @@ mod tests {
                 exempt_probes += 1;
                 assert!(!lens, "premise: the panel's own predicate ignores the midpoint");
             }
+            // The B2 widening, likewise: Texture ALONE must occur, or the new
+            // term in the oracle above agrees with the derivation vacuously.
+            if r.texture != 0.0
+                && r.clarity == 0.0
+                && r.dehaze == 0.0
+                && r.vibrance == 0.0
+                && r.saturation == 0.0
+            {
+                texture_probes += 1;
+                assert!(presence, "premise: texture alone lights Presence since B2");
+            }
         }
         // A draw that never lit (or never left dark) a section would agree with
         // anything — the equality above would prove nothing about it.
@@ -2409,6 +2734,7 @@ mod tests {
             assert!(lit[k] > 0 && lit[k] < 200, "{label}: the draw was degenerate ({} lit)", lit[k]);
         }
         assert!(exempt_probes > 0, "no recipe moved the midpoint alone — the exemption is untested");
+        assert!(texture_probes > 0, "no recipe moved texture alone — the B2 widening is untested");
     }
 
     /// The envelope wraps the recipe schema VERBATIM and adds four thinking

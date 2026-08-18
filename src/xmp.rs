@@ -516,8 +516,11 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
 
 /// **Import-side disclosure, GLOBAL half** (R24-5 M0): the `crs:` properties
 /// this sidecar carries on its own `rdf:Description` that Autoshop does not
-/// model at all — Lightroom's global Texture, PointColor, the Transform and
-/// Calibration blocks, Grain, Defringe, the camera Look.
+/// model at all — PointColor, the Transform and Calibration blocks, Defringe,
+/// the camera Look. (Global Texture and Grain headed that list until R25 B2
+/// modelled them, which is the list SHRINKING by itself — see the paragraph
+/// on the complement below, and the fixture note in
+/// `an_imported_sidecar_names_the_globals_the_engine_does_not_render`.)
 ///
 /// The merge PRESERVES all of them (that is what `graft_into` is for), so
 /// nothing is destroyed; what was missing is the sentence saying they exist.
@@ -529,7 +532,9 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
 ///
 /// The universe is the COMPLEMENT of what we own, so it needs no catalogue of
 /// Adobe's property names to rot: the day a batch teaches the engine
-/// `crs:Texture`, the key joins `owned_attr_keys` and leaves this list.
+/// `crs:Texture`, the key joins `owned_attr_keys` and leaves this list. That
+/// day was R25 B2, and it happened with no edit to this function — only to
+/// the tests, whose fixtures had used Texture as their unmodelled sample.
 ///
 /// BOTH SPELLINGS, because Lightroom really writes both: the Description's own
 /// open-tag ATTRIBUTES, and its top-level PROPERTY-ELEMENT children
@@ -851,6 +856,11 @@ fn owned_attrs(r: &EditRecipe) -> String {
     attr(&mut a, "Dehaze", &signed(r.dehaze));
     attr(&mut a, "Vibrance", &signed(r.vibrance));
     attr(&mut a, "Saturation", &signed(r.saturation));
+    // Global Texture (R25 B2) — the last Basic-panel slider that had no key.
+    // UNCONDITIONAL like its four neighbours above: Lightroom writes
+    // `crs:Texture="+26"` in the signed form (verified in the user's library),
+    // and a recipe that says 0 is stating a value, not omitting one.
+    attr(&mut a, "Texture", &signed(r.texture));
 
     // Per-colour HSL / Color mixer (8 ACR bands). Emit only when non-neutral so
     // a plain global recipe still produces a minimal, v1-compatible sidecar.
@@ -907,6 +917,41 @@ fn owned_attrs(r: &EditRecipe) -> String {
     // the same number may correct a somewhat different physical strength.
     if r.lens_distortion != 0.0 {
         attr(&mut a, "LensManualDistortionAmount", &signed(r.lens_distortion));
+    }
+
+    // The nine CARRIED effects (R25 B2): Lightroom renders them, we do not,
+    // and the sidecar is the whole point of modelling them at all.
+    //
+    // PER-KEY conditional, not the vignette pair's group gate. The pair above
+    // needs one because `lens_vignette_mid`'s neutral is 50 and it has no
+    // "absent" spelling; every field here is neutral at ZERO, so writing only
+    // the non-zero ones IS "write what is non-neutral" — and the three whose
+    // ACR default is not zero (Midpoint/Feather 50, Style 1) then reach
+    // Lightroom by ABSENCE, which is the honest encoding of "the recipe never
+    // learned one" and cannot invent a Midpoint of 0. Verified round-trip
+    // against the user's own sidecars: Lightroom writes the companions only
+    // when the amount is non-zero, so an imported file comes back the same
+    // shape it went in.
+    for (key, v) in [
+        ("PostCropVignetteAmount", r.post_crop_vignette),
+        ("PostCropVignetteRoundness", r.post_crop_vignette_round),
+    ] {
+        if v != 0.0 {
+            attr(&mut a, key, &signed(v));
+        }
+    }
+    for (key, v) in [
+        ("PostCropVignetteMidpoint", r.post_crop_vignette_mid),
+        ("PostCropVignetteFeather", r.post_crop_vignette_feather),
+        ("PostCropVignetteStyle", r.post_crop_vignette_style),
+        ("PostCropVignetteHighlightContrast", r.post_crop_vignette_hl),
+        ("GrainAmount", r.grain),
+        ("GrainSize", r.grain_size),
+        ("GrainFrequency", r.grain_rough),
+    ] {
+        if v != 0.0 {
+            attr(&mut a, key, &(v.round() as i64).to_string());
+        }
     }
 
     // Crop (normalised [0,1]); only applied by Lightroom when HasCrop is True.
@@ -1126,6 +1171,7 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
         "Dehaze",
         "Vibrance",
         "Saturation",
+        "Texture",
         "SplitToningShadowHue",
         "SplitToningShadowSaturation",
         "SplitToningHighlightHue",
@@ -1145,6 +1191,20 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
         "VignetteAmount",
         "VignetteMidpoint",
         "LensManualDistortionAmount",
+        // The R25 B2 carried effects. Owning a key is what makes the merge
+        // STRIP it before rewriting — without these nine the writer's own
+        // values would land beside Lightroom's originals as duplicate
+        // attributes, and `unmodelled_global_crs` would go on naming keys we
+        // now model.
+        "PostCropVignetteAmount",
+        "PostCropVignetteMidpoint",
+        "PostCropVignetteFeather",
+        "PostCropVignetteRoundness",
+        "PostCropVignetteStyle",
+        "PostCropVignetteHighlightContrast",
+        "GrainAmount",
+        "GrainSize",
+        "GrainFrequency",
         "HasCrop",
         "CropTop",
         "CropLeft",
@@ -3287,6 +3347,20 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         dehaze: f("Dehaze"),
         vibrance: f("Vibrance"),
         saturation: f("Saturation"),
+        texture: f("Texture"),
+        // The nine CARRIED effects (R25 B2). `f` answers 0 for an absent key,
+        // which is exactly this batch's neutral — so a sidecar that names none
+        // of them still imports as a no-op, and one that names a real vignette
+        // brings all six values with it.
+        post_crop_vignette: f("PostCropVignetteAmount"),
+        post_crop_vignette_mid: f("PostCropVignetteMidpoint"),
+        post_crop_vignette_feather: f("PostCropVignetteFeather"),
+        post_crop_vignette_round: f("PostCropVignetteRoundness"),
+        post_crop_vignette_style: f("PostCropVignetteStyle"),
+        post_crop_vignette_hl: f("PostCropVignetteHighlightContrast"),
+        grain: f("GrainAmount"),
+        grain_size: f("GrainSize"),
+        grain_rough: f("GrainFrequency"),
         hsl,
         color_grade,
         // crs Sharpness is 0..100, recipe sharpening 0..150 (writer scales ×⅔).
@@ -3411,21 +3485,32 @@ mod tests {
     /// `unsupported_corrections`, which had no partner until now.
     #[test]
     fn an_imported_sidecar_names_the_globals_the_engine_does_not_render() {
+        // FIXTURE NOTE (R25 B2): `Texture` and `GrainAmount` used to be the
+        // samples here. They are modelled now, so they would be the wrong kind
+        // of example — the complement shrank, exactly as this disclosure's own
+        // doc promised it would. `PointColor` and `Look` took their place;
+        // `PerspectiveUpright` stays until B4 claims it.
         let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
                    xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
                    <rdf:Description rdf:about=\"\" \
                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
                    crs:Exposure2012=\"+1.00\" crs:Texture=\"+30\" \
-                   crs:GrainAmount=\"12\" crs:PerspectiveUpright=\"1\" \
+                   crs:PointColor=\"0\" crs:PerspectiveUpright=\"1\" \
                    crs:RawFileName=\"crs:NotAnAttribute=1.ARW\"/></rdf:RDF></x:xmpmeta>";
         let found = unmodelled_global_crs(doc);
-        assert!(found.contains(&"Texture".to_string()), "LR's global Texture: {found:?}");
-        assert!(found.contains(&"GrainAmount".to_string()), "{found:?}");
+        assert!(found.contains(&"PointColor".to_string()), "LR's PointColor: {found:?}");
         assert!(found.contains(&"PerspectiveUpright".to_string()), "{found:?}");
         // A control we DO model is not "unmodelled" — the universe is the
         // complement of `owned_attr_keys`, which is what stops this list from
         // needing a catalogue of Adobe property names to keep up to date.
         assert!(!found.contains(&"Exposure2012".to_string()), "{found:?}");
+        // …and the B2 half of that claim, which is the whole reason the
+        // fixture above had to change: teaching the engine `crs:Texture` took
+        // the key OFF this list with no edit to the list itself.
+        assert!(
+            !found.contains(&"Texture".to_string()),
+            "Texture is modelled since R25 B2 and must have left this list: {found:?}"
+        );
         // Quote-aware: `crs:` inside an attribute VALUE is text, not a
         // property (a RawFileName or a mask name may contain anything).
         assert!(!found.contains(&"NotAnAttribute".to_string()), "{found:?}");
@@ -3484,31 +3569,35 @@ mod tests {
                     xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">";
         let tail = "</rdf:RDF></x:xmpmeta>";
         // (a) Pure element form — the shape that returned EMPTY before.
+        // (Same fixture note as the test above: `Texture`/`GrainAmount` are
+        // modelled since R25 B2, so the unmodelled samples are `PointColor`
+        // and `PerspectiveUpright` now.)
         let element = format!(
             "{head}<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
              <crs:Exposure2012>+1.00</crs:Exposure2012>\
              <crs:Texture>+30</crs:Texture>\
-             <crs:GrainAmount>12</crs:GrainAmount>\
+             <crs:PointColor>0</crs:PointColor>\
              <crs:PerspectiveUpright>1</crs:PerspectiveUpright>\
              </rdf:Description>{tail}"
         );
         let found = unmodelled_global_crs(&element);
         assert_eq!(
             found,
-            vec!["GrainAmount", "PerspectiveUpright", "Texture"],
-            "element-form globals must be named exactly once, and never the modelled Exposure2012"
+            vec!["PerspectiveUpright", "PointColor"],
+            "element-form globals must be named exactly once, and never the modelled \
+             Exposure2012 / Texture"
         );
 
         // (b) MIXED: Lightroom splits the same Description across both forms.
         let mixed = format!(
             "{head}<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-             crs:Exposure2012=\"+1.00\" crs:Texture=\"+30\">\
-             <crs:GrainAmount>12</crs:GrainAmount>\
+             crs:Exposure2012=\"+1.00\" crs:PointColor=\"0\">\
+             <crs:PerspectiveUpright>1</crs:PerspectiveUpright>\
              </rdf:Description>{tail}"
         );
-        assert_eq!(unmodelled_global_crs(&mixed), vec!["GrainAmount", "Texture"]);
+        assert_eq!(unmodelled_global_crs(&mixed), vec!["PerspectiveUpright", "PointColor"]);
 
         // (c) The two exclusions the element walk must keep: a mask block's
         // `crs:Local*` items (their own disclosure) and a creative Look's
@@ -3517,7 +3606,7 @@ mod tests {
         let nested = format!(
             "{head}<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
-             <crs:Texture>+30</crs:Texture>\
+             <crs:PointColor>0</crs:PointColor>\
              <crs:Look><rdf:Description><crs:Parameters><rdf:Description>\
              <crs:LookClarity2012>+50</crs:LookClarity2012>\
              </rdf:Description></crs:Parameters></rdf:Description></crs:Look>\
@@ -3526,7 +3615,7 @@ mod tests {
              </rdf:li></rdf:Seq></crs:MaskGroupBasedCorrections>\
              </rdf:Description>{tail}"
         );
-        assert_eq!(unmodelled_global_crs(&nested), vec!["Look", "Texture"]);
+        assert_eq!(unmodelled_global_crs(&nested), vec!["Look", "PointColor"]);
 
         // (d) NIT-1: `-` and `.` are legal XML name characters. No Adobe key
         // uses either today, so this pins the reading rather than a change:
@@ -4084,6 +4173,143 @@ mod tests {
         assert!(recipe_to_xmp(&pos).contains(r#"crs:LensManualDistortionAmount="+80""#));
         // Zero amount emits no key at all (byte-compatible with the old writer).
         assert!(!recipe_to_xmp(&EditRecipe::default()).contains("LensManualDistortionAmount"));
+    }
+
+    /// R25 B2: global Texture round-trips through its own `crs:Texture` key,
+    /// in Lightroom's own signed form.
+    ///
+    /// READ AND WRITE IN ONE BATCH is not a nicety here. `owned_attr_keys` is
+    /// the WRITER's universe and also the merge's STRIP universe, so a
+    /// read-only Texture would have left Lightroom's value in the document
+    /// beside ours (two answers for one slider), and a write-only one would
+    /// have gone on being named by `unmodelled_global_crs` while quietly
+    /// rendering. Either half alone is a defect; this pins both.
+    #[test]
+    fn texture_round_trips_through_xmp() {
+        let xmp = recipe_to_xmp(&EditRecipe { texture: 26.0, ..Default::default() });
+        assert!(xmp.contains(r#"crs:Texture="+26""#), "the signed form Lightroom writes: {xmp}");
+        assert_eq!(xmp_to_recipe(&xmp).texture, 26.0);
+        // Negative and neutral, and the key is UNCONDITIONAL like its four
+        // Basic-panel neighbours (Clarity2012 / Dehaze / Vibrance / Saturation).
+        let neg = recipe_to_xmp(&EditRecipe { texture: -40.0, ..Default::default() });
+        assert!(neg.contains(r#"crs:Texture="-40""#));
+        assert_eq!(xmp_to_recipe(&neg).texture, -40.0);
+        assert!(recipe_to_xmp(&EditRecipe::default()).contains(r#"crs:Texture="0""#));
+        // A FOREIGN sidecar's Texture is a real import, not a disclosure line.
+        let lr = "<rdf:Description rdf:about=\"\" \
+                  xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                  crs:Texture=\"+26\"/>";
+        assert_eq!(xmp_to_recipe(lr).texture, 26.0, "the LR value must arrive");
+    }
+
+    /// R25 B2, the strip arm: a cleared Texture must DISAPPEAR from a merged
+    /// document rather than linger at Lightroom's old value.
+    ///
+    /// This is what owning a key means. Before B2, `crs:Texture` was foreign
+    /// property and the merge preserved it verbatim (there are four tests
+    /// above that used it as the example of exactly that). Now the merge
+    /// strips it and rewrites ours — and if `owned_attr_keys` had gained the
+    /// key without the writer emitting it, or the writer without the key, this
+    /// document would answer one slider twice.
+    #[test]
+    fn a_cleared_texture_disappears_from_a_merged_document() {
+        let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n \
+                  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
+                  <rdf:Description rdf:about=\"\"\n    \
+                  xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    \
+                  crs:Texture=\"+20\" crs:PointColor=\"0\" crs:HasSettings=\"True\">\n  \
+                  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n";
+        let merged = merged_doc(lr, &EditRecipe { texture: -8.0, ..Default::default() })
+            .expect("a plain LR sidecar is mergeable");
+        assert_eq!(merged.matches("crs:Texture=").count(), 1, "one answer only: {merged}");
+        assert!(merged.contains(r#"crs:Texture="-8""#), "…and it is OURS: {merged}");
+        assert!(merged.contains("crs:PointColor=\"0\""), "an unmodelled global still survives");
+        // Cleared to neutral: the old +20 is gone, not resurrected.
+        let cleared = merged_doc(lr, &EditRecipe::default()).expect("mergeable");
+        assert_eq!(cleared.matches("crs:Texture=").count(), 1);
+        assert!(cleared.contains(r#"crs:Texture="0""#), "the stale +20 must not linger: {cleared}");
+        assert_eq!(xmp_to_recipe(&cleared).texture, 0.0);
+    }
+
+    /// R25 B2 (policy SF4-C): the nine carried effects reach the sidecar and
+    /// the engine renders nothing from them.
+    ///
+    /// The write rule is PER-KEY — every one of the nine is neutral at zero,
+    /// so "write what is non-neutral" needs no group gate, and the three whose
+    /// ACR default is not zero (Midpoint/Feather 50, Style 1) reach Lightroom
+    /// by ABSENCE rather than by a value we made up. Verified against the
+    /// user's own library, where Lightroom writes the companion keys only
+    /// alongside a non-zero amount.
+    #[test]
+    fn carried_effects_round_trip_and_render_nothing() {
+        // The shape a real Lightroom sidecar takes (DSC09568 / _DSC9082):
+        // an amount plus its five companions, grain likewise.
+        let r = EditRecipe {
+            post_crop_vignette: -17.0,
+            post_crop_vignette_mid: 50.0,
+            post_crop_vignette_feather: 50.0,
+            post_crop_vignette_round: 0.0,
+            post_crop_vignette_style: 1.0,
+            post_crop_vignette_hl: 0.0,
+            grain: 30.0,
+            grain_size: 25.0,
+            grain_rough: 50.0,
+            ..Default::default()
+        };
+        let xmp = recipe_to_xmp(&r);
+        for want in [
+            r#"crs:PostCropVignetteAmount="-17""#,
+            r#"crs:PostCropVignetteMidpoint="50""#,
+            r#"crs:PostCropVignetteFeather="50""#,
+            r#"crs:PostCropVignetteStyle="1""#,
+            r#"crs:GrainAmount="30""#,
+            r#"crs:GrainSize="25""#,
+            r#"crs:GrainFrequency="50""#,
+        ] {
+            assert!(xmp.contains(want), "{want} missing from: {xmp}");
+        }
+        // The two that are AT their neutral stay out — absence is how
+        // Lightroom is told "keep your own default".
+        assert!(!xmp.contains("PostCropVignetteRoundness"), "a zero roundness is not written");
+        assert!(!xmp.contains("PostCropVignetteHighlightContrast"));
+        // Every one comes back as itself — read side and write side in one
+        // batch, exactly as for Texture above.
+        let back = xmp_to_recipe(&xmp);
+        for (name, live, want) in [
+            ("post_crop_vignette", back.post_crop_vignette, r.post_crop_vignette),
+            ("post_crop_vignette_mid", back.post_crop_vignette_mid, r.post_crop_vignette_mid),
+            (
+                "post_crop_vignette_feather",
+                back.post_crop_vignette_feather,
+                r.post_crop_vignette_feather,
+            ),
+            ("post_crop_vignette_round", back.post_crop_vignette_round, r.post_crop_vignette_round),
+            ("post_crop_vignette_style", back.post_crop_vignette_style, r.post_crop_vignette_style),
+            ("post_crop_vignette_hl", back.post_crop_vignette_hl, r.post_crop_vignette_hl),
+            ("grain", back.grain, r.grain),
+            ("grain_size", back.grain_size, r.grain_size),
+            ("grain_rough", back.grain_rough, r.grain_rough),
+        ] {
+            assert_eq!(live, want, "{name} did not survive the round trip");
+        }
+        // A neutral recipe emits none of the nine (byte-compatible with the
+        // pre-B2 writer for every recipe that never touched them).
+        let neutral = recipe_to_xmp(&EditRecipe::default());
+        for k in ["PostCropVignette", "Grain"] {
+            assert!(!neutral.contains(k), "{k} must not appear on a neutral recipe: {neutral}");
+        }
+        // …and the ENGINE ignores all nine: the developed frame is
+        // bit-identical to the neutral one. That is the claim
+        // `Tier::CarriedOnly` makes, and it is the half a registry row cannot
+        // prove about itself.
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(24, 16, |x, y| {
+            image::Rgb([(x * 9) as u8, (y * 13) as u8, (x + y) as u8])
+        }));
+        assert_eq!(
+            crate::render::develop_preview(&img, &r).to_rgb8().into_raw(),
+            crate::render::develop_preview(&img, &EditRecipe::default()).to_rgb8().into_raw(),
+            "a CarriedOnly control that moved a pixel would be mis-classified"
+        );
     }
 
     /// One parametric mask + one raster mask — the fixture behind BOTH halves
@@ -4787,6 +5013,77 @@ mod tests {
         eprintln!("{files} sidecar(s), {total_imported} mask(s) imported in total");
     }
 
+    /// FORENSIC REGRESSION for the B2 GLOBALS, same directory and same
+    /// silent-skip rule as the mask probe above (the reference files are
+    /// photographs and are not in this repository; the inline fixtures beside
+    /// this one are synthetic by policy, so they prove the RULES and not the
+    /// FILES).
+    ///
+    /// `DSC09568.xmp` is the strongest case in the user's library: global
+    /// Texture +26 — the largest of the seven — beside a real post-crop
+    /// vignette. Before B2 every one of those values imported as zero and the
+    /// photo simply rendered differently from Lightroom.
+    #[test]
+    fn real_lightroom_sidecars_import_their_global_effects() {
+        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+        };
+        let mut seen_texture = 0usize;
+        let mut seen_effects = 0usize;
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.to_string_lossy().to_lowercase().contains(".xmp") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let r = xmp_to_recipe(&text);
+            eprintln!(
+                "{name}: texture {} · post-crop vignette {}/{}/{}/{}/{}/{} · grain {}/{}/{}",
+                r.texture,
+                r.post_crop_vignette,
+                r.post_crop_vignette_mid,
+                r.post_crop_vignette_feather,
+                r.post_crop_vignette_round,
+                r.post_crop_vignette_style,
+                r.post_crop_vignette_hl,
+                r.grain,
+                r.grain_size,
+                r.grain_rough,
+            );
+            // The named case, asserted exactly.
+            if name.starts_with("DSC09568") {
+                assert_eq!(r.texture, 26.0, "{name}: crs:Texture=\"+26\" must import as 26");
+                assert_eq!(r.post_crop_vignette, -17.0, "{name}: its post-crop vignette too");
+                assert_eq!(r.post_crop_vignette_style, 1.0, "{name}: Highlight Priority");
+                seen_texture += 1;
+            }
+            if r.texture != 0.0 || r.post_crop_vignette != 0.0 || r.grain != 0.0 {
+                seen_effects += 1;
+            }
+            // Whatever the values are, they must SURVIVE a save: the merge
+            // strips these keys now, so a read/write asymmetry would delete
+            // them from the file beside the RAW.
+            if let Some(merged) = merge_recipe_into_xmp(&text, &r) {
+                let round = xmp_to_recipe(&merged.doc);
+                assert_eq!(round.texture, r.texture, "{name}: Texture lost on merge");
+                assert_eq!(
+                    (round.post_crop_vignette, round.grain),
+                    (r.post_crop_vignette, r.grain),
+                    "{name}: a carried effect was lost on merge"
+                );
+            }
+        }
+        assert!(
+            seen_texture > 0,
+            "DSC09568.xmp was not in {dir} — the named forensic case never ran"
+        );
+        eprintln!("{seen_effects} sidecar(s) carried a non-neutral B2 effect");
+    }
+
     /// R25 P0-0.1: the bands `unparsable_crs_numbers` judges a document by ARE
     /// the control registry's, not a second hand-written copy — so a new
     /// attribute row arrives with its check already wired, and the two
@@ -5184,7 +5481,7 @@ mod tests {
     xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n\
     crs:Version=\"15.5.1\"\n\
     crs:ProcessVersion='15.4'\n\
-    crs:Texture=\"+20\"\n\
+    crs:PointColor=\"0\"\n\
     crs:CameraProfile=\"Adobe Color\"\n\
     crs:LensProfileEnable=\"1\"\n\
     crs:LensProfileName=\"Sony FE 24-70 > special\"\n\
@@ -5212,8 +5509,11 @@ mod tests {
             ..Default::default()
         };
         let merged = merged_doc(lr, &r).expect("a plain LR sidecar is mergeable");
-        // Everything Autoshop does not model survives.
-        assert!(merged.contains("crs:Texture=\"+20\""), "global Texture survives");
+        // Everything Autoshop does not model survives. (The sample used to be
+        // `crs:Texture`; R25 B2 models it, so it is no longer an example of an
+        // unmodelled global — it is an example of an owned one, which
+        // `a_cleared_texture_disappears_from_a_merged_document` covers.)
+        assert!(merged.contains("crs:PointColor=\"0\""), "an unmodelled global survives");
         assert!(merged.contains("crs:CameraProfile=\"Adobe Color\""), "camera profile survives");
         assert!(
             merged.contains("crs:LensProfileName=\"Sony FE 24-70 > special\""),
@@ -5239,7 +5539,7 @@ mod tests {
         let merged2 = merged_doc(&merged, &r2).expect("re-mergeable");
         assert_eq!(merged2.matches("crs:Exposure2012=").count(), 1);
         assert!(merged2.contains("crs:Exposure2012=\"-0.50\""));
-        assert!(merged2.contains("crs:Texture=\"+20\""), "still there after a second merge");
+        assert!(merged2.contains("crs:PointColor=\"0\""), "still there after a second merge");
         assert_eq!(merged2.matches("<crs:ToneCurvePV2012>").count(), 0, "cleared curve gone");
         assert!(merged2.contains("ToneCurveName2012=\"Linear\""));
     }
@@ -5250,7 +5550,8 @@ mod tests {
         // plenty of real sidecars (crs_str accepts that form). The merge
         // must strip the owned element too, or the document answers one
         // slider with two conflicting values — while unowned elements
-        // (Texture) survive untouched.
+        // (PointColor; it was Texture until R25 B2 modelled that one)
+        // survive untouched.
         let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 7.0-c000\">\n\
  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
   <rdf:Description rdf:about=\"\"\n\
@@ -5258,7 +5559,7 @@ mod tests {
     crs:HasSettings=\"True\">\n\
    <crs:Exposure2012>+1.00</crs:Exposure2012>\n\
    <crs:Contrast2012>+22</crs:Contrast2012>\n\
-   <crs:Texture>+20</crs:Texture>\n\
+   <crs:PointColor>0</crs:PointColor>\n\
   </rdf:Description>\n\
  </rdf:RDF>\n\
 </x:xmpmeta>\n";
@@ -5269,7 +5570,7 @@ mod tests {
         assert_eq!(merged.matches("crs:Exposure2012").count(), 1, "ours only: {merged}");
         assert!(merged.contains("crs:Exposure2012=\"0.25\""));
         assert!(
-            merged.contains("<crs:Texture>+20</crs:Texture>"),
+            merged.contains("<crs:PointColor>0</crs:PointColor>"),
             "unowned element survives: {merged}"
         );
         let back = xmp_to_recipe(&merged);
@@ -5343,7 +5644,7 @@ mod tests {
     crs:HasSettings=\"True\">\n\
    <crs:Exposure2012>+1.00</crs:Exposure2012>\n\
    <dc:description><![CDATA[client <proof> notes]]></dc:description>\n\
-   <crs:Texture>+20</crs:Texture>\n\
+   <crs:PointColor>0</crs:PointColor>\n\
   </rdf:Description>\n\
  </rdf:RDF>\n\
 </x:xmpmeta>\n";
@@ -5353,7 +5654,7 @@ mod tests {
             merged.contains("<![CDATA[client <proof> notes]]>"),
             "the foreign CDATA property must survive verbatim: {merged}"
         );
-        assert!(merged.contains("<crs:Texture>+20</crs:Texture>"), "unowned element survives");
+        assert!(merged.contains("<crs:PointColor>0</crs:PointColor>"), "unowned element survives");
         assert!(!merged.contains("<crs:Exposure2012>"), "ours is still stripped: {merged}");
         assert!(merged.contains("crs:Exposure2012=\"0.25\""));
     }
@@ -5367,7 +5668,7 @@ mod tests {
  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
   <rdf:Description rdf:about=\"\"\n\
     xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
-    crs:Texture=\"-9\"\n\
+    crs:PointColor=\"0\"\n\
     crs:HasSettings=\"True\">\n\
    <crs:MaskGroupBasedCorrections>\n\
     <rdf:Seq>\n\
@@ -5425,7 +5726,7 @@ mod tests {
             merged.contains("crs:Name=\"Adobe Landscape\""),
             "the element AFTER the mask block survives — nesting was not shredded"
         );
-        assert!(merged.contains("crs:Texture=\"-9\""), "unowned attribute survives");
+        assert!(merged.contains("crs:PointColor=\"0\""), "unowned attribute survives");
         // The whole document still ends properly (splice did not eat the tail).
         assert!(merged.trim_end().ends_with("</x:xmpmeta>"));
     }

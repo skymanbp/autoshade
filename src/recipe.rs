@@ -86,6 +86,12 @@ pub struct EditRecipe {
     pub clarity: f32,
     /// -100..=100, atmospheric haze removal.
     pub dehaze: f32,
+    /// -100..=100, fine detail (skin, foliage, fabric) without clarity's
+    /// midtone volume — Lightroom's Basic-panel Texture. The same unsharp
+    /// operator as `clarity` at a SMALL radius and with no midtone mask; the
+    /// per-mask `LocalAdjustment::texture` has rendered it since R22, and this
+    /// is the global counterpart it never had (R25 B2). → `crs:Texture`.
+    pub texture: f32,
 
     // --- Per-colour HSL (the 8 ACR colour bands) ----------------------------
     /// Lightroom's HSL / Color mixer. Default = all bands neutral (v1-compatible).
@@ -116,6 +122,49 @@ pub struct EditRecipe {
     /// applied after develop, before straighten — see `render::distort_norm`
     /// for the model. → `crs:LensManualDistortionAmount`.
     pub lens_distortion: f32,
+
+    // --- Effects: CARRIED to Lightroom, rendered by nothing here (R25 B2) ----
+    // Nine Adobe-only operators under the SF4-C policy: we round-trip them
+    // through their own `crs:` keys so a Lightroom edit survives an Autoshop
+    // save, and we deliberately do NOT approximate them. Each carries its
+    // reason in `advisor::catalogue::CARRIED_ONLY_GLOBAL`, and
+    // `Tier::CarriedOnly` is what makes the omission a declared fact rather
+    // than a slider that quietly does nothing.
+    //
+    // Every one is NEUTRAL AT ZERO on purpose, including the three whose ACR
+    // default is not zero (Midpoint/Feather 50, Style 1): zero here means
+    // "the sidecar said nothing", and the writer emits a key only when its
+    // value is non-zero — so an absent key stays absent and Lightroom keeps
+    // its own default instead of one we invented. Verified against the user's
+    // own library: Lightroom writes `PostCropVignetteAmount="0"` /
+    // `GrainAmount="0"` on nearly every sidecar and the COMPANION keys only
+    // when the amount is non-zero, so an untouched photo still imports as a
+    // no-op (`is_noop`) while a real vignette imports all six.
+    /// Post-crop vignette amount, -100..=100. → `crs:PostCropVignetteAmount`.
+    pub post_crop_vignette: f32,
+    /// Post-crop vignette midpoint, 0..=100 (ACR default 50).
+    /// → `crs:PostCropVignetteMidpoint`.
+    pub post_crop_vignette_mid: f32,
+    /// Post-crop vignette feather, 0..=100 (ACR default 50).
+    /// → `crs:PostCropVignetteFeather`.
+    pub post_crop_vignette_feather: f32,
+    /// Post-crop vignette roundness, -100..=100.
+    /// → `crs:PostCropVignetteRoundness`.
+    pub post_crop_vignette_round: f32,
+    /// Which post-crop vignette OPERATOR Adobe applies: 1 = Highlight
+    /// Priority, 2 = Colour Priority, 3 = Paint Overlay (0 = the sidecar named
+    /// none). → `crs:PostCropVignetteStyle`.
+    pub post_crop_vignette_style: f32,
+    /// Post-crop vignette highlight contrast, 0..=100.
+    /// → `crs:PostCropVignetteHighlightContrast`.
+    pub post_crop_vignette_hl: f32,
+    /// Film grain amount, 0..=100. → `crs:GrainAmount`.
+    pub grain: f32,
+    /// Film grain size, 0..=100 (ACR default 25). → `crs:GrainSize`.
+    pub grain_size: f32,
+    /// Film grain roughness/frequency, 0..=100 (ACR default 50).
+    /// → `crs:GrainFrequency`.
+    pub grain_rough: f32,
 
     // --- Geometry (optional) ------------------------------------------------
     /// Clockwise straighten angle in degrees, e.g. -2.5..=2.5 for horizons.
@@ -220,6 +269,7 @@ impl Default for EditRecipe {
             saturation: 0.0,
             clarity: 0.0,
             dehaze: 0.0,
+            texture: 0.0,
             hsl: Hsl::default(),
             color_grade: ColorGrade::default(),
             sharpening: 0.0,
@@ -227,6 +277,15 @@ impl Default for EditRecipe {
             lens_vignette: 0.0,
             lens_vignette_mid: 50.0,
             lens_distortion: 0.0,
+            post_crop_vignette: 0.0,
+            post_crop_vignette_mid: 0.0,
+            post_crop_vignette_feather: 0.0,
+            post_crop_vignette_round: 0.0,
+            post_crop_vignette_style: 0.0,
+            post_crop_vignette_hl: 0.0,
+            grain: 0.0,
+            grain_size: 0.0,
+            grain_rough: 0.0,
             straighten_deg: 0.0,
             crop: None,
             tone_curve: Vec::new(),
@@ -986,6 +1045,7 @@ impl EditRecipe {
         self.saturation = c(self.saturation, -100.0, 100.0);
         self.clarity = c(self.clarity, -100.0, 100.0);
         self.dehaze = c(self.dehaze, -100.0, 100.0);
+        self.texture = c(self.texture, -100.0, 100.0);
         self.hsl.clamp();
         self.color_grade.clamp();
         self.sharpening = c(self.sharpening, 0.0, 150.0);
@@ -993,6 +1053,21 @@ impl EditRecipe {
         self.lens_vignette = c(self.lens_vignette, -100.0, 100.0);
         self.lens_vignette_mid = c(self.lens_vignette_mid, 0.0, 100.0);
         self.lens_distortion = c(self.lens_distortion, -100.0, 100.0);
+        // The carried effects (R25 B2): bands are Adobe's own, so a
+        // hand-edited value can never reach the sidecar outside them.
+        self.post_crop_vignette = c(self.post_crop_vignette, -100.0, 100.0);
+        self.post_crop_vignette_mid = c(self.post_crop_vignette_mid, 0.0, 100.0);
+        self.post_crop_vignette_feather = c(self.post_crop_vignette_feather, 0.0, 100.0);
+        self.post_crop_vignette_round = c(self.post_crop_vignette_round, -100.0, 100.0);
+        // An operator INDEX, not a band: 1/2/3 are Adobe's three vignette
+        // styles and 0 is "none named". Rounded here rather than only at the
+        // writer so what the panel shows and what the sidecar carries are the
+        // same number.
+        self.post_crop_vignette_style = c(self.post_crop_vignette_style, 0.0, 3.0).round();
+        self.post_crop_vignette_hl = c(self.post_crop_vignette_hl, 0.0, 100.0);
+        self.grain = c(self.grain, 0.0, 100.0);
+        self.grain_size = c(self.grain_size, 0.0, 100.0);
+        self.grain_rough = c(self.grain_rough, 0.0, 100.0);
         self.lens_profile.clamp();
         self.straighten_deg = c(self.straighten_deg, -45.0, 45.0);
         self.confidence = c(self.confidence, 0.0, 1.0);
