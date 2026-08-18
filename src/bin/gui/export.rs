@@ -112,13 +112,21 @@ fn xmp_arm(
             bad.join(", ")
         ));
     }
-    // …and the open path's second disclosure too (review R12-11): foreign
-    // corrections the import cannot model are retained-but-not-applied.
-    let dropped_masks = autoshop::xmp::unsupported_corrections(text);
-    if dropped_masks > 0 {
-        warns.push(format!(
-            "{dropped_masks} unsupported Lightroom correction(s) not applied"
-        ));
+    // …and the open path's second disclosure too (review R12-11): what the
+    // sidecar's mask corrections cost on the way in.
+    //
+    // R25 P1 turned this from a COUNT into the reader's own named verdicts.
+    // "N unsupported Lightroom correction(s) not applied" was, on any real
+    // Lightroom file, a count of the user's ENTIRE mask catalog — refused
+    // over a rotation angle and a default blend mode — with nothing to say
+    // which of the six import gates had fired. The masks import now, and the
+    // line names whatever did not come with them. English, like every other
+    // entry in this batch channel; the window's own localized twin is
+    // `util::xmp_import_line`.
+    if let Some(line) =
+        autoshop::xmp::describe_import_losses(r.masks.len(), &autoshop::xmp::import_losses(text))
+    {
+        warns.push(line);
     }
     // R24-5 M0: and the GLOBAL half of that same disclosure, which this path
     // never had — the sidecar's own crs: properties the engine does not model.

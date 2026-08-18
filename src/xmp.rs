@@ -260,6 +260,181 @@ pub struct MaskLoss {
     pub reason: MaskLossReason,
 }
 
+/// Why one Lightroom correction does not reach this engine WHOLE — the
+/// IMPORT-side twin of [`MaskLossReason`], produced by the READER itself
+/// ([`classify_correction`]) so no consumer has to re-derive the import rules
+/// and a disclosure can never claim something other than what was imported.
+///
+/// **The asymmetry this closes (R25 P1).** The export side has named its
+/// losses per mask since M6a; the import side answered with a single integer
+/// and SIX independent "if I do not recognise this, drop the whole correction"
+/// gates. Every one of those gates fired on an ordinary Lightroom file:
+/// `crs:Angle` is written on EVERY radial (as `"0"` when unrotated) and
+/// `crs:MaskBlendMode` on EVERY component. The result was that every mask in
+/// the user's catalog was refused on import, with a count as the only
+/// explanation. A knob we do not model is not the same thing as a value we
+/// cannot read, and only the second one is a reason to refuse a correction.
+///
+/// Two variants DROP the correction ([`is_drop`]); the other eight are notes
+/// on a correction that DID import.
+///
+/// [`is_drop`]: MaskImportReason::is_drop
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MaskImportReason {
+    /// DROP. No parametric geometry to stand on: a brush / AI / depth /
+    /// heal component (`Mask/Paint`, `Mask/Image`, `Mask/Aggregate`,
+    /// `Mask/Ellipse`), or no `crs:CorrectionMasks` at all. Lightroom
+    /// recomputes these from a digest, so there are no pixels to take.
+    Unrepresentable,
+    /// DROP. The values READ fine but land outside this engine's model (an
+    /// exposure past ±5 EV, `crs:CorrectionActive="false"`, a component whose
+    /// coordinates are not numbers, more masks than the recipe cap holds).
+    OutOfModel,
+    /// `crs:Angle` is non-zero: the radial imports as its UNROTATED ellipse
+    /// (the angle's sign/pivot are unverified — the roundness rule, mirrored
+    /// from the export side's [`MaskLossReason::Rotation`]).
+    Rotation,
+    /// `crs:MaskBlendMode` is not the plain composition we already do, so the
+    /// component contributes its base geometry only.
+    BlendMode,
+    /// More than one geometry component: the base shape imports, the extra
+    /// shapes do not (the import twin of [`MaskLossReason::ComponentsFlattened`]).
+    MultiComponent,
+    /// A `Mask/RangeMask` we cannot honour (someone else's encoding, or more
+    /// than one) — the geometry imports without the range refinement.
+    ForeignRangeMask,
+    /// The correction carries `crs:MainCurve` / `RedCurve` / `GreenCurve` /
+    /// `BlueCurve`. Child ELEMENTS, so the attribute scan never saw them and
+    /// they used to vanish with no note at all.
+    LocalCurve,
+    /// `crs:LocalCurveRefineSaturation` is off its 100 default.
+    CurveRefineSaturation,
+    /// A `crs:Local*` slider this engine has no model for carries a non-zero
+    /// value; the payload is that slider's key.
+    InertLocal(&'static str),
+    /// A `crs:Local*` attribute name this build has never seen.
+    UnknownLocalKey,
+}
+
+impl MaskImportReason {
+    /// Every reason, drops before notes — the ONE list both disclosure
+    /// surfaces iterate ([`describe_import_losses`] and the GUI's
+    /// `xmp_import_line`), exactly as [`MaskLossReason::ALL`] serves the
+    /// export half. [`en`]'s exhaustive match stops the BUILD when a variant
+    /// is added; an iteration array does not, so a reason raised by the
+    /// reader and missing here would be counted by nobody. Pinned by
+    /// `mask_import_reason_all_covers_every_variant`.
+    ///
+    /// [`InertLocal`] appears with an EMPTY payload: the payload names one
+    /// slider, so no single value can stand for the variant. Grouping is by
+    /// [`same_kind`] (the discriminant), never by `==`.
+    ///
+    /// [`en`]: MaskImportReason::en
+    /// [`InertLocal`]: MaskImportReason::InertLocal
+    /// [`same_kind`]: MaskImportReason::same_kind
+    pub const ALL: [MaskImportReason; 10] = [
+        MaskImportReason::Unrepresentable,
+        MaskImportReason::OutOfModel,
+        MaskImportReason::Rotation,
+        MaskImportReason::BlendMode,
+        MaskImportReason::MultiComponent,
+        MaskImportReason::ForeignRangeMask,
+        MaskImportReason::LocalCurve,
+        MaskImportReason::CurveRefineSaturation,
+        MaskImportReason::InertLocal(""),
+        MaskImportReason::UnknownLocalKey,
+    ];
+
+    /// Did this verdict cost the whole correction? The two `true` answers are
+    /// what [`unsupported_corrections`] counts, so "imported + refused" stays
+    /// the size of the user's local work (`eval`'s reading) even now that a
+    /// correction can import AND carry notes.
+    pub fn is_drop(self) -> bool {
+        matches!(self, MaskImportReason::Unrepresentable | MaskImportReason::OutOfModel)
+    }
+
+    /// Same VARIANT, payload ignored — the grouping key both prose channels
+    /// use, because `InertLocal("LocalGrain")` and `InertLocal("LocalMoire")`
+    /// are one line in a sentence and two values under `==`.
+    pub fn same_kind(self, other: MaskImportReason) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+
+    /// English label for the prose channel (CLI stderr / batch warnings). The
+    /// GUI renders the same variants in the UI language instead.
+    pub fn en(self) -> &'static str {
+        match self {
+            MaskImportReason::Unrepresentable => "AI / brush correction(s) skipped",
+            MaskImportReason::OutOfModel => "correction(s) beyond this engine's model skipped",
+            MaskImportReason::Rotation => "radial rotation(s) read as 0",
+            MaskImportReason::BlendMode => "non-default blend mode(s) ignored",
+            MaskImportReason::MultiComponent => "extra shape component(s) dropped",
+            MaskImportReason::ForeignRangeMask => "range mask(s) dropped",
+            MaskImportReason::LocalCurve => "local point curve(s) not modelled",
+            MaskImportReason::CurveRefineSaturation => "curve refine saturation not modelled",
+            MaskImportReason::InertLocal(_) => "unmodelled local slider(s)",
+            MaskImportReason::UnknownLocalKey => "unknown local setting(s)",
+        }
+    }
+}
+
+/// One import defect, NAMED. A single correction can appear more than once (a
+/// rotated radial whose blend mode is Subtract loses two separate things) —
+/// the import twin of [`MaskLoss`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskImportLoss {
+    /// `crs:CorrectionName` when the sidecar sets one, else the positional
+    /// `Correction <n>` — the same "say WHICH one" rule the export side's
+    /// [`MaskLoss::name`] follows.
+    pub name: String,
+    pub reason: MaskImportReason,
+}
+
+/// What this sidecar's mask corrections cost on the way in, named — the
+/// import-side counterpart of [`mask_export_losses`]. Empty = every
+/// correction arrived whole (or there were none).
+pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
+    if xmp.len() > MAX_XMP_BYTES {
+        return Vec::new();
+    }
+    let authored_by_autoshop = is_autoshop_sidecar(xmp);
+    let scope = crs_own_scope(xmp);
+    mask_summary(scope.as_ref(), authored_by_autoshop).losses
+}
+
+/// One English sentence for what an import carried and what it left behind, or
+/// `None` when the sidecar's masks arrived whole. Groups by reason in
+/// [`MaskImportReason::ALL`] order and names the corrections, so the line is
+/// actionable ("which of my 12 masks?") — the import twin of
+/// [`describe_mask_losses`].
+pub fn describe_import_losses(imported: usize, losses: &[MaskImportLoss]) -> Option<String> {
+    if losses.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for reason in MaskImportReason::ALL {
+        let names: Vec<&str> = losses
+            .iter()
+            .filter(|l| l.reason.same_kind(reason))
+            .map(|l| l.name.as_str())
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        // Capped like the export sentence, for the same reason: the count is
+        // the fact, the first few names are the pointer.
+        let shown = names.len().min(4);
+        let more = names.len() - shown;
+        let list = names[..shown].join(", ");
+        let tail = if more > 0 { format!(", +{more} more") } else { String::new() };
+        parts.push(format!("{} {} ({list}{tail})", names.len(), reason.en()));
+    }
+    Some(format!(
+        "imported {imported} Lightroom mask(s); {} — the sidecar itself is not modified",
+        parts.join("; ")
+    ))
+}
+
 /// The masks `r` cannot project into a classic ACR sidecar, exactly as the
 /// writer judges them while emitting the XML (see [`masks_xml`]) — the ONE
 /// source for every surface's export-side disclosure. Empty = a faithful
@@ -1849,20 +2024,38 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
     // the attribute we append — one document, two conflicting answers.
     let mask_scope = crs_own_scope(existing);
     let summary = mask_summary(mask_scope.as_ref(), is_autoshop_sidecar(existing));
-    // Preserve the base's foreign mask block ONLY while the recipe has no
-    // masks of its own. The recipe in hand is the newest intent by
-    // definition — it is what is being saved right now — so when both sides
-    // have masks, ours publish and the base's block goes, WITH the note
-    // below. (Ranking file mtimes here instead would misfire: every save
-    // flow commits recipe.json before projecting the XMP, so the store
-    // always looks newer than the sidecar by the time this runs.)
-    let preserve_masks = summary.preserve_original && r.masks.is_empty();
-    if summary.preserve_original && !r.masks.is_empty() {
+    // Preserve the base's own mask block ONLY while this develop has not
+    // moved away from it. The recipe in hand is the newest intent by
+    // definition — it is what is being saved right now — so once it differs,
+    // ours publish and the base's block goes, WITH the note below. (Ranking
+    // file mtimes here instead would misfire: every save flow commits
+    // recipe.json before projecting the XMP, so the store always looks newer
+    // than the sidecar by the time this runs.)
+    //
+    // R25 P1 — THE trap of the import unlock. `r.masks.is_empty()` was a
+    // usable stand-in for "the user has not touched these" only while a lossy
+    // sidecar imported NOTHING. Now that it imports, the develop carries a
+    // DEGRADED reading of the base's block (a rotation read as 0, a blend
+    // mode ignored, a foreign range left behind), and writing that back over
+    // an untouched import would delete the parts we cannot express — silently,
+    // on an ordinary Ctrl+S, from the user's own Lightroom file. The question
+    // is therefore "did anything move since the import", and it is answered by
+    // re-reading the base through the SAME importer the develop came through:
+    // equal ⇒ we would only be re-emitting our own approximation, so keep the
+    // original bytes; different ⇒ the newest intent is the develop in hand, it
+    // publishes, and the note below says so.
+    //
+    // Ordered so the extra parse is only paid where it decides something: a
+    // maskless recipe short-circuits (the old arm, unchanged), and a base with
+    // nothing to preserve never reaches the comparison at all.
+    let preserve_masks = summary.preserve_original
+        && (r.masks.is_empty() || r.masks == xmp_to_recipe(existing).masks);
+    if summary.preserve_original && !preserve_masks {
         notes.push(format!(
-            "the merge base carries {} mask correction(s) this build cannot represent — \
-             they are not in the new file, which carries this develop's {} mask(s) instead \
+            "the merge base's mask block carries {} thing(s) this build cannot represent — \
+             it is not in the new file, which carries this develop's {} edited mask(s) instead \
              (the base file itself is not modified)",
-            summary.loss_count,
+            summary.defects,
             r.masks.len()
         ));
     }
@@ -2338,38 +2531,74 @@ fn parse_masks(xmp: &str, authored_by_autoshop: bool) -> Vec<LocalAdjustment> {
     mask_summary_from_block(block, authored_by_autoshop).supported
 }
 
-/// How many corrections in this sidecar the import CANNOT represent (LR
-/// brush / AI / depth masks — no `Mask/Gradient` / `Mask/CircularGradient`
-/// component). The skip itself is by design (the writer skips symmetrically);
-/// what was missing is the DISCLOSURE: a user importing their own Lightroom
-/// work lost every brush mask with no indication anything was dropped. The
-/// GUI surfaces this count when it reads a sidecar.
+/// How many corrections in this sidecar produced NO mask at all — brush / AI /
+/// depth geometry Lightroom recomputes from a digest, plus the ones whose
+/// values land outside this engine's model. The skip itself is by design (the
+/// writer skips the same shapes symmetrically); what was missing is the
+/// DISCLOSURE: a user importing their own Lightroom work lost every brush mask
+/// with no indication anything was dropped.
+///
+/// COUNTS DROPS ONLY, not every import defect (R25 P1) — a correction that
+/// imports carrying a note is not a refusal, and `eval` reads
+/// `imported + refused` as the size of the user's local work. The named list
+/// of everything, notes included, is [`import_losses`].
 pub fn unsupported_corrections(xmp: &str) -> usize {
     if xmp.len() > MAX_XMP_BYTES {
         return 0;
     }
     let authored_by_autoshop = is_autoshop_sidecar(xmp);
     let scope = crs_own_scope(xmp);
-    mask_summary(scope.as_ref(), authored_by_autoshop).loss_count
+    mask_summary(scope.as_ref(), authored_by_autoshop).dropped
 }
 
+/// One correction's verdict. R25 P1 retired the third state ("Partial", which
+/// meant DISCARDED): a correction we can read the geometry of imports, and
+/// whatever it carried that we do not model rides along as a named reason.
 enum MaskCorrectionParse {
-    FullySupported(LocalAdjustment),
-    Unsupported,
-    Partial,
+    Supported(LocalAdjustment, Vec<MaskImportReason>),
+    /// The one verdict that costs the whole correction — always a
+    /// [`MaskImportReason::is_drop`] reason.
+    Unsupported(MaskImportReason),
 }
 
 #[derive(Default)]
 struct MaskSummary {
     supported: Vec<LocalAdjustment>,
-    loss_count: usize,
+    /// Every defect, NAMED — the one list every disclosure surface iterates.
+    /// CAPPED: a document's corrections are unbounded and a disclosure is a
+    /// sentence, not a log. The two counters beside it are exact.
+    losses: Vec<MaskImportLoss>,
+    /// Corrections that produced no mask, EXACTLY (past the display cap too):
+    /// [`unsupported_corrections`]' answer.
+    dropped: usize,
+    /// Every defect, exactly — `losses.len()` before the cap.
+    defects: usize,
     preserve_original: bool,
 }
 
 impl MaskSummary {
-    fn record_loss(&mut self) {
-        self.loss_count = self.loss_count.saturating_add(1);
+    /// The ONE door a defect enters by, so the list and the two counters
+    /// cannot drift: named, counted, and — either way, drop or note — the
+    /// merge is told to keep the base's own mask block, because what we
+    /// imported is not equal to what the file holds.
+    fn record(&mut self, name: &str, reason: MaskImportReason) {
+        /// A sentence, not a log.
+        const MAX_IMPORT_LOSSES: usize = 256;
+        /// A correction name is untrusted text straight out of the sidecar
+        /// (the recipe's own names are capped by `EditRecipe::clamp`; these
+        /// never went through it). Truncated on a char boundary by `take`.
+        const MAX_NAME_CHARS: usize = 64;
+        if reason.is_drop() {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        self.defects = self.defects.saturating_add(1);
         self.preserve_original = true;
+        if self.losses.len() < MAX_IMPORT_LOSSES {
+            self.losses.push(MaskImportLoss {
+                name: name.chars().take(MAX_NAME_CHARS).collect(),
+                reason,
+            });
+        }
     }
 }
 
@@ -2380,15 +2609,25 @@ fn mask_summary(xmp: &str, authored_by_autoshop: bool) -> MaskSummary {
         // The group OPENS but never closes: whatever corrections it holds
         // cannot be counted, so the one honest summary is "a loss, preserve
         // the original" — the old literal finder reported this exact document
-        // as loss_count 0 AND preserve_original false, which both hid the
+        // as zero losses AND preserve_original false, which both hid the
         // drop from the GUI toast and told the merge it was free to delete
         // the block from the user's own sidecar.
         Err(()) => {
             let mut summary = MaskSummary::default();
-            summary.record_loss();
+            summary.record("Correction 1", MaskImportReason::OutOfModel);
             summary
         }
     }
+}
+
+/// The label this correction wears in every disclosure: its own
+/// `crs:CorrectionName`, else its position in the block. Blank names fall to
+/// the positional form — an empty slot in a comma list reads as a bug.
+fn correction_name(seg: &str, position: usize) -> String {
+    crs_str(seg, "CorrectionName")
+        .map(|v| v.into_owned())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("Correction {position}"))
 }
 
 fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSummary {
@@ -2397,7 +2636,7 @@ fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSumma
 
     let mut summary = MaskSummary::default();
     let mut at = 0;
-    let mut saw_correction = false;
+    let mut seen = 0usize;
     while let Some((start, gt, self_closing)) = next_xml_tag(block, at) {
         let tag = &block[start..=gt];
         let correction = tag_name(tag) == "rdf:Description"
@@ -2409,32 +2648,40 @@ fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSumma
             continue;
         }
 
-        saw_correction = true;
+        seen += 1;
         if self_closing {
-            summary.record_loss();
+            // No body at all: nothing to read a geometry out of.
+            summary.record(&format!("Correction {seen}"), MaskImportReason::Unrepresentable);
             at = gt + 1;
             continue;
         }
         let Some(close) = find_matching_close(block, gt + 1) else {
-            summary.record_loss();
+            summary.record(&format!("Correction {seen}"), MaskImportReason::OutOfModel);
             break;
         };
         let end = close + DESCRIPTION_CLOSE.len();
         let seg = &block[start..end];
+        let name = correction_name(seg, seen);
         match classify_correction(seg, authored_by_autoshop) {
-            MaskCorrectionParse::FullySupported(mask)
+            MaskCorrectionParse::Supported(mask, reasons)
                 if summary.supported.len() < MAX_MASKS_FROM_XMP =>
             {
                 summary.supported.push(mask);
+                for reason in reasons {
+                    summary.record(&name, reason);
+                }
             }
-            MaskCorrectionParse::FullySupported(_)
-            | MaskCorrectionParse::Unsupported
-            | MaskCorrectionParse::Partial => summary.record_loss(),
+            // Past the recipe's own mask cap the correction does not import,
+            // which is a drop however well it parsed.
+            MaskCorrectionParse::Supported(..) => {
+                summary.record(&name, MaskImportReason::OutOfModel);
+            }
+            MaskCorrectionParse::Unsupported(reason) => summary.record(&name, reason),
         }
         at = end;
     }
-    if !saw_correction && find_crs_value_at(block, "What", "Correction").is_some() {
-        summary.record_loss();
+    if seen == 0 && find_crs_value_at(block, "What", "Correction").is_some() {
+        summary.record("Correction 1", MaskImportReason::OutOfModel);
     }
     summary
 }
@@ -2461,8 +2708,16 @@ fn optional_number_is(seg: &str, key: &str, expected: f32) -> bool {
     }
 }
 
-fn correction_values_are_supported(seg: &str) -> bool {
-    const KNOWN_LOCAL: [&str; 25] = [
+/// The correction's own `crs:Local*` settings. `Err` refuses the WHOLE
+/// correction; `Ok` imports it carrying one note per knob we do not model.
+///
+/// The line between the two (R25 P1): a value we can READ but that lands
+/// outside the model is a refusal — importing it would render something the
+/// file does not say. A knob we simply have no model FOR is not: dropping the
+/// user's whole mask because it also carries a Moiré slider loses far more
+/// than it protects, and the note says exactly what did not come through.
+fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImportReason> {
+    const KNOWN_LOCAL: [&str; 28] = [
         "LocalExposure",
         "LocalHue",
         "LocalSaturation",
@@ -2488,6 +2743,21 @@ fn correction_values_are_supported(seg: &str) -> bool {
         "LocalTexture",
         "LocalGrain",
         "LocalCurveRefineSaturation",
+        // Lightroom BOOKKEEPING, not sliders — they carry no user intent, so
+        // the `UnknownLocalKey` note they used to raise printed "unmodelled
+        // slider" about something that is not one, on 12 of the reference
+        // set's 31 importable corrections (R25 P1 round-end). Measured in the
+        // user's own library: `LocalCorrectedDepth` appears 23 times and is
+        // "0" every time (a numeric flag), and the two Digest keys are
+        // Lightroom's own recompute ledger — a 32-hex string plus its schema
+        // version ("1"). Knowing a key and not modelling it is the honest
+        // answer for all three; only the numeric one can also carry a value,
+        // so only it joins `INERT_LOCAL` below. The two STRING keys must stay
+        // out of that list: `optional_number_is` cannot parse a hex digest, so
+        // membership there would raise a false note on every file that has one.
+        "LocalCorrectedDepth",
+        "LocalInputDigest",
+        "LocalInputDigestVersion",
     ];
     // The pre-2012 process-version twins (`LocalExposure` beside
     // `LocalExposure2012`, …) plus the bands this engine has no model for.
@@ -2495,7 +2765,7 @@ fn correction_values_are_supported(seg: &str) -> bool {
     // `*2012` twin, they are read back by `parse_one_correction`, and the
     // writer now emits the recipe's own values — a correction carrying them
     // is fully supported, not a partial import.
-    const INERT_LOCAL: [&str; 9] = [
+    const INERT_LOCAL: [&str; 10] = [
         "LocalExposure",
         "LocalContrast",
         "LocalClarity",
@@ -2505,6 +2775,11 @@ fn correction_values_are_supported(seg: &str) -> bool {
         "LocalMoire",
         "LocalDefringe",
         "LocalGrain",
+        // Silent at its observed "0", NAMED if a file ever carries another
+        // value — the same law every other inert key follows. Being
+        // bookkeeping is a reason not to call it an unknown key, not a reason
+        // to stop looking at it.
+        "LocalCorrectedDepth",
     ];
 
     if !matches!(
@@ -2514,7 +2789,7 @@ fn correction_values_are_supported(seg: &str) -> bool {
         || !optional_scaled_number_in(seg, "LocalExposure2012", 4.0, -5.0, 5.0)
         || !optional_scaled_number_in(seg, "LocalLuminanceNoise", 100.0, 0.0, 100.0)
     {
-        return false;
+        return Err(MaskImportReason::OutOfModel);
     }
 
     for key in [
@@ -2533,17 +2808,32 @@ fn correction_values_are_supported(seg: &str) -> bool {
         "LocalTint",
     ] {
         if !optional_scaled_number_in(seg, key, 100.0, -100.0, 100.0) {
-            return false;
+            return Err(MaskImportReason::OutOfModel);
         }
     }
-    if INERT_LOCAL.iter().any(|key| !optional_number_is(seg, key, 0.0))
-        || !optional_number_is(seg, "LocalCurveRefineSaturation", 100.0)
+    // Everything below this line is a NOTE, not a refusal.
+    let mut reasons: Vec<MaskImportReason> = Vec::new();
+    for key in INERT_LOCAL {
+        if !optional_number_is(seg, key, 0.0) {
+            reasons.push(MaskImportReason::InertLocal(key));
+        }
+    }
+    if !optional_number_is(seg, "LocalCurveRefineSaturation", 100.0) {
+        reasons.push(MaskImportReason::CurveRefineSaturation);
+    }
+    // The four per-channel local curves are child ELEMENTS, so the attribute
+    // scan below never saw them: a correction carrying one imported as
+    // "fully supported" with the curve silently gone. Modelled in a later
+    // batch; disclosed from here on.
+    if ["crs:MainCurve", "crs:RedCurve", "crs:GreenCurve", "crs:BlueCurve"]
+        .iter()
+        .any(|k| matches!(owned_element_body(seg, k), Ok(Some(_))))
     {
-        return false;
+        reasons.push(MaskImportReason::LocalCurve);
     }
 
     let Some((_, gt, _)) = next_xml_tag(seg, 0) else {
-        return false;
+        return Err(MaskImportReason::OutOfModel);
     };
     let mut cursor = 0;
     while let Some(a) = next_xml_attribute(&seg[..=gt], &mut cursor) {
@@ -2551,36 +2841,66 @@ fn correction_values_are_supported(seg: &str) -> bool {
             && local.starts_with("Local")
             && !KNOWN_LOCAL.contains(&local)
         {
-            return false;
+            reasons.push(MaskImportReason::UnknownLocalKey);
+            break;
         }
     }
-    true
+    Ok(reasons)
 }
 
-fn component_tag_is_supported(tag: &str, what: &str, authored_by_autoshop: bool) -> bool {
+/// One `<rdf:li crs:What="Mask/…">` component. `Err(())` = the component is
+/// UNUSABLE, and the caller decides what that costs: a geometry takes the
+/// whole correction with it, a range component only takes itself.
+fn component_import_reasons(
+    tag: &str,
+    what: &str,
+    authored_by_autoshop: bool,
+) -> Result<Vec<MaskImportReason>, ()> {
     let expected_mode = if what == "Mask/RangeMask" { "1" } else { "0" };
     let expected_value = if what == "Mask/RangeMask" { 0.0 } else { 1.0 };
 
-    if crs_str(tag, "Angle").is_some()
-        || !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true"))
+    // A muted component, or one painted at a partial value, changes what the
+    // mask covers — values we can read but have no model for, so they still
+    // refuse. (Compare the two below, which are knobs, not coverage.)
+    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true"))
         || !optional_number_is(tag, "MaskValue", expected_value)
     {
-        return false;
+        return Err(());
     }
-    if let Some(mode) = crs_str(tag, "MaskBlendMode")
-        && (!authored_by_autoshop || mode.as_ref() != expected_mode)
-    {
-        return false;
+    let mut reasons: Vec<MaskImportReason> = Vec::new();
+    // `crs:Angle` sits on EVERY Lightroom radial, written as "0" when the
+    // shape was never rotated (13 of the 24 radials in the reference set). A
+    // zero angle loses NOTHING, so flagging its mere presence would raise a
+    // false loss on half the catalog — the same "alarm on every save is alarm
+    // the user learns to ignore" rule R24 applied to the export line. Present
+    // but unreadable counts as rotated: we cannot say it is zero.
+    if crs_str(tag, "Angle").is_some() && crs_f32(tag, "Angle").is_none_or(|v| v != 0.0) {
+        reasons.push(MaskImportReason::Rotation);
+    }
+    // `crs:MaskBlendMode` sits on every component Lightroom writes, and the
+    // overwhelming majority carry the DEFAULT — the plain composition this
+    // engine already does, so accepting it costs nothing. Only a different
+    // mode is a loss, and it costs the composition, not the shape. Authorship
+    // is deliberately NOT part of this test any more: the value says what it
+    // says whoever wrote it, and requiring our own provenance is what refused
+    // every Lightroom mask in the first place.
+    if crs_str(tag, "MaskBlendMode").is_some_and(|mode| mode.as_ref() != expected_mode) {
+        reasons.push(MaskImportReason::BlendMode);
     }
 
     match what {
         "Mask/Gradient" => {
-            matches!(
+            if matches!(
                 crs_str(tag, "MaskInverted").as_deref(),
                 None | Some("true") | Some("false")
             ) && ["ZeroX", "ZeroY", "FullX", "FullY"]
                 .iter()
                 .all(|key| crs_f32(tag, key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
+            {
+                Ok(reasons)
+            } else {
+                Err(())
+            }
         }
         "Mask/CircularGradient" => {
             if !matches!(
@@ -2594,19 +2914,27 @@ fn component_tag_is_supported(tag: &str, what: &str, authored_by_autoshop: bool)
                 .all(|key| crs_f32(tag, key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
                 || !crs_f32(tag, "Roundness").is_some_and(|v| (0.0..=1.0).contains(&v))
             {
-                return false;
+                return Err(());
             }
             let Some(raw) = crs_f32(tag, "Feather") else {
-                return false;
+                return Err(());
             };
             let feather = if raw > 1.0 || raw == raw.trunc() { raw / 100.0 } else { raw };
-            (0.0..=1.0).contains(&feather)
+            if (0.0..=1.0).contains(&feather) { Ok(reasons) } else { Err(()) }
         }
+        // Someone else's range encoding is not ours to interpret — but that
+        // is a reason to leave the RANGE behind, not the mask (R25 P1). The
+        // caller turns this `Err` into a `ForeignRangeMask` note.
         "Mask/RangeMask" => {
-            authored_by_autoshop
+            if authored_by_autoshop
                 && matches!(crs_str(tag, "MaskInverted").as_deref(), None | Some("true"))
+            {
+                Ok(reasons)
+            } else {
+                Err(())
+            }
         }
-        _ => false,
+        _ => Err(()),
     }
 }
 
@@ -2632,15 +2960,16 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
     let mut geometry_count = 0usize;
     let mut range_count = 0usize;
     let mut unknown_component = false;
-    let mut component_loss = false;
-    // By NAME (attribute-carrying spelling included); an unterminated element
-    // (`Err`) falls to the same loss classification as an absent one.
-    let Ok(Some(mask_block)) = owned_element_body(seg, "crs:CorrectionMasks") else {
-        return if parse_one_correction(seg).is_some() {
-            MaskCorrectionParse::Partial
-        } else {
-            MaskCorrectionParse::Unsupported
-        };
+    let mut geometry_unusable = false;
+    let mut range_usable = true;
+    let mut reasons: Vec<MaskImportReason> = Vec::new();
+    // By NAME (attribute-carrying spelling included). No component list at
+    // all means no parametric geometry to stand on; an UNTERMINATED one is
+    // markup we could not finish reading, which is a different sentence.
+    let mask_block = match owned_element_body(seg, "crs:CorrectionMasks") {
+        Ok(Some(b)) => b,
+        Ok(None) => return MaskCorrectionParse::Unsupported(MaskImportReason::Unrepresentable),
+        Err(()) => return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel),
     };
 
     let mut at = 0;
@@ -2650,43 +2979,71 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
             && let Some((_, raw)) = xml_attribute_raw(tag, "crs:What")
         {
             let what = xml_unescape(raw);
+            let verdict = component_import_reasons(tag, what.as_ref(), authored_by_autoshop);
             match what.as_ref() {
-                "Mask/Gradient" | "Mask/CircularGradient" => geometry_count += 1,
-                "Mask/RangeMask" => range_count += 1,
+                "Mask/Gradient" | "Mask/CircularGradient" => {
+                    geometry_count += 1;
+                    match verdict {
+                        Ok(rs) => reasons.extend(rs),
+                        Err(()) => geometry_unusable = true,
+                    }
+                }
+                "Mask/RangeMask" => {
+                    range_count += 1;
+                    if verdict.is_err() {
+                        range_usable = false;
+                    }
+                }
+                // Brush / AI / depth / heal components. Lightroom recomputes
+                // these from a digest, so there is nothing to take — and
+                // importing the parametric shape BESIDE one would render a
+                // mask the file does not describe. Still refused (R24
+                // decision: bitmap masks are not exportable either), now with
+                // a sentence that says why.
                 _ => unknown_component = true,
-            }
-            if !component_tag_is_supported(tag, what.as_ref(), authored_by_autoshop) {
-                component_loss = true;
             }
         }
         at = end + 1;
     }
 
-    if geometry_count == 0 {
-        return MaskCorrectionParse::Unsupported;
+    if geometry_count == 0 || unknown_component {
+        return MaskCorrectionParse::Unsupported(MaskImportReason::Unrepresentable);
     }
-    if geometry_count != 1
-        || range_count > 1
-        || unknown_component
-        || component_loss
-        || !correction_values_are_supported(seg)
-        || (range_count != 0 && !authored_by_autoshop)
-    {
-        return MaskCorrectionParse::Partial;
+    if geometry_unusable {
+        return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel);
+    }
+    if geometry_count > 1 {
+        reasons.push(MaskImportReason::MultiComponent);
+    }
+    match correction_value_reasons(seg) {
+        Ok(rs) => reasons.extend(rs),
+        Err(reason) => return MaskCorrectionParse::Unsupported(reason),
     }
 
-    let Some(parsed) = parse_one_correction(seg) else {
-        return MaskCorrectionParse::Partial;
+    let Some(mut parsed) = parse_one_correction(seg) else {
+        return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel);
     };
-    if range_count == 1
-        && parsed
-            .range
-            .as_ref()
-            .is_none_or(|range| !range_values_are_supported(range))
+    // A range we cannot honour costs the RANGE, not the mask: the geometry is
+    // still exactly what the file draws. Dropping it must be explicit —
+    // leaving `parsed.range` in place would import someone else's encoding as
+    // if we had understood it.
+    if range_count > 0
+        && (!range_usable
+            || range_count > 1
+            || parsed.range.as_ref().is_none_or(|r| !range_values_are_supported(r)))
     {
-        return MaskCorrectionParse::Partial;
+        parsed.range = None;
+        reasons.push(MaskImportReason::ForeignRangeMask);
     }
-    MaskCorrectionParse::FullySupported(parsed)
+    // One line per KIND of loss: three components sharing a blend mode is one
+    // sentence, not three.
+    let mut uniq: Vec<MaskImportReason> = Vec::new();
+    for r in reasons {
+        if !uniq.contains(&r) {
+            uniq.push(r);
+        }
+    }
+    MaskCorrectionParse::Supported(parsed, uniq)
 }
 
 
@@ -3913,6 +4270,523 @@ mod tests {
         }
     }
 
+    // ── R25 P1: the import unlock ────────────────────────────────────────
+    //
+    // FIXTURE POLICY. This is a public repository and the reference sidecars
+    // are the user's own photographs, so no line of them is copied in. Every
+    // inline fixture below is SYNTHESISED: the attribute set, the value
+    // shapes, the attribute order and the element nesting are reproduced
+    // exactly as `DSC08761.xmp` / `DSC09642.xmp` write them, and every
+    // personal identifier (`crs:CorrectionName`, `crs:MaskName`, the sync
+    // GUIDs) carries a neutral test value instead. The real files are
+    // exercised by `real_lightroom_sidecars_import_their_parametric_masks`,
+    // which reads them from a path given at RUN time and skips when it is
+    // not set.
+
+    /// One `crs:What="Correction"` `<rdf:li>`, structurally verbatim: all 25
+    /// `crs:Local*` attributes in Lightroom's own order, the sliders on its
+    /// own 0..1 scale, `crs:CorrectionMasks` last. `locals` is spliced in
+    /// just before `LocalCurveRefineSaturation` (where an unknown key would
+    /// really sit); tests that need a DIFFERENT value for an existing key
+    /// rewrite it on the returned string, so the fixture can never carry the
+    /// same attribute twice.
+    fn lr_correction(name: &str, locals: &str, components: &str) -> String {
+        format!(
+            "     <rdf:li>\n\
+             \x20     <rdf:Description\n\
+             \x20      crs:What=\"Correction\"\n\
+             \x20      crs:CorrectionAmount=\"1\"\n\
+             \x20      crs:CorrectionActive=\"true\"\n\
+             \x20      crs:CorrectionName=\"{name}\"\n\
+             \x20      crs:CorrectionSyncID=\"0000000000000000000000000000000A\"\n\
+             \x20      crs:LocalExposure=\"0\"\n\
+             \x20      crs:LocalHue=\"0\"\n\
+             \x20      crs:LocalSaturation=\"0\"\n\
+             \x20      crs:LocalContrast=\"0\"\n\
+             \x20      crs:LocalClarity=\"0\"\n\
+             \x20      crs:LocalSharpness=\"0\"\n\
+             \x20      crs:LocalBrightness=\"0\"\n\
+             \x20      crs:LocalToningHue=\"0\"\n\
+             \x20      crs:LocalToningSaturation=\"0\"\n\
+             \x20      crs:LocalExposure2012=\"0.1\"\n\
+             \x20      crs:LocalContrast2012=\"0.43\"\n\
+             \x20      crs:LocalHighlights2012=\"0\"\n\
+             \x20      crs:LocalShadows2012=\"0\"\n\
+             \x20      crs:LocalWhites2012=\"0\"\n\
+             \x20      crs:LocalBlacks2012=\"0\"\n\
+             \x20      crs:LocalClarity2012=\"0\"\n\
+             \x20      crs:LocalDehaze=\"0\"\n\
+             \x20      crs:LocalLuminanceNoise=\"0\"\n\
+             \x20      crs:LocalMoire=\"0\"\n\
+             \x20      crs:LocalDefringe=\"0\"\n\
+             \x20      crs:LocalTemperature=\"0.24\"\n\
+             \x20      crs:LocalTint=\"0.44\"\n\
+             \x20      crs:LocalTexture=\"0\"\n\
+             \x20      crs:LocalGrain=\"0\"\n\
+             {locals}\
+             \x20      crs:LocalCurveRefineSaturation=\"100\">\n\
+             \x20     <crs:CorrectionMasks>\n\
+             \x20      <rdf:Seq>\n\
+             {components}\
+             \x20      </rdf:Seq>\n\
+             \x20     </crs:CorrectionMasks>\n\
+             \x20     </rdf:Description>\n\
+             \x20    </rdf:li>\n"
+        )
+    }
+
+    /// A radial component the way Lightroom writes one — `crs:Angle` and
+    /// `crs:MaskBlendMode` included, because it writes them on EVERY radial.
+    fn lr_radial(angle: &str, blend: &str) -> String {
+        format!(
+            "        <rdf:li\n\
+             \x20        crs:What=\"Mask/CircularGradient\"\n\
+             \x20        crs:MaskActive=\"true\"\n\
+             \x20        crs:MaskName=\"Radial Gradient 1\"\n\
+             \x20        crs:MaskBlendMode=\"{blend}\"\n\
+             \x20        crs:MaskInverted=\"false\"\n\
+             \x20        crs:MaskSyncID=\"0000000000000000000000000000000B\"\n\
+             \x20        crs:MaskValue=\"1\"\n\
+             \x20        crs:Top=\"0.114928\"\n\
+             \x20        crs:Left=\"0.590368\"\n\
+             \x20        crs:Bottom=\"0.802847\"\n\
+             \x20        crs:Right=\"0.921381\"\n\
+             \x20        crs:Angle=\"{angle}\"\n\
+             \x20        crs:Midpoint=\"50\"\n\
+             \x20        crs:Roundness=\"0\"\n\
+             \x20        crs:Feather=\"100\"\n\
+             \x20        crs:Flipped=\"true\"\n\
+             \x20        crs:Version=\"2\"/>\n"
+        )
+    }
+
+    /// A linear gradient component, same provenance.
+    fn lr_gradient(blend: &str) -> String {
+        format!(
+            "        <rdf:li\n\
+             \x20        crs:What=\"Mask/Gradient\"\n\
+             \x20        crs:MaskActive=\"true\"\n\
+             \x20        crs:MaskName=\"Linear Gradient 1\"\n\
+             \x20        crs:MaskBlendMode=\"{blend}\"\n\
+             \x20        crs:MaskInverted=\"false\"\n\
+             \x20        crs:MaskSyncID=\"0000000000000000000000000000000C\"\n\
+             \x20        crs:MaskValue=\"1\"\n\
+             \x20        crs:ZeroX=\"0.5\"\n\
+             \x20        crs:ZeroY=\"0.8\"\n\
+             \x20        crs:FullX=\"0.5\"\n\
+             \x20        crs:FullY=\"0.2\"/>\n"
+        )
+    }
+
+    /// The surrounding document: a Lightroom catalog export, NOT one of ours
+    /// (`x:xmptk` is Adobe's), which is the whole point — every gate this
+    /// batch reopened keyed on our own provenance.
+    fn lr_doc(corrections: &str) -> String {
+        format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">\n\
+             \x20<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             \x20 <rdf:Description rdf:about=\"\"\n\
+             \x20   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+             \x20   crs:Version=\"15.5.1\"\n\
+             \x20   crs:ProcessVersion=\"15.4\"\n\
+             \x20   crs:Exposure2012=\"+0.35\"\n\
+             \x20   crs:HasSettings=\"True\">\n\
+             \x20  <crs:MaskGroupBasedCorrections>\n\
+             \x20   <rdf:Seq>\n\
+             {corrections}\
+             \x20   </rdf:Seq>\n\
+             \x20  </crs:MaskGroupBasedCorrections>\n\
+             \x20 </rdf:Description>\n\
+             \x20</rdf:RDF>\n\
+             </x:xmpmeta>\n"
+        )
+    }
+
+    /// §0 OF THE ROUND. Lightroom writes `crs:Angle` on every radial — `"0"`
+    /// when the shape was never rotated — and the import refused the WHOLE
+    /// correction on its mere presence. Every radial mask in the user's
+    /// catalog therefore arrived as nothing, and the only thing said about it
+    /// was an integer count.
+    ///
+    /// MUTATION THIS CATCHES: put `crs_str(tag, "Angle").is_some()` back into
+    /// the refusal and this test goes to zero masks — which is exactly the
+    /// state the round opened in.
+    #[test]
+    fn a_lightroom_radial_with_angle_imports() {
+        let doc = lr_doc(&lr_correction("Radial 1", "", &lr_radial("37.412506", "0")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "a rotated Lightroom radial must import: {:?}", r.masks);
+        // The angle itself is NOT mapped (unverified sign/pivot) — the mask
+        // arrives as its axis-aligned ellipse, and the note says so.
+        let MaskGeometry::Radial { angle, top, feather, flipped, .. } = r.masks[0].mask else {
+            panic!("expected a radial, got {:?}", r.masks[0].mask);
+        };
+        assert_eq!(angle, 0.0, "crs:Angle is disclosed, not guessed at");
+        assert_eq!(top, 0.114928, "the geometry is the file's, verbatim");
+        assert_eq!(feather, 1.0, "crs:Feather=100 is Lightroom's 0..100 scale");
+        assert!(flipped, "crs:Flipped rides along");
+        assert_eq!(r.masks[0].exposure_ev, 0.4, "0.1 × 4 stops");
+        assert_eq!(unsupported_corrections(&doc), 0, "nothing was refused");
+        let losses = import_losses(&doc);
+        assert_eq!(
+            losses,
+            vec![MaskImportLoss {
+                name: "Radial 1".into(),
+                reason: MaskImportReason::Rotation
+            }],
+            "the rotation is named, and it is the ONLY loss"
+        );
+    }
+
+    /// The other half of §0: `crs:MaskBlendMode` is on every component
+    /// Lightroom writes, and the import refused it unless WE had written the
+    /// file. Its default value is the plain composition the engine already
+    /// does, so accepting it costs nothing — and a lossless import must
+    /// report NO loss, or the disclosure cries wolf on every photo.
+    #[test]
+    fn a_lightroom_gradient_with_blend_mode_zero_imports_losslessly() {
+        let doc = lr_doc(&lr_correction("Gradient 1", "", &lr_gradient("0")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "a plain Lightroom gradient must import: {:?}", r.masks);
+        assert!(import_losses(&doc).is_empty(), "a faithful import says nothing");
+        assert_eq!(unsupported_corrections(&doc), 0);
+        // …and a mode we cannot reproduce is a NOTE on an imported mask, not
+        // a refusal: the shape is still exactly what the file draws.
+        let subtract = lr_doc(&lr_correction("Gradient 1", "", &lr_gradient("1")));
+        let r2 = xmp_to_recipe(&subtract);
+        assert_eq!(r2.masks.len(), 1, "a Subtract component still has a shape");
+        assert_eq!(
+            import_losses(&subtract),
+            vec![MaskImportLoss {
+                name: "Gradient 1".into(),
+                reason: MaskImportReason::BlendMode
+            }]
+        );
+    }
+
+    /// A `crs:Local*` slider this engine has no model for used to cost the
+    /// user the whole mask. It is a knob, not a coverage change: the shape
+    /// and the fifteen sliders we DO model are still exactly the file's.
+    #[test]
+    fn a_nonzero_inert_local_no_longer_drops_the_whole_correction() {
+        let doc = lr_doc(
+            &lr_correction("Radial 1", "", &lr_radial("0", "0"))
+                .replace("crs:LocalDefringe=\"0\"", "crs:LocalDefringe=\"0.3\""),
+        );
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the mask imports: {:?}", r.masks);
+        assert_eq!(r.masks[0].contrast, 43.0, "the modelled sliders came through");
+        assert_eq!(
+            import_losses(&doc),
+            vec![MaskImportLoss {
+                name: "Radial 1".into(),
+                reason: MaskImportReason::InertLocal("LocalDefringe")
+            }],
+            "the slider that did not come through is named"
+        );
+        assert_eq!(unsupported_corrections(&doc), 0);
+    }
+
+    /// A `crs:Local*` attribute this build has never seen: same rule, and the
+    /// loss carries the CORRECTION's name so the sentence is actionable.
+    /// Also pins the two notes stacking on one correction.
+    #[test]
+    fn unknown_local_key_names_itself() {
+        let doc = lr_doc(&lr_correction(
+            "Sky",
+            "       crs:LocalWhatsit=\"0.5\"\n",
+            &lr_radial("0", "0"),
+        ))
+        .replace("crs:LocalCurveRefineSaturation=\"100\"", "crs:LocalCurveRefineSaturation=\"80\"");
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "an unknown knob is not a reason to lose the mask");
+        let losses = import_losses(&doc);
+        assert_eq!(losses.len(), 2, "both notes are raised: {losses:?}");
+        assert!(losses.iter().all(|l| l.name == "Sky"), "each names the correction: {losses:?}");
+        assert!(
+            losses.iter().any(|l| l.reason == MaskImportReason::UnknownLocalKey),
+            "{losses:?}"
+        );
+        assert!(
+            losses.iter().any(|l| l.reason == MaskImportReason::CurveRefineSaturation),
+            "{losses:?}"
+        );
+    }
+
+    /// R25 P1 round-end. `crs:LocalCorrectedDepth`, `crs:LocalInputDigest`
+    /// and `crs:LocalInputDigestVersion` are Lightroom's own BOOKKEEPING —
+    /// a numeric flag and a recompute ledger (32-hex digest + schema version)
+    /// — and they rode into `UnknownLocalKey`, whose label reads "unmodelled
+    /// slider". That sentence was wrong about the thing AND wrong about how
+    /// often: 12 notes across the reference library's 31 importable
+    /// corrections, on files whose sliders all came through intact.
+    ///
+    /// Knowing a key and not modelling it is the honest answer for all three.
+    /// The numeric one keeps the inert-key law all the same — silent at its
+    /// observed 0, NAMED at anything else — while the two string keys stay out
+    /// of `INERT_LOCAL`, because `optional_number_is` cannot parse a hex
+    /// digest and would raise a false note on every file that carries one.
+    #[test]
+    fn lightroom_bookkeeping_keys_are_known_not_unmodelled_sliders() {
+        // The shapes are Lightroom's, the digest is a neutral test value: a
+        // real digest is a hash OF the user's own file (fixture policy).
+        let ledger = "       crs:LocalCorrectedDepth=\"0\"\n\
+                      \x20      crs:LocalInputDigest=\"0000000000000000000000000000002A\"\n\
+                      \x20      crs:LocalInputDigestVersion=\"1\"\n";
+        let doc = lr_doc(&lr_correction("Sky", ledger, &lr_radial("0", "0")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "premise: the correction imports at all");
+        assert!(
+            import_losses(&doc).is_empty(),
+            "Lightroom's own bookkeeping is not a loss: {:?}",
+            import_losses(&doc)
+        );
+
+        // The inert-key law still holds for the numeric one. MUTATION THIS
+        // CATCHES: adding it to `KNOWN_LOCAL` and NOT to `INERT_LOCAL` makes
+        // a non-zero value silent, which is the opposite failure.
+        let moved = doc.replace("crs:LocalCorrectedDepth=\"0\"", "crs:LocalCorrectedDepth=\"0.5\"");
+        assert_eq!(
+            import_losses(&moved),
+            vec![MaskImportLoss {
+                name: "Sky".into(),
+                reason: MaskImportReason::InertLocal("LocalCorrectedDepth")
+            }],
+            "a bookkeeping flag off its observed value is named like any other inert key"
+        );
+        assert_eq!(xmp_to_recipe(&moved).masks.len(), 1, "and it still costs no mask");
+
+        // The two STRING keys can never be read as numbers — if either were
+        // in `INERT_LOCAL`, this document would raise a note for a value that
+        // is exactly what Lightroom writes.
+        assert!(
+            import_losses(&doc.replace(
+                "crs:LocalInputDigestVersion=\"1\"",
+                "crs:LocalInputDigestVersion=\"2\""
+            ))
+            .is_empty(),
+            "a digest ledger is not a slider at any value"
+        );
+    }
+
+    /// THE TRAP OF THIS BATCH (data-corruption class). Once a lossy sidecar
+    /// imports, `r.masks.is_empty()` stops meaning "the user has not touched
+    /// these" — and the merge used that emptiness to decide whether to keep
+    /// the base's own mask block. Left alone, an ordinary Ctrl+S would have
+    /// written our DEGRADED reading (rotation read as 0, blend mode ignored,
+    /// `crs:Midpoint` / `crs:Version` not even read) over the user's own
+    /// Lightroom block, silently.
+    ///
+    /// The whole round trip the app really takes is exercised, not just the
+    /// merge: import → serde_json → back (recipe.json is a file, and f32 that
+    /// does not survive the text round trip would make the equality fail on
+    /// the user's second launch, not in a unit test) → merge → the base's
+    /// mask block must come out byte-for-byte.
+    #[test]
+    fn preserve_masks_survives_a_lossy_import_the_user_did_not_touch() {
+        let doc = lr_doc(&format!(
+            "{}{}",
+            lr_correction("Radial 1", "", &lr_radial("37.412506", "0")),
+            lr_correction("Gradient 1", "", &lr_gradient("1")),
+        ));
+        let imported = xmp_to_recipe(&doc);
+        assert_eq!(imported.masks.len(), 2, "premise: the masks really did import");
+        assert_eq!(import_losses(&doc).len(), 2, "premise: the import really was lossy");
+
+        // recipe.json in the middle, exactly as the app stores it.
+        let json = serde_json::to_string(&imported).expect("serialise");
+        let reloaded: EditRecipe = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(
+            reloaded.masks, imported.masks,
+            "an f32 that does not survive recipe.json would silently arm the overwrite"
+        );
+
+        let start = doc.find("<crs:MaskGroupBasedCorrections>").expect("block");
+        let end = doc.find("</crs:MaskGroupBasedCorrections>").expect("block close")
+            + "</crs:MaskGroupBasedCorrections>".len();
+        let original = &doc[start..end];
+        let out = merge_recipe_into_xmp(&doc, &reloaded).expect("mergeable");
+        assert!(
+            out.doc.contains(original),
+            "the user's own mask block must survive an untouched save VERBATIM:\n{}",
+            out.doc
+        );
+        assert!(
+            out.doc.contains("crs:Angle=\"37.412506\"") && out.doc.contains("crs:Midpoint=\"50\""),
+            "the parts we cannot express are exactly the parts this rule protects"
+        );
+        assert!(
+            out.notes.is_empty(),
+            "nothing was replaced, so nothing to disclose: {:?}",
+            out.notes
+        );
+        // Our own projection is NOT prepended beside the base's block — one
+        // document, two mask groups was the other way to get this wrong.
+        assert_eq!(
+            out.doc.matches("<crs:MaskGroupBasedCorrections>").count(),
+            1,
+            "exactly one mask group in the output"
+        );
+    }
+
+    /// The other side of the same rule: the moment the user edits a mask, the
+    /// develop in hand IS the newest intent, so it publishes — and the base's
+    /// block going is a disclosed note, never a silence.
+    #[test]
+    fn an_edited_mask_overwrites_and_says_so() {
+        let doc = lr_doc(&lr_correction("Radial 1", "", &lr_radial("37.412506", "0")));
+        let mut r = xmp_to_recipe(&doc);
+        r.masks[0].exposure_ev = 1.25;
+        let out = merge_recipe_into_xmp(&doc, &r).expect("mergeable");
+        assert!(
+            !out.doc.contains("crs:Angle=\"37.412506\""),
+            "the develop's own projection replaced the block: {}",
+            out.doc
+        );
+        assert_eq!(out.notes.len(), 1, "the replacement is disclosed: {:?}", out.notes);
+        assert!(
+            out.notes[0].contains("1 thing(s)") && out.notes[0].contains("1 edited mask(s)"),
+            "the note names both counts: {}",
+            out.notes[0]
+        );
+        assert_eq!(
+            xmp_to_recipe(&out.doc).masks[0].exposure_ev,
+            1.25,
+            "and the edit is what the file now says"
+        );
+    }
+
+    /// R25 P1, the import twin of `mask_loss_reason_all_covers_every_variant`:
+    /// both disclosure surfaces ITERATE `MaskImportReason::ALL` (here and the
+    /// GUI's `xmp_import_line`), so the list is the one place a reason can be
+    /// forgotten — and the match below is where a new variant stops the build.
+    #[test]
+    fn import_loss_reasons_all_reach_the_prose() {
+        // Adding a variant makes THIS match non-exhaustive; the arm you write
+        // carries the next rank, and the asserts fail until `ALL` lists the
+        // newcomer in that position.
+        fn rank(r: MaskImportReason) -> usize {
+            match r {
+                MaskImportReason::Unrepresentable => 0,
+                MaskImportReason::OutOfModel => 1,
+                MaskImportReason::Rotation => 2,
+                MaskImportReason::BlendMode => 3,
+                MaskImportReason::MultiComponent => 4,
+                MaskImportReason::ForeignRangeMask => 5,
+                MaskImportReason::LocalCurve => 6,
+                MaskImportReason::CurveRefineSaturation => 7,
+                MaskImportReason::InertLocal(_) => 8,
+                MaskImportReason::UnknownLocalKey => 9,
+            }
+        }
+        for (i, r) in MaskImportReason::ALL.into_iter().enumerate() {
+            assert_eq!(rank(r), i, "ALL must list every reason once, in rank order");
+            assert!(!r.en().trim().is_empty(), "{r:?} has no label for the prose channel");
+            assert!(r.same_kind(r), "same_kind must be reflexive for {r:?}");
+        }
+        // The payload variant groups by KIND, not by value — the property the
+        // prose channels rely on to print one line for two sliders.
+        assert!(
+            MaskImportReason::InertLocal("LocalGrain")
+                .same_kind(MaskImportReason::InertLocal("LocalMoire")),
+            "two unmodelled sliders are one line"
+        );
+        assert!(
+            !MaskImportReason::Rotation.same_kind(MaskImportReason::BlendMode),
+            "different variants are different lines"
+        );
+        // Exactly the two drop verdicts, and they are the ones
+        // `unsupported_corrections` counts.
+        assert_eq!(
+            MaskImportReason::ALL.into_iter().filter(|r| r.is_drop()).count(),
+            2,
+            "a third drop reason needs `unsupported_corrections`' doc revisited"
+        );
+        let losses: Vec<MaskImportLoss> = MaskImportReason::ALL
+            .into_iter()
+            .map(|reason| MaskImportLoss { name: format!("m{}", rank(reason)), reason })
+            .collect();
+        let line = describe_import_losses(3, &losses).expect("ten losses ⇒ a line");
+        assert!(line.contains("imported 3 Lightroom mask(s)"), "{line}");
+        for r in MaskImportReason::ALL {
+            assert!(line.contains(r.en()), "{r:?} never reaches the prose: {line}");
+            assert!(
+                line.contains(&format!("m{}", rank(r))),
+                "{r:?} loses its correction name: {line}"
+            );
+        }
+    }
+
+    /// FORENSIC REGRESSION, run against the user's own Lightroom library.
+    /// The inline fixtures above are synthetic by policy, which means they
+    /// prove the RULES and not the FILES — and §0 of this round was a defect
+    /// nobody's synthetic fixture had caught in four releases.
+    ///
+    /// Point `AUTOSHOP_MB_FIXTURES` at a directory of `.xmp` / `.xmp.txt`
+    /// sidecars and this asserts, per file, that every `crs:What="Correction"`
+    /// is accounted for (imported + refused) and that the parametric ones
+    /// really do arrive — which is 0 on every one of them before this batch.
+    /// Unset, it is a silent no-op: the reference files are photographs, they
+    /// are not in this repository, and no path to them appears in this test.
+    #[test]
+    fn real_lightroom_sidecars_import_their_parametric_masks() {
+        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+        };
+        let mut files = 0usize;
+        let mut total_imported = 0usize;
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.to_string_lossy().to_lowercase().contains(".xmp") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            files += 1;
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            // The block's OWN corrections, counted the way the reader scopes
+            // them — retouch areas and creative Looks carry `Mask/*`
+            // components of their own and are not corrections.
+            let block = crs_own_scope(&text);
+            let corrections = owned_element_body(block.as_ref(), "crs:MaskGroupBasedCorrections")
+                .ok()
+                .flatten()
+                .map(|b| b.matches("crs:What=\"Correction\"").count())
+                .unwrap_or(0);
+            let t0 = std::time::Instant::now();
+            let imported = xmp_to_recipe(&text).masks.len();
+            let import_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let refused = unsupported_corrections(&text);
+            let losses = import_losses(&text);
+            eprintln!(
+                "{name}: {corrections} correction(s) → {imported} imported, {refused} refused, \
+                 {} loss note(s), parse {import_ms:.2} ms",
+                losses.len()
+            );
+            // The forensic half: WHICH verdict landed on which correction.
+            // This is the output the probe exists for — a count says the
+            // import worked, this says whether it was right.
+            for l in &losses {
+                eprintln!("    {:?}  {}", l.reason, l.name);
+            }
+            assert_eq!(
+                imported + refused,
+                corrections,
+                "{name}: every correction must be either imported or counted as refused"
+            );
+            assert!(
+                imported > 0,
+                "{name}: a real Lightroom sidecar with {corrections} correction(s) must import \
+                 at least one — importing none is the defect this batch closed"
+            );
+            total_imported += imported;
+        }
+        assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
+        eprintln!("{files} sidecar(s), {total_imported} mask(s) imported in total");
+    }
+
     /// R25 P0-0.1: the bands `unparsable_crs_numbers` judges a document by ARE
     /// the control registry's, not a second hand-written copy — so a new
     /// attribute row arrives with its check already wired, and the two
@@ -4643,10 +5517,10 @@ mod tests {
                     // R23-1b: two keys the writer used to emit as a literal
                     // "0". They ride the same ÷100 ↔ ×100 pair as their
                     // neighbours, and a sidecar carrying them must still import
-                    // as FULLY supported — `correction_values_are_supported`
-                    // demanded 0 for both until this round, so a non-zero one
-                    // would have downgraded the whole correction to Partial and
-                    // this equality would fail on every other field too.
+                    // as loss-free — `correction_value_reasons` demanded 0
+                    // for both until R23-1b, so a non-zero one would have
+                    // refused the whole correction and this equality would
+                    // fail on every other field too.
                     sharpness: -45.0,
                     saturation: 20.0,
                     hue: 35.0,
@@ -4764,8 +5638,17 @@ mod tests {
         assert_eq!(xmp_to_recipe(&merged).exposure_ev, 0.25);
     }
 
+    /// R25 P1 rewrote this test's premise. It used to read
+    /// `partial_and_unsupported_masks_are_not_rendered…` and pin the old
+    /// all-or-nothing rule: five corrections in, five losses, zero masks. Two
+    /// of those five carry nothing worse than a rotation angle and a DEFAULT
+    /// blend mode, which is what every Lightroom radial and every Lightroom
+    /// component look like — so the rule refused the user's whole catalog.
+    /// Now the readable ones import with a named note, the genuinely
+    /// unreadable ones still do not, and the base's block is still preserved
+    /// byte-for-byte while the develop has not touched it.
     #[test]
-    fn partial_and_unsupported_masks_are_not_rendered_and_their_group_is_preserved() {
+    fn readable_corrections_import_with_a_note_and_their_group_is_still_preserved() {
         let doc = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core">
      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
       <rdf:Description rdf:about=""
@@ -4806,8 +5689,37 @@ mod tests {
     </x:xmpmeta>"#;
 
         let parsed = xmp_to_recipe(doc);
-        assert!(parsed.masks.is_empty(), "partial masks must not render as approximations");
-        assert_eq!(unsupported_corrections(doc), 5);
+        assert_eq!(
+            parsed.masks.len(),
+            2,
+            "the rotated radial and the default-blend-mode gradient are readable: {:?}",
+            parsed.masks
+        );
+        assert_eq!(
+            unsupported_corrections(doc),
+            3,
+            "the brush pair and the muted correction are the only refusals"
+        );
+        let losses = import_losses(doc);
+        assert_eq!(losses.len(), 4, "three refusals plus the rotation note: {losses:?}");
+        assert_eq!(
+            losses.iter().filter(|l| l.reason == MaskImportReason::Rotation).count(),
+            1,
+            "crs:Angle=\"12\" is named, not silently discarded: {losses:?}"
+        );
+        assert!(
+            !losses.iter().any(|l| l.reason == MaskImportReason::BlendMode),
+            "the DEFAULT blend mode costs nothing and must raise nothing: {losses:?}"
+        );
+        // The rotated radial imports UNROTATED — the reading is honest about
+        // being approximate, which is the whole point of naming the loss.
+        assert!(
+            parsed
+                .masks
+                .iter()
+                .any(|m| matches!(m.mask, MaskGeometry::Radial { angle, .. } if angle == 0.0)),
+            "crs:Angle is not mapped onto the engine angle in this batch"
+        );
 
         let start = doc.find("<crs:MaskGroupBasedCorrections>").unwrap();
         let end = doc.find("</crs:MaskGroupBasedCorrections>").unwrap()
@@ -4874,7 +5786,7 @@ mod tests {
         assert!(!out.doc.contains("Mask/Brush"), "the foreign block is not resurrected");
         assert_eq!(out.notes.len(), 1, "the replacement is disclosed: {:?}", out.notes);
         assert!(
-            out.notes[0].contains("1 mask correction(s)") && out.notes[0].contains("1 mask(s)"),
+            out.notes[0].contains("1 thing(s)") && out.notes[0].contains("1 edited mask(s)"),
             "the note names both counts: {}",
             out.notes[0]
         );

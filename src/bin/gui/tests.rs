@@ -5068,6 +5068,172 @@
         }
     }
 
+    /// R25 P1, the IMPORT twin of the test above. The line it replaces
+    /// counted: 「N Lightroom mask(s) (brush/AI/depth) have no engine
+    /// equivalent」 — true of one import gate out of six, and silent about the
+    /// five that refused every ordinary radial and gradient in the user's
+    /// catalog. This pins that each reason reaches the sentence, in both
+    /// languages; that reasons sharing a label share a BULLET (three
+    /// unmodelled knobs are one phrase, not three); and that a faithful
+    /// import says NOTHING.
+    ///
+    /// Also the R24 「no internal symbols in UI prose」 pin: a reason's Rust
+    /// path must never leak into the line.
+    #[test]
+    fn the_import_banner_names_what_it_lost() {
+        use autoshop::xmp::{MaskImportLoss, MaskImportReason as R};
+        let loss = |name: &str, reason: R| MaskImportLoss { name: name.into(), reason };
+        let losses = vec![
+            loss("brushed", R::Unrepresentable),
+            loss("subtract only", R::OutOfModel),
+            loss("radial 1", R::Rotation),
+            loss("radial 1", R::UnknownLocalKey),
+            loss("gradient 2", R::BlendMode),
+            loss("gradient 2", R::InertLocal("LocalGrain")),
+            loss("combo", R::MultiComponent),
+            loss("ranged", R::ForeignRangeMask),
+            loss("curved", R::LocalCurve),
+            loss("refined", R::CurveRefineSaturation),
+        ];
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let line = xmp_import_line(lang, 7, &losses).expect("ten losses ⇒ a line");
+            // Every reason reaches the sentence, under its own label. The
+            // literals sit AT their `tr` call so the i18n audit can see them
+            // — translating a loop VARIABLE is a dynamic site it cannot read.
+            let ai_brush = tr(
+                lang,
+                "AI / brush masks cannot be imported — Lightroom recomputes them from a digest",
+            );
+            for label in [
+                ai_brush,
+                tr(lang, "Beyond this engine's model"),
+                tr(lang, "Rotation angle"),
+                tr(lang, "Blend mode"),
+                tr(lang, "Extra shapes"),
+                tr(lang, "Range mask (foreign)"),
+                tr(lang, "Local point curve"),
+                tr(lang, "Unmodelled slider"),
+            ] {
+                assert!(line.contains(label), "{lang:?}: {label:?} missing from {line}");
+            }
+            // Eight labels for ten losses: the three unmodelled-knob reasons
+            // share one bullet, and its names are MERGED, not overwritten.
+            assert!(
+                line.contains(&trf(
+                    lang,
+                    "Imported {n} Lightroom mask(s), {m} feature(s) not modelled",
+                    &[("n", "7"), ("m", "8")],
+                )),
+                "{lang:?}: the head counts both halves: {line}"
+            );
+            let knobs = line
+                .split(" · ")
+                .find(|p| p.starts_with(tr(lang, "Unmodelled slider")))
+                .unwrap_or_else(|| panic!("{lang:?}: no unmodelled-knob bullet in {line}"));
+            for who in ["radial 1", "gradient 2", "refined"] {
+                assert!(knobs.contains(who), "{lang:?}: {who} lost its bullet: {knobs}");
+            }
+            // R24's rule: a UI sentence never shows an internal symbol — the
+            // slider key rides in the reason, not on screen.
+            assert!(!line.contains("::"), "{lang:?}: internal symbol in UI prose: {line}");
+            assert!(!line.contains("InertLocal"), "{lang:?}: variant name on screen: {line}");
+            // A faithful import is silent, the same rule the save line follows.
+            assert!(
+                xmp_import_line(lang, 4, &[]).is_none(),
+                "{lang:?}: a clean import says nothing"
+            );
+            // A nameless correction still renders as a name.
+            let anon = xmp_import_line(lang, 1, &[loss("", R::Rotation)]).expect("a line");
+            assert!(anon.contains(tr(lang, "(unnamed)")), "{lang:?}: {anon}");
+            // …and the cap holds, like every other disclosure list.
+            let many: Vec<_> =
+                ["a", "b", "c", "d", "e"].iter().map(|n| loss(n, R::Rotation)).collect();
+            let capped = xmp_import_line(lang, 0, &many).expect("a line");
+            assert!(capped.contains("a, b, c, d"), "{lang:?}: four names shown: {capped}");
+            assert!(!capped.contains(", e)"), "{lang:?}: the fifth is folded away: {capped}");
+            assert!(
+                capped.contains(&trf(lang, "+{n} more", &[("n", "1")])),
+                "{lang:?}: and counted: {capped}"
+            );
+        }
+    }
+
+    /// R25 P1 end-to-end, through the panel the user actually looks at: a
+    /// Lightroom sidecar's masks reach the Local Masks list. Until this batch
+    /// that list was EMPTY for every Lightroom file on the machine — the
+    /// import refused each correction over a `crs:Angle` that Lightroom writes
+    /// on every radial (as "0" when unrotated) and a `crs:MaskBlendMode` it
+    /// writes on every component.
+    ///
+    /// The importer and the panel are wired together on purpose: the lib-side
+    /// test proves the parse, and this proves the parse REACHES the UI, which
+    /// is the half a reader of `xmp.rs` alone cannot see.
+    #[test]
+    fn a_photo_with_lightroom_masks_shows_them_in_the_list() {
+        // Synthetic, like every fixture in this batch: the attribute set and
+        // the nesting are Lightroom's, the names are neutral test values (no
+        // user XMP goes into a public repository).
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">\n\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             <rdf:Description rdf:about=\"\"\n\
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+             crs:HasSettings=\"True\">\n\
+             <crs:MaskGroupBasedCorrections><rdf:Seq>\n\
+             <rdf:li><rdf:Description crs:What=\"Correction\" crs:CorrectionActive=\"true\"\n\
+             crs:CorrectionName=\"Sky\" crs:CorrectionAmount=\"1\"\n\
+             crs:LocalExposure2012=\"-0.15\" crs:LocalCurveRefineSaturation=\"100\">\n\
+             <crs:CorrectionMasks><rdf:Seq>\n\
+             <rdf:li crs:What=\"Mask/CircularGradient\" crs:MaskActive=\"true\"\n\
+             crs:MaskName=\"Radial Gradient 1\" crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\"\n\
+             crs:MaskValue=\"1\" crs:Top=\"0.11\" crs:Left=\"0.59\" crs:Bottom=\"0.80\"\n\
+             crs:Right=\"0.92\" crs:Angle=\"37.412506\" crs:Midpoint=\"50\" crs:Roundness=\"0\"\n\
+             crs:Feather=\"100\" crs:Flipped=\"true\" crs:Version=\"2\"/>\n\
+             </rdf:Seq></crs:CorrectionMasks>\n\
+             </rdf:Description></rdf:li>\n\
+             <rdf:li><rdf:Description crs:What=\"Correction\" crs:CorrectionActive=\"true\"\n\
+             crs:CorrectionName=\"Foreground\" crs:CorrectionAmount=\"1\"\n\
+             crs:LocalExposure2012=\"0.1\" crs:LocalCurveRefineSaturation=\"100\">\n\
+             <crs:CorrectionMasks><rdf:Seq>\n\
+             <rdf:li crs:What=\"Mask/Gradient\" crs:MaskActive=\"true\"\n\
+             crs:MaskName=\"Linear Gradient 1\" crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\"\n\
+             crs:MaskValue=\"1\" crs:ZeroX=\"0.5\" crs:ZeroY=\"0.8\" crs:FullX=\"0.5\" crs:FullY=\"0.2\"/>\n\
+             </rdf:Seq></crs:CorrectionMasks>\n\
+             </rdf:Description></rdf:li>\n\
+             </rdf:Seq></crs:MaskGroupBasedCorrections>\n\
+             </rdf:Description></rdf:RDF></x:xmpmeta>";
+        let mut app =
+            AutoshopApp { recipe: autoshop::xmp::xmp_to_recipe(doc), ..Default::default() };
+        assert_eq!(
+            app.recipe.masks.len(),
+            2,
+            "premise: the importer brought the Lightroom masks in — without this the \
+             panel assertions below would pass on an empty list and prove nothing"
+        );
+        let seen = tall_frame(&mut app, |a, ui| {
+            a.develop_panel(ui);
+        });
+        // The ● rides on the header text, so this is a prefix match — the
+        // count is what is being pinned.
+        assert!(
+            seen.iter().any(|t| t.starts_with("Local Masks (2)")),
+            "the header must count both imported masks: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.starts_with("Sky · Radial")),
+            "the radial keeps its Lightroom name AND reads as a radial: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|t| t.starts_with("Foreground · Linear")),
+            "the gradient keeps its Lightroom name AND reads as a gradient: {seen:?}"
+        );
+        // …and they are LIVE, not parked: both carry a real exposure delta, so
+        // the section earns its ●.
+        assert!(
+            app.masks_section_active(),
+            "an imported Lightroom mask with a real slider must light the section"
+        );
+    }
+
     /// R24 round-end MED-2: the same sentence, said in two different VOICES.
     ///
     /// `base_curve` is stamped on every RAW open, so the global bucket is

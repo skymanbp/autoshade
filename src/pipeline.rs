@@ -2907,7 +2907,7 @@ mod guard_tests {
         assert!(!text.contains("Mask/Brush"), "the foreign block is not resurrected");
         assert!(text.contains("crs:Texture=\"+21\""), "LR-only globals still survive");
         let note = note.expect("the replaced block must be disclosed");
-        assert!(note.contains("mask correction(s)"), "the note names the loss: {note}");
+        assert!(note.contains("mask block carries"), "the note names the loss: {note}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }

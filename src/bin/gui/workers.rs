@@ -879,7 +879,8 @@ impl AutoshopApp {
                             let RestoredDevelop {
                                 saved,
                                 xmp_bad,
-                                dropped_masks,
+                                mask_import,
+                                imported_masks,
                                 carried_globals,
                                 clamp: clamp_dropped,
                                 lr_unreadable,
@@ -909,18 +910,18 @@ impl AutoshopApp {
                                 );
                                 self.toast(ToastKind::Error, t);
                             }
-                            // LR brush / AI / depth masks have no engine
-                            // equivalent — the import skips them BY DESIGN
-                            // (the writer skips symmetrically); what was
-                            // missing is telling the user their Lightroom
-                            // work arrived incomplete. The sidecar keeps
-                            // them; only the in-app render lacks them.
-                            if dropped_masks > 0 {
-                                let t = trf(
-                                    lang,
-                                    "{n} Lightroom mask(s) (brush/AI/depth) have no engine equivalent and were not imported — they stay in the sidecar untouched",
-                                    &[("n", &dropped_masks.to_string())],
-                                );
+                            // What the sidecar's masks cost on the way in.
+                            // R25 P1 replaced a COUNT of refusals with the
+                            // reader's own named verdicts: the old line said
+                            // "N have no engine equivalent" about corrections
+                            // that were mostly ordinary radials and
+                            // gradients, refused over a rotation angle and a
+                            // default blend mode. Now they import, and the
+                            // sentence names whatever really did not come
+                            // with them. The sidecar is untouched either way.
+                            if let Some(t) =
+                                crate::util::xmp_import_line(lang, imported_masks, &mask_import)
+                            {
                                 self.toast(ToastKind::Error, t);
                             }
                             // R24-5 M0, the GLOBAL half of the same story: the

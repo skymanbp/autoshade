@@ -39,18 +39,22 @@ pub(crate) struct RestoredDevelop {
     pub(crate) saved: SavedDevelop,
     /// Unreadable numeric XMP settings, phrased for the open-note channel.
     pub(crate) xmp_bad: Vec<String>,
-    /// LR mask corrections (brush/AI/depth) the import cannot represent —
-    /// its own channel, NOT `xmp_bad`: appended there it rendered as
+    /// What the sidecar's mask corrections cost on the way in, NAMED (R25
+    /// P1) — its own channel, NOT `xmp_bad`: appended there it rendered as
     /// "unreadable numeric setting(s)", a warning about something else.
-    /// 0 whenever the restore came from recipe.json (no LR-only masks).
-    pub(crate) dropped_masks: usize,
-    /// R24-5 M0, the GLOBAL counterpart of `dropped_masks`: `crs:` properties
+    /// Empty whenever the restore came from recipe.json (nothing was
+    /// imported from a sidecar) or the import was faithful.
+    pub(crate) mask_import: Vec<autoshop::xmp::MaskImportLoss>,
+    /// How many masks that same import DID bring in — the other half of the
+    /// sentence, and until R25 P1 it was always zero on a Lightroom file.
+    pub(crate) imported_masks: usize,
+    /// R24-5 M0, the GLOBAL counterpart of `mask_import`: `crs:` properties
     /// the sidecar carries on its own Description that this engine does not
     /// model (LR's global Texture, Grain, the Transform/Calibration blocks).
     /// The merge PRESERVES them — this is the sentence saying they are there,
     /// which no surface used to say, so a photo that renders differently in
     /// Lightroom had no explanation on screen. Its own channel, like
-    /// `dropped_masks`: appended to `xmp_bad` it would read as "unreadable",
+    /// `mask_import`: appended to `xmp_bad` it would read as "unreadable",
     /// which is the opposite of what happened.
     pub(crate) carried_globals: Vec<String>,
     /// What the restore-time clamps DISCARDED (W20: sanitisation must not
@@ -71,7 +75,8 @@ impl Default for RestoredDevelop {
         RestoredDevelop {
             saved: SavedDevelop::Nothing,
             xmp_bad: Vec::new(),
-            dropped_masks: 0,
+            mask_import: Vec::new(),
+            imported_masks: 0,
             carried_globals: Vec::new(),
             clamp: Default::default(),
             lr_unreadable: None,
@@ -143,11 +148,13 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         // exactly as before.
         if !r.is_noop() {
             clamp_dropped.absorb(r.clamp());
-            let dropped = autoshop::xmp::unsupported_corrections(&text);
+            let mask_import = autoshop::xmp::import_losses(&text);
+            let imported_masks = r.masks.len();
             return RestoredDevelop {
                 saved: SavedDevelop::Restored(r, kind),
                 xmp_bad,
-                dropped_masks: dropped,
+                mask_import,
+                imported_masks,
                 carried_globals: autoshop::xmp::unmodelled_global_crs(&text),
                 clamp: clamp_dropped,
                 lr_unreadable,
@@ -209,7 +216,8 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         };
     }
     let mut fallback = None;
-    let mut dropped_masks = 0usize;
+    let mut mask_import: Vec<autoshop::xmp::MaskImportLoss> = Vec::new();
+    let mut imported_masks = 0usize;
     let mut carried_globals: Vec<String> = Vec::new();
     for (xp, kind) in [
         (autoshop::pipeline::xmp_target(src), "XMP"),
@@ -238,7 +246,8 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         // it would only produce a misleading status line.
         if !r.is_noop() {
             clamp_dropped.absorb(r.clamp());
-            dropped_masks = autoshop::xmp::unsupported_corrections(&text);
+            mask_import = autoshop::xmp::import_losses(&text);
+            imported_masks = r.masks.len();
             carried_globals = autoshop::xmp::unmodelled_global_crs(&text);
             fallback = Some((r, kind));
         }
@@ -264,7 +273,8 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
                 }
                 if !r.is_noop() {
                     clamp_dropped.absorb(r.clamp());
-                    dropped_masks = autoshop::xmp::unsupported_corrections(&text);
+                    mask_import = autoshop::xmp::import_losses(&text);
+                    imported_masks = r.masks.len();
                     carried_globals = autoshop::xmp::unmodelled_global_crs(&text);
                     fallback = Some((r, "XMP (embedded in the RAW)"));
                 }
@@ -277,7 +287,8 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         return RestoredDevelop {
             saved: SavedDevelop::Unreadable { err, fallback },
             xmp_bad,
-            dropped_masks,
+            mask_import,
+            imported_masks,
             carried_globals: carried_globals.clone(),
             clamp: clamp_dropped,
             lr_unreadable,
@@ -288,7 +299,8 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         (Some((r, k)), _) => RestoredDevelop {
             saved: SavedDevelop::Restored(r, k),
             xmp_bad,
-            dropped_masks,
+            mask_import,
+            imported_masks,
             carried_globals: carried_globals.clone(),
             clamp: clamp_dropped,
             lr_unreadable,

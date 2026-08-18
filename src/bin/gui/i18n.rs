@@ -1256,8 +1256,28 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("mask refine failed", "蒙版精修失败"),
     ("Mask brush — paint to select · 「Erase」 removes · 「Apply」 bakes · Esc cancels",
         "蒙版笔刷——涂抹选取 · 「擦除」移除 · 「应用」固化 · Esc 取消"),
-    ("{n} Lightroom mask(s) (brush/AI/depth) have no engine equivalent and were not imported — they stay in the sidecar untouched",
-        "{n} 个 Lightroom 蒙版（笔刷/AI/景深）没有引擎等价物，未被导入——它们原样保留在边车文件中"),
+    // ── R25 P1: the import-side loss line (`util::xmp_import_line`) ──────────
+    // Replaces 「{n} Lightroom mask(s) (brush/AI/depth) have no engine
+    // equivalent…」, which counted refusals back when EVERY Lightroom mask was
+    // one. The masks import now; these name what did not come with them.
+    // Every glyph below was checked against the shipped CJK subset before it
+    // was written — 「旋」「混」「域」「附」「杆」 all resolve; the whole-chain gate
+    // (`embedded_fonts_cover_every_ui_symbol`) is what catches a tofu.
+    ("Imported {n} Lightroom mask(s), {m} feature(s) not modelled",
+        "已导入 {n} 个 Lightroom 蒙版，{m} 项未建模"),
+    ("Rotation angle", "旋转角度"),
+    ("Blend mode", "混合模式"),
+    ("Extra shapes", "附加形状"),
+    ("Range mask (foreign)", "值域蒙版（外部）"),
+    ("Local point curve", "局部点曲线"),
+    ("Unmodelled slider", "未建模的滑杆"),
+    ("AI / brush masks cannot be imported — Lightroom recomputes them from a digest",
+        "AI / 画笔蒙版无法导入 —— Lightroom 会自行重新计算"),
+    // NOT in the design's eight: the reader keeps TWO drop verdicts, and
+    // labelling 「values we can read but that are past the model」 as an
+    // AI/brush mask would be a sentence that lies. A subtract-only component
+    // (`crs:MaskValue="0"`) and an exposure past ±5 EV both land here.
+    ("Beyond this engine's model", "超出本引擎的模型"),
 
     // ── Round-10 batch: theme picker (Settings) ──────────────────────────────
     ("Theme", "主题"),

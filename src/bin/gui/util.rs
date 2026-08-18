@@ -401,6 +401,103 @@ pub(crate) fn xmp_loss_interrupts(
         })
 }
 
+/// The IMPORT-side twin of [`xmp_loss_line`] (R25 P1): one line saying how
+/// many Lightroom masks arrived and, NAMED, what did not come with them.
+///
+/// The line it replaces counted: "N Lightroom mask(s) (brush/AI/depth) have no
+/// engine equivalent and were not imported". That sentence was true of one
+/// import defect out of six and silent about the other five — and the five it
+/// was silent about refused every ordinary Lightroom mask, so the count it
+/// printed was usually the user's ENTIRE catalog with no way to tell why.
+///
+/// Every verdict comes from the READER (`xmp::MaskImportReason`), iterated in
+/// its own `ALL` order, so this can never describe a rule the import does not
+/// actually follow. Reasons that share a label share a bullet — three
+/// unmodelled sliders are one phrase, not three.
+///
+/// `None` when the import was faithful: a restore that lost nothing must not
+/// interrupt, exactly as on the export side.
+pub(crate) fn xmp_import_line(
+    lang: Lang,
+    imported: usize,
+    losses: &[autoshop::xmp::MaskImportLoss],
+) -> Option<String> {
+    use autoshop::xmp::MaskImportReason as R;
+    if losses.is_empty() {
+        return None;
+    }
+    // ONE label per bullet, in `ALL` order, names appended to whichever bullet
+    // already exists — `InertLocal`, `UnknownLocalKey` and
+    // `CurveRefineSaturation` are all "a knob we do not model" to a reader.
+    let mut parts: Vec<(&str, Vec<String>)> = Vec::new();
+    for reason in R::ALL {
+        let names: Vec<String> = losses
+            .iter()
+            .filter(|l| l.reason.same_kind(reason))
+            .map(|l| {
+                // A correction may legitimately have no name; an empty slot in
+                // a comma list reads as a rendering bug.
+                if l.name.trim().is_empty() {
+                    tr(lang, "(unnamed)").to_string()
+                } else {
+                    l.name.clone()
+                }
+            })
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        // The match stays exhaustive so each arm keeps a literal key the i18n
+        // audit can see at its own `tr` call site, and a new variant stops the
+        // build here too. Grouping is on the TRANSLATED label, which is a
+        // faithful key either way: two reasons sharing an English phrase share
+        // its Chinese one.
+        let label = match reason {
+            R::Unrepresentable => tr(
+                lang,
+                "AI / brush masks cannot be imported — Lightroom recomputes them from a digest",
+            ),
+            R::OutOfModel => tr(lang, "Beyond this engine's model"),
+            R::Rotation => tr(lang, "Rotation angle"),
+            R::BlendMode => tr(lang, "Blend mode"),
+            R::MultiComponent => tr(lang, "Extra shapes"),
+            R::ForeignRangeMask => tr(lang, "Range mask (foreign)"),
+            R::LocalCurve => tr(lang, "Local point curve"),
+            R::CurveRefineSaturation | R::InertLocal(_) | R::UnknownLocalKey => {
+                tr(lang, "Unmodelled slider")
+            }
+        };
+        match parts.iter_mut().find(|(l, _)| *l == label) {
+            Some((_, have)) => have.extend(names),
+            None => parts.push((label, names)),
+        }
+    }
+    let rendered: Vec<String> = parts
+        .into_iter()
+        .map(|(label, names)| {
+            // Capped like every other disclosure list: the count is the fact,
+            // the first few names are the pointer.
+            let shown = names.len().min(4);
+            let more = names.len() - shown;
+            let mut list = names[..shown].join(", ");
+            if more > 0 {
+                let more = more.to_string();
+                list.push_str(&format!(", {}", trf(lang, "+{n} more", &[("n", &more)])));
+            }
+            format!("{label} ({list})")
+        })
+        .collect();
+    Some(format!(
+        "{}: {}",
+        trf(
+            lang,
+            "Imported {n} Lightroom mask(s), {m} feature(s) not modelled",
+            &[("n", &imported.to_string()), ("m", &rendered.len().to_string())],
+        ),
+        rendered.join(" · ")
+    ))
+}
+
 /// The recipe field behind a curve-editor channel index.
 pub(crate) fn curve_points(recipe: &EditRecipe, ch: usize) -> &Vec<CurvePoint> {
     match ch {
