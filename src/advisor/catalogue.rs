@@ -1094,7 +1094,7 @@ pub const RECIPE_CONTROLS: [Control; 62] = [
 /// rather than one band), which is exactly why the drift had two independent
 /// surfaces. `texture` used to be the clearest example and is no longer one:
 /// R25 B2 gave it a global row too, sharing this one's operator and radius.
-pub const LOCAL_CONTROLS: [Control; 24] = [
+pub const LOCAL_CONTROLS: [Control; 28] = [
     // KNOWN GRANULARITY LIMIT (stated, not abstracted away). `Tier` hangs on
     // a Control ROW, and the whole geometry is one row — so the row says
     // `Rendered` while three of `MaskGeometry::Radial`'s fields are not:
@@ -1361,6 +1361,61 @@ pub const LOCAL_CONTROLS: [Control; 24] = [
         crs: CrsKey::Family("LocalLuminanceNoise"),
         tier: Some(Tier::Rendered),
         purpose: "local luminance noise reduction — for a \"this region is noisy\" request",
+    },
+    // The four LOCAL point curves (R25 P6). Lightroom spells them
+    // `crs:MainCurve` / `RedCurve` / `GreenCurve` / `BlueCurve` — BARE names,
+    // no `PV2012` suffix, unlike the global four this table already carries —
+    // as child elements of the Correction, and writes them SPARSELY (a real
+    // sidecar carries Red and Green with neither Main nor Blue). Hence four
+    // independent rows with the same `Shape::Curve` the globals use, and not
+    // one composite row: the row set is the field set.
+    //
+    // `Tier::Rendered` on all four: `render::apply_masks` feeds `main_curve`
+    // through the very `build_tone_lut` the global master curve goes through
+    // and the other three through `curve_lut` in the same fused pixel loop,
+    // and `xmp::masks_xml` emits each non-empty one inside the correction.
+    Control {
+        name: "main_curve",
+        shape: Shape::Curve,
+        range: None,
+        neutral: "empty = identity",
+        engine_only: false,
+        crs: CrsKey::Family("MainCurve"),
+        tier: Some(Tier::Rendered),
+        purpose: "this mask's own master tone curve as {input,output} points, both 0..255 — the \
+                  free-form shape the local Contrast/Highlights sliders cannot draw; leave it \
+                  empty unless the region needs a tonal move no slider expresses",
+    },
+    Control {
+        name: "red_curve",
+        shape: Shape::Curve,
+        range: None,
+        neutral: "empty = identity",
+        engine_only: false,
+        crs: CrsKey::Family("RedCurve"),
+        tier: Some(Tier::Rendered),
+        purpose: "this mask's RED channel curve (same point form as main_curve), for a colour \
+                  cast confined to one region and one tonal band",
+    },
+    Control {
+        name: "green_curve",
+        shape: Shape::Curve,
+        range: None,
+        neutral: "empty = identity",
+        engine_only: false,
+        crs: CrsKey::Family("GreenCurve"),
+        tier: Some(Tier::Rendered),
+        purpose: "this mask's GREEN channel curve",
+    },
+    Control {
+        name: "blue_curve",
+        shape: Shape::Curve,
+        range: None,
+        neutral: "empty = identity",
+        engine_only: false,
+        crs: CrsKey::Family("BlueCurve"),
+        tier: Some(Tier::Rendered),
+        purpose: "this mask's BLUE channel curve",
     },
     Control {
         name: "color_gains",
@@ -2102,6 +2157,7 @@ pub enum LocalValue<'a> {
     OptGains(Option<[f32; 3]>),
     Bool(bool),
     Text(&'a str),
+    Curve(&'a [CurvePoint]),
     Geometry(&'a crate::recipe::MaskGeometry),
     Components(&'a [crate::recipe::MaskComponent]),
     Range(Option<&'a crate::recipe::RangeMask>),
@@ -2144,6 +2200,10 @@ pub fn local_value<'a>(m: &'a LocalAdjustment, name: &str) -> Option<LocalValue<
         temperature,
         tint,
         noise_reduction,
+        main_curve,
+        red_curve,
+        green_curve,
+        blue_curve,
         color_gains,
         role,
     } = m;
@@ -2170,6 +2230,10 @@ pub fn local_value<'a>(m: &'a LocalAdjustment, name: &str) -> Option<LocalValue<
         "temperature" => LocalValue::Num(*temperature),
         "tint" => LocalValue::Num(*tint),
         "noise_reduction" => LocalValue::Num(*noise_reduction),
+        "main_curve" => LocalValue::Curve(main_curve),
+        "red_curve" => LocalValue::Curve(red_curve),
+        "green_curve" => LocalValue::Curve(green_curve),
+        "blue_curve" => LocalValue::Curve(blue_curve),
         "color_gains" => LocalValue::OptGains(*color_gains),
         "role" => LocalValue::Role(*role),
         _ => return None,
@@ -2544,6 +2608,17 @@ mod tests {
     ///     cannot see is left to its own test (`inverted`:
     ///     `render::tests::mask_coverage_reports_the_engine_weight`, which
     ///     asserts the coverage map flips end for end).
+    ///   * `Shape::Curve` (the four local point curves, R25 P6) — NOT probed
+    ///     here: a curve is an ARRAY of points, so neither `1.0` nor `0.0` is
+    ///     a value the one-hot/zeroing probe could write into the field, and
+    ///     the loop's `_ => continue` skips it exactly as it skips the
+    ///     carriers below. Their render half is backed by their own test —
+    ///     `render::tests::a_local_point_curve_darkens_only_inside_the_mask`,
+    ///     which renders a mask whose ONLY move is a curve and asserts the
+    ///     covered pixels move while the uncovered ones stay bit-identical
+    ///     (the one-hot direction), plus
+    ///     `render::tests::engine_active_counts_local_point_curves`, which
+    ///     pins the gate term itself in both directions.
     ///   * `Shape::EngineCarrier` (`components`, `color_gains`) — NOT probed
     ///     here: neither is a JSON scalar the one-hot/zeroing probe can write,
     ///     and `components` needs a raster on disk to compose. Their render

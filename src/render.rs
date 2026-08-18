@@ -1597,9 +1597,37 @@ fn apply_masks(
             shadows: m.shadows,
             whites: m.whites,
             blacks: m.blacks,
+            // The mask's own master point curve (R25 P6, `crs:MainCurve`)
+            // rides in as this synthetic recipe's `tone_curve`: `build_tone_lut`
+            // already composes that curve on top of the slider knots, so the
+            // local curve costs no new pass, no new LUT and no new curve model
+            // — it is the SAME builder the global master curve goes through.
+            tone_curve: m.main_curve.clone(),
             ..EditRecipe::default()
         };
         let lut = build_tone_lut(&local);
+        // The three per-channel local curves (`crs:{Red,Green,Blue}Curve`),
+        // compiled ONCE per mask like `colour_luts` below and applied inside
+        // the fused pixel loop right after the master curve — the global
+        // chain's own order (`apply_develop` stage 1 then 1b). `None` when all
+        // three are empty, so a curve-free mask pays nothing.
+        let rgb_curve_luts = (!m.red_curve.is_empty()
+            || !m.green_curve.is_empty()
+            || !m.blue_curve.is_empty())
+        .then(|| {
+            (
+                [
+                    curve_lut(&m.red_curve),
+                    curve_lut(&m.green_curve),
+                    curve_lut(&m.blue_curve),
+                ],
+                [
+                    !m.red_curve.is_empty(),
+                    !m.green_curve.is_empty(),
+                    !m.blue_curve.is_empty(),
+                ],
+            )
+        });
         let sat = m.saturation / 100.0;
         // Local colour transform, computed ONCE per mask (never inside the
         // pixel loop): compose Temp/Tint WB with the zoned recolour gains,
@@ -1695,7 +1723,12 @@ fn apply_masks(
             && m.blacks == 0.0
             && m.saturation == 0.0
             && m.hue == 0.0
-            && colour_luts.is_none();
+            && colour_luts.is_none()
+            // A mask whose ONLY move is a point curve reaches the pass through
+            // these two terms — the same trap a clarity-only mask fell into
+            // before R22 (it fell through every gate and rendered nothing).
+            && m.main_curve.is_empty()
+            && rgb_curve_luts.is_none();
         // ±100 → ±30°, the same scale `apply_hsl` gives the mixer's hue axis —
         // one meaning for "hue 40" wherever the user sets it. No chroma gate
         // here (the mixer needs one because its per-BAND weights are
@@ -1736,6 +1769,17 @@ fn apply_masks(
                 let l_old = luma601(&t);
                 let l_new = sample_lut(&lut, l_old);
                 scale_chroma(&mut t, l_old, l_new);
+                // Per-channel curves right after the master one, before
+                // saturation — `apply_develop`'s stage 1 → 1b → 3 order, so a
+                // full-coverage mask carrying a curve lands where the same
+                // curve set globally would.
+                if let Some((luts, active)) = &rgb_curve_luts {
+                    for ch in 0..3 {
+                        if active[ch] {
+                            t[ch] = sample_lut(&luts[ch], t[ch]);
+                        }
+                    }
+                }
                 let mut t = apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0);
                 // Local hue rotation, LAST in the fused transform: it turns the
                 // colour this mask's WB/tone/saturation stages produced, which
@@ -2119,6 +2163,14 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
         || m.temperature != 0.0
         || m.tint != 0.0
         || m.noise_reduction != 0.0
+        // The four local point curves (R25 P6). Empty = identity, exactly as
+        // `apply_develop`'s own `tone_neutral` reads the global curves — a
+        // non-empty curve is an edit even if its points happen to trace the
+        // diagonal, which is the same latitude the global stage takes.
+        || !m.main_curve.is_empty()
+        || !m.red_curve.is_empty()
+        || !m.green_curve.is_empty()
+        || !m.blue_curve.is_empty()
         || m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0])
 }
 
@@ -3922,6 +3974,14 @@ fn orientation_mirrors(o: Orientation) -> bool {
 /// same status a tone-curve point has — so turning the frame leaves it
 /// meaning exactly what it meant. Said out loud because the next reader will
 /// scan this function for "every geometry field" and find one it skips.
+///
+/// **Not migrated, and correctly so: the four local point curves** (R25 P6,
+/// `LocalAdjustment::main_curve` …). Their points are `{input, output}` pairs
+/// on the 0..255 TONE axis, not positions in the frame: rotating a photo
+/// changes which pixels a mask covers, never what value 128 maps to. Stated
+/// here for the same reason as `midpoint` — they are fields on a mask, and a
+/// reader auditing "did the migration cover every mask field?" must find the
+/// answer rather than a silence.
 pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
     if matches!(o, Orientation::Normal | Orientation::Unknown) {
         return false;
@@ -3972,6 +4032,12 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
 /// Does this recipe hold any geometry the `coord_era` migration would move?
 /// Used for the disclosure: a recipe with nothing but global sliders is
 /// re-stamped in silence, because nothing about it changed.
+///
+/// A mask counts for its GEOMETRY only. Its point curves (R25 P6) are
+/// frame-independent tone values and do not qualify — a mask carrying nothing
+/// but a curve still counts here through its geometry, so the distinction is
+/// invisible in the answer and easy to misread as an omission. It is not one;
+/// see [`orient_recipe_coords`].
 pub fn recipe_has_frame_coords(r: &EditRecipe) -> bool {
     r.crop.is_some()
         || r.masks.iter().any(|m| {
@@ -8454,6 +8520,120 @@ mod tests {
             ("sharpness", LocalAdjustment { sharpness: -60.0, ..Default::default() }),
         ] {
             assert!(engine_active(&m), "local {name} alone must count as active");
+        }
+    }
+
+    /// R25 P6. The registry's one-hot/zeroing probe
+    /// (`catalogue::local_tiers_agree_with_the_engines_own_activity_gate`)
+    /// cannot reach a `Shape::Curve` row — neither `1.0` nor `0.0` is a curve
+    /// — so it skips all four and their `Rendered` claim would be a free
+    /// declaration. This is the compensating test that probe's doc names, and
+    /// it probes BOTH directions the same way the scalar arm does.
+    #[test]
+    fn engine_active_counts_local_point_curves() {
+        use crate::recipe::CurvePoint;
+        let lift = || vec![CurvePoint { input: 64, output: 96 }];
+        assert!(!engine_active(&LocalAdjustment::default()), "premise: a bare mask is inert");
+        for (name, m) in [
+            ("main_curve", LocalAdjustment { main_curve: lift(), ..Default::default() }),
+            ("red_curve", LocalAdjustment { red_curve: lift(), ..Default::default() }),
+            ("green_curve", LocalAdjustment { green_curve: lift(), ..Default::default() }),
+            ("blue_curve", LocalAdjustment { blue_curve: lift(), ..Default::default() }),
+        ] {
+            // ONE-HOT: neutral everywhere but this curve ⇒ the mask wakes up.
+            assert!(engine_active(&m), "local {name} alone must count as active");
+            // ZEROING: an already-active mask with this curve emptied still
+            // renders (the other term holds it up) — so the term is additive,
+            // not a gate that swallows the rest.
+            let with_slider = LocalAdjustment { exposure_ev: 1.0, ..m.clone() };
+            assert!(engine_active(&with_slider), "premise: the two-term mask is active");
+            let mut without = with_slider;
+            without.main_curve.clear();
+            without.red_curve.clear();
+            without.green_curve.clear();
+            without.blue_curve.clear();
+            assert!(engine_active(&without), "clearing {name} must not mute the exposure move");
+        }
+    }
+
+    /// R25 P6, the render half: a mask whose ONLY move is a point curve must
+    /// move the pixels it covers and leave every other pixel BIT-IDENTICAL.
+    ///
+    /// Both halves matter. Before this batch a curve-only mask fell through
+    /// `tone_identity` exactly as a clarity-only mask fell through every gate
+    /// before R22 — it rendered nothing while the sidecar carried it — and the
+    /// bit-identical half is what proves the local curve is weighted by the
+    /// mask instead of being applied to the frame.
+    #[test]
+    fn a_local_point_curve_darkens_only_inside_the_mask() {
+        use crate::recipe::CurvePoint;
+        let (w, h) = (16usize, 4usize);
+        let base: Vec<[f32; 3]> = (0..w * h).map(|_| [0.60, 0.50, 0.40]).collect();
+        // Full effect at x=0, zero from x=w/2 on (the ramp's own convention).
+        let left_half = MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.0, full_y: 0.0 };
+        let run = |m: LocalAdjustment| -> Vec<[f32; 3]> {
+            let mut out = base.clone();
+            apply_masks(
+                &mut out,
+                w,
+                h,
+                &EditRecipe { masks: vec![m], ..Default::default() },
+                &MaskRasterSnapshot::default(),
+            );
+            out
+        };
+        // A pull-down master curve: midtones map lower, ends pinned.
+        let darken = vec![
+            CurvePoint { input: 0, output: 0 },
+            CurvePoint { input: 128, output: 64 },
+            CurvePoint { input: 255, output: 255 },
+        ];
+        let out = run(LocalAdjustment {
+            mask: left_half.clone(),
+            amount: 1.0,
+            main_curve: darken,
+            ..Default::default()
+        });
+        assert!(
+            out[0][0] < base[0][0] - 0.05,
+            "the fully covered pixel must darken: {:?} → {:?}",
+            base[0],
+            out[0]
+        );
+        for x in w / 2..w {
+            assert_eq!(out[x], base[x], "uncovered column {x} moved on a curve-only mask");
+        }
+
+        // The per-channel arm: a RED lift touches red and nothing else, so the
+        // three channel curves are wired to three different fields (a copied
+        // index would show up here as green or blue moving too).
+        let out = run(LocalAdjustment {
+            mask: left_half,
+            amount: 1.0,
+            red_curve: vec![
+                CurvePoint { input: 0, output: 0 },
+                CurvePoint { input: 128, output: 192 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            ..Default::default()
+        });
+        assert!(out[0][0] > base[0][0] + 0.05, "red must lift: {:?} → {:?}", base[0], out[0]);
+        // Green and blue keep their value to within LUT-sampling rounding.
+        // Not `==`: the fused pass runs the identity master curve through
+        // `sample_lut` + `scale_chroma` for every covered pixel, which is a
+        // ~1e-7 round trip on ANY active mask (it predates this batch). The
+        // claim being made is "the red curve touched one channel", and 1e-5 is
+        // four orders below the 0.05 swing above.
+        for (ch, name) in [(1usize, "green"), (2, "blue")] {
+            assert!(
+                (out[0][ch] - base[0][ch]).abs() < 1e-5,
+                "a red curve must leave {name} untouched: {:?} → {:?}",
+                base[0],
+                out[0]
+            );
+        }
+        for x in w / 2..w {
+            assert_eq!(out[x], base[x], "uncovered column {x} moved on a red-curve-only mask");
         }
     }
 

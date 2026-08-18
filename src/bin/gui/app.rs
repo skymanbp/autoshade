@@ -313,7 +313,10 @@ pub(crate) struct AutoshopApp {
     pub(crate) place_start: Option<(f32, f32)>,       // placement drag origin, full-frame normalized
     // --- tone-curve editor ---
     pub(crate) curve_channel: usize,                  // CURVE_CHANNELS index: 0=master 1=R 2=G 3=B
-    pub(crate) curve_drag: Option<usize>,             // control point being dragged (active channel)
+    // The control point being dragged, WITH the curve set it belongs to
+    // (R25 P6: the global curves and a selected mask's can both be on screen
+    // in one frame — see `CurveTarget`). Active channel is `curve_channel`.
+    pub(crate) curve_drag: Option<(CurveTarget, usize)>,
     #[cfg(test)]
     pub(crate) curve_rect: Option<egui::Rect>,        // test seam: the editor square's last rect
     #[cfg(test)]

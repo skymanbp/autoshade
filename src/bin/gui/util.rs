@@ -582,7 +582,10 @@ pub(crate) fn xmp_import_line(
             R::BlendMode => tr(lang, "Blend mode").into(),
             R::MultiComponent => tr(lang, "Extra shapes").into(),
             R::ForeignRangeMask => tr(lang, "Range mask (foreign)").into(),
-            R::LocalCurve => tr(lang, "Local point curve").into(),
+            // R25 P6 narrowed this verdict from "we do not model local point
+            // curves" to "this one could not be READ" — the label moved with
+            // it, because the old phrase now describes a feature that works.
+            R::LocalCurve => tr(lang, "Local point curve (unreadable)").into(),
             R::CurveRefineSaturation | R::InertLocal(_) | R::UnknownLocalKey => {
                 tr(lang, "Unmodelled slider").into()
             }
@@ -618,23 +621,60 @@ pub(crate) fn xmp_import_line(
     ))
 }
 
-/// The recipe field behind a curve-editor channel index.
-pub(crate) fn curve_points(recipe: &EditRecipe, ch: usize) -> &Vec<CurvePoint> {
-    match ch {
-        0 => &recipe.tone_curve,
-        1 => &recipe.red_curve,
-        2 => &recipe.green_curve,
-        _ => &recipe.blue_curve,
-    }
+/// The recipe field behind a curve-editor target + channel index.
+///
+/// `None` for a `Mask(i)` whose index no longer addresses a mask — deleting
+/// the selected mask while its editor is laid out is one frame away, and
+/// falling back to the GLOBAL curve would silently point the editor (and its
+/// next click) at the wrong four vectors. The editor answers `None` by drawing
+/// nothing, which is what an absent mask should look like.
+pub(crate) fn curve_points(
+    recipe: &EditRecipe,
+    target: CurveTarget,
+    ch: usize,
+) -> Option<&Vec<CurvePoint>> {
+    let four = match target {
+        CurveTarget::Global => {
+            [&recipe.tone_curve, &recipe.red_curve, &recipe.green_curve, &recipe.blue_curve]
+        }
+        CurveTarget::Mask(i) => {
+            let m = recipe.masks.get(i)?;
+            [&m.main_curve, &m.red_curve, &m.green_curve, &m.blue_curve]
+        }
+    };
+    let [main, red, green, blue] = four;
+    Some(match ch {
+        0 => main,
+        1 => red,
+        2 => green,
+        _ => blue,
+    })
 }
 
-pub(crate) fn curve_points_mut(recipe: &mut EditRecipe, ch: usize) -> &mut Vec<CurvePoint> {
-    match ch {
-        0 => &mut recipe.tone_curve,
-        1 => &mut recipe.red_curve,
-        2 => &mut recipe.green_curve,
-        _ => &mut recipe.blue_curve,
-    }
+pub(crate) fn curve_points_mut(
+    recipe: &mut EditRecipe,
+    target: CurveTarget,
+    ch: usize,
+) -> Option<&mut Vec<CurvePoint>> {
+    let four = match target {
+        CurveTarget::Global => [
+            &mut recipe.tone_curve,
+            &mut recipe.red_curve,
+            &mut recipe.green_curve,
+            &mut recipe.blue_curve,
+        ],
+        CurveTarget::Mask(i) => {
+            let m = recipe.masks.get_mut(i)?;
+            [&mut m.main_curve, &mut m.red_curve, &mut m.green_curve, &mut m.blue_curve]
+        }
+    };
+    let [main, red, green, blue] = four;
+    Some(match ch {
+        0 => main,
+        1 => red,
+        2 => green,
+        _ => blue,
+    })
 }
 
 /// Insert a curve control point keeping inputs sorted and UNIQUE — a second

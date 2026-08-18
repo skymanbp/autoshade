@@ -1956,7 +1956,7 @@
         assert!((id[128] - 128.0 / 255.0).abs() < 1e-3);
 
         let mut r = EditRecipe::default();
-        let pts = curve_points_mut(&mut r, 0);
+        let pts = curve_points_mut(&mut r, CurveTarget::Global, 0).expect("global");
         insert_curve_point(pts, 0, 0);
         insert_curve_point(pts, 255, 255);
         insert_curve_point(pts, 64, 96); // classic shadow lift between pinned ends
@@ -1965,7 +1965,10 @@
         assert!((lut[64] - 96.0 / 255.0).abs() < 1e-3, "anchored point maps exactly");
         // The channel selector reaches the right recipe field (master only here).
         for ch in 0..4 {
-            assert_eq!(curve_points(&r, ch).len(), if ch == 0 { 3 } else { 0 });
+            assert_eq!(
+                curve_points(&r, CurveTarget::Global, ch).expect("global").len(),
+                if ch == 0 { 3 } else { 0 }
+            );
         }
     }
 
@@ -2010,14 +2013,17 @@
         let changed_release = run_pass(&mut app, vec![button(false)]);
         assert!(changed_press || changed_release, "the editor must report the edit");
         assert_eq!(
-            curve_points(&app.recipe, 2).len(),
+            curve_points(&app.recipe, CurveTarget::Global, 2).expect("global").len(),
             1,
             "the click adds one point to the SELECTED channel"
         );
         for ch in [0usize, 1, 3] {
-            assert!(curve_points(&app.recipe, ch).is_empty(), "no cross-channel write (ch {ch})");
+            assert!(
+                curve_points(&app.recipe, CurveTarget::Global, ch).expect("global").is_empty(),
+                "no cross-channel write (ch {ch})"
+            );
         }
-        let p = &curve_points(&app.recipe, 2)[0];
+        let p = &curve_points(&app.recipe, CurveTarget::Global, 2).expect("global")[0];
         assert!(
             (p.input as f32 - 255.0 * 0.25).abs() <= 2.0,
             "the point lands at the clicked input: {}",
@@ -5121,7 +5127,10 @@
                 tr(lang, "Blend mode"),
                 tr(lang, "Extra shapes"),
                 tr(lang, "Range mask (foreign)"),
-                tr(lang, "Local point curve"),
+                // R25 P6: the four local point curves are modelled now, so
+                // this verdict only fires on a curve that would not PARSE —
+                // and its label says so instead of reading like a gap.
+                tr(lang, "Local point curve (unreadable)"),
                 tr(lang, "Unmodelled slider"),
             ] {
                 assert!(line.contains(label), "{lang:?}: {label:?} missing from {line}");
@@ -5661,6 +5670,103 @@
                 "{lang:?}: no selection ⇒ no per-mask detail"
             );
         }
+    }
+
+    /// R25 P6: the selected mask gets the SAME curve editor the global Curves
+    /// section has, pointed at its own four curves — a fourth group under
+    /// Lightroom's Tone / Detail / Color.
+    ///
+    /// Two halves, because either alone passes vacuously. The panel half
+    /// proves the group is laid out only for a selected mask; the driven half
+    /// proves the editor writes to `masks[0].main_curve` and NOT to
+    /// `recipe.tone_curve` — a target parameter that is ignored (or a copied
+    /// `curve_points` arm) looks identical on screen and edits the wrong photo
+    /// state, which is exactly the class of bug U10 caught the first time.
+    #[test]
+    fn the_selected_mask_offers_a_curve_editor() {
+        for (lang, caption) in
+            [(crate::i18n::Lang::En, "Curve"), (crate::i18n::Lang::Zh, "曲线")]
+        {
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            app.recipe.masks =
+                vec![autoshop::recipe::LocalAdjustment { name: "sky".into(), ..Default::default() }];
+            // ① selected → the fourth group caption is drawn.
+            app.sel_mask = Some(0);
+            let seen = tall_frame(&mut app, |a, ui| {
+                a.develop_panel(ui);
+            });
+            assert!(
+                seen.iter().any(|t| t == caption),
+                "{lang:?}: no {caption:?} group over the selected mask's curve editor: {seen:?}"
+            );
+            // ② nothing selected → no per-mask curve group. (The global
+            //    「Curves」 section is a different caption on purpose, so this
+            //    negative cannot be satisfied by it.)
+            app.sel_mask = None;
+            let seen = tall_frame(&mut app, |a, ui| {
+                a.develop_panel(ui);
+            });
+            assert!(
+                !seen.iter().any(|t| t == caption),
+                "{lang:?}: a {caption:?} group with no mask selected: {seen:?}"
+            );
+        }
+
+        // ③ the driven half: a click in the MASK editor lands in the mask.
+        let mut app = AutoshopApp::default();
+        app.recipe.masks =
+            vec![autoshop::recipe::LocalAdjustment { name: "sky".into(), ..Default::default() }];
+        let ctx = egui::Context::default();
+        let run_pass = |app: &mut AutoshopApp, events: Vec<egui::Event>| -> bool {
+            let mut changed = false;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    changed |= app.curve_editor_for(ui, CurveTarget::Mask(0));
+                });
+            });
+            changed
+        };
+        let _ = run_pass(&mut app, vec![]);
+        let rect = app.curve_rect.expect("the mask editor records its square (test seam)");
+        let q = egui::pos2(rect.min.x + rect.width() * 0.25, rect.min.y + rect.height() * 0.5);
+        let button = |pressed: bool| egui::Event::PointerButton {
+            pos: q,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let pressed = run_pass(&mut app, vec![egui::Event::PointerMoved(q), button(true)]);
+        let released = run_pass(&mut app, vec![button(false)]);
+        assert!(pressed || released, "the mask editor must report the edit");
+        assert_eq!(
+            app.recipe.masks[0].main_curve.len(),
+            1,
+            "the click adds one point to the MASK's master curve"
+        );
+        assert!(
+            app.recipe.tone_curve.is_empty(),
+            "the mask editor wrote into the GLOBAL tone curve: {:?}",
+            app.recipe.tone_curve
+        );
+        // ④ a target that no longer addresses a mask draws nothing rather
+        //    than falling through to the global curves.
+        app.recipe.masks.clear();
+        let mut drew = true;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                drew = app.curve_editor_for(ui, CurveTarget::Mask(0));
+            });
+        });
+        assert!(!drew, "a stale mask index must not report an edit");
+        assert!(app.recipe.tone_curve.is_empty(), "…and must not touch the global curves");
     }
 
     /// Every text one frame drew, nested `Shape::Vec` included — the way to read

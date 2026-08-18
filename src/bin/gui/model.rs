@@ -908,6 +908,25 @@ pub(crate) const CURVE_CHANNELS: [(&str, egui::Color32); 4] = [
     ("Blue", egui::Color32::from_rgb(90, 130, 240)),
 ];
 
+/// WHICH four curves the editor is pointed at. The recipe grew a second set in
+/// R25 P6 — every mask carries its own master + RGB point curves
+/// (`crs:MainCurve` / `RedCurve` / `GreenCurve` / `BlueCurve`) — and the
+/// editor is one widget serving both, so the target is a parameter rather than
+/// a second copy of 200 lines of plot and gesture code.
+///
+/// `curve_channel` (which of the four) stays a shared UI preference: it is the
+/// picker's position, and Lightroom likewise has one channel picker. The
+/// DRAG, by contrast, is scoped to the target it started on (`curve_drag`
+/// carries this value), because two editors can be laid out in the same frame
+/// and a drag begun on one must not move a point in the other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CurveTarget {
+    /// The recipe's own global curves (`EditRecipe::tone_curve` …).
+    Global,
+    /// One mask's curves, by index into `EditRecipe::masks`.
+    Mask(usize),
+}
+
 /// The lens-geometry half of the view mapping: the in-camera profile (the
 /// composed map needs its distortion knots) plus the manual amount. Cloned
 /// out of `geom_ctx` per gesture — a few 16-float Vecs, noise next to any

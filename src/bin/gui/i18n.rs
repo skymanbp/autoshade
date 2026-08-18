@@ -497,6 +497,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // R22-5 (#10): the selected mask's sliders in Lightroom's three groups.
     // 「Detail」/「Color」 reuse the panel-section entries above.
     ("Tone", "明暗"),
+    // R25 P6: the fourth group under those three — the mask's own point
+    // curves. SINGULAR, and deliberately not the 「Curves」 of the global
+    // section above (「曲线 · Curves」): two captions reading the same word in
+    // one scrolled panel is how a user edits the wrong curve.
+    ("Curve", "曲线"),
     ("Select a mask above to edit its adjustments", "选中上面任一蒙版即可编辑它的调整"),
     ("A RELATIVE warm/cool shift (±100) around a fixed 5500 K anchor, not absolute Kelvin: this value renders like ≈ {k} K. The global 「Temp (K)」 is absolute and anchored at this photo's as-shot value — a different axis.",
         "相对冷暖偏移（±100），以固定 5500 K 为基准，不是绝对色温：当前值渲染起来约等于 {k} K。全局「色温 (K)」是绝对值、以本张照片的拍摄色温为基准——两者不是同一条轴。"),
@@ -1359,7 +1364,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Blend mode", "混合模式"),
     ("Extra shapes", "附加形状"),
     ("Range mask (foreign)", "值域蒙版（外部）"),
-    ("Local point curve", "局部点曲线"),
+    // R25 P6: the four local point curves are modelled now, so this verdict
+    // no longer means "not supported" — it means the sidecar's own curve did
+    // not parse. The key moved with the meaning rather than staying a phrase
+    // that reads as a missing feature.
+    ("Local point curve (unreadable)", "局部点曲线（无法读取）"),
     ("Unmodelled slider", "未建模的滑杆"),
     ("AI / brush masks cannot be imported — Lightroom recomputes them from a digest",
         "AI / 画笔蒙版无法导入 —— Lightroom 会自行重新计算"),

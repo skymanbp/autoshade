@@ -728,6 +728,41 @@ pub struct LocalAdjustment {
     /// Local luminance noise reduction, 0..=100 → `crs:LocalLuminanceNoise`.
     /// For "this region is noisy" requests; smooths only inside the mask.
     pub noise_reduction: f32,
+    /// This mask's own master point curve → `crs:MainCurve`. Same `{input,
+    /// output}` 0..=255 points as the global [`EditRecipe::tone_curve`], and
+    /// composed through the very same LUT builder (`render::build_tone_lut`),
+    /// so "a curve" means one thing everywhere in this engine.
+    ///
+    /// **The key is the BARE name.** Lightroom writes the global curves as
+    /// `crs:ToneCurvePV2012{,Red,Green,Blue}` but the local ones as
+    /// `crs:MainCurve` / `RedCurve` / `GreenCurve` / `BlueCurve` — no
+    /// `PV2012` suffix — as child elements of the Correction, between
+    /// `crs:LocalCurveRefineSaturation` and `crs:CorrectionMasks`. Their point
+    /// payload is spelled `x,y` with NO SPACE after the comma, where the
+    /// global curves' is `x, y` WITH one; `xmp::local_curve_elem` is a
+    /// separate writer for exactly that reason.
+    ///
+    /// The four are SPARSE and INDEPENDENT — a real sidecar carries Red and
+    /// Green with no Main and no Blue — so this is four plain vectors, not one
+    /// four-curve struct. Empty = identity, and the two ways a vector can
+    /// arrive empty (absent from the JSON, or written as `[]`) MEAN THE SAME
+    /// THING: unlike `coord_era` / `Radial::midpoint`, whose type default is a
+    /// legitimate value and therefore needs a field-level `#[serde(default =
+    /// …)]`, an empty curve is "no curve" from either source. Do not copy that
+    /// pattern here.
+    pub main_curve: Vec<CurvePoint>,
+    /// This mask's RED channel curve → `crs:RedCurve`. See [`main_curve`].
+    ///
+    /// [`main_curve`]: LocalAdjustment::main_curve
+    pub red_curve: Vec<CurvePoint>,
+    /// This mask's GREEN channel curve → `crs:GreenCurve`. See [`main_curve`].
+    ///
+    /// [`main_curve`]: LocalAdjustment::main_curve
+    pub green_curve: Vec<CurvePoint>,
+    /// This mask's BLUE channel curve → `crs:BlueCurve`. See [`main_curve`].
+    ///
+    /// [`main_curve`]: LocalAdjustment::main_curve
+    pub blue_curve: Vec<CurvePoint>,
     /// Per-channel LINEAR-light gains for zone RECOLOURING, `1.0` = neutral.
     /// Produced by the zoned reverse-fit (fit_zoned.rs): a palette-transplant
     /// target (pale-blue sky → gold) demands channel ratios far beyond what
@@ -774,6 +809,10 @@ impl Default for LocalAdjustment {
             temperature: 0.0,
             tint: 0.0,
             noise_reduction: 0.0,
+            main_curve: Vec::new(),
+            red_curve: Vec::new(),
+            green_curve: Vec::new(),
+            blue_curve: Vec::new(),
             color_gains: None,
             role: MaskRole::Custom,
         }
@@ -1448,6 +1487,21 @@ impl EditRecipe {
                 *v = c(*v, -100.0, 100.0);
             }
             m.noise_reduction = c(m.noise_reduction, 0.0, 100.0);
+            // The four local point curves (R25 P6) take the GLOBAL curves'
+            // own cap, spelled once above: each is cloned and sorted per
+            // render exactly like `tone_curve`, and 64 masks × 4 curves is
+            // already the widest surface a crafted recipe has here. Point
+            // VALUES need no clamp — `CurvePoint` is a pair of `u8`, so
+            // 0..=255 is the type.
+            for curve in [
+                &mut m.main_curve,
+                &mut m.red_curve,
+                &mut m.green_curve,
+                &mut m.blue_curve,
+            ] {
+                summary.truncated_curve_points += curve.len().saturating_sub(MAX_CURVE_POINTS);
+                curve.truncate(MAX_CURVE_POINTS);
+            }
             // Recolour gains: keep each channel strictly positive and inside
             // a generous-but-sane range (0 would kill a channel outright; the
             // real repaint demands measure ≲ 3×). Neutral-ish gains collapse

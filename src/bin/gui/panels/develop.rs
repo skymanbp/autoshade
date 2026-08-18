@@ -2300,6 +2300,18 @@ impl AutoshopApp {
                         }
                     });
                 }
+                // R25 P6 — the FOURTH group under Lightroom's three: this
+                // mask's own point curves (`crs:MainCurve` / `RedCurve` /
+                // `GreenCurve` / `BlueCurve`). The very editor the global
+                // Curves section uses, pointed at this mask, so the plot, the
+                // click/drag/drag-out gestures and the engine-faithful line
+                // stay ONE implementation — a second copy is where the
+                // preview line drifts from `render::curve_lut`.
+                //
+                // Last in the section on purpose: it is the only control here
+                // that is not a slider, and it is the tallest.
+                group(ui, tr(lang, "Curve"));
+                changed |= self.curve_editor_for(ui, CurveTarget::Mask(i));
             } else if n_masks == 0 {
                 ui.label(
                     egui::RichText::new(tr(lang, "Lightroom-style local adjustments: add a gradient to darken the sky, a radial to brighten the subject. AI Analyze also writes to this list."))

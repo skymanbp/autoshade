@@ -338,9 +338,20 @@ pub enum MaskImportReason {
     /// A `Mask/RangeMask` we cannot honour (someone else's encoding, or more
     /// than one) — the geometry imports without the range refinement.
     ForeignRangeMask,
-    /// The correction carries `crs:MainCurve` / `RedCurve` / `GreenCurve` /
-    /// `BlueCurve`. Child ELEMENTS, so the attribute scan never saw them and
-    /// they used to vanish with no note at all.
+    /// A `crs:MainCurve` / `RedCurve` / `GreenCurve` / `BlueCurve` is present
+    /// and UNREADABLE: the element never closes, or one of its points is not
+    /// an `x,y` pair inside 0..255. The correction imports WITHOUT that curve
+    /// — the geometry is still exactly what the file draws, so this costs the
+    /// curve and not the mask (the same verdict [`ForeignRangeMask`] gets).
+    ///
+    /// R25 P1 raised this for every correction that carried a local curve at
+    /// all, because the engine modelled none of them and they were vanishing
+    /// with no note. R25 P6 models all four (`LocalAdjustment::main_curve` …),
+    /// so what remains is the narrower, still-real case above: a knob we do
+    /// not model and a value we cannot read are different things (see this
+    /// enum's header), and only the second one is a loss once the knob exists.
+    ///
+    /// [`ForeignRangeMask`]: MaskImportReason::ForeignRangeMask
     LocalCurve,
     /// `crs:LocalCurveRefineSaturation` is off its 100 default.
     CurveRefineSaturation,
@@ -405,7 +416,7 @@ impl MaskImportReason {
             MaskImportReason::BlendMode => "non-default blend mode(s) ignored",
             MaskImportReason::MultiComponent => "extra shape component(s) dropped",
             MaskImportReason::ForeignRangeMask => "range mask(s) dropped",
-            MaskImportReason::LocalCurve => "local point curve(s) not modelled",
+            MaskImportReason::LocalCurve => "local point curve(s) unreadable",
             MaskImportReason::CurveRefineSaturation => "curve refine saturation not modelled",
             MaskImportReason::InertLocal(_) => "unmodelled local slider(s)",
             MaskImportReason::UnknownLocalKey => "unknown local setting(s)",
@@ -803,6 +814,43 @@ pub(crate) const OWNED_ELEMENT_ONLY: [&str; 5] = [
     "MaskGroupBasedCorrections",
 ];
 
+/// One of a Correction's four LOCAL point curves (R25 P6), or the empty string
+/// when that curve is unset — Lightroom writes only the curves that exist.
+///
+/// **This is deliberately NOT the global `curve_elem`** in [`owned_children`],
+/// and the difference is not cosmetic. Three things separate the two spellings,
+/// all read off the user's own sidecars (`DSC09642`, `DSC08761`):
+///
+///   * the KEY is the bare name — `crs:MainCurve` / `RedCurve` / `GreenCurve` /
+///     `BlueCurve`, with no `PV2012` suffix, where the globals are
+///     `crs:ToneCurvePV2012{,Red,Green,Blue}`;
+///   * the POINT payload is `x,y` with **no space after the comma**, where the
+///     globals are `x, y` **with** one;
+///   * the ELEMENT nests two levels deeper (inside the correction's
+///     `rdf:Description`, not the sidecar's), so the indentation differs.
+///
+/// Sharing one formatter and parameterising the separator would put the two
+/// formats one careless "let's make this consistent" edit apart, which is the
+/// whole reason this is a second function with this paragraph on it.
+/// `local_curve_serialization_has_no_space_after_the_comma` fails the moment
+/// they converge.
+///
+/// The leading spaces follow the reference sidecar's own nesting. They survive
+/// into the output where the correction's ATTRIBUTE block's do not — that
+/// literal is written with `\` line continuations, which eat the newline and
+/// the indent after it. Whitespace is insignificant here either way; this is
+/// the spelling Lightroom writes, so it is the one to match.
+fn local_curve_elem(tag: &str, points: &[crate::recipe::CurvePoint]) -> String {
+    if points.is_empty() {
+        return String::new();
+    }
+    let pts: String = points
+        .iter()
+        .map(|p| format!("         <rdf:li>{},{}</rdf:li>\n", p.input, p.output))
+        .collect();
+    format!("       <crs:{tag}>\n        <rdf:Seq>\n{pts}        </rdf:Seq>\n       </crs:{tag}>\n")
+}
+
 /// Build the `<crs:MaskGroupBasedCorrections>` child element (empty string when
 /// there are no masks) PLUS the per-mask loss list the export-side disclosure
 /// is built from — one loop, so the XML and the claim about it cannot drift.
@@ -868,6 +916,20 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
         if m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0]) {
             losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::Recolour });
         }
+        // R25 P6. Position is Lightroom's own and verified on two of the
+        // user's sidecars: AFTER the attribute block closes at
+        // `crs:LocalCurveRefineSaturation`, BEFORE `<crs:CorrectionMasks>`.
+        // Sparse — an unset curve contributes nothing, so a mask that only
+        // carries Red writes only `<crs:RedCurve>`. Built HERE rather than as
+        // an argument below: a `format!` inside another `format!`'s arguments
+        // is what `clippy::format_in_format_args` refuses.
+        let curves = format!(
+            "{}{}{}{}",
+            local_curve_elem("MainCurve", &m.main_curve),
+            local_curve_elem("RedCurve", &m.red_curve),
+            local_curve_elem("GreenCurve", &m.green_curve),
+            local_curve_elem("BlueCurve", &m.blue_curve),
+        );
         items.push_str(&format!(
             "     <rdf:li>\n\
       <rdf:Description\n\
@@ -883,6 +945,7 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
        crs:LocalMoire=\"0\" crs:LocalDefringe=\"0\" crs:LocalTemperature=\"{temp}\"\n\
        crs:LocalTint=\"{tint}\" crs:LocalTexture=\"{tex}\" crs:LocalGrain=\"0\"\n\
        crs:LocalCurveRefineSaturation=\"100\">\n\
+{curves}\
        <crs:CorrectionMasks>\n\
         <rdf:Seq>\n\
          <rdf:li crs:What=\"{what}\" crs:MaskActive=\"true\" crs:MaskName=\"{mname}\"\n\
@@ -894,6 +957,7 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
       </rdf:Description>\n\
      </rdf:li>\n",
             range = range_mask_xml(&m.range, &guid(&format!("range-{i}-{name}"))),
+            curves = curves,
             amount = local_fmt(m.amount),
             name = xml_attr_escape(&name),
 
@@ -2914,7 +2978,12 @@ pub fn unsupported_corrections(xmp: &str) -> usize {
 /// meant DISCARDED): a correction we can read the geometry of imports, and
 /// whatever it carried that we do not model rides along as a named reason.
 enum MaskCorrectionParse {
-    Supported(LocalAdjustment, Vec<MaskImportReason>),
+    /// BOXED, and not for style: `LocalAdjustment` passed 320 bytes when R25
+    /// P6 gave every mask four point-curve vectors, while the refusal arm is
+    /// one small enum — `clippy::large_enum_variant` refuses that spread, and
+    /// the box is the indirection it asks for. Only `mask_summary_from_block`
+    /// destructures this, and it moves the adjustment straight into a `Vec`.
+    Supported(Box<LocalAdjustment>, Vec<MaskImportReason>),
     /// The one verdict that costs the whole correction — always a
     /// [`MaskImportReason::is_drop`] reason.
     Unsupported(MaskImportReason),
@@ -3025,7 +3094,7 @@ fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSumma
             MaskCorrectionParse::Supported(mask, reasons)
                 if summary.supported.len() < MAX_MASKS_FROM_XMP =>
             {
-                summary.supported.push(mask);
+                summary.supported.push(*mask);
                 for reason in reasons {
                     summary.record(&name, reason);
                 }
@@ -3181,12 +3250,22 @@ fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImpo
         reasons.push(MaskImportReason::CurveRefineSaturation);
     }
     // The four per-channel local curves are child ELEMENTS, so the attribute
-    // scan below never saw them: a correction carrying one imported as
-    // "fully supported" with the curve silently gone. Modelled in a later
-    // batch; disclosed from here on.
-    if ["crs:MainCurve", "crs:RedCurve", "crs:GreenCurve", "crs:BlueCurve"]
+    // scan below never sees them. R25 P1 raised a note for every correction
+    // that carried one, because none of them was modelled; R25 P6 models all
+    // four, so the note narrowed to the case that is still a real loss: a
+    // curve that is PRESENT and cannot be READ.
+    //
+    // The distinction is the module's own — "a knob we do not model is not the
+    // same thing as a value we cannot read" (see `MaskImportReason`) — and the
+    // narrowing is what stops the disclosure from claiming a loss that no
+    // longer happens. `parse_one_correction` reads the same four keys through
+    // the unchecked `parse_curve`, whose `Err` half becomes an empty curve;
+    // this loop is what keeps that from being silent. Unreadable costs the
+    // CURVE, not the correction — the geometry is still exactly what the file
+    // draws, the same verdict `ForeignRangeMask` gets.
+    if ["MainCurve", "RedCurve", "GreenCurve", "BlueCurve"]
         .iter()
-        .any(|k| matches!(owned_element_body(seg, k), Ok(Some(_))))
+        .any(|k| parse_curve_checked(seg, k).is_err())
     {
         reasons.push(MaskImportReason::LocalCurve);
     }
@@ -3407,7 +3486,7 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
             uniq.push(r);
         }
     }
-    MaskCorrectionParse::Supported(parsed, uniq)
+    MaskCorrectionParse::Supported(Box::new(parsed), uniq)
 }
 
 
@@ -3568,6 +3647,22 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         temperature: q100("LocalTemperature"),
         tint: q100("LocalTint"),
         noise_reduction: q100("LocalLuminanceNoise"),
+        // R25 P6: the four local point curves, read with the machinery the
+        // global curves already use — `parse_curve` is
+        // `owned_element_body` + `parse_curve_checked`, both name-matched and
+        // both already hardened (a whitespace-spelled `<rdf:li >`, an
+        // out-of-domain coordinate, an element that never closes). No second
+        // parser, and no third scan of the segment.
+        //
+        // `parse_curve` swallows the `Err` half into an empty curve, which
+        // would be silence — so `correction_value_reasons` runs the CHECKED
+        // form over the same four keys and raises `LocalCurve` for exactly the
+        // curves this line drops. The two must stay in step; the pair is
+        // pinned by `an_unreadable_local_curve_is_named_not_swallowed`.
+        main_curve: parse_curve(seg, "MainCurve"),
+        red_curve: parse_curve(seg, "RedCurve"),
+        green_curve: parse_curve(seg, "GreenCurve"),
+        blue_curve: parse_curve(seg, "BlueCurve"),
         // color_gains / role are engine-only and never reach a sidecar.
         ..Default::default()
     })
@@ -5542,6 +5637,19 @@ mod tests {
     /// rewrite it on the returned string, so the fixture can never carry the
     /// same attribute twice.
     fn lr_correction(name: &str, locals: &str, components: &str) -> String {
+        lr_correction_with_curves(name, locals, "", components)
+    }
+
+    /// The same fixture with the correction's four LOCAL point curves spliced
+    /// in (R25 P6) — child ELEMENTS between the attribute block's closing `>`
+    /// and `<crs:CorrectionMasks>`, which is where the reference sidecars put
+    /// them. `lr_curve` builds one.
+    fn lr_correction_with_curves(
+        name: &str,
+        locals: &str,
+        curves: &str,
+        components: &str,
+    ) -> String {
         format!(
             "     <rdf:li>\n\
              \x20     <rdf:Description\n\
@@ -5576,6 +5684,7 @@ mod tests {
              \x20      crs:LocalGrain=\"0\"\n\
              {locals}\
              \x20      crs:LocalCurveRefineSaturation=\"100\">\n\
+             {curves}\
              \x20     <crs:CorrectionMasks>\n\
              \x20      <rdf:Seq>\n\
              {components}\
@@ -5583,6 +5692,20 @@ mod tests {
              \x20     </crs:CorrectionMasks>\n\
              \x20     </rdf:Description>\n\
              \x20    </rdf:li>\n"
+        )
+    }
+
+    /// One local point curve as Lightroom writes it inside a Correction: a
+    /// BARE key (`MainCurve`, not `ToneCurvePV2012`) and points spelled `x,y`
+    /// with NO space after the comma — structurally verbatim from
+    /// `DSC09642.xmp`'s `<crs:RedCurve>` block, with test values.
+    fn lr_curve(tag: &str, points: &[(u8, u8)]) -> String {
+        let pts: String = points
+            .iter()
+            .map(|(x, y)| format!("       <rdf:li>{x},{y}</rdf:li>\n"))
+            .collect();
+        format!(
+            "      <crs:{tag}>\n       <rdf:Seq>\n{pts}       </rdf:Seq>\n      </crs:{tag}>\n"
         )
     }
 
@@ -6174,6 +6297,194 @@ mod tests {
         }
     }
 
+    // ── R25 P6: the four LOCAL point curves ──────────────────────────────
+
+    /// The round trip, in both directions, over all four keys and their
+    /// SPARSENESS. The fixture reproduces `DSC09642.xmp`'s own shape: Red and
+    /// Green present, Main and Blue absent.
+    #[test]
+    fn local_curves_round_trip() {
+        let curves = format!(
+            "{}{}",
+            lr_curve("RedCurve", &[(0, 0), (239, 255)]),
+            lr_curve("GreenCurve", &[(0, 12), (128, 140), (255, 255)]),
+        );
+        let doc = lr_doc(&lr_correction_with_curves(
+            "Radial 1",
+            "",
+            &curves,
+            &lr_radial("0", "0"),
+        ));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the correction must import: {:?}", r.masks);
+        let m = &r.masks[0];
+        assert_eq!(
+            m.red_curve,
+            vec![
+                CurvePoint { input: 0, output: 0 },
+                CurvePoint { input: 239, output: 255 },
+            ],
+            "crs:RedCurve did not reach the recipe"
+        );
+        assert_eq!(m.green_curve.len(), 3, "crs:GreenCurve: {:?}", m.green_curve);
+        assert!(m.main_curve.is_empty() && m.blue_curve.is_empty(), "absent means absent");
+
+        // …and back out through OUR writer, then in again: the curves survive
+        // byte-for-byte as VALUES (the writer's own spelling is pinned by
+        // `local_curve_serialization_has_no_space_after_the_comma`).
+        let back = xmp_to_recipe(&recipe_to_xmp(&r));
+        assert_eq!(back.masks.len(), 1, "the mask survives our own projection");
+        assert_eq!(back.masks[0].red_curve, m.red_curve, "red curve lost in the round trip");
+        assert_eq!(back.masks[0].green_curve, m.green_curve, "green curve lost");
+        assert!(
+            back.masks[0].main_curve.is_empty() && back.masks[0].blue_curve.is_empty(),
+            "the writer invented a curve the recipe does not hold"
+        );
+    }
+
+    /// THE FORMAT MUTATION GUARD. Lightroom spells a LOCAL curve point
+    /// `x,y` and a GLOBAL one `x, y`. Nothing in the code enforces that but
+    /// two separate formatters and this test — and "let's share one helper" /
+    /// "let's make the spacing consistent" is exactly the tidy-up a later
+    /// reader would make.
+    ///
+    /// MUTATION THIS CATCHES: adding a space in `local_curve_elem`, or
+    /// removing one from `owned_children`'s `curve_elem`. Both halves are
+    /// asserted in ONE document, so neither can be satisfied by accident.
+    #[test]
+    fn local_curve_serialization_has_no_space_after_the_comma() {
+        let r = EditRecipe {
+            // The global master curve, whose writer uses the SPACED form.
+            tone_curve: vec![
+                CurvePoint { input: 10, output: 20 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            masks: vec![LocalAdjustment {
+                name: "curved".into(),
+                amount: 1.0,
+                main_curve: vec![
+                    CurvePoint { input: 32, output: 48 },
+                    CurvePoint { input: 255, output: 255 },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let xmp = recipe_to_xmp(&r);
+        assert!(
+            xmp.contains("<rdf:li>32,48</rdf:li>"),
+            "a LOCAL curve point is spelled `x,y` with no space: {xmp}"
+        );
+        assert!(
+            !xmp.contains("<rdf:li>32, 48</rdf:li>"),
+            "the local writer grew the global writer's space: {xmp}"
+        );
+        assert!(
+            xmp.contains("<rdf:li>10, 20</rdf:li>"),
+            "the GLOBAL curve keeps its spaced form: {xmp}"
+        );
+        assert!(
+            !xmp.contains("<rdf:li>10,20</rdf:li>"),
+            "the global writer lost its space to the local one: {xmp}"
+        );
+        // The key is the BARE name and the element sits between the attribute
+        // block and the mask list — the two other things the reference
+        // sidecars pin and a shared helper would get wrong.
+        assert!(xmp.contains("<crs:MainCurve>"), "the local key carries no PV2012 suffix: {xmp}");
+        let after_refine = xmp
+            .split_once("crs:LocalCurveRefineSaturation=\"100\">")
+            .expect("the correction's attribute block closes there")
+            .1;
+        let curve_at = after_refine.find("<crs:MainCurve>").expect("the curve is emitted");
+        let masks_at = after_refine.find("<crs:CorrectionMasks>").expect("the mask list is too");
+        assert!(curve_at < masks_at, "the curve must precede <crs:CorrectionMasks>: {xmp}");
+    }
+
+    /// Sparse in, sparse OUT. Lightroom writes only the curves that exist, and
+    /// a writer that emitted all four (as identities, say) would hand the
+    /// photographer's sidecar three curves they never drew.
+    #[test]
+    fn sparse_curves_stay_sparse() {
+        let r = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "red only".into(),
+                amount: 1.0,
+                red_curve: vec![
+                    CurvePoint { input: 0, output: 0 },
+                    CurvePoint { input: 128, output: 160 },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let xmp = recipe_to_xmp(&r);
+        assert!(xmp.contains("<crs:RedCurve>"), "the curve that exists is written: {xmp}");
+        for absent in ["<crs:MainCurve>", "<crs:GreenCurve>", "<crs:BlueCurve>"] {
+            assert!(!xmp.contains(absent), "{absent} was invented out of an empty curve: {xmp}");
+        }
+        // A mask with NO curve at all writes none of the four — the common
+        // case, and the one that keeps every pre-P6 sidecar byte-identical.
+        let plain = recipe_to_xmp(&EditRecipe {
+            masks: vec![LocalAdjustment { name: "plain".into(), amount: 1.0, ..Default::default() }],
+            ..Default::default()
+        });
+        for absent in ["<crs:MainCurve>", "<crs:RedCurve>", "<crs:GreenCurve>", "<crs:BlueCurve>"] {
+            assert!(!plain.contains(absent), "{absent} on a curveless mask: {plain}");
+        }
+    }
+
+    /// R25 P1 raised `LocalCurve` on every correction that carried one of the
+    /// four curve elements, because the engine modelled none of them. P6
+    /// models all four — so a correction whose curves READ must now report
+    /// NOTHING, or the disclosure cries wolf on 19 of the user's photos.
+    #[test]
+    fn a_correction_with_curves_no_longer_reports_a_local_curve_loss() {
+        let curves = lr_curve("MainCurve", &[(0, 0), (128, 96), (255, 255)]);
+        let doc =
+            lr_doc(&lr_correction_with_curves("Radial 1", "", &curves, &lr_radial("0", "0")));
+        assert!(
+            import_losses(&doc).is_empty(),
+            "a correction whose curve imported must report no loss: {:?}",
+            import_losses(&doc)
+        );
+        assert_eq!(unsupported_corrections(&doc), 0);
+        assert_eq!(
+            xmp_to_recipe(&doc).masks[0].main_curve.len(),
+            3,
+            "premise: the curve really did import (else the silence is a lie)"
+        );
+    }
+
+    /// The other half of the narrowing: a curve that is PRESENT and cannot be
+    /// read is still a loss, and it is still NAMED. `parse_one_correction`
+    /// reads the four keys through the unchecked `parse_curve`, whose `Err`
+    /// half becomes an empty curve — this is what stops that from being
+    /// silence, which is the module's standing rule (`owned_element_body`).
+    ///
+    /// Costing the CURVE and not the correction is deliberate: the geometry is
+    /// still exactly what the file draws, the same verdict a foreign range
+    /// mask gets.
+    #[test]
+    fn an_unreadable_local_curve_is_named_not_swallowed() {
+        // "999,-5" is out of the 0..255 domain — the same input
+        // `parse_curve_checked` refuses on the global curves (L05).
+        let curves = lr_curve("BlueCurve", &[(0, 0), (255, 255)])
+            .replace("<rdf:li>255,255</rdf:li>", "<rdf:li>999,-5</rdf:li>");
+        let doc =
+            lr_doc(&lr_correction_with_curves("Radial 1", "", &curves, &lr_radial("0", "0")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the mask still imports — the shape is readable");
+        assert!(r.masks[0].blue_curve.is_empty(), "an unreadable curve imports as none");
+        assert_eq!(
+            import_losses(&doc),
+            vec![MaskImportLoss {
+                name: "Radial 1".into(),
+                reason: MaskImportReason::LocalCurve
+            }],
+            "the loss must be named, not swallowed"
+        );
+    }
+
     /// FORENSIC REGRESSION, run against the user's own Lightroom library.
     /// The inline fixtures above are synthetic by policy, which means they
     /// prove the RULES and not the FILES — and §0 of this round was a defect
@@ -6254,6 +6565,33 @@ mod tests {
                     (rt_mid, rt_ver),
                     "{name}: radial {i} lost a carried attribute in the round-trip"
                 );
+            }
+            // R25 P6: the four LOCAL point curves, per correction. 19 files in
+            // the user's library carry 43 of them and every one used to be
+            // dropped with a note; the print is the round report's per-file
+            // curve list and the assertion is the round trip through OUR
+            // writer — the one place the `x,y` spelling could silently drift
+            // to the global `x, y` and still look right in a diff.
+            let imported_recipe = xmp_to_recipe(&text);
+            for (i, (m, rt)) in imported_recipe.masks.iter().zip(&mine.masks).enumerate() {
+                for (key, got, round) in [
+                    ("MainCurve", &m.main_curve, &rt.main_curve),
+                    ("RedCurve", &m.red_curve, &rt.red_curve),
+                    ("GreenCurve", &m.green_curve, &rt.green_curve),
+                    ("BlueCurve", &m.blue_curve, &rt.blue_curve),
+                ] {
+                    if got.is_empty() {
+                        continue;
+                    }
+                    let pts: Vec<String> =
+                        got.iter().map(|p| format!("{},{}", p.input, p.output)).collect();
+                    eprintln!(
+                        "    mask {i} crs:{key}: {} point(s) [{}]",
+                        got.len(),
+                        pts.join(" ")
+                    );
+                    assert_eq!(got, round, "{name}: mask {i} lost crs:{key} in the round-trip");
+                }
             }
             assert_eq!(
                 imported + refused,

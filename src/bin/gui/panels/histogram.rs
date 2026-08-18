@@ -145,6 +145,26 @@ impl AutoshopApp {
     /// increasing), dragging well outside the box deletes it — the Lightroom
     /// gestures. Returns true when the recipe changed this frame.
     pub(crate) fn curve_editor(&mut self, ui: &mut egui::Ui) -> bool {
+        self.curve_editor_for(ui, CurveTarget::Global)
+    }
+
+    /// The same editor pointed at one set of four curves — the recipe's own
+    /// (`CurveTarget::Global`) or a mask's (R25 P6). Everything below is the
+    /// original body with `self.recipe.<curve>` replaced by a lookup through
+    /// `target`; splitting the widget in two instead would have given the mask
+    /// curves a second plot, a second gesture model and a second place for the
+    /// engine-faithful line to drift.
+    pub(crate) fn curve_editor_for(
+        &mut self,
+        ui: &mut egui::Ui,
+        target: CurveTarget,
+    ) -> bool {
+        // A stale mask index addresses no curve (see `curve_points`): draw
+        // nothing rather than fall through to somebody else's four vectors.
+        // Checked ONCE here, so every `expect` below is this guard's.
+        if curve_points(&self.recipe, target, self.curve_channel).is_none() {
+            return false;
+        }
         let lang = self.lang;
         let label_colors = self.theme.colors().curve_labels;
         let mut changed = false;
@@ -162,7 +182,8 @@ impl AutoshopApp {
                 }
             }
             if ui.small_button("↺").on_hover_text(tr(lang, "Clear the current channel's curve")).clicked() {
-                let pts = curve_points_mut(&mut self.recipe, self.curve_channel);
+                let pts = curve_points_mut(&mut self.recipe, target, self.curve_channel)
+                    .expect("the target was validated on entry");
                 if !pts.is_empty() {
                     pts.clear();
                     changed = true;
@@ -234,9 +255,20 @@ impl AutoshopApp {
 
         // --- interaction (mutates the active channel's control points) --------
         const HIT: f32 = 10.0; // grab radius around a point, screen px
-        let lut_before =
-            autoshop::render::curve_lut(curve_points(&self.recipe, self.curve_channel));
-        let pts = curve_points_mut(&mut self.recipe, self.curve_channel);
+        let lut_before = autoshop::render::curve_lut(
+            curve_points(&self.recipe, target, self.curve_channel)
+                .expect("the target was validated on entry"),
+        );
+        // The drag belongs to the target it STARTED on: two editors can be
+        // laid out in one frame (the global Curves section and a selected
+        // mask's), and a bare index would let one editor's drag move — and
+        // highlight — the other's point. Read fresh at each use, never cached,
+        // because the block below both sets and clears it within one frame.
+        let drag_here = |d: Option<(CurveTarget, usize)>| -> Option<usize> {
+            d.and_then(|(t, i)| (t == target).then_some(i))
+        };
+        let pts = curve_points_mut(&mut self.recipe, target, self.curve_channel)
+            .expect("the target was validated on entry");
         if (resp.drag_started() || resp.clicked())
             && let Some(q) = resp.interact_pointer_pos()
         {
@@ -256,10 +288,10 @@ impl AutoshopApp {
                 }
             };
             if resp.drag_started() {
-                self.curve_drag = Some(idx);
+                self.curve_drag = Some((target, idx));
             }
         }
-        if let Some(i) = self.curve_drag.filter(|&i| i < pts.len()) {
+        if let Some(i) = drag_here(self.curve_drag).filter(|&i| i < pts.len()) {
             if resp.dragged()
                 && let Some(q) = resp.interact_pointer_pos()
             {
@@ -294,7 +326,7 @@ impl AutoshopApp {
         // Control-point handles (the dragged one filled with the channel colour).
         for (i, c) in pts.iter().enumerate() {
             let q = to_screen(c.input as f32 / 255.0, c.output as f32 / 255.0);
-            if self.curve_drag == Some(i) {
+            if drag_here(self.curve_drag) == Some(i) {
                 p.circle_filled(q, 5.0, accent);
             } else {
                 p.circle_filled(q, 3.5, egui::Color32::from_gray(230));
