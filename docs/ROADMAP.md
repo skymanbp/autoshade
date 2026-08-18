@@ -385,7 +385,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 | **B2** | 全局 `crs:Texture` + 效果面板：Texture **读写必须同一次落地**（只读不写＝键不进 `owned_attr_keys`，merge 不剥离，我方值与文档原值并存；只写不读＝导入的 LR 值不生效）；裁剪后暗角六键 + Grain 三键先走 CarriedOnly；「暗角」标签同名冲突改名 | ✅ R25 v0.31.0（`1ddf53e`） |
 | **B3** | Detail 子控件（锐化 3 + 亮度降噪 2 + 彩色降噪 3）、手动色差 `ca_r`/`ca_b`（渲染）+ `AutoLateralCA`（携带）、Defringe 六键 | ✅ R25 v0.31.0（`98b4c65`；Defringe 走甲案＝CarriedOnly 终态） |
 | **B4** | Transform/Upright 八键 + Camera Calibration 八键走 `Tier::PassThrough`（**具名键集**，不是「一切未知」——merge 的剥离宇宙是静态清单，自由 map 会与实际写出的键失配）+ 渲染分叉披露 `global_render_gaps` | ✅ R25 v0.31.0（`3ae7df7`；PassThrough 首个真载荷） |
-| **B5** | 蒙版几何互通，三臂：**A＝导入**（LR 蒙版解锁，与 `INERT_LOCAL` 硬拒同根因一次修完）✅ R25 `4eb54aa`；**B1＝写回** `crs:Midpoint`/`crs:Version` + 旋转损失点名角度 ✅ R25 `a98a82f`；**B2＝`crs:Angle` 双向映射** ⏸ 待用户 LR 已知角度实验（符号/枢轴未验证，见 V2_PLAN §7 item 1） |
+| **B5** | 蒙版几何互通，三臂：**A＝导入**（LR 蒙版解锁，与 `INERT_LOCAL` 硬拒同根因一次修完）✅ R25 `4eb54aa`；**B1＝写回** `crs:Midpoint`/`crs:Version` + 旋转损失点名角度 ✅ R25 `a98a82f`；**B2＝`crs:Angle` 双向映射** ⏸ 符号已达 supported 级（正角=顺时针 y-down；用户 5 照符号检验 5/5，p=0.031，E1-verdict）但幅值/枢轴未测，映射仍不落码；terminal 证据仍是用户 LR 已知角度实验（见 V2_PLAN §7 item 1 v0.31.2 段） |
 | **SF4** | 「是否接受 `CarriedOnly` 这个中间态」（字段可读可写可编辑、本机预览不渲染、进了 Lightroom 才生效＝公开承认预览与 LR 不一致）三选一：**A** 全盘接受，B2-B4 全部可落码；**B** 不接受，那批全退回 PassThrough + 披露，App 只做自己渲染得了的；**C** 接受但**限白名单**——只对 Adobe 独有、我方短期实现不了的算子开口。**用户 2026-08-18 拍板 = C（默认档）**，24 个全局成员逐条带理由钉在 `CARRIED_ONLY_GLOBAL` | ✅ R25 定稿 |
 
 ### 素材请求（用户侧动作，非代码项）
@@ -398,6 +398,59 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 | **M-D** | #2 蒙版精修报错的 toast 原文（分流哪条臂） | ✅ R24 两臂都修 + 实跑否证 |
 
 ## 当前状态（已完成，勿重做）
+
+- **v0.31.2（2026-08-18，证据修复批 —— 用户自有图库只读取证再证伪两条既定
+  读法）** — 素材来源＝对用户图库的只读普查（201 径向全库 + 7 份 M-B sidecar
+  独立复算）+ E1-verdict 像素级测量（证据档案
+  `~/.claude/plans/r25-materials/web-evidence/`，E1-verdict + multimask-forensics）。
+  三条：
+  ① **`crs:Flipped` 与反相解绑（主项）**。R24 曾据单例判两字段「独立并存」——
+  R25 全库普查证伪解读：201/201 径向 `Flipped` 与 `MaskInverted` **完美反相关**
+  （155 `(true,false)` + 46 `(false,true)`，相同值组合 0 例；M-B 复算 23/23，
+  线性渐变 27/27 根本不带 `Flipped`）。两批证据字节层不冲突（「不是镜像副本」
+  与「值恒相反」同真），死的只是「所以含义不同」的解读：LR 把**一个**反相位
+  写了两遍。本引擎 `Radial::flipped`（render.rs 分量权重取补）与
+  `LocalAdjustment::inverted`（合成权重取补）按 XOR 合成，两半都读＝值与其补
+  XOR＝**每个导入 LR 径向被无条件反相**（155 个错、46 个碰巧对）。修＝导入只认
+  `MaskInverted`（`flipped` 恒 false），写侧两属性都从净反相
+  `lr_net_inverted = flipped ^ inverted` 派生——只写 LR 自己会写的组合，故在
+  「LR 渲染器读哪个属性」两种读法下都成立。实测 `DSC09568` 对真 LR 导出
+  tone-matched RMS **0.1099→0.0751**（蓝 0.1901→0.0869，引自 E1-verdict §6，
+  本批未重跑像素）。**recipe schema 零改动**（无新字段＝不触发 v0.31.0/1 exe
+  蒙版硬拒）；我方 `flipped` 仍渲染、仍是 GUI 翻转勾选，既有 recipe 渲染
+  一像素不变。**接受成本（复审裁决在案）**：往返后净反相精确保留，但承载位
+  从「翻转」并入「反相」勾选（XMP 只有一位，投影必然塌陷；替代方案加
+  carried-only 字段会改 schema 触发前向硬拒，判不值）。≤v0.31.1 我方写的
+  带翻转 sidecar 现读回不反相＝与 LR 读法一致化，非新损失。
+  ② **两处注释旋向改正**（render.rs:1930 段 / recipe.rs:940 段，只改注释码
+  不动）：旧注释称引擎径向角「逆时针，y-down 屏幕意义」，实测**顺时针**
+  （+30 渲出右端朝下；用户 5 照符号检验 5/5，p=0.031，**supported 级未到
+  proven**）。`R(+θ)` 在 y-up 数学系确为逆时针——旧注释带 y-up 读数却声称
+  y-down。
+  ③ **多蒙版 Correction 取错底形**。旧选择器按**种类**取几何（`Mask/Gradient`
+  恒优先于 `Mask/CircularGradient`）且无视 `crs:MaskBlendMode`：字节级证实
+  两例意图反转——`DSC08960` 蒙版 3 与 `_DSC9583` Mask 9 均为「径向底形+线性
+  减法」，旧码留下 LR 用来**抠掉**的形状当整个蒙版。修＝新 `base_geometry_at`
+  优先首个默认 BlendMode 组件（全减法才落回首个）；`Rotation` 损失注记只对
+  **实际导入**的几何发（旧码 `DSC08960` 四条注记三条描述从未入 recipe 的
+  径向）；`BlendMode` 注记保持组件级（对被弃减法组件是真话＝v0.31.1 的披露）。
+  实测恢复 3 蒙版（`DSC08960` 径向 {3}→{1,3,4}、`_DSC9583` 8→11 全入）。
+  **登记不修**（注释带触发条件+去向钉在代码）：CLI 零蒙版披露（`main.rs` 不调
+  `describe_import_losses`，通道设计缺口）；`unknown_component` 预占形状账
+  （混合 AI/画笔+参数化几何的 Correction 整条拒收正确但 6 个可表示形状
+  无披露，披露粒度设计题）。
+  门：clippy 0 双配置；**610**(+4：`lightroom_spells_one_inversion_bit_twice`
+  改判+`our_own_flip_leaves_as_lightrooms_own_inversion`+
+  `a_multi_component_correction_imports_its_base_geometry`+
+  `only_the_imported_geometrys_rotation_is_disclosed`+env 门
+  `real_lightroom_radials_carry_one_inversion_bit_spelled_twice`）lib / 8 CLI /
+  129 GUI / 2+2 合约双配置；audit_i18n 全 9 门 0；无新 zh 词条；6 项变异检查
+  修前必红（主审第一方抽查复现）。发版：fix 2a382dd，tag v0.31.2→2a382dd，
+  assets 回下载字节验证=本地逐位相等：cli
+  0e2e129133c66ff171f18ae53a673cf6c22817dbc407668d850618c9b663350a
+  =29,144,638 B / gui
+  e542146d59bdeed38e5a7ca071e79e15935bdbf14949ea5fc2f33e01e99753e2
+  =38,616,119 B。
 
 - **v0.31.1（2026-08-18，证据修正补丁 —— 三条「锁定假设」被网络取证证伪后的
   根修）** — 素材来源＝对 GitHub 公开 `.xmp` 的只读普查（证据档案
