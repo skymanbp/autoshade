@@ -377,25 +377,59 @@ const JOINT_MIN_SHARE: f32 = 0.02;
 // number below is pinned by `joint_family_is_calibrated_on_the_fixture_set`,
 // which also records the whole measurement table.
 //
-// HONEST STATUS: these are calibrated against SYNTHETIC fixtures plus the
-// two archived real-pair GEOMETRIES those fixtures distil. No new real
-// "the reverse-fit is nonsense" pair was available when they were set (the
-// requested sample is still outstanding), so the ladder is provisional and
-// wants a real-pair review before anyone treats a number here as measured
-// truth. What the fixtures DO establish is the separation: an honest fit
-// lands the weighted reading at 0.001-0.06, while the one pair whose target
-// is a repaint the global model structurally cannot reach lands at 0.58.
+// STATUS (R24 batch 2, 2026-08-17): NO LONGER PROVISIONAL. R23-6 set these
+// against synthetic fixtures alone and recorded the debt in this very block
+// ("wants a real-pair review before anyone treats a number here as measured
+// truth"). Six real (RAW, finished JPEG) pairs off the user's own library —
+// EXIF-timestamp-confirmed same frame — have since been measured through
+// `autoshop match`, and they moved BOTH ends of the ladder. The table is
+// `fit::tests::joint_family_is_calibrated_on_the_fixture_set`'s doc; the
+// finding that forced the retune is that the ONE pair the user called
+// nonsense (an astro composite: the Milky Way gone, the deep blue turned
+// grey) read 0.141 — under the old 0.25 line, so it raised no warning and
+// still reported 0.58 confidence.
+//
+// The separation the fixtures established is unchanged and still holds: a
+// fit that REACHES its target lands the weighted reading at 0.001-0.06,
+// while the pair whose target is a repaint the global model structurally
+// cannot reach lands at 0.58. The real pairs simply showed where inside
+// that gap the line actually belongs.
 
 /// The weighted reading at which reported confidence hits its floor — the
 /// joint family's counterpart of `fit`'s own FAR line, and the other end of
-/// the same calibration as [`JOINT_CONFIDENCE_SLOPE`]. 0.25 sits 4× above
-/// the worst honest fit in the fixture set (0.061, the region-graded canyon)
-/// and 2.3× below the unreachable repaint (0.581).
-pub(crate) const JOINT_FAR_ERR: f32 = 0.25;
+/// the same calibration as [`JOINT_CONFIDENCE_SLOPE`].
+///
+/// 0.10, distilled from eleven measured pairs (six real, five fixture) that
+/// bracket it from both sides:
+///   * ABOVE the line, and the reason it moved: the real astro-composite
+///     pair reads 0.141 and MUST warn (it was 0.578 confidence and silent at
+///     0.25 — the defect this retune closes), and the unreachable synthetic
+///     repaint reads 0.581, 5.8× over.
+///   * BELOW it, every fit that reached its target: the five honest real
+///     pairs at 0.019/0.024/0.030/0.035/0.054 (worst = 1.85× under) and the
+///     three fixtures that land at 0.001/0.004/0.045 (worst = 2.2× under).
+///   * The TIGHTEST constraint, and the one to re-open first when a second
+///     real failure pair arrives: the two fixtures where the solver
+///     correctly REFUSED to chase a whole-scene regrade (canyon warm 0.061,
+///     canyon gold 0.093). Those are policy refusals, not misses, so they
+///     must not be accused of being far — and 0.093 leaves only 8% of
+///     headroom. The line is deliberately biased the other way (41% of
+///     headroom over the real failure): a real pair the user called nonsense
+///     outranks a synthetic fixture whose silence is a judgement call.
+pub(crate) const JOINT_FAR_ERR: f32 = 0.10;
 /// Confidence slope on the weighted reading: `(1 − FLOOR) / JOINT_FAR_ERR`,
 /// i.e. the two ends of ONE calibration, exactly as `fit`'s
 /// `CONFIDENCE_SLOPE` / `FIT_FAR_ERR` pair now is.
-pub(crate) const JOINT_CONFIDENCE_SLOPE: f32 = 3.0;
+///
+/// The tie is KEPT through this retune because the real pairs endorsed it
+/// from the other end independently: the second-best pair in the set (a
+/// visibly greyer-than-target rendition) reported 0.910 confidence under the
+/// old slope of 3.0, i.e. the ladder was loose at the TOP as well as at the
+/// FAR line. Both ends therefore had to move the same way, which is exactly
+/// what one calibration with two ends means. Breaking the tie would have
+/// produced the incoherent report the tie exists to prevent — "treat this as
+/// a starting point, not a match" printed beside 0.70 confidence.
+pub(crate) const JOINT_CONFIDENCE_SLOPE: f32 = 7.5;
 /// Bounded-drift tolerance for the pipeline-end guard (role 3 above): how
 /// much WORSE the finished recipe's weighted reading may be than the
 /// untouched base's before the fit is declared to have done harm the
@@ -405,6 +439,12 @@ pub(crate) const JOINT_CONFIDENCE_SLOPE: f32 = 3.0;
 /// quantisation — so 0.05 is 56× the only observed non-improvement, and far
 /// under the smallest gap between fixtures. Deliberately loose: this guard
 /// exists to catch a disaster the scalar cannot see, not to referee taste.
+///
+/// UNCHANGED by the R24 real-pair round, and now measured rather than
+/// merely assumed: all six real pairs improve this reading by a wide margin
+/// (0.402→0.064, 0.332→0.064, 0.089→0.028, 0.082→0.060, 0.052→0.034,
+/// 0.050→0.014 — `pipeline::tests::r16_composed_fit_on_a_real_pair`), so
+/// no real pair has yet come within 0.05 of the guard from the wrong side.
 pub(crate) const JOINT_DRIFT_TOL: f32 = 0.05;
 
 /// One bucket's mismatch: [`zone_err`]'s formula, read in the DISPLAY

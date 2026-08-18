@@ -904,6 +904,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Full-res denoise", "全分辨率去噪"),
     ("Run the SCUNet GPU sidecar on this variant's pixels and show the result on canvas (undoable — bakes a clean base into the current variant; the develop sliders keep applying on top; first run downloads the model)",
         "对当前变体的像素跑 SCUNet GPU 边车，结果直接上画布（可撤销——干净基图烘焙进当前变体；显影滑杆继续在其上生效；首次运行会下载模型）"),
+    // The capability arm. WORD-FOR-WORD the segmentation buttons' missing-
+    // sidecar line (only the env var and the file name differ), because it is
+    // word-for-word the same situation — a release package ships neither
+    // helper — and two wordings for one condition is how a user concludes they
+    // are two different problems.
+    ("this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_DENOISE_SCRIPT at python/denoise.py",
+        "本版本未随发布包分发 python 边车——请从项目目录运行 Autoshop，或用 AUTOSHOP_DENOISE_SCRIPT 指向 python/denoise.py"),
     ("Denoise at full resolution (the full-sensor develop for a RAW, the image itself for a baked source; slow) — off = a ≤2048px working copy for a quick on-canvas result",
         "全分辨率去噪（RAW 用全画幅显影，烘焙图像用原图；慢）——关闭 = 用 ≤2048px 工作副本快速出画布结果"),
     ("AI denoise (full-res)… (GPU sidecar, can take minutes; first run downloads the model)",

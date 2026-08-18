@@ -318,6 +318,41 @@ pub fn same_frame_plausible(src: &DynamicImage, target: &DynamicImage) -> bool {
     (a - b).abs() <= SAME_FRAME_ASPECT_TOL * a.max(b)
 }
 
+/// The most a fit may claim once [`same_frame_plausible`] has said no (R24
+/// batch 2). The warning and this cap are ONE decision, for the same reason
+/// [`FIT_FAR_ERR`] and [`CONFIDENCE_SLOPE`] are: printing "treat the result as
+/// unreliable" beside a confidence of 0.83 states two contradictory things and
+/// the user believes the number.
+///
+/// The 0.83 is real — measured on the cropped real pair of 2026-08-17
+/// (`_DSC9422`, a portrait frame the user cropped to 1.294) — and so is the
+/// blindness behind it: the joint reading handed that pair one of its BEST
+/// scores (0.035), because value-range buckets correspond by value and simply
+/// do not notice that the two populations came from different rectangles.
+/// Neither of the fit's two readings can see this, so neither may set the
+/// number.
+///
+/// WHY A CAP AND NOT THE FLOOR: at a 2% aspect tolerance the commonest
+/// trigger is a crop of exactly the frame the user meant (see
+/// [`SAME_FRAME_ASPECT_TOL`]), which is the Lightroom export the tooltip asks
+/// for. Collapsing to [`CONFIDENCE_FLOOR`] would call the intended workflow
+/// broken. A cap says "your numbers are not evidence", which is the true
+/// claim, and leaves both ladders free to go LOWER when they have their own
+/// reason to.
+///
+/// WHERE 0.5 COMES FROM — measured, not chosen. Forty crop-only pairs (eight
+/// frames: four fixtures plus four of the real targets, each against five
+/// centre-crops of ITSELF at 95/90/80/65/50% of height) put an IDENTICAL look
+/// on both sides, so the truthful recipe is the identity and the truthful
+/// residual is zero. The solver instead reported 0.796-0.950 confidence on
+/// every one of them, and earned it by manufacturing real edits out of the
+/// framing difference alone — up to +23.4 / −18.3 of saturation and ±0.45 EV.
+/// The largest residual the framing alone manufactured was 0.0854, which
+/// [`confidence_from_look_err`] reads as 0.488; 0.5 is that number, rounded to
+/// a legible one. It is what the ladder itself says a fit is worth when its
+/// whole residual could be framing.
+const NOT_SAME_FRAME_CONFIDENCE_CAP: f32 = 0.5;
+
 /// The fit outcome: the recipe plus the distribution error (mean |Δ| over luma
 /// quantiles and channel means, 0 = identical look) before and after.
 pub struct FitReport {
@@ -782,6 +817,16 @@ fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: SolveFacts) ->
         )),
         None => confidence_from_look_err(err_after),
     };
+    // …and never more than a fit whose two sides are not the same rectangle
+    // may claim (R24 batch 2). THIRD in the same one-directional chain, and
+    // last because it is the only one of the three that no measurement of
+    // these pixels can raise: both readings above are taken over populations
+    // the crop already made incomparable, so this cap overrides a high number
+    // rather than competing with it. `min`, not an assignment — a fit that is
+    // ALSO far by its own residual keeps the lower claim.
+    if !m.same_frame {
+        recipe.confidence = recipe.confidence.min(NOT_SAME_FRAME_CONFIDENCE_CAP);
+    }
     recipe.clamp();
     FitReport { recipe, err_before, err_after, notes }
 }
@@ -2701,14 +2746,15 @@ mod tests {
         (base, clean)
     }
 
-    /// THE CALIBRATION RECORD for the joint value-range family (R23-6).
+    /// THE CALIBRATION RECORD for the joint value-range family (R23-6, retuned
+    /// on real pairs in R24 batch 2).
     ///
     /// Every threshold in `fit_zoned`'s joint block was set from this table
-    /// and nothing else, so the table lives here as an executable
-    /// assertion — a fixture drift that moves the numbers must fail loudly
+    /// and the real-pair table below it, so both live here as executable
+    /// assertions — a fixture drift that moves the numbers must fail loudly
     /// rather than quietly invalidate the constants.
     ///
-    /// Measured (weighted reading, base → finished fit):
+    /// Measured on the FIXTURES (weighted reading, base → finished fit):
     ///   identity                     0.0000 → 0.0009   (pure quantisation)
     ///   roundtrip (known recipe)     0.0592 → 0.0044
     ///   haze → clean (cast kept)     0.1802 → 0.0446
@@ -2716,22 +2762,39 @@ mod tests {
     ///   canyon gold (rotation class) 0.2428 → 0.0925
     ///   hazy canyon → vivid warm     0.5874 → 0.5813
     ///
-    /// Two facts the constants rest on:
-    ///   * SEPARATION — every honest fit lands at 0.004-0.093, while the one
-    ///     pair whose target is a repaint no global model can reach (the
-    ///     real-pair geometry of 2026-07-09 #2) stays at 0.58. That is what
-    ///     [`fit_zoned::JOINT_FAR_ERR`] = 0.25 sits between, and it is the
-    ///     whole point of the second reading: `look_err` scores that same
-    ///     fit 0.080, i.e. confidence 0.52, a number the user reads as "it
-    ///     mostly worked".
+    /// Measured on SIX REAL (RAW, finished JPEG) pairs off the user's library,
+    /// 2026-08-17, EXIF-timestamp-confirmed same frame, through `autoshop
+    /// match` (finished reading, `look_err` before → after, reported
+    /// confidence). These are what retired the "provisional" label:
+    ///   A1 astro composite     0.141   0.156 → 0.061   the nonsense pair
+    ///   A4 low-sat neutral     0.054   0.091 → 0.063
+    ///   A5 portrait, cropped   0.035   0.070 → 0.029   not-same-frame warned
+    ///   A2 vivid warm          0.030   0.028 → 0.010
+    ///   A6 portrait            0.024   0.124 → 0.028
+    ///   A3 monochrome          0.019   0.024 → 0.012
+    ///
+    /// Three facts the constants rest on:
+    ///   * SEPARATION — the fits that REACH their target land at 0.001-0.054
+    ///     (three fixtures, five real pairs), while a target no global model
+    ///     can reach stays high: 0.581 for the synthetic repaint (the
+    ///     real-pair geometry of 2026-07-09 #2) and 0.141 for the real astro
+    ///     composite. That is the gap [`fit_zoned::JOINT_FAR_ERR`] = 0.10
+    ///     sits in, and it is the whole point of the second reading:
+    ///     `look_err` scores those same two fits 0.080 and 0.061, i.e. 0.52
+    ///     and 0.63 confidence — numbers the user reads as "it mostly worked"
+    ///     over a render whose Milky Way is gone.
+    ///   * THE REFUSAL CLASS sits between, and pins the line from above: on
+    ///     canyon warm (0.061) and canyon gold (0.093) the solver correctly
+    ///     DECLINED to chase a whole-scene regrade with global curves. A
+    ///     policy refusal is not a miss and must not be accused of one, so
+    ///     0.093 is the tightest single constraint on the line — 8% of
+    ///     headroom, and the first thing to re-open when a second real
+    ///     failure pair arrives.
     ///   * MONOTONICITY — every pair improves or holds, the single exception
     ///     being the identity pair's +0.0009 of rounding. That is what
-    ///     [`fit_zoned::JOINT_DRIFT_TOL`] = 0.05 has 56× of headroom over.
-    ///
-    /// HONEST STATUS: synthetic fixtures plus the two archived real-pair
-    /// geometries they distil. The new real "the reverse-fit is nonsense"
-    /// pair this round asked for did not arrive, so these constants are
-    /// provisional pending a real-pair review.
+    ///     [`fit_zoned::JOINT_DRIFT_TOL`] = 0.05 has 56× of headroom over,
+    ///     and all six real pairs improve by far more than 0.05
+    ///     (`pipeline::tests::r16_composed_fit_on_a_real_pair`).
     #[test]
     fn joint_family_is_calibrated_on_the_fixture_set() {
         let edge = ANALYZE_EDGE;
@@ -2745,9 +2808,13 @@ mod tests {
             let a = crate::fit_zoned::joint_reading(&fit_px, &tp2).expect("fit reading");
             (b.weighted, a.weighted, rep.err_after)
         };
-        let mut honest_max = 0.0f32;
+        // The two bands are asserted SEPARATELY (R24 batch 2). They used to
+        // share one `honest_max`, which hid the fact that a policy refusal
+        // lands 2× higher than a fit that actually reached its target — and
+        // that gap is where the retuned line had to fit.
+        let mut reached_max = 0.0f32;
+        let mut refusal_max = 0.0f32;
         for (name, src, tgt) in [
-            ("identity", synth(), synth()),
             ("canyon warm", canyon(false), canyon(true)),
             ("canyon gold", canyon(false), canyon_gold_target()),
         ] {
@@ -2757,13 +2824,21 @@ mod tests {
                 "{name}: the fit must not push the joint reading past the drift \
                  tolerance ({before:.4} -> {after:.4})"
             );
-            honest_max = honest_max.max(after);
+            refusal_max = refusal_max.max(after);
+        }
+        {
+            let (before, after, _) = read(&synth(), &synth());
+            assert!(
+                after <= before + crate::fit_zoned::JOINT_DRIFT_TOL,
+                "identity: {before:.4} -> {after:.4}"
+            );
+            reached_max = reached_max.max(after);
         }
         {
             let (base, clean) = haze_pair();
             let (before, after, _) = read(&base, &clean);
             assert!(after < before * 0.5, "haze: {before:.4} -> {after:.4}");
-            honest_max = honest_max.max(after);
+            reached_max = reached_max.max(after);
         }
         {
             let src = synth();
@@ -2779,19 +2854,64 @@ mod tests {
             let tgt = render::develop_preview(&src, &truth);
             let (before, after, _) = read(&src, &tgt);
             assert!(after < before * 0.5, "roundtrip: {before:.4} -> {after:.4}");
-            honest_max = honest_max.max(after);
+            reached_max = reached_max.max(after);
         }
-        // The separation the FAR line lives in. Both sides asserted, so a
-        // drift that closes the gap from either end fails here rather than
+        // The separation the FAR line lives in. Every side asserted, so a
+        // drift that closes the gap from any end fails here rather than
         // silently making the reading useless.
         let (_, unreachable, look) = read(&hazy_canyon_source(), &vivid_warm_target());
         assert!(
-            honest_max < crate::fit_zoned::JOINT_FAR_ERR * 0.6,
-            "the honest fits must stay well under the FAR line (worst {honest_max:.4})"
+            reached_max * 2.0 <= crate::fit_zoned::JOINT_FAR_ERR,
+            "a fit that REACHES its target must stay at least 2x under the FAR \
+             line (worst {reached_max:.4}); the real pairs' worst is 0.054, so \
+             this margin is the fixtures' half of the same statement"
+        );
+        assert!(
+            refusal_max < crate::fit_zoned::JOINT_FAR_ERR,
+            "a policy refusal is not a miss and must not be warned about \
+             (worst {refusal_max:.4}) — the tightest constraint on the line"
+        );
+        assert!(
+            refusal_max > reached_max,
+            "premise of the two-band split: refusing to chase a regrade must \
+             read farther than reaching the target ({refusal_max:.4} vs \
+             {reached_max:.4})"
         );
         assert!(
             unreachable > crate::fit_zoned::JOINT_FAR_ERR * 2.0,
             "the unreachable repaint must stay well over the FAR line ({unreachable:.4})"
+        );
+        // THE REAL-PAIR ANCHORS, recorded as literals because the photographs
+        // cannot ship (RAW + finished JPEG off the user's library, measured
+        // through `autoshop match` on 2026-08-17 — the table in this test's
+        // doc). Everything above pins the line from BELOW; only these pin it
+        // from above, and without them the constant could drift back to any
+        // value the fixtures tolerate. They are what makes this test fail on
+        // the pre-R24 ladder.
+        // Both sides are constants, so they are checked at COMPILE time: a
+        // ladder that stops bracketing the real pairs must not wait for
+        // someone to run the suite.
+        const REAL_NONSENSE_WEIGHTED: f32 = 0.141; // A1, the astro composite
+        const REAL_HONEST_WORST: f32 = 0.054; // A4, worst of the five honest
+        const _: () = assert!(
+            crate::fit_zoned::JOINT_FAR_ERR <= REAL_NONSENSE_WEIGHTED,
+            "the real pair the user called nonsense reads 0.141 and must raise \
+             the joint warning — that is why the line moved off 0.25"
+        );
+        const _: () = assert!(
+            REAL_HONEST_WORST < crate::fit_zoned::JOINT_FAR_ERR,
+            "…and the worst HONEST real pair reads 0.054 and must not"
+        );
+        // The other end of the same anchor: on that pair the ladder must
+        // reach its floor, not merely warn. It reported 0.578 before this
+        // retune — a warning printed beside "we are 58% sure" is the
+        // incoherence the tie between the two constants exists to prevent.
+        assert_eq!(
+            clamp_confidence(
+                1.0 - REAL_NONSENSE_WEIGHTED * crate::fit_zoned::JOINT_CONFIDENCE_SLOPE
+            ),
+            CONFIDENCE_FLOOR,
+            "the nonsense pair must bottom the confidence out, not shade it"
         );
         // …and the reason the second reading exists: the scalar calls that
         // same fit a partial success.
@@ -2985,6 +3105,29 @@ mod tests {
         );
         // Refused would be wrong: a recipe still comes back.
         assert!(rep.err_after.is_finite());
+        // …and the DISCLOSURE has to reach the number too (R24 batch 2). The
+        // real cropped pair of 2026-08-17 printed "treat the result as
+        // unreliable" directly beneath a confidence of 0.83, because both
+        // readings are taken over populations the crop already made
+        // incomparable and neither can see that. The sentence and the number
+        // are one statement or the user believes the number.
+        assert!(
+            rep.recipe.confidence <= NOT_SAME_FRAME_CONFIDENCE_CAP,
+            "a warned pair must not claim more than the cap, got {}",
+            rep.recipe.confidence
+        );
+        // A CAP, not a verdict: the crop-only measurement behind it says the
+        // residual could be framing, not that the fit is broken, so the floor
+        // stays available to the two ladders that DO measure something.
+        assert!(rep.recipe.confidence > CONFIDENCE_FLOOR);
+        // And it must not touch a pair whose frames agree — the cap is keyed
+        // to the warning, so a silent pair keeps whatever it earned.
+        let same = fit_recipe(&src, &synth());
+        assert!(
+            same.recipe.confidence > NOT_SAME_FRAME_CONFIDENCE_CAP,
+            "an unwarned pair must be free of the cap, got {}",
+            same.recipe.confidence
+        );
     }
 
     /// R23 review MED-3: an ADJUSTED recipe gets an adjusted REPORT.
@@ -3111,12 +3254,29 @@ mod tests {
         );
         assert!(rep.recipe.confidence >= CONFIDENCE_FLOOR);
         // …and on a fit that genuinely lands, it must not invent doubt.
+        //
+        // The bar is stated as a SEPARATION rather than an absolute (R24
+        // batch 2). It used to be `>= 0.75`, which was never an independent
+        // anchor: it was the old joint slope of 3.0 read back off this
+        // fixture (0.0446 x 3.0 leaves 0.87, so 0.75 was slack under it).
+        // Retuning the slope to 7.5 on the real pairs moves the same
+        // untouched fixture to 0.67, so an absolute bar could only be
+        // re-copied from the new slope — a test marking its own homework. The
+        // invariant that does not move with the ladder is that a landed fit
+        // and an unreachable one must not read alike.
         let (base, clean) = haze_pair();
         let good = fit_recipe(&base, &clean);
         assert!(
-            good.recipe.confidence >= 0.75,
-            "a landed fit must keep its confidence, got {}",
+            good.recipe.confidence > CONFIDENCE_FLOOR * 2.0,
+            "a landed fit must keep a confidence well clear of the floor, got {}",
             good.recipe.confidence
+        );
+        assert!(
+            good.recipe.confidence > rep.recipe.confidence + 0.3,
+            "the landed fit ({:.2}) and the unreachable repaint ({:.2}) must \
+             not read alike",
+            good.recipe.confidence,
+            rep.recipe.confidence
         );
     }
 

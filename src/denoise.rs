@@ -999,6 +999,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The MISSING-sidecar arm, pinned as a returned `Err` (R24 batch 2).
+    ///
+    /// The round's material gathering reported this arm printing `Error: …`
+    /// while the process exited 0 — an exit code scripts and CI read as
+    /// success. It does not reproduce: `denoise_cmd` propagates both arms with
+    /// `?`, `main` returns `anyhow::Result`, and a live run refuses with exit 1
+    /// on a baked input and on a RAW, in bash and in PowerShell alike. What
+    /// there WAS no coverage for is the property that makes that true, and the
+    /// one historical instance of this class in this codebase (`batch_cmd`
+    /// swallowing every per-photo failure into exit 0, 16-lane scan L09) was a
+    /// missing test, not a missing `?`. So the property is a test now: the
+    /// refusal must arrive as `Err` at the PUBLIC entry the CLI calls, not as
+    /// an `eprintln` plus `Ok(())` further in.
+    #[test]
+    fn a_missing_sidecar_script_is_an_error_not_a_printed_warning() {
+        let dir = tdir("nosidecar");
+        let mut opts = opts_for(&dir, true);
+        opts.script = dir.join("this-script-does-not-exist.py");
+        let input = dir.join("in.png");
+        write_png(&input, 8, 8);
+        let out = dir.join("out.png");
+
+        // `denoise_active` is what `main::denoise_cmd`'s baked arm calls…
+        let err = denoise_active(&opts, &input, true, &out).unwrap_err().to_string();
+        assert!(err.contains("denoise sidecar not found"), "{err}");
+        // …and no deliverable may be left behind claiming otherwise.
+        assert!(!out.exists(), "a refused denoise must not publish an output");
+        // The RAW arm reaches the same refusal through `render_to_file`, so
+        // the arm below it is pinned directly rather than through a sensor
+        // fixture this repo does not carry.
+        assert!(denoise_file(&opts, &input, &out).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// M-D4: the check replaced by an unconditional refusal (or pointed at
     /// the wrong path) — a sidecar that DOES write its output must succeed.
     /// Without this positive control the negative tests pass under a mutant

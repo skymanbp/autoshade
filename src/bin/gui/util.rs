@@ -1141,6 +1141,26 @@ pub(crate) fn segment_helper_available() -> bool {
     })
 }
 
+/// The same question for the Python DENOISE sidecar (R24 batch 2).
+///
+/// One helper family, one treatment: `python/denoise.py` ships exactly the way
+/// `python/segment.py` does — which is to say a release package carries
+/// neither — so 「🤖 AI Denoise now」 had the failure the segmentation buttons
+/// were fixed out of a round ago. It spent the click, ran the worker, and
+/// surfaced `denoise.rs`'s English "denoise sidecar not found at …" verbatim
+/// in a status line the rest of the app renders in the user's language. A
+/// capability probe answers before the click and in both languages, and it
+/// costs one `exists()` per process for the same reason the segmentation one
+/// does: `config::bundled_helper` searches the executable's own directory (not
+/// the cwd) and the env override is read at launch.
+pub(crate) fn denoise_helper_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        let cfg = autoshop::config::Config::load();
+        std::path::Path::new(&cfg.denoise_script).exists()
+    })
+}
+
 /// Where the persistent 160px thumbnail for `src` lives, or `None` when the
 /// source can't be stat'ed (no stable key → no caching). Rooted at the same
 /// per-user store as develops/settings (`store_root()` honours the

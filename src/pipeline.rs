@@ -4424,6 +4424,29 @@ mod tests {
     /// with `-- --ignored r16 --nocapture`. Prints the OLD neutral-source
     /// fit next to the NEW composed-calibration fit. Pure lib calls — the
     /// develop store is read (calibration authority) but never written.
+    ///
+    /// R24 batch 2 ran this on six real pairs to retire the joint ladder's
+    /// "provisional" label (the table is `fit::tests::
+    /// joint_family_is_calibrated_on_the_fixture_set`'s doc). Composed-domain
+    /// joint reading, base → fitted:
+    ///   A1 astro composite   0.402 → 0.064     A4 low-sat  0.082 → 0.060
+    ///   A2 vivid warm        0.332 → 0.064     A5 cropped  0.052 → 0.034
+    ///   A3 monochrome        0.050 → 0.014     A6 portrait 0.089 → 0.028
+    ///
+    /// TWO findings that belong with the numbers, because the next person to
+    /// run this harness will otherwise re-derive them the hard way:
+    ///   * The reading is DOMAIN-DEPENDENT, and this harness's domain is not
+    ///     the CLI's. `autoshop match` solves on the embedded preview and
+    ///     stamps the calibration afterwards; this solves with the
+    ///     calibration COMPOSED in. On A1 the composed solve is genuinely the
+    ///     better fit (look error 0.032 vs the CLI's 0.061), and its joint
+    ///     reading says so — 0.064 against the CLI's 0.141. The ladder is
+    ///     calibrated on the CLI-domain numbers because that is the domain
+    ///     the user's failure was reported in; a pair that reads far HERE is
+    ///     therefore worse than the constant suggests, not better.
+    ///   * Every one of the six improves by far more than
+    ///     [`crate::fit_zoned::JOINT_DRIFT_TOL`], so no real pair has yet
+    ///     come at that guard from the wrong side.
     #[test]
     #[ignore = "real-photo repro: needs AUTOSHOP_FIT_REPRO_RAW/_TARGET"]
     fn r16_composed_fit_on_a_real_pair() {
@@ -4550,6 +4573,34 @@ mod tests {
         let jb = crate::fit_zoned::joint_reading(&src_px, &tgt_px);
         let ja = crate::fit_zoned::joint_reading(&fit_px, &tgt_px);
         eprintln!("joint reading: base {jb:?}\njoint reading: fit  {ja:?}");
+        // The LADDER's verdict on this pair, printed beside the raw reading
+        // (R24 batch 2): the numbers above are what a calibration round
+        // measures, but "does this pair warn, and what does it claim" is what
+        // a calibration round DECIDES, and re-deriving it by hand from two
+        // constants is how a review misses that the two disagree.
+        eprintln!(
+            "ladder: confidence {:.3}, joint FAR warning {} (line {}, reading {:.4})",
+            new.recipe.confidence,
+            if ja.is_some_and(|r| r.weighted >= crate::fit_zoned::JOINT_FAR_ERR) {
+                "RAISED"
+            } else {
+                "silent"
+            },
+            crate::fit_zoned::JOINT_FAR_ERR,
+            ja.map(|r| r.weighted).unwrap_or(f32::NAN),
+        );
+        eprintln!(
+            "ladder: same-frame check {} (source {}x{}, target {}x{})",
+            if crate::fit::same_frame_plausible(&neutral, &target) {
+                "passed"
+            } else {
+                "WARNED — the reported confidence is capped"
+            },
+            neutral.width(),
+            neutral.height(),
+            target.width(),
+            target.height(),
+        );
         if let (Some(b), Some(a)) = (jb, ja) {
             assert!(
                 a.weighted <= b.weighted + crate::fit_zoned::JOINT_DRIFT_TOL,

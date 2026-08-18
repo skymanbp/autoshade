@@ -900,17 +900,31 @@ impl AutoshopApp {
                 // to find out what the denoiser does.
                 ui.add_space(SPACE_SM);
                 ui.horizontal(|ui| {
-                    let ready = self.src_path.is_some() && !self.busy;
+                    // CAPABILITY, not just state — the same rule the two
+                    // segmentation buttons follow one panel down (R24 batch 2).
+                    // Without `python/denoise.py` on disk this click can only
+                    // end in `denoise.rs`'s English "denoise sidecar not found
+                    // at …" landing in a status line the rest of the window
+                    // renders in the user's language, so the button says so up
+                    // front instead of spending the click to find out.
+                    let has_helper = denoise_helper_available();
+                    let ready = self.src_path.is_some() && !self.busy && has_helper;
+                    let missing = tr(lang,
+                        "this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_DENOISE_SCRIPT at python/denoise.py",
+                    );
                     if ui
                         .add_enabled(ready, egui::Button::new(tr(lang, "🤖 AI Denoise now")))
                         // 🤖 + the cross-reference line (#4): this verb stays
                         // beside Noise Reduction on purpose, so its tooltip is
-                        // where it says the rest of the AI moved to.
-                        .on_hover_text(ai_xref(lang, tr(lang,
+                        // where it says the rest of the AI moved to. On the arm
+                        // that CANNOT run, the tooltip is about the missing
+                        // sidecar and nothing else — same discipline as the
+                        // segmentation pair.
+                        .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
                             "Run the SCUNet GPU sidecar on this variant's pixels and show the result on canvas \
                              (undoable — bakes a clean base into the current variant; the develop sliders keep \
                              applying on top; first run downloads the model)",
-                        )))
+                        )) } else { missing.to_string() })
                         .clicked()
                     {
                         self.start_ai_denoise();

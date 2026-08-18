@@ -317,6 +317,11 @@ pub fn load_image_for_develop(path: &Path) -> Result<DynamicImage> {
     load_image_gated(path, true) // not-a-consumer-call: dispatch inside the gate
 }
 
+/// THE ROUTING TABLE for the refusal below, kept in the doc rather than in the
+/// error text (R24 batch 2): a RAW that arrived here belongs in
+/// [`crate::render::render_to_image`] or [`crate::render::source_pixels`] (the
+/// one raw-vs-baked dispatch), or in [`decode_any`] when the caller wants the
+/// sensor data rather than a picture.
 // not-a-consumer-call: the gate's body — where a camera RAW is refused by name.
 fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     use image::ImageDecoder as _;
@@ -327,10 +332,19 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     // format could not be determined" for a photo the app had just developed
     // on screen) — the class this refuses by name, wherever it happens.
     if is_raw(path) {
+        // The sentence a USER may read. It used to end in three Rust paths
+        // (`render::render_to_image / render::source_pixels`, `decode::
+        // decode_any`), which is a developer's routing table shown in a
+        // desktop toast and a web error body — the two surfaces this gate
+        // actually reaches (the CLI routes RAWs before they arrive here). The
+        // routing table now lives one screen up, in this function's own doc,
+        // where the developer who needs it is already reading; what stays here
+        // is the fact and the way out, in words the person holding the photo
+        // can act on.
         anyhow::bail!(
-            "{} is a camera RAW — this path reads BAKED rasters (PNG/TIFF/JPEG) only. \
-             Develop it through render::render_to_image / render::source_pixels (or \
-             decode::decode_any for the sensor data)",
+            "{} is a camera RAW, and this step reads finished images \
+             (PNG/TIFF/JPEG) only — a RAW has to be developed before anything \
+             can read it as a picture",
             path.display()
         );
     }
@@ -1044,9 +1058,14 @@ mod tests {
     /// This is the v0.22 mask-refine bug's root: the GUI worker handed a .ARW
     /// to `load_image`, whose `ImageReader` has no RAW decoder, so the user saw
     /// "The image format could not be determined" for a photo the app was
-    /// developing on screen at that moment. A named refusal (and the pointer to
-    /// the develop entry points) is what makes the next missed dispatch
-    /// diagnosable in one read of the toast.
+    /// developing on screen at that moment. A named refusal is what makes the
+    /// next missed dispatch diagnosable in one read of the toast.
+    ///
+    /// R24 batch 2 also pins what the sentence may NOT contain. This gate's
+    /// only two surfaces are the desktop toast and the web error body, and the
+    /// text used to hand both of them three Rust paths. Naming the file and the
+    /// condition is what makes a missed dispatch obvious; naming our functions
+    /// is what makes a user think the app is broken in a way they caused.
     #[test]
     fn load_image_refuses_a_camera_raw_by_name() { // not-a-consumer-call: the gate's own test
         let dir = std::env::temp_dir().join(format!("autoshop-load-raw-{}", std::process::id()));
@@ -1067,9 +1086,21 @@ mod tests {
             ] {
                 let e = format!("{e:#}");
                 assert!(
-                    e.contains("RAW") && e.contains("render_to_image"),
+                    e.contains("RAW") && e.contains("developed"),
                     "{what}({name}) must name the RAW and the way out: {e}"
                 );
+                assert!(
+                    e.contains(name),
+                    "{what}({name}) must name the FILE — a toast that omits it \
+                     cannot be acted on: {e}"
+                );
+                for symbol in ["render_to_image", "source_pixels", "decode_any", "::"] {
+                    assert!(
+                        !e.contains(symbol),
+                        "{what}({name}) leaks the internal symbol {symbol:?} into \
+                         a message the desktop and web faces show verbatim: {e}"
+                    );
+                }
             }
         }
         // A baked raster still loads through the very same gate.
