@@ -281,6 +281,10 @@ impl AutoshopApp {
         changed |= self.dev_detail(ui, detail_active);
         changed |= self.dev_effects(ui, effects_active);
         changed |= self.dev_lens(ui);
+        // R25 B4, in Lightroom's own panel order (Transform follows Lens
+        // Corrections). Read-only, so it can never set `changed` — and it
+        // draws nothing at all unless the photo carried such a block.
+        changed |= self.dev_transform(ui);
         changed |= self.dev_crop(ui);
         changed |= self.dev_masks(ui);
         changed |= self.dev_versions(ui);
@@ -1197,6 +1201,96 @@ impl AutoshopApp {
                 );
             });
         changed
+    }
+
+    /// 变换 — Lightroom's Transform (Upright / Perspective) and Camera
+    /// Calibration blocks, the first members of `Tier::PassThrough` (R25 B4).
+    ///
+    /// **READ-ONLY, and that is the design, not a shortcut.** Pass-through
+    /// means we never interpret these values: no band, no clamp, no neutral,
+    /// no idea what they do to a pixel. A slider needs all four. Offering one
+    /// would say "this app understands your Upright correction" about sixteen
+    /// strings it copies between two files without reading — and the app
+    /// already has a rule for a control that moves a number and no pixel
+    /// (`ARCHITECTURE.md`: "the worst kind of bug here"). What the section
+    /// owes the photographer is the OPPOSITE of a slider: proof the values
+    /// are still there, and one sentence saying we do not touch them.
+    ///
+    /// Absent from the recipe ⇒ absent from the panel: a heading over an
+    /// empty list is a promise about a file that never had one.
+    ///
+    /// The rows show Adobe's own `crs:` property names, not friendly labels —
+    /// the honest spelling for something we cannot describe in our own words.
+    /// `CameraProfile` is the exception, because its VALUE is a name the
+    /// photographer chose in Lightroom's profile browser rather than an
+    /// internal of the Upright solver.
+    fn dev_transform(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        if self.recipe.passthrough.is_empty() {
+            return false;
+        }
+        ui.add_space(SPACE_MD);
+        // BOTH blocks in the heading: the section carries Lightroom's
+        // Transform panel AND its Calibration panel, and naming only the first
+        // would send someone looking for their camera profile in the wrong
+        // place. No ● — the dot means "an adjustment is active but collapsed",
+        // and there is no adjustment here to be active.
+        egui::CollapsingHeader::new(format!(
+            "{} / {}",
+            tr(lang, "Transform"),
+            tr(lang, "Calibration")
+        ))
+            .id_salt("sec_transform")
+            .default_open(false)
+            .show(ui, |ui| {
+                // In PASSTHROUGH_CRS order (Adobe's own grouping), which is
+                // also the order the writer emits — one order everywhere, so
+                // the panel and the sidecar read the same way.
+                let rows = |ui: &mut egui::Ui, caption: &str, keys: &[&str]| {
+                    let present: Vec<(&str, &str)> = keys
+                        .iter()
+                        .filter_map(|k| {
+                            self.recipe.passthrough.get(*k).map(|v| (*k, v.as_str()))
+                        })
+                        .collect();
+                    if present.is_empty() {
+                        return;
+                    }
+                    ui.label(egui::RichText::new(caption).weak().small());
+                    for (key, value) in present {
+                        ui.horizontal(|ui| {
+                            let label = if key == "CameraProfile" {
+                                tr(lang, "Camera profile").to_string()
+                            } else {
+                                format!("crs:{key}")
+                            };
+                            ui.label(egui::RichText::new(label).small());
+                            ui.label(egui::RichText::new(value).small().strong());
+                        });
+                    }
+                };
+                // Partitioned by the KEY, not by a hard-coded midpoint: the
+                // two groups are complements, so a seventeenth key lands in
+                // one of them instead of falling off the end of a `split_at`.
+                let keys = autoshop::xmp::PASSTHROUGH_CRS;
+                let perspective: Vec<&str> =
+                    keys.iter().copied().filter(|k| k.starts_with("Perspective")).collect();
+                let calibration: Vec<&str> =
+                    keys.iter().copied().filter(|k| !k.starts_with("Perspective")).collect();
+                rows(ui, tr(lang, "Perspective correction"), &perspective);
+                rows(ui, tr(lang, "Camera calibration"), &calibration);
+                ui.add_space(SPACE_SM);
+                ui.label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Carried through to the sidecar unchanged; Autoshop never interprets these",
+                    ))
+                    .weak()
+                    .small(),
+                );
+            });
+        // Nothing here can change the recipe — that is the whole point.
+        false
     }
 
     /// One develop-panel section — body extracted verbatim from

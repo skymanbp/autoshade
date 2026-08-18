@@ -1360,6 +1360,17 @@ pub(crate) fn carry_over_unrepresentable(
     // it explicitly, since the derivation there is by `Tier::CarriedOnly`.
     recipe.ca_r = base.ca_r;
     recipe.ca_b = base.ca_b;
+    // R25 B4: the Transform / Calibration pass-through block rides for the
+    // SAME reason and with the sharpest edge of all. It is `EngineCarrier`, so
+    // no response can restate it; we now OWN its sixteen keys, so the next
+    // save's merge strips them out of the user's sidecar before rewriting —
+    // and the writer emits only what the map holds. A Refine that dropped this
+    // map would therefore delete the photographer's Upright correction and
+    // camera profile from the file beside their RAW, permanently, without a
+    // single control having moved. `carried_effects_survive_a_refine` derives
+    // its field list from the tiers that render nothing, so this line is
+    // required to exist by the same test the B2/B3 blocks answer to.
+    recipe.passthrough = base.passthrough.clone();
     recipe.clamp(); // the size caps still apply after re-attaching
 }
 
@@ -2177,23 +2188,28 @@ fn write_xmp_doc(
         // is honest about what happened to it: a base at the output path is
         // genuinely replaced by the regeneration; a base beside the RAW is
         // not touched at all, only unrepresented in the new file. "The camera
-        // profile / Look, LR lens-profile data" are EXAMPLES of what a
+        // creative Look, LR lens-profile data" are EXAMPLES of what a
         // Lightroom base carries, not a claim about this one — a ratings-only
         // sidecar loses its ratings the same way. (Lightroom's Texture used to
         // head that list; R25 B2 models it, so a regenerated file DOES carry
-        // it and naming it here would have made the disclosure false.)
+        // it and naming it here would have made the disclosure false. The
+        // "camera profile" went the same way in R25 B4: `crs:CameraProfile`
+        // and the Transform block ride in `EditRecipe::passthrough` and are
+        // rewritten by the regeneration too — the creative `Look` is a NESTED
+        // element with no string spelling and is still genuinely lost, which
+        // is why it is the example that stayed.)
         notes.push(if bp == out {
             format!(
                 "the existing sidecar at {} could not be merged — it was regenerated, \
-                 so properties it carried (e.g. Lightroom's camera profile / \
-                 Look, LR lens-profile data) are not in the new file",
+                 so properties it carried (e.g. Lightroom's creative Look, \
+                 LR lens-profile data) are not in the new file",
                 out.display()
             )
         } else {
             format!(
                 "the sidecar at {} could not be merged — the new file at {} was \
                  regenerated without the properties it carried (e.g. Lightroom's \
-                 camera profile / Look, LR lens-profile data, ratings); \
+                 creative Look, LR lens-profile data, ratings); \
                  the sidecar itself is untouched",
                 bp.display(),
                 out.display()
@@ -2773,19 +2789,33 @@ mod guard_tests {
     /// fails on the first one that `carry_over_unrepresentable` does not copy.
     #[test]
     fn carried_effects_survive_a_refine() {
-        use crate::advisor::catalogue::{global_value, Shape, Tier, RECIPE_CONTROLS};
+        use crate::advisor::catalogue::{Shape, RECIPE_CONTROLS};
         // The CarriedOnly rows, PLUS the two engine-only rows that render
         // (`ca_r`/`ca_b`, R25 B3). The derivation cannot reach those from the
         // tier — they are `Rendered` — but they are in exactly the same
         // position: the schema never asks for them, so this block is their
         // only way home. Naming them here keeps the pair from being the one
         // field the widening test cannot see.
+        //
+        // R25 B4 widened the SIEVE, not just the list: the filter is now every
+        // tier that renders nothing (`CarriedOnly` ∪ `PassThrough`) rather than
+        // the one tier B2 happened to create. `passthrough` is the case that
+        // proves the point — it is not `CarriedOnly`, it is exactly as
+        // un-restatable, and a `CarriedOnly`-only sieve would have let B4 ship
+        // with no carry line and no test to say so.
         let carried: Vec<&str> = RECIPE_CONTROLS
             .iter()
-            .filter(|c| c.tier == Some(Tier::CarriedOnly) || matches!(c.name, "ca_r" | "ca_b"))
+            .filter(|c| {
+                c.tier.is_some_and(|t| !t.renders() && t.owns_crs_key())
+                    || matches!(c.name, "ca_r" | "ca_b")
+            })
             .map(|c| c.name)
             .collect();
         assert!(carried.len() > 9, "premise: B3 widened the tier past B2's nine");
+        assert!(
+            carried.contains(&"passthrough"),
+            "premise: the B4 PassThrough row must reach this sieve, or the widening was cosmetic"
+        );
         for pair in ["ca_r", "ca_b"] {
             assert!(carried.contains(&pair), "the rendered-but-engine-only pair must be probed");
         }
@@ -2803,18 +2833,33 @@ mod guard_tests {
                 .expect("a registry row");
             json[*name] = match shape {
                 Shape::Bool => serde_json::json!(true),
+                // B4's row is a key → verbatim-string MAP, and `3.0` is not a
+                // value it deserialises from. One real Lightroom spelling,
+                // first-hand from the reference sidecars.
+                Shape::EngineCarrier => serde_json::json!({ "PerspectiveVertical": "-35" }),
                 _ => serde_json::json!(3.0),
             };
         }
         let mut base: EditRecipe =
             serde_json::from_value(json).expect("the probe values are in range");
         base.clamp();
+        // Read through SERDE, not through `global_value`: the latter answers
+        // for the scalar shapes, and B4's carrier is a map. Comparing the
+        // serialised value covers every shape the sieve can ever hand us — and
+        // it is the same "against the DEFAULT, never against zero" rule
+        // `global_value` was serving here (de-fringe's neutral is Adobe's own
+        // 30/70/40/60, so "moved" cannot mean "non-zero").
+        let field = |r: &EditRecipe, name: &str| {
+            serde_json::to_value(r).ok().and_then(|v| v.get(name).cloned())
+        };
         for name in &carried {
-            // Against the DEFAULT, not against zero: de-fringe's neutral is
-            // Adobe's own 30/70/40/60, so "moved" cannot mean "non-zero".
+            assert!(
+                field(&base, name).is_some(),
+                "{name}: the registry names a field serde cannot see"
+            );
             assert_ne!(
-                global_value(&base, name),
-                global_value(&neutral, name),
+                field(&base, name),
+                field(&neutral, name),
                 "{name}: the probe must actually move the control"
             );
         }
@@ -2823,8 +2868,8 @@ mod guard_tests {
         carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
         for name in &carried {
             assert_eq!(
-                global_value(&proposed, name),
-                global_value(&base, name),
+                field(&proposed, name),
+                field(&base, name),
                 "{name}: a Refine deleted a carried value the model was never asked for"
             );
         }
@@ -3175,7 +3220,13 @@ mod guard_tests {
         assert!(!text.contains("crs:PointColor"), "…by regenerating, so the LR property is gone");
         let note = note.expect("the loss must be disclosed, not silent");
         assert!(note.contains("regenerated"), "the note names what happened: {note}");
-        assert!(note.contains("camera profile"), "…and what it cost: {note}");
+        // R25 B4: the example the note gives used to be "camera profile /
+        // Look". `crs:CameraProfile` rides in `EditRecipe::passthrough` now,
+        // so a REGENERATED file still carries it and naming it here would
+        // make the disclosure false; the creative `Look` is a nested element
+        // with no string spelling and is still genuinely lost.
+        assert!(note.contains("creative Look"), "…and what it cost: {note}");
+        assert!(!note.contains("camera profile"), "…which is no longer the profile: {note}");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);

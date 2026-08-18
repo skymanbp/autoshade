@@ -401,6 +401,57 @@ pub(crate) fn xmp_loss_interrupts(
         })
 }
 
+/// The OTHER corner of the disclosure square (R25 B4): the settings this
+/// photo carries that LIGHTROOM renders and this canvas does not.
+///
+/// [`xmp_loss_line`] says "the sidecar cannot carry what you are looking at".
+/// This says the reverse — "you are not looking at everything the sidecar
+/// carries" — and until R25 nothing did. B2 and B3 made that urgent: twenty-
+/// four `Tier::CarriedOnly` controls now round-trip through the sidecar
+/// without moving one pixel here (policy SF4-C), and B4 added the pass-through
+/// blocks. Each slider says so in its own tooltip; this is the document-level
+/// sentence, said at the moment the file is handed to Lightroom.
+///
+/// NAMED BY SECTION, not by field. `post_crop_vignette_hl` is an internal
+/// symbol and R24 pinned those out of user prose; the develop panel's own
+/// section headings are the words the photographer already has. The mapping
+/// goes through the registry's FAMILY table, so a control that joins a family
+/// joins the sentence — and a family nobody labelled here falls back to the
+/// registry name (loud, and `the_render_gap_line_appears_only_when_something_
+/// is_carried` fails on the underscore) rather than vanishing.
+///
+/// `None` when nothing is carried: this never interrupts and never toasts —
+/// nothing was lost, the sidecar is complete, and it is the canvas that is
+/// missing something. The quiet channel only.
+///
+/// The B4 pass-through blocks do not reach here (`xmp::global_render_gaps`
+/// states why): with no interpretation there is no neutral, so they would
+/// name themselves on every Lightroom photo. They disclose through the
+/// develop panel's own read-only Transform / Calibration section instead.
+pub(crate) fn render_gap_line(lang: Lang, gaps: &[&'static str]) -> Option<String> {
+    use autoshop::advisor::catalogue::CONTROL_FAMILIES;
+    if gaps.is_empty() {
+        return None;
+    }
+    let mut sections: Vec<String> = Vec::new();
+    for g in gaps {
+        let label = match CONTROL_FAMILIES.iter().find(|f| f.members.contains(g)).map(|f| f.name) {
+            Some("effects") => tr(lang, "Effects").to_string(),
+            Some("detail_effects") => tr(lang, "Detail").to_string(),
+            Some("lens_effects") => tr(lang, "Lens").to_string(),
+            _ => (*g).to_string(),
+        };
+        if !sections.contains(&label) {
+            sections.push(label);
+        }
+    }
+    Some(format!(
+        "{}: {}",
+        tr(lang, "Carried to Lightroom, not rendered here"),
+        sections.join(", ")
+    ))
+}
+
 /// The IMPORT-side twin of [`xmp_loss_line`] (R25 P1): one line saying how
 /// many Lightroom masks arrived and, NAMED, what did not come with them.
 ///

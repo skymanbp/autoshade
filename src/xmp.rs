@@ -514,6 +514,56 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
         .collect()
 }
 
+/// **The MIRROR of [`global_export_losses`]** (R25 B4): the controls this
+/// document carries that LIGHTROOM renders and this engine does not.
+///
+/// The disclosure story had one half. `RenderedNotExported` — we render it,
+/// the sidecar cannot carry it — has been named since R24-5 M0. The opposite
+/// corner had no surface at all, and R25's B2/B3 batches filled it with
+/// twenty-four members: a photographer who imports a Lightroom grain, a
+/// post-crop vignette or a colour-noise setting sees a canvas that is missing
+/// them, and until now nothing on screen said so. `ARCHITECTURE.md` calls a
+/// slider that moves a number and no pixel "the worst kind of bug here"; this
+/// is the sentence that keeps the SF4-C whitelist from being exactly that.
+///
+/// DERIVED from the registry's `CarriedOnly` rows, so a control promoted to
+/// `Rendered` leaves this disclosure by itself and a new carried one arrives
+/// already named.
+///
+/// "Active" is measured against [`EditRecipe::default`], NEVER against zero.
+/// The de-fringe block's neutral is Adobe's own 30/70/40/60 (R25 B3), so a
+/// zero comparison would report every untouched photo as carrying a de-fringe
+/// this app does not render — a disclosure that cries wolf on every save is a
+/// disclosure nobody reads.
+///
+/// **`PassThrough` is deliberately NOT here**, though its tier renders nothing
+/// either — and the reason is the tier's own definition rather than an
+/// oversight. Every other row on this list has a KNOWN neutral, so "active"
+/// is a decidable question; a pass-through value is never interpreted, which
+/// means we cannot tell `crs:PerspectiveUpright="0"` (a block Lightroom
+/// stamps on every file it touches, changing nothing anywhere) from a real
+/// Upright correction. Including it would put this sentence on essentially
+/// every Lightroom photo, permanently and unactionably, and drown the members
+/// that ARE actionable — the same judgement `xmp_loss_interrupts` makes about
+/// the base curve. The pass-through disclosure is its own develop-panel
+/// section, which shows the sixteen values themselves and says we never read
+/// them. Pinned in both directions by
+/// `the_render_gaps_name_what_lightroom_renders_and_this_engine_does_not`.
+pub fn global_render_gaps(r: &EditRecipe) -> Vec<&'static str> {
+    use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+    let (Ok(live), Ok(neutral)) =
+        (serde_json::to_value(r), serde_json::to_value(EditRecipe::default()))
+    else {
+        return Vec::new();
+    };
+    RECIPE_CONTROLS
+        .iter()
+        .filter(|c| c.tier == Some(Tier::CarriedOnly))
+        .filter(|c| live.get(c.name) != neutral.get(c.name))
+        .map(|c| c.name)
+        .collect()
+}
+
 /// **Import-side disclosure, GLOBAL half** (R24-5 M0): the `crs:` properties
 /// this sidecar carries on its own `rdf:Description` that Autoshop does not
 /// model at all — PointColor, the Transform and Calibration blocks, the
@@ -657,6 +707,52 @@ pub fn unmodelled_global_crs(xmp: &str) -> Vec<String> {
     }
     found.into_iter().collect()
 }
+
+/// **The PASS-THROUGH key set** (R25 B4): Lightroom's Transform (Upright /
+/// Perspective) and Camera Calibration blocks, carried verbatim between the
+/// sidecar and `EditRecipe::passthrough` and NEVER interpreted — the first
+/// real payload `Tier::PassThrough` has ever had.
+///
+/// A NAMED SET, not "everything unknown", and that is the whole design.
+/// [`owned_attr_keys`] is a static list and it is the merge's REMOVAL
+/// universe: a free-form map would emit keys the merge never strips, so our
+/// value would land beside Lightroom's original as a duplicate attribute.
+/// Sixteen keys we can name are sixteen keys the strip can name too.
+///
+/// The complement is not abandoned — it is DISCLOSED. `crs:Look` (a nested
+/// element, not a string), `crs:PointColor`, `crs:CameraProfileDigest`,
+/// `crs:UprightTransform` and the rest stay outside this list, are preserved
+/// by the merge exactly as before, and go on being named by
+/// [`unmodelled_global_crs`]. That is the feature, not the omission.
+///
+/// FIRST-HAND (all seven reference sidecars): every Perspective key is present
+/// on every file, `crs:PerspectiveScale="100"` and `crs:PerspectiveX="0.00"`
+/// are the resting spellings, one file carries `crs:PerspectiveVertical="-35"`
+/// and `crs:PerspectiveRotate="+0.9"` — three different numeric spellings for
+/// the same neutral, which is precisely why these are strings. The
+/// Calibration keys appear on none of them (Lightroom omits the block at its
+/// defaults) and `crs:CameraProfile="Adobe Standard"` on all seven — a NAME,
+/// with a space in it, so the map is `String → String` and not a number map.
+pub const PASSTHROUGH_CRS: [&str; 16] = [
+    // Transform / Upright (8)
+    "PerspectiveUpright",
+    "PerspectiveVertical",
+    "PerspectiveHorizontal",
+    "PerspectiveRotate",
+    "PerspectiveScale",
+    "PerspectiveAspect",
+    "PerspectiveX",
+    "PerspectiveY",
+    // Camera Calibration (8)
+    "CameraProfile",
+    "CameraCalibrationRedHue",
+    "CameraCalibrationRedSaturation",
+    "CameraCalibrationGreenHue",
+    "CameraCalibrationGreenSaturation",
+    "CameraCalibrationBlueHue",
+    "CameraCalibrationBlueSaturation",
+    "CameraCalibrationShadowTint",
+];
 
 /// The `crs:` properties this writer owns that have NO attribute spelling —
 /// the four tone curves and the mask block, which reach the sidecar only as
@@ -1025,6 +1121,27 @@ fn owned_attrs(r: &EditRecipe) -> String {
         }
     }
 
+    // The PASS-THROUGH blocks (R25 B4): Transform / Upright and Camera
+    // Calibration, written back as the exact strings they arrived as.
+    //
+    // In [`PASSTHROUGH_CRS`] order, NOT the map's. A `BTreeMap` iterates
+    // alphabetically, which would interleave the two blocks
+    // (CameraCalibration… before CameraProfile before Perspective…) and put
+    // them in an order no Lightroom file uses — legal XML, unreadable diffs.
+    // The declared order is Adobe's own grouping.
+    //
+    // No formatting whatever: `+0.9`, `0.00` and `Adobe Standard` all go out
+    // as themselves. `attr` still XML-escapes, which is transport, not
+    // interpretation — and it is why a profile name with an `&` in it
+    // survives. A key absent from the map was absent from the document, and
+    // stays absent: we do not invent a Calibration block for a file that
+    // never had one.
+    for key in PASSTHROUGH_CRS {
+        if let Some(v) = r.passthrough.get(key) {
+            attr(&mut a, key, v);
+        }
+    }
+
     // Crop (normalised [0,1]); only applied by Lightroom when HasCrop is True.
     // Straighten rides the SAME crop transform in Adobe's model: a nonzero
     // CropAngle under HasCrop="False" is ignored by Lightroom, so a
@@ -1310,6 +1427,12 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
+    // The R25 B4 PASS-THROUGH blocks. Owning them is what makes the merge
+    // strip each key before the writer puts it back — without that, our
+    // verbatim copy would land beside Lightroom's original as a duplicate
+    // attribute. It is also what takes the sixteen out of
+    // `unmodelled_global_crs`, whose universe is this list's complement.
+    keys.extend(PASSTHROUGH_CRS.iter().map(|s| (*s).to_string()));
     for band in crate::recipe::HSL_BANDS {
         keys.push(format!("HueAdjustment{band}"));
         keys.push(format!("SaturationAdjustment{band}"));
@@ -2117,6 +2240,32 @@ pub struct MergeOutcome {
     pub losses: Vec<MaskLoss>,
 }
 
+/// What the merge REMOVES from the base document before writing `r`'s own
+/// properties back — [`owned_attr_keys`], minus the pass-through keys this
+/// particular recipe knows nothing about (R25 B4).
+///
+/// Owning a key normally means the recipe SPEAKS for it: a grain slider back
+/// at 0 means "no grain", the writer omits the key, and the merge's strip is
+/// what makes the removal real. A pass-through property has no such state.
+/// The map is filled ONLY by reading a document, there is no control that can
+/// empty it, and an empty entry therefore never means "the user cleared the
+/// camera profile" — it means this recipe came from somewhere that never saw
+/// one (a v0.30 `recipe.json` written before the field existed, a paste from
+/// another photo, a fresh Analyze). Stripping on that would delete the
+/// photographer's Upright correction and camera profile from the file beside
+/// their RAW, silently, on an ordinary Ctrl+S — the exact defect class this
+/// round is closing, not opening.
+///
+/// Absent from the map ⇒ not stripped ⇒ the base's own bytes stand. Present
+/// ⇒ stripped and rewritten verbatim. Either way exactly one copy survives,
+/// which is the duplicate-attribute rule the strip exists for.
+fn merge_strip_keys(r: &EditRecipe) -> Vec<String> {
+    owned_attr_keys()
+        .into_iter()
+        .filter(|k| !PASSTHROUGH_CRS.contains(&k.as_str()) || r.passthrough.contains_key(k))
+        .collect()
+}
+
 pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutcome> {
     if existing.len() > MAX_XMP_BYTES {
         return None;
@@ -2144,7 +2293,7 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
     // BOTH quote styles: single-quoted attributes are legal XML, and leaving
     // one behind would duplicate the attribute we append.
     let mut tag = existing[desc_start..=gt].to_string();
-    for key in owned_attr_keys() {
+    for key in merge_strip_keys(r) {
         let name = format!("crs:{key}");
         while let Some((span, _)) = xml_attribute_raw(&tag, &name) {
             let mut left = span.start;
@@ -2219,7 +2368,7 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
         .iter()
         .filter(|k| !(preserve_masks && **k == "MaskGroupBasedCorrections"))
         .map(|k| (*k).to_string())
-        .chain(owned_attr_keys())
+        .chain(merge_strip_keys(r))
         .collect();
 
 
@@ -2449,6 +2598,18 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
     let mut bad: Vec<String> = owned_attr_keys()
         .into_iter()
         .filter(|k| !STRINGY.contains(&k.as_str()))
+        // The PASS-THROUGH sixteen are EXEMPT, and not as a special case — as
+        // the definition of the tier. This scan exists because an owned key
+        // whose value does not parse "imports as a SILENT neutral, and the
+        // next save overwrites the sidecar with those neutrals". A
+        // pass-through property has no neutral to import as: it is never read
+        // as a number, never clamped and never replaced — it goes back out as
+        // the same string, in range or out, numeric or not. Naming
+        // `crs:CameraProfile="Adobe Standard"` here would be a warning about a
+        // value that round-tripped perfectly (R25 B4); so would
+        // `crs:PerspectiveX="-140"`, which is out of the ±100 default band
+        // this scan falls back to and is a perfectly ordinary Upright result.
+        .filter(|k| !PASSTHROUGH_CRS.contains(&k.as_str()))
         .filter(|k| {
             crs_str(&scope, k).is_some()
                 && crs_f32(&scope, k)
@@ -3538,6 +3699,21 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         blue_curve: parse_curve(scope, "ToneCurvePV2012Blue"),
         masks: parse_masks(scope, ours),
 
+        // The PASS-THROUGH blocks (R25 B4), read as STRINGS and stored
+        // verbatim. `crs_str` already reads BOTH spellings — the
+        // Description's own attribute and the property-element child — so
+        // this loop covers the element form with no second scanner (the R24
+        // round-end MED-1 lesson: a third scan arm is how the two forms drift
+        // apart). An absent key stays absent from the map, which is how the
+        // writer knows not to invent it.
+        //
+        // Read from `scope`, like every other setting: a creative Look nests
+        // its own baked `crs:CameraProfile`, and the flat scan would have
+        // imported the PROFILE's name whenever the top level omitted one.
+        passthrough: PASSTHROUGH_CRS
+            .iter()
+            .filter_map(|k| crs_str(scope, k).map(|v| ((*k).to_string(), v.into_owned())))
+            .collect(),
 
         rationale,
         confidence,
@@ -3620,21 +3796,35 @@ mod tests {
     /// `unsupported_corrections`, which had no partner until now.
     #[test]
     fn an_imported_sidecar_names_the_globals_the_engine_does_not_render() {
-        // FIXTURE NOTE (R25 B2): `Texture` and `GrainAmount` used to be the
-        // samples here. They are modelled now, so they would be the wrong kind
-        // of example — the complement shrank, exactly as this disclosure's own
-        // doc promised it would. `PointColor` and `Look` took their place;
-        // `PerspectiveUpright` stays until B4 claims it.
+        // FIXTURE NOTE, THIRD REVISION. `Texture` / `GrainAmount` were the
+        // samples until R25 B2 modelled them; `PerspectiveUpright` took over
+        // and B4 has now claimed that too. The samples are `PointColor` and
+        // `CameraProfileDigest` — the latter chosen deliberately: it sits one
+        // line from `crs:CameraProfile` in every real sidecar, and B4 owns the
+        // profile NAME while the digest stays foreign. The list shrinking under
+        // the fixtures, batch after batch, IS the complement definition working.
         let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
                    xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
                    <rdf:Description rdf:about=\"\" \
                    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
                    crs:Exposure2012=\"+1.00\" crs:Texture=\"+30\" \
                    crs:PointColor=\"0\" crs:PerspectiveUpright=\"1\" \
+                   crs:CameraProfile=\"Adobe Standard\" \
+                   crs:CameraProfileDigest=\"2D1D4700365C3E2831EEAE0D1A8F9CDF\" \
                    crs:RawFileName=\"crs:NotAnAttribute=1.ARW\"/></rdf:RDF></x:xmpmeta>";
         let found = unmodelled_global_crs(doc);
         assert!(found.contains(&"PointColor".to_string()), "LR's PointColor: {found:?}");
-        assert!(found.contains(&"PerspectiveUpright".to_string()), "{found:?}");
+        assert!(found.contains(&"CameraProfileDigest".to_string()), "{found:?}");
+        // …and the B4 half of the same claim: the Transform / Calibration
+        // blocks are ours now, so they left this list with no edit to it.
+        assert!(
+            !found.contains(&"PerspectiveUpright".to_string()),
+            "PerspectiveUpright is passed through since R25 B4: {found:?}"
+        );
+        assert!(
+            !found.contains(&"CameraProfile".to_string()),
+            "the profile NAME is passed through; only its digest is foreign: {found:?}"
+        );
         // A control we DO model is not "unmodelled" — the universe is the
         // complement of `owned_attr_keys`, which is what stops this list from
         // needing a catalogue of Adobe property names to keep up to date.
@@ -3704,24 +3894,27 @@ mod tests {
                     xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">";
         let tail = "</rdf:RDF></x:xmpmeta>";
         // (a) Pure element form — the shape that returned EMPTY before.
-        // (Same fixture note as the test above: `Texture`/`GrainAmount` are
-        // modelled since R25 B2, so the unmodelled samples are `PointColor`
-        // and `PerspectiveUpright` now.)
+        // (Same fixture note as the test above, third revision: `Texture` is
+        // modelled since B2 and `PerspectiveUpright` is passed through since
+        // B4, so the unmodelled samples are `PointColor` and
+        // `UprightTransform` — the Upright SOLVER's own opaque blob, which is
+        // in six of the seven reference sidecars and stays foreign.)
         let element = format!(
             "{head}<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
              <crs:Exposure2012>+1.00</crs:Exposure2012>\
              <crs:Texture>+30</crs:Texture>\
-             <crs:PointColor>0</crs:PointColor>\
              <crs:PerspectiveUpright>1</crs:PerspectiveUpright>\
+             <crs:PointColor>0</crs:PointColor>\
+             <crs:UprightTransform>1.0000000</crs:UprightTransform>\
              </rdf:Description>{tail}"
         );
         let found = unmodelled_global_crs(&element);
         assert_eq!(
             found,
-            vec!["PerspectiveUpright", "PointColor"],
+            vec!["PointColor", "UprightTransform"],
             "element-form globals must be named exactly once, and never the modelled \
-             Exposure2012 / Texture"
+             Exposure2012 / Texture or the passed-through PerspectiveUpright"
         );
 
         // (b) MIXED: Lightroom splits the same Description across both forms.
@@ -3729,10 +3922,10 @@ mod tests {
             "{head}<rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
              crs:Exposure2012=\"+1.00\" crs:PointColor=\"0\">\
-             <crs:PerspectiveUpright>1</crs:PerspectiveUpright>\
+             <crs:UprightTransform>1.0000000</crs:UprightTransform>\
              </rdf:Description>{tail}"
         );
-        assert_eq!(unmodelled_global_crs(&mixed), vec!["PerspectiveUpright", "PointColor"]);
+        assert_eq!(unmodelled_global_crs(&mixed), vec!["PointColor", "UprightTransform"]);
 
         // (c) The two exclusions the element walk must keep: a mask block's
         // `crs:Local*` items (their own disclosure) and a creative Look's
@@ -4640,6 +4833,335 @@ mod tests {
         let r = xmp_to_recipe(lr);
         assert_eq!((r.sharpen_radius, r.color_nr, r.defringe_purple), (1.0, 25.0, 3.0));
         assert!(r.auto_lateral_ca);
+    }
+
+    // ───────────────────── R25 B4: the pass-through blocks ──────────────────
+
+    /// A Lightroom Transform / Calibration block, verbatim, in this batch's
+    /// own spellings — synthetic, but every value below is copied CHARACTER
+    /// FOR CHARACTER out of the seven reference sidecars (a bare `0`, a
+    /// decimal `0.00`, a signed `+0.9`, a plain `100`, a negative `-35` and a
+    /// profile NAME with a space in it: six different spellings of things a
+    /// number formatter would flatten into three).
+    fn lr_transform_doc() -> String {
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+         xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+         <rdf:Description rdf:about=\"\" \
+         xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+         crs:Exposure2012=\"+1.00\" \
+         crs:PerspectiveUpright=\"0\" crs:PerspectiveVertical=\"-35\" \
+         crs:PerspectiveHorizontal=\"0\" crs:PerspectiveRotate=\"+0.9\" \
+         crs:PerspectiveScale=\"100\" crs:PerspectiveAspect=\"0\" \
+         crs:PerspectiveX=\"0.00\" crs:PerspectiveY=\"0.00\" \
+         crs:CameraProfile=\"Adobe Standard\" \
+         crs:CameraProfileDigest=\"2D1D4700365C3E2831EEAE0D1A8F9CDF\" \
+         crs:HasSettings=\"True\"/></rdf:RDF></x:xmpmeta>"
+            .to_string()
+    }
+
+    /// **The first real payload `Tier::PassThrough` has ever carried**
+    /// (`ARCHITECTURE.md` recorded the tier as "none yet" until this batch).
+    /// The registry's three-sided law only checks that a ROW exists; this
+    /// checks that the value survives the round trip as ITSELF.
+    #[test]
+    fn passthrough_round_trips_verbatim() {
+        let r = xmp_to_recipe(&lr_transform_doc());
+        assert_eq!(r.passthrough.len(), 9, "eight Perspective keys + the profile: {:?}", r.passthrough);
+        // VERBATIM means the spelling too. Every one of these would have been
+        // destroyed by a number round trip: `+0.9` loses its sign marker,
+        // `0.00` loses two decimals, `Adobe Standard` is not a number at all.
+        for (key, want) in [
+            ("PerspectiveUpright", "0"),
+            ("PerspectiveVertical", "-35"),
+            ("PerspectiveRotate", "+0.9"),
+            ("PerspectiveScale", "100"),
+            ("PerspectiveX", "0.00"),
+            ("CameraProfile", "Adobe Standard"),
+        ] {
+            assert_eq!(r.passthrough.get(key).map(String::as_str), Some(want), "{key}");
+        }
+        // The keys OUTSIDE the named sixteen are untouched by all of this:
+        // the digest stays foreign, preserved by the merge and named by the
+        // import disclosure. "Named set, not everything unknown."
+        assert!(!r.passthrough.contains_key("CameraProfileDigest"));
+        assert!(
+            unmodelled_global_crs(&lr_transform_doc()).contains(&"CameraProfileDigest".to_string())
+        );
+
+        // Out and back, through OUR writer.
+        let ours = recipe_to_xmp(&r);
+        assert!(ours.contains(r#"crs:PerspectiveRotate="+0.9""#), "{ours}");
+        assert!(ours.contains(r#"crs:CameraProfile="Adobe Standard""#), "{ours}");
+        assert_eq!(xmp_to_recipe(&ours).passthrough, r.passthrough, "a full verbatim round trip");
+
+        // Written in PASSTHROUGH_CRS order, not the BTreeMap's alphabetical
+        // one: Adobe groups Transform before Calibration, and a diff against
+        // Lightroom's own file has to be readable.
+        let at = |k: &str| ours.find(&format!("crs:{k}=")).unwrap_or_else(|| panic!("{k} missing"));
+        assert!(at("PerspectiveUpright") < at("PerspectiveY"), "the Transform block keeps its order");
+        assert!(at("PerspectiveY") < at("CameraProfile"), "Transform before Calibration");
+
+        // XML transport still applies — escaping is not interpretation, and a
+        // profile name really can carry an ampersand.
+        let odd = EditRecipe {
+            passthrough: [("CameraProfile".to_string(), "Sky & Sea <v2>".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let doc = recipe_to_xmp(&odd);
+        assert!(doc.contains("Sky &amp; Sea &lt;v2&gt;"), "escaped on the way out: {doc}");
+        assert_eq!(
+            xmp_to_recipe(&doc).passthrough.get("CameraProfile").map(String::as_str),
+            Some("Sky & Sea <v2>"),
+            "…and unescaped back to the very same string"
+        );
+    }
+
+    /// The empty map is the state of every recipe written before this batch,
+    /// and it must change NOTHING: no invented Transform block in the sidecar,
+    /// and an older `recipe.json` with no such key still reads.
+    #[test]
+    fn an_empty_passthrough_map_leaves_the_sidecar_bytes_unchanged() {
+        let doc = recipe_to_xmp(&EditRecipe::default());
+        for key in PASSTHROUGH_CRS {
+            assert!(
+                !doc.contains(&format!("crs:{key}=")),
+                "{key}: a recipe that never saw a Transform block must not assert one: {doc}"
+            );
+        }
+        // Forward/backward compatibility of the FIELD, which is the other
+        // half of "unchanged": a recipe.json from v0.30 has no `passthrough`
+        // key at all and must still load, as an empty map.
+        let legacy = r#"{"version":2,"exposure_ev":0.25}"#;
+        let r: EditRecipe = serde_json::from_str(legacy).expect("a legacy recipe still parses");
+        assert!(r.passthrough.is_empty());
+        assert_eq!(r.exposure_ev, 0.25);
+    }
+
+    /// The merge's own trap, and the reason [`merge_strip_keys`] exists: a
+    /// recipe that never SAW a Transform block must not delete one.
+    ///
+    /// Owning a key normally licenses the strip — that is how a cleared
+    /// vignette disappears. Pass-through has no cleared state: nothing in the
+    /// app can empty the map, so "absent" only ever means "this recipe came
+    /// from somewhere that never read the document" (a v0.30 recipe.json, a
+    /// paste from another photo, a fresh Analyze). Stripping on that would
+    /// delete the photographer's Upright correction and camera profile from
+    /// the file beside their RAW on an ordinary Ctrl+S.
+    #[test]
+    fn a_recipe_that_never_saw_a_transform_block_does_not_delete_one() {
+        let lr = lr_transform_doc();
+        // (a) The dangerous case: empty map, real Transform block in the base.
+        let blind = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        let merged = merged_doc(&lr, &blind).expect("mergeable");
+        for want in [
+            r#"crs:PerspectiveVertical="-35""#,
+            r#"crs:PerspectiveRotate="+0.9""#,
+            r#"crs:CameraProfile="Adobe Standard""#,
+        ] {
+            assert!(merged.contains(want), "the base's own {want} must survive: {merged}");
+        }
+        assert_eq!(merged.matches("crs:CameraProfile=").count(), 1, "and exactly once");
+        assert!(merged.contains(r#"crs:Exposure2012="0.25""#), "…while ours still publish");
+
+        // (b) The ordinary case: the recipe DID read the block, so ours are
+        // stripped and rewritten — one copy, never two.
+        let seen = EditRecipe { exposure_ev: 0.25, ..xmp_to_recipe(&lr) };
+        let merged = merged_doc(&lr, &seen).expect("mergeable");
+        assert_eq!(merged.matches("crs:CameraProfile=").count(), 1, "stripped, then rewritten");
+        assert_eq!(merged.matches("crs:PerspectiveScale=").count(), 1);
+        assert!(merged.contains(r#"crs:CameraProfile="Adobe Standard""#));
+        // (c) …and a CHANGED value replaces rather than duplicates.
+        let mut edited = seen.clone();
+        edited.passthrough.insert("CameraProfile".to_string(), "Adobe Landscape".to_string());
+        let merged = merged_doc(&lr, &edited).expect("mergeable");
+        assert_eq!(merged.matches("crs:CameraProfile=").count(), 1);
+        assert!(merged.contains(r#"crs:CameraProfile="Adobe Landscape""#), "{merged}");
+        assert!(!merged.contains("Adobe Standard\""), "the old value is gone: {merged}");
+    }
+
+    /// The regenerate path — the one that "carries none of the base's
+    /// properties". It carries these: the sixteen live in the RECIPE now, so
+    /// a document rebuilt from scratch still states them. (`pipeline`'s
+    /// regeneration note names the creative `Look` instead of the camera
+    /// profile for exactly this reason.)
+    #[test]
+    fn passthrough_survives_a_regenerate() {
+        let r = xmp_to_recipe(&lr_transform_doc());
+        let fresh = recipe_to_xmp(&r); // no base document at all
+        assert!(fresh.contains(r#"crs:CameraProfile="Adobe Standard""#), "{fresh}");
+        assert!(fresh.contains(r#"crs:PerspectiveVertical="-35""#), "{fresh}");
+        assert_eq!(xmp_to_recipe(&fresh).passthrough, r.passthrough);
+    }
+
+    /// Both spellings, one scanner. `crs_str` already reads the
+    /// property-ELEMENT form, so the reader needed no second scan arm (R24
+    /// round-end MED-1: a third arm is how the two forms drift apart) — and
+    /// the SCOPE rule matters more here than anywhere: a creative Look nests
+    /// its own baked `crs:CameraProfile`, and a flat scan would import the
+    /// PROFILE's name as the photographer's choice.
+    #[test]
+    fn passthrough_reads_the_element_form_and_never_the_nested_look() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <rdf:Description rdf:about=\"\" \
+                   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\">\
+                   <crs:CameraProfile>Adobe Standard</crs:CameraProfile>\
+                   <crs:PerspectiveScale>110</crs:PerspectiveScale>\
+                   <crs:Look><rdf:Description><crs:Parameters><rdf:Description>\
+                   <crs:CameraProfile>Camera Landscape</crs:CameraProfile>\
+                   <crs:PerspectiveScale>999</crs:PerspectiveScale>\
+                   </rdf:Description></crs:Parameters></rdf:Description></crs:Look>\
+                   </rdf:Description></rdf:RDF></x:xmpmeta>";
+        let r = xmp_to_recipe(doc);
+        assert_eq!(
+            r.passthrough.get("CameraProfile").map(String::as_str),
+            Some("Adobe Standard"),
+            "the Description's OWN profile, never the Look's baked one"
+        );
+        assert_eq!(r.passthrough.get("PerspectiveScale").map(String::as_str), Some("110"));
+        // A document with no such block reports none — absence stays absence.
+        assert!(xmp_to_recipe("<rdf:Description \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:Exposure2012=\"0.00\"/>")
+            .passthrough
+            .is_empty());
+    }
+
+    /// A pass-through value is never "unparsable", because it is never parsed.
+    ///
+    /// The trap this closes: the sixteen keys joined `owned_attr_keys`, and
+    /// that list IS `unparsable_crs_numbers`' universe — with a ±100 fallback
+    /// band for any key the registry states no range for. Without the
+    /// exemption, `crs:CameraProfile="Adobe Standard"` (not a number) and
+    /// `crs:PerspectiveX="-140"` (an ordinary Upright result, outside ±100)
+    /// would both have been reported as values that "import as a silent
+    /// neutral" — about the one block in the recipe that has no neutral and
+    /// is never replaced.
+    #[test]
+    fn a_passthrough_value_is_never_called_unparsable() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <rdf:Description rdf:about=\"\" \
+                   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                   crs:CameraProfile=\"Adobe Standard\" crs:PerspectiveX=\"-140\" \
+                   crs:PerspectiveScale=\"117.5\" crs:Contrast2012=\"+22\" \
+                   crs:HasSettings=\"True\"/></rdf:RDF></x:xmpmeta>";
+        assert!(unparsable_crs_numbers(doc).is_empty(), "{:?}", unparsable_crs_numbers(doc));
+        // The premise, so the emptiness above is not emptiness for another
+        // reason: the same scan still names an OWNED number that is off its
+        // band, in the very same document.
+        let bad = doc.replace(r#"crs:Contrast2012="+22""#, r#"crs:Contrast2012="+220""#);
+        assert_eq!(unparsable_crs_numbers(&bad), vec!["Contrast2012"]);
+        // …and the values still arrive, out of band and all.
+        let r = xmp_to_recipe(doc);
+        assert_eq!(r.passthrough.get("PerspectiveX").map(String::as_str), Some("-140"));
+        assert_eq!(r.passthrough.get("PerspectiveScale").map(String::as_str), Some("117.5"));
+    }
+
+    /// **The disclosure that had no other half** (R25 B4, work order 4.7):
+    /// `global_export_losses` has named "we render it, the sidecar cannot
+    /// carry it" since R24-5 M0; this names the opposite corner — Lightroom
+    /// renders it, this engine does not — which R25's B2/B3 batches filled
+    /// with twenty-four members and B4 with the twenty-fifth.
+    #[test]
+    fn the_render_gaps_name_what_lightroom_renders_and_this_engine_does_not() {
+        use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
+        // NEUTRAL SAYS NOTHING — and against the DEFAULT, not against zero.
+        // The de-fringe block's neutral is Adobe's own 30/70/40/60 (R25 B3),
+        // so a zero comparison would report a de-fringe gap on every single
+        // photo ever opened, and a disclosure that fires always is read never.
+        assert!(
+            global_render_gaps(&EditRecipe::default()).is_empty(),
+            "a default recipe carries no gap: {:?}",
+            global_render_gaps(&EditRecipe::default())
+        );
+        let untouched = xmp_to_recipe(
+            "<rdf:Description xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:DefringePurpleAmount=\"0\" crs:DefringePurpleHueLo=\"30\" \
+             crs:DefringePurpleHueHi=\"70\" crs:DefringeGreenAmount=\"0\" \
+             crs:DefringeGreenHueLo=\"40\" crs:DefringeGreenHueHi=\"60\"/>",
+        );
+        assert!(
+            global_render_gaps(&untouched).is_empty(),
+            "a real sidecar's resting de-fringe block is not a gap: {:?}",
+            global_render_gaps(&untouched)
+        );
+        // One carried value, named.
+        let grainy = EditRecipe { grain: 30.0, ..Default::default() };
+        assert_eq!(global_render_gaps(&grainy), vec!["grain"]);
+        // A RENDERED control is not a gap, however far it is from neutral.
+        let bright = EditRecipe { exposure_ev: 2.0, texture: 40.0, ..Default::default() };
+        assert!(global_render_gaps(&bright).is_empty(), "{:?}", global_render_gaps(&bright));
+        // The B4 row is NOT here, and that is the tier's own definition
+        // rather than an omission: we never interpret a pass-through value,
+        // so we cannot tell Lightroom's resting `PerspectiveUpright="0"` — on
+        // six of the seven reference sidecars, changing nothing anywhere —
+        // from a real Upright correction. This sentence would then appear on
+        // every Lightroom photo ever opened and drown the members that ARE
+        // actionable. Its disclosure is the develop panel's own read-only
+        // section, which shows the values instead of guessing at them.
+        let upright = EditRecipe {
+            passthrough: [("PerspectiveVertical".to_string(), "-35".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        assert!(
+            global_render_gaps(&upright).is_empty(),
+            "PassThrough has no knowable neutral, so it discloses through its section"
+        );
+        assert!(
+            RECIPE_CONTROLS
+                .iter()
+                .any(|c| c.name == "passthrough" && c.tier == Some(Tier::PassThrough)),
+            "premise: the row exists and renders nothing — the exclusion above is a choice"
+        );
+        // DERIVATION: the list is exactly the CarriedOnly rows. Moving one to
+        // `Rendered` takes it out of the disclosure with no edit here — which
+        // is the property this test is really pinning.
+        let mut every = serde_json::to_value(EditRecipe::default()).expect("serialises");
+        let expect: Vec<&str> = RECIPE_CONTROLS
+            .iter()
+            .filter(|c| c.tier == Some(Tier::CarriedOnly))
+            .map(|c| c.name)
+            .collect();
+        assert!(
+            expect.len() >= 24,
+            "premise: B2+B3 put twenty-four CarriedOnly rows here: {expect:?}"
+        );
+        for name in &expect {
+            let shape = RECIPE_CONTROLS
+                .iter()
+                .find(|c| c.name == *name)
+                .map(|c| c.shape)
+                .expect("a registry row");
+            every[*name] = match shape {
+                crate::advisor::catalogue::Shape::Bool => serde_json::json!(true),
+                _ => serde_json::json!(7.0),
+            };
+        }
+        let all: EditRecipe = serde_json::from_value(every).expect("in range");
+        assert_eq!(global_render_gaps(&all), expect, "every non-rendering row, and only those");
+        // The two disclosures are DISJOINT halves of one story, never the
+        // same claim twice: a tier renders or it does not.
+        for g in global_render_gaps(&all) {
+            assert!(
+                !global_export_losses(&all).contains(&g),
+                "{g} cannot be both a render gap and an export loss"
+            );
+        }
+        // And the CarriedOnly whitelist is fully covered by it — a slider on
+        // that list that never reached this sentence would be the silent fork
+        // the SF4-C policy needs this disclosure to close.
+        for (n, _) in crate::advisor::catalogue::CARRIED_ONLY_GLOBAL {
+            assert!(
+                global_render_gaps(&all).contains(n),
+                "{n} is CarriedOnly but never reaches the render-gap disclosure"
+            );
+        }
+        let _ = Tier::PassThrough; // the tier this batch populated
     }
 
     /// R25 B2 (policy SF4-C): the nine carried effects reach the sidecar and
@@ -5554,6 +6076,83 @@ mod tests {
             "DSC09034.xmp was not in {dir} — the B3 auto-CA forensic case never ran"
         );
         eprintln!("{seen_effects} sidecar(s) carried a non-neutral B2 effect");
+    }
+
+    /// FORENSIC REGRESSION for the B4 PASS-THROUGH blocks, same directory and
+    /// same silent-skip rule as the two probes above.
+    ///
+    /// This is the one batch whose whole promise is "the bytes come back",
+    /// and synthetic fixtures cannot prove it: the spellings are the point,
+    /// and only Lightroom writes them. First-hand from the seven reference
+    /// sidecars — all eight Perspective keys on every file, `CameraProfile`
+    /// on every file, and NOT ONE Calibration key anywhere (Lightroom omits
+    /// the block at its defaults), which is exactly why an absent key must
+    /// stay absent instead of being invented at some neutral we chose.
+    #[test]
+    fn real_lightroom_sidecars_pass_their_transform_blocks_through() {
+        let Ok(dir) = std::env::var("AUTOSHOP_MB_FIXTURES") else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            panic!("AUTOSHOP_MB_FIXTURES is set but unreadable: {dir}");
+        };
+        let mut files = 0usize;
+        let mut seen_profile = 0usize;
+        let mut seen_upright = 0usize;
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.to_string_lossy().to_lowercase().contains(".xmp") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            files += 1;
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let r = xmp_to_recipe(&text);
+            let shown: Vec<String> =
+                PASSTHROUGH_CRS.iter().filter_map(|k| r.passthrough.get(*k).map(|v| format!("{k}={v:?}"))).collect();
+            eprintln!("{name}: {} passthrough key(s) — {}", shown.len(), shown.join(" "));
+            if r.passthrough.contains_key("CameraProfile") {
+                seen_profile += 1;
+            }
+            if r.passthrough.contains_key("PerspectiveUpright") {
+                seen_upright += 1;
+            }
+            // VERBATIM, on real bytes: every value that arrived must reach the
+            // merged document as the identical string, and come back as the
+            // identical string. A formatter anywhere in this path would show
+            // up here as `+0.9` → `0.9` or `0.00` → `0`.
+            //
+            // Counted inside `crs_own_scope`, and this probe is what proved
+            // the distinction matters: every one of the reference sidecars
+            // carries a SECOND `crs:CameraProfile` inside its creative Look's
+            // baked `<crs:Parameters>`, which the merge preserves on purpose
+            // (`top_level_owned_spans` strips top-level properties only) and
+            // the reader is already scoped away from. A flat count over the
+            // whole document reports two and is reading someone else's
+            // settings block as our duplicate.
+            if let Some(merged) = merge_recipe_into_xmp(&text, &r) {
+                let scope = crs_own_scope(&merged.doc);
+                for (k, v) in &r.passthrough {
+                    assert!(
+                        scope.contains(&format!("crs:{k}=\"{v}\"")),
+                        "{name}: crs:{k} did not reach the merged document as {v:?}"
+                    );
+                    assert_eq!(
+                        scope.matches(&format!("crs:{k}=")).count(),
+                        1,
+                        "{name}: crs:{k} was written twice — the strip missed the original"
+                    );
+                }
+                assert_eq!(
+                    xmp_to_recipe(&merged.doc).passthrough,
+                    r.passthrough,
+                    "{name}: the pass-through block did not survive its own round trip"
+                );
+            }
+        }
+        assert!(files > 0, "AUTOSHOP_MB_FIXTURES held no sidecars: {dir}");
+        assert_eq!(seen_profile, files, "every reference sidecar carries crs:CameraProfile");
+        assert_eq!(seen_upright, files, "…and the whole Perspective block");
     }
 
     /// R25 P0-0.1: the bands `unparsable_crs_numbers` judges a document by ARE

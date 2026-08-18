@@ -425,6 +425,21 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Grain roughness", "噪点密度"),
     ("Carried to Lightroom, not rendered here", "本机不渲染，仅随 XMP 带出"),
 
+    // ── Develop · Transform + Calibration (R25 B4 — Tier::PassThrough) ───────
+    // A READ-ONLY section: these sixteen crs properties are carried between
+    // the sidecar and recipe.json verbatim and never interpreted, so there is
+    // nothing here to offer a slider for. The two group captions are
+    // QUALIFIED («Perspective correction» / «Camera calibration») while the
+    // bare 「Transform」/「Calibration」 name the blocks in the save-time
+    // render-gap line — the same word doing the same job in both places.
+    ("Transform", "变换"),
+    ("Calibration", "校准"),
+    ("Perspective correction", "透视校正"),
+    ("Camera calibration", "相机校准"),
+    ("Camera profile", "镜头配置文件"),
+    ("Carried through to the sidecar unchanged; Autoshop never interprets these",
+        "原样带出到边车文件；Autoshop 从不解读这些值"),
+
     // ── Develop · Local Masks (add + AI segmentation) ────────────────────────
     ("Local Masks ({n})", "局部蒙版 ({n})"),
     ("＋ Linear gradient", "＋ 线性渐变"),

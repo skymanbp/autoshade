@@ -258,6 +258,29 @@ pub struct EditRecipe {
     /// → `crs:GrainFrequency`.
     pub grain_rough: f32,
 
+    // --- Transform + Calibration: PASSED THROUGH, never interpreted (R25 B4) -
+    /// Lightroom's Transform (Upright / Perspective) and Camera Calibration
+    /// blocks, carried between the sidecar and `recipe.json` as the VERBATIM
+    /// strings Lightroom wrote — key → value, no parsing, no clamping, no
+    /// meaning. The first member of `Tier::PassThrough`, and the one contract
+    /// that separates it from `CarriedOnly`: a carried control is a NUMBER we
+    /// read, bound and could render one day; a passed-through property is a
+    /// string we have no opinion about at all. Out-of-range, oddly spelled or
+    /// eight-decimal values ride out exactly as they rode in.
+    ///
+    /// The DOMAIN is a named key set (`xmp::PASSTHROUGH_CRS`, sixteen keys),
+    /// not "everything unknown": `owned_attr_keys` — the merge's strip
+    /// universe — is a static list, so a free-for-all map would write keys the
+    /// merge does not remove and Lightroom would read our value beside its own
+    /// duplicate. Everything outside those sixteen stays where it always was:
+    /// preserved by the merge, and NAMED by `xmp::unmodelled_global_crs`.
+    ///
+    /// A `BTreeMap`, so `recipe.json` and the R21 structure fingerprint are
+    /// deterministic. The container's `#[serde(default)]` covers absence (an
+    /// empty map is `BTreeMap::default()`) — no field-level default is needed
+    /// here, unlike `coord_era`, whose legacy default DIFFERS from the type's.
+    pub passthrough: std::collections::BTreeMap<String, String>,
+
     // --- Geometry (optional) ------------------------------------------------
     /// Clockwise straighten angle in degrees, e.g. -2.5..=2.5 for horizons.
     pub straighten_deg: f32,
@@ -399,6 +422,10 @@ impl Default for EditRecipe {
             grain: 0.0,
             grain_size: 0.0,
             grain_rough: 0.0,
+            // Empty = the document carried no Transform / Calibration block.
+            // There is no "neutral Upright" to invent here: a key we never saw
+            // must not be written into somebody's sidecar.
+            passthrough: std::collections::BTreeMap::new(),
             straighten_deg: 0.0,
             crop: None,
             tone_curve: Vec::new(),
@@ -1120,6 +1147,23 @@ impl EditRecipe {
             before - s.len()
         }
         summary.truncated_string_bytes += cap(&mut self.rationale, MAX_RATIONALE);
+        // The pass-through block is STRINGS from a foreign document, so it
+        // falls under the same rule as `rationale` and the mask names above:
+        // the reader fills it from a fixed sixteen keys, but a hand-edited
+        // recipe.json is not obliged to. Bounded here rather than trusted —
+        // and generously, because the whole promise of these values is that
+        // they ride out byte-for-byte (`crs:CameraProfile` is a profile NAME,
+        // and Adobe's are long).
+        const MAX_PASSTHROUGH: usize = 64;
+        const MAX_PASSTHROUGH_VALUE: usize = 512;
+        while self.passthrough.len() > MAX_PASSTHROUGH {
+            if let Some((_, v)) = self.passthrough.pop_last() {
+                summary.truncated_string_bytes += v.len();
+            }
+        }
+        for v in self.passthrough.values_mut() {
+            summary.truncated_string_bytes += cap(v, MAX_PASSTHROUGH_VALUE);
+        }
         summary.dropped_masks = self.masks.len().saturating_sub(MAX_MASKS);
         self.masks.truncate(MAX_MASKS);
         for m in &mut self.masks {
@@ -1491,6 +1535,22 @@ impl EditRecipe {
                 } else {
                     self.lens_profile.clone()
                 },
+                // The pass-through blocks are PROVENANCE too (R25 B4), and
+                // this exclusion is load-bearing rather than tidy. Lightroom
+                // writes the whole Perspective block plus `crs:CameraProfile`
+                // onto every file it has so much as looked at, whether or not
+                // the photographer ever opened Transform — all seven reference
+                // sidecars carry nine of these keys and six of the seven carry
+                // the Perspective block entirely at rest — so counting them as
+                // an edit would make an UNTOUCHED Lightroom sidecar out-rank the
+                // photographer's own stored develop (`SavedDevelop`
+                // precedence, gui/persist.rs) and blank their canvas on
+                // open. Nothing in this app can set the map either: it is
+                // filled by reading a document and by nothing else, so it can
+                // never be the thing the user changed. The sidecar keeps its
+                // block regardless — `xmp::merge_strip_keys` never strips a
+                // key the recipe in hand does not carry.
+                passthrough: std::collections::BTreeMap::new(),
                 ..self.clone()
             } == EditRecipe::default()
     }
@@ -1818,6 +1878,27 @@ mod tests {
         let mut toggled = stamped.clone();
         toggled.lens_profile.distortion_on = false;
         assert!(!toggled.is_noop(), "a toggle away from the stamp is an edit");
+        // R25 B4: the pass-through blocks are the same kind of provenance,
+        // and the consequence of getting this wrong is bigger than a badge.
+        // Lightroom stamps `crs:PerspectiveUpright="0" … crs:CameraProfile=
+        // "Adobe Standard"` onto every file it has touched (nine keys on all
+        // seven reference sidecars), so if that counted as an edit an
+        // UNTOUCHED Lightroom sidecar would out-rank the photographer's own
+        // stored develop on open (`SavedDevelop` precedence) and blank the
+        // canvas. Nothing in the app can set this map, so it can never be the
+        // thing the user changed.
+        let carried = EditRecipe {
+            passthrough: [
+                ("PerspectiveUpright".to_string(), "0".to_string()),
+                ("CameraProfile".to_string(), "Adobe Standard".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert!(carried.is_noop(), "a Lightroom Transform block is not an edit");
+        let edited = EditRecipe { exposure_ev: 0.5, ..carried.clone() };
+        assert!(!edited.is_noop(), "…and it does not mask a real one either");
         // Round-trip.
         let json = serde_json::to_string(&toggled).unwrap();
         let back: EditRecipe = serde_json::from_str(&json).unwrap();

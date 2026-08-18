@@ -173,9 +173,17 @@ pub enum Tier {
     CarriedOnly,
     /// Carried through the sidecar verbatim and never interpreted — neither
     /// engine nor reader gives it meaning. Reserved for the LR-only property
-    /// blocks the XMP merge already preserves (Transform, Calibration, the
-    /// camera Look): those are not recipe fields today, so the tier has NO
-    /// registry member yet, and the B4 batch is what gives it one.
+    /// blocks the XMP merge already preserves; R25 B4 gave the tier its first
+    /// and so far only member, `passthrough` (Lightroom's Transform / Upright
+    /// and Camera Calibration blocks — `xmp::PASSTHROUGH_CRS`, sixteen keys
+    /// read and written as the strings Lightroom wrote).
+    ///
+    /// The line against [`CarriedOnly`](Tier::CarriedOnly): a carried control
+    /// is a NUMBER we read, bound and could render one day, and it owes the
+    /// whitelist a reason why we do not. A pass-through property is a STRING
+    /// we have no opinion about at all — no band, no clamp, no neutral, and
+    /// nothing to promise. That is why it needs no allow-list and why
+    /// `unparsable_crs_numbers` exempts it: there is no reading to get wrong.
     PassThrough,
     /// The engine renders it and the sidecar cannot carry it — what you see
     /// here is NOT what Lightroom will show. The half of the disclosure story
@@ -392,7 +400,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 61] = [
+pub const RECIPE_CONTROLS: [Control; 62] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -1025,6 +1033,27 @@ pub const RECIPE_CONTROLS: [Control; 61] = [
         tier: Some(Tier::RenderedNotExported),
         purpose: "the in-camera lens profile read from the RAW's own metadata (calibration, never \
                   exported to XMP)",
+    },
+    Control {
+        // R25 B4 — the FIRST member `Tier::PassThrough` has ever had, and the
+        // batch the tier's own doc named as the one allowed to give it one.
+        //
+        // One row for sixteen `crs:` keys, which is why the shape is a
+        // carrier: the value is a key → verbatim-string map, not a number the
+        // schema could ask for. `EngineCarrier` is what keeps it out of the
+        // advisor's response schema for good (`engine_carriers_never_reach_
+        // the_schema`) — and that is not a scheduling decision. There is
+        // nothing here for a model to decide: we do not know what these values
+        // MEAN, which is the definition of the tier.
+        name: "passthrough",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = the document carried no Transform / Calibration block",
+        engine_only: true,
+        crs: CrsKey::Family("Perspective* + CameraProfile + CameraCalibration* (xmp::PASSTHROUGH_CRS)"),
+        tier: Some(Tier::PassThrough),
+        purpose: "Lightroom's Transform (Upright) and Camera Calibration blocks, carried between \
+                  the sidecar and recipe.json verbatim and never interpreted",
     },
     Control {
         name: "masks",
@@ -1895,6 +1924,10 @@ pub enum GlobalValue<'a> {
     Masks(&'a [LocalAdjustment]),
     Knots(&'a [[f32; 2]]),
     Lens(&'a LensProfile),
+    /// The R25 B4 pass-through block: `crs:` key → the verbatim string
+    /// Lightroom wrote. Equality is the whole map, which is the right
+    /// "is it active" answer for a value nothing interprets.
+    PassThrough(&'a std::collections::BTreeMap<String, String>),
 }
 
 impl GlobalValue<'_> {
@@ -1979,6 +2012,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         base_curve,
         lens_profile,
         masks,
+        passthrough,
         rationale,
         confidence,
     } = r;
@@ -2042,6 +2076,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "base_curve" => GlobalValue::Knots(base_curve),
         "lens_profile" => GlobalValue::Lens(lens_profile),
         "masks" => GlobalValue::Masks(masks),
+        "passthrough" => GlobalValue::PassThrough(passthrough),
         "rationale" => GlobalValue::Text(rationale),
         "confidence" => GlobalValue::Num(*confidence),
         _ => return None,
@@ -2411,19 +2446,56 @@ mod tests {
                 assert!(!why.trim().is_empty(), "{label}.{n} has no stated reason");
             }
         }
-        // PassThrough is declared and deliberately unpopulated: the LR-only
-        // property blocks it describes (Transform, Calibration, the camera
-        // Look) are preserved by the XMP merge WITHOUT being recipe fields.
-        // The B4 batch is what gives this tier its first member; until then
-        // an accidental one would be a control nobody renders and nobody
-        // interprets.
-        assert!(
-            RECIPE_CONTROLS
-                .iter()
-                .chain(LOCAL_CONTROLS.iter())
-                .all(|c| c.tier != Some(Tier::PassThrough)),
-            "PassThrough gained a member — that is a B4 decision, not a refactor"
+        // PassThrough was declared and deliberately unpopulated until R25 B4,
+        // and this assertion used to say so ("PassThrough gained a member —
+        // that is a B4 decision, not a refactor"). B4 is this batch: the
+        // Transform and Calibration blocks became `EditRecipe::passthrough`,
+        // and the guard becomes the LAW that membership has to satisfy.
+        //
+        // Two conditions, each the reason the tier exists:
+        //
+        //   * `Shape::EngineCarrier` — a value we never interpret is a value
+        //     the advisor can have no opinion about, so the response schema
+        //     must not be able to ask for it (`Shape::schema` answers None,
+        //     which is what `engine_carriers_never_reach_the_schema` enforces
+        //     end to end). A `Shape::Number` here would be a control the model
+        //     could set and nobody could give meaning to.
+        //   * `crs.is_owned()` — pass-through is a SIDECAR contract. A member
+        //     with `CrsKey::None` would round-trip through nothing at all,
+        //     which is not "carried verbatim", it is just engine state.
+        //
+        // The premise is asserted too: an empty tier would make both
+        // conditions vacuously true, and this test would pass on a build where
+        // B4 had been reverted.
+        let pass_through: Vec<&str> = RECIPE_CONTROLS
+            .iter()
+            .chain(LOCAL_CONTROLS.iter())
+            .filter(|c| c.tier == Some(Tier::PassThrough))
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            pass_through,
+            vec!["passthrough"],
+            "R25 B4 gave PassThrough its first and only member; another one is a decision"
         );
+        for c in RECIPE_CONTROLS.iter().chain(LOCAL_CONTROLS.iter()) {
+            if c.tier != Some(Tier::PassThrough) {
+                continue;
+            }
+            assert_eq!(
+                c.shape,
+                Shape::EngineCarrier,
+                "{}: a PassThrough value is never interpreted, so the AI schema must not be \
+                 able to ask for it",
+                c.name
+            );
+            assert!(
+                c.crs.is_owned(),
+                "{}: PassThrough means carried THROUGH THE SIDECAR — a member with no crs key \
+                 of its own carries nothing",
+                c.name
+            );
+        }
     }
 
     /// The LOCAL tiers' RENDER half, re-derived from the engine rather than
@@ -2656,6 +2728,9 @@ mod tests {
             // required schema field could only ever return a guess (and, being
             // required, would return 0 and delete the photographer's own value
             // on every Refine).
+            // R25 B4 adds a FIFTH kind, and the plainest of them all:
+            // `passthrough` is a value nobody interprets, so there is no
+            // question to ask the model about it (`Tier::PassThrough`).
             vec![
                 "as_shot_k",
                 "as_shot_tint",
@@ -2679,6 +2754,8 @@ mod tests {
                 "lens_profile",
                 "nr_contrast",
                 "nr_detail",
+                // R25 B4, the fifth kind: nothing to ask, nothing to answer.
+                "passthrough",
                 "post_crop_vignette",
                 "post_crop_vignette_feather",
                 "post_crop_vignette_hl",

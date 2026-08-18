@@ -1055,6 +1055,19 @@ impl AutoshopApp {
                                     format!(" · {m}")
                                 });
                             }
+                            // R25 B4: the OPPOSITE corner, on the same line.
+                            // The sidecar just written is complete — it is the
+                            // canvas that is missing something, so this is
+                            // never a loss, never a toast, never a ⚠. Said
+                            // here because this is the moment the file goes to
+                            // Lightroom, which is when the difference between
+                            // the two renders starts to matter.
+                            if let Some(m) = render_gap_line(
+                                lang,
+                                &autoshop::xmp::global_render_gaps(&self.recipe),
+                            ) {
+                                s.push_str(&format!(" · {m}"));
+                            }
                             s
                         }
                         Err(e) => {

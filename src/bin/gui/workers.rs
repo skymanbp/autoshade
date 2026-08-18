@@ -1750,6 +1750,20 @@ impl AutoshopApp {
                                                                 s = format!("{s} · {m}");
                                                             }
                                                         }
+                                                        // R25 B4, the other
+                                                        // corner: what LR
+                                                        // renders and this
+                                                        // canvas does not.
+                                                        // Quiet channel only —
+                                                        // nothing was lost.
+                                                        if let Some(m) = render_gap_line(
+                                                            lang,
+                                                            &autoshop::xmp::global_render_gaps(
+                                                                &stamped,
+                                                            ),
+                                                        ) {
+                                                            s = format!("{s} · {m}");
+                                                        }
                                                     }
                                                     Err(e) => {
                                                         let t = trf(

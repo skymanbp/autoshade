@@ -6077,6 +6077,150 @@
         );
     }
 
+    /// R25 B4: the Transform section SHOWS what the sidecar carried and
+    /// offers no way to change it.
+    ///
+    /// The negative half is the design, not an omission — pass-through means
+    /// we never interpret these sixteen values, and a slider needs a band, a
+    /// clamp and a neutral we do not have. So how do you prove nothing here is
+    /// a slider, from a frame's drawn text? By the SPELLING. Every slider in
+    /// this panel formats its value through `fixed_decimals(0|1|2)`, so none
+    /// of them can draw `+0.9` (a leading plus), `0.00` (two decimals on an
+    /// integer axis) or `Adobe Standard` (not a number at all). Those three
+    /// strings appearing exactly as Lightroom wrote them IS the proof that the
+    /// section is a read-out — and it is the same assertion as "verbatim",
+    /// which is the whole promise of the tier.
+    #[test]
+    fn the_transform_section_shows_values_but_no_sliders() {
+        // A photo that never carried the block draws NO section: a heading
+        // over an empty list is a promise about a file that never had one.
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            // BOTH block names in the heading: the section carries Lightroom's
+            // Transform panel and its Calibration panel, and half a name sends
+            // someone looking for their camera profile in the wrong place.
+            let header = format!("{} / {}", tr(lang, "Transform"), tr(lang, "Calibration"));
+            let mut app = AutoshopApp { lang, ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert!(
+                !seen.contains(&header),
+                "{lang:?}: an empty pass-through map must draw no section: {seen:?}"
+            );
+
+            // …and one that did shows every key it carried. The values are
+            // the real spellings from the reference sidecars (DSC09642 is the
+            // one file in the library with a non-zero Upright).
+            app.recipe.passthrough = [
+                ("PerspectiveVertical", "-35"),
+                ("PerspectiveRotate", "+0.9"),
+                ("PerspectiveX", "0.00"),
+                ("CameraProfile", "Adobe Standard"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+            assert!(seen.contains(&header), "{lang:?}: no section: {seen:?}");
+            for want in [
+                tr(lang, "Perspective correction"),
+                tr(lang, "Camera calibration"),
+                tr(lang, "Camera profile"),
+                tr(lang, "Carried through to the sidecar unchanged; Autoshop never interprets these"),
+            ] {
+                assert!(seen.iter().any(|t| t == want), "{lang:?}: {want:?} missing: {seen:?}");
+            }
+            // Adobe's own property names for the values we cannot describe in
+            // our own words — one label, one key, no invented friendly name.
+            for key in ["crs:PerspectiveVertical", "crs:PerspectiveRotate", "crs:PerspectiveX"] {
+                assert!(seen.iter().any(|t| t == key), "{lang:?}: {key} row missing: {seen:?}");
+            }
+            // NO SLIDERS: the three spellings no slider in this panel can
+            // produce, drawn exactly as Lightroom wrote them.
+            for verbatim in ["-35", "+0.9", "0.00", "Adobe Standard"] {
+                assert!(
+                    seen.iter().any(|t| t == verbatim),
+                    "{lang:?}: {verbatim:?} is not on screen as itself — either the row is a \
+                     slider (which would reformat it) or the value was interpreted: {seen:?}"
+                );
+            }
+            // A key the document never carried is never invented.
+            assert!(
+                !seen.iter().any(|t| t == "crs:CameraCalibrationRedHue"),
+                "{lang:?}: an absent Calibration key must stay absent: {seen:?}"
+            );
+        }
+    }
+
+    /// R25 B4 (work order 4.9): the render-gap line — the disclosure corner
+    /// that had no surface — appears exactly when this photo carries a
+    /// setting Lightroom renders and this canvas does not.
+    ///
+    /// The counterpart of `the_save_line_names_what_the_xmp_cannot_carry`:
+    /// that one says the sidecar is missing something, this one says the
+    /// canvas is. It never interrupts, because nothing was lost.
+    #[test]
+    fn the_render_gap_line_appears_only_when_something_is_carried() {
+        use autoshop::xmp::global_render_gaps;
+        // A default develop says NOTHING — and this is the assertion that
+        // matters most, because the de-fringe block's neutral is Adobe's own
+        // 30/70/40/60: a "non-zero" test would fire on every photo ever
+        // opened, and a line that always appears is a line nobody reads.
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            assert!(
+                render_gap_line(lang, &global_render_gaps(&Default::default())).is_none(),
+                "{lang:?}: a neutral develop carries no gap"
+            );
+            assert!(render_gap_line(lang, &[]).is_none(), "{lang:?}: nothing in, nothing out");
+
+            // One carried effect, named by its SECTION — the word the
+            // photographer already has on screen, never `post_crop_vignette`.
+            let grain = autoshop::recipe::EditRecipe { grain: 30.0, ..Default::default() };
+            let line = render_gap_line(lang, &global_render_gaps(&grain))
+                .unwrap_or_else(|| panic!("{lang:?}: an imported grain is a gap"));
+            assert!(line.contains(tr(lang, "Effects")), "{lang:?}: {line}");
+            assert!(line.contains(tr(lang, "Carried to Lightroom, not rendered here")));
+
+            // Every section, once each — the three carried families,
+            // deduplicated (nine carried effects are one 「Effects」).
+            let all = autoshop::recipe::EditRecipe {
+                grain: 30.0,
+                grain_size: 25.0,
+                color_nr: 25.0,
+                defringe_purple: 3.0,
+                // A pass-through block on the same recipe, which must NOT
+                // reach this line: with nothing interpreted there is no
+                // neutral to compare against, so it would name itself on
+                // every Lightroom photo (xmp::global_render_gaps states it).
+                // Its surface is the read-only Transform / Calibration
+                // section, tested above.
+                passthrough: [("PerspectiveVertical".to_string(), "-35".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            };
+            let line = render_gap_line(lang, &global_render_gaps(&all)).expect("three sections");
+            for section in [tr(lang, "Effects"), tr(lang, "Detail"), tr(lang, "Lens")] {
+                assert!(line.contains(section), "{lang:?}: {section:?} missing from {line}");
+            }
+            assert!(
+                !line.contains(tr(lang, "Calibration")),
+                "{lang:?}: a pass-through block has no knowable neutral and must not \
+                 nag on every Lightroom photo: {line}"
+            );
+            assert_eq!(
+                line.matches(tr(lang, "Effects")).count(),
+                1,
+                "{lang:?}: nine carried effects are ONE section: {line}"
+            );
+            // R24's rule, and this test's tripwire: a carried control whose
+            // family nobody labelled falls back to its registry NAME, which is
+            // an internal symbol — so the underscore is what fails here.
+            assert!(
+                !line.contains('_'),
+                "{lang:?}: a field id reached the UI prose — label its family: {line}"
+            );
+        }
+    }
+
     /// R25 (closing R22-1): Settings SHOWS the segmentation sidecar path and
     /// offers no way to change it.
     ///
