@@ -40,9 +40,26 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   loop **visually**: the proposal is rendered and judged by the vision model,
   which can buy one guided revision — adopted only if it re-scores at least
   as high (batch/eval skip this; the rationale discloses every branch).
-- **XMP sidecar** — the same recipe serialises to an ACR/Lightroom `.xmp`
-  (global sliders + local linear/radial masks), so the AI's edit opens as
-  fully-adjustable sliders in your catalog.
+- **XMP sidecar, both directions** — the same recipe serialises to an
+  ACR/Lightroom `.xmp` (global sliders, Texture, the Detail axes, de-fringe,
+  post-crop vignetting and grain, local linear/radial masks with their own point
+  curves, and the Transform/Calibration blocks carried verbatim), so the AI's
+  edit opens as fully-adjustable sliders in your catalog. A sidecar Lightroom
+  already wrote is READ back when you open the photo — and since v0.31.0 its
+  masks actually arrive: every Lightroom mask used to be discarded on import,
+  because LR writes `crs:Angle` and `crs:MaskBlendMode` on every one of them and
+  either was enough to drop the whole correction. What still cannot be
+  represented is NAMED (「rotation angle」, 「local point curve」, 「unmodelled
+  slider」…) instead of counted, on both directions of the boundary.
+- **Lightroom panel parity (v0.31.0)** — Texture, the Sharpening and
+  Noise-Reduction sub-axes, colour noise reduction, manual + automatic CA,
+  de-fringe, post-crop vignetting and film grain all have a home now. Each one
+  either renders here or says 「carried to Lightroom, not rendered here」 on
+  itself, and the save lists the whole carried set: no control moves a number
+  without either moving a pixel or admitting that it doesn't. Transform/Upright
+  and Camera Calibration go one step further — they pass through the sidecar
+  verbatim and are never interpreted, so the app shows their values and offers
+  no slider.
 - **AI Denoise (SCUNet, GPU)** — ACR/LR-style denoise for high-ISO / astro
   frames. Off by default, triggered by a flag, a CLI command, or a UI button.
 - **PNG/TIFF source mode** — feed an already-processed image (e.g. denoised in
@@ -51,14 +68,15 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   16-bit by default) are normalised into the sRGB working space — 16-bit depth
   preserved — instead of being read as if they were sRGB.
 - **Desktop app (native GUI)** — `autoshop-gui`: a library grid that marks which
-  photos already have a saved develop, the full develop panel (tone, presence,
-  curves, 8-band HSL, colour grading), local masks (linear / radial / brush /
-  AI-selected — rotatable radials, add/subtract/intersect shape composition,
-  per-mask eye toggle & duplicate, brush-editable AI rasters with
-  feather/expand/contract and full-resolution guided refine), crop &
-  straighten, spot heal, reverse-fit, before/after, per-photo version
-  snapshots and variant strips that survive a reopen (`variants.json`), and
-  Ctrl+S to a Lightroom XMP. English / 中文.
+  photos already have a saved develop, the full develop panel (tone, presence
+  incl. Texture, curves, 8-band HSL, colour grading, detail & lens, effects,
+  and a read-only Transform/Calibration read-out), local masks (linear / radial
+  / brush / AI-selected — rotatable radials, add/subtract/intersect shape
+  composition, per-mask eye toggle & duplicate, per-mask point curves,
+  brush-editable AI rasters with feather/expand/contract and full-resolution
+  guided refine), crop & straighten, spot heal, reverse-fit, before/after,
+  per-photo version snapshots and variant strips that survive a reopen
+  (`variants.json`), and Ctrl+S to a Lightroom XMP. English / 中文.
 - **Web UI** — `serve` opens a local gallery: pick a photo, Analyze, tweak the
   develop sliders (tone, presence, curves, 8-band HSL, colour grading) with live
   before/after, give a text direction, export.
@@ -355,8 +373,20 @@ the list is there for everything the filter has never heard of.
 
 ## Honest scope
 
-- Render ops are tasteful **approximations** of Lightroom, not bit-exact. The
-  XMP→Lightroom path renders them faithfully in the meantime.
+- Render ops are tasteful **approximations** of Lightroom, not bit-exact — and
+  since v0.31.0 the control registry says out loud which control is which of
+  three things. **Rendered**: drawn here approximately and written to the
+  sidecar (the ordinary sliders). **Carried, not rendered**: written to the
+  sidecar, and the canvas deliberately does not draw it, because the operator
+  behind it is unpublished and approximating it would mean putting an operator
+  we invented between you and your picture — film grain, the post-crop vignette
+  family, the Sharpen/Noise detail axes, colour noise reduction, de-fringe and
+  the auto-CA switch. **Passed through verbatim**: the Transform/Upright and
+  Camera Calibration blocks, carried byte-for-byte and never interpreted, which
+  is why the app shows their values and offers no slider for them. Each carried
+  control says so on itself and the save names the active set, so the
+  XMP→Lightroom path is still the faithful one — the difference is now stated
+  rather than silent.
 - AI denoise runs on the demosaiced RGB (not the raw Bayer mosaic like Adobe
   Denoise), and ~3 min for a 60 MP frame on an RTX 4060 Ti. Excellent, not
   identical to Adobe.

@@ -366,9 +366,159 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   组件组合/局部点曲线/AI 画笔蒙版，一次实验四项取证）；f944ef3 147 张对照集路径
   确认；#2 报错 toast 原文。
 - **每轮硬门**：clippy 0、全量测试绿（基线 449+7+73+2）、audit_i18n 0、zh 词条过
-  803 字形子集、禁启 GUI、禁 cargo fmt、五文档+记忆同步、Opus 5 对抗复审后发版。
+  成品字体子集（口径见下方 v0.31.0 条的更正）、禁启 GUI、禁 cargo fmt、五文档
+  +记忆同步、Opus 5 对抗复审后发版。
+
+## 标签定义（LR 差距批次 / 素材 / 分叉编号 —— 2026-08-18 入库）
+
+> 上面第二十二至二十四轮段（`M0`、`B2-B5`）与下面「当前状态」多处引用这些标签，
+> 而定义此前**只在不入库的计划档**里（`feedback17-final-plan-r22-r24.md`、
+> `feedback17-xcheck-consensus.md`、`r25-design.md`）——接手的人无从查证，这是台账
+> 的真实漏洞。定义在此入库；计划档仍是工单级细节的出处，**含义以本节为准**。
+
+### 基座与批次（源：R24-5「LR 缺口分批」）
+
+| 标签 | 定义 | 状态 |
+|---|---|---|
+| **M0** | 五档控件 tier 注册表（`Rendered` / `CarriedOnly` / `PassThrough` / `RenderedNotExported` / `DerivedWriteOnly`，继承 V2_PLAN §7）+ 两条包含断言（GUI 可改 ⊆ 引擎渲染 ∪ CarriedOnly 白名单；AI 可设同）+ 三方向披露（导出蒙版具名 / 导出全局 / 导入全局走补集） | ✅ R24 v0.30.0 |
+| **M8** | 投递根统一：`./out` 由散落常量升为一等设置 `config::delivery_root`（Destination 信任），库侧 pipeline / serve / style 各消费点同走一个漏斗 | ✅ R24 v0.30.0 |
+| **B2** | 全局 `crs:Texture` + 效果面板：Texture **读写必须同一次落地**（只读不写＝键不进 `owned_attr_keys`，merge 不剥离，我方值与文档原值并存；只写不读＝导入的 LR 值不生效）；裁剪后暗角六键 + Grain 三键先走 CarriedOnly；「暗角」标签同名冲突改名 | ✅ R25 v0.31.0（`1ddf53e`） |
+| **B3** | Detail 子控件（锐化 3 + 亮度降噪 2 + 彩色降噪 3）、手动色差 `ca_r`/`ca_b`（渲染）+ `AutoLateralCA`（携带）、Defringe 六键 | ✅ R25 v0.31.0（`98b4c65`；Defringe 走甲案＝CarriedOnly 终态） |
+| **B4** | Transform/Upright 八键 + Camera Calibration 八键走 `Tier::PassThrough`（**具名键集**，不是「一切未知」——merge 的剥离宇宙是静态清单，自由 map 会与实际写出的键失配）+ 渲染分叉披露 `global_render_gaps` | ✅ R25 v0.31.0（`3ae7df7`；PassThrough 首个真载荷） |
+| **B5** | 蒙版几何互通，三臂：**A＝导入**（LR 蒙版解锁，与 `INERT_LOCAL` 硬拒同根因一次修完）✅ R25 `4eb54aa`；**B1＝写回** `crs:Midpoint`/`crs:Version` + 旋转损失点名角度 ✅ R25 `a98a82f`；**B2＝`crs:Angle` 双向映射** ⏸ 待用户 LR 已知角度实验（符号/枢轴未验证，见 V2_PLAN §7 item 1） |
+| **SF4** | 「是否接受 `CarriedOnly` 这个中间态」（字段可读可写可编辑、本机预览不渲染、进了 Lightroom 才生效＝公开承认预览与 LR 不一致）三选一：**A** 全盘接受，B2-B4 全部可落码；**B** 不接受，那批全退回 PassThrough + 披露，App 只做自己渲染得了的；**C** 接受但**限白名单**——只对 Adobe 独有、我方短期实现不了的算子开口。**用户 2026-08-18 拍板 = C（默认档）**，24 个全局成员逐条带理由钉在 `CARRIED_ONLY_GLOBAL` | ✅ R25 定稿 |
+
+### 素材请求（用户侧动作，非代码项）
+
+| 标签 | 内容 | 状态 |
+|---|---|---|
+| **M-A** | 一组新的「反推瞎搞」复现对（RAW + 参考成片），给联合梯子建真实基线 | ✅ R24 自采六对真同帧 |
+| **M-B** | 一次 LR 采样实验的 sidecar 族：①径向旋到已知角度 ②径向组件组合 ③含局部点曲线的蒙版 ④AI/画笔蒙版 | ◐ R24 自采 160 份取证覆盖③④与阴性结果；**①已知角度**与 Defringe 非零仍欠（见 v0.31.0 条的「素材欠」） |
+| **M-C** | `f944ef3` 那 147 张 RAW+xmp 对照集是否还在、路径确认 | ✅ R25 全量重跑（数字见 v0.31.0 条） |
+| **M-D** | #2 蒙版精修报错的 toast 原文（分流哪条臂） | ✅ R24 两臂都修 + 实跑否证 |
 
 ## 当前状态（已完成，勿重做）
+
+- **v0.31.0 RELEASED（2026-08-18，第二十五轮=收尾闭合轮：Lightroom 差距全量
+  清账）** — 用户令「剩余的所有缺口、计划中的待办项，全部设计好并打磨+推进，
+  彻底完成收尾，闭合项目」。八包收官（P0-P6 七个实现提交 + 轮末复审修复批）：
+  `a398ea4` 基座三修 / `4eb54aa` 导入解锁 / `1ddf53e` B2 Texture / `98b4c65`
+  B3 Detail·Defringe·CA / `3ae7df7` B4 PassThrough / `a98a82f` B5-B1 几何写回
+  / `a1bd81b` P6 局部点曲线 / `464008a` 复审修复批。测试 543→**603 lib** /
+  8 CLI / 114→**129 GUI** / 2+2 合约双配置，clippy 0，audit_i18n 0，字体门
+  801/801。**`EditRecipe` +29 顶层字段**（B2 十 / B3 十七 / B4 `passthrough`
+  一 / 修复批 `schema_era` 一），`LocalAdjustment` +4（四条点曲线），
+  `MaskGeometry::Radial` +2；控件注册表 34→**63 全局** / 24→**28 局部**。
+  **头号发现＝缺陷不是差距（P1，`4eb54aa`）**：用户 Lightroom 库里的**每一个**
+  蒙版此前在导入时被整条丢弃——`xmp.rs` 两道门任一命中即丢：`crs:Angle` 存在
+  （LR 每个径向都写，未旋转时写 `"0"`）、`crs:MaskBlendMode` 非我方文件即拒
+  （160 份取证里 620 顶层 + 428 组内 = **1048/1048** 个蒙版组件全带）。与
+  `INERT_LOCAL` 非零硬拒、未知 `crs:Local*` 硬拒等**共六道同源门**是一个根因：
+  导入侧「不认识就整条丢、只给一个整数」，而导出侧自 R22 M6a 起早已是具名
+  `MaskLoss{name,reason}`——**这个不对称就是根因**。修＝`MaskImportReason` 十变体
+  与导出侧同文件同习语（八条**有损但导入**：旋转角度/混合模式/未建模滑杆/未知
+  `Local*` 键/附加形状/外部值域蒙版/读不出的局部曲线/曲线精修饱和；两条 **drop**：
+  `Unrepresentable`＝没有参数几何可站（画笔·AI·深度）、`OutOfModel`＝读得懂但超
+  出模型——**分开才不让句子说谎**），几何照常导入、未建模项具名披露。真实回归（7 份
+  42 条 Correction）：**修前导入 0 → 修后 31 导入 / 11 拒收**，
+  `imported+refused==corrections` 每份成立；仍拒的是 `Mask/Paint`·`Image`·
+  `Aggregate`·`Ellipse`（LR 靠 digest 重算，第三方取不到像素，披露原话点名）。
+  **P0 基座三修（`a398ea4`）**：把 B2-B5 每批都要重改的三张手写表派生化——导入
+  带宽表从注册表派生、● 指示器由 `family_is_active` 派生（`DOT_EXEMPT` 唯一豁免
+  带理由）、`MaskLossReason` 两处硬编码数组由 `ALL` 派生；**拒改
+  `PIPELINE_BYTES_PER_PIXEL`**：R22 复审登记的「既往偏低 ~17%」经第一手三时刻
+  算账＝**恰 24 B/px**，非实测而是当年的主张，算账入测试
+  `develop_peak_accounts_for_every_pass`，**该登记就此关闭**，P0 零行为变更。
+  **B2（`1ddf53e`）**：全局 `texture` 与蒙版路径**同一算子同一半径式**（位级孪生
+  钉：全覆盖蒙版 texture ≡ 全局 texture），插在 clarity 与 saturation 之间照 ACR
+  Basic 面板序；裁剪后暗角六 + Grain 三走 CarriedOnly；「暗角」同名冲突改
+  「镜头暗角」；工单外自堵一处真缺陷——merge 现在剥我方键，不 carry 就会删掉用户
+  sidecar 里的 grain/暗角。**B3（`98b4c65`）**：Detail 八轴 + 手动 CA 折进已有的
+  每通道径向因子（`MANUAL_CA_PER_UNIT=2e-5`，带完整推导；`geometry_profile` 单
+  漏斗铺满全部几何消费点）+ `AutoLateralCA` + Defringe 六键；Defringe 默认
+  `0/30/70/0/40/60` ＝**本仓首批非零默认**（读侧缺键回落字段默认非 0，否则旧文件
+  未动就变成非 noop）；`i18n` 里在案的「De-fringe in a later batch」承诺原地删除。
+  **B4（`3ae7df7`）**：`Tier::PassThrough` 的**首个真载荷**——`PASSTHROUGH_CRS`
+  16 键（Perspective/Upright 八 + `CameraProfile` + Calibration 七）`String→String`
+  原样进出（三种中性拼写 `"0"`/`"0.0"`/`"0.00"` 共存＝String map 的实证理由）；
+  新增对称披露 `global_render_gaps`（LR 渲染而我方不渲染的那半，是 SF4-C 默认档
+  的必要配套）。**B5-B1（`a98a82f`）**：`crs:Midpoint`/`crs:Version` 读写往返
+  （字段级 serde default，照 `coord_era` 先例）；旋转损失**载荷化**——报「旋转
+  37° 未写入 XMP」而非「有旋转」（实测库内 37/−22/2/−44/−24/−2）；`crs:Angle`
+  仍不发射＝在读不懂的刻度上断言方向不如让 LR 用自家默认；拆掉一颗真雷：
+  `range_mask_xml` 在同一 Correction 内几何组件之后写 `crs:Version="3"`，无界扫描
+  会把它当椭圆版本戳读进每个带值域的径向。**P6（`a1bd81b`）**：局部点曲线四条
+  （LR 裸名 `MainCurve`/`RedCurve`/…，**逗号后无空格**，与全局曲线 `"67, 61"` 的
+  格式化函数刻意不共用，反合并变异双向钉）；走已有融合通道零新 pass。
+  **轮末 Opus 5 对抗复审判定 BLOCK → 修复批 `464008a`（一根因两 HIGH，均对
+  v0.30 前后在真实 sidecar 上实证）**：根因＝**「配方没见过的键被读成用户清空」**。
+  ①`preserve_masks` 的守门旗只在**有损**导入置位 → 无损导入 + v0.30 形状的无蒙版
+  recipe 存盘**静默删光** LR 整个蒙版块（2/7 参考 sidecar 的 12/42 条被毁、注记为
+  空；「导入修得越好、文件越没保护」）；修＝判据换成「**底片本来就有蒙版块**」，
+  并删掉那个只写不读的破代理字段。②merge 的无知律只套了 B4 的 16 键，B2/B3 的 27
+  个标量键仍走平坦律 → v0.30 recipe 一存盘就剥掉 Grain/PostCrop/SharpenRadius、
+  把 `crs:Texture="-20"` 归零（3/7 真实照片中招，零披露）；修＝新字段
+  `schema_era`（`coord_era` 先例逐条对照；0＝v0.31.0 之前）+ 派生集合
+  `era_suppressed_attr_keys`（24 个 CarriedOnly 行 + `texture`/`ca_r`/`ca_b`，
+  恰 27 键，PassThrough 因其 map 存在律更强而排除），**按键而非按配方**：旧照片
+  上真拖过的值仍会写出，因为那是声明。其余：Look 交叉名作用域读法只会少读不会
+  升级（原本会把 Look 里烘焙的 `Clarity2012` 提成用户滑杆）、paste 不再跨照片带
+  `passthrough`、zh 误译修（`Camera profile`＝相机配置文件，镜头配置文件留给真正
+  的镜头档）、P0 oracle 两条死析取补活、`tone_active`/`crop_active` 派生化收官
+  （最后两组手写 ● 元组消失）、P6 曲线注释按实测容差软化（最差 1.5e-5 个 8-bit
+  码）、env-gated 探针读不动夹具改为点名 panic 而非静默不计。**接受成本（已裁决
+  并登记）**：在 Autoshop 里删光蒙版**不再**把删除传播到 sidecar（要删请在
+  Lightroom 侧删）——本轮主题就是数据保全高于删除手势；已编辑过的蒙版块 republish
+  会按我方 writer 确定性重铸 `MaskName`/`MaskSyncID`。**⚠ 前向三类语义（互不相同，
+  发版说明分列）**：①`EditRecipe` 顶层 +29 字段 + `deny_unknown_fields` →
+  **v0.30 exe 硬拒**任何 v0.31 写的 `recipe.json`（同 v0.29→v0.30 `coord_era`）；
+  ②`LocalAdjustment` +4 曲线且同样 `deny_unknown_fields` → **带蒙版**的 recipe 被
+  旧 exe 硬拒，无蒙版字节不变（同 R23 LocalHue/Sharpness）；③`MaskGeometry::Radial`
+  +2 是**内部标签枚举、无** `deny_unknown_fields` → 旧 exe **静默丢弃再写回**＝悄悄
+  改文件，**本轮首次出现的第三类**。指纹变 → R21 已删版本登记簿的结构臂一次性
+  以**新号**重新保档（hwm 臂不动＝同号永不复活，合约 2/2 绿）。**M-C 全量 147
+  重基线（`~/.claude/plans/mc-eval-147-full.txt`）**：147/147 零失败，**总 gap
+  14.2%**；最大系统性分歧 whites **+22.55** / blacks **−14.18** / highlights
+  +11.69 / noise_reduction +11.71（AI 恒加降噪，用户不加）/ vibrance +10.80 /
+  clarity +8.12 / contrast **−7.61**；主曲线 RMSE **6.1**/255、RGB 三通道
+  0.6-0.7；**补偿模式**＝AI 在曲线里打对比（S 强度 13.7 vs 用户 3.7）同时在
+  contrast 滑杆上收着打；temperature_k mean|Δ| 401K、bias **−163K**（AI 偏冷）；
+  saturation 被 AI 略过 52/147。**蒙版行是 §0 缺陷的独立实证**——eval 自己数出
+  用户侧「0.00（+2.35 我方导入器拒收）」，即平均每张 2.35 个用户蒙版被拒，正是
+  P1 修掉的那个数字。判读与「据此调提示词」归用户，本轮如实呈报不预改。
+  **两条台账口径更正**：①「803 字形子集」是历史标签——实测
+  `NotoSansSC-autoshop.ttf` ＝ **751 字形 / 739 码点**，五字体 cmap 并集 **2396
+  码点**（`ROADMAP` 旧句已改指「成品字体子集」）；②R22 登记的
+  「`BYTES_PER_PIXEL=24` 既往偏低 ~17%」以第一手算账**关闭**（见 P0）。
+  **登记不修**：AI 精修会把 `midpoint`/`version` 重置回 50/2（库内全部径向本就
+  50/2＝**无观测实例**；修法要动有 bug 前科的整体回退启发式，不值）；`Sharpness`
+  0..100 假设被当作锁定不变量（需用户一份 >100 实测样本才能闭）；`nr_detail`/
+  `nr_contrast` 零观测形态（全库 `LuminanceSmoothing=0`，中性有推理无实测）；
+  Effects 段目前落在「Detail & Lens」弱组标题下、标题未扩；store 指纹 fail-open
+  已披露。**后续登记**：**90° 手动旋转＝v0.32 首项**（骨架见下）；B5-B2 角度写回、
+  LocalHue/LocalSharpness 的 LR 数值尺度、Defringe 乙案（渲染近似）、
+  `AutoLateralCA` 验收——四项都等**同一次** LR 实验；底部变体条物理合并搁置；
+  SF9-B 版本捕获像素不做；保存侧蒙版丢失红 toast 保持不降级；蒙版 Temp/Tint 照 LR
+  留 Color 组。**素材欠（用户侧一次 6 合 1 LR 实验即可全取）**：Defringe 紫 +3 /
+  绿 +2 → 加一个径向旋 +30° → 该蒙版 Hue +50 / Sharpness −40 → 复制该径向做
+  Subtract → 打开 Auto CA → Ctrl+S 存 sidecar。发版：feat+tag v0.31.0，资产字节
+  验证见发布印章（待发版戳）。
+
+  **90° 手动旋转设计骨架（v0.32 首项，本轮拍板推迟，骨架入库以免再丢）**
+
+  | # | 位置 | 设计 |
+  |---|---|---|
+  | 7.1 | `src/recipe.rs` | 新 `quarter_turns: u8`（0..3）。**不复用** `straighten_deg`（它是 ±45 且直接映射 `crs:CropAngle`） |
+  | 7.2 | `src/render.rs` / `src/decode.rs` | 根因洞见：**EXIF 方向与用户四分之一圈可以合成同一个 `image::metadata::Orientation`**。改动＝一个 `compose(exif, quarter_turns)` + `raw_orientation_of` 三个消费点读合成值；`orient_f32`/`oriented`/`orient_point` 原样复用 |
+  | 7.3 | 坐标 | 显示帧改变 → 存量 crop / 蒙版几何随转，**复用 `orient_recipe_coords`**（已 8 态全覆盖） |
+  | 7.4 | 栅格蒙版 | v0.30 的迁移刻意不转位图；**这次不同**——栅格是我们自己写的 PNG，`image::rotate90` 无损，应真的转（新号落盘，旧的按 R21 纪律） |
+  | 7.5 | XMP | LR 的 90° 不是 `crs:CropAngle`（±45）而是 `tiff:Orientation` + 裁剪矩形落在旋转后的帧里；我们今天完全不写 `tiff:Orientation` |
+  | 7.6 | 缓存 | decode 缓存盐 3 → 4 |
+  | 7.7 | GUI | 工具栏 `↶ / ↷` 两个按钮，各一步撤销 |
+
+  **风险**：坐标帧是 v0.30 的根修主场，任何回归都会以「竖图横躺」复发；且
+  `quarter_turns`（用户**意图**）与 `coord_era`（存储**纪元**）正交，不可合并成
+  一个整数——`recipe.rs` 已为 `version` 写过完全同构的论证。**工作量**≈2 包。
 
 - **v0.30.0 RELEASED（2026-08-17，第二十四轮=17 条反馈三轮清账收官之 R24：数
   据模型+方向根修+梯子定稿）** — 锁定计划之 R24 全量落地+素材自采反哺的两个

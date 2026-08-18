@@ -612,10 +612,11 @@ pub fn global_render_gaps(r: &EditRecipe) -> Vec<&'static str> {
 
 /// **Import-side disclosure, GLOBAL half** (R24-5 M0): the `crs:` properties
 /// this sidecar carries on its own `rdf:Description` that Autoshop does not
-/// model at all — PointColor, the Transform and Calibration blocks, the
-/// camera Look. (Global Texture and Grain headed that list until R25 B2
-/// modelled them, and the whole Defringe block left it in B3 — the list
-/// SHRINKING by itself, see the paragraph
+/// model at all — PointColor, the camera Look, `CameraProfileDigest`,
+/// `UprightTransform`. (Global Texture and Grain headed that list until R25
+/// B2 modelled them, the whole Defringe block left it in B3, and the
+/// Transform / Calibration blocks left in B4 as [`PASSTHROUGH_CRS`] — the
+/// list SHRINKING by itself, see the paragraph
 /// on the complement below, and the fixture note in
 /// `an_imported_sidecar_names_the_globals_the_engine_does_not_render`.)
 ///

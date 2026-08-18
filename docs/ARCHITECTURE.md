@@ -297,16 +297,26 @@ order with Lightroom's Add / Subtract / Intersect grammar
 (`MaskComponent`/`MaskCombine`, rendered by `render::combined_mask_weight`),
 an `enabled` eye toggle (a lossless mute — engine, coverage overlay, export
 gate and XMP writer all skip a disabled mask consistently), and an optional
-Range Mask refinement. Its sliders mirror the global ones plus three that
-exist only per mask: `texture`, a SIGNED `sharpness` (positive sharpens,
-negative softens — ACR's local band, R23-1b) and `hue`, a rotation of every
-colour under the mask (R23-1b; the global mixer moves one band across the
-whole frame instead). Components, `color_gains` and `role` are **engine-only**;
-the radial `angle` is rendered, GUI-editable and AI-settable but is dropped by
-the classic-ACR XMP projection, which carries the base geometry alone (crs
-`MaskBlendMode`/`Angle` semantics have no verified reference sidecar — the
-roundness rule: never reshape Lightroom masks on a guess; the writer discloses
-each such loss). Bitmap rasters are immutable once referenced: every raster
+Range Mask refinement. Its sliders mirror the global ones plus two that
+exist only per mask: a SIGNED `sharpness` (positive sharpens, negative softens
+— ACR's local band, R23-1b) and `hue`, a rotation of every colour under the
+mask (R23-1b; the global mixer moves one band across the whole frame instead).
+`texture` was a third until R25 gave it a global twin — the two now share one
+operator and one radius model, which is what lets the engine assert that a
+full-coverage masked Texture is bit-identical to the global one. Since R25 a
+mask also carries **four point curves** of its own (`main_curve` /
+`red_curve` / `green_curve` / `blue_curve`, LR's bare `crs:MainCurve` … with
+no `PV2012` suffix and no space after the comma — deliberately NOT the global
+curve's formatter), each independently sparse: 19 of the 160 reference
+sidecars use them, mostly one or two channels. Components, `color_gains` and
+`role` are **engine-only**; the radial `angle` is rendered, GUI-editable and
+AI-settable but is dropped by the classic-ACR XMP projection, which carries the
+base geometry alone (`crs:Angle`'s sign and pivot have no verified reference
+sidecar — the roundness rule: never reshape Lightroom masks on a guess; since
+R25 the writer's disclosure NAMES the angle it dropped, 「rotation 37° not
+written to XMP」, rather than saying only that something rotated). The radial's
+`crs:Midpoint` and `crs:Version` are read and written back unchanged — carried,
+never interpreted. Bitmap rasters are immutable once referenced: every raster
 edit (brush add/erase, feather, expand/contract, the full-resolution guided
 refine) bakes a freshly claimed file and repoints the recipe.
 
@@ -504,6 +514,9 @@ open, the variant strip, version snapshots, batch export, `api_recipe`, CLI
 `apply`); recipes arriving from the browser or from the model are stamped
 current-frame at their boundary instead. Raster (painted / AI-segmented) masks
 are image files, not coordinates: they are left alone and the user is told so.
+v0.31.0 adds a second stamp built field-for-field on this precedent —
+`schema_era` (0 = written before the R25 control set existed) — for the same
+class of reason: see 「the merge treats ignorance as ignorance」 in §4.5.
 
 **One dispatch, enforced at the gate (R22).** "A RAW" has a single definition
 app-wide (`decode::is_raw`), and the two ways into pixels are separate by
@@ -551,18 +564,39 @@ vision advisor.
 ### 4.4 Render engine (M2)
 
 Applies the recipe deterministically. Frame stage first: decode → EXIF
-orientation → working-resolution cap → lens geometry (distortion/CA) →
+orientation → working-resolution cap → lens geometry (distortion + CA) →
 straighten → crop. Then the pixel stage, in this order: anchored white balance →
 lens-profile vignette → manual vignette → **dehaze in linear light** (before any
 tonal work, so the airlight estimate cannot move when Exposure is dragged) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the tone curve and
 the per-photo camera base curve composed into one table) → per-channel RGB
-curves → 8-band HSL → colour grading → clarity → saturation/vibrance → noise
-reduction → sharpening → local adjustments (linear/radial/bitmap masks).
+curves → 8-band HSL → colour grading → clarity → **texture** →
+saturation/vibrance → noise reduction → sharpening → local adjustments
+(linear/radial/bitmap masks).
+
+Two R25 additions ride existing stages rather than adding one. **Texture** is
+the same `unsharp_luma` operator as clarity at a small radius with no midtone
+mask (0.005·min(w,h), floor 2), placed between clarity and saturation for ACR's
+Basic-panel order and sharing the mask path's radius model verbatim — so
+「Texture +30」 means the same structure globally and inside a mask, on a
+1280 px preview and at 61 MP. **Manual CA** (`ca_r`/`ca_b`) folds into the
+per-channel radial factor the lens-profile CA correction already builds
+(`MANUAL_CA_PER_UNIT = 2e-5` per slider unit, i.e. ±0.2 % of the half-diagonal
+at the ends — derived beside the constant), so it is a scaling of an existing
+LUT, not a new operator; every geometry consumer reads the one
+`geometry_profile` funnel so preview, canvas, export and the web surface can
+never disagree about whether the frame moved.
 
 Each mask runs its own sub-chain, in this order: **dehaze** → the fused
-**WB + tone + saturation** blend → **clarity** → **texture** → **noise
-reduction**. Clarity/dehaze/texture became engine-rendered in R22 (feedback
+**WB + tone + curves + saturation** blend → **clarity** → **texture** → **noise
+reduction**. The mask's own **point curves** (R25) live inside that fused pass
+and cost no extra one: `main_curve` is handed to the same `build_tone_lut` that
+already composes the mask's synthesized tone recipe, and the three RGB curves
+are compiled once per mask and applied right after it — the global chain's
+1 → 1b → 3 order mirrored locally. Splitting them out into a pass of their own
+would have changed the output of every existing partial-weight mask, the same
+reason R22 gave for not splitting the blend.
+Clarity/dehaze/texture became engine-rendered in R22 (feedback
 #15a/#10B — until then they were carried, exported to XMP and drawn only by
 Lightroom, so a mask that moved only those three did nothing in-app; recipes
 saved before R22 re-render with the local effect, which the user signed off on).
@@ -686,15 +720,51 @@ sweeps; the `v<n>` family is kept). A live editor's in-memory strip outranks
 the variant half, so the GUI consumes the version half and keeps rendering its
 own cards; for every non-GUI surface this IS the list. Copy the XMP beside the RAW when
 you want Lightroom to pick it up. A Lightroom sidecar that already sits beside
-the RAW is READ on open — the newer intent wins — and never overwritten (mask
-corrections it carries that classic import can't represent — brush / AI /
-depth — are counted and disclosed, not silently dropped).
+the RAW is READ on open — the newer intent wins — and never overwritten.
+
+**Import (R25).** Until v0.31.0 that read imported *no* Lightroom mask at all.
+Two gates each dropped a whole correction on sight: the presence of `crs:Angle`
+(LR writes it on every radial, `"0"` included) and a `crs:MaskBlendMode` on a
+file we did not author (all 1048 mask components in the 160-sidecar reference
+library carry one). Both were the same root as five more 「don't recognise it →
+discard the correction, keep an integer count」 gates, while the EXPORT side had
+had a named `MaskLoss{name, reason}` since R22 — the asymmetry WAS the defect.
+The import side now mirrors it: `MaskImportReason` names eight LOSSY-but-
+imported cases (rotation / blend mode / inert local slider / unknown local key /
+extra shapes / foreign range mask / unreadable local curve / curve-refine
+saturation) — the geometry still arrives — and two DROPS kept deliberately
+distinct from them, `Unrepresentable` (no parametric geometry to stand on) and
+`OutOfModel` (values that read fine but land outside the model), so a sentence
+saying 「imported with N features unmodelled」 cannot be told about a correction
+that was not imported at all. The banner names what it could not model instead
+of counting it. Measured on the reference library: 0 masks imported before, 31 of
+its 42 corrections after, with `imported + refused == corrections` holding file
+by file. What still refuses is the component types nobody outside Lightroom can
+reconstruct — `Mask/Paint`, `Mask/Image`, `Mask/Aggregate`, `Mask/Ellipse` —
+brush / AI / depth masks LR recomputes from a digest, which the disclosure says
+in those words.
+
+**And the merge treats ignorance as ignorance, not as an instruction** — the
+one law behind the round-end fix. A recipe holding a default for something it
+has never read is not a photographer clearing it: a recipe with no masks does
+not delete the sidecar's mask block (the test is 「does the BASE have one」, not
+「was the import lossy」), an era-0 recipe (`schema_era`, `coord_era`'s twin,
+0 = written before v0.31.0) neither strips nor emits any of the 27 R25 scalar
+keys still sitting at their untouched default, and the pass-through map's
+absence is likewise not a clear. All three are per KEY, not per file: drag one
+of those sliders on a legacy photo and it writes, because THAT is a statement.
+The accepted cost is stated where the rule lives — deleting every mask inside
+Autoshop no longer propagates the deletion to the sidecar (delete them on the
+Lightroom side), and republishing a mask block you HAVE edited recasts
+`MaskName`/`MaskSyncID` deterministically from our writer.
 
 The **export** direction is disclosed the same way (M6a). Classic ACR XMP
 cannot express everything the engine renders, so the writer names what it left
 behind while it emits: raster (bitmap) and muted masks are skipped whole, extra
 Add/Subtract/Intersect shapes flatten to the base geometry, a rotated radial
-exports unrotated, and per-channel recolour gains do not travel. The verdicts are
+exports unrotated (since R25 the note says by how many degrees, and why the
+angle is withheld rather than guessed), and per-channel recolour gains do not
+travel. The verdicts are
 the writer's own, produced by the ONE loop that emits the mask block (so the claim
 cannot drift from the file) and handed back with the document itself —
 `xmp::recipe_to_xmp_with_losses` / `MergeOutcome::losses`, one pass per save;
@@ -707,7 +777,7 @@ is what the disclosure says. Since v0.30.0 the GUI's line NAMES the masks
 rather than counting them (the CLI's has since M6a; 「which of my twelve?」 was
 the half a count could not answer).
 
-#### The five-tier control registry (v0.30.0)
+#### The five-tier control registry (v0.30.0; populated in v0.31.0)
 
 Two independent facts decide what a develop control IS — does the ENGINE render
 it, and does it reach the SIDECAR — and until R24 nothing wrote them down
@@ -715,17 +785,17 @@ together, so 「the GUI offers a slider the engine ignores」 and 「the save
 silently drops what you are looking at」 were both unrepresentable claims.
 `advisor::catalogue::Tier` names one (renders x exports) combination each:
 
-| tier | engine renders | own `crs:` property | members today |
-|---|---|---|---|
-| `Rendered` | yes | yes | the ordinary controls (26 global, 20 local) |
-| `CarriedOnly` | no | yes | the mask `name` — a label, not an operator |
-| `PassThrough` | no | verbatim | none yet; reserved for the LR-only blocks the merge preserves (Transform, Calibration, the camera Look) |
-| `RenderedNotExported` | yes | no | `base_curve`, `lens_profile`; per mask `components`, `enabled`, `color_gains` |
-| `DerivedWriteOnly` | (yes) | no — only a derived value | `as_shot_k`/`as_shot_tint`, which reach the sidecar as `crs:Temperature`/`Tint` |
+| tier | engine renders | own `crs:` property | members today | disclosed by |
+|---|---|---|---|---|
+| `Rendered` | yes | yes | the ordinary controls — **29 global, 23 local** (R25 added global `texture` and the manual CA pair `ca_r`/`ca_b`; per mask, the four point curves) | — nothing to disclose |
+| `CarriedOnly` | no | yes | **25**: the 24 unpublished-operator globals R25 ruled on — the six post-crop vignette keys, the three grain keys, the five Sharpen/Noise detail axes, the three colour-NR keys, `auto_lateral_ca`, the six de-fringe keys — plus the mask `name`, a label rather than an operator. Every one carries its REASON in `CARRIED_ONLY_GLOBAL` / `CARRIED_ONLY_LOCAL` | `xmp::global_render_gaps` → 「carried to Lightroom, not rendered here」, on the control and in the save line |
+| `PassThrough` | no | verbatim | **1 row, 16 keys**: `passthrough`, a `BTreeMap<String,String>` over the named `xmp::PASSTHROUGH_CRS` block — the 8 Perspective/Upright keys and `CameraProfile` + the 7 Camera Calibration keys. A NAMED key set, deliberately not 「everything unknown」: the merge's strip universe is a static list, so a free-form map would desynchronise from what is actually written. `unmodelled_global_crs` keeps naming the rest — that is the feature, not the omission | the read-only Transform / Calibration section: values shown, no slider offered, because a slider on something never interpreted would be a lie |
+| `RenderedNotExported` | yes | no | `base_curve`, `lens_profile`; per mask `components`, `enabled`, `color_gains` | `xmp::global_export_losses` + the mask loss list |
+| `DerivedWriteOnly` | (yes) | no — only a derived value | `as_shot_k`/`as_shot_tint`, which reach the sidecar as `crs:Temperature`/`Tint` | — |
 
 `Control.tier` is `Option<Tier>`; `None` is not "unclassified" but "not a
-develop control" (the era stamp, the AI's own `rationale`/`confidence`, the
-solver's mask `role`), and such a row may never own a `crs:` property. The
+develop control" (the two era stamps, the AI's own `rationale`/`confidence`,
+the solver's mask `role`), and such a row may never own a `crs:` property. The
 registry is enforced from three sides: adding a field to `EditRecipe` /
 `LocalAdjustment` already fails the build until it has a row (the `global_value`
 / `local_value` destructures, R23-1), the row cannot be written without a tier
@@ -743,20 +813,35 @@ on an explicit allow-list carrying its reason. A slider that moves a number and
 no pixel is the worst kind of bug here: it looks like it works, it survives a
 save, it reloads, and the photo never changes.
 
-The registry also generates the two disclosures the mask-side story was missing.
-Outbound, `xmp::global_export_losses` names the active `RenderedNotExported`
-controls — a photo whose look depends on its camera base curve or its
-lens-profile correction used to export a sidecar that renders visibly
-differently in Lightroom, silently — and they join the mask losses in the one
-save sentence. Inbound, `xmp::unmodelled_global_crs` names the `crs:` properties
-an imported sidecar carries on its own `rdf:Description` that this engine does
-not model at all (LR's global Texture, Grain, the Transform/Calibration blocks).
-The merge PRESERVES every one of them; what was missing was the sentence saying
-they are there, so a canvas that did not match Lightroom's render had no
+The registry also generates the three disclosures the mask-side story was
+missing. Outbound, `xmp::global_export_losses` names the active
+`RenderedNotExported` controls — a photo whose look depends on its camera base
+curve or its lens-profile correction used to export a sidecar that renders
+visibly differently in Lightroom, silently — and they join the mask losses in
+the one save sentence. The other direction of the same honesty is
+`xmp::global_render_gaps` (R25), the symmetric list for `CarriedOnly`: what
+LIGHTROOM will render and this canvas will not. It is the precondition for the
+whole carried tier existing — 24 sliders that move a number and no pixel would
+otherwise be exactly the bug the inclusion laws above forbid. It compares
+against `EditRecipe::default()` rather than zero, because de-fringe's Adobe
+defaults are non-zero (`0/30/70/0/40/60`, this repo's first non-zero-default
+`crs:` fields), and it excludes `PassThrough` on purpose: a block with no
+knowable neutral cannot be judged 「active」, so keys Lightroom stamps on every
+file would cry wolf forever.
+
+Inbound, `xmp::unmodelled_global_crs` names the `crs:` properties an imported
+sidecar carries on its own `rdf:Description` that this engine does not model at
+all. The merge PRESERVES every one of them; what was missing was the sentence
+saying they are there, so a canvas that did not match Lightroom's render had no
 explanation on screen. Its universe is the COMPLEMENT of `owned_attr_keys`, so
-it needs no catalogue of Adobe property names to keep up to date: the day a
-batch teaches the engine `crs:Texture`, the key joins the owned set and leaves
-this list by itself.
+it needs no catalogue of Adobe property names to keep up to date — and R25 is
+the prediction coming true: the day the batches taught the engine `crs:Texture`,
+the Grain block and the Transform/Calibration blocks, those keys joined the
+owned set and left this list by themselves, with no edit to the list at all.
+The cost was paid in TEST FIXTURES, which had used exactly those keys as their
+「unmodelled」 samples and had to be re-based four times across the round (they
+now use `PointColor`, `Look` and `CameraProfileDigest`); what remains named is
+what remains unmodelled.
 
 ### 4.6 Style / eval harness (M4)
 
