@@ -201,7 +201,7 @@ Image-input limits (well within our single small preview): ≤512 MB payload, �
 
 ## 4. Claude verifier — `claude -p` envelope parsing + `Verdict`
 
-**Invocation (as planned, Report 3):** `claude -p --bare --model <model> --output-format json <prompt>`. `--bare` was believed mandatory — without it a project-level skill (`cc-enslaver`) + PROGRESS.md auto-load and pollute `.result` with a YAML block; `--bare` strips it and cut cost 16× ($0.111 → $0.0070) [verified: A1 runs].
+**Invocation (as planned, Report 3):** `claude -p --bare --model <model> --output-format json <prompt>`. `--bare` was believed mandatory — without it a project-level skill (`cc-enforcer`) + PROGRESS.md auto-load and pollute `.result` with a YAML block; `--bare` strips it and cut cost 16× ($0.111 → $0.0070) [verified: A1 runs].
 
 > **Reversed in v0.11.2 — do not restore `--bare`.** Since claude CLI ≥ 2.1.210
 > `--bare` also means "OAuth and keychain are never read", so under it the
