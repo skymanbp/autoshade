@@ -623,6 +623,10 @@ pub struct Config {
     pub denoise_cache: String,
     /// AI segmentation sidecar (`python/segment.py`) — subject/sky bitmap masks.
     pub segment_script: String,
+    /// Style-embedding sidecar (`python/embed.py`) — SigLIP 2 vectors for the
+    /// style index (R27 Batch-5). Same trust class as the other two: it names
+    /// a program's argv, so it is env-only and Destination-trusted.
+    pub embed_script: String,
 
     /// How strongly to lean on the user's historical edit style, 0.0..1.0.
     pub style_strength: f32,
@@ -755,6 +759,7 @@ pub(crate) const SETTINGS: &[Setting] = &[
     env_only("AUTOSHOP_PYTHON", Trust::Destination), // Command::new
     env_only("AUTOSHOP_DENOISE_SCRIPT", Trust::Destination), // that command's argv
     env_only("AUTOSHOP_SEGMENT_SCRIPT", Trust::Destination),
+    env_only("AUTOSHOP_EMBED_SCRIPT", Trust::Destination),
     // A redirected weight cache is a poisoned-model path.
     env_only("AUTOSHOP_DENOISE_CACHE", Trust::Destination),
     env_only("AUTOSHOP_DENOISE_MODEL", Trust::Preference),
@@ -1155,6 +1160,8 @@ impl Config {
         });
         let segment_script =
             env_val("AUTOSHOP_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
+        let embed_script =
+            env_val("AUTOSHOP_EMBED_SCRIPT").unwrap_or_else(|| bundled_helper("python/embed.py"));
         Config {
             openai_api_key: header_safe_key(
                 pick_opt(
@@ -1228,6 +1235,7 @@ impl Config {
             denoise_script,
             denoise_cache,
             segment_script,
+            embed_script,
             style_strength: env_val("AUTOSHOP_STYLE_STRENGTH")
                 .and_then(|s| s.parse::<f32>().ok())
                 // "NaN" parses as a valid f32 and SURVIVES clamp (clamp keeps
@@ -1438,6 +1446,7 @@ mod tests {
             "AUTOSHOP_PYTHON",
             "AUTOSHOP_DENOISE_SCRIPT",
             "AUTOSHOP_SEGMENT_SCRIPT",
+            "AUTOSHOP_EMBED_SCRIPT",
             "AUTOSHOP_DENOISE_CACHE",
             "AUTOSHOP_DATA_DIR",
             "PATH",

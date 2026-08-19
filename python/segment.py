@@ -187,15 +187,261 @@ def sky_mask(img_path: str):
     return Image.fromarray(m, mode="L")
 
 
+# --- OBJECT: SAM 2.1, point-prompted at the sidecar's own click -------------
+#
+# The third backend (R27 Batch-5, L-08 Arm C). Lightroom's `Mask/Image` carries
+# `crs:ReferencePoint` on 218/218 real instances — the photographer's own
+# normalised click — and `MaskSubType=0` means "the object (or background)
+# there". A point-promptable model is a LITERAL match for that: the file hands
+# us a click and SAM's native interface IS a click.
+#
+# LICENCE: "The SAM 2 model checkpoints, SAM 2 demo code (front-end and
+# back-end), and SAM 2 training code are licensed under Apache 2.0"
+# (https://github.com/facebookresearch/sam2). The HF repo tags `apache-2.0` and
+# is NOT gated (verified against the HF API 2026-08-19). SAM 3 was rejected on
+# mechanism as well as licence: its repo is gated, so "download on first run"
+# cannot work without a token and a click-through.
+#
+# PINNING is stricter here than the two older backends. Those resolve a pinned
+# HF REVISION and let `transformers` fetch; this one fetches every file itself
+# and gates each on its sha256 + byte count, then loads with
+# `local_files_only=True` — `denoise.py`'s discipline, reused verbatim through
+# its own `_fetch_verified`. The gap on `subject`/`sky` is registered in their
+# own comments above, not closed here.
+SAM = {
+    "repo": "facebook/sam2.1-hiera-large",
+    "revision": "665f8e2ad61cf5f53d65644ff27c8ee525124610",
+    "files": {
+        "model.safetensors": {
+            "sha256": "dc407dce21301fd94abb395c5099b4f2c455fdc8a8f261ac3d0ea6d4cd197230",
+            "bytes": 897897416,
+        },
+        "config.json": {
+            "sha256": "00446988cf4d617118d2d347eabe2c46aebed744628facdd540508be30b69ec3",
+            "bytes": 5705,
+        },
+        "preprocessor_config.json": {
+            "sha256": "6ebf229ee259368ce4a8d4f2fe893a72b053023710853e257253939e601f583d",
+            "bytes": 683,
+        },
+        "processor_config.json": {
+            "sha256": "f8a68e865cfad115c1c2763f3d93eca7b1c622da06da2a9273eb437fb2389b6d",
+            "bytes": 95,
+        },
+    },
+}
+
+
+def _sam_cache(cache_dir):
+    """Fetch every pinned SAM file into one directory and return it.
+
+    Imports `denoise.py`'s verified downloader rather than copying it, exactly
+    as `embed.py` does — one implementation of the download-and-refuse rule in
+    the tree. Its progress lines say `[denoise]` because that is the module
+    they live in.
+    """
+    try:
+        from denoise import _fetch_verified
+    except ImportError as e:
+        die(
+            f"object segmentation needs the shared sidecar downloader from denoise.py ({e}) "
+            "-> segment.py must sit beside denoise.py in python/"
+        )
+    d = os.path.join(cache_dir, "facebook--sam2.1-hiera-large@" + SAM["revision"][:12])
+    os.makedirs(d, exist_ok=True)
+    for name, pin in SAM["files"].items():
+        url = f"https://huggingface.co/{SAM['repo']}/resolve/{SAM['revision']}/{name}"
+        _fetch_verified(
+            url,
+            os.path.join(d, name),
+            pin["sha256"],
+            pin["bytes"] + 4096,
+            f"the SAM 2.1 '{name}'",
+        )
+    return d
+
+
+def object_mask(img_path: str, point, cache_dir: str, min_iou: float):
+    """Soft alpha for the object under `point` (normalised x, y)."""
+    try:
+        import torch
+        from transformers import Sam2Model
+    except ImportError:
+        # ASCII-only: Windows consoles in legacy codepages mangle wide dashes.
+        die(
+            "object segmentation needs transformers + torch -> pip install transformers "
+            "(SAM 2.1 Hiera-Large, ~898 MB, downloads to python/weights on first run)"
+        )
+    import numpy as np
+    from PIL import Image
+
+    d = _sam_cache(cache_dir)
+    model = Sam2Model.from_pretrained(d, local_files_only=True)
+    model.eval()
+    # Same determinism knobs, same reason as sky_mask: this mask becomes a FILE
+    # a saved recipe references.
+    torch.manual_seed(0)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+
+    img = Image.open(img_path).convert("RGB")
+    # PREPROCESSING SPELLED OUT, not delegated to `Sam2Processor`. Two reasons,
+    # and the first is not stylistic: transformers 5.2.0 resolves that
+    # processor to `Sam2ImageProcessorFast`, which raises
+    # "requires `torchvision` to be installed" — and torchvision is a
+    # torch-version-coupled dependency this project has not taken. The second
+    # is the embed.py reason: a resample filter that changed under us would
+    # move every mask with nothing in this repo changing.
+    #
+    # The transform is exactly the pinned `preprocessor_config.json`, asserted
+    # against it below: squash to 1024x1024 (`default_to_square: true`, so
+    # there is no letterbox and no padding to undo), resample 2 = BILINEAR,
+    # rescale 1/255, normalise by the ImageNet statistics.
+    import json
+
+    with open(os.path.join(d, "preprocessor_config.json"), encoding="utf-8") as f:
+        pc = json.load(f)
+    size = pc.get("size") or {}
+    mean, std = pc.get("image_mean"), pc.get("image_std")
+    if (
+        (size.get("height"), size.get("width")) != (1024, 1024)
+        or pc.get("resample") != 2
+        or not pc.get("default_to_square")
+        or mean != [0.485, 0.456, 0.406]
+        or std != [0.229, 0.224, 0.225]
+    ):
+        raise SystemExit(
+            "refusing to segment: the pinned SAM 2.1 preprocessor config does not match the "
+            "transform this sidecar implements — re-derive it before moving the revision pin."
+        )
+    edge = 1024
+    arr = np.asarray(
+        img.resize((edge, edge), resample=2), dtype=np.float32
+    ) / 255.0
+    arr = (arr - np.asarray(mean, dtype=np.float32)) / np.asarray(std, dtype=np.float32)
+    pixel_values = torch.from_numpy(
+        np.ascontiguousarray(arr.transpose(2, 0, 1))
+    ).unsqueeze(0)
+    # The normalised click -> MODEL-frame pixels. The Rust bridge hands over
+    # the ORIGINAL-frame preview, so the point and the pixels are in the same
+    # frame by construction; the squash above is a pure scale, so the click
+    # maps by multiplying with the model edge. Clamping keeps a click written
+    # at exactly 1.0 (or a hair outside, which Lightroom does write) on the
+    # last addressable pixel instead of one past the edge.
+    px = min(max(point[0], 0.0), 1.0) * (edge - 1)
+    py = min(max(point[1], 0.0), 1.0) * (edge - 1)
+    pts = torch.tensor([[[[float(px), float(py)]]]], dtype=torch.float32)
+    labels = torch.tensor([[[1]]], dtype=torch.long)
+    with torch.no_grad():
+        out = model(
+            pixel_values=pixel_values.to(device),
+            input_points=pts.to(device),
+            input_labels=labels.to(device),
+            multimask_output=True,
+        )
+    # LOGITS, then sigmoid — never `binarize=True`'s hard 0/1. The render
+    # engine samples this bilinearly and multiplies it in, so a hard mask is a
+    # hard edge on every adjustment; the logits carry the model's own soft
+    # transition. The low-res masks come back at 256x256 and are resized to the
+    # SOURCE frame here, which is exact because the forward transform was a
+    # plain squash with no padding to undo.
+    low = out.pred_masks.float().cpu()
+    low = low.reshape(-1, low.shape[-2], low.shape[-1]).unsqueeze(1)
+    masks = torch.nn.functional.interpolate(
+        low, size=(img.height, img.width), mode="bilinear", align_corners=False
+    ).squeeze(1)
+    scores = out.iou_scores.float().cpu().reshape(-1)
+    # argmax with the LOWEST-INDEX tie-break written out: `torch.argmax`'s tie
+    # behaviour is not contractually specified, and this choice decides which
+    # of three candidate masks becomes the user's selection.
+    best = int(max(range(len(scores)), key=lambda i: (float(scores[i]), -i)))
+    iou = float(scores[best])
+    if iou < min_iou:
+        # EXIT 3, not a bad mask. The Rust bridge treats a written-but-refused
+        # mask as a failure and discards it; declining loudly is what lets the
+        # caller say "the segmenter did not find an object there" instead of
+        # adopting a blob.
+        print(
+            f"segment.py: declining the object mask - best predicted IoU {iou:.3f} is below "
+            f"--min-iou {min_iou:.3f} at reference point ({point[0]:.4f}, {point[1]:.4f})",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    alpha = torch.sigmoid(masks[best])
+    m = alpha.clamp(0.0, 1.0).numpy()
+    m = (m * 255.0).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(m, mode="L")
+
+
+def parse_point(text: str):
+    """`crs:ReferencePoint` verbatim — two space-separated normalised floats."""
+    parts = text.split()
+    if len(parts) != 2:
+        die(f"--reference-point must be two space-separated numbers, got {text!r}")
+    try:
+        x, y = float(parts[0]), float(parts[1])
+    except ValueError:
+        die(f"--reference-point must be two numbers, got {text!r}")
+    # Lightroom writes these inside [0,1]; a small margin absorbs a click on
+    # the very edge without accepting a coordinate from another frame.
+    if not (-0.05 <= x <= 1.05 and -0.05 <= y <= 1.05):
+        die(f"--reference-point ({x}, {y}) is outside the normalised frame")
+    return (x, y)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", required=True, help="source image (any PIL-readable format)")
     ap.add_argument("--output", required=True, help="mask PNG to write (8-bit grayscale)")
-    ap.add_argument("--target", required=True, choices=["subject", "sky"])
+    ap.add_argument("--target", required=True, choices=["subject", "sky", "object"])
+    ap.add_argument(
+        "--reference-point",
+        help="crs:ReferencePoint verbatim, e.g. \"0.517578 0.260997\" (required for --target object)",
+    )
+    ap.add_argument(
+        "--min-iou",
+        type=float,
+        default=0.5,
+        help="decline (exit 3) when SAM's own predicted IoU is below this",
+    )
+    ap.add_argument(
+        "--mask-size",
+        type=int,
+        default=4096,
+        help="cap the written mask's LONG EDGE (0 = no cap)",
+    )
+    ap.add_argument("--cache", default=os.path.join(os.path.dirname(__file__), "weights"))
     a = ap.parse_args()
 
-    mask = subject_mask(a.input) if a.target == "subject" else sky_mask(a.input)
+    if a.target == "object":
+        if not a.reference_point:
+            die("--target object needs --reference-point (the sidecar's crs:ReferencePoint)")
+        mask = object_mask(a.input, parse_point(a.reference_point), a.cache, a.min_iou)
+    elif a.target == "subject":
+        mask = subject_mask(a.input)
+    else:
+        mask = sky_mask(a.input)
     mask = mask.convert("L")
+    # LONG-EDGE CAP. The render engine charges every mask raster w*h*4 against a
+    # 256 MiB budget (`render::raster_bytes` / `MASK_RASTER_BUDGET_BYTES`), so a
+    # 9504x6336 mask alone would be 229.7 MiB and a recipe with two of them is
+    # refused outright. 4096 costs 42.7 MiB, which leaves room for five, and it
+    # is still 1.4x Adobe's own segmenter proxy (`crs:FullMaskSize` is
+    # "2880,1920" on every real instance). The mask is sampled BILINEARLY in
+    # normalised coordinates, so its resolution is independent of the render's
+    # — this cap costs edge precision, not correctness.
+    if a.mask_size and max(mask.size) > a.mask_size:
+        from PIL import Image as _Image
+
+        scale = a.mask_size / max(mask.size)
+        w = max(1, round(mask.width * scale))
+        h = max(1, round(mask.height * scale))
+        # NAMED filter, for the reason every resize in this family is named.
+        mask = mask.resize((w, h), resample=_Image.BILINEAR)
     # tmp + os.replace: a direct save truncates in place, so an interrupted /
     # failed / racing rerun could corrupt a mask a saved recipe already
     # references (fixed names like mask-sky.png outlive this process). The

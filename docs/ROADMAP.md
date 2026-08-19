@@ -410,6 +410,131 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **AI 蒙版重算 + SigLIP 2 风格嵌入（2026-08-19，R27 Batch-5，未发版）** ——
+  两件事，共用一条「本机 ML sidecar」纪律（设计稿：`~/.claude/plans/r27-materials/
+  D1-ml-sidecar-design.md`，用户已批）。
+
+  **T1 · 风格索引升级到 SigLIP 2（V2_PLAN §7-8 收口）**。新 sidecar
+  `python/embed.py` + 桥 `src/embed.rs` + 配置 `AUTOSHOP_EMBED_SCRIPT`。
+  模型 **`google/siglip2-base-patch16-384`**（768 维，HF 许可证标签
+  `apache-2.0`，revision `f775b65a79762255128c981547af89addcfe0f88`，
+  `model.safetensors` **1,501,968,264 B** / sha256 `ed72c0ac…`，实测下载
+  **59.8 s**）。**选它是为许可证不是为跑分**：`openai/clip-vit-large-patch14`
+  在 HF 上**根本没有许可证标签**，且卡片写「Any deployed use case of the model
+  - whether commercial or not - is currently out of scope」，LAION H/14 卡片
+  照抄同一句；本仓库是 PUBLIC 且正在做版权登记，而 SigLIP 2 既是无歧义
+  Apache-2.0 又在公开基准上更强——这种「合规选项同时是更好选项」的情况必须拿下。
+  推理栈**既不是 candle 也不是 ort**：本机 `onnxruntime` 的 provider 列表里
+  **没有 CUDA**，ort 会退化成纯 CPU；而 torch 2.8.0+cu128 + transformers 5.2.0
+  本来就在，sidecar 还能**直接 import `denoise.py` 的 `_fetch_verified`**——
+  全树只有一份「下载并按 sha256 拒收」的实现，不是复制粘贴。
+  **Rust 侧是「并排」不是「融合」**：`StyleExemplar::embed: Option<Vec<f32>>`，
+  距离 = `Σ WEIGHTS[i]·(qᵢ−eᵢ)² + W_EMB·(1 − cos)` 两块相加，**绝不拼接**——
+  所以 `W_EMB=0`、查询无向量、样本无向量三种情况都**逐位复现旧排序**，一份索引
+  里混着有向量/无向量的样本也是合法的（`retrieve_with_embed`）。
+  `CURRENT_INDEX_VERSION` **4 → 5**（v5 = 「可带 SigLIP 2 嵌入块，距离可带余弦
+  项」），且 **v4 仍读**：嵌入是纯增量，拒收 v4 只会让老用户的 Style 面板白死
+  一个小时的重建（R19）。**两个容量常量重新联立推导（R18 关闭）**：
+  实测一条 768 维向量的 JSON 文本 **9,529 B ⇒ 12.41 B/元素**，最坏
+  16 B/元素 ⇒ 12 KiB/条，加其余字段封顶 `MAX_EXEMPLAR_BYTES = 16 KiB`；
+  `MAX_STYLE_EXEMPLARS` **50,000 → 5,000**、`MAX_STYLE_INDEX_BYTES`
+  **32 MiB → 96 MiB**，5,000 × 16 KiB = 80 MiB ≤ 96 MiB，并用两条
+  **模块级 `const _: () = assert!()`** 钉死——是**编译门**不是测试门，改任一个
+  常量而不改另一个直接 `cargo check` 失败。**已登记的代价**：5,000–32,000 张的
+  库现在撞样本数上限（以前撞字节上限），本项目实测过的最大库是 751 张，尚有 6.7×。
+  **冒烟实测**（3 张 CC0 zoo 预览，经我们自己的 `autoshop decode` 抽出）：
+  维度 768、L2 范数 1.0000000、**两次 GPU 单图运行 JSON 字节完全相同**（确定性）、
+  CUDA↔CPU 逐元素最大差 3.2e-7（跨设备逐位相等**从未声称**）、三张互相余弦
+  0.4643 / 0.5447 / 0.5917（有区分度）。**⚠ 与 D1 §5.2 的预期不符并登记**：
+  batch=3 与单图跑同一张，最大差 **1.64e-7**——batch 尺寸**确实**会改末位（cuBLAS
+  分块），所以「batch 不影响结果」应读作「不影响到 1e-7 以内」，`parse_vector`
+  的 1e-3 范数闸覆盖它。**未标定**：`W_EMB = 2.0` 是量纲推理（14 维权重和 14.5，
+  余弦距离跨度 0..2）**不是测量**，`AUTOSHOP_STYLE_EMBED_WEIGHT` 可改、0 复原旧
+  行为；整条嵌入路径由 `AUTOSHOP_STYLE_EMBED` **默认关**（首跑 1.5 GB 下载 +
+  每次调用重载权重）。
+
+  **T2 · `Mask/Image` 臂落地（V2_PLAN §7-14，L-08 Arm C）——剩余拒收的主项**。
+  新几何 `MaskGeometry::AiMask`（Batch-4 的 `Brush` 是先例）。**这不是导入，是
+  重算，全篇纪律都建在这句话上**：sidecar 里**没有栅格也没有几何**（本轮把
+  F2 的 105 例扩测到**全库 218 例**：21 个属性名、`MaskActive` 218/218 为 true、
+  `MaskVersion` 218/218 为 1、`MaskSubType` 恰好 3 个值、唯一子元素
+  `crs:Gesture` 83 例），所以只能**跑我们自己的分割器出我们自己的 alpha**。
+  * **携带**：`subtype` / `ref_x,ref_y` / `name` / `mask_version` / 组合三元组，
+    加一条 **白名单** `provenance: Vec<(String,String)>`（11 个从不解释的属性：
+    三份摘要 + 版本标签 + `WholeImageArea` / `FullMaskSize` / `Origin` /
+    `ModelVersion` / `ErrorReason` / `MaskSubCategoryID`）。白名单**两头都查**
+    ——解析器遇到没量过的属性名直接拒（roundness 纪律），写回时再查一次
+    （手改的 `recipe.json` 不能往 XML 里塞新属性）。`crs:Gesture` 的
+    `Mask/Paint` 走**同一个** `parse_paint_stroke` 收进 `gesture`。
+  * **写回**：`ai_mask_xml` 原样重发 LR 写的那个组件（自闭合/带 Gesture 两种形
+    态都对），**SyncID 按本写手规矩重铸**，摘要原样带出去（它描述的是意图不是
+    我们的栅格，重铸摘要等于伪造溯源）。
+  * **渲染 = develop 时惰性重算**：`segment::resolve_ai_masks` 按
+    `MaskSubType` 分派——1 → subject、2 → sky、**0 → 新的 SAM 2.1 Hiera-Large
+    在 `crs:ReferencePoint` 上点提示**（Apache-2.0；repo `facebook/sam2.1-hiera-large`
+    revision `665f8e2a…`，`model.safetensors` **897,897,416 B** / sha256
+    `dc407dce…`，逐文件 sha256 + 字节闸后 `local_files_only=True` 载入——比
+    subject/sky 两条老路**更严**，那两条只钉 revision，差距已在各自注释里登记）。
+    **不装 torchvision**：transformers 5.2.0 把 `Sam2Processor` 解析成
+    `Sam2ImageProcessorFast`，它硬要 torchvision；所以预处理**照 pinned
+    `preprocessor_config.json` 手写**（1024² 方形压扁、resample 2 = BILINEAR、
+    ImageNet 均值方差）并在运行时**回头断言配置没变**。输出取 logits→sigmoid
+    的**软 alpha**（不是 `binarize=True` 的硬 0/1），`multimask_output` 三选一
+    用 argmax + 显式最低下标破平（`torch.argmax` 的平局行为无契约），IoU 低于
+    `--min-iou` **exit 3 拒收**而不是写一团坏 mask。
+  * **缓存**：raster 落在照片自己的 develop 目录，键 =
+    `(photo_key, subtype, ref 点, 后端代数)` 的 FNV-1a（**不是** `DefaultHasher`
+    ——std 明说跨版本不保证，缓存名一升级就变，等于每次升级重跑模型）。
+    `raster` 路径并入 `LocalAdjustment::bitmap_paths_mut`，于是 store 的
+    相对化/解析/脱钩/快照/删版本清扫**一条走廊全覆盖**。
+  * **披露强制且双向**：`MaskImportReason::AiMaskRecomputed` /
+    `MaskLossReason::AiMaskRecomputed`，中文「AI 蒙版（本机重算，非 Adobe
+    原栅格）」；另有**独立的** `AiMaskUnresolved`（「已带走，尚未重算」）——
+    「近似了」和「根本没画」不是同一条消息，合并会让一次失败的模型运行读起来
+    像一次成功的近似。画布徽标、蒙版行、导入行、导出行四处同步。
+  * **失败绝不静默归零**：sidecar 缺失 / 依赖缺失 / 模型拒收 / 栅格不可解码，
+    一律 `raster = None`，而 `render::is_raster_backed` 让这种蒙版**整条
+    adjustment 被跳过**——不是按权重 0 渲染，因为 0 配上 `inverted` 会把这次
+    编辑铺满整帧。原因逐条带出（`AiMaskResolution::unresolved`）。
+  * **`coord_era` 迁移**：转参考点、**丢缓存 alpha**（旧帧里分出来的 alpha 不能
+    转，只能重算），所以它**不属于** `recipe_has_raster_masks`（那句披露说的是
+    「转不动」，而这个转得动）。
+
+  **M-B 夹具前后实测（同一条测试、同一份夹具，HEAD `b39044f` worktree 对照）**：
+  `_DSC8904` 13 条 correction **8 → 13** 导入（拒收 5 → 0）、`_DSC9082`
+  **3 → 5**（拒 2 → 0）、`_DSC9414` **3 → 5**（拒 2 → 0），其余四份本来就 4/4、
+  4/4、3/3、8/8 不变；**合计 33 → 42 个 mask，9 条拒收 → 0**。
+  **端到端实跑**（Canon EOS R6 CR3 + 一份带 `ai_mask` 的 recipe，`autoshop apply`）：
+  冷跑 **48.0 s**（含模型加载 + 推理）写出 `ai-mask-8648066c82c17d67.png`
+  **4096×2731 8-bit 灰度 715,381 B 覆盖率 11.90 %**（长边帽生效），热跑
+  **9.8 s** 并打印「1 reused from the develop cache」——模型没有再跑。
+
+  **门**：clippy ×2 = 0；`cargo test` + `--bins --features gui` 全绿
+  （lib **669 → 695**，其中 688 pass + 7 条既有 ignored 探针；CLI 9 / GUI 131 /
+  合约 2+2 未动）；`AUTOSHOP_LR_PROBE_FIXTURES` **16/16 字节往返**；
+  `AUTOSHOP_MB_FIXTURES` 全绿（计数见上）；`AUTOSHOP_RAW_ZOO` **9/9**；
+  `audit_i18n` 全 9 门 0（新增 5 条 zh 词条）；**字体 cmap 门绿且无需重新生成
+  子集**——新增汉字「本/机/重/算/非/原/栅/格/尚/由」逐字验证均已在
+  `assets/fonts/NotoSansSC-autoshop.ttf`（739 字）里，`▨`/`×`/`—` 在
+  symbols2 里。**10 条变异逐条验证红→回滚**（转录在 batch5 报告）。
+  新增 tier-3 环境门 **`AUTOSHOP_SEG_PROBE`**（未设静默、设了跑真 SAM 2.1：
+  实测 Canon 预览 1536×1024 覆盖率 0.1272、soft=true）。
+
+  **本轮不做（登记）**：① Object 与 **Background** 在 sidecar 里**不可分**
+  （都是 `MaskSubType=0`，`MaskSubCategoryID` 全库 218 例只有 8 例、2 个值，
+  远不够立枚举）——一律按「点下去的那个物体」分割并披露，不猜。
+  ② 我们的 alpha **离 Adobe 有多远没测**：sidecar 没有栅格，不做一次受控 LR
+  导出就无从比较（V2_PLAN §7-14 的剩余收口）。③ subject/sky 两条老后端仍只钉
+  revision 未钉字节（D1 §3.3 的 sha256 逐文件闸只上到了 SAM 这条新路）。
+  ④ BiRefNet 未接（要 torchvision，D1 §3.2）——subject 仍是 rembg/U²-Net。
+  **← 主审裁决（2026-08-19）**：接受但**不定案**——subject 臂三案（u2net 现状 /
+  BiRefNet+torchvision / SAM 按 ReferencePoint 点提示，后者已集成零新依赖）的
+  质量差异**均无实测**（D1 §9 #7/#8 本就未测），按「蒙版不许猜」律押到发布
+  **目检包**：用户对真实照片比对三案蒙版后再裁升级与否。
+  ⑤ D1 §9 的 8 GB 卡运行时/显存估计**仍是估计**，本轮只实测了 SigLIP 2 与
+  SAM 2.1 的端到端墙钟，没有单独测显存峰值。⑥ GUI 里没有「现在重算这条 AI
+  蒙版」的按钮——重算跟着 develop 走。
+
 - **画笔蒙版结构落地 + 分割许可证根修（2026-08-19，R27 Batch-4，未发版）** ——
   L-08 由「登记不修」转正为**根实现**（用户裁决：最高质量、笔刷必须无损往返、
   不许位图降级）。**一句话**：`Mask/Aggregate` + `Mask/Paint` 从此是一等几何，

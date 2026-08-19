@@ -776,6 +776,16 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     // AFTER the master check: a refused apply must not leave a freshly
     // created, empty output directory behind.
     ensure_parent(out)?;
+    // AI masks are resolved HERE — at develop time, immediately before the
+    // render that needs them — not at import. Importing a Lightroom library
+    // must not spawn a segmentation model run per photo, and a re-render costs
+    // nothing because the alpha is cached in the photo's develop dir
+    // (`segment::resolve_ai_masks`). A failure leaves the mask carried and
+    // inert, and says so; it never fails the develop.
+    let ai = autoshop::segment::resolve_ai_masks(&Config::load(), &src, &mut recipe);
+    if let Some(line) = ai.describe() {
+        println!("ai mask : {line}");
+    }
     println!("rendering {} with {} ...", raw.display(), recipe_path.display());
     let (w, h) = render::render_to_file(&src, &recipe, out, None, None)?;
     println!("render -> {} ({} x {})", out.display(), w, h);
@@ -883,6 +893,14 @@ fn auto_cmd(
     }
     if src != raw {
         println!("  (rendering the saved pixel master {})", src.display());
+    }
+    // Same develop-time resolution as `apply` (see there). `render_recipe` is
+    // the render's own copy, so the resolved raster paths never reach the
+    // saved recipe from here — the cache is keyed by the photo and the intent,
+    // so the next develop finds the same file anyway.
+    let ai = autoshop::segment::resolve_ai_masks(&cfg, &src, &mut render_recipe);
+    if let Some(line) = ai.describe() {
+        println!("ai mask : {line}");
     }
     let (w, h) = render::render_to_file(&src, &render_recipe, &out, dn.as_ref(), None)?;
     println!("render -> {} ({} x {})", out.display(), w, h);
@@ -1627,6 +1645,7 @@ mod tests {
             denoise_script: String::new(),
             denoise_cache: String::new(),
             segment_script: String::new(),
+            embed_script: String::new(),
             style_strength: 0.5,
         }
     }

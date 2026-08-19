@@ -773,6 +773,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Canvas mask badge + model-picker placeholder ─────────────────────────
     ("▨ Bitmap mask", "▨ 位图蒙版"),
     ("▨ Brush mask (carried, not rendered)", "▨ 画笔蒙版（已带走，未渲染）"),
+    // R27 Batch-5. 「重算」 not 「导入」 on purpose: Lightroom's sidecar holds no
+    // raster, so what the canvas shows came from OUR segmenter and the badge
+    // has to say so — a photographer looking at a sky selection that looks
+    // right must not be left assuming it is Adobe's. Every CJK glyph here is
+    // already in the shipped subset (verified against
+    // assets/fonts/NotoSansSC-autoshop.ttf): 「本」「机」「重」「算」「非」
+    // 「原」「栅」「格」「尚」「由」 all occur elsewhere in this table's font.
+    ("▨ AI mask (re-derived locally, not Adobe's raster)",
+        "▨ AI 蒙版（本机重算，非 Adobe 原栅格）"),
+    ("▨ AI mask (carried, not yet re-derived)", "▨ AI 蒙版（已带走，尚未重算）"),
     ("Select…", "选择… / pick"),
     ("or type a custom id", "或输入自定义模型 id"),
 
@@ -880,6 +890,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // 「此」「处」「未」「渲」「染」 all already occur in this table.
     ("brush masks ×{n} carried but not rendered here",
         "画笔蒙版 ×{n} 已带走，但此处未渲染"),
+    // The AI mask's line has to carry the OPPOSITE correction to the brush's:
+    // the sidecar gets the intent WHOLE (Lightroom will rebuild its own mask
+    // from it), so nothing was left out of the XMP — what differs is the alpha
+    // this app drew. 「非 Adobe 原栅格」 is the load-bearing half.
+    ("AI masks ×{n} re-derived locally — not Adobe's raster",
+        "AI 蒙版 ×{n} 由本机重算——非 Adobe 原栅格"),
     // No 「未带走」 on these two: the frame sentence above is already
     // 「…不会带走：」, and "will not carry: radial rotation NOT CARRIED" reads as
     // the opposite of what happened (R22 L5). The English labels are bare nouns
@@ -1410,6 +1426,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // their dab streams and the group's blend mode all arrive and round-trip;
     // the alpha kernel is what is still being measured, so nothing is drawn.
     ("Brush mask (carried, not rendered)", "画笔蒙版（已带走，未渲染）"),
+    // Two sentences, not one, because they are two different states: the mask
+    // rendered from OUR alpha, or it rendered nothing at all. Collapsing them
+    // would let a failed model run read as a successful approximation.
+    ("AI mask (re-derived locally, not Adobe's raster)",
+        "AI 蒙版（本机重算，非 Adobe 原栅格）"),
+    ("AI mask (carried, not yet re-derived)", "AI 蒙版（已带走，尚未重算）"),
     ("Range mask (foreign)", "值域蒙版（外部）"),
     // R25 P6: the four local point curves are modelled now, so this verdict
     // no longer means "not supported" — it means the sidecar's own curve did

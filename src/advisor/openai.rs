@@ -953,6 +953,7 @@ mod tests {
             denoise_script: String::new(),
             denoise_cache: String::new(),
             segment_script: String::new(),
+            embed_script: String::new(),
             style_strength: 0.5,
         }
     }

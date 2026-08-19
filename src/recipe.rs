@@ -1139,6 +1139,121 @@ pub enum MaskGeometry {
         /// preserved rather than sorted.
         strokes: Vec<BrushStroke>,
     },
+    /// Lightroom's AI mask — one `crs:What="Mask/Image"` component (R27
+    /// Batch-5, L-08 Arm C). The INTENT is imported and carried; the alpha is
+    /// **RECOMPUTED on this machine by our own segmenter**, and that is a
+    /// different thing from an import.
+    ///
+    /// **Why this cannot be an import.** F2's anatomy enumerated the full
+    /// attribute vocabulary over 105 real instances (re-measured at 218 across
+    /// the wider library for this batch, 21 attribute names, one child element)
+    /// and found **no raster payload and no geometry payload** — the longest
+    /// attribute value anywhere on one is 55 characters. The sidecar names
+    /// WHICH segmentation to run (`MaskSubType` + `MaskName` +
+    /// `ReferencePoint`), WHICH model produced the original (`ModelVersion`,
+    /// three digests), and the proxy frame it ran in (`FullMaskSize`,
+    /// `WholeImageArea`, `Origin`). Nothing else. Adobe recomputes the alpha on
+    /// apply; so must we, with a different model.
+    ///
+    /// **So the disclosure is mandatory and it runs in both directions.** What
+    /// this engine renders is OUR segmenter's alpha, not Adobe's raster: the
+    /// coverage will differ at every edge and can differ grossly on a hard
+    /// scene. `MaskImportReason::AiMaskRecomputed` says so on the way in and
+    /// `MaskLossReason::AiMaskRecomputed` on the way out, in both languages.
+    /// A sidecar/model failure leaves `raster` at `None`, which renders the
+    /// mask INERT (weight 0, exactly like a `Bitmap` whose file is missing) and
+    /// is disclosed as carried-not-rendered — never a silent zero, never a
+    /// crash.
+    ///
+    /// **What rides back out** is the component Lightroom wrote, verbatim: the
+    /// intent fields below plus `provenance`, which holds the attributes this
+    /// engine never interprets. A republished sidecar therefore still says what
+    /// Lightroom said, and Lightroom recomputes its own alpha from it — which
+    /// is the one round trip that IS lossless here.
+    AiMask {
+        /// `crs:MaskName` — a localised user string (`天空 1`, `Sky 1`,
+        /// `背景1`, `水源`). Carried so a republished sidecar keeps the
+        /// photographer's own label; also the only hint that a `subtype == 0`
+        /// mask meant *Background* rather than *Object*, which is why that
+        /// guess is NOT made here (see `subtype`).
+        name: String,
+        /// `crs:MaskSubType` — **0 = Object/Background, 1 = Subject, 2 = Sky**
+        /// (decoded by cross-tabulating against `MaskName` over 105 instances;
+        /// re-measured 218 in this batch, still exactly three values).
+        ///
+        /// Object and Background share the value 0 and the sidecar does not
+        /// separate them: `crs:MaskSubCategoryID` appears on 8 of 218 with two
+        /// values, far too few to call an enum. So the segmenter is pointed at
+        /// the OBJECT under the click point in both cases, and the possibility
+        /// that the photographer meant its complement is disclosed rather than
+        /// guessed — the roundness rule.
+        subtype: u32,
+        /// `crs:ReferencePoint` — the user's own click, normalised to the
+        /// frame, present on 218/218. This is the ONLY spatial information the
+        /// component carries, and it is what a point-promptable segmenter
+        /// (SAM 2.1) consumes directly.
+        ref_x: f32,
+        ref_y: f32,
+        /// `crs:MaskBlendMode` on the component, VERBATIM — 0 = union onto the
+        /// correction's coverage, 1 = subtract (paired with `value` 0). Same
+        /// encoding, same reading and same "carried for the writer, projected
+        /// onto `MaskCombine` for the render" split as
+        /// [`MaskGeometry::Brush::blend_mode`].
+        blend_mode: u32,
+        /// `crs:MaskValue`, VERBATIM — the other half of the subtract pair,
+        /// never a strength.
+        value: f32,
+        /// `crs:MaskInverted`.
+        inverted: bool,
+        /// `crs:MaskVersion` — `"1"` on 218/218. Lightroom's own schema stamp
+        /// for the component, carried and never interpreted, exactly like
+        /// [`MaskGeometry::Radial::mask_version`].
+        mask_version: u32,
+        /// Every remaining `crs:` attribute the file carried, in DOCUMENT
+        /// ORDER, as `(local name, value)` — the three digests and their
+        /// version tags, `WholeImageArea`, `FullMaskSize`, `Origin`,
+        /// `ModelVersion`, `ErrorReason`, `MaskSubCategoryID`.
+        ///
+        /// **PROVENANCE ONLY. Nothing here is read.** `FullMaskSize`
+        /// (`"2880,1920"`) is the resolution Adobe's segmenter worked at and
+        /// `WholeImageArea` / `Origin` are the crop rect and bbox origin in
+        /// those proxy pixels — they describe a raster this engine does not
+        /// have and would only mislead a renderer that consulted them. They are
+        /// kept so the sidecar round-trips and so a future measurement has the
+        /// numbers, not so anything can act on them.
+        ///
+        /// A key outside the measured vocabulary is REFUSED by the parser
+        /// rather than carried ([`xmp`]'s `AI_MASK_PROVENANCE_KEYS`): an
+        /// open-ended attribute bag read off disk and written into XML is an
+        /// injection surface, and a name we have never seen means a writer we
+        /// have not measured.
+        ///
+        /// [`xmp`]: crate::xmp
+        provenance: Vec<(String, String)>,
+        /// The `crs:Gesture` child's `Mask/Paint` strokes — the user's brush
+        /// REFINEMENT of the AI mask (present on 83 of 218 components, exactly
+        /// one Paint each in the F2 census).
+        ///
+        /// Carried, not rendered, for exactly [`BrushStroke::dabs`]'s reason:
+        /// the alpha kernel is not in the file. Carrying it is still what makes
+        /// the 7 corrections whose ONLY brush content is a gesture importable
+        /// at all.
+        gesture: Vec<BrushStroke>,
+        /// The RECOMPUTED alpha, once our segmenter has produced one — a path
+        /// to an 8-bit grey PNG inside the photo's develop dir, keyed by
+        /// (photo, subtype, reference point, backend) so a re-render reuses it
+        /// instead of re-running the model (`segment::resolve_ai_masks`).
+        ///
+        /// Machine-local, like every other raster path in this file: it joins
+        /// [`LocalAdjustment::bitmap_paths_mut`], so the store relativizes,
+        /// resolves, detaches and snapshots it with the rest. `None` = not
+        /// resolved yet, or the model declined — which renders inert and is
+        /// disclosed, never silently zero.
+        ///
+        /// NOT written to the sidecar: what Lightroom gets back is the intent.
+        #[serde(default)]
+        raster: Option<String>,
+    },
 }
 
 /// One `crs:What="Mask/Paint"` stroke inside a [`MaskGeometry::Brush`] group.
@@ -1313,6 +1428,17 @@ fn geometry_is_finite(g: &MaskGeometry) -> bool {
                     [s.value, s.radius, s.flow, s.center_weight].iter().all(|v| v.is_finite())
                 })
         }
+        // The reference point is a real COORDINATE — it decides where the
+        // segmenter clicks — so a NaN here would put the prompt nowhere. The
+        // gesture strokes get the same treatment as a brush group's for the
+        // same reason: they reach the sidecar writer, and "NaN" is not
+        // something Lightroom can parse back.
+        MaskGeometry::AiMask { ref_x, ref_y, value, gesture, .. } => {
+            [ref_x, ref_y, value].iter().all(|v| v.is_finite())
+                && gesture.iter().all(|s| {
+                    [s.value, s.radius, s.flow, s.center_weight].iter().all(|v| v.is_finite())
+                })
+        }
     }
 }
 
@@ -1391,6 +1517,57 @@ fn clamp_geometry(g: &mut MaskGeometry) {
                 s.radius = if s.radius.is_finite() { s.radius.clamp(0.0, COORD_LIMIT) } else { 0.0 };
             }
         }
+        // An AI mask's bands are the SIDECAR's plus one that is the RENDER's:
+        // the reference point is a normalised click that becomes a pixel
+        // coordinate the segmenter is prompted at, so it takes the coordinate
+        // limit rather than a unit band (a click just outside the frame is a
+        // thing Lightroom writes — the sidecar's own values run to 3 decimal
+        // places inside [0,1], but the segment bridge is what decides what is
+        // reachable, not this clamp). `blend_mode`, `mask_version` and every
+        // `provenance` string are left alone for `MaskGeometry::Brush`'s
+        // reason: there is no "nearest legal value" for an enum, a schema stamp
+        // or an opaque digest.
+        MaskGeometry::AiMask { ref_x, ref_y, value, gesture, provenance, .. } => {
+            for v in [ref_x, ref_y] {
+                *v = if v.is_finite() { v.clamp(-COORD_LIMIT, COORD_LIMIT) } else { 0.5 };
+            }
+            *value = if value.is_finite() { value.clamp(0.0, 1.0) } else { 1.0 };
+            for s in gesture.iter_mut() {
+                for (v, neutral) in
+                    [(&mut s.value, 1.0f32), (&mut s.flow, 1.0), (&mut s.center_weight, 0.0)]
+                {
+                    *v = if v.is_finite() { v.clamp(0.0, 1.0) } else { neutral };
+                }
+                s.radius = if s.radius.is_finite() { s.radius.clamp(0.0, COORD_LIMIT) } else { 0.0 };
+            }
+            // A hand-edited recipe.json must not be able to make one component
+            // cost an unbounded allocation, or to smuggle a novel attribute
+            // into a sidecar. The COUNT is bounded here; the KEYS are an
+            // allowlist in the parser and again in the writer.
+            provenance.truncate(MAX_AI_PROVENANCE_ENTRIES);
+            for (k, v) in provenance.iter_mut() {
+                truncate_chars(k, MAX_AI_PROVENANCE_KEY_CHARS);
+                truncate_chars(v, MAX_AI_PROVENANCE_VALUE_CHARS);
+            }
+        }
+    }
+}
+
+/// Bounds for [`MaskGeometry::AiMask::provenance`] — the measured vocabulary is
+/// 11 optional attributes, the longest value in the whole reference library is
+/// 55 characters (`crs:WholeImageArea`), and the longest name is
+/// `LocalInputDigestVersion` at 23. Each cap leaves room without leaving the
+/// door open.
+const MAX_AI_PROVENANCE_ENTRIES: usize = 16;
+const MAX_AI_PROVENANCE_KEY_CHARS: usize = 48;
+const MAX_AI_PROVENANCE_VALUE_CHARS: usize = 128;
+
+/// Truncate on a CHARACTER boundary — `String::truncate` panics mid-codepoint,
+/// and these strings come off disk where a multi-byte value is legal.
+fn truncate_chars(s: &mut String, max: usize) {
+    if s.chars().count() > max {
+        let cut = s.char_indices().nth(max).map_or(s.len(), |(i, _)| i);
+        s.truncate(cut);
     }
 }
 
@@ -1400,13 +1577,26 @@ impl LocalAdjustment {
     /// relativize/resolve/detach/snapshot helpers share, so a new geometry
     /// carrier can never be forgotten by one of them.
     pub fn bitmap_paths_mut(&mut self) -> Vec<&mut String> {
+        // TWO carriers now (R27 Batch-5): the explicit `Bitmap` raster and the
+        // RECOMPUTED alpha an `AiMask` caches. They are the same kind of thing
+        // to every consumer of this walk — a machine-local PNG path that must
+        // be relativized on save, resolved on load, copied when a version
+        // snapshot becomes live, and swept with a deleted version — so the
+        // AiMask one goes through the same door rather than growing a second.
+        fn raster_of(g: &mut MaskGeometry) -> Option<&mut String> {
+            match g {
+                MaskGeometry::Bitmap { path } => Some(path),
+                MaskGeometry::AiMask { raster: Some(path), .. } => Some(path),
+                _ => None,
+            }
+        }
         let mut out = Vec::new();
-        if let MaskGeometry::Bitmap { path } = &mut self.mask {
-            out.push(path);
+        if let Some(p) = raster_of(&mut self.mask) {
+            out.push(p);
         }
         for c in self.components.iter_mut() {
-            if let MaskGeometry::Bitmap { path } = &mut c.geometry {
-                out.push(path);
+            if let Some(p) = raster_of(&mut c.geometry) {
+                out.push(p);
             }
         }
         out
@@ -1602,6 +1792,28 @@ impl EditRecipe {
                     for s in strokes.iter_mut() {
                         bytes += cap(&mut s.sync_id, name_max);
                         bytes += cap(&mut s.dabs, MAX_DABS);
+                    }
+                    (bytes, dropped)
+                }
+                // Every string an AI mask carries, including the ones only the
+                // WRITER reads. `provenance` is capped by ENTRY COUNT in
+                // `clamp_geometry` and by LENGTH here, so a hand-edited
+                // recipe.json cannot make one component's XML unbounded from
+                // either direction.
+                MaskGeometry::AiMask { name, gesture, provenance, raster, .. } => {
+                    let mut bytes = cap(name, name_max);
+                    if let Some(p) = raster.as_mut() {
+                        bytes += cap(p, MAX_PATH);
+                    }
+                    let dropped = gesture.len().saturating_sub(MAX_BRUSH_STROKES);
+                    gesture.truncate(MAX_BRUSH_STROKES);
+                    for s in gesture.iter_mut() {
+                        bytes += cap(&mut s.sync_id, name_max);
+                        bytes += cap(&mut s.dabs, MAX_DABS);
+                    }
+                    for (k, v) in provenance.iter_mut() {
+                        bytes += cap(k, name_max);
+                        bytes += cap(v, name_max);
                     }
                     (bytes, dropped)
                 }

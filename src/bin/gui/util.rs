@@ -126,6 +126,25 @@ pub(crate) fn draw_mask_overlay(
                 ACCENT,
             );
         }
+        // An AI mask DOES render — through an alpha OUR segmenter recomputed,
+        // because Lightroom's sidecar carries no raster to import. The badge
+        // says that in the same breath as the selection, so a photographer
+        // looking at a sky selection that "looks right" is never left assuming
+        // it is Adobe's (R27 Batch-5, L-08 Arm C). The unresolved case is the
+        // other sentence: the mask is carried and nothing is drawn.
+        MaskGeometry::AiMask { raster, .. } => {
+            p.text(
+                xf.rect.left_top() + egui::vec2(10.0, 10.0),
+                egui::Align2::LEFT_TOP,
+                if raster.is_some() {
+                    tr(lang, "▨ AI mask (re-derived locally, not Adobe's raster)")
+                } else {
+                    tr(lang, "▨ AI mask (carried, not yet re-derived)")
+                },
+                egui::FontId::proportional(14.0),
+                ACCENT,
+            );
+        }
     }
 }
 
@@ -167,7 +186,13 @@ pub(crate) fn mask_handle_points(geom: &MaskGeometry, xf: ViewXform) -> Vec<(u8,
             ]
         }
         // Neither raster nor brush geometry has a parametric knob to drag.
-        MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. } => Vec::new(),
+        // An AI mask joins them: its only coordinate is the segmenter's
+        // reference point, which is a PROMPT and not a shape the user drags —
+        // giving it a knob would suggest the alpha follows the handle, and it
+        // does not until the model runs again.
+        MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. } | MaskGeometry::AiMask { .. } => {
+            Vec::new()
+        }
     }
 }
 
@@ -400,6 +425,16 @@ pub(crate) fn xmp_loss_line(
             R::BrushCarried => {
                 trf(lang, "brush masks ×{n} carried but not rendered here", &[("n", &n)])
             }
+            // The other non-XMP entry, and the sharper one: the INTENT rides
+            // out whole (Lightroom will rebuild its own mask from it), while
+            // the pixels shown here came from OUR segmenter. Saying only
+            // "carried" would let a photographer read the export as a raster
+            // round trip, which it is not in either direction.
+            R::AiMaskRecomputed => trf(
+                lang,
+                "AI masks ×{n} re-derived locally — not Adobe's raster",
+                &[("n", &n)],
+            ),
             // R25 P5: the rotation loss SAYS THE ANGLE and says why. 「radial
             // rotation ×1」 told a photographer that something about rotation
             // was dropped, and left both actionable halves out — how much, and
@@ -608,6 +643,15 @@ pub(crate) fn xmp_import_line(
             // What did not arrive is the DRAWING of them, which waits on the
             // alpha-kernel measurement — so the label says both halves.
             R::BrushCarried => tr(lang, "Brush mask (carried, not rendered)").into(),
+            // NOT a loss either — the correction arrived, and so did every
+            // shape standing beside it (the 78-correction gain). What the
+            // label must not let the reader assume is that the ALPHA came from
+            // Lightroom: the sidecar carries no raster, so ours is a
+            // re-derivation with different edges.
+            R::AiMaskRecomputed => {
+                tr(lang, "AI mask (re-derived locally, not Adobe's raster)").into()
+            }
+            R::AiMaskUnresolved => tr(lang, "AI mask (carried, not yet re-derived)").into(),
             R::ForeignRangeMask => tr(lang, "Range mask (foreign)").into(),
             // R25 P6 narrowed this verdict from "we do not model local point
             // curves" to "this one could not be READ" — the label moved with
@@ -798,7 +842,12 @@ pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist
         // for the sidecar round trip and nothing draws them, so remapping
         // them would be work with no observer (`render::orient_recipe_coords`
         // makes the same call for the same reason).
-        MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. } => geom.clone(),
+        MaskGeometry::Bitmap { .. }
+        | MaskGeometry::Brush { .. }
+        // Same call for the AI mask's reference point: it is a model prompt in
+        // the ORIGINAL frame, not an overlay anchor, and remapping it into view
+        // space would be work with no observer.
+        | MaskGeometry::AiMask { .. } => geom.clone(),
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
             let a = orig_norm_to_view(zero_x, zero_y, dims, deg, dist);
             let b = orig_norm_to_view(full_x, full_y, dims, deg, dist);

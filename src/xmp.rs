@@ -1004,7 +1004,139 @@ crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
         // so the `None` below is never the answer that decides anything — it
         // exists so this function stays total.
         MaskGeometry::Brush { .. } => None,
+        // Same shape of exception as the brush group, one element deeper: an
+        // AI mask may carry a `crs:Gesture` child, so it is not an
+        // attribute-form component either. [`ai_mask_xml`] emits the whole
+        // element and [`masks_xml`] routes to it BEFORE reaching here.
+        MaskGeometry::AiMask { .. } => None,
     }
+}
+
+/// The `crs:` attributes a [`MaskGeometry::AiMask`] carries as PROVENANCE — the
+/// ones this engine never interprets, listed in the order Lightroom writes
+/// them.
+///
+/// **An allowlist, both ways.** The parser refuses a `Mask/Image` carrying an
+/// attribute outside this list plus the modelled ones (the roundness rule: a
+/// name we have never seen means a writer we have not measured), and the writer
+/// emits only names from this list — so a hand-edited `recipe.json` cannot
+/// smuggle a novel attribute, or markup, into a sidecar.
+///
+/// Measured over the user's library on 2026-08-19: 218 `Mask/Image` instances,
+/// 21 distinct attribute names, of which 7 are modelled fields
+/// ([`MaskGeometry::AiMask`]) plus `crs:What` and `crs:MaskActive` (an
+/// invariant, `"true"` on 218/218) and `crs:MaskSyncID` (re-minted by this
+/// writer like every other component's). These eleven are the rest.
+const AI_MASK_PROVENANCE_KEYS: [&str; 11] = [
+    "MaskSubCategoryID",
+    "InputDigest",
+    "InputDigestVersion",
+    "MaskDigest",
+    "LocalInputDigest",
+    "LocalInputDigestVersion",
+    "WholeImageArea",
+    "FullMaskSize",
+    "Origin",
+    "ModelVersion",
+    "ErrorReason",
+];
+
+/// One [`MaskGeometry::AiMask`] as a complete `crs:CorrectionMasks` member: the
+/// `Mask/Image` element, its carried provenance attributes, and the
+/// `crs:Gesture` list when the photographer refined it with a stroke.
+///
+/// **What this is and is not.** It is the INTENT riding back out verbatim, so a
+/// sidecar this app rewrites still tells Lightroom which segmentation the
+/// photographer asked for, at which click, from which model — and Lightroom
+/// recomputes its own alpha from that, exactly as it does for its own files.
+/// It is NOT a claim that our render matched Adobe's: those pixels came from a
+/// different segmenter and the disclosure channels say so
+/// ([`MaskLossReason::AiMaskRecomputed`]).
+///
+/// The provenance digests ride out UNCHANGED on purpose. They describe the
+/// intent (which input, which model version), not our raster; re-minting them
+/// would assert a provenance we did not have, and dropping them would lose the
+/// photographer's own. `crs:MaskSyncID` is the one identity this writer does
+/// mint, because that is what it does for every component it emits.
+fn ai_mask_xml(g: &MaskGeometry, sync_seed: &str) -> Option<String> {
+    let MaskGeometry::AiMask {
+        name,
+        subtype,
+        ref_x,
+        ref_y,
+        blend_mode,
+        value,
+        inverted,
+        mask_version,
+        provenance,
+        gesture,
+        ..
+    } = g
+    else {
+        return None;
+    };
+    let mut extra = String::new();
+    for (k, v) in provenance {
+        // The allowlist, enforced at the LAST moment before the bytes exist.
+        // `recipe.json` is disk input and this string becomes XML someone
+        // else's parser reads.
+        if AI_MASK_PROVENANCE_KEYS.contains(&k.as_str()) {
+            extra.push_str(&format!(" crs:{k}=\"{}\"", xml_attr_escape(v)));
+        }
+    }
+    // The gesture's strokes reuse the Paint spelling exactly — same element,
+    // same nine attributes, same three literals-because-they-are-invariants.
+    let mut painted = String::new();
+    for (k, s) in gesture.iter().enumerate() {
+        let dabs: String = s
+            .dabs
+            .split('\n')
+            .map(|t| format!("               <rdf:li>{}</rdf:li>\n", xml_attr_escape(t)))
+            .collect();
+        painted.push_str(&format!(
+            "            <rdf:li>\n\
+             <rdf:Description\n\
+              crs:What=\"Mask/Paint\" crs:MaskActive=\"true\" crs:MaskBlendMode=\"0\"\n\
+              crs:MaskInverted=\"false\" crs:MaskSyncID=\"{id}\" crs:MaskValue=\"{v}\"\n\
+              crs:Radius=\"{r}\" crs:Flow=\"{f}\" crs:CenterWeight=\"{cw}\">\n\
+             <crs:Dabs>\n\
+              <rdf:Seq>\n\
+{dabs}              </rdf:Seq>\n\
+             </crs:Dabs>\n\
+             </rdf:Description>\n\
+            </rdf:li>\n",
+            id = guid(&format!("{sync_seed}-gesture-{k}")),
+            v = s.value,
+            r = s.radius,
+            f = s.flow,
+            cw = s.center_weight,
+        ));
+    }
+    let head = format!(
+        "          <rdf:Description\n\
+           crs:What=\"Mask/Image\" crs:MaskActive=\"true\" crs:MaskName=\"{mname}\"\n\
+           crs:MaskBlendMode=\"{blend_mode}\" crs:MaskInverted=\"{inverted}\" \
+crs:MaskSyncID=\"{id}\"\n\
+           crs:MaskValue=\"{value}\" crs:MaskVersion=\"{mask_version}\" \
+crs:MaskSubType=\"{subtype}\"\n\
+           crs:ReferencePoint=\"{ref_x} {ref_y}\"{extra}",
+        mname = xml_attr_escape(name),
+        id = guid(sync_seed),
+    );
+    Some(if painted.is_empty() {
+        // Self-closing when there is no gesture — 135 of 218 real instances.
+        format!("         <rdf:li>\n{head}/>\n         </rdf:li>\n")
+    } else {
+        format!(
+            "         <rdf:li>\n{head}>\n\
+          <crs:Gesture>\n\
+           <rdf:Seq>\n\
+{painted}           </rdf:Seq>\n\
+          </crs:Gesture>\n\
+          </rdf:Description>\n\
+         </rdf:li>\n"
+        )
+    })
 }
 
 /// One [`MaskGeometry::Brush`] group as a complete `crs:CorrectionMasks`
@@ -1180,6 +1312,22 @@ pub enum MaskLossReason {
     /// the accumulation law come from a controlled Lightroom measurement or
     /// from a guess, and this project does not guess about mask shape.
     BrushCarried,
+    /// An AI mask (`Mask/Image`) rides out into the sidecar COMPLETE — and the
+    /// alpha this engine rendered was **recomputed by our own segmenter**, not
+    /// Adobe's, so the XMP Lightroom reads and the pixels Autoshop showed do
+    /// not describe the same coverage.
+    ///
+    /// The second member of [`BrushCarried`]'s odd-one-out class, and the one
+    /// where the gap is largest. A brush mask is carried and NOT drawn — the
+    /// user sees nothing and knows it. An AI mask IS drawn, which is worse to
+    /// leave unsaid: the photographer sees a sky selection that looks right and
+    /// has no way to know its edges came from a different model. The sidecar
+    /// carries no raster at all (F2's anatomy: 218 instances, longest attribute
+    /// value 55 characters), so this is structural and permanent, not a
+    /// to-do.
+    ///
+    /// [`BrushCarried`]: MaskLossReason::BrushCarried
+    AiMaskRecomputed,
     /// A rotated radial exports as its UNROTATED ellipse. v0.32.0 NARROWED
     /// this to one case: `crs:Angle`'s sign and pivot are measured now and the
     /// projection carries the tilt, so what is left is a document with no
@@ -1217,11 +1365,12 @@ impl MaskLossReason {
     /// [`en`]: MaskLossReason::en
     /// [`Rotation`]: MaskLossReason::Rotation
     /// [`same_kind`]: MaskLossReason::same_kind
-    pub const ALL: [MaskLossReason; 6] = [
+    pub const ALL: [MaskLossReason; 7] = [
         MaskLossReason::Bitmap,
         MaskLossReason::Disabled,
         MaskLossReason::ComponentsFlattened,
         MaskLossReason::BrushCarried,
+        MaskLossReason::AiMaskRecomputed,
         MaskLossReason::Rotation(0),
         MaskLossReason::Recolour,
     ];
@@ -1243,6 +1392,9 @@ impl MaskLossReason {
             MaskLossReason::ComponentsFlattened => "extra shape component(s) flattened",
             MaskLossReason::BrushCarried => {
                 "brush mask(s) carried, not yet rendered - kernel measurement in flight"
+            }
+            MaskLossReason::AiMaskRecomputed => {
+                "AI mask(s) re-derived by the local segmenter - not Adobe's own raster"
             }
             MaskLossReason::Rotation(_) => "radial rotation dropped",
             MaskLossReason::Recolour => "recolour gains dropped",
@@ -1349,6 +1501,43 @@ pub enum MaskImportReason {
     ///
     /// [`Unrepresentable`]: MaskImportReason::Unrepresentable
     BrushCarried,
+    /// A `Mask/Image` AI mask imported as INTENT and **re-derived on this
+    /// machine by a different segmenter** — the dominant refusal before R27
+    /// Batch-5, and the one arm that cannot be closed by any parser.
+    ///
+    /// F2's anatomy settled the mechanism on 105 real instances (re-measured at
+    /// 218 for this batch): the component carries `MaskSubType` +
+    /// `ReferencePoint` + `MaskName`, the provenance digests, and the proxy
+    /// frame Adobe's model ran in — **no raster payload and no geometry
+    /// payload**, longest attribute value 55 characters. So there is nothing to
+    /// import in the sense the other variants mean it. What lands is a
+    /// RECOMPUTATION: our own subject / sky / point-prompted segmenter produces
+    /// its own alpha, which will differ from Adobe's at every edge.
+    ///
+    /// A note, not a drop, and that is the whole gain: 78 corrections across 40
+    /// files — 40 % of every file in the reference library that has a mask at
+    /// all — were refused entire because of one of these, taking 52
+    /// engine-drawable parametric shapes with them.
+    ///
+    /// When the segmenter has not run or declined, the mask renders INERT and
+    /// [`AiMaskUnresolved`] says so instead — two different sentences for two
+    /// different states, because "approximated" and "not drawn" are not the
+    /// same news.
+    ///
+    /// [`AiMaskUnresolved`]: MaskImportReason::AiMaskUnresolved
+    AiMaskRecomputed,
+    /// An AI mask arrived but has NO alpha: the segmentation sidecar has not
+    /// run for this photo yet, or it ran and declined. The mask contributes
+    /// nothing and the correction's other shapes render normally.
+    ///
+    /// Separate from [`AiMaskRecomputed`] on purpose. That one says "these
+    /// pixels are ours, not Adobe's"; this one says "there are no pixels".
+    /// Collapsing them would let a failed model run read as a successful
+    /// approximation, which is the one confusion this whole arm exists to
+    /// avoid.
+    ///
+    /// [`AiMaskRecomputed`]: MaskImportReason::AiMaskRecomputed
+    AiMaskUnresolved,
     /// A `Mask/RangeMask` we cannot honour (someone else's encoding, or more
     /// than one) — the geometry imports without the range refinement.
     ForeignRangeMask,
@@ -1392,13 +1581,15 @@ impl MaskImportReason {
     /// [`en`]: MaskImportReason::en
     /// [`InertLocal`]: MaskImportReason::InertLocal
     /// [`same_kind`]: MaskImportReason::same_kind
-    pub const ALL: [MaskImportReason; 11] = [
+    pub const ALL: [MaskImportReason; 13] = [
         MaskImportReason::Unrepresentable,
         MaskImportReason::OutOfModel,
         MaskImportReason::Rotation(0),
         MaskImportReason::BlendMode,
         MaskImportReason::MultiComponent,
         MaskImportReason::BrushCarried,
+        MaskImportReason::AiMaskRecomputed,
+        MaskImportReason::AiMaskUnresolved,
         MaskImportReason::ForeignRangeMask,
         MaskImportReason::LocalCurve,
         MaskImportReason::CurveRefineSaturation,
@@ -1432,6 +1623,12 @@ impl MaskImportReason {
             MaskImportReason::MultiComponent => "extra shape component(s) dropped",
             MaskImportReason::BrushCarried => {
                 "brush mask(s) carried, not yet rendered - kernel measurement in flight"
+            }
+            MaskImportReason::AiMaskRecomputed => {
+                "AI mask(s) re-derived by the local segmenter - not Adobe's own raster"
+            }
+            MaskImportReason::AiMaskUnresolved => {
+                "AI mask(s) carried but not yet re-derived - the local segmenter has not run"
             }
             MaskImportReason::ForeignRangeMask => "range mask(s) dropped",
             MaskImportReason::LocalCurve => "local point curve(s) unreadable",
@@ -1947,6 +2144,14 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
                 Some(li) => li,
                 None => unreachable!("brush_mask_xml answers every Brush geometry"),
             }
+        // FOUR shapes now (R27 Batch-5): an AI mask emits its whole
+        // `Mask/Image` element, carrying the intent Lightroom will recompute
+        // from.
+        } else if matches!(m.mask, MaskGeometry::AiMask { .. }) {
+            match ai_mask_xml(&m.mask, &guid(&format!("ai-{i}-{name}"))) {
+                Some(li) => li,
+                None => unreachable!("ai_mask_xml answers every AiMask geometry"),
+            }
         } else {
             let Some((what, geom, w)) = mask_geom_xml(&m.mask, net_inv, frame) else {
                 losses.push(MaskLoss { name, reason: MaskLossReason::Bitmap });
@@ -1972,7 +2177,9 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
         let mut extra_lis = String::new();
         let mut flattened = 0usize;
         for (k, c) in m.components.iter().enumerate() {
-            match brush_mask_xml(&c.geometry, &guid(&format!("brush-{i}-{name}-{k}"))) {
+            let li = brush_mask_xml(&c.geometry, &guid(&format!("brush-{i}-{name}-{k}")))
+                .or_else(|| ai_mask_xml(&c.geometry, &guid(&format!("ai-{i}-{name}-{k}"))));
+            match li {
                 Some(li) => extra_lis.push_str(&li),
                 None => flattened += 1,
             }
@@ -1994,6 +2201,18 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
             || m.components.iter().any(|c| matches!(c.geometry, MaskGeometry::Brush { .. }))
         {
             losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::BrushCarried });
+        }
+        // The AI mask's own direction of loss, and it is the sharper one: the
+        // sidecar gets the INTENT whole (so Lightroom will reproduce its own
+        // mask exactly), while the pixels Autoshop showed came from OUR
+        // segmenter. The two will not agree at the edges and can disagree
+        // badly on a hard scene. Raised once per mask that carries one
+        // anywhere, base or component — a fact about the mask, not a count.
+        if matches!(m.mask, MaskGeometry::AiMask { .. })
+            || m.components.iter().any(|c| matches!(c.geometry, MaskGeometry::AiMask { .. }))
+        {
+            losses
+                .push(MaskLoss { name: name.clone(), reason: MaskLossReason::AiMaskRecomputed });
         }
         // The rotation verdict now comes FROM THE EMITTER (v0.32.0): it is the
         // one place that knows whether the angle reached the document, and
@@ -5113,6 +5332,155 @@ fn parse_brush_group(scope: &str, agg: &XmlComponent<'_>) -> Result<MaskGeometry
     Ok(MaskGeometry::Brush { name, blend_mode, value, inverted, strokes })
 }
 
+/// One `crs:What="Mask/Image"` component → [`MaskGeometry::AiMask`], or
+/// `Err(())` when the file breaks an invariant this parser refuses to guess
+/// past. `scope` is the string `img`'s offsets are measured in.
+///
+/// **What is refused, and why refusing beats guessing** — every gate has zero
+/// counter-examples in the 218 real instances measured for R27 Batch-5:
+///
+///  * a muted component (`MaskActive` other than `"true"`) — 218/218 are
+///    `"true"`, and a muted component changes what the mask covers;
+///  * a missing or unreadable `MaskSubType` / `ReferencePoint` — both sit on
+///    218/218, and they ARE the mask: without the pair there is nothing to
+///    point a segmenter at;
+///  * a `MaskSubType` outside `{0, 1, 2}` — three values on 218/218, and each
+///    routes to a specific backend. A fourth would have no backend and
+///    guessing one would invent a selection;
+///  * an attribute name outside the modelled set plus
+///    [`AI_MASK_PROVENANCE_KEYS`];
+///  * a child element other than `crs:Gesture`, or a Gesture holding anything
+///    but `Mask/Paint` (83 Gestures, one Paint each).
+fn parse_ai_mask(scope: &str, img: &XmlComponent<'_>) -> Result<MaskGeometry, ()> {
+    let tag = img.tag;
+    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true")) {
+        return Err(());
+    }
+    // The three composition attributes, read exactly as a brush group's are.
+    let blend_mode = match crs_str(tag, "MaskBlendMode") {
+        None => 0u32,
+        Some(v) => v.trim().parse::<u32>().map_err(|_| ())?,
+    };
+    let value = match crs_str(tag, "MaskValue") {
+        None => 1.0f32,
+        Some(_) => crs_f32(tag, "MaskValue").filter(|v| v.is_finite()).ok_or(())?,
+    };
+    let inverted = match crs_str(tag, "MaskInverted").as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err(()),
+    };
+    let name = crs_str(tag, "MaskName").map(|v| v.into_owned()).unwrap_or_default();
+    // REQUIRED, not defaulted: an absent subtype is not "object", it is a
+    // component this reader has never seen.
+    let subtype = crs_str(tag, "MaskSubType")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| (0..=2).contains(v))
+        .ok_or(())?;
+    // `"0.517578 0.260997"` — space separated, normalised. STRICT: a malformed
+    // token used to be the kind of thing a `filter_map` would drop, leaving the
+    // remaining value to shift into the wrong field.
+    let pt: Option<Vec<f32>> = crs_str(tag, "ReferencePoint")
+        .map(|s| s.split_whitespace().map(|x| x.parse::<f32>().ok()).collect::<Option<Vec<_>>>())
+        .ok_or(())?;
+    let pt = pt.filter(|v| v.len() == 2 && v.iter().all(|x| x.is_finite())).ok_or(())?;
+    let mask_version = crs_str(tag, "MaskVersion")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(1);
+
+    // Every attribute on the element, in document order, split into "modelled
+    // above", "carried as provenance", and "refused".
+    let mut provenance: Vec<(String, String)> = Vec::new();
+    for (key, raw) in crs_attributes(tag) {
+        match key.as_str() {
+            // Modelled, or an invariant this writer re-emits as a literal.
+            "What" | "MaskActive" | "MaskName" | "MaskBlendMode" | "MaskInverted"
+            | "MaskSyncID" | "MaskValue" | "MaskVersion" | "MaskSubType" | "ReferencePoint" => {}
+            k if AI_MASK_PROVENANCE_KEYS.contains(&k) => {
+                provenance.push((key, xml_unescape(raw).into_owned()));
+            }
+            _ => return Err(()),
+        }
+    }
+
+    // The optional `crs:Gesture` — the photographer's brush refinement.
+    let mut gesture = Vec::new();
+    if let Some(body) = component_body(scope, img)? {
+        let Some(seq) = owned_element_body(body, "crs:Gesture")? else {
+            // A body that is not a Gesture is markup this reader cannot
+            // account for — the same verdict `classify_correction` gives a
+            // component nested somewhere unmodelled.
+            return Err(());
+        };
+        let kids = components_in(seq);
+        if kids.iter().any(|k| k.depth > 0) {
+            return Err(());
+        }
+        for k in &kids {
+            if k.what.as_ref() != "Mask/Paint" {
+                return Err(());
+            }
+            gesture.push(parse_paint_stroke(seq, k)?);
+        }
+        if gesture.is_empty() {
+            return Err(());
+        }
+    }
+
+    Ok(MaskGeometry::AiMask {
+        name,
+        subtype,
+        ref_x: pt[0],
+        ref_y: pt[1],
+        blend_mode,
+        value,
+        inverted,
+        mask_version,
+        provenance,
+        gesture,
+        // Nothing is resolved at PARSE time: the segmenter runs at develop
+        // time (`segment::resolve_ai_masks`), which is what makes this lazy —
+        // importing a library must not spawn a model run per photo.
+        raster: None,
+    })
+}
+
+/// Every `crs:`-namespaced attribute on one element tag, as
+/// `(local name, RAW value)` in document order.
+///
+/// Exists so [`parse_ai_mask`] can assert the CLOSED vocabulary its refusal
+/// gate depends on. Asking `crs_str` for each known name could only ever tell
+/// us which of the names we already knew were present — never that the document
+/// carried a name we have not measured, which is the case that means "not
+/// Lightroom's writer".
+fn crs_attributes(tag: &str) -> Vec<(String, &str)> {
+    let mut out = Vec::new();
+    let bytes = tag.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = tag[i..].find("crs:") {
+        let start = i + rel;
+        // Must follow whitespace to be an attribute NAME rather than part of a
+        // value (a `crs:` inside a quoted string is data, not markup).
+        if start == 0 || !bytes[start - 1].is_ascii_whitespace() {
+            i = start + 4;
+            continue;
+        }
+        let after = start + 4;
+        let Some(eq_rel) = tag[after..].find('=') else { break };
+        let name = &tag[after..after + eq_rel];
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            i = after;
+            continue;
+        }
+        let rest = &tag[after + eq_rel + 1..];
+        let Some(q0) = rest.find('"') else { break };
+        let Some(q1_rel) = rest[q0 + 1..].find('"') else { break };
+        out.push((name.to_string(), &rest[q0 + 1..q0 + 1 + q1_rel]));
+        i = after + eq_rel + 1 + q0 + 1 + q1_rel + 1;
+    }
+    out
+}
+
 /// One `crs:What="Mask/Paint"` child of a brush group → [`BrushStroke`].
 ///
 /// The three attribute INVARIANTS are gates, not fields: `MaskActive="true"`,
@@ -5257,6 +5625,7 @@ fn classify_correction(
 ) -> MaskCorrectionParse {
     let mut geometry_count = 0usize;
     let mut brush_count = 0usize;
+    let mut ai_count = 0usize;
     let mut range_count = 0usize;
     let mut unknown_component = false;
     let mut geometry_unusable = false;
@@ -5367,16 +5736,43 @@ fn classify_correction(
                         geometry_unusable = true;
                     }
                 }
-                // AI / depth / heal components (`Mask/Image` above all — 105
-                // instances in the reference library, 78 corrections still
-                // refused because of them). Lightroom stores only the INTENT
-                // (`MaskSubType` + `MaskName` + `ReferencePoint`) and the
-                // provenance digests: there is no raster payload and no
-                // geometry payload anywhere on one, longest attribute value 55
-                // characters. Reproducing them needs a segmenter of our own
-                // producing our own alpha, which is a different feature from
-                // import (approximate re-derivation, disclosed as such) and
-                // not something a parser can reach.
+                // AI MASK — imported since R27 Batch-5 (L-08 Arm C), and the
+                // dominant refusal until then: 78 corrections across 40 files,
+                // 40 % of every file in the reference library that has a mask
+                // at all, taking 52 engine-drawable parametric shapes down
+                // with them.
+                //
+                // What arrives is the INTENT (`MaskSubType` + `MaskName` +
+                // `ReferencePoint`) and the provenance digests; there is no
+                // raster payload and no geometry payload anywhere on one. The
+                // alpha is therefore RE-DERIVED by our own segmenter at
+                // develop time, not imported, and `AiMaskRecomputed` says so
+                // in both directions. That distinction is the whole reason
+                // this took a machine-learning work item rather than a parser
+                // one — and the reason it can never be silent.
+                //
+                // `verdict` is deliberately unused, for `Mask/Aggregate`'s
+                // reason: the shared checks are the PARAMETRIC ones, and
+                // `MaskValue="0"` on an AI component is half of Lightroom's
+                // subtract pair, which the shared code would read as a mute.
+                // `parse_ai_mask` is this component's validator.
+                "Mask/Image" => {
+                    ai_count += 1;
+                    // The extent is recorded whether or not it parses, exactly
+                    // as a brush group's is: a `crs:Gesture` child is nesting
+                    // we know the container of, so a component we cannot model
+                    // must not ALSO make its own children look like markup from
+                    // nowhere.
+                    if let Some(close) =
+                        element_close_start(mask_block, tag_name(tag), component.gt)
+                    {
+                        owned_nesting.push((component.gt, close));
+                    }
+                    if parse_ai_mask(mask_block, component).is_err() {
+                        geometry_unusable = true;
+                    }
+                }
+                // Depth / heal / anything else this reader has not measured.
                 _ => unknown_component = true,
             }
         }
@@ -5391,7 +5787,7 @@ fn classify_correction(
         unknown_component = true;
     }
 
-    if (geometry_count == 0 && brush_count == 0) || unknown_component {
+    if (geometry_count == 0 && brush_count == 0 && ai_count == 0) || unknown_component {
         return MaskCorrectionParse::Unsupported(MaskImportReason::Unrepresentable);
     }
     if geometry_unusable {
@@ -5406,6 +5802,15 @@ fn classify_correction(
     }
     if brush_count > 0 {
         reasons.push(MaskImportReason::BrushCarried);
+    }
+    // Raised on the IMPORT itself, not on whether the segmenter has run: the
+    // photographer is being told what kind of thing arrived, and "the alpha
+    // will be ours, not Adobe's" is true the moment the component is read.
+    // `AiMaskUnresolved` is the separate, later sentence about a mask that has
+    // no alpha yet — `segment::resolve_ai_masks` raises that one, because it
+    // is the only place that knows.
+    if ai_count > 0 {
+        reasons.push(MaskImportReason::AiMaskRecomputed);
     }
     match correction_value_reasons(seg) {
         Ok(rs) => reasons.extend(rs),
@@ -5557,8 +5962,17 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
     // what the file says.
     let (_, block, comps) = correction_mask_components(seg)?;
     let mut brushes: Vec<MaskGeometry> = Vec::new();
-    for c in comps.iter().filter(|c| c.depth == 0 && c.what.as_ref() == "Mask/Aggregate") {
-        brushes.push(parse_brush_group(block, c).ok()?);
+    let mut ai_masks: Vec<MaskGeometry> = Vec::new();
+    for c in comps.iter().filter(|c| c.depth == 0) {
+        match c.what.as_ref() {
+            "Mask/Aggregate" => brushes.push(parse_brush_group(block, c).ok()?),
+            // R27 Batch-5, same discipline: parsed once up front by the strict
+            // validator, so a `?` here refuses the correction exactly as
+            // `classify_correction`'s own call did and the two cannot disagree
+            // about what the file says.
+            "Mask/Image" => ai_masks.push(parse_ai_mask(block, c).ok()?),
+            _ => {}
+        }
     }
     // The geometry component decides the mask shape. `base_geometry_at` picks
     // WHICH parametric component that is when there are several — read its
@@ -5568,9 +5982,24 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
     // holding nothing but strokes.
     let (mask, base_el) = match base_geometry_at(seg) {
         None => {
-            if brushes.is_empty() {
+            // ORDER MATTERS, and it is not the document's. With no parametric
+            // shape to stand on, prefer a geometry the engine can actually
+            // DRAW: an AI mask renders (through the recomputed alpha) and a
+            // brush group does not, so taking the brush as base in a
+            // correction that holds both would make the whole correction
+            // inert and the AI mask a component of nothing.
+            if !ai_masks.is_empty() {
+                // Scope `""` for the inversion read below, for the brush
+                // arm's reason: `MaskInverted` is carried INSIDE the geometry
+                // and written back from there, so lifting it into
+                // `LocalAdjustment::inverted` as well would spell one bit
+                // twice — and on a mask whose alpha has not resolved yet, the
+                // second spelling would turn zero coverage into a WHOLE-FRAME
+                // adjustment.
+                (ai_masks.remove(0), "")
+            } else if brushes.is_empty() {
                 return None;
-            }
+            } else {
             // Scope `""` for the inversion read below, deliberately. A brush
             // group's `crs:MaskInverted` is CARRIED INSIDE the geometry
             // (`MaskGeometry::Brush::inverted`) and written back from there,
@@ -5580,6 +6009,7 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
             // zero-coverage mask into a WHOLE-FRAME adjustment. The same
             // one-bit-one-home rule `lr_net_inverted` enforces for radials.
             (brushes.remove(0), "")
+            }
         }
         Some(p) => {
     let base_tag = next_xml_tag(seg, p).map_or(&seg[p..], |(s, e, _)| &seg[s..=e]);
@@ -5739,9 +6169,14 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
     // photo is (`base_geometry_at`'s whole subject).
     let components: Vec<MaskComponent> = brushes
         .into_iter()
+        .chain(ai_masks)
         .map(|geometry| {
             let mode = match &geometry {
-                MaskGeometry::Brush { blend_mode, .. } => brush_combine(*blend_mode),
+                MaskGeometry::Brush { blend_mode, .. }
+                // R27 Batch-5: an AI mask composes by the SAME `crs:MaskBlendMode`
+                // grammar (0 = union, 1 = subtract paired with `MaskValue="0"`),
+                // so it goes through the one mapping rather than a second copy.
+                | MaskGeometry::AiMask { blend_mode, .. } => brush_combine(*blend_mode),
                 _ => MaskCombine::Add,
             };
             MaskComponent { geometry, mode }
@@ -7879,8 +8314,9 @@ mod tests {
                 MaskLossReason::Disabled => 1,
                 MaskLossReason::ComponentsFlattened => 2,
                 MaskLossReason::BrushCarried => 3,
-                MaskLossReason::Rotation(_) => 4,
-                MaskLossReason::Recolour => 5,
+                MaskLossReason::AiMaskRecomputed => 4,
+                MaskLossReason::Rotation(_) => 5,
+                MaskLossReason::Recolour => 6,
             }
         }
         for (i, r) in MaskLossReason::ALL.into_iter().enumerate() {
@@ -10190,11 +10626,13 @@ mod tests {
                 MaskImportReason::BlendMode => 3,
                 MaskImportReason::MultiComponent => 4,
                 MaskImportReason::BrushCarried => 5,
-                MaskImportReason::ForeignRangeMask => 6,
-                MaskImportReason::LocalCurve => 7,
-                MaskImportReason::CurveRefineSaturation => 8,
-                MaskImportReason::InertLocal(_) => 9,
-                MaskImportReason::UnknownLocalKey => 10,
+                MaskImportReason::AiMaskRecomputed => 6,
+                MaskImportReason::AiMaskUnresolved => 7,
+                MaskImportReason::ForeignRangeMask => 8,
+                MaskImportReason::LocalCurve => 9,
+                MaskImportReason::CurveRefineSaturation => 10,
+                MaskImportReason::InertLocal(_) => 11,
+                MaskImportReason::UnknownLocalKey => 12,
             }
         }
         for (i, r) in MaskImportReason::ALL.into_iter().enumerate() {
@@ -12798,5 +13236,281 @@ mod tests {
             unparsable_crs_numbers(&oversized),
             vec!["XMP document exceeds the 16 MiB limit".to_string()]
         );
+    }
+
+    // --- R27 Batch-5: the `Mask/Image` AI arm (L-08 Arm C) -------------------
+    //
+    // Fixtures below reproduce the shape measured across 218 real `Mask/Image`
+    // instances in the user's library on 2026-08-19: 21 distinct attribute
+    // names, `MaskActive="true"` on all of them, `MaskVersion="1"` on all of
+    // them, `MaskSubType` in {0, 1, 2}, `ReferencePoint` on all of them, and
+    // exactly one optional child element (`crs:Gesture`, on 83).
+
+    /// One `Mask/Image` component. `extra` splices additional attributes;
+    /// `gesture` splices a `crs:Gesture` child (empty = self-closing, which is
+    /// what 135 of the 218 real instances are).
+    fn lr_ai_mask(subtype: &str, blend: &str, value: &str, extra: &str, gesture: &str) -> String {
+        let head = format!(
+            "        <rdf:Description\n\
+             \x20        crs:What=\"Mask/Image\"\n\
+             \x20        crs:MaskActive=\"true\"\n\
+             \x20        crs:MaskName=\"Sky 1\"\n\
+             \x20        crs:MaskBlendMode=\"{blend}\"\n\
+             \x20        crs:MaskInverted=\"false\"\n\
+             \x20        crs:MaskSyncID=\"440777CD3CB8E24BB8E16028893B45DC\"\n\
+             \x20        crs:MaskValue=\"{value}\"\n\
+             \x20        crs:MaskVersion=\"1\"\n\
+             \x20        crs:MaskSubType=\"{subtype}\"\n\
+             \x20        crs:ReferencePoint=\"0.605469 0.281525\"{extra}"
+        );
+        if gesture.is_empty() {
+            format!("       <rdf:li>\n{head}/>\n       </rdf:li>\n")
+        } else {
+            format!(
+                "       <rdf:li>\n{head}>\n\
+                 \x20       <crs:Gesture>\n\
+                 \x20        <rdf:Seq>\n\
+                 {gesture}\
+                 \x20        </rdf:Seq>\n\
+                 \x20       </crs:Gesture>\n\
+                 \x20       </rdf:Description>\n\
+                 \x20      </rdf:li>\n"
+            )
+        }
+    }
+
+    /// The provenance block Lightroom writes on a real sky mask — every
+    /// attribute this engine carries and never interprets.
+    const LR_AI_PROVENANCE: &str = "\n         crs:InputDigest=\"D0DAC04EB58F013F49D93EF47D22794E\"\
+\n         crs:InputDigestVersion=\"2\"\
+\n         crs:MaskDigest=\"00D1A1B68591DF41F6CA3F8F805D0F1B\"\
+\n         crs:WholeImageArea=\"0/1,0/1,1920/1,2880/1\"\
+\n         crs:Origin=\"0,0\"\
+\n         crs:ModelVersion=\"234881976\"";
+
+    /// THE DOMINANT REFUSAL, closed. Before R27 Batch-5 a correction holding a
+    /// `Mask/Image` was thrown away entire — 78 corrections across 40 files,
+    /// 40 % of every file in the reference library that has a mask at all —
+    /// and it took the gradient standing beside it with it.
+    ///
+    /// MUTATION-LINED. Verified red by reverting the `"Mask/Image"` arm of
+    /// `classify_correction` to `unknown_component = true` (transcript in the
+    /// batch report): the correction disappears and the gradient with it.
+    #[test]
+    fn an_ai_mask_imports_beside_the_shapes_it_used_to_take_down() {
+        let doc = lr_doc(&lr_correction(
+            "Mask 1",
+            "",
+            &format!("{}{}", lr_gradient("0"), lr_ai_mask("2", "0", "1", LR_AI_PROVENANCE, "")),
+        ));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the correction must import: {:?}", r.masks);
+        let m = &r.masks[0];
+        // The parametric shape is still the BASE — an AI mask does not displace
+        // a gradient that was there first (`base_geometry_at`).
+        assert!(matches!(m.mask, MaskGeometry::Linear { .. }), "{:?}", m.mask);
+        assert_eq!(m.components.len(), 1, "the AI mask rides as a component");
+        assert_eq!(m.components[0].mode, MaskCombine::Add, "MaskBlendMode=0 is a union");
+        let MaskGeometry::AiMask {
+            name,
+            subtype,
+            ref_x,
+            ref_y,
+            blend_mode,
+            value,
+            inverted,
+            mask_version,
+            provenance,
+            gesture,
+            raster,
+        } = &m.components[0].geometry
+        else {
+            panic!("expected an AI mask, got {:?}", m.components[0].geometry);
+        };
+        assert_eq!(name.as_str(), "Sky 1");
+        assert_eq!((*subtype, *blend_mode, *value, *inverted, *mask_version), (2, 0, 1.0, false, 1));
+        assert_eq!((*ref_x, *ref_y), (0.605469, 0.281525), "the click arrives verbatim");
+        assert!(gesture.is_empty(), "no crs:Gesture on this fixture");
+        // NOTHING is resolved at parse time: importing a library must not spawn
+        // a model run per photo.
+        assert!(raster.is_none(), "the alpha is recomputed at DEVELOP time, not here");
+        // Every provenance attribute, in document order, carried and untouched.
+        let keys: Vec<&str> = provenance.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "InputDigest",
+                "InputDigestVersion",
+                "MaskDigest",
+                "WholeImageArea",
+                "Origin",
+                "ModelVersion"
+            ]
+        );
+        assert_eq!(provenance[3].1, "0/1,0/1,1920/1,2880/1");
+
+        // And the import SAYS what kind of thing arrived — a RE-DERIVATION,
+        // not Adobe's raster. Importing this silently would be worse than the
+        // refusal it replaced.
+        let losses = import_losses(&doc);
+        assert!(
+            losses.iter().any(|l| l.reason == MaskImportReason::AiMaskRecomputed),
+            "a re-derived AI mask must be disclosed: {losses:?}"
+        );
+        let line = describe_import_losses(1, &losses).unwrap_or_default();
+        assert!(
+            line.contains("re-derived") && line.contains("Adobe"),
+            "the prose must name the recomputation, not just the count: {line}"
+        );
+    }
+
+    /// A correction whose ONLY component is an AI mask imports too, with the
+    /// AI mask as its base — the 59 corrections in the census that carry
+    /// nothing else.
+    #[test]
+    fn an_ai_only_correction_takes_the_ai_mask_as_its_base() {
+        let doc = lr_doc(&lr_correction(
+            "Mask 2",
+            "",
+            &lr_ai_mask("0", "0", "1", LR_AI_PROVENANCE, ""),
+        ));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "an AI-only correction imports: {:?}", r.masks);
+        assert!(matches!(r.masks[0].mask, MaskGeometry::AiMask { subtype: 0, .. }));
+        assert!(r.masks[0].components.is_empty(), "the base is not also a component");
+    }
+
+    /// The `crs:Gesture` child — the photographer's brush refinement of the AI
+    /// mask (83 of 218 instances) — is carried, so the 7 corrections whose only
+    /// brush content is a gesture arrive whole.
+    #[test]
+    fn an_ai_masks_gesture_strokes_are_carried() {
+        let doc = lr_doc(&lr_correction(
+            "Mask 3",
+            "",
+            &lr_ai_mask("2", "0", "1", LR_AI_PROVENANCE, &lr_paint_specimen()),
+        ));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "{:?}", r.masks);
+        let MaskGeometry::AiMask { gesture, .. } = &r.masks[0].mask else {
+            panic!("expected an AI mask, got {:?}", r.masks[0].mask);
+        };
+        assert_eq!(gesture.len(), 1, "one Mask/Paint per Gesture, as measured");
+        assert_eq!(gesture[0].value, 0.439815);
+        assert_eq!(gesture[0].radius, 0.582157);
+        assert!(gesture[0].dabs.starts_with("r 0.581835\nd 0.000684 0.940004"));
+    }
+
+    /// The write-back re-emits the component shape Lightroom wrote — the
+    /// intent verbatim, so Lightroom rebuilds ITS own alpha from it — with a
+    /// FRESH `crs:MaskSyncID` per this writer's rule.
+    ///
+    /// MUTATION-LINED. Verified red by dropping the `ai_mask_xml` routing from
+    /// `masks_xml`'s base arm (the correction then exports as a bitmap-skip
+    /// and the whole mask disappears from the sidecar) — transcript in the
+    /// batch report.
+    #[test]
+    fn an_ai_mask_round_trips_back_into_the_sidecar() {
+        let doc = lr_doc(&lr_correction(
+            "Mask 4",
+            "",
+            &lr_ai_mask("2", "0", "1", LR_AI_PROVENANCE, ""),
+        ));
+        let r = xmp_to_recipe(&doc);
+        let out = recipe_to_xmp(&r);
+        assert!(out.contains(r#"crs:What="Mask/Image""#), "the component kind rides out:\n{out}");
+        assert!(out.contains(r#"crs:MaskSubType="2""#), "the intent rides out:\n{out}");
+        assert!(
+            out.contains(r#"crs:ReferencePoint="0.605469 0.281525""#),
+            "the click rides out at the file's own precision:\n{out}"
+        );
+        assert!(out.contains(r#"crs:MaskVersion="1""#), "the schema stamp rides out:\n{out}");
+        for (k, v) in [
+            ("InputDigest", "D0DAC04EB58F013F49D93EF47D22794E"),
+            ("MaskDigest", "00D1A1B68591DF41F6CA3F8F805D0F1B"),
+            ("WholeImageArea", "0/1,0/1,1920/1,2880/1"),
+            ("ModelVersion", "234881976"),
+        ] {
+            assert!(
+                out.contains(&format!("crs:{k}=\"{v}\"")),
+                "provenance {k} must ride out unchanged:\n{out}"
+            );
+        }
+        // FRESH SyncID — a sidecar we rewrite is OUR document, and this writer
+        // mints identities for every component it emits.
+        assert!(
+            !out.contains("440777CD3CB8E24BB8E16028893B45DC"),
+            "the file's own MaskSyncID must not be republished:\n{out}"
+        );
+        // And the EXPORT discloses the other direction of the same gap.
+        let losses = mask_export_losses(&r);
+        assert!(
+            losses.iter().any(|l| l.reason == MaskLossReason::AiMaskRecomputed),
+            "the export must say the pixels shown were not Adobe's: {losses:?}"
+        );
+    }
+
+    /// An attribute outside the measured vocabulary is REFUSED, not carried.
+    /// A name we have never seen means a writer we have not measured (the
+    /// roundness rule) — and an open-ended attribute bag read off disk and
+    /// written back into XML is an injection surface besides.
+    ///
+    /// MUTATION-LINED. Verified red by replacing `parse_ai_mask`'s
+    /// `_ => return Err(())` arm with `_ => {}` (transcript in the batch
+    /// report): the unknown attribute is silently dropped and the correction
+    /// imports as if the file had said nothing surprising.
+    #[test]
+    fn an_unmeasured_attribute_on_an_ai_mask_is_refused_not_guessed() {
+        let good = lr_doc(&lr_correction("ok", "", &lr_ai_mask("2", "0", "1", "", "")));
+        assert_eq!(xmp_to_recipe(&good).masks.len(), 1, "the baseline imports");
+
+        for extra in [
+            "\n         crs:SomethingNobodyMeasured=\"1\"",
+            // A subtype outside {0,1,2} has no backend, and guessing one would
+            // invent a selection.
+            "",
+        ] {
+            let doc = if extra.is_empty() {
+                lr_doc(&lr_correction("bad", "", &lr_ai_mask("7", "0", "1", "", "")))
+            } else {
+                lr_doc(&lr_correction("bad", "", &lr_ai_mask("2", "0", "1", extra, "")))
+            };
+            assert!(
+                xmp_to_recipe(&doc).masks.is_empty(),
+                "a Mask/Image outside the measured encoding must not import ({extra:?})"
+            );
+            let losses = import_losses(&doc);
+            assert!(
+                losses.iter().any(|l| l.reason.is_drop()),
+                "and the refusal must be NAMED: {losses:?}"
+            );
+        }
+    }
+
+    /// `MaskBlendMode="1"` + `MaskValue="0"` is Lightroom's SUBTRACT pair, not
+    /// a muted mask — the same reading v0.31.1 taught this parser for
+    /// parametric components, mapped once through `brush_combine`.
+    #[test]
+    fn an_ai_masks_subtract_pair_reads_as_a_subtraction() {
+        let doc = lr_doc(&lr_correction(
+            "Mask 5",
+            "",
+            &format!("{}{}", lr_gradient("0"), lr_ai_mask("1", "1", "0", "", "")),
+        ));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "{:?}", r.masks);
+        assert_eq!(r.masks[0].components.len(), 1);
+        assert_eq!(
+            r.masks[0].components[0].mode,
+            MaskCombine::Subtract,
+            "MaskBlendMode=1 carves out"
+        );
+        let MaskGeometry::AiMask { blend_mode, value, .. } = &r.masks[0].components[0].geometry
+        else {
+            panic!("expected an AI mask");
+        };
+        // The pair is CARRIED verbatim for the writer even though the render
+        // reads the projected `MaskCombine` — two spellings of one fact.
+        assert_eq!((*blend_mode, *value), (1, 0.0));
     }
 }

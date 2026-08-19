@@ -1806,6 +1806,7 @@ mod tests {
             curve: Some([6.0, 20.0]),
             path: None,
             families: None,
+            embed: None,
         };
         assert_ne!(
             idx.render_reference(&[&ex], calib),

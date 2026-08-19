@@ -52,7 +52,11 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   represented is NAMED (「local point curve」, 「unmodelled slider」…) instead of
   counted, on both directions of the boundary — and on every front-end: the
   window shows it in the open banner and `autoshop analyze` / `auto` / `match`
-  print the same sentence on stderr beside the `xmp ->` line.
+  print the same sentence on stderr beside the `xmp ->` line. Lightroom's **AI
+  masks** (Sky / Subject / Object) now arrive too — but as a *re-derivation*,
+  not an import: the sidecar carries only the intent and the click point, never
+  a raster, so the alpha is recomputed here by a local segmenter and every
+  surface says so rather than letting it pass for Adobe's own mask.
 - **The radial mask geometry is measured, not guessed (v0.32.0)** — twelve
   purpose-shot Lightroom exports plus pixel measurement of the results settled
   what `Mask/CircularGradient` actually means. `crs:Top/Left/Bottom/Right` is
@@ -408,8 +412,11 @@ environment. The two sidecar knobs (`AUTOSHOP_PYTHON`,
 | `AUTOSHOP_ANALYSIS_BASE_URL` | `https://api.openai.com/v1` | verifier API base when provider = `api` |
 | `AUTOSHOP_IMAGE_EFFORT` | — | image-role reasoning effort; blank ⇒ the provider decides |
 | `AUTOSHOP_ANALYSIS_EFFORT` | — | verifier reasoning effort; blank ⇒ the provider decides |
-| `AUTOSHOP_PYTHON` | `python` | interpreter for the denoise sidecar |
+| `AUTOSHOP_PYTHON` | `python` | interpreter for the ML sidecars (denoise / segment / embed) |
 | `AUTOSHOP_DENOISE_MODEL` | `color_real_psnr` | default SCUNet weights |
+| `AUTOSHOP_EMBED_SCRIPT` | bundled `python/embed.py` | style-embedding sidecar (SigLIP 2) |
+| `AUTOSHOP_STYLE_EMBED` | off | opt in to SigLIP 2 style embeddings — the first run downloads **1.50 GB** of weights, so this is never taken without being asked |
+| `AUTOSHOP_STYLE_EMBED_WEIGHT` | `2.0` | weight of the embedding block in the retrieval distance; `0` reproduces the pre-v5 ranking exactly. **Not calibrated** — see `docs/V2_PLAN.md` §7 item 8 |
 
 Reasoning effort is a **suggestion, not a contract**: the tiers differ per
 provider (the `claude` CLI documents `low, medium, high, xhigh, max`;

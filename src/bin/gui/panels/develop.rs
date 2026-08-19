@@ -1539,6 +1539,12 @@ impl AutoshopApp {
                             MaskGeometry::Radial { .. } => tr(self.lang, "Radial"),
                             MaskGeometry::Bitmap { .. } => tr(self.lang, "Bitmap"),
                             MaskGeometry::Brush { .. } => tr(self.lang, "Brush"),
+                            // Named "AI" and never "Sky"/"Subject": the row
+                            // must not read as Lightroom's own mask. What it
+                            // draws is our segmenter's re-derivation, and the
+                            // overlay badge plus the import line carry the
+                            // rest of that sentence (R27 Batch-5).
+                            MaskGeometry::AiMask { .. } => tr(self.lang, "AI"),
                         };
                         // A user-given name wins; else a reverse-fit zone shows
                         // its localised role label; else the generic placeholder.
@@ -1743,7 +1749,13 @@ impl AutoshopApp {
                         MaskGeometry::Radial { .. } => Some(MaskKind::Radial),
                         // Neither a raster nor a brush group has drag-to-place
                         // geometry — no 重画 for either.
-                        MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. } => None,
+                        // An AI mask has no drag-to-place geometry either:
+                        // its reference point is a MODEL PROMPT, so "redraw"
+                        // would mean re-running the segmenter, not moving a
+                        // shape — a different action from this button's.
+                        MaskGeometry::Bitmap { .. }
+                        | MaskGeometry::Brush { .. }
+                        | MaskGeometry::AiMask { .. } => None,
                     };
                     if let Some(kind) = kind {
                         let redraw_armed = matches!(
@@ -2043,6 +2055,7 @@ impl AutoshopApp {
                                 MaskGeometry::Radial { .. } => tr(lang, "Radial"),
                                 MaskGeometry::Bitmap { .. } => tr(lang, "Bitmap"),
                                 MaskGeometry::Brush { .. } => tr(lang, "Brush"),
+                                MaskGeometry::AiMask { .. } => tr(lang, "AI"),
                             };
                             let selected = self.sel_component == Some(c);
                             if ui

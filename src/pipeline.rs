@@ -182,6 +182,37 @@ pub fn produce_recipe(
         .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
         .context("encode preview JPEG for advisor")?;
     let preview = Preview { jpeg };
+    // The style QUERY embedding (R27 Batch-5), taken here because this is the
+    // last point the camera's own full preview is in scope — and because the
+    // index's vectors were built from exactly this buffer through exactly this
+    // helper (`style::embed_preview`), which is what makes a query vector and a
+    // stored vector comparable at all.
+    //
+    // OFF unless the user asked (`AUTOSHOP_STYLE_EMBED`): the sidecar reloads
+    // 1.5 GB of weights per call, so this is seconds of latency on every
+    // develop, spent only when the index it is being compared against has the
+    // vectors to spend it on. A failure degrades to the 14-dim retrieval with
+    // a stderr line, never an aborted develop.
+    let query_embed: Option<Vec<f32>> = (req.style > 0.0 && crate::style::embedding_enabled())
+        .then(|| crate::embed::EmbedOpts::from_config(cfg))
+        .filter(|o| o.available())
+        .and_then(|o| {
+            match crate::style::embed_preview(
+                &o,
+                &decoded.preview,
+                &std::env::temp_dir(),
+                "query",
+            ) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!(
+                        "⚠ style embedding unavailable ({e:#}) — retrieving on the 14-dim \
+                         feature alone"
+                    );
+                    None
+                }
+            }
+        });
     // The full-resolution preview buffer is DEAD from here on — only meta and
     // histogram feed the advise chain, which can stall on the network for
     // minutes. Keeping `decoded` whole pinned hundreds of MB of 61MP pixels
@@ -219,7 +250,13 @@ pub fn produce_recipe(
         Some(crate::style::EffectiveIndex::Absent) | None => None,
     };
     let retrieved = style_ix.as_ref().map(|ix| {
-        let ex = ix.retrieve(&meta, &histogram, crate::style::RETRIEVE_K, raw);
+        let ex = ix.retrieve_with_embed(
+            &meta,
+            &histogram,
+            query_embed.as_deref(),
+            crate::style::RETRIEVE_K,
+            raw,
+        );
         StyleRetrieval {
             // GATE 5: the reference block's own "do not exceed it" clauses are
             // templated on the STRENGTH axis, not on the style dial that
@@ -5500,6 +5537,7 @@ mod tests {
             denoise_script: String::new(),
             denoise_cache: String::new(),
             segment_script: String::new(),
+            embed_script: String::new(),
             style_strength: 0.5,
         };
         let e = produce_recipe(
@@ -5586,6 +5624,7 @@ mod tests {
             curve: None,
             path: Some(format!("D:\\rolls\\{stem}.ARW")),
             families: None,
+            embed: None,
         };
         let all = [ex("DSC0001"), ex("DSC0002"), ex("DSC0003")];
         let refs: Vec<&StyleExemplar> = all.iter().collect();

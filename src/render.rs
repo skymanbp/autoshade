@@ -1820,11 +1820,11 @@ fn apply_masks(
         // adjustment is the inert contract (recipe.rs `MaskGeometry::Bitmap`)
         // — and it covers COMPONENTS for the same reason: a lost Subtract
         // raster contributes 0 and silently WIDENS the effect area.
-        if (bmp.is_none() && matches!(m.mask, MaskGeometry::Bitmap { .. }))
+        if (bmp.is_none() && is_raster_backed(&m.mask))
             || m.components
                 .iter()
                 .zip(&comp_bmps)
-                .any(|(c, b)| b.is_none() && matches!(c.geometry, MaskGeometry::Bitmap { .. }))
+                .any(|(c, b)| b.is_none() && is_raster_backed(&c.geometry))
         {
             continue;
         }
@@ -2168,6 +2168,23 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // (`MaskImportReason::BrushCarried`, `MaskLossReason::BrushCarried`),
         // so it is a stated limit and not a silent zero.
         MaskGeometry::Brush { .. } => 0.0,
+        // AI mask: the RECOMPUTED alpha, sampled exactly like a raster mask —
+        // because that is what it is. `segment::resolve_ai_masks` runs our own
+        // segmenter at the reference point the sidecar names and caches the
+        // 8-bit grey PNG beside the develop; `raster: None` (not resolved yet,
+        // or the model declined) takes the same inert path a `Bitmap` with an
+        // unreadable file takes, and both disclosure channels say so
+        // (`MaskImportReason::AiMaskRecomputed` / `MaskLossReason::…`).
+        //
+        // The honest sentence, which the disclosures also carry: these pixels
+        // are NOT Adobe's. The sidecar holds no raster, so the alpha here comes
+        // from a different model with a different edge behaviour — an
+        // approximation of the photographer's intent, never a reproduction of
+        // their mask.
+        MaskGeometry::AiMask { .. } => match bmp {
+            Some(b) => sample_gray_norm(b, nx, ny),
+            None => 0.0,
+        },
     }
 }
 
@@ -2406,9 +2423,35 @@ struct MaskRasterSnapshot {
 
 impl MaskRasterSnapshot {
     fn get(&self, geometry: &MaskGeometry) -> Option<&image::GrayImage> {
-        let MaskGeometry::Bitmap { path } = geometry else { return None };
-        self.images.get(path).map(std::sync::Arc::as_ref)
+        self.images.get(geometry_raster_path(geometry)?).map(std::sync::Arc::as_ref)
     }
+}
+
+/// The raster FILE one geometry renders from, if it currently has one — the
+/// ONE place "where does this geometry's pixels live" is answered.
+///
+/// Two carriers since R27 Batch-5: an explicit [`MaskGeometry::Bitmap`], and a
+/// [`MaskGeometry::AiMask`] whose alpha `segment::resolve_ai_masks` has already
+/// recomputed. `None` for an AiMask means *not resolved yet, or the segmenter
+/// declined* — which is a real state, and [`is_raster_backed`] is the question
+/// that separates "has no raster" from "needs no raster".
+pub(crate) fn geometry_raster_path(g: &MaskGeometry) -> Option<&str> {
+    match g {
+        MaskGeometry::Bitmap { path } => Some(path.as_str()),
+        MaskGeometry::AiMask { raster, .. } => raster.as_deref(),
+        _ => None,
+    }
+}
+
+/// Does this geometry draw from a raster at all?
+///
+/// Distinct from `geometry_raster_path(g).is_some()`, and the distinction is
+/// the whole point: an AI mask with no resolved alpha answers `true` here and
+/// `None` there, which is exactly the "this mask NEEDS pixels and has none"
+/// state the weight loop must SKIP rather than render at weight 0 — a 0 under
+/// `inverted` applies the adjustment to the entire frame.
+pub(crate) fn is_raster_backed(g: &MaskGeometry) -> bool {
+    matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::AiMask { .. })
 }
 
 fn load_mask_raster_snapshot(recipe: &EditRecipe) -> Result<MaskRasterSnapshot> {
@@ -2431,8 +2474,16 @@ pub fn dead_bitmap_rasters(m: &crate::recipe::LocalAdjustment) -> Vec<String> {
     std::iter::once(&m.mask)
         .chain(m.components.iter().map(|c| &c.geometry))
         .filter_map(|g| {
-            let MaskGeometry::Bitmap { path } = g else { return None };
-            load_mask_bitmap(g).is_none().then(|| path.clone())
+            if !is_raster_backed(g) {
+                return None;
+            }
+            // An AI mask with NO resolved alpha is dead in exactly the sense
+            // this list means — the row must say so — and it has no path to
+            // name, so it names the intent instead (R27 Batch-5).
+            let name = geometry_raster_path(g)
+                .map(str::to_string)
+                .unwrap_or_else(|| "AI mask (not yet recomputed)".to_string());
+            load_mask_bitmap(g).is_none().then_some(name)
         })
         .collect()
 }
@@ -2515,10 +2566,7 @@ fn active_bitmap_rasters(
         .flat_map(|m| {
             std::iter::once(&m.mask)
                 .chain(m.components.iter().map(|c| &c.geometry))
-                .filter_map(move |g| match g {
-                    MaskGeometry::Bitmap { path } => Some((m, g, path.as_str())),
-                    _ => None,
-                })
+                .filter_map(move |g| geometry_raster_path(g).map(|p| (m, g, p)))
         })
 }
 
@@ -2689,7 +2737,7 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
     type Key = Option<(Option<std::time::SystemTime>, u64)>;
     type Cache = Mutex<std::collections::HashMap<String, (Key, Option<Arc<image::GrayImage>>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
-    let MaskGeometry::Bitmap { path } = g else { return None };
+    let path = geometry_raster_path(g)?;
     let cache = CACHE.get_or_init(Default::default);
     let ident: Key = std::fs::metadata(path)
         .ok()
@@ -2698,7 +2746,7 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
         // No user code runs under the lock, so poisoning is not reachable —
         // recover anyway rather than turning a past panic into a new one.
         let map = cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((cached_t, img)) = map.get(path.as_str())
+        if let Some((cached_t, img)) = map.get(path)
             && *cached_t == ident
         {
             return img.clone();
@@ -2710,7 +2758,7 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
     // unbounded — the decoder allocates the full raster plus its native
     // intermediate before any byte count exists. The refusal is cached under
     // the file's identity below, exactly like a failed decode.
-    let over_budget = image::ImageReader::open(path.as_str())
+    let over_budget = image::ImageReader::open(path)
         .ok()
         .and_then(|r| r.into_dimensions().ok())
         .is_some_and(|(w, h)| {
@@ -2745,7 +2793,7 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
             {
                 map.clear();
             }
-            map.insert(path.clone(), (ident, decoded.clone()));
+            map.insert(path.to_string(), (ident, decoded.clone()));
         } else {
             map.clear();
         }
@@ -2804,11 +2852,11 @@ pub fn mask_coverage(
     // Same load-failure contract as `apply_masks` (inert, inversion included,
     // components included), so the overlay never advertises coverage the
     // render will not apply.
-    if (bmp.is_none() && matches!(m.mask, MaskGeometry::Bitmap { .. }))
+    if (bmp.is_none() && is_raster_backed(&m.mask))
         || m.components
             .iter()
             .zip(&comp_bmps)
-            .any(|(c, b)| b.is_none() && matches!(c.geometry, MaskGeometry::Bitmap { .. }))
+            .any(|(c, b)| b.is_none() && is_raster_backed(&c.geometry))
     {
         return image::GrayImage::new(w, h);
     }
@@ -4353,6 +4401,18 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
         // raster's honest status here: `recipe_has_raster_masks` counts it, and
         // the migration's disclosure says the mask could not be turned.
         MaskGeometry::Brush { .. } => {}
+        // An AI mask DOES carry a coordinate — the reference point is the one
+        // spatial fact the sidecar holds — so it turns like any other. Its
+        // cached alpha does not: that raster was segmented in the OLD frame, so
+        // rotating it is not a coordinate migration, it is a re-render. The
+        // cache is DROPPED and the next develop recomputes it at the turned
+        // point (`segment::resolve_ai_masks`), which is why this geometry is
+        // not a member of `recipe_has_raster_masks` — nothing here fails to be
+        // turned, and claiming it did would be the wrong disclosure.
+        MaskGeometry::AiMask { ref_x, ref_y, raster, .. } => {
+            (*ref_x, *ref_y) = orient_point(o, *ref_x, *ref_y);
+            *raster = None;
+        }
     };
     for m in r.masks.iter_mut() {
         turn(&mut m.mask);
@@ -10809,5 +10869,137 @@ d 0.113862 0.987261"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An AI mask with no recomputed alpha must SKIP its adjustment, not
+    /// render it at weight 0.
+    ///
+    /// The distinction is not academic — it is the difference between "this
+    /// mask does nothing" and "this mask does everything". `LocalAdjustment`
+    /// composes coverage with `inverted` as `1 - w`, so a zero-coverage mask
+    /// under `inverted: true` applies the edit to the ENTIRE frame. That is
+    /// exactly the silent-zero failure the AI arm is not allowed to have, and
+    /// `is_raster_backed` is what separates "needs pixels and has none" from
+    /// "needs no pixels".
+    ///
+    /// MUTATION-LINED. Verified red by reverting the two `is_raster_backed`
+    /// call sites to `matches!(…, MaskGeometry::Bitmap { .. })` (transcript in
+    /// the batch report): the inverted arm's assertion fails because the
+    /// unresolved AI mask brightens the whole frame.
+    #[test]
+    fn an_unresolved_ai_mask_skips_its_adjustment_instead_of_covering_the_frame() {
+        let ai = |inverted: bool| crate::recipe::LocalAdjustment {
+            name: "Sky".into(),
+            inverted,
+            exposure_ev: 3.0,
+            mask: MaskGeometry::AiMask {
+                name: "Sky 1".into(),
+                subtype: 2,
+                ref_x: 0.5,
+                ref_y: 0.3,
+                blend_mode: 0,
+                value: 1.0,
+                inverted: false,
+                mask_version: 1,
+                provenance: Vec::new(),
+                gesture: Vec::new(),
+                // NOT resolved: the segmenter has not run, or declined.
+                raster: None,
+            },
+            ..Default::default()
+        };
+        // The two questions the weight loop asks, answered directly — the same
+        // pair `apply_masks` and `mask_coverage_preview` both consult.
+        let g = &ai(false).mask;
+        assert!(is_raster_backed(g), "an AI mask draws from a raster");
+        assert!(geometry_raster_path(g).is_none(), "…and it has none yet");
+        // With no bitmap, the weight is 0 everywhere — which is exactly why the
+        // caller must skip rather than invert it.
+        assert_eq!(mask_weight(g, 0.5, 0.3, None), 0.0);
+        assert_eq!(mask_weight(g, 0.1, 0.9, None), 0.0);
+
+        // The visible consequence, through the public coverage preview: an
+        // unresolved AI mask advertises NO coverage in either polarity. Under
+        // the old Bitmap-only test the inverted one would have advertised the
+        // whole frame.
+        let reference = DynamicImage::ImageRgb8(image::RgbImage::new(8, 8));
+        for inverted in [false, true] {
+            let cov = mask_coverage(&ai(inverted), &reference);
+            let lit = cov.pixels().filter(|p| p.0[0] > 0).count();
+            assert_eq!(
+                lit, 0,
+                "an unresolved AI mask must advertise nothing (inverted={inverted})"
+            );
+        }
+
+        // And once an alpha EXISTS the geometry samples it like any raster.
+        let dir = std::env::temp_dir().join(format!("autoshop-ai-render-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("alpha.png");
+        let mut img = image::GrayImage::new(4, 4);
+        for px in img.pixels_mut() {
+            px.0[0] = 255;
+        }
+        img.save(&p).unwrap();
+        let mut resolved = ai(false);
+        if let MaskGeometry::AiMask { raster, .. } = &mut resolved.mask {
+            *raster = Some(p.to_string_lossy().into_owned());
+        }
+        assert_eq!(
+            geometry_raster_path(&resolved.mask),
+            Some(p.to_string_lossy().as_ref()),
+            "the resolved alpha is the geometry's raster"
+        );
+        let bmp = load_mask_bitmap(&resolved.mask).expect("the alpha must load");
+        assert_eq!(mask_weight(&resolved.mask, 0.5, 0.5, Some(&bmp)), 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `coord_era` migration turns an AI mask's reference point and DROPS
+    /// its cached alpha — the raster was segmented in the old frame, so
+    /// rotating it is a re-render, not a coordinate migration.
+    ///
+    /// MUTATION: leave `*raster` alone in `orient_recipe_coords`' AiMask arm
+    /// and the second assert fails — the mask would then render the OLD
+    /// frame's selection over the turned pixels.
+    #[test]
+    fn turning_the_frame_moves_the_ai_click_and_invalidates_its_cached_alpha() {
+        let mut r = EditRecipe {
+            coord_era: 0, // the LEGACY era — what the migration acts on
+            masks: vec![crate::recipe::LocalAdjustment {
+                exposure_ev: 1.0,
+                mask: MaskGeometry::AiMask {
+                    name: "Sky 1".into(),
+                    subtype: 2,
+                    ref_x: 0.25,
+                    ref_y: 0.10,
+                    blend_mode: 0,
+                    value: 1.0,
+                    inverted: false,
+                    mask_version: 1,
+                    provenance: Vec::new(),
+                    gesture: Vec::new(),
+                    raster: Some("stale.png".into()),
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            recipe_has_frame_coords(&r),
+            "an AI mask's reference point IS a frame coordinate the migration moves"
+        );
+        assert!(
+            !recipe_has_raster_masks(&r),
+            "and it is not 'unturnable' — nothing here fails to be turned"
+        );
+        let turned = orient_recipe_coords(&mut r, rawler::Orientation::Rotate90);
+        assert!(turned, "the migration ran");
+        let MaskGeometry::AiMask { ref_x, ref_y, raster, .. } = &r.masks[0].mask else {
+            panic!("the geometry must survive the migration");
+        };
+        assert_ne!((*ref_x, *ref_y), (0.25, 0.10), "the click moved with the frame");
+        assert!(raster.is_none(), "the alpha from the OLD frame must not be reused");
     }
 }

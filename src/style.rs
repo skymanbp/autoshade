@@ -30,14 +30,121 @@ const WEIGHTS: [f32; NDIM] = [
 /// Bump when the FEATURE semantics change (v3: display-frame Meta dims, i.e.
 /// the EXIF orientation reaching the aspect feature at last; v4: the COMPOSED
 /// orientation — v3 plus the photographer's own `quarter_turns`, R27, so a
-/// hand-rotated shot is retrieved as the portrait/landscape it now IS).
-const CURRENT_INDEX_VERSION: u32 = 4;
+/// hand-rotated shot is retrieved as the portrait/landscape it now IS;
+/// **v5: the optional SigLIP 2 embedding block** — a v5 exemplar MAY carry
+/// [`StyleExemplar::embed`] and the distance MAY gain a cosine term, which
+/// changes the RANKING and therefore the version).
+const CURRENT_INDEX_VERSION: u32 = 5;
+/// Index versions this build will serve. v4 is accepted alongside v5 on
+/// purpose: the v5 change is PURELY ADDITIVE (an absent `embed` contributes
+/// nothing to the distance, [`embed_distance`]), so refusing a v4 index would
+/// leave every existing user with a dead Style panel for the length of an
+/// hour-long rebuild in exchange for nothing. The FEATURE semantics of v4 and
+/// v5 are identical — that is what makes this safe, and it is why v3 is still
+/// refused (its aspect dim means something else).
+const READABLE_INDEX_VERSIONS: [u32; 2] = [4, CURRENT_INDEX_VERSION];
 // Load-time bounds: an index is disk input that reaches the model prompt, so
 // its size, shape and values get invariants at the door (there is no
 // exfiltration channel — the response is strict json_schema — but an
 // unbounded index means an unbounded paid request and a steerable grade).
-const MAX_STYLE_INDEX_BYTES: usize = 32 * 1024 * 1024;
-const MAX_STYLE_EXEMPLARS: usize = 50_000;
+//
+// RE-DERIVED TOGETHER in R27 Batch-5, because they had stopped agreeing. The
+// old pair (32 MiB / 50,000) already disagreed by ~1.5x on a v4 record and
+// would have disagreed by 14x once a 768-dim embedding landed: the byte cap
+// silently became the real exemplar limit and the exemplar cap stopped
+// meaning anything. The arithmetic now, measured rather than guessed:
+//
+//   * one embedding, as serialised: 768 elements at `str(np.float32(x))`
+//     precision measured **12.41 bytes each** over three real SigLIP 2
+//     vectors (9,529 bytes of array text). The WORST case is a
+//     15-character shortest-decimal plus its comma = 16 B, so the bound is
+//     768 x 16 = 12,288 B = 12 KiB.
+//   * everything else on a record (14 feats, 12 settings, tag, absolute
+//     path, curve, family summary) is bounded well under 4 KiB.
+//   * => MAX_EXEMPLAR_BYTES = 16 KiB, and 5,000 x 16 KiB = 80 MiB, which
+//     fits the 96 MiB file cap with room for the envelope (version, the two
+//     14-dim normalisation vectors, source_dir).
+//
+// KNOWN COST, registered rather than discovered: for a library between ~5,000
+// and ~32,000 edited photos the EXEMPLAR cap now binds where the byte cap used
+// to. That is a deliberate trade — two constants that disagree by 14x are a
+// worse guarantee than one honest number — and the largest library this
+// project has measured is 751 photos, ~6.7x inside it.
+const MAX_STYLE_INDEX_BYTES: usize = 96 * 1024 * 1024;
+const MAX_STYLE_EXEMPLARS: usize = 5_000;
+/// The per-exemplar bound the two caps above are derived from.
+const MAX_EXEMPLAR_BYTES: usize = 16 * 1024;
+
+// R18 CANNOT RECUR, because this is a BUILD gate and not a test: moving either
+// cap without the other stops compilation with the sentence below. A runtime
+// test would have been the weaker choice — clippy's own `assertions_on_constants`
+// points at exactly this, and a constant-vs-constant invariant belongs where
+// the constants are.
+//
+// MUTATION: set `MAX_STYLE_EXEMPLARS` back to 50_000, or `MAX_STYLE_INDEX_BYTES`
+// back to 32 MiB, and `cargo check` fails here.
+const _: () = assert!(
+    MAX_STYLE_EXEMPLARS * MAX_EXEMPLAR_BYTES <= MAX_STYLE_INDEX_BYTES,
+    "the exemplar cap x the per-exemplar bound exceeds the index file cap — the two \
+     constants moved apart again (R18)"
+);
+// …and the per-exemplar bound must actually HOLD an embedding, or the line
+// above would be true and meaningless. 768 elements at the 16-byte worst case
+// of a shortest-round-trip f32 decimal plus its comma is 12 KiB.
+const _: () = assert!(
+    MAX_EXEMPLAR_BYTES >= crate::embed::EMBED_DIM * 16,
+    "the per-exemplar bound cannot hold one embedding"
+);
+
+/// Weight of the embedding block in the retrieval distance:
+/// `d = Σ WEIGHTS[i]·(q_i−e_i)² + W_EMB·(1 − cos(q_embed, e_embed))`.
+///
+/// **This number is dimensional reasoning, not a measurement.** The 14-dim
+/// block's weights sum to 14.5 and a cosine distance spans 0..2, so 2.0 puts
+/// the two blocks in the same order of magnitude — that is the whole argument
+/// for it. It has NOT been calibrated against the user's own library, which is
+/// the one experiment that could settle it, and this comment is where that
+/// stays visible.
+///
+/// `AUTOSHOP_STYLE_EMBED_WEIGHT` overrides it, and **0 reproduces the previous
+/// ranking exactly** — not approximately: the cosine term is added, never
+/// folded into the existing weights, so a zero weight leaves the old sum
+/// bit-for-bit (pinned by `retrieve_distance_is_unchanged_for_a_well_formed_index`).
+const W_EMB_DEFAULT: f64 = 2.0;
+
+/// [`W_EMB_DEFAULT`], or the `AUTOSHOP_STYLE_EMBED_WEIGHT` override. Non-finite
+/// and negative values fall back to the default: a negative weight would rank
+/// the LEAST similar photo first, which is not a tuning choice.
+fn embed_weight() -> f64 {
+    std::env::var("AUTOSHOP_STYLE_EMBED_WEIGHT")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(W_EMB_DEFAULT)
+}
+
+/// Is the embedding sidecar wanted for this run? OFF unless
+/// `AUTOSHOP_STYLE_EMBED` is set to something other than `0`/`false`.
+///
+/// Opt-in because the first run downloads **1.50 GB** of weights and every
+/// call re-loads them (~seconds), which is not a cost an index build or a
+/// develop may take without being asked. An index built with it off is a
+/// perfectly good v5 index — the block is simply absent.
+pub fn embedding_enabled() -> bool {
+    std::env::var("AUTOSHOP_STYLE_EMBED")
+        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off"))
+        .unwrap_or(false)
+}
+
+/// Long edge the preview is reduced to before the embedding sidecar sees it —
+/// the ONE frame both the index build and the query go through.
+///
+/// It exists so the two cannot disagree. The sidecar squashes whatever it is
+/// given to 384x384, so the only way a photo's index vector and its query
+/// vector could differ is if the two paths handed it different pixels: the
+/// build starts from a 61 MP embedded preview and the develop path from an
+/// advisor-sized one. Both resize through THIS constant and THIS filter first.
+const EMBED_FRAME_EDGE: u32 = 512;
 
 /// How many similar past shots one develop leans on. Named since R23-2
 /// because the number is now DISCLOSED ("the 4 most similar shots"), so the
@@ -208,6 +315,91 @@ pub struct StyleExemplar {
     /// long index for a field that degrades to "no summary line").
     #[serde(default)]
     pub families: Option<crate::eval::FamilySummary>,
+    /// SigLIP 2 image embedding — 768 dims, L2-normalised, produced by
+    /// `python/embed.py` (R27 Batch-5, index v5).
+    ///
+    /// **Beside the 14-dim feature, never fused into it.** The hand feature is
+    /// EXIF + histogram: focal length, hour of day, clipping, warmth. The
+    /// embedding is what the frame LOOKS like. They answer different questions
+    /// and they are on incomparable scales, so the distance keeps them as two
+    /// blocks with their own weights ([`embed_distance`]) rather than
+    /// concatenating them into one vector where `WEIGHTS` would stop meaning
+    /// anything.
+    ///
+    /// Deliberately NOT z-scored, unlike [`ZSCORE_DIMS`]: a per-dim mean and
+    /// σ over ~150 exemplars is a degenerate estimate at 768 dims, and
+    /// `normalize`'s `(v−mean)/σ` would amplify whichever dims happened to be
+    /// flat. A cosine over unit vectors needs no per-dim statistics at all,
+    /// which is the second reason the two blocks stay separate.
+    ///
+    /// `#[serde(default)]` and `Option`, so this is optional in BOTH
+    /// directions: a v4 index has none (and the cosine term contributes
+    /// nothing), and a v5 index built without the sidecar has none either.
+    /// Retrieval must tolerate an index built either way — that is the
+    /// contract, not a fallback.
+    #[serde(default)]
+    pub embed: Option<Vec<f32>>,
+}
+
+/// The embedding half of the retrieval distance: `W_EMB · (1 − cos(q, e))`,
+/// or `0.0` when either side has no vector.
+///
+/// Both sides are L2-normalised by the sidecar (and re-checked at the door by
+/// [`crate::embed::parse_vector`] / [`exemplar_is_finite`]), so the cosine is a
+/// plain dot product. Accumulated in f64 for the same reason the 14-dim block
+/// is: the ranking must be deterministic, and `total_cmp` can only order keys
+/// that were computed the same way every time.
+///
+/// A width mismatch answers 0 rather than truncating: two vectors of different
+/// widths are not comparable, and silently comparing their common prefix is
+/// how an index that mixed models would produce a plausible, wrong ranking.
+fn embed_distance(q: Option<&[f32]>, e: Option<&[f32]>, w: f64) -> f64 {
+    let (Some(q), Some(e)) = (q, e) else { return 0.0 };
+    if q.len() != e.len() || q.is_empty() {
+        return 0.0;
+    }
+    let dot: f64 = q.iter().zip(e).map(|(&a, &b)| a as f64 * b as f64).sum();
+    // Unit vectors put the dot in [-1, 1]; the clamp is against the ~1e-7
+    // round-trip slack the JSON text carries, not against a real value.
+    w * (1.0 - dot.clamp(-1.0, 1.0))
+}
+
+/// One photo's SigLIP 2 vector, from the camera's embedded preview.
+///
+/// The ONE entry point both the index build and the develop-time query use, so
+/// a photo's stored vector and its query vector are produced by the same
+/// pipeline: reduce to [`EMBED_FRAME_EDGE`] with a NAMED filter, write a PNG,
+/// hand it to the sidecar. `dir` is where the temp PNG and the sidecar's JSON
+/// live; both are removed before this returns.
+///
+/// Errors are the CALLER's to degrade: the build skips the vector for that
+/// photo and keeps the exemplar, the develop path retrieves on the 14 dims
+/// alone. Neither may fail the run — a style index is not worth an aborted
+/// develop, and a 1.5 GB download must never be able to break one.
+pub fn embed_preview(
+    opts: &crate::embed::EmbedOpts,
+    preview: &image::DynamicImage,
+    dir: &Path,
+    tag: &str,
+) -> Result<Vec<f32>> {
+    // `Triangle` is bilinear, NAMED rather than defaulted for the same reason
+    // the sidecar names PIL's resample: a filter that changed under us would
+    // move every vector without a line of this repo changing.
+    let small = preview.resize(EMBED_FRAME_EDGE, EMBED_FRAME_EDGE, image::imageops::FilterType::Triangle);
+    // pid + tag: two workers (or two processes) must never share one name.
+    let stem = format!("autoshop-embed-{}-{}", std::process::id(), tag);
+    let img_path = dir.join(format!("{stem}.png"));
+    let json_path = dir.join(format!("{stem}.json"));
+    let run = (|| -> Result<Vec<f32>> {
+        small
+            .to_rgb8()
+            .save(&img_path)
+            .with_context(|| format!("stage embedding input {}", img_path.display()))?;
+        crate::embed::embed_file(opts, &img_path, &json_path)
+    })();
+    let _ = std::fs::remove_file(&img_path);
+    let _ = std::fs::remove_file(&json_path);
+    run
 }
 
 /// Is this exemplar the QUERY photo itself? Path identity when the exemplar
@@ -241,6 +433,19 @@ fn exemplar_is_finite(e: &StyleExemplar) -> bool {
         && e.settings.values().all(|v| v.is_finite())
         && e.curve.is_none_or(|c| c.iter().all(|v| v.is_finite()))
         && e.families.is_none_or(|f| f.is_finite())
+        // The embedding gets a TIGHTER band than the 14 dims, for free: it is
+        // L2-normalised by construction, so every element is in [-1, 1] and
+        // the whole vector's norm is 1. Checking the elements alone would
+        // still admit a 768-dim vector of 1.0s (norm 27.7), which the cosine
+        // would then treat as overwhelmingly similar to everything. The width
+        // is pinned too — a foreign width is silently ignored by
+        // `embed_distance`, and an index that carries one should say so at the
+        // door instead of retrieving as if the block were absent.
+        && e.embed.as_ref().is_none_or(|v| {
+            v.len() == crate::embed::EMBED_DIM
+                && v.iter().all(|x| x.is_finite() && x.abs() <= 1.0 + 1e-3)
+                && (v.iter().map(|&x| x as f64 * x as f64).sum::<f64>().sqrt() - 1.0).abs() < 1e-3
+        })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -296,6 +501,29 @@ impl StyleIndex {
         // atomic counter hands out indices, and each result lands in its own
         // slot so the exemplar ORDER stays identical to the serial version.
         use std::sync::atomic::{AtomicUsize, Ordering};
+        // The embedding sidecar, resolved ONCE before the pool starts (R27
+        // Batch-5). `None` when the user has not asked for it, or when the
+        // script is not on disk — announced here, not discovered 150 times.
+        let embedder: Option<crate::embed::EmbedOpts> = embedding_enabled()
+            .then(|| crate::embed::EmbedOpts::from_config(&crate::config::Config::load()))
+            .filter(|o| {
+                if o.available() {
+                    println!(
+                        "  style embedding ON ({}) — first run downloads ~1.50 GB of SigLIP 2 \
+                         weights",
+                        o.script.display()
+                    );
+                    true
+                } else {
+                    eprintln!(
+                        "  style embedding requested but the sidecar is not at {} — building the \
+                         14-dim index only (set AUTOSHOP_EMBED_SCRIPT, or run from the project dir)",
+                        o.script.display()
+                    );
+                    false
+                }
+            });
+        let embed_dir = std::env::temp_dir();
         let mut slots: Vec<Option<StyleExemplar>> = Vec::new();
         slots.resize_with(pairs.len(), || None);
         let next = AtomicUsize::new(0);
@@ -307,6 +535,7 @@ impl StyleIndex {
             for _ in 0..workers {
                 let tx = tx.clone();
                 let (pairs, next, done) = (&pairs, &next, &done);
+                let (embedder, embed_dir) = (&embedder, &embed_dir);
                 s.spawn(move || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&raw) = pairs.get(i) else { break };
@@ -325,8 +554,38 @@ impl StyleIndex {
                         raw,
                         crate::store::saved_quarter_turns(raw),
                     ) {
-                        Ok(decode::Decoded { meta, histogram, .. }) => {
+                        Ok(decode::Decoded { meta, histogram, preview, .. }) => {
                             let feat = feature_vector(&meta, &histogram);
+                            // The embedding, BEFORE `preview` goes out of scope
+                            // — and `preview` is dropped immediately after, so
+                            // the ~181 MB buffer is not held across the
+                            // sidecar's seconds-long model load.
+                            let embed = embedder.as_ref().and_then(|o| {
+                                let r = embed_preview(
+                                    o,
+                                    &preview,
+                                    embed_dir,
+                                    &format!("idx-{i}"),
+                                );
+                                match r {
+                                    Ok(v) => Some(v),
+                                    // DEGRADE, never fail: this photo keeps its
+                                    // 14-dim exemplar and the index becomes a
+                                    // legitimate mixed one (see
+                                    // `retrieve_with_embed`). A sidecar that
+                                    // could abort an hour-long build over one
+                                    // frame would be worse than no sidecar.
+                                    Err(e) => {
+                                        eprintln!(
+                                            "  {}: no style embedding ({e:#}) — indexed on the \
+                                             14-dim feature alone",
+                                            pipeline::stem(raw)
+                                        );
+                                        None
+                                    }
+                                }
+                            });
+                            drop(preview);
                             // An unreadable sidecar must SKIP the photo, not
                             // produce a settings-free exemplar that dilutes
                             // retrieval (the pair scan guaranteed the .xmp
@@ -344,6 +603,7 @@ impl StyleIndex {
                                         curve: crate::eval::user_curve_shape(&xmp)
                                             .map(|(b, s)| [b, s]),
                                         families: crate::eval::user_family_summary(&xmp),
+                                        embed,
                                     };
                                     if exemplar_is_finite(&ex) {
                                         Some(ex)
@@ -469,12 +729,18 @@ impl StyleIndex {
         // Version gate: v3 = display-frame Meta dims (the portrait feature).
         // An older index recorded portrait RAWs as landscape — serving it
         // silently would bias every retrieval until a manual rebuild.
-        if idx.version != CURRENT_INDEX_VERSION {
+        //
+        // v5 does NOT refuse v4 (see `READABLE_INDEX_VERSIONS`): the embedding
+        // block is additive and an absent one contributes exactly nothing, so
+        // a v4 index still ranks the way it always did. What is refused is a
+        // version whose 14 FEATURES mean something else.
+        if !READABLE_INDEX_VERSIONS.contains(&idx.version) {
             anyhow::bail!(
-                "style index {} is version {} (current {}) — rebuild it: autoshop style-index <dir>",
+                "style index {} is version {} (this build reads {:?}) — rebuild it: \
+                 autoshop style-index <dir>",
                 path.display(),
                 idx.version,
-                CURRENT_INDEX_VERSION
+                READABLE_INDEX_VERSIONS
             );
         }
         if idx.exemplars.is_empty() {
@@ -580,8 +846,40 @@ impl StyleIndex {
 
     /// k nearest exemplars to (meta,hist), excluding the query photo itself
     /// when it is a corpus member (see [`is_self`]).
+    ///
+    /// The 14-dim block only. [`retrieve_with_embed`] is the same call with a
+    /// query embedding; this one is exactly that call with `None`, so a caller
+    /// that has no vector (and an index that carries none) ranks precisely as
+    /// it did before R27 Batch-5.
     pub fn retrieve(&self, meta: &Meta, hist: &Histogram, k: usize, exclude: &Path) -> Vec<&StyleExemplar> {
+        self.retrieve_with_embed(meta, hist, None, k, exclude)
+    }
+
+    /// [`retrieve`](StyleIndex::retrieve) with the query photo's SigLIP 2
+    /// embedding folded in as a second distance block.
+    ///
+    /// Tolerant in both directions by construction: `query_embed = None`, or an
+    /// exemplar with no `embed`, contributes 0 to that pair's distance
+    /// ([`embed_distance`]). So one index may legitimately hold a mix of
+    /// exemplars with and without vectors — which is what happens when a build
+    /// runs with the sidecar on and one photo's sidecar call fails.
+    ///
+    /// KNOWN, DELIBERATE ASYMMETRY: in such a mixed index the exemplars WITHOUT
+    /// a vector get a 0 cosine term while the ones with a vector get
+    /// `W_EMB·(1−cos) ≥ 0`, so a vector-less exemplar is never penalised and is
+    /// mildly favoured. Normalising that away would mean inventing a distance
+    /// for a comparison we did not make; the honest reading is that a missing
+    /// vector is "no evidence", and no evidence does not push a candidate down.
+    pub fn retrieve_with_embed(
+        &self,
+        meta: &Meta,
+        hist: &Histogram,
+        query_embed: Option<&[f32]>,
+        k: usize,
+        exclude: &Path,
+    ) -> Vec<&StyleExemplar> {
         let q = normalize(feature_vector(meta, hist), &self.mean, &self.std);
+        let w_emb = embed_weight();
         let ex_path = std::path::absolute(exclude)
             .unwrap_or_else(|_| exclude.to_path_buf())
             .display()
@@ -605,7 +903,9 @@ impl StyleIndex {
                         WEIGHTS[i] as f64 * d * d
                     })
                     .sum::<f64>();
-                (d2, e)
+                // ADDED, never folded in: the 14-dim sum above is untouched, so
+                // `W_EMB = 0` leaves every historical ranking bit-for-bit.
+                (d2 + embed_distance(query_embed, e.embed.as_deref(), w_emb), e)
             })
             .collect();
         // total_cmp, never partial_cmp-with-Equal-fallback: a NaN key made
@@ -1002,6 +1302,7 @@ mod tests {
             curve: Some([5.0, 12.0]),
             path: None,
             families: None,
+            embed: None,
         };
         let (a, b) = (mk(0.4, 20.0, 10.0), mk(0.6, 40.0, 30.0));
         let targets = style_targets(&[&a, &b]);
@@ -1041,6 +1342,7 @@ mod tests {
             stem: stem.into(),
             path: path.map(str::to_string),
             families: None,
+            embed: None,
             feat: vec![0.0; NDIM],
             tag: "t".into(),
             settings: BTreeMap::new(),
@@ -1067,6 +1369,7 @@ mod tests {
             stem: "x".into(),
             path: None,
             families: None,
+            embed: None,
             feat: vec![0.0; NDIM],
             tag: "t".into(),
             settings: BTreeMap::new(),
@@ -1089,6 +1392,7 @@ mod tests {
             curve: Some([6.0, 20.0]),
             path: None,
             families: None,
+            embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1194,6 +1498,7 @@ mod tests {
             curve: None,
             path: None,
             families,
+            embed: None,
         };
         let with = mk(Some(crate::eval::FamilySummary {
             hsl: [2.0, 18.0, 6.0],
@@ -1242,6 +1547,7 @@ mod tests {
                 grade: [20.0, 4.0],
                 rgb_curves: 2,
             }),
+            embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1297,6 +1603,7 @@ mod tests {
                 curve: Some([0.0, 0.0]),
                 path: None,
                 families: None,
+            embed: None,
             }],
             source_dir: None,
         };
@@ -1360,6 +1667,7 @@ mod tests {
                 curve: Some([0.0, 0.0]),
                 path: None,
                 families: None,
+            embed: None,
             }],
             source_dir: None,
         };
@@ -1403,6 +1711,7 @@ mod tests {
             curve: None,
             path: None,
             families: None,
+            embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1475,6 +1784,7 @@ mod tests {
             curve: None,
             path: None,
             families: None,
+            embed: None,
         };
         let built = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1536,6 +1846,7 @@ mod tests {
             // A full path exists on the exemplar; the disclosure must NOT use it.
             path: Some(format!("D:\\rolls\\2024\\{stem}.ARW")),
             families: None,
+            embed: None,
         };
         let long = "x".repeat(MAX_STEM_CHARS + 20);
         let all = [mk("DSC0001"), mk("DSC0002"), mk("DSC0003"), mk("DSC0004"), mk(&long)];
@@ -1572,6 +1883,7 @@ mod tests {
             curve: None,
             path: None,
             families: None,
+            embed: None,
         };
         let idx = StyleIndex {
             version: CURRENT_INDEX_VERSION,
@@ -1608,5 +1920,188 @@ mod tests {
         // feature_vector's dim 0 for this hist/meta is a small number, so
         // the exemplar nearest in dim 0 wins under EITHER accumulator.
         assert_eq!(got[0].stem, "near", "the f64 accumulator picks the same neighbour");
+    }
+
+    // R18's own gate is a pair of module-level `const _: () = assert!(…)`
+    // above, not a test here: a constant-vs-constant invariant that fails the
+    // BUILD is strictly stronger than one that fails a test run, and clippy's
+    // `assertions_on_constants` says so too.
+
+    /// A unit vector of the pinned width — the shape every door check accepts.
+    fn unit_embed() -> Vec<f32> {
+        let e = 1.0f32 / (crate::embed::EMBED_DIM as f32).sqrt();
+        vec![e; crate::embed::EMBED_DIM]
+    }
+
+    fn plain_exemplar(stem: &str) -> StyleExemplar {
+        StyleExemplar {
+            stem: stem.into(),
+            feat: vec![0.0; NDIM],
+            tag: "wide/mid/midday/landscape".into(),
+            settings: BTreeMap::new(),
+            curve: None,
+            path: None,
+            families: None,
+            embed: None,
+        }
+    }
+
+    /// The embedding block is ADDITIVE: an absent vector on either side costs
+    /// nothing, so a v4 index and a v5 index built without the sidecar rank
+    /// exactly as they always did — and `W_EMB = 0` reproduces the old ranking
+    /// even when both sides HAVE vectors (R17).
+    ///
+    /// MUTATION: make `embed_distance` return `w` when a side is `None` and
+    /// the first two asserts fail — a mixed index would then rank vector-less
+    /// exemplars by a number nobody measured.
+    #[test]
+    fn the_embedding_distance_is_additive_and_tolerates_a_mixed_index() {
+        let u = unit_embed();
+        let mut opposite = u.clone();
+        for v in opposite.iter_mut() {
+            *v = -*v;
+        }
+        assert_eq!(embed_distance(None, Some(&u), 2.0), 0.0, "no query vector, no term");
+        assert_eq!(embed_distance(Some(&u), None, 2.0), 0.0, "no exemplar vector, no term");
+        assert_eq!(embed_distance(Some(&u), Some(&u), 0.0), 0.0, "W_EMB = 0 contributes nothing");
+        // cos(v, v) = 1 => distance 0; cos(v, -v) = -1 => distance 2 * W_EMB.
+        // The tolerance is 1e-5, not 0: `1/sqrt(768)` is not exact in f32, so
+        // the self-dot lands within ~1e-7 of 1 and the term within ~2e-7 of 0.
+        // That is the same slack `embed::parse_vector`'s norm gate allows, and
+        // it is why the cosine is CLAMPED to [-1, 1] before the subtraction.
+        assert!(embed_distance(Some(&u), Some(&u), 2.0).abs() < 1e-5, "identical vectors: ~0");
+        assert!(
+            (embed_distance(Some(&u), Some(&opposite), 2.0) - 4.0).abs() < 1e-6,
+            "opposed unit vectors span the full 2 x W_EMB"
+        );
+        // A width mismatch answers 0 rather than comparing a common prefix:
+        // two vectors of different widths are not comparable at all.
+        assert_eq!(embed_distance(Some(&u), Some(&u[..4]), 2.0), 0.0, "mixed widths: no term");
+    }
+
+    /// The index door treats an embedding as the UNIT vector it claims to be.
+    ///
+    /// MUTATION: drop the norm test from `exemplar_is_finite` and the third
+    /// assert passes — an all-ones 768-vector (norm 27.7) would then be
+    /// accepted, and the retrieval's bare-dot-product cosine would rank it
+    /// ahead of every real photo regardless of what either depicts.
+    #[test]
+    fn a_malformed_embedding_is_refused_at_the_index_door() {
+        let mut ok = plain_exemplar("ok");
+        ok.embed = Some(unit_embed());
+        assert!(exemplar_is_finite(&ok), "a unit vector of the pinned width is accepted");
+
+        let mut short = plain_exemplar("short");
+        short.embed = Some(vec![1.0]);
+        assert!(!exemplar_is_finite(&short), "a foreign width is refused, not ignored");
+
+        let mut unnormalised = plain_exemplar("big");
+        unnormalised.embed = Some(vec![1.0; crate::embed::EMBED_DIM]);
+        assert!(!exemplar_is_finite(&unnormalised), "an unnormalised vector is refused");
+
+        let mut nan = plain_exemplar("nan");
+        let mut v = unit_embed();
+        v[0] = f32::NAN;
+        nan.embed = Some(v);
+        assert!(!exemplar_is_finite(&nan), "a NaN element is refused");
+    }
+
+    /// v5 reads v4 (the embedding is additive, so a v4 index ranks the way it
+    /// always did) and still refuses v3 (whose aspect FEATURE means something
+    /// else). Bumping the version must not brick a working Style panel for the
+    /// length of an hour-long rebuild — R19.
+    ///
+    /// MUTATION: replace the `READABLE_INDEX_VERSIONS.contains` gate with the
+    /// old `!= CURRENT_INDEX_VERSION` and the v4 arm fails.
+    #[test]
+    fn a_v4_index_still_loads_and_a_v3_one_still_does_not() {
+        let dir = std::env::temp_dir().join(format!("autoshop-style-v5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |version: u32| {
+            let idx = StyleIndex {
+                version,
+                mean: vec![0.0; NDIM],
+                std: vec![1.0; NDIM],
+                exemplars: vec![plain_exemplar("a")],
+                source_dir: None,
+            };
+            let p = dir.join(format!("v{version}.json"));
+            std::fs::write(&p, serde_json::to_string(&idx).unwrap()).unwrap();
+            p
+        };
+        assert!(StyleIndex::load(&write(4)).is_ok(), "a v4 index still serves");
+        assert!(StyleIndex::load(&write(CURRENT_INDEX_VERSION)).is_ok(), "v5 serves");
+        // `StyleIndex` is not `Debug`, so `unwrap_err` is out — match instead.
+        let e = match StyleIndex::load(&write(3)) {
+            Ok(_) => panic!("a v3 index must not load: its aspect FEATURE means something else"),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("version 3"), "v3 is still refused by name: {e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The retrieval's cosine block actually MOVES the ranking, and the 14-dim
+    /// block alone is what decides it when the weight is 0 — the two halves of
+    /// R17 in one test.
+    ///
+    /// MUTATION: drop the `+ embed_distance(...)` term from
+    /// `retrieve_with_embed` and the first assert fails (the embedding stops
+    /// mattering at all).
+    #[test]
+    fn the_query_embedding_reorders_retrieval_and_a_zero_weight_does_not() {
+        let u = unit_embed();
+        let mut away = u.clone();
+        for (i, v) in away.iter_mut().enumerate() {
+            // Orthogonal: flip half the signs, so cos = 0 and the block
+            // contributes W_EMB instead of 0.
+            if i % 2 == 0 {
+                *v = -*v;
+            }
+        }
+        let mut near = plain_exemplar("near-in-embedding");
+        near.embed = Some(u.clone());
+        let mut far = plain_exemplar("far-in-embedding");
+        far.embed = Some(away);
+        // IDENTICAL 14-dim features, so the embedding is the ONLY thing that
+        // can separate them, and `far` is listed FIRST so a stable sort with
+        // no embedding term would answer `far`.
+        let idx = StyleIndex {
+            version: CURRENT_INDEX_VERSION,
+            mean: vec![0.0; NDIM],
+            std: vec![1.0; NDIM],
+            exemplars: vec![far, near],
+            source_dir: None,
+        };
+        let meta = crate::decode::Meta {
+            make: "T".into(),
+            model: "T".into(),
+            lens: None,
+            iso: Some(100),
+            shutter: None,
+            aperture: None,
+            focal_length_mm: None,
+            exposure_bias_ev: None,
+            date_time: None,
+            width: 100,
+            height: 100,
+            as_shot_wb_coeffs: [1.0; 4],
+        };
+        let hist = crate::decode::Histogram {
+            luma: vec![1; 256],
+            r: vec![1; 256],
+            g: vec![1; 256],
+            b: vec![1; 256],
+            clip_black_pct: 0.0,
+            clip_white_pct: 0.0,
+            sample_pixels: 1,
+        };
+        let got = idx.retrieve_with_embed(&meta, &hist, Some(&u), 1, Path::new("q.arw"));
+        assert_eq!(got[0].stem, "near-in-embedding", "the cosine block decides the tie");
+        // The same query with NO vector: the two exemplars are exactly tied,
+        // the sort is stable, and the first listed one wins — i.e. an index
+        // whose query has no embedding ranks precisely as it did before.
+        let none = idx.retrieve_with_embed(&meta, &hist, None, 1, Path::new("q.arw"));
+        assert_eq!(none[0].stem, "far-in-embedding", "no query vector leaves the old ranking");
     }
 }

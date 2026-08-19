@@ -266,6 +266,61 @@
 > written; the adversarial review then broke the first fix twice more (stale
 > deliverable passes; segment's `exists()` guard never fired for pre-claimed
 > names), which is why the contract lives in one place with all three arms.
+>
+> ### The ML sidecar family (R27 Batch-5)
+>
+> There are now **three** Python sidecars, and they share one discipline rather
+> than three copies of it. `python/denoise.py` owns the download-and-refuse
+> implementation — `_download` with an in-stream byte cap, `_sha256`,
+> `_reclaim_stale_parts`, `_fetch_verified` — and the other two **import it**
+> (`from denoise import _fetch_verified`) instead of reimplementing it, which
+> is why their progress lines announce themselves as `[denoise]`.
+>
+> | sidecar | bridge | model(s) | licence | size |
+> |---|---|---|---|---|
+> | `denoise.py` | `denoise.rs` | SCUNet ×5 | Apache-2.0 (KAIR) | ~72 MB each |
+> | `segment.py --target subject` | `segment.rs` | U²-Net via a NAMED rembg session | Apache-2.0 | small |
+> | `segment.py --target sky` | `segment.rs` | OneFormer ADE20K Swin-L | MIT | ~880 MB |
+> | `segment.py --target object` | `segment.rs` | **SAM 2.1 Hiera-Large**, point-prompted | Apache-2.0 | 897,897,416 B |
+> | `embed.py` | `embed.rs` | **SigLIP 2 base/16 @384**, 768-dim | Apache-2.0 | 1,501,968,264 B |
+>
+> **Licence is a selection criterion, not a footnote.** This is a public
+> repository whose product is being copyright registered, and a licence that
+> restricts *use* is not cured by not redistributing the weights. SegFormer was
+> removed in Batch-4 for exactly that (「for research or evaluation purposes
+> only」); CLIP and OpenCLIP were passed over in Batch-5 because their model
+> cards say deployment is out of scope and the OpenAI HF mirror carries no
+> licence tag at all. In both cases the licence-clean option was also the
+> stronger model.
+>
+> **Pinning has two tiers, and the difference is stated rather than smoothed
+> over.** `denoise.py`, `embed.py` and `segment.py`'s SAM path fetch every file
+> themselves, gate it on sha256 + an exact byte count, and load from a local
+> directory with `local_files_only=True` — the digest is the only door.
+> `segment.py`'s subject/sky paths still pin only an HF *revision*, which fixes
+> WHICH tree is fetched but not the BYTES; that gap is registered in their own
+> comments. `trust_remote_code` is never used anywhere: it downloads and
+> executes upstream Python through HF's cache, which our gate never sees.
+>
+> **What the sidecars are FOR** is the part that matters architecturally. The
+> segmenter picks *where* — its output is an 8-bit grey raster the deterministic
+> engine samples bilinearly — and the embedder picks *which past edits to show
+> the advisor*. Neither one decides a slider. And when a sidecar cannot run, the
+> feature degrades with a named reason: the style index keeps its 14-dim
+> feature, and an AI mask stays carried-but-unrendered with its adjustment
+> SKIPPED rather than applied at weight 0 (a zero under `inverted` would apply
+> the edit to the whole frame).
+>
+> **AI masks are a RECOMPUTATION, and every surface says so.** Lightroom's
+> `crs:What="Mask/Image"` carries no raster and no geometry — 218 real
+> instances, 21 attribute names, longest value 55 characters — only the intent
+> (`MaskSubType` + `ReferencePoint` + `MaskName`) and provenance digests. So
+> `segment::resolve_ai_masks` runs OUR segmenter at develop time and caches the
+> alpha beside the develop, keyed by photo + subtype + click + backend
+> generation. The result is an approximation of the photographer's intent, never
+> a reproduction of Adobe's mask, and `MaskImportReason::AiMaskRecomputed` /
+> `MaskLossReason::AiMaskRecomputed` say that in both languages and in both
+> directions.
 
 ## 1. The core idea
 
