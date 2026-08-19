@@ -111,16 +111,33 @@ fn local_fmt(v: f32) -> String {
 /// (`PROBE4-FINAL.md` §2.1). "The centre stays put" misses by 88 px and is
 /// dead twice over.
 ///
-/// ONE loose end, registered by `PROBE4-FINAL.md` §3 and deliberately not
+/// ~~ONE loose end, registered by `PROBE4-FINAL.md` §3 and deliberately not
 /// modelled: the SEMI-AXIS scale measures 1.0325 on one hard-edge frame and
-/// 1.0065 on another, so a single affine cannot be exactly right for both.
-/// Carrying `k` on the axes too (what the code below does) is the recommended
-/// reading — one constant in one place, exact on the frame the falloff
-/// endpoints were calibrated against, and its worst case (2.6 % of a semi-axis)
-/// is *smaller* than the ±5 % frame-to-frame scatter already in those
-/// endpoints. TRIGGER for revisiting: two more `Feather = 0` exports, one small
-/// mask at 24 mm and one large at 105 mm, both centred (§3's "decisive
-/// follow-up"). WHERE IT GOES: this constant and this constant only.
+/// 1.0065 on another, so a single affine cannot be exactly right for both.~~
+/// **The registered TRIGGER FIRED 2026-08-19 (R27 Batch-8)** — the user shot
+/// exactly the named exports (centred `Feather = 0`, small at 24 mm, large at
+/// 105 mm, plus a third at 34 mm) — **and the answer is that this constant is
+/// a PER-FRAME quantity, not a constant** (`batch8-report.md` §4). Measured
+/// per-frame scale `s`: 0.98395/0.98398 (24 mm), 0.99956/0.99953 (105 mm),
+/// 1.00428/1.00398 (34 mm) — `kx` and `ky` agree to 3e-5 within every frame,
+/// ellipse-fit residual 0.07–1.16 px on 720 rays, confirmed by a second
+/// estimator sharing no code. The "axis vs centre scale split" (old L-05)
+/// DISSOLVES: one scale about the frame centre reproduces centre AND both
+/// axes on all three frames to ≤ 2.2 px, where this constant misses by
+/// 30–104 px. PROBE2/PROBE4's 1.0325/1.0315 remain valid — as THOSE frames'
+/// `s`. Mechanism OPEN: the lens-profile hypothesis has the right sign and
+/// magnitude on all five frames but is contradicted by radial uniformity
+/// (`s` behaves as a pure similarity, which distortion is not).
+///
+/// WHY THE VALUE STILL STANDS UNCHANGED: with no mechanism there is nothing
+/// principled to derive `s` from, and any other constant is equally wrong on
+/// some measured frame (1.032 is exact on the probe frames, ~3.5 % off on
+/// Batch-8's). NEW TRIGGER, which decides the mechanism in one 5-minute
+/// export: the SAME capture exported twice with `LensProfileEnable` 0 and 1,
+/// identical centred `Feather = 0` radial (`batch8-report.md` §7 item 4). If
+/// `s` tracks the toggle this becomes a per-frame value read from the lens
+/// profile; if not, the constant is simply wrong and a measured per-frame
+/// table replaces it. WHERE IT GOES: this constant and this constant only.
 const LR_MASK_FRAME_SCALE: f64 = 1.032;
 
 /// The frame every normalised `crs:` coordinate — mask box AND crop rectangle
