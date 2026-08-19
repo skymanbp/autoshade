@@ -1864,17 +1864,25 @@ fn value_is_active(live: GlobalValue<'_>, neutral: GlobalValue<'_>) -> bool {
 /// `deny_unknown_fields` downgrades and R21's `recipe_norm` structure
 /// fingerprint). One envelope, one paid call, zero new roles.
 ///
-/// ORDER, honestly: `required` lists the fields in thinking order, and the
-/// prompt states that order explicitly. Whether OpenAI's strict structured
-/// output GENERATES fields in the declared order is UNVERIFIED — it cannot be
-/// tested without a real paid call, so the probe lives as an `#[ignore]`d,
-/// env-gated test (`openai::tests::think_envelope_field_order_probe`). The
-/// envelope's structural benefits (an explicit plan, an auditable self-critique,
-/// a per-family use/skip decision) do not depend on generation order; only the
-/// "think before you write" strength does. `properties` is alphabetical on the
-/// wire regardless — this tree's `serde_json` has no `preserve_order` feature,
-/// so a JSON object's keys serialize sorted, exactly as the recipe schema's
-/// own properties already do.
+/// ORDER, measured (R27, 2026-08-19): strict structured output does NOT
+/// generate fields in the declared order. The paid probe
+/// (`openai::tests::think_envelope_field_order_probe`, run once with a real
+/// key) came back with the answer's keys in strict ALPHABETICAL order —
+/// `recipe` at byte 170, `scene` at 1269, `self_critique` at 1393,
+/// `tool_plan` at 1595 — so the model wrote the recipe FIRST and the
+/// "thinking" after it, whatever `required` declares. Mechanism hypothesis
+/// (n=1, but exactly alphabetical): the endpoint serialises object keys
+/// sorted, the same way this tree's own `serde_json` does. Consequence:
+/// "think before you write" rests on the PROMPT alone; the envelope's
+/// structural benefits (an explicit plan, an auditable self-critique, a
+/// per-family use/skip decision) survive unchanged, because they never
+/// depended on generation order. Registered option, deliberately not taken
+/// now: renaming the thinking fields to sort ahead of `recipe`
+/// alphabetically would force the order via the measured mechanism — a
+/// second probe should confirm the mechanism before any rename trades on it.
+/// The probe stays `#[ignore]`d + env-gated (`AUTOSHOP_THINK_PROBE_KEY`) and
+/// FAILS LOUDLY by design when the order is not generated, so re-running it
+/// is the mechanism check.
 pub fn think_envelope_schema() -> Value {
     let families: Vec<Value> = CONTROL_FAMILIES
         .iter()
