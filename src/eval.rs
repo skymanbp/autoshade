@@ -23,7 +23,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+// `Context` is gone since R27 Batch-7: the one `?` in `run` (an unreadable
+// sidecar) cannot propagate out of a worker closure any more, so that failure
+// travels back as `PhotoOutcome::Aborted` carrying the SAME message the
+// `with_context` produced — `read_sidecar` returns an `Option`, so the context
+// string WAS the whole error and nothing is lost by formatting it directly.
+use anyhow::Result;
 
 use crate::advisor::catalogue::{self, Shape, COLOR_GRADE_CRS, RECIPE_CONTROLS};
 use crate::config::Config;
@@ -437,7 +442,70 @@ struct Acc {
     omit: u32,
 }
 
-pub fn run(dir: &Path, limit: usize) -> Result<()> {
+impl Acc {
+    /// Fold one photograph's contribution in. Split out of the loop by R27
+    /// Batch-7 so the per-photo work can run on a worker while the SUMS are
+    /// still added in photo order — `f64` addition is not associative, so
+    /// folding in completion order would move the reported gap score in the
+    /// last ulp depending on which photo happened to finish first.
+    fn merge(&mut self, other: &Acc) {
+        self.sum_abs += other.sum_abs;
+        self.sum_signed += other.sum_signed;
+        self.n += other.n;
+        self.omit += other.omit;
+    }
+}
+
+/// What became of one photograph. The three non-`Stats` arms exist because the
+/// serial loop had three distinct exits (`continue` on a failed analysis, `?` on
+/// an unreadable sidecar, and — new — "an earlier photo already aborted the
+/// run"), and a pool cannot `?` out of a worker: the decision has to travel back
+/// as a value and be acted on in index order.
+enum PhotoOutcome {
+    Stats(Box<PhotoStats>),
+    /// `produce_recipe` failed; the FAILED line is already in this photo's
+    /// block and the run continues, exactly as the serial `continue` did.
+    Failed,
+    /// The hard error the serial loop raised with `?`, carried out to be
+    /// re-raised after the pool drains.
+    Aborted(String),
+    /// Dequeued after another photo aborted — never analyzed, never billed.
+    Skipped,
+}
+
+/// Emit one output fragment.
+///
+/// At one job the fragment goes STRAIGHT to stdout and is flushed, so the
+/// `[i/n] stem ... ` prefix still appears before the minute of network work the
+/// photo is about to spend — the serial harness's progress indicator, kept
+/// byte-for-byte. Above one job nothing may print from a worker: the fragment
+/// joins the photo's block and the sequencer releases it in index order.
+fn emit(live: bool, block: &mut String, text: &str) {
+    if live {
+        use std::io::Write;
+        print!("{text}");
+        let _ = std::io::stdout().flush();
+    } else {
+        block.push_str(text);
+    }
+}
+
+/// Everything ONE photograph contributes to the report — produced on a worker,
+/// folded on the main thread in index order (see [`Acc::merge`]).
+#[derive(Default)]
+struct PhotoStats {
+    /// This photo's per-control contributions, keyed exactly like the report.
+    acc: BTreeMap<String, Acc>,
+    /// `(rmse, user_lift, ai_lift, user_s, ai_s)` when either side drew a
+    /// master curve.
+    curve: Option<(f64, f64, f64, f64, f64)>,
+    /// Per-channel curve RMSE, entered only where either side drew one.
+    rgb: [Option<f64>; 3],
+    /// `(imported, our importer refuses, AI proposed)` when any side had one.
+    masks: Option<(usize, usize, usize)>,
+}
+
+pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
     let cfg = Config::load();
     // R27 P1, deliberate NON-action: this stays RAW-only, and not for want of
     // a flag. `eval` scores the AI against the user's OWN edit, which it reads
@@ -467,6 +535,22 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
     // The ruler, in registry order (which is also the report order — the two
     // used to be separate hand-kept lists with a comment claiming they matched).
     let ruler = rows();
+    // The work list is fixed up front — exactly the first `limit` pairs the old
+    // sequential `.take(limit)` selected — then a bounded, memory-budgeted pool
+    // works through it (R27 Batch-7). At `--jobs 1` this is the serial loop it
+    // replaces, line for line and sum for sum.
+    let work: Vec<&Path> = pairs.iter().take(limit).map(|p| p.as_path()).collect();
+    let n = work.len();
+    let plan = crate::jobs::plan(jobs, n);
+    if let Some(note) = &plan.note {
+        println!("{note}");
+    }
+    if plan.jobs > 1 {
+        println!(
+            "  {} photo(s) in flight; each photo's lines are held and printed in order.",
+            plan.jobs
+        );
+    }
     let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
     let mut evaluated = 0u32;
     // Master-tone-curve comparison (the look control the flat sliders miss),
@@ -485,12 +569,25 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
     let (mut mask_photos, mut user_masks, mut user_masks_unsupported, mut ai_masks) =
         (0u32, 0usize, 0usize, 0usize);
 
-    for (i, raw) in pairs.iter().take(limit).enumerate() {
-        print!("[{}/{}] {} ... ", i + 1, pairs.len().min(limit), pipeline::stem(raw));
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        let xmp_text = crate::store::read_sidecar(&raw.with_extension("xmp"))
-            .with_context(|| format!("read user xmp for {}", raw.display()))?;
+    // Set the moment a photo raises the HARD error the serial loop raised with
+    // `?` (an unreadable sidecar). Checked at dequeue so the remaining photos
+    // are skipped instead of billed — at `--jobs 1` that is exactly the old
+    // stop-at-once behaviour; above it, the photos already in flight finish
+    // first and the run then fails with the same message.
+    let aborted = std::sync::atomic::AtomicBool::new(false);
+    let live = plan.jobs == 1;
+    let outcomes = crate::jobs::for_each_indexed(plan.jobs, n, |i, block| {
+        if aborted.load(std::sync::atomic::Ordering::Relaxed) {
+            return PhotoOutcome::Skipped;
+        }
+        let raw: &Path = work[i];
+        emit(live, block, &format!("[{}/{}] {} ... ", i + 1, n, pipeline::stem(raw)));
+        let Some(xmp_text) = crate::store::read_sidecar(&raw.with_extension("xmp")) else {
+            aborted.store(true, std::sync::atomic::Ordering::Relaxed);
+            emit(live, block, "FAILED\n");
+            return PhotoOutcome::Aborted(format!("read user xmp for {}", raw.display()));
+        };
+        let mut stats = PhotoStats::default();
         // The Description's OWN scope, like every other whole-document reader
         // (`xmp::crs_own_scope`): a nested creative Look's baked parameters are
         // the PROFILE's, not the photographer's, and scoring the AI against
@@ -507,7 +604,7 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         // style and must NOT let the visual closed loop revise the proposal
         // (either would bias the gap — and the judge is a paid vision call
         // per photo, unasked-for in a measurement run).
-        let (ai, _verdict, _notes) =
+        let (ai, _verdict, notes) =
             match pipeline::produce_recipe(
                 raw,
                 &cfg,
@@ -535,11 +632,11 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
             ) {
             Ok(v) => v,
             Err(e) => {
-                println!("FAILED: {e}");
-                continue;
+                emit(live, block, &format!("FAILED: {e}\n"));
+                return PhotoOutcome::Failed;
             }
         };
-        for row in &ruler {
+        for row in ruler.iter() {
             let eps = row.eps();
             let n0 = neutral(row, &ai);
             let user_val = user_value(row, scope, user_wb, has_crop);
@@ -567,7 +664,7 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
             if !user_used && !ai_used {
                 continue;
             }
-            let e = acc.entry(row.metric.clone()).or_default();
+            let e = stats.acc.entry(row.metric.clone()).or_default();
             match ai_val {
                 Some(a) => {
                     let d = row.diff(a, u) as f64;
@@ -605,12 +702,13 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         if !user_curve.is_empty() || !ai_curve.is_empty() {
             let ulut = curve_lut(&user_curve);
             let alut = curve_lut(&ai_curve);
-            curve_n += 1;
-            sum_curve_rmse += curve_rmse(&ulut, &alut);
-            sum_user_lift += curve_black_lift(&ulut) as f64;
-            sum_ai_lift += curve_black_lift(&alut) as f64;
-            sum_user_s += curve_s_strength(&ulut) as f64;
-            sum_ai_s += curve_s_strength(&alut) as f64;
+            stats.curve = Some((
+                curve_rmse(&ulut, &alut),
+                curve_black_lift(&ulut) as f64,
+                curve_black_lift(&alut) as f64,
+                curve_s_strength(&ulut) as f64,
+                curve_s_strength(&alut) as f64,
+            ));
         }
 
         // --- the three per-channel RGB curves (R23-1) ---------------------
@@ -629,8 +727,8 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
             if user_curve.is_empty() && ai_curve.is_empty() {
                 continue;
             }
-            rgb_acc[ch].0 += 1;
-            rgb_acc[ch].1 += curve_rmse(&curve_lut(&user_curve), &curve_lut(&ai_curve));
+            stats.rgb[ch] =
+                Some(curve_rmse(&curve_lut(&user_curve), &curve_lut(&ai_curve)));
         }
 
         // --- local masks: counts, not divergence --------------------------
@@ -641,20 +739,82 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
         let imported = crate::xmp::xmp_to_recipe(&xmp_text).masks.len();
         let refused = crate::xmp::unsupported_corrections(&xmp_text);
         if imported + refused + ai.masks.len() > 0 {
-            mask_photos += 1;
-            user_masks += imported;
-            user_masks_unsupported += refused;
-            ai_masks += ai.masks.len();
+            stats.masks = Some((imported, refused, ai.masks.len()));
         }
 
-        evaluated += 1;
-        println!("done");
+        emit(live, block, "done\n");
+        // Above one job the per-photo ⚠ lines the pipeline raises on stderr
+        // (the GPT-proposer fallback at pipeline.rs:390) arrive in COMPLETION
+        // order and can no longer be read as belonging to the line above them.
+        // The same disclosures ride the typed note channel by construction, so
+        // attach them to THIS photo's block — the attribution the reordering
+        // costs, bought back on the channel that already carries it. At one job
+        // the transcript stays exactly what it was.
+        if !live && !notes.is_empty() {
+            let text = crate::rationale::render_en(&notes);
+            let text = text.trim();
+            if !text.is_empty() {
+                block.push_str("       ");
+                block.push_str(text);
+                block.push('\n');
+            }
+        }
+        PhotoOutcome::Stats(Box::new(stats))
+    });
+
+    // ── FOLD, strictly in photo order ────────────────────────────────────────
+    // `f64` addition is not associative, so summing in completion order would
+    // move the printed gap score in the last ulp depending on which photo
+    // finished first. Folding the positional results reproduces the serial
+    // arithmetic exactly, at any `--jobs`.
+    let mut abort: Option<String> = None;
+    for outcome in outcomes.into_iter().flatten() {
+        match outcome {
+            PhotoOutcome::Stats(s) => {
+                for (metric, one) in &s.acc {
+                    acc.entry(metric.clone()).or_default().merge(one);
+                }
+                if let Some((rmse, ul, al, us, as_)) = s.curve {
+                    curve_n += 1;
+                    sum_curve_rmse += rmse;
+                    sum_user_lift += ul;
+                    sum_ai_lift += al;
+                    sum_user_s += us;
+                    sum_ai_s += as_;
+                }
+                for (ch, r) in s.rgb.iter().enumerate() {
+                    if let Some(rmse) = r {
+                        rgb_acc[ch].0 += 1;
+                        rgb_acc[ch].1 += rmse;
+                    }
+                }
+                if let Some((imported, refused, ai_n)) = s.masks {
+                    mask_photos += 1;
+                    user_masks += imported;
+                    user_masks_unsupported += refused;
+                    ai_masks += ai_n;
+                }
+                evaluated += 1;
+            }
+            // Reported in its own block; the run continues (unchanged).
+            PhotoOutcome::Failed | PhotoOutcome::Skipped => {}
+            // The FIRST hard error wins, so the message a `--jobs 1` run would
+            // have raised is the message this run raises.
+            PhotoOutcome::Aborted(why) => {
+                if abort.is_none() {
+                    abort = Some(why);
+                }
+            }
+        }
+    }
+    if let Some(why) = abort {
+        anyhow::bail!("{why}");
     }
 
     if evaluated == 0 {
         // Attempted pairs that ALL failed must not exit 0 — broken
         // credentials looked like a clean run to CI (16-lane scan L09).
-        if pairs.iter().take(limit).next().is_some() {
+        if n > 0 {
             anyhow::bail!("no photo evaluated — every attempted pair failed (see the FAILED lines above)");
         }
         println!("No photos evaluated.");

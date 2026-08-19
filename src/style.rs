@@ -386,8 +386,24 @@ pub fn embed_preview(
     // the sidecar names PIL's resample: a filter that changed under us would
     // move every vector without a line of this repo changing.
     let small = preview.resize(EMBED_FRAME_EDGE, EMBED_FRAME_EDGE, image::imageops::FilterType::Triangle);
-    // pid + tag: two workers (or two processes) must never share one name.
-    let stem = format!("autoshop-embed-{}-{}", std::process::id(), tag);
+    // pid + seq + tag: two workers (or two processes) must never share one
+    // name. The pid+tag pair was NOT enough — `pipeline::produce_recipe` passes
+    // the constant tag "query" for every photo, so the moment two develops ran
+    // concurrently in one process (the batch pool, which has shipped at three
+    // workers since R26; the web server's request threads) they staged into the
+    // same `autoshop-embed-<pid>-query.png` and the same `.json`: one worker
+    // embedded the other's frame and got a style vector for the wrong
+    // photograph, and either one's cleanup deleted the other's file mid-run.
+    // The seq belongs HERE rather than at the call site — that is the fix that
+    // holds for every caller, including the next one (`StyleIndex::build`
+    // already passed a unique `idx-{i}` and was never affected).
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stem = format!(
+        "autoshop-embed-{}-{}-{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        tag
+    );
     let img_path = dir.join(format!("{stem}.png"));
     let json_path = dir.join(format!("{stem}.json"));
     let run = (|| -> Result<Vec<f32>> {

@@ -410,6 +410,73 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **并行图片处理 `--jobs N` + 内存根因定案（2026-08-19，R27 Batch-7，未发版）**
+  —— 用户令「尝试并行图片处理加速」。**先取证，后动手**：R27 Batch-6 的 147 张
+  HEAD 重基线死在 83/147（~80 分钟，机器撞 commit 内存墙），本批把那次死亡溯到
+  最上游并**证伪了「泄漏」假设**。
+
+  **① 根因定案 = 无泄漏，是单张峰值（有数）**。两次第一方测量，零 API 花费：
+  (a) `eval::tests::estimators_against_the_photographers_own_sliders`（`#[ignore]`
+  取证探针，只解码不打网络）对**全部 147 对**跑 44.77 s，进程 commit 按四分位
+  均值 112 / 127 / 115 / 122 MB、峰值 WS 254.5 MB —— **整段平坦，无单调增长**；
+  (b) 一个 scratchpad 专用探针（不入库）复演 `produce_recipe` 的**非网络半程**，
+  逐张读进程自身的 `PeakPagefileUsage`：**decode 半程峰值 commit 151 MB / 0.10 s
+  一张**，**标定半程（`pipeline::photo_base_knots` → `render::render_to_image`）
+  峰值 commit 1771 MB / 2.1 s 一张**。11 张连跑高水位只从 1771.3 → 1772.3 MB
+  （+1.0 MB），张与张之间的常驻 commit 恒为 12.2–12.6 MB —— **泄漏会把高水位
+  每轮顶高，它没有**。1.77 GB 全在 demosaic：`render_to_image` 先出**整幅**
+  oriented f32（61 MP × 3 × 4 B ≈ 732 MB + rawler 自己的 sensor 缓冲 + 转向瞬态）
+  **才**套 `max_edge`（render.rs:266-272），所以 `photo_base_knots` 那句「≤2048
+  工作分辨率」只约束了 develop 各级，**约束不到峰值**。结论：要修的是**峰值 ×
+  并发数**，不是增长。
+
+  **② `--jobs N`（新模块 `src/jobs.rs`，std only，零新依赖）**。`batch` 与
+  `eval` 各得一个 `--jobs`；**默认 = 各自改动前的并发度**（`eval` = 1 串行、
+  `batch` = 3，即 R26 起写死的那个 `work.len().min(3)`），所以不带旗跑等于旧行为。
+  worker 数 = `min(--jobs, 待办张数, 内存闸)`，内存闸 =
+  `min(可用物理, 可用 commit) × 50% ÷ 1800 MB`（常数
+  `jobs::PER_PHOTO_PEAK_COMMIT_MB`，出处即上面 1771 MB 上取整；50% 的另一半留给
+  机器其余部分**和 `eval` 每张 spawn 的 `claude` 验证子进程**——那是一整个 Node
+  运行时，**不在**这个常数里）。可用内存 Windows 走 `GlobalMemoryStatusEx`
+  （windows-sys 加一个 feature，无新 crate），Linux 走 `sysconf(_SC_AVPHYS_PAGES)`，
+  其余 unix 返回 `None` = **不设闸**（宁可不猜）。**被闸降级时打印一行披露**，
+  静默降级会读成「旗子没生效」。**注意 `batch` 此前那 3 个 worker 是完全无预算的**
+  —— 3 × 1.77 GB ≈ 5.3 GB 同时要，这是本批顺带堵上的既有隐患。
+
+  **③ 输出纪律：按 INDEX 顺序，不按完成顺序**。`jobs::Sequencer` 收下每张的整块
+  文本，只有前面全部落纸才放行第 i 块；worker **不阻塞**（轮不到就寄存，几百字节
+  一块）。`batch` 原先是「完成即抢 stdout 锁打整行」——整行不撕裂，但
+  `[7/50]` 会排在 `[3/50]` 前面，同一文件夹重跑得到不同顺序的记录；现在确定了。
+  **诚实登记一条盖不住的**：管线深处的 `eprintln!`（如 pipeline.rs:390 的 GPT
+  proposer 回退 ⚠）直奔进程 stderr，**按完成顺序出现**，不能按位置归属到某张
+  （Rust 整段 `write_fmt` 持 stderr 锁，所以只是错位，不会撕行）。补偿=`eval` 在
+  `--jobs > 1` 时把 `produce_recipe` 第三个返回值（typed `rationale::Note`）渲染
+  进**本张**的块——同一条披露本来就在这条通道上。
+
+  **④ `eval` 聚合表与完成顺序无关**。每张产出 `PhotoStats`（自己的
+  `BTreeMap<metric, Acc>` + 曲线/RGB/蒙版分量），主线程**按 index 折叠**
+  （`Acc::merge`）——`f64` 加法不满足结合律，按完成顺序求和会让 gap score 在末位
+  ulp 上漂。旧的三个出口全部保形：分析失败仍打 FAILED 并继续；sidecar 读不出仍是
+  硬错（走 `PhotoOutcome::Aborted` 带回**同一句** `read user xmp for <path>`），
+  且置 abort 位让后续张次**不出队、不计费**——`--jobs 1` 下就是旧的立即停。
+
+  **⑤ 计划外根修：`style::embed_preview` 暂存名撞车**。原名
+  `autoshop-embed-<pid>-<tag>`，而 `pipeline::produce_recipe` 对每张都传常量
+  tag `"query"` —— 一进程内两张并发（**R26 起就是三 worker 的 `batch`**、web
+  的请求线程）就写同一个 `.png`/`.json`：一个 worker 嵌到另一张的画面（**拿到别人
+  的风格向量**），或者互删对方的文件。修在 `embed_preview` 内部加进程内原子序号
+  （`StyleIndex::build` 那个 `idx-{i}` 本来就唯一，未受影响）——一处修，所有调用
+  点都好。
+
+  **未验证/登记**：并行下的 API 侧节流**只有「N 个 propose 在飞」这一层**，中转站
+  端点的 RPM 未知，没加全局限速；`claude` 子进程的并发内存不在预算常数内；
+  `eval --jobs > 1` 的**真实**跑批由主循环执行（本批零付费调用）。**`serve` 与 GUI
+  不共用这两个循环**（`batch_cmd`/`process_one`/`eval::run` 仅 CLI 调用，已 grep
+  确认），行为零变化。
+
+  门：clippy 双配置 0；测试 **695 lib（8 ignored）+ 10 CLI + 131 GUI + 2 + 2 合约**
+  （lib +6 = `jobs` 的 sequencer/内存闸/pool/串行四组；CLI +1 = `--jobs` 默认值）。
+
 - **AI 蒙版重算 + SigLIP 2 风格嵌入（2026-08-19，R27 Batch-5，未发版）** ——
   两件事，共用一条「本机 ML sidecar」纪律（设计稿：`~/.claude/plans/r27-materials/
   D1-ml-sidecar-design.md`，用户已批）。

@@ -162,6 +162,14 @@ enum Command {
         /// default would analyze — and BILL — the camera JPEG beside every RAW.
         #[arg(long)]
         include_baked: bool,
+        /// Photos to develop CONCURRENTLY. Each photo is dominated by blocking
+        /// network round trips, so workers overlap that wait; the default 3 is
+        /// the concurrency this command has shipped with since R26. Whatever
+        /// you ask for, a memory budget caps it — one 61 MP photo peaks at
+        /// ~1.8 GB (`jobs::PER_PHOTO_PEAK_COMMIT_MB`) — and the run says so
+        /// when it does.
+        #[arg(long, default_value_t = 3)]
+        jobs: usize,
     },
     /// Evaluate AI edits against your own: for RAWs that have a sibling .xmp
     /// (your Lightroom/ACR edit), run the AI and report per-field error + bias.
@@ -171,6 +179,14 @@ enum Command {
         /// Max photos to evaluate (cost guard; each one runs the AI).
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Photos to evaluate CONCURRENTLY. Default 1 = the serial harness,
+        /// unchanged. Above 1 the per-photo lines are held and printed in index
+        /// order, and the report is folded in index order too, so the table and
+        /// the gap score do not depend on which photo finished first. A memory
+        /// budget caps this — one 61 MP photo peaks at ~1.8 GB — and the run
+        /// says so when it does.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
     },
     /// Build the style index from your edited library (RAW+.xmp pairs) → the
     /// advisor then references your edits on similar shots. Run once / on update.
@@ -329,10 +345,10 @@ fn main() -> Result<()> {
             )
         }
         Command::Denoise { input, out, strength, model } => denoise_cmd(&input, out, strength, model),
-        Command::Batch { dir, render, limit, include_baked } => {
-            batch_cmd(&dir, render, limit, include_baked)
+        Command::Batch { dir, render, limit, include_baked, jobs } => {
+            batch_cmd(&dir, render, limit, include_baked, jobs)
         }
-        Command::Eval { dir, limit } => eval::run(&dir, limit),
+        Command::Eval { dir, limit, jobs } => eval::run(&dir, limit, jobs),
         Command::StyleIndex { dir } => style_index_cmd(&dir),
         Command::Reimagine { raw, prompt, fidelity, quality, out } => {
             let cfg = Config::load();
@@ -1351,7 +1367,13 @@ fn heal_cmd(
     Ok(())
 }
 
-fn batch_cmd(dir: &Path, render: bool, limit: usize, include_baked: bool) -> Result<()> {
+fn batch_cmd(
+    dir: &Path,
+    render: bool,
+    limit: usize,
+    include_baked: bool,
+    jobs: usize,
+) -> Result<()> {
     let cfg = Config::load();
     // R27 P1. `batch` is the one of the three scanners where including baked
     // photos is a real feature rather than a policy break — it develops
@@ -1402,9 +1424,13 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize, include_baked: bool) -> Res
     // the same set the old sequential `.take(n)` selected — then a small bounded
     // pool works through it. Each photo is dominated by blocking network round
     // trips (GPT propose + verify, plus revision rounds), so a few workers
-    // overlap network wait with CPU renders; 3 keeps API-rate pressure and peak
-    // memory modest. process_one already runs produce_recipe with verbose=false,
-    // so workers print nothing until their one completion line below.
+    // overlap network wait with CPU renders. The count is `--jobs` (default 3,
+    // the concurrency shipped since R26) capped by a MEMORY budget: R27 Batch-7
+    // measured one 61 MP photo's pass at ~1.77 GB of peak commit, so three
+    // unbudgeted workers could ask a tight machine for ~5.3 GB at once — which
+    // is the wall a 147-photo `eval` hit. process_one already runs
+    // produce_recipe with verbose=false, so workers print nothing until their
+    // one completion line below.
     let work: Vec<&Path> = pending.iter().take(n).map(|p| p.as_path()).collect();
     // Deliverables are stem-keyed and one library can hold two DSC00001.ARW
     // (counter rollover — four review units reported the silent overwrite).
@@ -1432,8 +1458,10 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize, include_baked: bool) -> Res
         }
         outs
     };
-    let workers = work.len().min(3);
-    let next = std::sync::atomic::AtomicUsize::new(0);
+    let plan = autoshop::jobs::plan(jobs, work.len());
+    if let Some(note) = &plan.note {
+        println!("{note}");
+    }
     // Per-index results: summary counts stay exact and deterministic
     // regardless of completion order.
     #[derive(Clone, Copy, PartialEq)]
@@ -1442,51 +1470,37 @@ fn batch_cmd(dir: &Path, render: bool, limit: usize, include_baked: bool) -> Res
         NotAccepted, // produced but NOT saved — a non-Accept verdict never auto-saves
         Failed,
     }
-    let results: std::sync::Mutex<Vec<Option<Outcome>>> = std::sync::Mutex::new(vec![None; n]);
-
-    std::thread::scope(|s| {
-        for _ in 0..workers {
-            s.spawn(|| {
-                loop {
-                    // Dequeue the next photo; the shared counter over the fixed
-                    // list preserves --limit semantics exactly.
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(raw) = work.get(i) else { break };
-                    // A failed photo reports its error and the batch continues
-                    // (same as the old sequential loop).
-                    let res = process_one(raw, &cfg, outs[i].as_deref());
-                    // One WHOLE line per photo, printed on completion; holding
-                    // the stdout lock keeps workers' lines from interleaving.
-                    use std::io::Write;
-                    let mut out = std::io::stdout().lock();
-                    let outcome = match &res {
-                        Ok(v) if v.decision == autoshop::advisor::Decision::Accept => {
-                            let _ = writeln!(out, "[{}/{n}] {} ... {:?}", i + 1, stem(raw), v.decision);
-                            Outcome::Saved
-                        }
-                        Ok(v) => {
-                            let _ = writeln!(
-                                out,
-                                "[{}/{n}] {} ... {:?} — NOT saved (a non-Accept verdict never auto-saves)",
-                                i + 1,
-                                stem(raw),
-                                v.decision
-                            );
-                            Outcome::NotAccepted
-                        }
-                        Err(e) => {
-                            let _ = writeln!(out, "[{}/{n}] {} ... FAILED: {e}", i + 1, stem(raw));
-                            Outcome::Failed
-                        }
-                    };
-                    drop(out);
-                    results.lock().unwrap()[i] = Some(outcome);
-                }
-            });
+    // Workers write into their own block and the sequencer releases blocks in
+    // INDEX order (R27 Batch-7). Before that, each worker took the stdout lock
+    // on completion — whole lines, but in whatever order the photos finished,
+    // so `[7/50]` could print before `[3/50]` and a re-run of the same folder
+    // produced a differently-ordered transcript. A failed photo still reports
+    // its error and the batch still continues, exactly as before.
+    let results = autoshop::jobs::for_each_indexed(plan.jobs, n, |i, block| {
+        use std::fmt::Write;
+        let raw = work[i];
+        let res = process_one(raw, &cfg, outs[i].as_deref());
+        match &res {
+            Ok(v) if v.decision == autoshop::advisor::Decision::Accept => {
+                let _ = writeln!(block, "[{}/{n}] {} ... {:?}", i + 1, stem(raw), v.decision);
+                Outcome::Saved
+            }
+            Ok(v) => {
+                let _ = writeln!(
+                    block,
+                    "[{}/{n}] {} ... {:?} — NOT saved (a non-Accept verdict never auto-saves)",
+                    i + 1,
+                    stem(raw),
+                    v.decision
+                );
+                Outcome::NotAccepted
+            }
+            Err(e) => {
+                let _ = writeln!(block, "[{}/{n}] {} ... FAILED: {e}", i + 1, stem(raw));
+                Outcome::Failed
+            }
         }
     });
-
-    let results = results.into_inner().unwrap();
     let ok = results.iter().filter(|r| **r == Some(Outcome::Saved)).count();
     let skipped = results.iter().filter(|r| **r == Some(Outcome::NotAccepted)).count();
     let fail = results.iter().filter(|r| **r == Some(Outcome::Failed)).count();
@@ -1861,6 +1875,44 @@ mod tests {
         .to_string();
         assert!(e.contains("unsupported output format"), "auto: {e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R27 Batch-7: `--jobs` exists on both per-photo loops, and its DEFAULT is
+    /// each command's pre-Batch-7 concurrency — 1 for `eval` (which was serial)
+    /// and 3 for `batch` (which has run a hard-coded three-worker pool since
+    /// R26). Anything else would make an unflagged run behave differently from
+    /// the release before it, in one direction or the other.
+    ///
+    /// MUTATION THIS KILLS: copying `default_value_t = 1` onto `batch` (which
+    /// reads as the safe choice and silently makes every unflagged library
+    /// batch three times slower), or `= 3` onto `eval` (which triples a
+    /// measurement run's concurrent spend and peak memory without being asked).
+    /// A test that only checked "the flag parses" would pass under both.
+    #[test]
+    fn jobs_defaults_to_each_commands_existing_concurrency() {
+        let jobs_of = |args: [&str; 3]| match Cli::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("{args:?} must parse: {e}"))
+            .command
+        {
+            Command::Batch { jobs, .. } | Command::Eval { jobs, .. } => jobs,
+            _ => panic!("{args:?} parsed as some other subcommand"),
+        };
+        assert_eq!(jobs_of(["autoshop", "batch", "dir"]), 3, "batch keeps its R26 pool");
+        assert_eq!(jobs_of(["autoshop", "eval", "dir"]), 1, "eval stays serial unless asked");
+        // …and the flag is actually wired, on both.
+        for cmd in ["batch", "eval"] {
+            let cli = Cli::try_parse_from(["autoshop", cmd, "dir", "--jobs", "6"])
+                .unwrap_or_else(|e| panic!("{cmd} --jobs 6 must parse: {e}"));
+            let got = match cli.command {
+                Command::Batch { jobs, .. } | Command::Eval { jobs, .. } => jobs,
+                _ => panic!("`{cmd} --jobs` parsed as some other subcommand"),
+            };
+            assert_eq!(got, 6, "{cmd} must carry --jobs, not drop it");
+        }
+        // 0 is a typo, not "no workers": the planner floors it at one rather
+        // than the parser refusing, so a script that computes the value from
+        // `nproc - 1` on a single-core box still runs.
+        assert_eq!(autoshop::jobs::plan_with(0, 10, None).jobs, 1);
     }
 
     /// L09#4: the `heal --full-res` help names the baked-source downsample

@@ -97,6 +97,13 @@ windows-sys = { version = "0.59", features = [
     # struct's IO_COUNTERS live behind these two gates.
     "Win32_Security",
     "Win32_System_Threading",
+    # `GlobalMemoryStatusEx` + `MEMORYSTATUSEX` — the free-memory reading the
+    # R27 Batch-7 `--jobs` cap divides by its measured per-photo peak
+    # (`jobs::free_memory_mb`). Header-only bindings in a crate already in the
+    # tree, so this adds no download and no new supply-chain surface; official
+    # bindings beat a hand-rolled `extern` for a kernel32 struct whose
+    # `dwLength` field is a versioning contract.
+    "Win32_System_SystemInformation",
 ] }
 
 [target.'cfg(unix)'.dependencies]

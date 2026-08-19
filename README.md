@@ -201,8 +201,8 @@ autoshop analyze <src> [--guidance "..."] [--style 0..1] [--strength 0..1]   # A
 autoshop apply   <src> <recipe.json> -o out  # render a recipe to an image
 autoshop auto    <src> [--denoise] [--guidance "..."] [--style 0..1] [--strength 0..1]   # analyze + render, end-to-end
 autoshop denoise <src> [--strength 0..1] [--model ...]  # AI denoise → clean 16-bit master
-autoshop batch   <dir> [--render] [--limit N]           # process a whole folder
-autoshop eval    <dir> [--limit N]           # compare AI edits vs your own .xmp
+autoshop batch   <dir> [--render] [--limit N] [--jobs N]  # process a whole folder (--jobs = photos in flight, default 3)
+autoshop eval    <dir> [--limit N] [--jobs N]  # compare AI edits vs your own .xmp (--jobs default 1 = serial)
 autoshop style-index <dir>                   # build the "your taste" reference index (also in the GUI: AI panel › Style reference library)
 autoshop serve   <dir> [--port 8080]         # local web UI
 autoshop reimagine <raw> --prompt "..."      # experimental generative restyle
