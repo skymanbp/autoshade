@@ -1371,7 +1371,59 @@ pub(crate) fn carry_over_unrepresentable(
     // its field list from the tiers that render nothing, so this line is
     // required to exist by the same test the B2/B3 blocks answer to.
     recipe.passthrough = base.passthrough.clone();
+    carry_radial_carried_attributes(recipe, base);
     recipe.clamp(); // the size caps still apply after re-attaching
+}
+
+/// `crs:Midpoint` and `crs:Version` ride home from the refine base (R27 L-09).
+///
+/// The two are CARRIED-ONLY radial attributes: Lightroom writes them on every
+/// radial, this engine never consults them, and `advisor::catalogue`'s mask
+/// geometry schema deliberately omits them — a model cannot know a value it
+/// never saw, and a required property is a property it would invent. The cost
+/// was that a Refine returned the geometry with both at their serde defaults
+/// (50 / 2), so refining an imported Lightroom radial silently rewrote the
+/// photographer's Midpoint on the very next save.
+///
+/// R25 registered this as 「not worth fixing」 on the ground that the fix meant
+/// widening `schema_loses` above — the state-bearing predicate that decides
+/// which masks take the WHOLESALE-REVERT path. That reasoning stands, so this
+/// does not touch it: it is a separate pass over the matched masks, it can
+/// neither set `unmatched` nor change which masks are carried, and a base
+/// whose masks the response did not identifiably return has already had them
+/// restored verbatim by then (making this a self-copy).
+///
+/// Matching is the SAME rule the block above uses — the base name is unique
+/// and exactly one returned mask answers to it — and only Radial → Radial
+/// copies: a response that sent back a different geometry KIND is a new shape,
+/// with no midpoint of the old one to inherit.
+fn carry_radial_carried_attributes(recipe: &mut EditRecipe, base: &EditRecipe) {
+    use crate::recipe::MaskGeometry;
+    let carried = |g: &MaskGeometry| match g {
+        MaskGeometry::Radial { midpoint, mask_version, .. } => Some((*midpoint, *mask_version)),
+        _ => None,
+    };
+    for original in base.masks.iter() {
+        let Some((midpoint, mask_version)) = carried(&original.mask) else { continue };
+        if original.name.is_empty()
+            || base.masks.iter().filter(|m| m.name == original.name).count() != 1
+        {
+            continue;
+        }
+        let answers: Vec<usize> = recipe
+            .masks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| (m.name == original.name).then_some(i))
+            .collect();
+        let [i] = answers[..] else { continue };
+        if let MaskGeometry::Radial { midpoint: mp, mask_version: mv, .. } =
+            &mut recipe.masks[i].mask
+        {
+            *mp = midpoint;
+            *mv = mask_version;
+        }
+    }
 }
 
 /// Does this saved curve carry the fingerprint of the +0.5 preview bias?
@@ -3017,6 +3069,88 @@ mod guard_tests {
             "the rotation is the model's to set now — the whole geometry is its answer"
         );
         assert_eq!(proposed.masks.len(), 1, "a rotated ellipse is not 'unrepresentable' any more");
+    }
+
+    /// R27 L-09 (user ruling 2026-08-19 =「修」). `crs:Midpoint` and
+    /// `crs:Version` are carried-only: the AI schema cannot ask for them, so
+    /// every Refine used to hand back 50 / 2 and the next save wrote those
+    /// numbers into the photographer's sidecar over whatever Lightroom had
+    /// said. The library happens to hold no non-default Midpoint, which is why
+    /// it was registered rather than fixed — a zero-instance defect is still a
+    /// defect, and the fixture here is the instance.
+    ///
+    /// The SECOND half is the conservatism the ruling asked for: nothing but
+    /// those two fields moves. The model's own answer for the rest of the
+    /// geometry — a rotation, a re-drawn box — must survive untouched, or this
+    /// pass would have quietly become the wholesale revert R25 declined to
+    /// widen into.
+    ///
+    /// MUTATION THIS CATCHES: delete the `carry_radial_carried_attributes`
+    /// call and the first pair of asserts fails at 50 / 2 (the pre-R27 state);
+    /// copy the whole `original.mask` instead of the two fields and the angle
+    /// assert fails, because the model's rotation would be thrown away.
+    #[test]
+    fn a_refine_keeps_the_photographers_radial_midpoint() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let radial = |angle: f32, midpoint: f32, mask_version: u32| MaskGeometry::Radial {
+            top: 0.2,
+            left: 0.2,
+            bottom: 0.8,
+            right: 0.8,
+            feather: 0.5,
+            roundness: 0.0,
+            flipped: false,
+            angle,
+            midpoint,
+            mask_version,
+        };
+        // An imported Lightroom radial whose Midpoint the photographer moved.
+        let base = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject".into(),
+                mask: radial(15.0, 30.0, 3),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // What the model returns: the same mask by name, re-rotated, with the
+        // two fields at the defaults its schema forces on them.
+        let mut proposed = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject".into(),
+                mask: radial(-40.0, 50.0, 2),
+                exposure_ev: 0.3,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        let MaskGeometry::Radial { midpoint, mask_version, angle, top, .. } = proposed.masks[0].mask
+        else {
+            panic!("expected a radial, got {:?}", proposed.masks[0].mask);
+        };
+        assert_eq!(midpoint, 30.0, "the photographer's Midpoint must survive a Refine");
+        assert_eq!(mask_version, 3, "…and so must Lightroom's own geometry version");
+        assert_eq!(angle, -40.0, "but the model's rotation is still the model's answer");
+        assert_eq!(top, 0.2, "and nothing else in the geometry moved");
+        assert_eq!(proposed.masks[0].exposure_ev, 0.3, "nor anything else in the adjustment");
+
+        // A response that renamed the mask (or sent back two answering to the
+        // same name) is not identifiable, so nothing is copied onto a shape
+        // that may not be the same shape.
+        let mut renamed = EditRecipe {
+            masks: vec![LocalAdjustment {
+                name: "subject 2".into(),
+                mask: radial(-40.0, 50.0, 2),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        carry_over_unrepresentable(&mut renamed, &base, LensOpinion::default(), None);
+        let MaskGeometry::Radial { midpoint, .. } = renamed.masks[0].mask else {
+            panic!("expected a radial")
+        };
+        assert_eq!(midpoint, 50.0, "an unmatched name carries nothing");
     }
 
     #[test]

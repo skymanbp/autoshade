@@ -368,6 +368,17 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 - **每轮硬门**：clippy 0、全量测试绿（基线 449+7+73+2）、audit_i18n 0、zh 词条过
   成品字体子集（口径见下方 v0.31.0 条的更正）、禁启 GUI、禁 cargo fmt、五文档
   +记忆同步、Opus 5 对抗复审后发版。
+- **发版链 + 环境门套件（R27 L-29 补入，2026-08-19）**：
+  `bump → feat → push → tag → gh release → assets 回下载逐位 cmp → 台账章`。
+  **每次发版必须另跑 env 门控的真实夹具套件并把张数记在门数字旁边**：
+  `AUTOSHOP_LR_PROBE_FIXTURES`（真实 LR sidecar 往返，v0.32.0 实跑 16/16）与
+  `AUTOSHOP_MB_FIXTURES`（M-B 采样族）。**未设变量则静默跳过**，所以裸 `cargo
+  test` 的门数字（620/8/129/2+2 这一族）**不含**它们——真实边车往返出回归也能
+  绿着发出去，这正是 L-29 登记的风险。记法照门数字：「620 lib / 8 CLI / 129 GUI
+  / 2+2 合约 + LR 探针 16/16 + M-B n/n」。同族同样静默的还有需要真 RAW 的
+  `AUTOSHOP_PROBE_RAW`（`render.rs` / `lensmeta.rs`）与 `AUTOSHOP_ORIENT_PROBE_RAW`
+  （`decode.rs`）——有真机时一并跑并记数。`AUTOSHOP_THINK_PROBE_KEY`（付费）
+  不进硬门，按轮决定。
 
 ## 标签定义（LR 差距批次 / 素材 / 分叉编号 —— 2026-08-18 入库）
 
@@ -393,11 +404,90 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 | 标签 | 内容 | 状态 |
 |---|---|---|
 | **M-A** | 一组新的「反推瞎搞」复现对（RAW + 参考成片），给联合梯子建真实基线 | ✅ R24 自采六对真同帧 |
-| **M-B** | 一次 LR 采样实验的 sidecar 族：①径向旋到已知角度 ②径向组件组合 ③含局部点曲线的蒙版 ④AI/画笔蒙版 | ◐ R24 自采 160 份取证覆盖③④与阴性结果；**①已知角度 ✅ 2026-08-18 十二张受控导出已交，已在 R26 v0.32.0 全部消费**；Defringe 非零仍欠 |
+| **M-B** | 一次 LR 采样实验的 sidecar 族：①径向旋到已知角度 ②径向组件组合 ③含局部点曲线的蒙版 ④AI/画笔蒙版 | ✅ **全部交齐**。R24 自采 160 份取证覆盖③④与阴性结果；**①已知角度 ✅ 2026-08-18 十二张受控导出已交，已在 R26 v0.32.0 全部消费**；~~Defringe 非零仍欠~~ **← 2026-08-19 勘误：Defringe 非零同在 2026-08-18 那批里已交**（`_DSC9597.xmp: crs:DefringePurpleAmount="10"`、`DefringePurpleHueLo="19"`、`DefringePurpleHueHi="49"`；同批另七份全带静息块 `0/30/70` + `0/40/60`，反过来独立确证 R25 选的非零默认）。该行原是一次部分编辑的残留，不是判断 |
 | **M-C** | `f944ef3` 那 147 张 RAW+xmp 对照集是否还在、路径确认 | ✅ R25 全量重跑（数字见 v0.31.0 条） |
 | **M-D** | #2 蒙版精修报错的 toast 原文（分流哪条臂） | ✅ R24 两臂都修 + 实跑否证 |
 
 ## 当前状态（已完成，勿重做）
+
+- **台账勘误 + 登记转正（2026-08-19，R27 Batch-1a，未发版）** —— 不是一次发布，
+  是一次**审计留痕**：R27 立案时对全部文档做了穷尽扫描（`A-leftover-ledger.md`
+  33 项），查出台账多处滞后于事实，以及若干「登记不修」在本轮被用户裁决为「修」。
+  逐条列在这里，便于日后追溯**是谁、在哪一天、依据什么改的**。下面被更正的原句
+  一律保留（删除线 + 箭头），不做静默重写。
+  **① 素材台账（M-B / 六合一实验）**：`M-B` 行的「Defringe 非零仍欠」与
+  v0.31.0 条的「素材欠（用户侧一次 6 合 1 LR 实验即可全取）」六项、v0.30.0 条的
+  「Defringe 全库 0 待用户 LR 补做」——**全部已于 2026-08-18 交付**，逐项证据：
+  Defringe 非零 `_DSC9597.xmp: DefringePurpleAmount="10"` / 径向旋 +30°
+  `_DSC9600.xmp: Angle="28.229232"` / 蒙版 Hue +50 `_DSC9594.xmp:
+  LocalHue="0.277778"` / 蒙版 Sharpness `_DSC9594.xmp: LocalSharpness="0.803738"` /
+  Subtract 复制 `_DSC9598.xmp: MaskBlendMode="1"` / Auto CA `_DSC9596.xmp:
+  AutoLateralCA="1"`；另有两份附赠 `_DSC9595.xmp: Sharpness="150"`、
+  `_DSC9593.xmp: LocalExposure2012="1"`。
+  **② L-14 Defringe 乙案**：标签定义表 `B3` 行早已写明「Defringe 走甲案＝
+  CarriedOnly 终态」，且 SF4 已由用户拍板 = C；v0.31.0 条把「Defringe 乙案（渲染
+  近似）」列为「等同一次 LR 实验」是**滞后行**。**裁决：甲案终态成立，乙案不做**。
+  **③ 90° 旋转归属**：v0.31.0 条写「v0.32 首项」，v0.32.0 条写「仍留 v0.33」，
+  两行相冲。**以 v0.33 为准**（v0.32.0 那轮被径向几何根修占满，功能顺延一版）。
+  **④ L-16b / L-16d 两条「登记不修」自陈不可达**：崩溃窗孤儿 meta 行、web「RAW
+  不可读仍回存」窄残留——文本本身就说「已滤」「实际不可达」，登记为**已关闭的纵深
+  防御注记**，不再算未决项。
+  **⑤ 本轮用户裁决（2026-08-19）**：L-16a Analyze 继承 `refuse_unresolved_strip`
+  =**终态**；L-26 macOS/Linux 字体回退表留空 = **保留开口**（**不**宣布
+  Windows-only，等真机字体路径实测）；L-19 两项既裁成本（App 内删光蒙版不传播到
+  sidecar、往返把 `crs:Flipped` 并入反相位）= **定案**；L-09 AI 精修重置
+  `midpoint`/`mask_version` = **修**（已实现，见⑥）；V2_PLAN §7-8 CLIP 升级 =
+  **批准**，从「决策项」转为 R27 工作项。
+  **⑥ 登记不修 → 已修（代码面，本批落地，随 R27 发版）**：L-07 CLI 蒙版导入损失
+  披露（`main::lightroom_import_note`，`analyze`/`auto`/`match` 三处随 `xmp ->`
+  行发 stderr；`batch` 不需要——它的待办集按 `has_develop_or_sidecar` 过滤，带
+  sidecar 的照片根本不进）；L-09 见⑤；L-16c `straighten≠0` 时的裁剪迁移（详见⑦）；
+  L-17 第三类前向静默 → **响亮拒收**（`MaskGeometry` 与 `RangeMask` 两个内部标签
+  枚举补 `deny_unknown_fields`——「serde 不支持」这句旧断言经实测证伪：加在
+  **容器**上即可，标签字段本身自动豁免。**前向后果**：从 v0.33 起，旧 exe 遇到新
+  版写的蒙版几何会**按字段名点名拒收整个 recipe**，不再静默丢字段再写回。这与
+  `EditRecipe` 顶层的既定姿态一致，也是「不支持降级」的成文依据）；L-25
+  `explorer.exe` 逗号路径（explorer 自行按**逗号**切命令行——它的开关本就写作
+  `/select,<path>`——故改为 `raw_arg` 传加引号的整条路径；路径含 `"` 或非
+  Unicode 时不建原始命令行，回落旧写法）；L-29 见上方「发版链 + 环境门套件」。
+  **⑦ L-16c 判定（读码定性，非猜测）**：R24 登记的「`straighten≠0` 时 crop 迁移
+  一阶近似」**只有一半是真的**。裁剪矩形归一化的参照系是**拉直后的内接帧**
+  （`render_pipeline` 先 `rotate_straighten` 再 `apply_crop`），而
+  `inscribed_dims` 对 `w↔h` **严格交换等变**（一般支路一望即知；细支路里的
+  `if w >= h` 看似破坏对称，实则在 `w == h` 上**不可达**——该支路要求
+  `sin 2a ≥ 1` 即恰 45°，那里 `s == c` 两个输出本就相等）。加上旋转互相可交换，
+  **四个纯旋转态的裁剪迁移本来就是精确的**。真正的残差是**符号**：
+  `rot(deg)∘镜像 == 镜像∘rot(−deg)`，所以四个**镜像**态下拉直角被反着用了
+  `2·deg`。修＝对镜像态取反 `straighten_deg`（与椭圆 `angle` 同一条规则）。
+  八态至此全精确。新测试两条 + 变异验证在案。
+  **⑧ V2_PLAN / M1_PLAN 同步**：§7-2 正端点关闭（`_DSC9593`）、§7-3 折入三组
+  实测对、§7-10 `LocalSharpness` **当日走完一个完整弧线后以 ÷100 定案**——用户
+  先确认是**手输** 80（手输应写 `0.800000`，文件是 `0.803738`，一度判「÷100 被
+  证伪」），随后 R27 网证（F3）拿到两个不依赖该文件的 Adobe 侧锚点：Adobe 自家
+  Soften Skin 本地预设 **+25 → `0.25`**、MIDI2LR 全滑杆拉满 **+100 → `1`**；
+  手输假说所需除数 99.535 会把 ±100 端点推到 ±1.0047（Adobe 恰坐在 1.0 上），
+  且公共语料 18 个非零值里 10 个任意实数、无量化网格 ⇒ **÷100 成立，0.803738
+  =滑杆实际停在 80.37，让步的是回忆**（用户 2026-08-19 接受定案；证据档案
+  `~/.claude/plans/r27-materials/F3-web-evidence/`）、§7-8 CLIP 升级
+  批准；M1_PLAN §8 表退役一遍（1/2/4/7/8/10/11/13/14 关，3/6/9/12 留开并各自换
+  新计划）、§9.5 重写。
+  **⑨ 过时注释更正（纯注释，零行为）**：`xmp.rs` `MaskImportReason::Rotation`
+  与 `a_lightroom_radial_with_angle_imports`、`bin/gui/tests.rs`
+  `the_rotation_warning_says_why` 三处仍写「`crs:Angle` 符号/枢轴未验证」——
+  v0.32.0 已实测三项，现存唯一情形是「文档没声明画幅」；`render.rs`
+  `radial_roundness_is_a_documented_no_op` 写「尺度与符号未验证」——v0.31.1 已
+  测定域为 ±100 整数滑杆，未测的只剩**像素含义**。
+  **⑩ 本批门（未发版，仅记数）**：624 lib（+4）/ 9 CLI（+1）/ 130 GUI（+1）/
+  2+2 合约，`cargo clippy --all-targets` 与 `--all-targets --features gui` 双 0，
+  无新 i18n 词条（CLI 披露走既有英文 stderr 通道），六条新测试全做变异验证。
+  **⑪ V2_PLAN §7-9 OpenAI Images 六子项当日付费实测闭**（用户批准，3 次 edits
+  调用 <$0.3，原始响应存 `~/.claude/plans/r27-materials/probe-images/`）：
+  `gpt-image-1.5` 存在；`chatgpt-image-latest` **存在＝原「absence」断言证伪**；
+  `input_fidelity` 在 **gpt-image-2 上 400 拒收**（生产配置严禁下发该参数）、在
+  1.5 上 low/high 皆 200、机制＝输入图 token 深度（194 vs 4354）；掩码透明区=
+  编辑区、**不透明区仅近似保留**（RMS 5.6/255，整帧重绘）⇒ object-removal 集成
+  必须自行逐位回贴非编辑区；`b64_json` 为默认响应、`usage` 图文分列且 1.5 计
+  输出 text token；docs 主机对程序化抓取 403＝不可依赖。
 
 - **v0.32.0（2026-08-19，第二十六轮 = 径向蒙版几何根修）** ——
   素材＝**用户为此专门拍的 12 张受控 Lightroom 导出**（M-B ①结清）
@@ -471,7 +561,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   tone-matched RMS **0.1099→0.0751**（蓝 0.1901→0.0869，引自 E1-verdict §6，
   本批未重跑像素）。**recipe schema 零改动**（无新字段＝不触发 v0.31.0/1 exe
   蒙版硬拒）；我方 `flipped` 仍渲染、仍是 GUI 翻转勾选，既有 recipe 渲染
-  一像素不变。**接受成本（复审裁决在案）**：往返后净反相精确保留，但承载位
+  一像素不变。**接受成本（复审裁决在案；用户 2026-08-19 复核＝定案，L-19）**：
+  往返后净反相精确保留，但承载位
   从「翻转」并入「反相」勾选（XMP 只有一位，投影必然塌陷；替代方案加
   carried-only 字段会改 schema 触发前向硬拒，判不值）。≤v0.31.1 我方写的
   带翻转 sidecar 现读回不反相＝与 LR 读法一致化，非新损失。
@@ -488,10 +579,14 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   **实际导入**的几何发（旧码 `DSC08960` 四条注记三条描述从未入 recipe 的
   径向）；`BlendMode` 注记保持组件级（对被弃减法组件是真话＝v0.31.1 的披露）。
   实测恢复 3 蒙版（`DSC08960` 径向 {3}→{1,3,4}、`_DSC9583` 8→11 全入）。
-  **登记不修**（注释带触发条件+去向钉在代码）：CLI 零蒙版披露（`main.rs` 不调
-  `describe_import_losses`，通道设计缺口）；`unknown_component` 预占形状账
+  **登记不修**（注释带触发条件+去向钉在代码）：~~CLI 零蒙版披露（`main.rs` 不调
+  `describe_import_losses`，通道设计缺口）~~ **← R27 Batch-1a 已修（L-07）：
+  `main::lightroom_import_note` 在 `analyze`/`auto`/`match` 三处随 `xmp ->` 行
+  发 stderr，与导出侧损失行同一通道；`eval.rs` 仍只数 drop，这是标尺定义不是通道
+  缺口，已成文**；`unknown_component` 预占形状账
   （混合 AI/画笔+参数化几何的 Correction 整条拒收正确但 6 个可表示形状
-  无披露，披露粒度设计题）。
+  无披露，披露粒度设计题）**← 用户 2026-08-19 裁决＝根修实现，先取证三类组件
+  字节层，属 R27 后续批**。
   门：clippy 0 双配置；**610**(+4：`lightroom_spells_one_inversion_bit_twice`
   改判+`our_own_flip_leaves_as_lightrooms_own_inversion`+
   `a_multi_component_correction_imports_its_base_geometry`+
@@ -622,7 +717,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   的镜头档）、P0 oracle 两条死析取补活、`tone_active`/`crop_active` 派生化收官
   （最后两组手写 ● 元组消失）、P6 曲线注释按实测容差软化（最差 1.5e-5 个 8-bit
   码）、env-gated 探针读不动夹具改为点名 panic 而非静默不计。**接受成本（已裁决
-  并登记）**：在 Autoshop 里删光蒙版**不再**把删除传播到 sidecar（要删请在
+  并登记；用户 2026-08-19 复核＝定案，L-19）**：在 Autoshop 里删光蒙版**不再**把删除传播到 sidecar（要删请在
   Lightroom 侧删）——本轮主题就是数据保全高于删除手势；已编辑过的蒙版块 republish
   会按我方 writer 确定性重铸 `MaskName`/`MaskSyncID`。**⚠ 前向三类语义（互不相同，
   发版说明分列）**：①`EditRecipe` 顶层 +29 字段 + `deny_unknown_fields` →
@@ -630,7 +725,12 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   ②`LocalAdjustment` +4 曲线且同样 `deny_unknown_fields` → **带蒙版**的 recipe 被
   旧 exe 硬拒，无蒙版字节不变（同 R23 LocalHue/Sharpness）；③`MaskGeometry::Radial`
   +2 是**内部标签枚举、无** `deny_unknown_fields` → 旧 exe **静默丢弃再写回**＝悄悄
-  改文件，**本轮首次出现的第三类**。指纹变 → R21 已删版本登记簿的结构臂一次性
+  改文件，**本轮首次出现的第三类**。**← R27 Batch-1a 关闭（L-17）**：「serde 不
+  支持在内部标签枚举上 `deny_unknown_fields`」这句是**错的**，实测（serde 1.0.228
+  + serde_json 1.0.150）加在**容器**上即生效且自动豁免标签字段。`MaskGeometry`
+  与 `RangeMask` 两个内部标签枚举现已都加上，**第三类从此与①②同为响亮拒收**；
+  代价是 v0.33 起旧 exe 遇到新版蒙版几何会按字段名拒收整个 recipe，这正是
+  「不支持降级」的成文姿态。指纹变 → R21 已删版本登记簿的结构臂一次性
   以**新号**重新保档（hwm 臂不动＝同号永不复活，合约 2/2 绿）。**M-C 全量 147
   重基线（`~/.claude/plans/mc-eval-147-full.txt`）**：147/147 零失败，**总 gap
   14.2%**；最大系统性分歧 whites **+22.55** / blacks **−14.18** / highlights
@@ -645,26 +745,40 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   `NotoSansSC-autoshop.ttf` ＝ **751 字形 / 739 码点**，五字体 cmap 并集 **2396
   码点**（`ROADMAP` 旧句已改指「成品字体子集」）；②R22 登记的
   「`BYTES_PER_PIXEL=24` 既往偏低 ~17%」以第一手算账**关闭**（见 P0）。
-  **登记不修**：AI 精修会把 `midpoint`/`version` 重置回 50/2（库内全部径向本就
-  50/2＝**无观测实例**；修法要动有 bug 前科的整体回退启发式，不值）；~~`Sharpness`
+  **登记不修**：~~AI 精修会把 `midpoint`/`version` 重置回 50/2（库内全部径向本就
+  50/2＝**无观测实例**；修法要动有 bug 前科的整体回退启发式，不值）~~ **← R27
+  Batch-1a 已修（L-09，用户 2026-08-19 裁决＝修）**：`pipeline::
+  carry_radial_carried_attributes` 独立一遍从精修底片把两个携带字段按名字回贴，
+  **不碰** `schema_loses`（那才是决定整体回退的谓词，也正是当年判「不值」的理由），
+  合成夹具用非默认 `Midpoint=30`/`Version=3`；~~`Sharpness`
   0..100 假设被当作锁定不变量（需用户一份 >100 实测样本才能闭）~~ **← v0.31.1
   已证伪并根修，见本文件 v0.31.1 段**；`nr_detail`/
   `nr_contrast` 零观测形态（全库 `LuminanceSmoothing=0`，中性有推理无实测）；
   Effects 段目前落在「Detail & Lens」弱组标题下、标题未扩；store 指纹 fail-open
-  已披露。**后续登记**：**90° 手动旋转＝v0.32 首项**（骨架见下）；B5-B2 角度写回、
+  已披露。**后续登记**：~~**90° 手动旋转＝v0.32 首项**（骨架见下）~~ **← 归属更正
+  2026-08-19：v0.32.0 被径向几何根修占满，90° 顺延到 v0.33（与 v0.32.0 条的
+  「仍留 v0.33」一致，本行是滞后行）**；~~B5-B2 角度写回、
   LocalHue/LocalSharpness 的 LR 数值尺度、Defringe 乙案（渲染近似）、
-  `AutoLateralCA` 验收——四项都等**同一次** LR 实验；底部变体条物理合并搁置；
+  `AutoLateralCA` 验收——四项都等**同一次** LR 实验~~ **← 该实验 2026-08-18 已做，
+  四项分别落定：B5-B2 角度写回 ✅ 合于 v0.32.0；LocalHue ✅ ×180；LocalSharpness
+  ✅ **÷100（当日先误判证伪、后经 Adobe 双锚定案，弧线见勘误条⑧与 V2_PLAN
+  §7-10）**；Defringe
+  乙案 = **不做**（甲案 CarriedOnly 终态，B3 行 + SF4-C 早已裁过）；`AutoLateralCA`
+  ✅ 素材 `_DSC9596.xmp: AutoLateralCA="1"` 已在手**；底部变体条物理合并搁置；
   SF9-B 版本捕获像素不做；保存侧蒙版丢失红 toast 保持不降级；蒙版 Temp/Tint 照 LR
-  留 Color 组。**素材欠（用户侧一次 6 合 1 LR 实验即可全取）**：Defringe 紫 +3 /
+  留 Color 组。~~**素材欠（用户侧一次 6 合 1 LR 实验即可全取）**：Defringe 紫 +3 /
   绿 +2 → 加一个径向旋 +30° → 该蒙版 Hue +50 / Sharpness −40 → 复制该径向做
-  Subtract → 打开 Auto CA → Ctrl+S 存 sidecar。发版：feat 012d420，tag
+  Subtract → 打开 Auto CA → Ctrl+S 存 sidecar。~~ **← 六项 2026-08-18 全部交齐，
+  逐项 file:value 见本文件「台账勘误（2026-08-19，R27 Batch-1a）」条①。**
+  发版：feat 012d420，tag
   v0.31.0→012d420，assets 回下载字节验证=本地逐位相等：cli
   e4de58dc2b92a1a625595d5f6d8a06a0d284ca1655c01992f5df2a2c45c599ef
   =29,145,146 B / gui
   05d04b70eed24cd0f1e7b8328f055142b4a0aa10e5039aadbea5517beffc9c71
   =38,613,218 B；`--version` 自证 0.31.0。
 
-  **90° 手动旋转设计骨架（v0.32 首项，本轮拍板推迟，骨架入库以免再丢）**
+  **90° 手动旋转设计骨架（~~v0.32 首项~~ **← 归属更正 2026-08-19：v0.33**，
+  本轮拍板推迟，骨架入库以免再丢）**
 
   | # | 位置 | 设计 |
   |---|---|---|
@@ -727,14 +841,31 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   Denoise 补 segment 同族能力探针+zh 逐字同形。**素材自采四条全录**（零付费
   零写库）：M-A 六对（stem 同名 116 只有 54 真同帧=EXIF 时间戳教训）；M-B
   160 XMP 取证含载荷性阴性结果（Add/Subtract 全顶层、组内组件 0/428——B 批
-  设计据此，Defringe 全库 0 待用户 LR 补做）；M-C=整个 Raw 树恰 147 对，15
+  设计据此，~~Defringe 全库 0 待用户 LR 补做~~ **← 2026-08-18 已补做：
+  `_DSC9597.xmp: DefringePurpleAmount="10"`，见「台账勘误（2026-08-19，
+  R27 Batch-1a）」条①**）；M-C=整个 Raw 树恰 147 对，15
   张小样已跑（数字见 scratchpad mc-eval-15-sample）；M-D 两臂文案表在案。
-  **登记不修**：LOW-2 Analyze 继承 refuse_unresolved_strip=与 Ctrl+S 一致化
-  设计；N3 崩溃窗孤儿 meta 行不可达已滤；straighten≠0 时 crop 迁移一阶近似；
-  web「RAW 不可读仍回存」窄残留实际不可达；LR sidecar 对迁移坐标的对齐待真
-  实验证。**后续登记**：底部变体条物理合并（共享属主已铺=删除+重钉小活，待
+  **登记不修**（五条，2026-08-19 R27 Batch-1a 逐条结算）：
+  ①LOW-2 Analyze 继承 refuse_unresolved_strip=与 Ctrl+S 一致化
+  设计 **← 用户 2026-08-19 裁决＝终态**；
+  ②~~N3 崩溃窗孤儿 meta 行不可达已滤~~ **← 关闭为纵深防御注记**：该登记的正文
+  自陈「不可达已滤」——孤儿 meta 行在渲染前已被过滤掉，登记的是「万一过滤失效」
+  的第二道防线，不是待办；保留代码里的过滤，台账不再计为未决项；
+  ③~~straighten≠0 时 crop 迁移一阶近似~~ **← R27 Batch-1a 已修（L-16c）**：读码
+  定性后发现只有一半为真——裁剪的参照系是 `inscribed_dims` 的内接帧，而该函数
+  对 `w↔h` 严格交换等变，加上旋转互相可交换，**四个纯旋转态本来就精确**；真正
+  的残差是四个**镜像**态下 `straighten_deg` 没有取反（`rot(deg)∘镜像 ==
+  镜像∘rot(−deg)`），已按椭圆 `angle` 的同一条规则修；八态全精确，2.5°/−44°
+  往返测试 + 变异验证在案；
+  ④~~web「RAW 不可读仍回存」窄残留实际不可达~~ **← 关闭为纵深防御注记**：同②，
+  正文自陈「实际不可达」；路由到不了那条臂，登记的是防线不是缺口；
+  ⑤LR sidecar 对迁移坐标的对齐待真实验证 **← 仍开**（L-16e，五条里唯一有真实
+  残余风险的一条，且 v0.32.0 的 `(32,20)` 位移与 `k=1.032` 帧仿射让它更值得做：
+  在 Autoshop 里改一张照片 → 写 sidecar → 用 Lightroom 打开目验蒙版/裁剪落点）。
+  **后续登记**：底部变体条物理合并（共享属主已铺=删除+重钉小活，待
   用户裁布局）；SF9-B 版本捕获像素；M-C 全量 147 重基线待小样判读后拍板；
-  B2-B5 待 Defringe。发版：feat b42c1d9，tag v0.30.0→b42c1d9，assets 回下载字节验证=本地逐位相等：cli 34b5e7b5…=28,927,209 B / gui 4a12a965…=38,331,807 B。——
+  ~~B2-B5 待 Defringe~~ **← Defringe 素材 2026-08-18 已交（`_DSC9597.xmp`），
+  B2-B5 已于 R25 v0.31.0 / R26 v0.32.0 全部落地**。发版：feat b42c1d9，tag v0.30.0→b42c1d9，assets 回下载字节验证=本地逐位相等：cli 34b5e7b5…=28,927,209 B / gui 4a12a965…=38,331,807 B。——
   三轮清账（R22 v0.28.0 / R23 v0.29.0 / R24 v0.30.0）至此收官，下轮开工先读
   本条。
 

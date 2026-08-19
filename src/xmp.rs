@@ -761,12 +761,18 @@ pub enum MaskImportReason {
     /// exposure past ±5 EV, `crs:CorrectionActive="false"`, a component whose
     /// coordinates are not numbers, more masks than the recipe cap holds).
     OutOfModel,
-    /// `crs:Angle` is non-zero: the radial imports as its UNROTATED ellipse
-    /// (the angle's sign/pivot are unverified — the roundness rule, mirrored
-    /// from the export side's [`MaskLossReason::Rotation`]). The payload is
-    /// the sidecar's angle in WHOLE DEGREES, or `0` when there was no angle
-    /// to name — the attribute was present but UNREADABLE (which still counts
-    /// as rotated: we cannot say it is zero), or it rounds away.
+    /// `crs:Angle` is non-zero and the radial still imports as its UNROTATED
+    /// ellipse — mirrored from the export side's [`MaskLossReason::Rotation`].
+    ///
+    /// The REASON narrowed in v0.32.0 and this line moved with it: the sign,
+    /// the pivot and the magnitude are all measured now (`ANGLE-MODEL.md`
+    /// §6.1), and [`lr_to_engine`] carries the tilt through. The variant fires
+    /// only when the DOCUMENT DECLARES NO FRAME — no `tiff:ImageWidth /
+    /// ImageLength`, so the pixel→normalised fold has no aspect to fold with
+    /// ([`FrameAspect`], [`RadialDecode::Unrotated`]) — or when the attribute
+    /// is present but unreadable. The payload is the sidecar's angle in WHOLE
+    /// DEGREES, or `0` when there was no angle to name (unreadable still
+    /// counts as rotated: we cannot say it is zero), or it rounds away.
     Rotation(i32),
     /// `crs:MaskBlendMode` is not the plain composition we already do, so the
     /// component contributes its base geometry only.
@@ -896,18 +902,24 @@ pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
 /// actionable ("which of my 12 masks?") — the import twin of
 /// [`describe_mask_losses`].
 ///
-/// REGISTERED, NOT FIXED (R25 P9) — **only the GUI calls this.** The callers are
-/// `bin/gui/export.rs` and `bin/gui/persist.rs`; `src/main.rs` calls neither, so
-/// a CLI import prints nothing at all about what the sidecar lost, and
-/// `eval.rs` uses `unsupported_corrections`, which counts DROPS only
-/// ([`MaskImportReason::is_drop`]) and cannot see a degradation like
-/// `MultiComponent` either.
-/// TRIGGER: any `autoshop apply` on a photo with a Lightroom sidecar whose
-/// masks do not import whole.
-/// WHERE IT GOES: nowhere — the losses are computed and discarded.
-/// This is a CHANNEL gap (the CLI has no disclosure surface for masks at all),
-/// not a parser defect, so closing it means designing where a CLI run says it
-/// — out of scope for a fix batch.
+/// BOTH FRONT-ENDS consume this (R27, closing the R25 P9 registration). The
+/// GUI reads it through `bin/gui/export.rs` and `bin/gui/persist.rs`; the CLI
+/// reads it through `main::lightroom_import_note`, which prints the sentence
+/// on stderr beside the `xmp -> …` line of every single-photo command that
+/// publishes a projection (`analyze`, `auto`, `match`). Until R27 the CLI had
+/// no mask disclosure at all: the losses were computable and nobody computed
+/// them.
+///
+/// STILL NARROWER, and named rather than left to be rediscovered: `eval.rs`
+/// uses [`unsupported_corrections`], which counts DROPS only
+/// ([`MaskImportReason::is_drop`]) and so cannot see a degradation like
+/// `MultiComponent`. That is the eval RULER's own definition — "imported +
+/// refused" has to stay the size of the user's local work — not a missing
+/// channel, so it is a difference to know about, not a gap to close.
+///
+/// `batch` prints nothing here on purpose: its work list is
+/// `store::has_develop_or_sidecar`-filtered, so a photo that HAS a Lightroom
+/// sidecar is never in it.
 pub fn describe_import_losses(imported: usize, losses: &[MaskImportLoss]) -> Option<String> {
     if losses.is_empty() {
         return None;
@@ -4615,6 +4627,21 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
         clarity: q100("LocalClarity2012"),
         dehaze: q100("LocalDehaze"),
         texture: q100("LocalTexture"),
+        // `q100` here is the MEASURED scale as of 2026-08-19, settled by two
+        // Adobe-anchored pairs that no library file supplies: Adobe's own
+        // shipped Soften Skin local preset (UI Sharpness +25 -> `0.25`) and
+        // MIDI2LR's all-sliders-at-maximum dump (+100 -> `1`). The one wobble
+        // on record — the controlled session's `_DSC9594.xmp` reading
+        // `crs:LocalSharpness="0.803738"` against a requested +80, briefly
+        // read as a falsification when the user recalled TYPING the value —
+        // resolves the other way: the divisor a typed 80 would need (99.535)
+        // puts +-100 at +-1.0047, outside the endpoint Adobe sits exactly on,
+        // and arbitrary 5-6-decimal values are normal Lightroom output (10 of
+        // 18 distinct public non-zero values; no quantisation lattice). So
+        // 0.803738 is the slider at 80.37 and the recollection gives way —
+        // user-accepted ruling, 2026-08-19. Evidence archive:
+        // ~/.claude/plans/r27-materials/F3-web-evidence/.
+        // See docs/V2_PLAN.md §7 item 10 for the full adjudication.
         sharpness: q100("LocalSharpness"),
         saturation: q100("LocalSaturation"),
         // NOT `q100` — `crs:LocalHue` is the ONE local key measured off its
@@ -6861,8 +6888,10 @@ mod tests {
         let doc = lr_doc(&lr_correction("Radial 1", "", &lr_radial("37.412506", "0")));
         let r = xmp_to_recipe(&doc);
         assert_eq!(r.masks.len(), 1, "a rotated Lightroom radial must import: {:?}", r.masks);
-        // The angle itself is NOT mapped (unverified sign/pivot) — the mask
-        // arrives as its axis-aligned ellipse, and the note says so.
+        // The angle itself is NOT mapped here — not because the sign or pivot
+        // are unknown (v0.32.0 measured both), but because `lr_doc` declares
+        // no frame, which is the one case left. The mask arrives as its
+        // axis-aligned ellipse, and the note says so.
         let MaskGeometry::Radial { angle, top, feather, flipped, .. } = r.masks[0].mask else {
             panic!("expected a radial, got {:?}", r.masks[0].mask);
         };

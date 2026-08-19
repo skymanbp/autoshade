@@ -1113,12 +1113,22 @@ pub(crate) fn abs_display(p: &std::path::Path) -> String {
 /// per click of a button nobody clicks in a loop). Waiting instead would block
 /// the UI thread on a helper whose runtime we do not control.
 ///
-/// KNOWN LIMITATION, deliberately not worked around (and not verified on this
-/// machine): `explorer.exe` is reported to mis-parse an argument containing a
-/// comma, so revealing a folder whose name carries one — the develop dir embeds
-/// the photo's stem, so a photo called `a,b.arw` reaches it — can open the wrong
-/// window. It cannot open anything outside the user's own filesystem, so this is
-/// a cosmetic failure, not a safety one.
+/// COMMA PATHS, fixed in R27 (L-25). `explorer.exe` does not use the C runtime
+/// argv rules: it re-parses its own command line and treats a COMMA as an
+/// argument separator (which is why its documented switches are spelled
+/// `/select,<path>` and `/root,<path>` — the comma IS the delimiter). Rust's
+/// `Command::arg` quotes only for spaces and quotes, so a develop dir carrying
+/// the photo's stem — a photo called `a,b.arw` reaches it — arrived as two
+/// arguments and opened the wrong window.
+///
+/// The fix is to hand explorer a command line it parses the way we mean:
+/// [`explorer_quoted_arg`] wraps the path in double quotes and
+/// `CommandExt::raw_arg` puts it on the line verbatim, since Rust's own
+/// encoder would escape the quotes back out. Still NOT a shell invocation —
+/// `CreateProcess` interprets no metacharacters — and the quoting cannot be
+/// escaped from, because `"` is not a legal character in a Windows path;
+/// [`explorer_quoted_arg`] returns `None` rather than assume it, and the
+/// caller then falls back to the old plain argument.
 pub(crate) fn reveal_folder(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(windows)]
     let mut cmd = {
@@ -1143,8 +1153,44 @@ pub(crate) fn reveal_folder(dir: &std::path::Path) -> std::io::Result<()> {
     let mut cmd = std::process::Command::new("open");
     #[cfg(all(not(windows), not(target_os = "macos")))]
     let mut cmd = std::process::Command::new("xdg-open");
+    #[cfg(windows)]
+    match explorer_quoted_arg(dir) {
+        Some(raw) => {
+            use std::os::windows::process::CommandExt as _;
+            cmd.raw_arg(raw);
+        }
+        // A path this function will not vouch for goes the old way: one
+        // escaped argv entry. Worse for a comma, no worse than before.
+        None => {
+            cmd.arg(dir);
+        }
+    }
+    #[cfg(not(windows))]
     cmd.arg(dir);
     cmd.spawn().map(|_| ())
+}
+
+/// The exact command-line fragment [`reveal_folder`] hands `explorer.exe` for
+/// `dir` — the path in double quotes — or `None` when this function refuses to
+/// vouch for the path.
+///
+/// Two refusals, both narrow and both deliberate:
+///   * a path that is not valid Unicode (`to_str` fails). `raw_arg` takes the
+///     bytes as written and a lone surrogate has no spelling on a command
+///     line; the caller falls back to `Command::arg`, which knows how to pass
+///     an `OsStr` through.
+///   * a path containing `"`. It cannot happen — `"` is one of the nine
+///     characters Windows forbids in a file name — but the whole point of the
+///     quotes is that nothing inside them terminates them, and an assumption
+///     that guards a raw command line is worth checking rather than asserting.
+///
+/// Note what is NOT done: no `/select,` and no `/root,`. Both would CHANGE the
+/// gesture (select the folder inside its parent / re-root the window), and the
+/// button's promise is "show me this folder".
+#[cfg(any(windows, test))]
+pub(crate) fn explorer_quoted_arg(dir: &std::path::Path) -> Option<String> {
+    let s = dir.to_str()?;
+    (!s.contains('"')).then(|| format!("\"{s}\""))
 }
 
 /// Per-call temp-file counter: a cancelled worker and its replacement run

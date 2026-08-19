@@ -4021,6 +4021,33 @@ fn orientation_mirrors(o: Orientation) -> bool {
 /// would mean rewriting an image on disk that version snapshots and other
 /// recipes may share. The caller discloses this instead of pretending.
 ///
+/// **The straighten angle** (R27, closing the R24 registration
+/// 「`straighten≠0` 时 crop 迁移一阶近似」). `Crop` is normalised against the
+/// STRAIGHTENED frame — `render_pipeline` runs `rotate_straighten` before
+/// `apply_crop` — so migrating the rectangle correctly means knowing what the
+/// straighten does under the same turn. Two facts settle it:
+///
+/// * [`inscribed_dims`] is SWAP-EQUIVARIANT: `inscribed_dims(h, w, deg)` is
+///   `inscribed_dims(w, h, deg)` with its two outputs exchanged. The general
+///   branch is `((w·c − h·s)/cos2, (h·c − w·s)/cos2)`, visibly so; the thin
+///   branch's `if w >= h` looks asymmetric but is unreachable at `w == h`,
+///   because that branch needs `short ≤ sin(2a)·long`, i.e. `sin 2a ≥ 1`, i.e.
+///   exactly 45°, where `s == c` makes its two outputs equal anyway. So the
+///   inscribed rectangle of the TURNED frame is the turn of the inscribed
+///   rectangle, and normalised coordinates inside it map by `orient_point`
+///   with nothing left over.
+/// * Rotations commute (`rot(deg) ∘ R90 == R90 ∘ rot(deg)`), so for the four
+///   pure rotations the migration was ALREADY exact. Reflections do not:
+///   `rot(deg) ∘ M == M ∘ rot(−deg)`. Leaving the angle alone through a
+///   MIRROR therefore straightened the frame the wrong way by `2·deg` — the
+///   approximation R24 registered — and every crop coordinate then indexed
+///   content that had been rotated out from under it.
+///
+/// The fix is the rule already applied to the ellipse `angle` just below: a
+/// reflection reverses the sense of a rotation, so negate it. With that, all
+/// eight states are exact and the migration stays the bijection its
+/// round-trip test claims.
+///
 /// **Not migrated, and correctly so: `Radial::midpoint`** (R25 P5). It is a
 /// ratio along the ellipse's own falloff axis, not a point in the frame — the
 /// same status a tone-curve point has — so turning the frame leaves it
@@ -4039,6 +4066,13 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
         return false;
     }
     let mirrors = orientation_mirrors(o);
+    // The straighten rides the same sign rule as an ellipse angle, and for the
+    // same reason (see the doc comment): a reflection reverses the sense of a
+    // rotation, and `rotate_straighten` runs BEFORE `apply_crop`, so getting
+    // this wrong moves the content under every crop coordinate below.
+    if mirrors {
+        r.straighten_deg = -r.straighten_deg;
+    }
     if let Some(c) = r.crop.as_mut() {
         let (x0, y0) = orient_point(o, c.left, c.top);
         let (x1, y1) = orient_point(o, c.right, c.bottom);
@@ -4090,6 +4124,15 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
 /// but a curve still counts here through its geometry, so the distinction is
 /// invisible in the answer and easy to misread as an omission. It is not one;
 /// see [`orient_recipe_coords`].
+///
+/// `straighten_deg` is deliberately NOT counted (R27 L-16c), even though the
+/// migration now reverses it under a mirror. It moves for FOUR of the eight
+/// states and this predicate cannot see which one is coming, so counting it
+/// would raise the note on every rotated photo that has a tilt and nothing
+/// else — an alarm that is wrong three times in four. The states that do move
+/// it (`HorizontalFlip`/`VerticalFlip`/`Transpose`/`Transverse`) are ones no
+/// camera writes; a recipe that also holds a crop or a mask — i.e. any recipe
+/// where the tilt has something to be wrong about — is disclosed by that.
 pub fn recipe_has_frame_coords(r: &EditRecipe) -> bool {
     r.crop.is_some()
         || r.masks.iter().any(|m| {
@@ -7237,9 +7280,14 @@ mod tests {
     fn radial_roundness_is_a_documented_no_op() {
         use crate::recipe::MaskGeometry;
         // CONTRACT (see `MaskGeometry::Radial` in recipe.rs): roundness is
-        // carried by recipe/XMP/AI schema but NOT rendered, because its scale
-        // and sign are unverified. Pinning the no-op so any future
-        // implementation lands together with the doc and the XMP round-trip.
+        // carried by recipe/XMP/AI schema but NOT rendered. Its DOMAIN is no
+        // longer the gap — v0.31.1 measured it as Lightroom's ±100 integer
+        // slider (24/24 real radials write a bare signed integer) and both the
+        // clamp and the importer's gate moved to that band. What stays
+        // unmeasured is what the number DOES to the ellipse in pixels
+        // (docs/V2_PLAN.md §7 item 11), which is why carrying it verbatim
+        // beats converting it. Pinning the no-op so any future implementation
+        // lands together with the doc and the XMP round-trip.
         let radial = |roundness: f32| MaskGeometry::Radial {
             top: 0.2,
             left: 0.1,
@@ -7747,6 +7795,105 @@ mod tests {
             panic!("range survives")
         };
         assert!((px - 0.25).abs() < 1e-6 && (py - 0.75).abs() < 1e-6, "range point round trip");
+    }
+
+    /// R27 L-16c, half one. The `coord_era` migration's crop arm is exact ONLY
+    /// if the frame the crop is normalised against turns with the frame — and
+    /// that frame is `inscribed_dims`'s output, not the sensor rectangle,
+    /// because `render_pipeline` straightens before it crops.
+    ///
+    /// Swapping `w` and `h` must swap the two answers and change nothing else.
+    /// The general branch shows it by inspection; this pins the branch
+    /// boundary too, which is where the `if w >= h` inside the thin case could
+    /// have made the claim false.
+    ///
+    /// MUTATION THIS CATCHES: collapse the thin branch's
+    /// `if w >= h { (x/s, x/c) } else { (x/c, x/s) }` to either arm alone and
+    /// the sliver rows go red (verified). Note what does NOT catch it, because
+    /// it looks like it should: SWAPPING the general branch's two expressions
+    /// keeps the property, since exchanging both the inputs and the outputs of
+    /// a swap-equivariant pair is still swap-equivariant. This test pins the
+    /// symmetry, not the formula — `the_straighten_angle_reverses_only_under_
+    /// a_mirror` and the existing crop round trip pin the values.
+    #[test]
+    fn the_straightened_frame_turns_with_the_photo() {
+        // Real ARW dims, their transpose, a square, and a sliver.
+        for (w, h) in
+            [(9504.0f32, 6336.0f32), (6336.0, 9504.0), (4000.0, 4000.0), (100.0, 3000.0)]
+        {
+            for deg in [0.5f32, 2.5, -2.5, 30.0, -44.0, 44.0, 45.0, -45.0] {
+                let (a, b) = inscribed_dims(w, h, deg);
+                let (c, d) = inscribed_dims(h, w, deg);
+                let close = |x: f32, y: f32| (x - y).abs() <= 1e-3 * x.abs().max(1.0);
+                assert!(
+                    close(a, d) && close(b, c),
+                    "inscribed_dims({w},{h},{deg}) = ({a},{b}) but ({h},{w}) = ({c},{d}) \
+                     — the turned frame must be the turn of the frame"
+                );
+            }
+        }
+    }
+
+    /// R27 L-16c, half two. R24 registered 「`straighten≠0` 时 crop 迁移一阶
+    /// 近似」 without a code site. The residue is the SIGN: rotations commute
+    /// with a quarter turn, so the four pure rotations were already exact, but
+    /// `rot(deg) ∘ mirror == mirror ∘ rot(−deg)`, so a mirrored photo was
+    /// straightened the wrong way by `2·deg` and every crop coordinate then
+    /// indexed content that had moved out from under it.
+    ///
+    /// Both angles the registration is quoted against: a routine horizon
+    /// (2.5°) and the extreme end of the ±45 clamp (−44°).
+    ///
+    /// MUTATION THIS CATCHES: delete the `if mirrors { r.straighten_deg = … }`
+    /// block in `orient_recipe_coords` and the four mirror rows go red; negate
+    /// on EVERY orientation instead and the three rotation rows go red.
+    #[test]
+    fn the_straighten_angle_reverses_only_under_a_mirror() {
+        let seed = |deg: f32| EditRecipe {
+            straighten_deg: deg,
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            ..Default::default()
+        };
+        for deg in [2.5f32, -44.0] {
+            // A quarter or half turn carries the tilt unchanged: the content
+            // and the frame turned together.
+            for o in [Orientation::Rotate90, Orientation::Rotate180, Orientation::Rotate270] {
+                let mut r = seed(deg);
+                assert!(orient_recipe_coords(&mut r, o));
+                assert_eq!(r.straighten_deg, deg, "{o:?} must not touch the tilt");
+            }
+            // A reflection reverses it — and these four are involutions, so
+            // applying the same one twice is the identity (the round trip the
+            // migration's bijectivity claim rests on).
+            for o in [
+                Orientation::HorizontalFlip,
+                Orientation::VerticalFlip,
+                Orientation::Transpose,
+                Orientation::Transverse,
+            ] {
+                let mut r = seed(deg);
+                assert!(orient_recipe_coords(&mut r, o));
+                assert_eq!(r.straighten_deg, -deg, "{o:?} must reverse the tilt");
+                assert!(orient_recipe_coords(&mut r, o));
+                assert_eq!(r.straighten_deg, deg, "{o:?} twice is the identity");
+                // …and the crop came home with it (float tolerance, not `==`:
+                // `1 − (1 − 0.1)` is 0.10000002 in f32).
+                let (c, c0) = (r.crop.unwrap(), seed(deg).crop.unwrap());
+                assert!(
+                    (c.left - c0.left).abs() < 1e-6
+                        && (c.top - c0.top).abs() < 1e-6
+                        && (c.right - c0.right).abs() < 1e-6
+                        && (c.bottom - c0.bottom).abs() < 1e-6,
+                    "{o:?}: crop round trip {c:?} vs {c0:?}"
+                );
+            }
+        }
+        // And a photo with no tilt is untouched whatever the state.
+        for o in [Orientation::Transverse, Orientation::Rotate90] {
+            let mut r = seed(0.0);
+            assert!(orient_recipe_coords(&mut r, o));
+            assert_eq!(r.straighten_deg, 0.0);
+        }
     }
 
     /// A raster mask is an image FILE: the migration must leave its path alone

@@ -48,7 +48,13 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 449 library + 7 CLI + 73 GUI tests pass in both build configurations.
+> 624 library + 9 CLI + 130 GUI + 2+2 contract tests pass in both build
+> configurations (count refreshed 2026-08-19; the line had been left at
+> v0.26.x's 449 + 7 + 73). Two suites are ADDITIONAL and env-gated, so a bare
+> `cargo test` does not include them: `AUTOSHOP_LR_PROBE_FIXTURES` (16 real
+> Lightroom radial sidecars, byte round-trip) and `AUTOSHOP_MB_FIXTURES` (the
+> 7-file M-B forensic set). Every release runs both and records their counts —
+> see ROADMAP「发版链 + 环境门套件」.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -545,6 +551,38 @@ v0.31.0 adds a second stamp built field-for-field on this precedent —
 `schema_era` (0 = written before the R25 control set existed) — for the same
 class of reason: see 「the merge treats ignorance as ignorance」 in §4.5.
 
+The migration's crop arm has one subtlety worth naming, because a reader will
+otherwise look for the hole R24 registered and not find it (R27 L-16c). A crop
+rectangle is normalised against the STRAIGHTENED frame — `render_pipeline`
+straightens before it crops — not against the sensor rectangle. That turns out
+to cost nothing for a quarter or half turn: `render::inscribed_dims` is exactly
+swap-equivariant in `w`/`h`, and rotations commute with each other, so the
+inscribed frame of the turned photo IS the turn of the inscribed frame and
+`orient_point` maps into it with no residue. What the registration was really
+pointing at is a SIGN: `rot(θ) ∘ mirror == mirror ∘ rot(−θ)`, so under the four
+mirroring orientation states the straighten was being applied backwards by
+`2·θ`, and every crop coordinate then indexed content that had rotated out from
+under it. `orient_recipe_coords` now negates `straighten_deg` on exactly those
+four states — the same rule it already applied to an ellipse's `angle` — and
+all eight states are exact.
+
+**Forward compatibility across all four persisted shapes** (R27 L-17 completes
+the set). `EditRecipe` and every plain struct in it carry `deny_unknown_fields`,
+so a build meeting a recipe from a NEWER build refuses it loudly and by name
+rather than reading a truncated version of it. From R27 that is true of the two
+internally tagged enums as well: `MaskGeometry` and `RangeMask` now carry the
+attribute on the CONTAINER (which covers every variant and exempts the `kind`
+tag). Until then they were the one silent hole — v0.31.0's two new `Radial`
+fields were dropped without a word by a v0.30 binary, which then wrote the
+truncated geometry back, editing the user's file on their behalf. The old
+comment claiming serde cannot deny unknown fields on an internally tagged enum
+was simply wrong, and was checked against serde 1.0.228 before it was removed.
+`variants.json` is the deliberate exception in the other direction (see the
+strip's `#[serde(flatten)]` capture-all above): it is a LIST the two builds
+share, so tolerating and carrying unknown members is the correct behaviour
+there, while a recipe is a complete statement and a partial reading of one is
+never safe.
+
 **One dispatch, enforced at the gate (R22).** "A RAW" has a single definition
 app-wide (`decode::is_raw`), and the two ways into pixels are separate by
 construction: a RAW must be demosaiced by the develop engine, a baked raster is
@@ -766,10 +804,26 @@ saying 「imported with N features unmodelled」 cannot be told about a correcti
 that was not imported at all. The banner names what it could not model instead
 of counting it. Measured on the reference library: 0 masks imported before, 31 of
 its 42 corrections after, with `imported + refused == corrections` holding file
-by file. What still refuses is the component types nobody outside Lightroom can
+by file. (Re-measured at HEAD on 2026-08-19 through the `AUTOSHOP_MB_FIXTURES`
+probe: **33 of 42**, the two extra being v0.31.2's multi-component base-geometry
+fix, which stopped a Correction whose base shape sat behind a Subtract component
+from being read as the subtracted shape.) What still refuses is the component
+types nobody outside Lightroom can
 reconstruct — `Mask/Paint`, `Mask/Image`, `Mask/Aggregate`, `Mask/Ellipse` —
 brush / AI / depth masks LR recomputes from a digest, which the disclosure says
 in those words.
+
+**Every front-end hears it, the CLI included (R27).** `xmp::import_losses` →
+`xmp::describe_import_losses` is the one producer; the GUI localises it into the
+open banner (`bin/gui/export.rs`, `bin/gui/persist.rs`), and the CLI prints the
+English sentence on stderr beside its `xmp -> …` line
+(`main::lightroom_import_note`, from `analyze` / `auto` / `match`). Until R27
+that producer had GUI callers only, so a headless run over a photo whose sidecar
+held a brush mask said nothing at all about it. `batch` is deliberately silent:
+its work list is filtered by `store::has_develop_or_sidecar`, so a photo that has
+a Lightroom sidecar never enters it. `eval.rs` stays narrower on purpose — it
+counts `unsupported_corrections`, i.e. DROPS only, because its ruler needs
+「imported + refused」 to equal the size of the user's local work.
 
 **And the merge treats ignorance as ignorance, not as an instruction** — the
 one law behind the round-end fix. A recipe holding a default for something it
@@ -783,7 +837,9 @@ of those sliders on a legacy photo and it writes, because THAT is a statement.
 The accepted cost is stated where the rule lives — deleting every mask inside
 Autoshop no longer propagates the deletion to the sidecar (delete them on the
 Lightroom side), and republishing a mask block you HAVE edited recasts
-`MaskName`/`MaskSyncID` deterministically from our writer.
+`MaskName`/`MaskSyncID` deterministically from our writer. The user re-examined
+both on 2026-08-19 and confirmed them as settled (ROADMAP L-19), so they are a
+documented trade, not an open question.
 
 The **export** direction is disclosed the same way (M6a). Classic ACR XMP
 cannot express everything the engine renders, so the writer names what it left

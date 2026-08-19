@@ -912,12 +912,30 @@ impl MaskRole {
 
 /// Where a local adjustment applies. Coordinates are normalised to the frame and
 /// MAY fall outside [0,1] for gradients (matching ACR's geometry).
-// KNOWN BOUNDARY: serde does not support `deny_unknown_fields` on
-// internally-tagged enums (this one and RangeMask) — an unknown field inside
-// a variant deserializes silently and is dropped on the next rewrite. The
-// top-level recipe and every plain struct DO deny.
+//
+// FORWARD COMPATIBILITY, class 3 (R27 L-17, closing the registration at
+// docs/ROADMAP.md's v0.31.0 entry). The old comment here read "serde does not
+// support `deny_unknown_fields` on internally-tagged enums" — that is wrong,
+// and the cost of believing it was the only SILENT forward break this project
+// ever shipped: v0.31.0 added `midpoint` + `mask_version` to `Radial`, and a
+// v0.30 binary reading such a recipe dropped both without a word and wrote the
+// truncated geometry back, quietly editing the user's file. Classes 1 and 2
+// (a new top-level `EditRecipe` field, a new `LocalAdjustment` curve) are LOUD
+// because those containers deny; this one was not, purely for want of the
+// attribute.
+//
+// The attribute placed on the CONTAINER covers every variant and exempts the
+// tag itself (probed against serde 1.0.228 + serde_json 1.0.150 before landing;
+// pinned by `an_unknown_radial_field_is_a_loud_refusal`). Consequence, stated
+// so it is a decision rather than a surprise: a build that meets a recipe from
+// a NEWER build now REFUSES it by name instead of silently truncating it —
+// same posture as `EditRecipe`'s own `deny_unknown_fields`, and the reason
+// downgrades are not supported. The AI's own schema is a strict SUBSET of
+// these fields (`advisor::catalogue::mask_geometry_schema` /
+// `range_mask_schema`, both `additionalProperties: false`), so no proposal
+// shape changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MaskGeometry {
     /// Linear gradient — the zero→full vector sets direction + falloff width.
     /// Maps to ACR `What="Mask/Gradient"`.
@@ -987,15 +1005,19 @@ pub enum MaskGeometry {
         /// KNOWN BOUNDARY: this field and `mask_version` are deliberately NOT
         /// in the AI's mask-geometry schema (`advisor::catalogue`) — a model
         /// cannot know a value it never saw, and a required property is a
-        /// property it would invent. The cost is that a REFINE returns the
-        /// geometry with both at their defaults, so an AI refine of an
-        /// imported Lightroom radial resets them. Left as a boundary rather
-        /// than fixed: no radial in the reference library carries a
-        /// non-default Midpoint, and teaching
-        /// `pipeline::carry_over_unrepresentable` about them means widening
-        /// its state-bearing predicate, which decides which masks take its
-        /// wholesale-revert path. The GUI's own ↻ Redraw DOES preserve them
-        /// (canvas.rs) — that path costs nothing to get right.
+        /// property it would invent. So a REFINE returns the geometry with
+        /// both at their serde defaults.
+        ///
+        /// R25 left that as a permanent cost; R27 (L-09, user ruling
+        /// 2026-08-19 =「修」) closed it WITHOUT the widening R25 feared:
+        /// `pipeline::carry_radial_carried_attributes` re-attaches the pair
+        /// from the refine base in a pass of its own, so `schema_loses` — the
+        /// state-bearing predicate that decides which masks take the
+        /// wholesale-revert path — is untouched. The schema stays silent about
+        /// both fields, which is still the right shape: the model is not asked
+        /// for a number it cannot know, and the pipeline puts the
+        /// photographer's own back. The GUI's ↻ Redraw preserved them all
+        /// along (canvas.rs).
         #[serde(default = "radial_midpoint_centre")]
         midpoint: f32,
         /// Lightroom's `crs:Version` on the mask component (2 in every
@@ -1174,8 +1196,12 @@ impl LocalAdjustment {
 /// `Mask/RangeMask` component inside `crs:CorrectionMasks` — structure verified
 /// against the user's own Lightroom sidecars (e.g. `_DSC9245.xmp` LumRange,
 /// `_DSC9303.xmp` PointModels).
+// Denies unknown fields for the same reason [`MaskGeometry`] does, and in the
+// same breath: the two are this crate's only internally-tagged enums, so a
+// fix that covered one of them would have left the identical silent-drop hole
+// open in the other.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RangeMask {
     /// Select by luminance: full weight inside [lo, hi], smooth ramps over
     /// lo_outer→lo and hi→hi_outer. All four in 0..=1, non-decreasing —
@@ -2478,16 +2504,20 @@ mod tests {
     ///     fields, so an older exe REFUSES the whole recipe.json, loudly;
     ///   * a new `LocalAdjustment` field (P6) → same, for any recipe that
     ///     has masks;
-    ///   * a new `MaskGeometry::Radial` field (here) → serde cannot deny
-    ///     unknown fields on an internally-tagged enum (the KNOWN BOUNDARY
-    ///     note on the type), so an older exe reads the mask FINE, drops
-    ///     these two keys, and writes the file back without them. Silent.
+    ///   * a new `MaskGeometry::Radial` field (here) → in R25 this was the
+    ///     SILENT one: an older exe read the mask fine, dropped the two keys
+    ///     and wrote the file back without them. R27 closed that (the type
+    ///     now denies unknown fields — see `an_unknown_radial_field_is_a_
+    ///     loud_refusal`), so from v0.33 on the third shape behaves like the
+    ///     first two.
     ///
-    /// This pins both halves of that: the drop must not corrupt anything
-    /// else, and what comes back must be Lightroom's neutrals — which is
-    /// also the pin on the FIELD-level serde defaults, since the type's own
-    /// defaults (0.0 / 0) would claim a midpoint at the extreme and a schema
-    /// version nobody has ever written.
+    /// What this test still pins is the OTHER direction, which no attribute
+    /// changes: a recipe MISSING the two keys — every file written before
+    /// v0.31.0 — must read whole. The drop must not corrupt anything else,
+    /// and what comes back must be Lightroom's neutrals, which is also the
+    /// pin on the FIELD-level serde defaults, since the type's own defaults
+    /// (0.0 / 0) would claim a midpoint at the extreme and a schema version
+    /// nobody has ever written.
     ///
     /// MUTATION THIS CATCHES: replace either `#[serde(default = "…")]` with
     /// a bare `#[serde(default)]` and the two neutral asserts fail.
@@ -2540,6 +2570,57 @@ mod tests {
         // …and the dropped pair reads as LIGHTROOM's neutral, not the type's.
         assert_eq!(midpoint, 50.0, "an absent Midpoint is ACR's 50, not f32::default()");
         assert_eq!(mask_version, 2, "an absent Version is Lightroom's 2, not u32::default()");
+    }
+
+    /// R27 L-17 — the class-3 forward break stops being silent.
+    ///
+    /// v0.31.0 added two fields to `Radial` and a v0.30 binary reading such a
+    /// recipe dropped them WITHOUT A WORD and wrote the truncated geometry
+    /// back, editing the user's file on their behalf. The reason given at the
+    /// time was that serde cannot `deny_unknown_fields` on an internally
+    /// tagged enum. It can — on the CONTAINER, where it covers every variant
+    /// and exempts the tag — and this is the pin.
+    ///
+    /// Three shapes, because the boundary has three edges: the tag must still
+    /// be accepted, a KNOWN field set must still parse, and the same object
+    /// plus one key from the future must be refused BY NAME so a downgrading
+    /// user reads a sentence instead of losing a value. `RangeMask` is the
+    /// only other internally-tagged enum in the crate and gets the same
+    /// treatment in the same breath.
+    ///
+    /// MUTATION THIS CATCHES: drop `deny_unknown_fields` from either enum and
+    /// the corresponding `unwrap_err` panics — which is exactly the state
+    /// v0.31.0 and v0.32.0 shipped in.
+    #[test]
+    fn an_unknown_radial_field_is_a_loud_refusal() {
+        let radial = |extra: &str| {
+            format!(
+                r#"{{"masks":[{{"name":"subject","mask":{{"kind":"radial","top":0.3,"left":0.35,
+                   "bottom":0.7,"right":0.65,"feather":0.5,"roundness":0.0,"flipped":false,
+                   "angle":0.0,"midpoint":50.0,"mask_version":2{extra}}}}}]}}"#
+            )
+        };
+        // Premise: the known shape parses, tag and all.
+        let ok: EditRecipe = serde_json::from_str(&radial("")).expect("the known shape parses");
+        assert!(matches!(ok.masks[0].mask, MaskGeometry::Radial { .. }));
+        // …and one key from a future build is a refusal that NAMES it.
+        let e = serde_json::from_str::<EditRecipe>(&radial(r#","quarter_turns":1"#))
+            .expect_err("an unknown radial field must refuse the recipe, not be dropped");
+        assert!(
+            e.to_string().contains("quarter_turns"),
+            "the refusal must name the field: {e}"
+        );
+        // The same edge on the crate's other internally-tagged enum.
+        let range = |extra: &str| {
+            format!(
+                r#"{{"masks":[{{"name":"sky","range":{{"kind":"luminance","lo_outer":0.0,
+                   "lo":0.2,"hi":0.8,"hi_outer":1.0{extra}}}}}]}}"#
+            )
+        };
+        assert!(serde_json::from_str::<EditRecipe>(&range("")).is_ok(), "premise: it parses");
+        let e = serde_json::from_str::<EditRecipe>(&range(r#","depth_lo":0.1"#))
+            .expect_err("an unknown range-mask field must refuse too");
+        assert!(e.to_string().contains("depth_lo"), "the refusal must name the field: {e}");
     }
 
     #[test]

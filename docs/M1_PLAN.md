@@ -382,24 +382,38 @@ Ground truth = the user's **finished edits**. Two cases ([ARCHITECTURE.md:129-13
 
 ## 8. Consolidated list of EVERY remaining [unverified] item (needs a real file/API test)
 
-| # | Item | What closes it |
-|---|---|---|
-| 1 | `rawler` 0.7.2 `RawSource::new` constructor signature + `image` crate re-export path | `cargo doc` on the pinned rawler release; compile a real decode |
-| 2 | Whether `libraw-rs` 0.0.4 builds against current LibRaw on Windows | Not needed (libraw rejected); skip unless rawler also fails |
-| 3 | OpenAI structured-outputs numeric schema limits (max properties/depth/enum) | Read the "Supported schemas" anchor of the structured-outputs guide |
-| 4 | Current gpt-4o-family per-model prices | OpenAI pricing page / dashboard |
-| 5 | Exact per-model RPM/TPM for `gpt-5.5` (tier-dependent) | Account console / models page at our tier |
-| 6 | `Exposure2012` numeric range bound (decimal type verified; ±5.0 not doc-confirmed) | `exiftool -G1 -s -X foo.ARW` on a Lightroom-edited raw |
-| 7 | ±100 slider bounds for Contrast/Highlights/Shadows/Whites/Blacks/Clarity/Vibrance/Dehaze | Same exiftool read; or `exiftool -list -XMP-crs:all` |
-| 8 | Crop `Top/Left/Bottom/Right` 0.0..1.0 fractional range | Same exiftool read on a cropped edit |
-| 9 | `CropAngle` unit/sign vs recipe's clockwise-positive `straighten_deg` | Edit one known-tilt image in Lightroom, read `CropAngle`, compare sign |
-| 10 | `ProcessVersion="11.0"` exact current value | exiftool read of a current-Lightroom sidecar |
-| 11 | ΔE00 < 2 = "imperceptible" threshold (convention, not derived) | Treat as rule-of-thumb pass bar; no hard close needed |
-| 12 | EV-offset, WB-offset, gray-world-on-neutrals estimators (heuristics) | Validate against a few Case-A images where true sliders are known |
-| 13 | `Dehaze` presence in a given sidecar (version-dependent) | exiftool read; score absent-as-neutral-0 |
-| 14 | `temperature_k` ↔ `Temperature` absolute-Kelvin validity (RAW + Custom WB only) | exiftool read of WhiteBalance + Temperature on a real edit |
+> **Retirement pass — 2026-08-19 (R27 Batch-1a).** This table was written in M1 and
+> never formally retired, so it kept reading as a live ledger of fourteen open
+> questions long after nine of them had been answered somewhere else in the repo.
+> Each row below now carries a VERDICT with the citation that closes it. **Four stay
+> open** — #3, #6, #9, #12 — and each of those has a new plan, not a restatement of
+> the old one. The highest-value survivor is **#9 (`CropAngle` sign)**: a sign error
+> tilts every straightened export the wrong way and nothing in the repo tests it
+> against Lightroom.
 
-Toolchain gaps that block verification of #6–#10, #13–#14: **`exiftool` is not on PATH** and **`rawpy`/`cv2`/`skimage`/`colour` are not installed** [verified this session]. Installing `exiftool` is the single highest-leverage step — it closes nearly every remaining XMP/eval `[unverified]` at once.
+| # | Item | Verdict (2026-08-19) |
+|---|---|---|
+| 1 | `rawler` 0.7.2 `RawSource::new` constructor signature + `image` crate re-export path | **CLOSED** — the call compiles and ships (`src/render.rs:140`); every release since v0.5.0 decodes real ARWs through it. A signature that did not exist would not build. |
+| 2 | Whether `libraw-rs` 0.0.4 builds against current LibRaw on Windows | **CLOSED as not-applicable** — the row's own "what closes it" column says *"Not needed (libraw rejected); skip unless rawler also fails"*. rawler never failed. The tree has no C build dependency and keeps none (`Cargo.toml`). |
+| 3 | OpenAI structured-outputs numeric schema limits (max properties/depth/enum) | **OPEN.** Not verified in R27 either: the closing action is to read Adobe-external documentation on `platform.openai.com`, and this batch ran offline. **New plan:** fold it into the paid-probe batch the user approved (V2_PLAN §7 item 9 + `AUTOSHOP_THINK_PROBE_KEY`) — the same authenticated session that probes the Images API can request the schema page and record the limits. Until then the practical bound stands empirically: `advisor::catalogue::edit_recipe_schema` has been accepted by the live API on every shipped release. |
+| 4 | Current gpt-4o-family per-model prices | **CLOSED as retired** — the row names a model generation this project no longer calls (`config.rs`'s defaults are gpt-5-family; `src/advisor/openai.rs`). Prices are a per-session lookup, never a repo invariant. |
+| 5 | Exact per-model RPM/TPM (tier-dependent) | **OPEN-BY-DESIGN, permanently.** Rate limits are account- and tier-scoped and OpenAI does not publish them as a stable fact; this is one of the three *unclosable-by-design* rows the project keeps as an honest disclosure rather than a to-do (with V2_PLAN §7 items 5 and 9's doc-host clause). |
+| 6 | `Exposure2012` numeric range bound (decimal type verified; ±5.0 not doc-confirmed) | **OPEN.** The GLOBAL bound is still doc-unconfirmed. What R27 did settle is its LOCAL twin: `crs:LocalExposure2012="1"` = +4.00 EV exactly, measured on `_DSC9593.xmp` (V2_PLAN §7 item 2), and the import gate sits one stop wider at ±5 on purpose (`src/xmp.rs:3916`). **New plan:** the same one-frame experiment on the GLOBAL slider — push Exposure to +5.00 and to −5.00, Ctrl+S, read the two values — rides the next Lightroom session. |
+| 7 | ±100 slider bounds for Contrast/Highlights/Shadows/Whites/Blacks/Clarity/Vibrance/Dehaze | **CLOSED** — settled by the 160-sidecar survey (R24) plus the control registry's per-row `range` (`src/advisor/catalogue.rs`), which is the single source both the schema and the eval ruler derive from. v0.31.1's `Sharpness` correction is the proof the mechanism works: a band that was wrong got caught by real files, and `Sharpness` is not in this row's list precisely because its band is 0..150, not ±100. |
+| 8 | Crop `Top/Left/Bottom/Right` 0.0..1.0 fractional range | **CLOSED** — §9.3 of this document, from a real sidecar: `CropTop/Left="0"`, `CropBottom/Right="1"`, gated by `HasCrop`. |
+| 9 | `CropAngle` unit/sign vs recipe's clockwise-positive `straighten_deg` | **OPEN — and it is the one that matters.** The writer emits `straighten_deg` 1:1 (`src/xmp.rs:1781`) and the reader takes it back 1:1 (`src/xmp.rs:4867`), both gated on `HasCrop="True"`; nothing measures the sign, and §9.3's sample frame has `CropAngle="0"`. **New plan, two routes:** (a) library forensics, running as an R27 item — the user's own catalogue is scanned for sidecars carrying a non-zero `crs:CropAngle` beside a finished export, and the rendered tilt is compared against ours (this is the CLI-first discipline the round adopted: use existing files as ground truth, and only ask for a fresh Lightroom session if they disagree); (b) failing that, one deliberately straightened frame at a known tilt (e.g. −2.5°) in the next session. |
+| 10 | `ProcessVersion="11.0"` exact current value | **CLOSED** — §9.3: the real value is `15.4`. |
+| 11 | ΔE00 < 2 = "imperceptible" threshold (convention, not derived) | **CLOSED as not-a-question** — the row's own column says *"Treat as rule-of-thumb pass bar; no hard close needed"*. It is a convention, cited as one. |
+| 12 | EV-offset, WB-offset, gray-world-on-neutrals estimators (heuristics) | **OPEN, with a plan the user approved 2026-08-19.** Validation rides the **147-pair set** — the same corpus as the M-C re-baseline — as a correlation report of each estimator's output against the user's real slider values, produced by the CLI (no GUI). That makes it a by-product of a re-run that has to happen anyway (the eval baseline is pixel-stale since v0.32.0 moved every ARW by (32,20) px), rather than a separate errand. |
+| 13 | `Dehaze` presence in a given sidecar (version-dependent) | **CLOSED** — handled structurally: an absent key scores as neutral 0 (`src/eval.rs`), and §9.3's own sample carries `Dehaze="+18"`, so both the present and the absent case are covered by construction rather than by a census. |
+| 14 | `temperature_k` ↔ `Temperature` absolute-Kelvin validity (RAW + Custom WB only) | **CLOSED** — §9.3 (`Temperature="5650"` is written even at `WhiteBalance="As Shot"`) plus the v0.21.0 batch-29 absolute-Kelvin work; the reader pins the 5500 K anchor explicitly (`xmp::xmp_to_recipe`). |
+
+*Historical note, kept because it explains the shape of the table above:* the M1
+session recorded that **`exiftool` was not on PATH** and `rawpy`/`cv2`/`skimage`/
+`colour` were not installed, and called installing `exiftool` "the single
+highest-leverage step". It never happened, and it turned out not to be needed —
+sidecars are plain XML and this repo reads them directly (`src/xmp.rs`), which is
+also why the rows above closed on repo evidence rather than on a tool.
 
 ---
 
@@ -437,4 +451,40 @@ The real sidecar also carries keys we do **not** model: `Texture`, per-channel `
 - **Eval consequence, and why it is deliberately left to a re-baseline.** The exclusion above — "`Texture` is out-of-scope, not AI error" — was correct in M1 and is now wrong for `Texture`, which the engine renders. The eval ruler is derived from the control registry (R23-1), so a key changing tier changes the score; scores are ALREADY not comparable across R23 (the prompts were rewritten wholesale). The R25 full re-baseline over the 147-pair set therefore IS the new reference, and re-deriving old numbers against it would be arithmetic on two different rulers.
 
 ### 9.5 What this turn did NOT close (still needs a real API/decode test)
-`rawler` decode of an `ILCE-7RM4A` file (§9.2); `CropAngle` sign (need a tilted edit); exact upper slider bounds (only in-range values seen); OpenAI structured-output schema limits + current prices (§8 #3–5). `exiftool` still not installed — not blocking now (sidecars are plain XML, readable directly), but needed to batch-read 153 sidecars efficiently for the Case-A scorer.
+
+*Rewritten 2026-08-19 (R27 Batch-1a) to match the §8 retirement pass. The original
+sentence listed five things; four of them closed years of releases ago and the list
+had never been revisited, so it kept sending readers to look for work that was
+already done.*
+
+**Closed since this section was written:**
+- **`rawler` decode of an `ILCE-7RM4A` file** (§9.2's `[unverified]`) — closed by
+  shipping: every release since v0.5.0 develops the user's own A7R IV ARWs, and the
+  147-pair M-C evaluation run decodes 147 of them end to end without a failure.
+- **Exact upper slider bounds** — closed by the 160-sidecar survey and the control
+  registry's per-row `range` (§8 #7). v0.31.1 is the demonstration that the
+  mechanism finds a wrong band: `crs:Sharpness` turned out to be 0..150, not 0..100.
+- **Current prices** (§8 #4) — retired rather than closed: the row named a model
+  generation this project no longer calls, and a price is a lookup, not an invariant.
+- **`exiftool`** — never installed, and it turned out not to be needed. Sidecars are
+  plain XML and `src/xmp.rs` reads them directly; the Case-A scorer batch-reads the
+  whole 147-pair set through that path (`src/eval.rs`), which is what the tool was
+  wanted for.
+
+**Still open, with their current plans (the §8 table carries the detail):**
+- **#9 `CropAngle` sign** — the one with teeth. A sign error tilts every straightened
+  export the wrong way, the writer/reader pair is 1:1 in both directions
+  (`src/xmp.rs:1781` / `src/xmp.rs:4867`) and nothing tests it against Lightroom.
+  **Plan:** library forensics first (an R27 item — find a real non-zero
+  `crs:CropAngle` beside its finished export and compare the rendered tilt), a
+  deliberately straightened export only if that comes up empty.
+- **#6 global `Exposure2012` range bound** — the LOCAL twin is measured now
+  (`crs:LocalExposure2012="1"` = +4.00 EV exactly, `_DSC9593.xmp`); the global one
+  rides the next Lightroom session as a two-value read at ±5.00.
+- **#3 OpenAI structured-output schema limits** — folded into the paid-probe batch
+  the user approved, since it needs a live authenticated session.
+- **#12 estimator validation** — rides the 147-pair set as a correlation report
+  against the user's real slider values (user-approved 2026-08-19), produced by the
+  CLI alongside the eval re-baseline that v0.32.0's `(32, 20)` px render shift has
+  made necessary anyway.
+- **#5 per-model RPM/TPM** — unclosable by design; kept as an honest disclosure.

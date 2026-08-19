@@ -5233,9 +5233,12 @@
 
     /// R25 P5. 「radial rotation ×1」 named a category and left out both halves
     /// a photographer could act on: HOW MUCH tilt was set aside, and WHY. The
-    /// why matters because the answer is not a bug — `crs:Angle`'s sign and
-    /// pivot are unverified against a real Lightroom experiment, so the
-    /// engine refuses to guess — and a line that does not say so reads as one.
+    /// why matters because the answer is not a bug — v0.32.0 measured
+    /// `crs:Angle`'s sign, pivot and magnitude, so what is left is the one
+    /// case the fold cannot serve: the DOCUMENT DECLARES NO FRAME
+    /// (`xmp::FrameAspect`), and without the aspect there is no pixel↔
+    /// normalised conversion to make — and a line that does not say so reads
+    /// as a bug.
     ///
     /// Both directions, because both drop an angle: the writer drops OURS,
     /// the reader drops LIGHTROOM's.
@@ -7017,4 +7020,38 @@
         // was already reported once, and a retry here is the third attempt.
         let failed: Verdict = Some(Err("timed out reading response".into()));
         assert_eq!(FitReviewPlan::of(&failed), FitReviewPlan::Skip);
+    }
+
+    /// R27 L-25. `explorer.exe` re-parses its own command line and splits it on
+    /// COMMAS — that is why its documented switches are spelled
+    /// `/select,<path>`. Rust's `Command::arg` quotes for spaces and quotes
+    /// only, so a develop directory carrying a photo stem like `a,b` arrived as
+    /// two arguments and opened the wrong window. The path now goes onto the
+    /// line in double quotes, verbatim, through `CommandExt::raw_arg`.
+    ///
+    /// The refusal is the safety half: a raw command line is only safe because
+    /// nothing inside the quotes can terminate them, so the builder declines
+    /// rather than assume it.
+    ///
+    /// MUTATION THIS CATCHES: return the bare path instead of the quoted one
+    /// and the comma row loses its quotes — the pre-R27 behaviour exactly;
+    /// drop the `contains('"')` guard and the last row hands back a fragment
+    /// with an unbalanced quote inside it.
+    #[test]
+    fn the_explorer_argument_survives_a_comma() {
+        use std::path::PathBuf;
+        let q = |s: &str| crate::util::explorer_quoted_arg(&PathBuf::from(s));
+        assert_eq!(
+            q(r"C:\Users\me\autoshop\a,b.arw"),
+            Some(r#""C:\Users\me\autoshop\a,b.arw""#.to_string()),
+            "the comma has to sit INSIDE the quotes"
+        );
+        // Ordinary paths take the same route — one rule, not a comma special
+        // case, or the untested branch would be the common one.
+        assert_eq!(q(r"C:\photos\2026"), Some(r#""C:\photos\2026""#.to_string()));
+        // Spaces were already fine and stay fine.
+        assert_eq!(q(r"C:\my photos"), Some(r#""C:\my photos""#.to_string()));
+        // A quote cannot occur in a Windows path; if one ever does, no raw
+        // line is built at all and the caller falls back to `Command::arg`.
+        assert_eq!(q("C:\\odd\"q"), None);
     }

@@ -50,7 +50,9 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   because LR writes `crs:Angle` and `crs:MaskBlendMode` on every one of them and
   either was enough to drop the whole correction. What still cannot be
   represented is NAMED (「local point curve」, 「unmodelled slider」…) instead of
-  counted, on both directions of the boundary.
+  counted, on both directions of the boundary — and on every front-end: the
+  window shows it in the open banner and `autoshop analyze` / `auto` / `match`
+  print the same sentence on stderr beside the `xmp ->` line.
 - **The radial mask geometry is measured, not guessed (v0.32.0)** — twelve
   purpose-shot Lightroom exports plus pixel measurement of the results settled
   what `Mask/CircularGradient` actually means. `crs:Top/Left/Bottom/Right` is

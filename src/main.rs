@@ -479,6 +479,42 @@ fn same_path(a: &Path, b: &Path) -> bool {
     false
 }
 
+/// What the photo's own Lightroom sidecar costs on the way IN, as one English
+/// sentence, or `None` when there is no such sidecar / nothing was lost.
+///
+/// R27 (L-07) converts the R25 P9 registration「CLI discloses nothing about
+/// mask import loss」into a channel. `xmp::describe_import_losses` had exactly
+/// two callers, both under `bin/gui`: a CLI run over a photo whose sidecar
+/// holds a brush mask, a Subtract component or a rotation this build cannot
+/// fold said nothing at all about it, while the GUI said it on every open.
+///
+/// The sentence is a property of the FILE, so it is computed from the same
+/// source `pipeline::write_xmp` merges over — Lightroom's own sidecar beside
+/// the RAW — and printed on the same stderr channel the export-side loss line
+/// uses (`pipeline::write_xmp_doc`). ONE producer, so no CLI command can print
+/// a different (or no) version of it.
+///
+/// `None` for a baked source (a PNG's neighbouring `.xmp` is someone else's
+/// file — the line `store::lightroom_sidecar` and `write_xmp` both draw) and
+/// for an UNREADABLE sidecar, which `write_xmp` already discloses with the
+/// reason.
+fn lightroom_import_note(raw: &Path) -> Option<String> {
+    if !decode::is_raw(raw) {
+        return None;
+    }
+    let lr = raw.with_extension("xmp");
+    let autoshop::store::SidecarRead::Ok(text) = autoshop::store::read_sidecar_checked(&lr) else {
+        return None;
+    };
+    let losses = autoshop::xmp::import_losses(&text);
+    // The count the reader WOULD carry — the same number the GUI's open path
+    // passes (`bin/gui/export.rs`), so the two surfaces cannot report the same
+    // file differently.
+    let imported = autoshop::xmp::xmp_to_recipe(&text).masks.len();
+    let line = autoshop::xmp::describe_import_losses(imported, &losses)?;
+    Some(format!("reading {}: {line}", lr.display()))
+}
+
 /// The non-output half of the pre-pay preflight (the L09#1 rule made whole
 /// — 16-lane scan, L10 family): a requirement the command is CERTAIN to hit
 /// is checked before the first paid call or heavyweight decode.
@@ -618,6 +654,11 @@ fn analyze_cmd(
             // command can print a different (or no) version of them.
             Ok((p, _, _)) => println!("xmp    -> {}", p.display()),
             Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
+        }
+        // …and the IMPORT half of the same disclosure (R27 L-07): what this
+        // photo's own Lightroom sidecar would cost on the way in.
+        if let Some(m) = lightroom_import_note(raw) {
+            eprintln!("⚠ {m}");
         }
         if redirected {
             // Post-store, ./out is only a legacy read fallback — the place the
@@ -833,6 +874,10 @@ fn auto_cmd(
             Some(Ok((xmp_path, _, _))) => println!("xmp    -> {}", xmp_path.display()),
             Some(Err(e)) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
             None => println!("(baked source — recipe.json only, no XMP)"),
+        }
+        // The import half (R27 L-07), same producer as `analyze`.
+        if let Some(m) = lightroom_import_note(raw) {
+            eprintln!("⚠ {m}");
         }
     }
     Ok(())
@@ -1168,6 +1213,10 @@ fn match_cmd(
                 println!("xmp    -> {} (copy {s}.xmp beside {s}.ARW for Lightroom)", xmp_path.display());
             }
             Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
+        }
+        // The import half (R27 L-07), same producer as `analyze`.
+        if let Some(m) = lightroom_import_note(raw) {
+            eprintln!("⚠ {m}");
         }
     }
     Ok(())
@@ -1752,5 +1801,106 @@ mod tests {
         assert!(help.contains("baked"), "{help}");
         assert!(help.contains("2048"), "{help}");
         assert!(!help.contains("RAW only"), "{help}");
+    }
+
+    /// R27 L-07. `xmp::describe_import_losses` had two callers and both were
+    /// in the GUI: a CLI run over a photo whose Lightroom sidecar holds a
+    /// brush mask printed nothing at all about it, while the window said it on
+    /// every open. This is the CLI's half of that channel.
+    ///
+    /// The fixture is SYNTHETIC (public repo — no user sidecar bytes here).
+    /// Its shape follows the reference corpus: a `Correction` whose only
+    /// component is a `Mask/Paint`, which Lightroom recomputes from a digest,
+    /// so there are no pixels for a third-party reader to take.
+    ///
+    /// MUTATION THIS CATCHES: drop the `describe_import_losses` call from
+    /// `lightroom_import_note` (or gate it on `decode::is_raw` being FALSE)
+    /// and the brush arm goes silent again; drop the `is_raw` guard entirely
+    /// and the baked arm starts consulting a neighbouring `.xmp` that belongs
+    /// to somebody else's file.
+    #[test]
+    fn a_lossy_lightroom_sidecar_is_disclosed_on_the_cli() {
+        let root = std::env::temp_dir()
+            .join(format!("autoshop-cli-import-note-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // One correction, one `Mask/Paint` component: `Unrepresentable`.
+        let brush = "\
+<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">
+ <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">
+  <rdf:Description rdf:about=\"\"
+    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"
+    crs:Version=\"15.5.1\"
+    crs:ProcessVersion=\"15.4\"
+    crs:Exposure2012=\"+0.35\"
+    crs:HasSettings=\"True\">
+   <crs:MaskGroupBasedCorrections>
+    <rdf:Seq>
+     <rdf:li>
+      <rdf:Description
+       crs:What=\"Correction\"
+       crs:CorrectionAmount=\"1\"
+       crs:CorrectionActive=\"true\"
+       crs:CorrectionName=\"Brush 1\"
+       crs:LocalExposure2012=\"0.1\">
+      <crs:CorrectionMasks>
+       <rdf:Seq>
+        <rdf:li
+         crs:What=\"Mask/Paint\"
+         crs:MaskActive=\"true\"
+         crs:MaskName=\"Brush 1\"
+         crs:MaskBlendMode=\"0\"
+         crs:MaskInverted=\"false\"
+         crs:MaskValue=\"1\"/>
+       </rdf:Seq>
+      </crs:CorrectionMasks>
+      </rdf:Description>
+     </rdf:li>
+    </rdf:Seq>
+   </crs:MaskGroupBasedCorrections>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+";
+        let raw = root.join("lossy.arw");
+        std::fs::write(&raw, b"not a real ARW - the note never decodes pixels").unwrap();
+        std::fs::write(raw.with_extension("xmp"), brush).unwrap();
+        let note = lightroom_import_note(&raw).expect("a brush correction is a disclosed loss");
+        assert!(note.contains("Brush 1"), "the sentence must name the correction: {note}");
+        assert!(
+            note.contains("AI / brush correction(s) skipped"),
+            "…and say what it cost: {note}"
+        );
+        assert!(note.contains("lossy.xmp"), "…and which file it read: {note}");
+
+        // A sidecar with global settings only loses nothing, and says nothing.
+        let clean = root.join("clean.arw");
+        std::fs::write(&clean, b"stub").unwrap();
+        std::fs::write(
+            clean.with_extension("xmp"),
+            brush
+                .split("   <crs:MaskGroupBasedCorrections>")
+                .next()
+                .unwrap()
+                .to_string()
+                + "  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n",
+        )
+        .unwrap();
+        assert_eq!(lightroom_import_note(&clean), None, "a faithful import says nothing");
+
+        // A baked photo's neighbouring `.xmp` is someone else's file — the
+        // line `pipeline::write_xmp` draws before it consults one.
+        let baked = root.join("baked.png");
+        std::fs::write(&baked, b"stub").unwrap();
+        std::fs::write(baked.with_extension("xmp"), brush).unwrap();
+        assert_eq!(lightroom_import_note(&baked), None, "a baked source has no LR sidecar");
+
+        // No sidecar at all is silence, not a panic.
+        let bare = root.join("bare.arw");
+        std::fs::write(&bare, b"stub").unwrap();
+        assert_eq!(lightroom_import_note(&bare), None);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
