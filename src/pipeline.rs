@@ -2348,17 +2348,26 @@ fn write_xmp_doc(
     bounded.clamp();
     let recipe = &bounded;
     let base_path = merge_base.as_ref().map(|(p, _)| p.clone());
-    // The frame the radial projection writes INTO (v0.32.0, `xmp::FrameAspect`).
-    // Paid ONLY when the recipe holds a rotated radial: every other geometry
-    // projects without an aspect, and reading a 61 MP ARW's metadata on every
-    // save to serve a mask nobody rotated is a cost for nothing. A base sidecar
-    // that declares its own `tiff:ImageWidth/ImageLength` still wins over this
-    // — see `merge_recipe_into_xmp_in_frame`. Unreadable = no frame = the
-    // rotation is disclosed rather than guessed, the same tri-state
+    // The frame the geometry projection writes INTO (`xmp::FrameAspect`).
+    // A base sidecar that declares its own `tiff:ImageWidth/ImageLength` still
+    // wins over this — see `merge_recipe_into_xmp_in_frame`. Unreadable = no
+    // frame = the loss is disclosed rather than guessed, the same tri-state
     // `migrate_recipe_coord_frame` takes on the orientation it cannot read.
+    //
+    // R27 WIDENED THE GATE. v0.32.0 paid for this only on a rotated radial,
+    // because nothing else in the projection needed an aspect. Two
+    // measurements changed that: a tilted CROP is a rotated-corner encoding in
+    // the source frame and cannot be written without `W/H`
+    // (`P3-cropangle-model.md` §2), and EVERY geometry on a portrait capture
+    // has to be turned back into the sensor frame before it is written
+    // (`P1-portrait-mask-frame.md` §5). So the gate is now "does this recipe
+    // carry frame coordinates at all", which is one memoised metadata read per
+    // photo per process — and it is no longer "a cost for nothing".
     let frame = photo
-        .filter(|_| recipe_has_rotated_radial(recipe))
-        .and_then(photo_frame_aspect);
+        .filter(|_| {
+            crate::render::recipe_has_frame_coords(recipe) || recipe.straighten_deg != 0.0
+        })
+        .and_then(|p| photo_frame_aspect(p, recipe.quarter_turns));
     let merged =
         merge_base.and_then(|(_, b)| xmp::merge_recipe_into_xmp_in_frame(&b, recipe, frame));
     // A merge that SUCCEEDED can still have losses it could not avoid (the
@@ -2436,42 +2445,50 @@ fn write_xmp_doc(
     Ok((out, note, mask_losses))
 }
 
-/// Does this recipe hold a radial whose tilt the XMP projection needs a frame
-/// aspect to write? Nothing else in the projection is aspect-dependent, so this
-/// is the exact gate on paying for [`photo_frame_aspect`].
-fn recipe_has_rotated_radial(r: &EditRecipe) -> bool {
-    let rotated = |g: &crate::recipe::MaskGeometry| {
-        matches!(g, crate::recipe::MaskGeometry::Radial { angle, .. } if *angle != 0.0)
-    };
-    r.masks
-        .iter()
-        .any(|m| rotated(&m.mask) || m.components.iter().any(|c| rotated(&c.geometry)))
-}
-
-/// The photo's own frame aspect, memoised per file the way [`orient_memo`] is —
+/// The photo's own SOURCE frame — un-rotated size plus the turn that carries
+/// it to the display frame — memoised per file the way [`orient_memo`] is:
 /// both answers cost the same metadata read, and the strip-card and batch
 /// surfaces ask per recipe, not per photo. `None` for a photo whose frame
 /// cannot be read; the caller discloses that rather than guessing an aspect.
-fn photo_frame_aspect(photo: &Path) -> Option<xmp::FrameAspect> {
+///
+/// **The SOURCE frame, not the display one** (R27 A7). `decode::frame_size`
+/// applies the orientation and hands back what the render produces; the frame
+/// a `crs:` coordinate is measured against is the one the FILE stores
+/// (`P1-portrait-mask-frame.md` §1: a portrait export's mask numbers are
+/// fractions of the 9504 × 6336 sensor array even though its pixels are
+/// 6336 × 9504). Feeding the display dimensions here inverted the aspect for
+/// every portrait capture — the projection's `s = W/H` came out as `H/W`.
+///
+/// `quarter_turns` is the photographer's own rotation, composed onto the EXIF
+/// state, so the declared `tiff:Orientation` describes the frame this build
+/// actually displays — closing the Batch-2 registration that a sidecar written
+/// for a turned photo described the un-turned frame.
+fn photo_frame_aspect(photo: &Path, quarter_turns: u8) -> Option<xmp::FrameAspect> {
+    /// `(un-turned source size, the file's own EXIF orientation)`.
+    type SourceFrame = ((usize, usize), rawler::Orientation);
     static MEMO: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, (usize, usize)>>,
+        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, SourceFrame>>,
     > = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let key = (photo.to_path_buf(), curve_ident(photo));
     let cached = memo.lock().ok().and_then(|m| m.get(&key).copied());
-    let (w, h) = match cached {
+    let ((w, h), exif) = match cached {
         Some(v) => v,
         None => {
             // Inabilities are NOT cached — a locked file must be retried, the
             // rule the curve and orientation memos already follow.
-            let v = crate::decode::frame_size(photo).ok()?;
+            let v = crate::decode::source_frame(photo).ok()?;
             match memo.lock() {
                 Ok(mut m) => *m.entry(key).or_insert(v),
                 Err(_) => v,
             }
         }
     };
-    xmp::FrameAspect::from_size(w as f64, h as f64)
+    xmp::FrameAspect::from_size_turned(
+        w as f64,
+        h as f64,
+        crate::render::compose_orientation(exif, quarter_turns),
+    )
 }
 
 /// Where the .xmp for `raw` goes — the photo's central develop dir (see
@@ -4701,7 +4718,10 @@ mod tests {
         // unchanged, so a round trip cannot apply the turn a second time.
         let doc = crate::xmp::recipe_to_xmp(&r);
         assert!(doc.contains("crs:HasCrop=\"True\""), "{doc}");
-        assert!(doc.contains("crs:CropAngle=\"-3.5\""), "{doc}");
+        // R27: the sidecar's `crs:CropAngle` is the NEGATION of the engine's
+        // clockwise straighten, at Lightroom's own six decimals
+        // (`P3-cropangle-model.md` §4, §6.4).
+        assert!(doc.contains("crs:CropAngle=\"3.500000\""), "{doc}");
         let back = crate::xmp::xmp_to_recipe(&doc);
         let bc = back.crop.expect("the crop survives the sidecar");
         for (got, want) in

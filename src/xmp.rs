@@ -120,50 +120,127 @@ fn local_fmt(v: f32) -> String {
 /// follow-up"). WHERE IT GOES: this constant and this constant only.
 const LR_MASK_FRAME_SCALE: f64 = 1.032;
 
-/// The frame a mask's normalised coordinates are measured against, reduced to
-/// the ONE number the radial projection needs: `s = W / H`.
+/// The frame every normalised `crs:` coordinate — mask box AND crop rectangle
+/// — is measured against: the SOURCE frame's pixel size, plus the turn that
+/// carries it into the frame this engine displays.
 ///
-/// Only the RATIO enters. The decode multiplies the stored half-extents by
-/// `W` and `H` to reach pixels and divides by them again to reach the engine's
-/// own normalised frame, so `W` and `H` cancel and `s` is all that survives —
-/// which is why this is an aspect and not a size, and why a document that
-/// declares its dimensions in any unit can serve it.
+/// **`W, H` are the UN-ROTATED SOURCE frame** = the DNG/RAW `DefaultCropSize`,
+/// NOT the raw `ImageWidth/Length` and NOT the exported pixel dimensions
+/// (`PROBE2-VERDICT.md` §3.3: decoding in the raw frame splits `k_A` and `k_B`
+/// by 0.35 % where the source frame holds them to 0.02 %). Two R27
+/// measurements pin the two ways "exported dimensions" was wrong:
 ///
-/// `W, H` are the **exported** pixel dimensions = the DNG `DefaultCropSize`,
-/// NOT the raw `ImageWidth/Length` (`PROBE2-VERDICT.md` §3.3: decoding in the
-/// raw frame splits `k_A` and `k_B` by 0.35 % where the export frame holds them
-/// to 0.02 %). A Lightroom sidecar's own `tiff:ImageWidth/ImageLength` ARE
-/// those dimensions — verified on `_DSC9600.xmp`, `tiff:ImageWidth="9504"`
-/// against the ARW's `DefaultCropSize = (9504, 6336)`.
+/// * **Cropped** (`P5-cropped-mask-frame.md` §1, HIGH). `PROBE4-FINAL.md` §4
+///   opens with "`W, H` = the exported pixel dimensions ( = DNG
+///   `DefaultCropSize`)". Those two readings coincide only while
+///   `HasCrop="False"`; they diverge the moment a crop exists, and
+///   `DefaultCropSize` is the correct one — the mask is laid out on the
+///   UNCROPPED frame and the crop is a window onto it (22 of 23 shared masks
+///   byte-identical across a crop change, a matched-filter limit of 0.09 % on
+///   any crop-frame coupling against a 6.1 DN positive control). Feeding the
+///   exported dimensions of a cropped render into the decode displaces
+///   `DSC09401_16.9.JPG`'s five radials by **834–1384 px**.
+/// * **Portrait** (`P1-portrait-mask-frame.md` §1, HIGH). For a
+///   `tiff:Orientation` 5–8 capture the source frame is the un-rotated SENSOR
+///   array (9504 × 6336), and the export is already upright with **no**
+///   orientation tag and no `tiff:` at all — so reading the JPEG's own
+///   dimensions as the mask frame, "the natural thing to do, and what a
+///   decoder does by default", is exactly the defect. 7/7 files pick their
+///   true frame by `dSS`, and a pure radial declaring +1.6 EV reads as
+///   +1.65 EV under the sensor frame and **−1.98 EV** (wrong sign) under the
+///   display one.
+///
+/// Only the RATIO enters the ellipse projection — the decode multiplies the
+/// stored half-extents by `W` and `H` to reach pixels and divides by them
+/// again to reach the engine's own normalised frame, so `W` and `H` cancel and
+/// `s = W/H` is all that survives. The SIZE is kept anyway because the writer
+/// declares it (`tiff:ImageWidth/ImageLength`), which is what lets a document
+/// we authored be re-imported in the frame it was written in.
+///
+/// [`turn`](Self::turn) is the map SOURCE → DISPLAY: the capture's EXIF
+/// orientation composed with the photographer's own quarter turns
+/// ([`crate::render::compose_orientation`]). The projection decodes in the
+/// source frame and then moves the whole recipe through
+/// [`crate::render::orient_recipe_coords`], which is the algebra this build
+/// already owns for the `coord_era` migration — one turn, every geometry.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FrameAspect(f64);
+pub struct FrameAspect {
+    w: f64,
+    h: f64,
+    turn: rawler::Orientation,
+}
 
 impl FrameAspect {
-    /// From a pixel size. `None` for anything that is not a positive, finite
-    /// rectangle — a zero dimension would make the projection singular.
+    /// From a SOURCE pixel size whose display frame is the same frame (a
+    /// landscape capture, a baked image whose pixels are already upright).
+    /// `None` for anything that is not a positive, finite rectangle — a zero
+    /// dimension would make the projection singular.
     pub fn from_size(w: f64, h: f64) -> Option<Self> {
-        (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then(|| FrameAspect(w / h))
+        FrameAspect::from_size_turned(w, h, rawler::Orientation::Normal)
     }
 
-    /// The frame a sidecar DECLARES, from `tiff:ImageWidth` / `tiff:ImageLength`.
+    /// [`from_size`](Self::from_size) for a capture whose display frame is the
+    /// source frame TURNED — `turn` is the composed orientation
+    /// ([`crate::render::compose_orientation`]), i.e. the same state
+    /// `orient_recipe_coords` takes.
+    pub fn from_size_turned(w: f64, h: f64, turn: rawler::Orientation) -> Option<Self> {
+        (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0)
+            .then_some(FrameAspect { w, h, turn })
+    }
+
+    /// `s = W/H` in the SOURCE frame — the one number the ellipse projection
+    /// needs.
+    fn aspect(&self) -> f64 {
+        self.w / self.h
+    }
+
+    /// The source → display turn. `Normal` when the two frames coincide.
+    fn turn(&self) -> rawler::Orientation {
+        self.turn
+    }
+
+    /// The SAME frame with the turn already folded in: the display rectangle,
+    /// declaring no turn of its own. This is what a document that will NOT
+    /// carry a `tiff:Orientation` must be projected in — geometry and
+    /// declaration have to agree, and a document that declares nothing
+    /// declares the frame its own pixels are in.
+    fn displayed(&self) -> Self {
+        let (w, h) = if crate::decode::orientation_transposes(self.turn) {
+            (self.h, self.w)
+        } else {
+            (self.w, self.h)
+        };
+        FrameAspect { w, h, turn: rawler::Orientation::Normal }
+    }
+
+    /// The frame a document DECLARES, from `tiff:ImageWidth` /
+    /// `tiff:ImageLength` / `tiff:Orientation`.
     ///
     /// Read off the whole document, not the crs scope: these are `tiff:`
     /// properties and they sit on the same `rdf:Description` in every Lightroom
     /// sidecar seen here, but nothing makes that structural.
     ///
-    /// KNOWN BOUNDARY, and it is the untested one: for a ROTATED frame
-    /// (`tiff:Orientation` 5–8) these two are taken verbatim, where the mask
-    /// coordinates live in the sensor frame *before* orientation (johnrellis,
-    /// Adobe Community, quoted in `BBOX-DECODE.md` §5.1). Every frame in the
-    /// twelve-export experiment is `Orientation="1"`, so which way the swap
-    /// goes is unmeasured and guessing it would reshape a portrait user's mask
-    /// on nothing. TRIGGER: a portrait sidecar carrying a radial with a
-    /// non-zero `crs:Angle`. WHERE IT GOES: one portrait export with a known
-    /// angle settles it, and this function is the only place that changes.
+    /// The declared pair is taken VERBATIM as the source frame, including for
+    /// the transposing orientations — `F3-REPORT.md`'s public census is 72/72
+    /// that a sidecar's `tiff:ImageWidth/ImageLength` are always the sensor
+    /// (landscape) frame, and `P1-portrait-mask-frame.md` §3 confirms it on the
+    /// user's own library (`_DSC9312.xmp`: `tiff:Orientation="8"` beside the
+    /// ARW's `DefaultCropSize = (9504, 6336)`, against a 6336 × 9504 export).
+    /// The pre-R27 comment here called that swap "unmeasured"; it is measured
+    /// now, and the swap is the DECODER's job (see [`turn`](Self::turn)), not a
+    /// reinterpretation of the declaration.
+    ///
+    /// A missing `tiff:Orientation` reads as `Normal`, which is the same thing
+    /// EXIF itself means by an absent tag.
     fn from_xmp(doc: &str) -> Option<Self> {
-        FrameAspect::from_size(
+        FrameAspect::from_size_turned(
             declared_number(doc, "tiff:ImageWidth")?,
             declared_number(doc, "tiff:ImageLength")?,
+            declared_number(doc, "tiff:Orientation")
+                .filter(|v| (1.0..=8.0).contains(v))
+                .map_or(rawler::Orientation::Normal, |v| {
+                    rawler::Orientation::from_u16(v as u16)
+                }),
         )
     }
 }
@@ -342,7 +419,7 @@ fn lr_to_engine(lr: LrRadial, frame: Option<FrameAspect>) -> RadialDecode {
             RadialDecode::Refused
         };
     }
-    let Some(FrameAspect(s)) = frame else {
+    let Some(s) = frame.map(|f| f.aspect()) else {
         // No declared frame: the naive box, as before v0.32.0, with the
         // rotation disclosed rather than silently applied or silently dropped.
         //
@@ -400,7 +477,7 @@ fn engine_to_lr(e: EngineRadial, frame: Option<FrameAspect>) -> (LrRadial, Optio
     if e.angle_deg == 0.0 {
         return unrotated(None);
     }
-    let Some(FrameAspect(s)) = frame else {
+    let Some(s) = frame.map(|f| f.aspect()) else {
         return unrotated(Some(e.angle_deg));
     };
     // `diag(s, 1)·R(angle)·diag(rx, ry)` — the ellipse carried into the
@@ -421,6 +498,344 @@ fn engine_to_lr(e: EngineRadial, frame: Option<FrameAspect>) -> (LrRadial, Optio
     let (a, b) = (a / k, b / k);
     let (sin, cos) = deg.to_radians().sin_cos();
     (corners((a * cos - b * sin) / s, a * sin + b * cos, deg), None)
+}
+
+/// The five numbers Lightroom stores for the CROP — `crs:Crop{Left,Top,Right,
+/// Bottom}` plus `crs:CropAngle`. NOT an axis-aligned rectangle: see
+/// [`lr_to_engine_crop`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LrCrop {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+    angle_deg: f64,
+}
+
+/// What [`lr_to_engine_crop`] could make of one stored crop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CropDecode {
+    /// Decoded into this engine's composition. `crop` is `None` for the
+    /// rectangle that IS the whole straightened frame (the straighten-only
+    /// carrier, which the writer emits and this collapses back).
+    /// `overshoot_frac` is how far outside the straightened frame the
+    /// rectangle reached before being clamped, as a fraction of that frame's
+    /// longer side — `0.0` when the conversion was exact, and the only lossy
+    /// edge of the whole conversion (see §"the one inexactness" below).
+    Read { crop: Option<Crop>, straighten_deg: f64, overshoot_frac: f64 },
+    /// Tilted, and the document declares no frame ([`FrameAspect::from_xmp`]):
+    /// the rectangle's own side lengths cannot be recovered without `W/H`, so
+    /// the crop is dropped and the straighten — which needs no aspect — rides
+    /// alone. Disclosed, never silent.
+    NoFrame { straighten_deg: f64 },
+    /// The corners do not describe a rectangle at the declared angle (the
+    /// `p > 0 ∧ q > 0` guard), or they leave `[0,1]`. Real Lightroom data
+    /// satisfies both; a document that does not is malformed, and cropping to
+    /// it would deliver a frame the file does not describe. The tilt is a
+    /// separate attribute and is still readable, so it rides — which is what
+    /// every build before R27 did with an unreadable rectangle.
+    Refused { straighten_deg: f64 },
+}
+
+impl CropDecode {
+    /// The rectangle this engine will apply, or `None` — no crop, an
+    /// unreadable one, or the straighten-only carrier.
+    fn crop(self) -> Option<Crop> {
+        match self {
+            CropDecode::Read { crop, .. } => crop,
+            CropDecode::NoFrame { .. } | CropDecode::Refused { .. } => None,
+        }
+    }
+
+    /// The straighten this engine will apply, in its own clockwise-positive
+    /// degrees. Readable on every arm: it needs no aspect and no rectangle.
+    fn straighten_deg(self) -> f64 {
+        match self {
+            CropDecode::Read { straighten_deg, .. }
+            | CropDecode::NoFrame { straighten_deg }
+            | CropDecode::Refused { straighten_deg } => straighten_deg,
+        }
+    }
+}
+
+/// The straightened frame's size in units of the SOURCE frame's height — the
+/// rectangle [`crate::render::rotate_straighten`] leaves behind, which is the
+/// frame this engine's [`Crop`] fractions are measured against.
+///
+/// `inscribed_dims` is homogeneous of degree 1 in `(w, h)`, so evaluating it at
+/// `(s, 1)` gives the same FRACTIONS as evaluating it at `(W, H)` — and the
+/// renderer's own call is the one definition, called here rather than copied.
+fn inscribed_norm(s: f64, straighten_deg: f64) -> (f64, f64) {
+    let (w, h) = crate::render::inscribed_dims(s as f32, 1.0, straighten_deg as f32);
+    (w as f64, h as f64)
+}
+
+/// Lightroom's stored crop → this engine's `(Crop, straighten_deg)`.
+///
+/// **`crs:Crop{Left,Top,Right,Bottom}` is not an axis-aligned rectangle.** It
+/// is the pair of opposite ROTATED CORNERS of the crop rectangle, written as
+/// plain fractions of the un-rotated SOURCE frame — the IDENTICAL encoding
+/// [`lr_to_engine`] decodes for `Mask/CircularGradient`, one family, two
+/// consumers (`P3-cropangle-model.md` §1, HIGH):
+///
+/// ```text
+///     (Left,  Top)    = centre + R(θ)·(−p, −q)
+///     (Right, Bottom) = centre + R(θ)·(+p, +q)
+///     X = (R−L)/2·W        Y = (B−T)/2·H          SIGNED, never abs()
+///     p =  X·cos θ + Y·sin θ     q = −X·sin θ + Y·cos θ
+///     W_out = round(2p)          H_out = round(2q)
+/// ```
+///
+/// 7/7 photographs pixel-exact with ZERO free parameters, max residual 0.6 px,
+/// across two signs of `CropAngle`, two `tiff:Orientation` states and two
+/// source aspect ratios; seven rival models miss by 165–987 px, including the
+/// naive AABB this build used until R27 (485 px, 0/7). There is **no `k`
+/// magnification on the crop** — global best-fit scale 1.000006 — where the
+/// mask frame carries `k = 1.032`: same namespace, same corner encoding,
+/// different affine, and that asymmetry is measured rather than assumed.
+///
+/// **The sign** (`P3-cropangle-model.md` §4, HIGH, 34× margin on the weakest of
+/// six photographs, 7257× on the best). `rot(source → export) = −CropAngle`:
+/// Lightroom turns the CONTENT counter-clockwise by `+CropAngle`, i.e. the crop
+/// BOX clockwise. [`crate::render::rotate_straighten`] turns the content
+/// CLOCKWISE for a positive angle, so `straighten_deg = −CropAngle` — the
+/// negation lives HERE, at the boundary, exactly like `LR_MASK_FRAME_SCALE`,
+/// and the engine's own convention does not move. Until R27 the value rode 1:1
+/// into a clockwise rotator, so every straightened import was tilted by
+/// **2 × CropAngle** the wrong way (6.55° on the library's largest).
+///
+/// **The composition.** Lightroom has no auto-crop step: the crop rectangle is
+/// given explicitly, in the source frame, and one resample produces the output.
+/// This engine rotates first (auto-cropping to
+/// [`crate::render::inscribed_dims`]) and then applies `Crop` as fractions of
+/// THAT frame. The two are the same map wherever both can express the
+/// rectangle, and this function is the conversion — `d = R(−θ)·(centre −
+/// c_src)`, then `left = (d.x + W_i/2 − p)/W_i` (`P3-cropangle-model.md` §6.2's
+/// "if the current order is kept").
+///
+/// **The one inexactness, measured not asserted.** The inscribed rectangle is
+/// CENTRED, so a Lightroom crop pushed against the edge of the rotated frame
+/// can reach outside it even when it is smaller. Over P3's seven measured
+/// specimens the overshoot is 0.00 px, 0.16 px, 0.94 px, 0.95 px, 5.32 px,
+/// 5.89 px and 46.77 px (0.85 % of one edge, `_DSC9443_1`) — so the conversion
+/// is exact or sub-pixel on six of seven, and the seventh loses less than one
+/// percent of one edge. The rectangle is CLAMPED (never sorted — see below)
+/// and the amount is reported, because `EditRecipe::clamp` would otherwise do
+/// the same clamp later, silently, at the first save.
+///
+/// **No ordering guard.** `Left > Right` is legal and reachable: under the
+/// corner encoding it means `X < 0`, i.e. `tan θ > p/q`, which a 2:3 crop
+/// straightened past +33.69° produces (`P3-cropangle-model.md` §6.3, and
+/// `crs:CropAngle`'s own range is ±45°, F3 STRONG). The pre-R27 reader required
+/// `left < right && top < bottom` and DISCARDED such a crop in silence. The
+/// `[0,1]` half of the guard stays: both stored points are corners of a
+/// rectangle Lightroom keeps inside the frame.
+fn lr_to_engine_crop(lr: LrCrop, frame: Option<FrameAspect>, ours: bool) -> CropDecode {
+    // The engine's straighten is CLOCKWISE-positive; Lightroom's CropAngle is
+    // the content's counter-clockwise turn. One negation, one place.
+    let straighten_deg = -lr.angle_deg;
+    let inside = |v: f64| (0.0..=1.0).contains(&v);
+    if ![lr.left, lr.top, lr.right, lr.bottom].iter().copied().all(inside) {
+        return CropDecode::Refused { straighten_deg };
+    }
+    // "The whole frame" with a hair of float slack: the straighten-only
+    // carrier comes back through the corner conversion as the inscribed
+    // rectangle's own corners, which land on 0/1 to within f32 rounding rather
+    // than exactly on it. A 10⁻⁶ window is a tenth of a pixel on a 9504 px
+    // frame — below anything a crop can mean.
+    const FULL_EPS: f64 = 1e-6;
+    let full = |c: &Crop| {
+        c.left as f64 <= FULL_EPS
+            && c.top as f64 <= FULL_EPS
+            && c.right as f64 >= 1.0 - FULL_EPS
+            && c.bottom as f64 >= 1.0 - FULL_EPS
+    };
+    // The rectangle read as the axis-aligned one it looks like. Correct at
+    // `θ = 0`, where the corner encoding degenerates to exactly that and the
+    // source frame IS the straightened frame — bit-stable, no aspect needed,
+    // and the positive-extent guard is the `p > 0 ∧ q > 0` one at θ = 0.
+    let verbatim = || {
+        if !(lr.right > lr.left && lr.bottom > lr.top) {
+            return CropDecode::Refused { straighten_deg };
+        }
+        let crop = Crop {
+            left: lr.left as f32,
+            top: lr.top as f32,
+            right: lr.right as f32,
+            bottom: lr.bottom as f32,
+        };
+        CropDecode::Read {
+            crop: (!full(&crop)).then_some(crop),
+            straighten_deg,
+            overshoot_frac: 0.0,
+        }
+    };
+    if lr.angle_deg == 0.0 {
+        return verbatim();
+    }
+    let Some(s) = frame.map(|f| f.aspect()) else {
+        // PROVENANCE RULE, the third (see `xmp_to_recipe`'s two): a tilted
+        // rectangle in a document that declares no frame cannot be placed —
+        // the corner decode needs `W/H` — but a document WE wrote without a
+        // frame holds the rectangle in the straightened frame it was stored
+        // in, because that is what this writer's own frameless arm emits.
+        // Reading ours back verbatim is that arm's exact inverse; reading a
+        // FOREIGN one that way would silently invent a rectangle out of
+        // corners that mean something else, so it is dropped and disclosed.
+        return if ours { verbatim() } else { CropDecode::NoFrame { straighten_deg } };
+    };
+    let (sin, cos) = lr.angle_deg.to_radians().sin_cos();
+    // Signed half-extents of the stored corner pair, in units of the source
+    // frame's HEIGHT (`W` and `H` cancel out of every fraction below, so the
+    // aspect is the whole of what the frame contributes).
+    let (xn, yn) = ((lr.right - lr.left) / 2.0 * s, (lr.bottom - lr.top) / 2.0);
+    let (p, q) = (xn * cos + yn * sin, -xn * sin + yn * cos);
+    if !(p > 0.0 && q > 0.0) {
+        return CropDecode::Refused { straighten_deg };
+    }
+    let (wi, hi) = inscribed_norm(s, straighten_deg);
+    if !(wi > 0.0 && hi > 0.0) {
+        return CropDecode::Refused { straighten_deg };
+    }
+    // The crop centre, carried from the source frame into the straightened one
+    // by the inverse of the rotation the renderer applies.
+    let (ox, oy) = (((lr.left + lr.right) / 2.0 - 0.5) * s, (lr.top + lr.bottom) / 2.0 - 0.5);
+    let (dx, dy) = (cos * ox + sin * oy, -sin * ox + cos * oy);
+    let (x0, y0) = (wi / 2.0 + dx - p, hi / 2.0 + dy - q);
+    let (left, right) = (x0 / wi, (x0 + 2.0 * p) / wi);
+    let (top, bottom) = (y0 / hi, (y0 + 2.0 * q) / hi);
+    let overshoot = [-left, -top, right - 1.0, bottom - 1.0]
+        .into_iter()
+        .fold(0.0f64, f64::max);
+    let clamp01 = |v: f64| v.clamp(0.0, 1.0) as f32;
+    let crop = Crop {
+        left: clamp01(left),
+        top: clamp01(top),
+        right: clamp01(right),
+        bottom: clamp01(bottom),
+    };
+    if !(crop.right > crop.left && crop.bottom > crop.top) {
+        return CropDecode::Refused { straighten_deg };
+    }
+    CropDecode::Read {
+        crop: (!full(&crop)).then_some(crop),
+        straighten_deg,
+        // A fraction of the straightened frame's own axis — the caller turns
+        // it into pixels with the frame it has.
+        overshoot_frac: overshoot,
+    }
+}
+
+/// This engine's `(Crop, straighten_deg)` → Lightroom's stored corners. The
+/// exact inverse of [`lr_to_engine_crop`], and `R(θ)` is orthogonal, so the
+/// round trip is algebraic rather than numerical.
+///
+/// `None` = this recipe has no crop and no tilt (`crs:HasCrop="False"`).
+/// A straighten with no crop encodes as the WHOLE straightened frame — which
+/// under the corner model is the inscribed rectangle's own four corners, not
+/// `0,0,1,1` — because Adobe applies `CropAngle` only under `HasCrop="True"`.
+/// At `straighten_deg == 0` the inscribed rectangle IS the frame and those
+/// corners are `0,0,1,1` again, byte-identical to every document this writer
+/// has ever produced.
+///
+/// The frameless arm is the one degraded edge: with a tilt and no aspect the
+/// corners cannot be built, so the rectangle goes out in the STRAIGHTENED
+/// frame it is stored in. Reachable only when the photo's own frame could not
+/// be read (`pipeline::photo_frame_aspect` supplies it for every save that has
+/// a photo), and it is what every build before R27 wrote for every crop.
+fn engine_to_lr_crop(
+    crop: Option<&Crop>,
+    straighten_deg: f64,
+    frame: Option<FrameAspect>,
+) -> Option<LrCrop> {
+    if crop.is_none() && straighten_deg == 0.0 {
+        return None;
+    }
+    let c = crop.copied().unwrap_or(Crop { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0 });
+    let (l, t, r, b) = (c.left as f64, c.top as f64, c.right as f64, c.bottom as f64);
+    let angle_deg = -straighten_deg;
+    if straighten_deg == 0.0 {
+        return Some(LrCrop { left: l, top: t, right: r, bottom: b, angle_deg });
+    }
+    let Some(s) = frame.map(|f| f.aspect()) else {
+        return Some(LrCrop { left: l, top: t, right: r, bottom: b, angle_deg });
+    };
+    let (wi, hi) = inscribed_norm(s, straighten_deg);
+    let (sin, cos) = angle_deg.to_radians().sin_cos();
+    let (p, q) = ((r - l) * wi / 2.0, (b - t) * hi / 2.0);
+    let (dx, dy) = (((l + r) / 2.0 - 0.5) * wi, ((t + b) / 2.0 - 0.5) * hi);
+    // Back into the source frame: the rotation itself, then the corners.
+    let (ox, oy) = (cos * dx - sin * dy, sin * dx + cos * dy);
+    let (cx, cy) = (ox + s / 2.0, oy + 0.5);
+    let (x, y) = (p * cos - q * sin, p * sin + q * cos);
+    Some(LrCrop {
+        left: (cx - x) / s,
+        right: (cx + x) / s,
+        top: cy - y,
+        bottom: cy + y,
+        angle_deg,
+    })
+}
+
+/// One document's crop block, decoded ([`lr_to_engine_crop`]). Adobe applies
+/// `crs:CropAngle` only under `crs:HasCrop="True"`, so anything else is no crop
+/// AND no tilt — importing a stale angle from a disabled crop activated a
+/// straighten Adobe itself does not render.
+fn read_crop(scope: &str, frame: Option<FrameAspect>, ours: bool) -> CropDecode {
+    let angle = crs_f32(scope, "CropAngle").unwrap_or(0.0) as f64;
+    if crs_str(scope, "HasCrop").as_deref() != Some("True") {
+        return CropDecode::Read { crop: None, straighten_deg: 0.0, overshoot_frac: 0.0 };
+    }
+    let n = |k: &str| crs_f32(scope, k).map(f64::from);
+    let (Some(left), Some(top), Some(right), Some(bottom)) =
+        (n("CropLeft"), n("CropTop"), n("CropRight"), n("CropBottom"))
+    else {
+        // A crop block missing a corner is a rectangle we cannot place; the
+        // tilt is a separate attribute and still rides. `unparsable_crs_numbers`
+        // names the unreadable ones on its own channel.
+        return CropDecode::Refused { straighten_deg: -angle };
+    };
+    lr_to_engine_crop(LrCrop { left, top, right, bottom, angle_deg: angle }, frame, ours)
+}
+
+/// What a document's crop cost on the way in, as one English sentence — the
+/// crop half of the import disclosures `unparsable_crs_numbers` and
+/// `import_losses` already carry for the global sliders and the masks.
+///
+/// `None` when the crop arrived whole, which is every uncropped document and
+/// every un-straightened crop.
+pub fn crop_import_note(xmp: &str) -> Option<String> {
+    if xmp.len() > MAX_XMP_BYTES || xmlns_conflict(xmp).is_some() {
+        return None;
+    }
+    let scope = crs_own_scope(xmp);
+    let frame = FrameAspect::from_xmp(xmp);
+    match read_crop(scope.as_ref(), frame, is_autoshop_sidecar(xmp)) {
+        CropDecode::Read { overshoot_frac, .. } if overshoot_frac > 0.0 => {
+            // In pixels of the frame the document declares, when it declares
+            // one — a fraction means nothing to a photographer.
+            let px = frame.map(|f| overshoot_frac * f.w.max(f.h));
+            Some(format!(
+                "the straightened crop reaches {} outside the frame this build's straighten \
+                 leaves behind, and was trimmed to fit",
+                match px {
+                    Some(px) => format!("{px:.0} px"),
+                    None => format!("{:.2} % of one edge", overshoot_frac * 100.0),
+                }
+            ))
+        }
+        CropDecode::NoFrame { .. } => Some(
+            "the crop rectangle is tilted and the document declares no \
+             tiff:ImageWidth/ImageLength, so its corners could not be placed — the straighten \
+             was imported, the rectangle was not"
+                .to_string(),
+        ),
+        CropDecode::Refused { .. } => Some(
+            "the crop rectangle could not be read as a rectangle and was not imported"
+                .to_string(),
+        ),
+        CropDecode::Read { .. } => None,
+    }
 }
 
 /// One radial coordinate the way Lightroom spells it: six decimals with the
@@ -1501,7 +1916,34 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
 /// sidecar, shared by the fresh-document writer and the merge path
 /// ([`merge_recipe_into_xmp`]); the REMOVAL universe lives in
 /// [`owned_attr_keys`] and must cover every key this can ever emit.
-fn owned_attrs(r: &EditRecipe) -> String {
+/// Does a detail/NR COMPANION key ride out at zero because its group's AMOUNT
+/// is set? (R27 T4, `P2-feather-k-closures.md` §4.)
+///
+/// Lightroom's rule is **amount-gated, not per-key** — over 211 Adobe exports
+/// carrying `crs:LuminanceSmoothing`, all 4 with it > 0 carry the Detail
+/// companion and none of the 207 with it = 0 does; 133/133 with
+/// `ColorNoiseReduction > 0` carry Detail + Smoothness and 0 of 64 with it = 0
+/// do; `SharpenEdgeMasking="0"` rides on 159 files whose `Sharpness` is set.
+/// This writer gated each companion on ITS OWN value, so a recipe with
+/// `LuminanceSmoothing="50"` and a contrast of 0 emitted the amount and the
+/// Detail but DROPPED `LuminanceNoiseReductionContrast` — a shape no Lightroom
+/// file has.
+///
+/// **Only the companions whose ACR default is ZERO join**, and that is the
+/// whole of the alignment. `LuminanceNoiseReductionContrast` and
+/// `SharpenEdgeMasking` default to 0 in ACR, so emitting `"0"` says exactly
+/// what their absence said and the change is byte-level only. The others
+/// (`SharpenRadius` 1.0, `SharpenDetail` 25, the two Detail/Smoothness 50s)
+/// default to a NON-zero value, and this recipe's 0 means "never learned one"
+/// — emitting it would tell Lightroom to sharpen at radius 0 or drop detail
+/// retention from 50 to 0, which is a render change, not a spelling. Those
+/// keep reaching Lightroom by ABSENCE, which is the honest encoding and the
+/// rule `owned_attrs`' vignette/grain block states for the same reason.
+fn amount_carries(key: &str, amount: f32) -> bool {
+    matches!(key, "LuminanceNoiseReductionContrast" | "SharpenEdgeMasking") && amount != 0.0
+}
+
+fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
     let mut a = String::new();
     // The SCHEMA-ERA gate's emission half (R25 P8). It has to sit beside the
     // strip half in [`merge_strip_keys`] and agree with it exactly: strip
@@ -1607,8 +2049,11 @@ fn owned_attrs(r: &EditRecipe) -> String {
     if r.sharpen_radius != 0.0 && ungated("SharpenRadius") {
         attr(&mut a, "SharpenRadius", &format!("{:+.1}", r.sharpen_radius));
     }
-    for (key, v) in [("SharpenDetail", r.sharpen_detail), ("SharpenEdgeMasking", r.sharpen_mask)] {
-        if v != 0.0 && ungated(key) {
+    for (key, v, amount) in [
+        ("SharpenDetail", r.sharpen_detail, r.sharpening),
+        ("SharpenEdgeMasking", r.sharpen_mask, r.sharpening),
+    ] {
+        if (v != 0.0 || amount_carries(key, amount)) && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
@@ -1622,14 +2067,14 @@ fn owned_attrs(r: &EditRecipe) -> String {
     // the companions Lightroom itself omits when the amount is zero
     // (ColorNoiseReductionDetail / Smoothness are absent from the two files
     // whose ColorNoiseReduction is 0) must stay absent from ours too.
-    for (key, v) in [
-        ("LuminanceNoiseReductionDetail", r.nr_detail),
-        ("LuminanceNoiseReductionContrast", r.nr_contrast),
-        ("ColorNoiseReduction", r.color_nr),
-        ("ColorNoiseReductionDetail", r.color_nr_detail),
-        ("ColorNoiseReductionSmoothness", r.color_nr_smooth),
+    for (key, v, amount) in [
+        ("LuminanceNoiseReductionDetail", r.nr_detail, r.noise_reduction),
+        ("LuminanceNoiseReductionContrast", r.nr_contrast, r.noise_reduction),
+        ("ColorNoiseReduction", r.color_nr, 0.0),
+        ("ColorNoiseReductionDetail", r.color_nr_detail, r.color_nr),
+        ("ColorNoiseReductionSmoothness", r.color_nr_smooth, r.color_nr),
     ] {
-        if v != 0.0 && ungated(key) {
+        if (v != 0.0 || amount_carries(key, amount)) && ungated(key) {
             attr(&mut a, key, &(v.round() as i64).to_string());
         }
     }
@@ -1757,28 +2202,31 @@ fn owned_attrs(r: &EditRecipe) -> String {
         }
     }
 
-    // Crop (normalised [0,1]); only applied by Lightroom when HasCrop is True.
-    // Straighten rides the SAME crop transform in Adobe's model: a nonzero
-    // CropAngle under HasCrop="False" is ignored by Lightroom, so a
-    // straighten-only recipe must ship HasCrop=True with the full frame (the
-    // reader below collapses that full-frame rectangle back to `None`).
-    if let Some(c) = &r.crop {
-        attr(&mut a, "HasCrop", "True");
-        attr(&mut a, "CropTop", &format!("{:.6}", c.top));
-        attr(&mut a, "CropLeft", &format!("{:.6}", c.left));
-        attr(&mut a, "CropBottom", &format!("{:.6}", c.bottom));
-        attr(&mut a, "CropRight", &format!("{:.6}", c.right));
-    } else if r.straighten_deg != 0.0 {
-        attr(&mut a, "HasCrop", "True");
-        attr(&mut a, "CropTop", "0.000000");
-        attr(&mut a, "CropLeft", "0.000000");
-        attr(&mut a, "CropBottom", "1.000000");
-        attr(&mut a, "CropRight", "1.000000");
-    } else {
-        attr(&mut a, "HasCrop", "False");
-    }
-    if r.straighten_deg != 0.0 {
-        attr(&mut a, "CropAngle", &format!("{:.1}", r.straighten_deg));
+    // Crop + straighten, as ONE rotated-corner encoding ([`engine_to_lr_crop`],
+    // R27). Only applied by Lightroom when HasCrop is True — a non-zero
+    // CropAngle under HasCrop="False" is ignored — so a straighten-only recipe
+    // still ships HasCrop=True, and what it ships is the STRAIGHTENED frame's
+    // own four corners (which are `0,0,1,1` exactly when there is no tilt, so
+    // every un-straightened document this writer has ever produced is
+    // unchanged to the byte).
+    match engine_to_lr_crop(r.crop.as_ref(), r.straighten_deg as f64, frame) {
+        Some(c) => {
+            attr(&mut a, "HasCrop", "True");
+            attr(&mut a, "CropTop", &format!("{:.6}", c.top));
+            attr(&mut a, "CropLeft", &format!("{:.6}", c.left));
+            attr(&mut a, "CropBottom", &format!("{:.6}", c.bottom));
+            attr(&mut a, "CropRight", &format!("{:.6}", c.right));
+            // SIX decimals, which is Lightroom's own precision for this key
+            // (`-3.274380`) and the four beside it. The `{:.1}` this replaces
+            // (R27, `P3-cropangle-model.md` §6.4) turned that specimen into
+            // `-3.3` on every re-save: 0.0256° of drift = 4.3 px of
+            // edge-to-edge tilt across a 9504 px frame, in a carrier whose
+            // whole purpose is a lossless round trip.
+            if c.angle_deg != 0.0 {
+                attr(&mut a, "CropAngle", &format!("{:.6}", c.angle_deg));
+            }
+        }
+        None => attr(&mut a, "HasCrop", "False"),
     }
 
     attr(
@@ -1893,15 +2341,75 @@ fn xmp_document(r: &EditRecipe, desc: &str) -> String {
 /// The `rdf:Description` carrying everything this writer owns — the ONE
 /// definition, so a fresh document and a spliced-in one cannot drift. Carries
 /// the mask-loss verdicts out with it (see [`owned_children`]).
+///
+/// A FRESH document declares its own frame (R27 A8) and therefore writes its
+/// geometry in that frame — see [`frame_declaration`] and [`in_source_frame`].
 fn crs_description(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLoss>) {
+    let r = in_source_frame(r, frame);
+    let r = r.as_ref();
     let (children, losses) = owned_children(r, true, frame);
     let desc = format!(
         "<rdf:Description rdf:about=\"\"\n\
-    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"{attrs}>{children}\n\
+    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"{tiff}{attrs}>{children}\n\
   </rdf:Description>",
-        attrs = owned_attrs(r),
+        tiff = frame_declaration(frame),
+        attrs = owned_attrs(r, frame),
     );
     (desc, losses)
+}
+
+/// The `tiff:` block that says which frame the `crs:` coordinates in this
+/// document are measured against — `ImageWidth` / `ImageLength` (the SOURCE
+/// frame, un-rotated, i.e. the RAW's `DefaultCropSize`) and `Orientation` (the
+/// turn that carries it to the frame the photographer sees, EXIF composed with
+/// their own quarter turns).
+///
+/// Empty when the frame is unknown, which is also when nothing above needed it.
+///
+/// **Why a writer declares this at all** (R27, closing `C-rotation-skeleton.md`'s
+/// round-trip hole). Until now Autoshop's own fresh sidecars declared no frame,
+/// so re-importing one could not decode its own rotated radial — the reader
+/// needs `W/H` to fold a pixel-frame tilt into the engine's normalised one, and
+/// a document with no declaration hands it nothing. Every real Lightroom
+/// sidecar carries these (`_DSC9600.xmp`: `tiff:ImageWidth="9504"
+/// tiff:ImageLength="6336"`); ours now do too, and a portrait sidecar's
+/// `tiff:Orientation` is what tells the reader the numbers are sensor-frame.
+fn frame_declaration(frame: Option<FrameAspect>) -> String {
+    let Some(f) = frame else { return String::new() };
+    format!(
+        "\n    xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\
+         \n    tiff:ImageWidth=\"{w}\"\n    tiff:ImageLength=\"{h}\"\n    tiff:Orientation=\"{o}\"",
+        w = f.w.round() as i64,
+        h = f.h.round() as i64,
+        o = f.turn().to_u16().max(1),
+    )
+}
+
+/// The recipe as the frame it will be WRITTEN in sees it: the inverse of the
+/// turn [`xmp_to_recipe`] applies on the way in.
+///
+/// Borrowed and untouched for every frame whose source and display coincide —
+/// every landscape capture, every baked image, and every document that
+/// declares no frame at all.
+fn in_source_frame<'a>(
+    r: &'a EditRecipe,
+    frame: Option<FrameAspect>,
+) -> std::borrow::Cow<'a, EditRecipe> {
+    use rawler::Orientation as O;
+    let turn = frame.map(|f| f.turn()).unwrap_or(O::Normal);
+    if matches!(turn, O::Normal | O::Unknown) {
+        return std::borrow::Cow::Borrowed(r);
+    }
+    // The dihedral group of the square: the two quarter turns are each other's
+    // inverse and everything else is an involution.
+    let back = match turn {
+        O::Rotate90 => O::Rotate270,
+        O::Rotate270 => O::Rotate90,
+        other => other,
+    };
+    let mut owned = r.clone();
+    crate::render::orient_recipe_coords(&mut owned, back);
+    std::borrow::Cow::Owned(owned)
 }
 
 /// First occurrence of `needle` that is real MARKUP — not text quoted inside a
@@ -2999,6 +3507,37 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
     merge_recipe_into_xmp_in_frame(existing, r, None)
 }
 
+/// Which frame a MERGE writes its geometry in, and whether this writer must
+/// declare that frame itself (R27 A8).
+///
+/// The rule is that the coordinates and the declaration can never disagree:
+///
+/// * the base declares a usable frame ⇒ that one wins and needs no help. It is
+///   what Lightroom itself measured this file's coordinates against, and a
+///   sidecar and its photo can legitimately disagree (a re-crop, a proxy).
+/// * the base mentions `tiff:` but declares no usable pair ⇒ we must not add
+///   attributes to its tag (a second `xmlns:tiff`, or a second
+///   `tiff:ImageWidth`, is not well-formed XML), so the geometry goes out in
+///   the DISPLAY frame — which is what a document that declares nothing means
+///   by its own numbers, and what every build before R27 wrote.
+/// * the base is silent about `tiff:` ⇒ the photo's SOURCE frame, declared.
+///   This is the arm that makes a portrait photo's merged sidecar readable:
+///   without the declaration the numbers would be sensor-frame in a document
+///   that claims nothing, and our own reader would take them for display-frame.
+fn merge_frame(existing: &str, photo: Option<FrameAspect>) -> (Option<FrameAspect>, bool) {
+    if let Some(base) = FrameAspect::from_xmp(existing) {
+        return (Some(base), false);
+    }
+    let touched = ["xmlns:tiff", "tiff:ImageWidth", "tiff:ImageLength", "tiff:Orientation"]
+        .iter()
+        .any(|k| find_outside_constructs(existing, k).is_some());
+    if touched {
+        (photo.map(|f| f.displayed()), false)
+    } else {
+        (photo, photo.is_some())
+    }
+}
+
 /// [`merge_recipe_into_xmp`] with a FALLBACK frame — the photo's own aspect,
 /// for the radial projection ([`FrameAspect`]). The base document's own
 /// `tiff:ImageWidth/ImageLength` still wins when it has them: those are what
@@ -3009,7 +3548,7 @@ pub fn merge_recipe_into_xmp_in_frame(
     r: &EditRecipe,
     frame: Option<FrameAspect>,
 ) -> Option<MergeOutcome> {
-    let frame = FrameAspect::from_xmp(existing).or(frame);
+    let (frame, declare_frame) = merge_frame(existing, frame);
     if existing.len() > MAX_XMP_BYTES {
         return None;
     }
@@ -3048,9 +3587,19 @@ pub fn merge_recipe_into_xmp_in_frame(
     }
 
 
+    // The recipe in the frame the OUTPUT document will be read in (R27) — the
+    // base's own declaration when it has one, and it is the base's tag we are
+    // rewriting, so the turn has to match what that tag says.
+    let turned = in_source_frame(r, frame);
+    let r = turned.as_ref();
+
     let closing_len = if self_closing { 2 } else { 1 };
     let head = tag[..tag.len() - closing_len].trim_end().to_string();
-    let new_tag = format!("{head}{}>", owned_attrs(r));
+    let new_tag = format!(
+        "{head}{tiff}{attrs}>",
+        tiff = if declare_frame { frame_declaration(frame) } else { String::new() },
+        attrs = owned_attrs(r, frame),
+    );
 
     // The element body: drop every owned child block, then prepend ours.
     // Owned blocks never nest themselves, so a whole-span splice is safe —
@@ -4729,6 +5278,15 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     // The engine's own neutrals, for the ONE block whose neutral is not zero
     // (de-fringe, R25 B3) — `f`'s zero fallback would invent a hue window.
     let dflt = EditRecipe::default();
+    // The SOURCE frame this document's coordinates are measured against, and
+    // the turn that carries them into the frame this engine displays — read
+    // ONCE and served to both geometry decodes (crop and masks), because they
+    // are the same encoding in the same frame (`FrameAspect`).
+    let frame = FrameAspect::from_xmp(xmp);
+    // Adobe applies `CropAngle` only under `HasCrop="True"` — importing a
+    // stale angle from a DISABLED crop activated a straighten Adobe itself
+    // does not render.
+    let crop_read = read_crop(scope, frame, ours);
 
     let mut hsl = Hsl::default();
     for (i, band) in crate::recipe::HSL_BANDS.iter().enumerate() {
@@ -4853,39 +5411,19 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         defringe_green: crs_f32(scope, "DefringeGreenAmount").unwrap_or(dflt.defringe_green),
         defringe_green_lo: crs_f32(scope, "DefringeGreenHueLo").unwrap_or(dflt.defringe_green_lo),
         defringe_green_hi: crs_f32(scope, "DefringeGreenHueHi").unwrap_or(dflt.defringe_green_hi),
-        // Adobe applies CropAngle only under HasCrop="True" (see the crop
-        // comment below) — importing a stale angle from a DISABLED crop
-        // activated a straighten Adobe itself does not render.
-        straighten_deg: if crs_str(scope, "HasCrop").as_deref() == Some("True") { f("CropAngle") } else { 0.0 },
-        crop: (crs_str(scope, "HasCrop").as_deref() == Some("True"))
-            .then(|| {
-                let crop = Crop {
-                    left: crs_f32(scope, "CropLeft")?,
-                    top: crs_f32(scope, "CropTop")?,
-                    right: crs_f32(scope, "CropRight")?,
-                    bottom: crs_f32(scope, "CropBottom")?,
-                };
-                ([crop.left, crop.top, crop.right, crop.bottom]
-                    .iter()
-                    .all(|v| (0.0..=1.0).contains(v))
-                    && crop.left < crop.right
-                    && crop.top < crop.bottom)
-                    .then_some(crop)
-            })
-            .flatten()
-            // A full-frame rectangle is the writer's straighten-only carrier
-            // (Adobe activates CropAngle only under HasCrop=True) — collapse
-            // it back to "no crop" so the round-trip stays lossless.
-            .filter(|c| {
-                !(c.left <= 0.0 && c.top <= 0.0 && c.right >= 1.0 && c.bottom >= 1.0)
-            }),
+        // Both halves come out of ONE decode (R27, `lr_to_engine_crop`): the
+        // rectangle and the tilt are two faces of one rotated-corner encoding,
+        // and reading either without the other is what made every straightened
+        // import wrong by 2 × CropAngle on top of a frame error.
+        straighten_deg: crop_read.straighten_deg() as f32,
+        crop: crop_read.crop(),
 
 
         tone_curve: parse_curve(scope, "ToneCurvePV2012"),
         red_curve: parse_curve(scope, "ToneCurvePV2012Red"),
         green_curve: parse_curve(scope, "ToneCurvePV2012Green"),
         blue_curve: parse_curve(scope, "ToneCurvePV2012Blue"),
-        masks: parse_masks(scope, ours, FrameAspect::from_xmp(xmp)),
+        masks: parse_masks(scope, ours, frame),
 
         // The PASS-THROUGH blocks (R25 B4), read as STRINGS and stored
         // verbatim. `crs_str` already reads BOTH spellings — the
@@ -4919,6 +5457,23 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     // gates the as-shot caption off for these photos.
     if ours && !is_autoshop_era2(xmp) && r.temperature_k.is_some() {
         r.as_shot_k = Some(5500.0);
+    }
+    // SOURCE FRAME → DISPLAY FRAME (R27 A7, `P1-portrait-mask-frame.md` §5).
+    // Every `crs:` coordinate above — crop rectangle and mask geometry alike —
+    // was decoded in the frame the document declares, which for a portrait
+    // capture is the UN-ROTATED sensor array (9504 × 6336) while this engine
+    // renders the turned one. `orient_recipe_coords` is the algebra that moves
+    // a whole recipe between those two frames; it already exists for the
+    // `coord_era` migration, and running it HERE is what makes an imported
+    // recipe's `coord_era` stamp true instead of a label on sensor-frame
+    // numbers. It moves the crop, every mask box, the range-mask sample point
+    // and — under a mirror — the straighten's sign, all in one pass.
+    //
+    // A landscape document (`tiff:Orientation` absent or 1) turns nothing, so
+    // this is inert for every frame the twelve-export experiment and the 16
+    // reference sidecars contain.
+    if let Some(turn) = frame.map(|f| f.turn()) {
+        crate::render::orient_recipe_coords(&mut r, turn);
     }
     // Independent scalar controls saturate at the recipe contract and are
     // named by `unparsable_crs_numbers` when that changes a foreign value.
@@ -5598,7 +6153,12 @@ mod tests {
         let r = EditRecipe { straighten_deg: 2.5, ..Default::default() };
         let x = recipe_to_xmp(&r);
         assert!(x.contains("crs:HasCrop=\"True\""), "straighten must activate the crop state");
-        assert!(x.contains("crs:CropAngle=\"2.5\""), "{x}");
+        // R27: `crs:CropAngle` is the NEGATION of this engine's clockwise
+        // straighten (`P3-cropangle-model.md` §4 — Lightroom turns the content
+        // counter-clockwise by +CropAngle, measured on six photographs, 34×
+        // margin on the weakest), and it goes out with Lightroom's own six
+        // decimals rather than the one this writer used to round to (§6.4).
+        assert!(x.contains("crs:CropAngle=\"-2.500000\""), "{x}");
         let back = xmp_to_recipe(&x);
         assert_eq!(back.crop, None, "the full-frame carrier must not become a real crop");
         assert_eq!(back.straighten_deg, 2.5);
@@ -7404,6 +7964,485 @@ mod tests {
         assert!((xmp_to_recipe(&out).masks[0].hue - 50.0).abs() < 1e-3);
     }
 
+    // ── R27: the crop rectangle is the SAME rotated-corner encoding ─────────
+    //
+    // The seven rows below are the user's own library, transcribed verbatim
+    // from `~/.claude/plans/r27-materials/p3-scratch/final_table.py:10-18`
+    // (the script `P3-cropangle-model.md` §8 lists as its reproduction). Each
+    // is a self-consistent pair: the crop block and the pixels come out of the
+    // same file, so a stale sidecar cannot contaminate it. NO photograph and
+    // NO export is in this repository — these are the metadata numbers and the
+    // exported dimensions they predict.
+    //
+    // `(name, W, H, L, T, R, B, CropAngle, exported W × H in SENSOR
+    //  orientation, px of width and height this engine's composition clamps
+    //  away)`.
+    type P3Crop = (&'static str, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64);
+    const P3_CROPS: [P3Crop; 7] = [
+        ("_DSC9558", 9504.0, 6336.0, 0.119389, 0.003478, 0.994441, 0.991209, -0.132584, 8302.0, 6277.0, 0.000, 0.000),
+        ("DSC09024_1", 9504.0, 6336.0, 0.00219, 0.007883, 0.99781, 0.992117, -0.303486, 9429.0, 6286.0, 0.000, 0.216),
+        ("_DSC9493", 9504.0, 6336.0, 0.013441, 0.0, 0.986559, 1.0, 0.724343, 9328.0, 6219.0, 0.000, 1.243),
+        ("_DSC1216_hdr", 9438.0, 6265.0, 0.005237, 0.018724, 0.994763, 0.981276, -0.725680, 9262.0, 6148.0, 0.000, 1.251),
+        ("_DSC9138", 9504.0, 6336.0, 0.031274, 0.0, 0.968726, 1.0, 1.728388, 9097.0, 6065.0, 0.000, 6.909),
+        ("_DSC9443_1", 9504.0, 6336.0, 0.094153, 0.135618, 0.978448, 0.955195, -1.979145, 8220.0, 5480.0, 0.000, 30.260),
+        ("_DSC9298", 9504.0, 6336.0, 0.09115, 0.100566, 1.0, 0.900897, -3.274380, 8334.0, 5556.0, 5.895, 0.000),
+    ];
+
+    /// §0 OF R27 BATCH-3, the crop half. `crs:Crop{Left,Top,Right,Bottom}` are
+    /// the two opposite ROTATED CORNERS of the crop rectangle in the un-rotated
+    /// source frame — the identical encoding `BBOX-DECODE.md` found for
+    /// `Mask/CircularGradient`, one family — and the exported dimensions are
+    /// that rectangle's own side lengths, `2p × 2q`.
+    ///
+    /// **7/7 pixel-exact, zero free parameters**, across two signs of
+    /// `CropAngle`, two `tiff:Orientation` states and two source aspect ratios
+    /// (`P3-cropangle-model.md` §3.2). The rivals, on the same seven rows:
+    /// naive AABB (what this build read until R27) 485 px, 0/7; opposite sign
+    /// 987 px; rotation in normalised space 165 px; AABB of the rotated rect
+    /// 957 px; fractions of the rotated bbox 619 px; of the inscribed rect
+    /// 878 px; side length ÷cos θ 477 px. The first two are asserted below, so
+    /// restoring either reading fails here rather than in a photograph.
+    ///
+    /// The last two columns are what this engine's own composition
+    /// (rotate → auto-crop to the inscribed rectangle → crop) cannot express:
+    /// a Lightroom rectangle pushed against the edge of the rotated frame can
+    /// reach outside the CENTRED inscribed rectangle. Measured, per specimen,
+    /// and it is 0 on the first row, ≤ 1.3 px on three more, and worst at
+    /// 30.3 px = 0.55 % of one edge.
+    ///
+    /// MUTATION THIS CATCHES: drop the `sin`/`cos` mixing in
+    /// `lr_to_engine_crop` (i.e. go back to `W·(R−L) × H·(B−T)`) and every row
+    /// but the sign-free ones misses its exported size by tens to hundreds of
+    /// pixels; flip the straighten's sign and the predicted sizes swap into the
+    /// opposite-sign column.
+    #[test]
+    fn the_seven_measured_lightroom_crops_reproduce_their_exported_dimensions() {
+        for (name, w, h, l, t, r, b, angle, ow, oh, lost_w, lost_h) in P3_CROPS {
+            let frame = FrameAspect::from_size(w, h);
+            let lr = LrCrop { left: l, top: t, right: r, bottom: b, angle_deg: angle };
+            let CropDecode::Read { crop: Some(c), straighten_deg, .. } =
+                lr_to_engine_crop(lr, frame, false)
+            else {
+                panic!("{name}: a real Lightroom crop must decode");
+            };
+            assert!(
+                (straighten_deg + angle).abs() < 1e-12,
+                "{name}: the engine's clockwise straighten is −CropAngle"
+            );
+            // The frame this engine's straighten leaves behind, in pixels.
+            let (wi, hi) = inscribed_norm(w / h, straighten_deg);
+            let (wi, hi) = (wi * h, hi * h);
+            // …and the rectangle's own side lengths inside it, with the
+            // clamped edge added back: that IS the model's `2p × 2q`.
+            let out_w = (c.right - c.left) as f64 * wi + lost_w;
+            let out_h = (c.bottom - c.top) as f64 * hi + lost_h;
+            // Half a pixel — `W_out = round(2p)` per axis — on the six
+            // specimens whose crop block and pixels come out of the SAME file.
+            // `_DSC9138` is the one paired to a SIDECAR, so its block may have
+            // moved since the export; `P3-cropangle-model.md` §6.5 registers
+            // its −0.61 px height as exactly that (and notes 9097/1.5 =
+            // 6064.67, which is what an aspect lock would give).
+            let tol = if name == "_DSC9138" { 0.65 } else { 0.5 };
+            assert!(
+                (out_w - ow).abs() < tol && (out_h - oh).abs() < tol,
+                "{name}: model says {out_w:.1} × {out_h:.1}, Lightroom exported {ow} × {oh}"
+            );
+            // The two headline rivals, refuted on this row's own numbers.
+            let naive = ((r - l) * w, (b - t) * h);
+            let flipped = {
+                let (sin, cos) = angle.to_radians().sin_cos();
+                let (x, y) = ((r - l) / 2.0 * w, (b - t) / 2.0 * h);
+                (2.0 * (x * cos - y * sin), 2.0 * (x * sin + y * cos))
+            };
+            if angle.abs() > 0.2 {
+                assert!(
+                    (naive.0 - ow).abs() > 1.0 || (naive.1 - oh).abs() > 1.0,
+                    "{name}: the naive AABB must NOT reproduce {ow} × {oh}"
+                );
+                assert!(
+                    (flipped.0 - ow).abs() > 1.0 || (flipped.1 - oh).abs() > 1.0,
+                    "{name}: the opposite sign must NOT reproduce {ow} × {oh}"
+                );
+            }
+        }
+    }
+
+    /// The crop codec is an ALGEBRAIC inverse: whatever Lightroom wrote comes
+    /// back, to the last decimal it spelled. Run on the four P3 specimens whose
+    /// rectangle fits this engine's inscribed frame outright, plus the two
+    /// arrangements §6.3 says are legal.
+    ///
+    /// MUTATION THIS CATCHES: swap `p*cos − q*sin` for `p*cos + q*sin` in
+    /// `engine_to_lr_crop` (the natural sign slip) and every rotated row comes
+    /// back with different corners.
+    #[test]
+    fn the_crop_corner_encoding_round_trips_what_lightroom_wrote() {
+        for (name, w, h, l, t, r, b, angle, ..) in P3_CROPS {
+            let frame = FrameAspect::from_size(w, h);
+            let lr = LrCrop { left: l, top: t, right: r, bottom: b, angle_deg: angle };
+            let CropDecode::Read { crop: Some(c), straighten_deg, overshoot_frac } =
+                lr_to_engine_crop(lr, frame, false)
+            else {
+                panic!("{name}: must decode");
+            };
+            let back = engine_to_lr_crop(Some(&c), straighten_deg, frame).expect("a crop");
+            // The clamp is the only lossy edge, and it moves an edge by at
+            // most its own overshoot — so that is the tolerance, and it is
+            // ZERO on the rows that needed no clamp.
+            let tol = overshoot_frac + 1e-6;
+            for (got, want, key) in [
+                (back.left, l, "Left"),
+                (back.top, t, "Top"),
+                (back.right, r, "Right"),
+                (back.bottom, b, "Bottom"),
+            ] {
+                assert!(
+                    (got - want).abs() <= tol,
+                    "{name}: crs:Crop{key} {got:.6} vs {want:.6} (tol {tol:.6})"
+                );
+            }
+            assert!((back.angle_deg - angle).abs() < 1e-12, "{name}: the angle is exact");
+        }
+    }
+
+    /// R27 `P3-cropangle-model.md` §6.3: `Left > Right` is a legal Lightroom
+    /// arrangement — under the corner encoding it means `X < 0`, i.e.
+    /// `tan θ > p/q`, which a 2:3 crop straightened past +33.69° produces, and
+    /// `crs:CropAngle`'s own documented range is ±45°. The pre-R27 reader
+    /// required `left < right && top < bottom` and threw such a crop away in
+    /// silence.
+    ///
+    /// The fixture is CONSTRUCTED, not copied: no file in the user's library
+    /// reaches the inverted region (the nine non-zero `CropAngle` sidecars all
+    /// sit ≥ 30.4° from their own wall), so the encoder builds the corners a
+    /// 35° straighten of a tall rectangle would produce and the decoder has to
+    /// read them back.
+    ///
+    /// MUTATION THIS CATCHES: restore either half of the ordering guard and
+    /// the inverted arrangement decodes to `None` — a crop silently gone.
+    #[test]
+    fn an_inverted_crop_arrangement_is_read_rather_than_discarded() {
+        // A tall (2:3) rectangle inside a 3:2 frame, straightened 35°.
+        let frame = FrameAspect::from_size(9504.0, 6336.0);
+        let engine = Crop { left: 0.30, top: 0.10, right: 0.62, bottom: 0.90 };
+        let lr = engine_to_lr_crop(Some(&engine), -35.0, frame).expect("corners");
+        assert!(
+            lr.left > lr.right,
+            "the fixture must actually reach the inverted region: {lr:?}"
+        );
+        let CropDecode::Read { crop: Some(back), straighten_deg, .. } =
+            lr_to_engine_crop(lr, frame, false)
+        else {
+            panic!("an inverted arrangement must still decode: {lr:?}");
+        };
+        assert!((straighten_deg + 35.0).abs() < 1e-12);
+        for (got, want) in [
+            (back.left, engine.left),
+            (back.top, engine.top),
+            (back.right, engine.right),
+            (back.bottom, engine.bottom),
+        ] {
+            assert!((got - want).abs() < 1e-5, "{got} != {want} ({back:?})");
+        }
+    }
+
+    /// The whole document round trip on a tilted crop, through the reader and
+    /// the writer the app actually calls — including the `{:.6}` `CropAngle`
+    /// that replaced `{:.1}` (`P3-cropangle-model.md` §6.4: importing
+    /// `_DSC9298` and saving it back emitted `-3.3`, a 0.0256° drift = 4.3 px
+    /// of edge-to-edge tilt across a 9504 px frame).
+    ///
+    /// MUTATION THIS CATCHES: put `{:.1}` back and the angle assertion fails
+    /// by the exact drift the report measured; drop the negation at either end
+    /// and the round trip returns `+3.274380`.
+    #[test]
+    fn a_tilted_crop_survives_a_whole_document_round_trip() {
+        let doc = in_frame(
+            &lr_doc(""),
+            9504,
+            6336,
+        )
+        .replace(
+            "crs:Version=\"15.5.1\"",
+            "crs:Version=\"15.5.1\"\n   crs:HasCrop=\"True\"\n   crs:CropLeft=\"0.09115\"\n   \
+             crs:CropTop=\"0.100566\"\n   crs:CropRight=\"1\"\n   crs:CropBottom=\"0.900897\"\n   \
+             crs:CropAngle=\"-3.274380\"",
+        );
+        let r = xmp_to_recipe(&doc);
+        assert!((r.straighten_deg - 3.27438).abs() < 1e-5, "{}", r.straighten_deg);
+        let c = r.crop.expect("the tilted rectangle imports");
+        let out = recipe_to_xmp_in_frame(&r, FrameAspect::from_size(9504.0, 6336.0)).0;
+        assert!(out.contains("crs:CropAngle=\"-3.274380\""), "{out}");
+        // …and the rectangle comes back within the clamp this composition
+        // costs on this specimen (5.9 px of 9186 = 0.00064).
+        let back = xmp_to_recipe(&out).crop.expect("and again");
+        for (got, want) in [
+            (back.left, c.left),
+            (back.top, c.top),
+            (back.right, c.right),
+            (back.bottom, c.bottom),
+        ] {
+            assert!((got - want).abs() < 1e-5, "{got} != {want}");
+        }
+    }
+
+    /// A tilted crop in a FOREIGN document that declares no frame cannot be
+    /// placed — and is dropped and disclosed rather than read as the
+    /// axis-aligned rectangle it is not. Ours is read verbatim, because that
+    /// is precisely what this writer's frameless arm emits.
+    ///
+    /// MUTATION THIS CATCHES: read the foreign one verbatim too and the note
+    /// disappears while a rectangle appears out of corners that mean something
+    /// else.
+    #[test]
+    fn a_frameless_tilted_crop_is_dropped_for_a_foreign_document_and_kept_for_ours() {
+        let crop = "crs:HasCrop=\"True\" crs:CropLeft=\"0.05\" crs:CropTop=\"0\" \
+                    crs:CropRight=\"0.95\" crs:CropBottom=\"1\" crs:CropAngle=\"-1.5\"";
+        let foreign = format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+             xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description \
+             rdf:about=\"\" xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             {crop}/></rdf:RDF></x:xmpmeta>"
+        );
+        let r = xmp_to_recipe(&foreign);
+        assert_eq!(r.crop, None, "a rectangle we cannot place is not invented");
+        assert!((r.straighten_deg - 1.5).abs() < 1e-6, "the tilt needs no aspect and rides");
+        assert!(
+            crop_import_note(&foreign).is_some_and(|n| n.contains("could not be placed")),
+            "{:?}",
+            crop_import_note(&foreign)
+        );
+        // Ours: the writer's own frameless arm wrote the rectangle in the
+        // straightened frame, so the reader takes it back.
+        let mine = EditRecipe {
+            crop: Some(Crop { left: 0.05, top: 0.0, right: 0.95, bottom: 1.0 }),
+            straighten_deg: 1.5,
+            ..Default::default()
+        };
+        let back = xmp_to_recipe(&recipe_to_xmp(&mine));
+        assert_eq!(back.crop, mine.crop, "our own frameless round trip is lossless");
+        assert!(crop_import_note(&recipe_to_xmp(&mine)).is_none());
+    }
+
+    /// R27 T3, the second half of `P5-cropped-mask-frame.md` §8's parser
+    /// lesson: `crs:RetouchAreas` carries its OWN `Mask/Ellipse` (and
+    /// `Mask/Paint`) components, which are healing brushes rather than local
+    /// adjustments — a flat `crs:What="Mask/…"` count over the packet
+    /// disagrees with the correction-scoped parse on **83 of 166** images in
+    /// the user's library. This reader has always scoped its scan to
+    /// `crs:MaskGroupBasedCorrections` (`mask_summary`); the point of this
+    /// test is that it STAYS scoped.
+    ///
+    /// MUTATION THIS CATCHES: point `mask_summary` at the whole crs scope
+    /// instead of the correction block and the retouch ellipse arrives as a
+    /// phantom mask (or a phantom loss).
+    #[test]
+    fn a_retouch_area_is_not_counted_as_a_local_adjustment() {
+        let retouch = "  <crs:RetouchAreas>\n   <rdf:Seq>\n    <rdf:li>\n     \
+             <rdf:Description crs:SpotType=\"heal\" crs:SourceState=\"sourceSetAutomatically\">\n\
+             \x20    <crs:Masks>\n      <rdf:Seq>\n       <rdf:li crs:What=\"Mask/Ellipse\" \
+             crs:MaskValue=\"1\" crs:Top=\"0.1\" crs:Left=\"0.1\" crs:Bottom=\"0.2\" \
+             crs:Right=\"0.2\"/>\n      </rdf:Seq>\n     </crs:Masks>\n     \
+             </rdf:Description>\n    </rdf:li>\n   </rdf:Seq>\n  </crs:RetouchAreas>\n";
+        let doc = lr_doc(&lr_correction("R", "", &lr_radial("0", "0")))
+            .replace("  <crs:MaskGroupBasedCorrections>", &format!("{retouch}  <crs:MaskGroupBasedCorrections>"));
+        assert!(doc.contains("Mask/Ellipse"), "the fixture must carry the retouch component");
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "one correction, one mask — the retouch is not one");
+        assert_eq!(unsupported_corrections(&doc), 0, "nor is it a LOSS");
+        assert!(import_losses(&doc).is_empty(), "{:?}", import_losses(&doc));
+    }
+
+    /// R27 T4, `P2-feather-k-closures.md` §4.3. Lightroom's rule for the
+    /// detail/NR companions is **amount-gated**: 4/4 exports with
+    /// `LuminanceSmoothing > 0` carry the Detail companion and 0 of 207 with
+    /// it at 0 do; `SharpenEdgeMasking="0"` rides on 159 files whose
+    /// `Sharpness` is set. This writer gated each companion on its OWN value,
+    /// so `DSC09533.JPG`'s shape — `LuminanceSmoothing="50"`,
+    /// `…Detail="50"`, `…Contrast="0"` — came out with the Contrast key
+    /// missing, which no Lightroom file has.
+    ///
+    /// Behaviourally neutral by construction: only the companions whose ACR
+    /// default is ZERO join the rule (see `amount_carries`), so an emitted
+    /// `"0"` says exactly what its absence said.
+    ///
+    /// MUTATION THIS CATCHES: revert `amount_carries` to `false` and the two
+    /// zero-valued companions vanish from a document whose amounts are set;
+    /// widen it to every companion and `SharpenRadius="+0.0"` starts asserting
+    /// a radius Lightroom would render at.
+    #[test]
+    fn the_detail_companions_ride_on_their_amount_the_way_lightroom_writes_them() {
+        // `DSC09533.JPG`, verbatim (P2 §4.1).
+        let r = EditRecipe {
+            noise_reduction: 50.0,
+            nr_detail: 50.0,
+            nr_contrast: 0.0,
+            color_nr: 100.0,
+            color_nr_detail: 50.0,
+            color_nr_smooth: 50.0,
+            sharpening: 0.0,
+            ..Default::default()
+        };
+        let x = recipe_to_xmp(&r);
+        for want in [
+            "crs:LuminanceSmoothing=\"50\"",
+            "crs:LuminanceNoiseReductionDetail=\"50\"",
+            "crs:LuminanceNoiseReductionContrast=\"0\"",
+            "crs:ColorNoiseReduction=\"100\"",
+            "crs:ColorNoiseReductionDetail=\"50\"",
+            "crs:ColorNoiseReductionSmoothness=\"50\"",
+        ] {
+            assert!(x.contains(want), "the LR-shaped NR block is missing {want}: {x}");
+        }
+        assert!(!x.contains("SharpenEdgeMasking"), "no sharpening amount, no companion: {x}");
+        assert!(!x.contains("SharpenRadius"), "and never an invented radius: {x}");
+        // Sharpening set, masking at rest: Lightroom writes the zero.
+        let sharp = EditRecipe { sharpening: 45.0, ..Default::default() };
+        let x = recipe_to_xmp(&sharp);
+        assert!(x.contains("crs:SharpenEdgeMasking=\"0\""), "{x}");
+        assert!(!x.contains("SharpenDetail"), "a 25-default companion stays absent: {x}");
+        assert!(!x.contains("SharpenRadius"), "so does the 1.0-default radius: {x}");
+        // A recipe with NO noise reduction keeps the whole block absent — the
+        // half of the rule the old per-key gate got right.
+        let none = recipe_to_xmp(&EditRecipe::default());
+        assert!(!none.contains("LuminanceNoiseReductionContrast"), "{none}");
+        assert!(!none.contains("SharpenEdgeMasking"), "{none}");
+    }
+
+    /// R27 A7. A PORTRAIT capture's `crs:` coordinates are fractions of the
+    /// UN-ROTATED SENSOR ARRAY, and the export is already upright
+    /// (`P1-portrait-mask-frame.md` §1, HIGH; 7/7 files pick their true frame
+    /// by `dSS`, four landscape controls recover the known answer).
+    ///
+    /// The fixture is `_DSC9527-已增强-NR.JPG`'s Mask 8 (P1 §4.2), verbatim:
+    /// a single `Mask/CircularGradient` at `Angle="0"` declaring +1.6 EV, whose
+    /// `|b|` far exceeds the frame so it renders as a BAND — and the two
+    /// readings put that band on perpendicular axes, 12 628 px apart. P1
+    /// measures its fitted gain at **+1.647 ± 0.270** under the sensor frame
+    /// against a declared +1.60, and **−1.982** — the wrong SIGN — under the
+    /// display one.
+    ///
+    /// The two numbers asserted here are P1 §4.2's own: the band sits about
+    /// display `y = 4748` with a half-extent of `4315` px along that axis.
+    /// Under the rejected reading it would be a VERTICAL band about
+    /// `x = 3171` with half-width `4453`.
+    ///
+    /// MUTATION THIS CATCHES: drop the `orient_recipe_coords` call at the end
+    /// of `xmp_to_recipe` (or read `tiff:Orientation` as `Normal`) and the band
+    /// comes back vertical — the v0.33 defect P1 was written to close.
+    #[test]
+    fn a_portrait_captures_mask_is_decoded_in_the_sensor_frame() {
+        // sensor 9504 × 6336, tiff:Orientation="8" → display 6336 × 9504.
+        let doc = in_frame(
+            &lr_doc(&lr_correction(
+                "Mask 8",
+                "",
+                &lr_radial_at("-3.21675", "0.060424", "2.073933", "0.940417", "0"),
+            )),
+            9504,
+            6336,
+        )
+        .replace("tiff:ImageWidth", "tiff:Orientation=\"8\"\n   tiff:ImageWidth");
+        let r = xmp_to_recipe(&doc);
+        let MaskGeometry::Radial { top, left, bottom, right, .. } = r.masks[0].mask else {
+            panic!("a radial");
+        };
+        // The engine's frame is the DISPLAY one: 6336 × 9504.
+        let (cy, ry) = (
+            (top as f64 + bottom as f64) / 2.0 * 9504.0,
+            (bottom as f64 - top as f64) / 2.0 * 9504.0,
+        );
+        assert!((cy - 4748.0).abs() < 1.5, "the band's display centre is y = {cy:.0}, not 4748");
+        assert!((ry - 4315.0).abs() < 1.5, "its display half-extent is {ry:.0}, not 4315");
+        // …and the OTHER axis is the one that overflows the frame, which is
+        // what makes it a band rather than an ellipse.
+        let rx = (right as f64 - left as f64) / 2.0 * 6336.0;
+        assert!(rx > 6336.0, "the perpendicular half-extent {rx:.0} must exceed the frame");
+        // The writer un-turns it: the file's own four numbers come back.
+        let out = recipe_to_xmp_in_frame(
+            &r,
+            FrameAspect::from_size_turned(9504.0, 6336.0, rawler::Orientation::Rotate270),
+        )
+        .0;
+        for (key, want) in [
+            ("Top", "-3.21675"),
+            ("Left", "0.060424"),
+            ("Bottom", "2.073933"),
+            ("Right", "0.940417"),
+        ] {
+            assert!(
+                out.contains(&format!("crs:{key}=\"{want}\"")),
+                "crs:{key} did not survive the portrait round trip: {out}"
+            );
+        }
+    }
+
+    /// R27 A8, and it closes `C-rotation-skeleton.md`'s round-trip hole: a
+    /// document THIS writer produces now declares the frame its coordinates
+    /// are measured against, so re-importing one recovers the rotated radial
+    /// it wrote. Before R27 a fresh sidecar declared nothing, and the reader —
+    /// which needs `W/H` to fold a pixel-frame tilt into the engine's
+    /// normalised one — could not read our own file back.
+    ///
+    /// MUTATION THIS CATCHES: return an empty string from `frame_declaration`
+    /// and the re-import loses the tilt (and says so through
+    /// `describe_import_losses`), which is exactly the hole.
+    #[test]
+    fn a_fresh_document_declares_its_frame_and_can_be_read_back() {
+        let r = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Radial {
+                    top: 0.30, left: 0.20, bottom: 0.62, right: 0.75,
+                    feather: 0.5, roundness: 0.0, flipped: false, angle: 21.5,
+                    midpoint: 50.0, mask_version: 2,
+                },
+                exposure_ev: 0.4,
+                ..Default::default()
+            }],
+            crop: Some(Crop { left: 0.08, top: 0.05, right: 0.9, bottom: 0.94 }),
+            straighten_deg: 1.25,
+            ..Default::default()
+        };
+        for turn in [rawler::Orientation::Normal, rawler::Orientation::Rotate270] {
+            let frame = FrameAspect::from_size_turned(9504.0, 6336.0, turn);
+            let doc = recipe_to_xmp_in_frame(&r, frame).0;
+            assert!(doc.contains("xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\""), "{doc}");
+            assert!(doc.contains("tiff:ImageWidth=\"9504\""), "{doc}");
+            assert!(doc.contains("tiff:ImageLength=\"6336\""), "{doc}");
+            assert!(
+                doc.contains(&format!("tiff:Orientation=\"{}\"", turn.to_u16())),
+                "the DISPLAYED orientation, quarter turns included: {doc}"
+            );
+            let back = xmp_to_recipe(&doc);
+            // Compared as the ELLIPSE it draws, in the frame this engine
+            // displays — `(box, angle)` is a redundant carrier (a quarter turn
+            // of the box with the angle shifted 90° is the SAME ellipse), and
+            // Lightroom's own ±45° canonicalisation legitimately picks the
+            // other representative on the way through.
+            let (dw, dh) = if crate::decode::orientation_transposes(turn) {
+                (6336.0, 9504.0)
+            } else {
+                (9504.0, 6336.0)
+            };
+            let (a0, b0, t0) = engine_pixel_ellipse(&r.masks[0].mask, dw, dh);
+            let (a1, b1, t1) = engine_pixel_ellipse(&back.masks[0].mask, dw, dh);
+            assert!(
+                (a0 - a1).abs() < 1.0 && (b0 - b1).abs() < 1.0,
+                "{turn:?}: semi-axes {a0:.1}/{b0:.1} came back {a1:.1}/{b1:.1}"
+            );
+            assert!(
+                ((t0 - t1).rem_euclid(180.0)).min((t1 - t0).rem_euclid(180.0)) < 1e-2,
+                "{turn:?}: tilt {t0} came back as {t1}"
+            );
+            assert!((back.straighten_deg - 1.25).abs() < 1e-4, "{turn:?}: tilt");
+            let c = back.crop.expect("the crop survives");
+            assert!(
+                (c.left - 0.08).abs() < 2e-3 && (c.bottom - 0.94).abs() < 2e-3,
+                "{turn:?}: crop {c:?}"
+            );
+        }
+    }
+
     /// The REAL probe sidecars, when they are on the machine. Twelve controlled
     /// Lightroom exports live at
     /// `~/.claude/plans/r25-materials/lr-experiment/`; point
@@ -7465,6 +8504,24 @@ mod tests {
             if let (Some(w), Some(g)) = (read(&text, "Angle"), read(&out, "Angle")) {
                 let (w, g): (f64, f64) = (w.parse().unwrap(), g.parse().unwrap());
                 assert!((w - g).abs() < 1e-4, "{}: crs:Angle {g} vs {w}", path.display());
+            }
+            // R27: the CROP block travels the same road, and every one of
+            // these files carries `crs:HasCrop="False"` — so the crop codec
+            // must leave them exactly that, not invent a full-frame carrier.
+            for key in ["HasCrop", "CropTop", "CropLeft", "CropBottom", "CropRight", "CropAngle"] {
+                assert_eq!(
+                    read(&out, key),
+                    read(&text, key),
+                    "{}: crs:{key} did not survive the round trip",
+                    path.display()
+                );
+            }
+            // …and the frame this writer declares is the frame the file
+            // declared (A8), which is what makes the round trip re-readable.
+            for key in ["tiff:ImageWidth", "tiff:ImageLength", "tiff:Orientation"] {
+                let want = declared_number(&text, key);
+                let got = declared_number(&out, key);
+                assert_eq!(want, got, "{}: {key} {got:?} vs {want:?}", path.display());
             }
             checked += 1;
         }

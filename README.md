@@ -451,11 +451,17 @@ the list is there for everything the filter has never heard of.
   named. `crs:Roundness` and `crs:Midpoint` are still carried and never
   rendered — every radial reachable here writes their defaults and current
   Lightroom has no slider for either on a radial, so there is nothing to
-  calibrate against. `Feather = 100` is the one point on the falloff law that
-  was never measured (the export shot at it covers the whole frame, leaving
-  nothing to anchor on). Portrait frames, cropped frames and `|Angle| > 45°`
-  are untested: the twelve exports the model rests on are all uncropped
-  landscape. And a sidecar that declares no frame size still exports a rotated
+  calibrate against. ~~`Feather = 100` is the one point on the falloff law that
+  was never measured~~ **— measured in R27** (the frame-filling export needed an
+  annulus the hypotheses cannot anchor on; `d_out` comes out at 1.64 with a
+  5 %-residual interval of [1.54, 1.76] against the law's 1.548, and `d_in`
+  really does collapse to 0). ~~Portrait frames, cropped frames and
+  `|Angle| > 45°` are untested~~ **— portrait and cropped frames are settled in
+  R27 and the reader now decodes in the un-rotated source frame for both**
+  (a cropped export's mask coordinates stay pinned to the UNCROPPED frame; a
+  portrait export's stay pinned to the un-rotated sensor array, and the whole
+  recipe is turned into the display frame once, on import). `|Angle| > 45°`
+  remains untested. And a sidecar that declares no frame size still exports a rotated
   radial unrotated — the pixel↔normalised fold needs the aspect — which the
   save says in those words.
 - **Every Sony ARW render moved by (32, 20) px in v0.32.0.** The develop window

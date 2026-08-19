@@ -637,6 +637,26 @@ under it. `orient_recipe_coords` now negates `straighten_deg` on exactly those
 four states — the same rule it already applied to an ellipse's `angle` — and
 all eight states are exact.
 
+**Lightroom's crop is the same rotated-corner encoding the mask box uses**
+(R27 Batch-3, `P3-cropangle-model.md`). `crs:Crop{Left,Top,Right,Bottom}` are
+not an axis-aligned rectangle: they are two opposite ROTATED corners of the
+crop rect as fractions of the un-rotated source frame — `X = (R−L)/2·W`,
+`Y = (B−T)/2·H` signed, `p = X cosθ + Y sinθ`, `q = −X sinθ + Y cosθ`, exported
+size `round(2p) × round(2q)` — which is bit for bit the decode
+`xmp::lr_to_engine` runs for `Mask/CircularGradient`. One family, two consumers,
+and the ONE difference is measured rather than assumed: there is no `k = 1.032`
+magnification on the crop (global best-fit scale 1.000006). The sign is
+`rot(source → export) = −CropAngle`, so `straighten_deg = −CropAngle`, and like
+`k` that negation lives only at the XMP boundary — the engine's clockwise
+convention does not move. `xmp::lr_to_engine_crop` folds Lightroom's
+(corners, angle) into this engine's (inscribed-frame rectangle, straighten) so
+the render pipeline is untouched; the conversion is exact except where a
+Lightroom rectangle pushed against the edge of the rotated frame reaches
+outside the CENTRED inscribed rectangle, which is clamped and DISCLOSED
+(`xmp::crop_import_note`) rather than silently trimmed by `EditRecipe::clamp` at
+the next save. Measured on the seven library specimens the model rests on, that
+clamp costs 0, 0.2, 1.2, 1.3, 6.9, 30.3 and 5.9 px.
+
 **Forward compatibility across all four persisted shapes** (R27 L-17 completes
 the set). `EditRecipe` and every plain struct in it carry `deny_unknown_fields`,
 so a build meeting a recipe from a NEWER build refuses it loudly and by name
@@ -971,9 +991,20 @@ experiment:
 * **`crs:LocalHue`'s scale is 180, not 100.** A controlled export with the mask
   Hue slider at +50 wrote `crs:LocalHue="0.277778"`; 0.277778 × 180 = 50.00004.
 
-`W, H` are the exported pixel dimensions (= `DefaultCropSize`), and only their
-RATIO survives the algebra, which is why the boundary carries an
-`xmp::FrameAspect` rather than a size. The whole projection is `xmp::
+~~`W, H` are the exported pixel dimensions (= `DefaultCropSize`)~~ **ERRATUM,
+R27 Batch-3:** `W, H` are the **un-rotated SOURCE frame** — `DefaultCropSize`,
+which equals the exported dimensions only while `HasCrop="False"` and the
+capture is landscape. The two readings diverge the moment a crop exists
+(`P5-cropped-mask-frame.md` §1: reading a cropped export's own dimensions
+displaces `DSC09401_16.9.JPG`'s five radials by 834–1384 px) and again on a
+portrait capture (`P1-portrait-mask-frame.md` §1: an `Orientation=8` export is
+already upright and carries no `tiff:` at all, while its `crs:` numbers are
+still fractions of the 9504 × 6336 sensor array). Only the RATIO survives the
+ellipse algebra, but the boundary now carries the SIZE and the source→display
+TURN as well (`xmp::FrameAspect`): the size because the writer declares it
+(`tiff:ImageWidth/ImageLength`, so a document we wrote can be read back), and
+the turn because the reader moves the whole recipe through
+`render::orient_recipe_coords` once it has decoded in the source frame. The whole projection is `xmp::
 lr_to_engine` / `engine_to_lr`, an exact algebraic inverse: 16 real Lightroom
 radial sidecars round-trip their four corners **byte for byte** (the angle to
 10⁻⁴ °, bounded by the `f32` the recipe stores it in), including the rows where

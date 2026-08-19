@@ -999,12 +999,16 @@ pub const RECIPE_CONTROLS: [Control; 64] = [
         // button, not a proposal.
         engine_only: true,
         // NOT `CropAngle` (that is `straighten_deg`, ±45): Lightroom expresses
-        // a quarter turn as `tiff:Orientation`, which this build does not yet
-        // write at all (R27 item A8, gated on the portrait measurement at
-        // `xmp::FrameAspect`). So the turn is engine-side only for now, and a
-        // sidecar we write describes the UNTURNED frame — registered in
-        // ROADMAP, not silently implied by a `crs:` key that means something
-        // else.
+        // a quarter turn as `tiff:Orientation`, which is not a `crs:` key and
+        // so has no place in this registry. R27 Batch-3 (A8) DOES write it now
+        // — `xmp::frame_declaration` emits the COMPOSED orientation (the
+        // camera's EXIF state ∘ these quarter turns), which is what closes the
+        // 「a sidecar we write describes the UNTURNED frame」 gap registered in
+        // ROADMAP. What stays true, and is why this row is still
+        // `CrsKey::None`: the turn cannot be recovered from the sidecar on the
+        // way back (classic ACR has nowhere to put it), so a re-import reports
+        // no turn and the authoritative restore path is the store's
+        // `recipe.json`.
         crs: CrsKey::None,
         tier: None,
         purpose: "engine bookkeeping: the photographer's own clockwise quarter turns (0..3), \

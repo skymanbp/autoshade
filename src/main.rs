@@ -522,8 +522,17 @@ fn lightroom_import_note(raw: &Path) -> Option<String> {
     // passes (`bin/gui/export.rs`), so the two surfaces cannot report the same
     // file differently.
     let imported = autoshop::xmp::xmp_to_recipe(&text).masks.len();
-    let line = autoshop::xmp::describe_import_losses(imported, &losses)?;
-    Some(format!("reading {}: {line}", lr.display()))
+    // The mask sentence and the CROP sentence (R27) ride together: a file can
+    // lose either, both or neither, and a `?` on the first would have swallowed
+    // the second on every sidecar whose masks arrived whole.
+    let line = [
+        autoshop::xmp::describe_import_losses(imported, &losses),
+        autoshop::xmp::crop_import_note(&text),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    (!line.is_empty()).then(|| format!("reading {}: {}", lr.display(), line.join("; ")))
 }
 
 /// The non-output half of the pre-pay preflight (the L09#1 rule made whole

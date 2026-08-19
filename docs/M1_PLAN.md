@@ -287,7 +287,7 @@ Tooling note for the build harness [verified, not a Claude bug]: on this machine
 | `dehaze` | `Dehaze` | real | identity −100..100; absent in older sidecars — on read, score absent as neutral 0 [verified: XMP.pm real; exiftool forum] |
 | `sharpening` | `Sharpness` | integer | identity 0..150 — **no rescale**; clamp only [verified v0.31.1: 15 real sidecars carry `crs:Sharpness="150"` (2 repos, NIKON Z 6 + Z 30, `crs:Version` 15.3 + 17.2), max of 566 observed occurrences. The earlier "crs 0..100, rescale ×⅔ on write" row was WRONG: it came from a third-party Lua slider table (`RobColeLr/…/DevelopSettings.lua` L165 min=0 max=100), not from Adobe, and the sidecars contradict it. 150 is the Detail > Sharpening Amount slider's UI maximum] |
 | `noise_reduction` | `LuminanceSmoothing` | integer | 0..100; **easily-missed key** — must be written or NR is silently dropped [verified: standard crs, Report 5] |
-| `straighten_deg` | `CropAngle` | real | degrees; recipe = clockwise-positive — verify sign on one known image before trusting [verified key; sign [unverified]] |
+| `straighten_deg` | `CropAngle` | real | degrees; recipe = clockwise-positive. **SIGN MEASURED 2026-08-19 (R27 P3): `straighten_deg = −CropAngle`** — Lightroom turns the CONTENT counter-clockwise by a positive `CropAngle`. The negation lives at the XMP boundary (`xmp::lr_to_engine_crop` / `engine_to_lr_crop`), and the value is written with six decimals, not one. |
 | `crop.{left,top,right,bottom}` | `CropLeft/Top/Right/Bottom` | real | normalised [0,1], (0,0) top-left → identity; only applied when `HasCrop="True"` [verified: identity mapping; HasCrop gate] |
 | `crop` present | `HasCrop` | boolean | `"True"` when `crop` is `Some`, else `"False"` [verified: real sidecar] |
 | `tone_curve[{input,output}]` | `ToneCurvePV2012` | Seq of `"x, y"` | 0..255 ints; must start `"0, 0"`, end `"255, 255"`; ≥2 points; empty recipe curve ⇒ omit or write identity [verified: real sidecars] |
@@ -335,7 +335,7 @@ Tooling note for the build harness [verified, not a Claude bug]: on this machine
 </x:xmpmeta>
 ```
 
-[unverified] the ±100 slider bounds, crop 0.0..1.0 fraction, `ProcessVersion="11.0"`, and `CropAngle` sign — these are well-established ACR convention but were not pin-confirmed in primary docs (Adobe helpx pages timed out). Closing step: run `exiftool -G1 -s -X foo.ARW` on a raw actually edited in Lightroom, or `exiftool -list -XMP-crs:all`, and read the emitted values.
+[unverified] the ±100 slider bounds, crop 0.0..1.0 fraction, `ProcessVersion="11.0"`, and ~~`CropAngle` sign~~ (**CLOSED 2026-08-19, R27 P3 — measured against rendered pixels on six photographs, not looked up: `rot(source → export) = −CropAngle`**) — these are well-established ACR convention but were not pin-confirmed in primary docs (Adobe helpx pages timed out). Closing step: run `exiftool -G1 -s -X foo.ARW` on a raw actually edited in Lightroom, or `exiftool -list -XMP-crs:all`, and read the emitted values.
 
 ---
 
@@ -385,11 +385,12 @@ Ground truth = the user's **finished edits**. Two cases ([ARCHITECTURE.md:129-13
 > **Retirement pass — 2026-08-19 (R27 Batch-1a).** This table was written in M1 and
 > never formally retired, so it kept reading as a live ledger of fourteen open
 > questions long after nine of them had been answered somewhere else in the repo.
-> Each row below now carries a VERDICT with the citation that closes it. **Four stay
-> open** — #3, #6, #9, #12 — and each of those has a new plan, not a restatement of
-> the old one. The highest-value survivor is **#9 (`CropAngle` sign)**: a sign error
+> Each row below now carries a VERDICT with the citation that closes it. ~~**Four stay
+> open** — #3, #6, #9, #12~~ **THREE stay open — #3, #6, #12 — since 2026-08-19: #9 is CLOSED by R27 P3** (see its row). Each of the rest has a new plan, not a restatement of
+> the old one. ~~The highest-value survivor is **#9 (`CropAngle` sign)**: a sign error
 > tilts every straightened export the wrong way and nothing in the repo tests it
-> against Lightroom.
+> against Lightroom.~~ **It was: the sign was INVERTED, every straightened import was off by
+> 2 × CropAngle, and the library forensics route this ledger proposed is what found it.**
 
 | # | Item | Verdict (2026-08-19) |
 |---|---|---|
@@ -401,7 +402,7 @@ Ground truth = the user's **finished edits**. Two cases ([ARCHITECTURE.md:129-13
 | 6 | `Exposure2012` numeric range bound (decimal type verified; ±5.0 not doc-confirmed) | **OPEN.** The GLOBAL bound is still doc-unconfirmed. What R27 did settle is its LOCAL twin: `crs:LocalExposure2012="1"` = +4.00 EV exactly, measured on `_DSC9593.xmp` (V2_PLAN §7 item 2), and the import gate sits one stop wider at ±5 on purpose (`src/xmp.rs:3916`). **New plan:** the same one-frame experiment on the GLOBAL slider — push Exposure to +5.00 and to −5.00, Ctrl+S, read the two values — rides the next Lightroom session. |
 | 7 | ±100 slider bounds for Contrast/Highlights/Shadows/Whites/Blacks/Clarity/Vibrance/Dehaze | **CLOSED** — settled by the 160-sidecar survey (R24) plus the control registry's per-row `range` (`src/advisor/catalogue.rs`), which is the single source both the schema and the eval ruler derive from. v0.31.1's `Sharpness` correction is the proof the mechanism works: a band that was wrong got caught by real files, and `Sharpness` is not in this row's list precisely because its band is 0..150, not ±100. |
 | 8 | Crop `Top/Left/Bottom/Right` 0.0..1.0 fractional range | **CLOSED** — §9.3 of this document, from a real sidecar: `CropTop/Left="0"`, `CropBottom/Right="1"`, gated by `HasCrop`. |
-| 9 | `CropAngle` unit/sign vs recipe's clockwise-positive `straighten_deg` | **OPEN — and it is the one that matters.** The writer emits `straighten_deg` 1:1 (`src/xmp.rs:1781`) and the reader takes it back 1:1 (`src/xmp.rs:4867`), both gated on `HasCrop="True"`; nothing measures the sign, and §9.3's sample frame has `CropAngle="0"`. **New plan, two routes:** (a) library forensics, running as an R27 item — the user's own catalogue is scanned for sidecars carrying a non-zero `crs:CropAngle` beside a finished export, and the rendered tilt is compared against ours (this is the CLI-first discipline the round adopted: use existing files as ground truth, and only ask for a fresh Lightroom session if they disagree); (b) failing that, one deliberately straightened frame at a known tilt (e.g. −2.5°) in the next session. |
+| 9 | `CropAngle` unit/sign vs recipe's clockwise-positive `straighten_deg` | **CLOSED 2026-08-19 (R27 P3), by measurement — and the answer was that it was WRONG.** `rot(source → export) = −CropAngle`: Lightroom turns the content counter-clockwise by a positive `CropAngle`, this engine's `rotate_straighten` turns it clockwise, so every straightened import was tilted by **2 × CropAngle** the wrong way (6.55° on the library's largest). Measured by SIFT/RANSAC registration against un-straightened references on **six photographs** spanning −3.27°…+1.73°, best pair agreeing to 0.0002°, rival hypothesis separated by 34× the residual on the weakest row; a seventh (`_DSC9558`, `PerspectiveUpright=2`) is excluded WITH CAUSE, not silently. The route was (a) — library forensics, exactly as planned here — and it also found that the crop RECTANGLE was being read in the wrong frame (rotated corners of the source frame, not an axis-aligned box), that the ordering guard `left < right` silently discarded legal `Left > Right` crops, and that the writer's `{:.1}` cost 4.3 px of edge-to-edge tilt per re-save. All four fixed in R27 Batch-3; evidence `~/.claude/plans/r27-materials/P3-cropangle-model.md`. |
 | 10 | `ProcessVersion="11.0"` exact current value | **CLOSED** — §9.3: the real value is `15.4`. |
 | 11 | ΔE00 < 2 = "imperceptible" threshold (convention, not derived) | **CLOSED as not-a-question** — the row's own column says *"Treat as rule-of-thumb pass bar; no hard close needed"*. It is a convention, cited as one. |
 | 12 | EV-offset, WB-offset, gray-world-on-neutrals estimators (heuristics) | **OPEN, with a plan the user approved 2026-08-19.** Validation rides the **147-pair set** — the same corpus as the M-C re-baseline — as a correlation report of each estimator's output against the user's real slider values, produced by the CLI (no GUI). That makes it a by-product of a re-run that has to happen anyway (the eval baseline is pixel-stale since v0.32.0 moved every ARW by (32,20) px), rather than a separate errand. |
@@ -439,7 +440,7 @@ Use these, **not** the guessed constants in §5's template / §8's table:
 - `crs:ProcessVersion="15.4"` (NOT `"11.0"` — closes §8 #10), `crs:Version="15.5.1"`, `crs:CompatibleVersion="234881024"`.
 - Sliders are **signed integers with an explicit `+`**: `Contrast2012="+22"`, `Highlights2012="+7"`, `Shadows2012="-6"`, `Tint="+13"`, `Dehaze="+18"`, `Vibrance="+5"`, `Saturation="+13"`. `Exposure2012="0.00"` is decimal EV. `Sharpness="40"` plain unsigned int; `LuminanceSmoothing="0"` present. → §5's signed-int convention is right and the writer must emit the leading `+` for positives. *(v0.31.1: the "0..100" this bullet used to assert about `Sharpness` was an inference from one sample sitting at 40, not a measurement of the band. The band is 0..150 — see the §8 table row.)*
 - `Temperature="5650"` is written **even when `WhiteBalance="As Shot"`** → refines §8 #14: `Temperature` is emitted as an absolute Kelvin regardless of WB mode in this corpus.
-- Crop: `HasCrop="False"`, `CropTop/Left="0"`, `CropBottom/Right="1"`, `CropAngle="0"` → confirms 0..1 fractions + `HasCrop` gate (closes §8 #8). `CropAngle` sign still [unverified] (no tilted sample in this file).
+- Crop: `HasCrop="False"`, `CropTop/Left="0"`, `CropBottom/Right="1"`, `CropAngle="0"` → confirms 0..1 fractions + `HasCrop` gate (closes §8 #8). ~~`CropAngle` sign still [unverified] (no tilted sample in this file)~~ **— closed elsewhere: R27 P3 found seven tilted specimens in the user's own library (§8 #9).**
 - **Tone curve correction:** real `ToneCurvePV2012` = `"0, 0"`,`"67, 61"`,`"189, 210"`,`"224, 255"` — the **last point need NOT be `"255, 255"`** (§5's template wrongly mandates it). Endpoints can be interior; only "starts at x=0, monotonic in x" holds.
 
 ### 9.4 Scope reality — user's edits exceed our global-only `EditRecipe` [verified: same file]
@@ -472,12 +473,10 @@ already done.*
   wanted for.
 
 **Still open, with their current plans (the §8 table carries the detail):**
-- **#9 `CropAngle` sign** — the one with teeth. A sign error tilts every straightened
-  export the wrong way, the writer/reader pair is 1:1 in both directions
-  (`src/xmp.rs:1781` / `src/xmp.rs:4867`) and nothing tests it against Lightroom.
-  **Plan:** library forensics first (an R27 item — find a real non-zero
-  `crs:CropAngle` beside its finished export and compare the rendered tilt), a
-  deliberately straightened export only if that comes up empty.
+- ~~**#9 `CropAngle` sign** — the one with teeth.~~ **CLOSED 2026-08-19 (R27 P3).** The plan
+  below is what ran, and it paid: the 1:1 writer/reader pair was INVERTED, and the same
+  forensics turned up three more defects in the crop block (frame, ordering guard,
+  `{:.1}` precision). See the §8 row and `V2_PLAN.md` §7 item 12.
 - **#6 global `Exposure2012` range bound** — the LOCAL twin is measured now
   (`crs:LocalExposure2012="1"` = +4.00 EV exactly, `_DSC9593.xmp`); the global one
   rides the next Lightroom session as a two-value read at ±5.00.

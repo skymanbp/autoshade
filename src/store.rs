@@ -3869,6 +3869,14 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
             bad.join(", ")
         );
     }
+    // The CROP half of the same disclosure (R27): a tilted Lightroom rectangle
+    // is a rotated-corner encoding in the source frame, and this engine's
+    // rotate-then-crop composition cannot always express one — it is trimmed,
+    // or (with no declared frame) not placed at all. Same channel, same
+    // background-path rule as the numbers above.
+    if let Some(note) = crate::xmp::crop_import_note(&text) {
+        eprintln!("⚠ {note}");
+    }
     derived.clamp();
     // Stamp like the GUI's XMP-only RESTORE does (fresh camera knots + the
     // in-camera lens profile): a verbatim derived snapshot loaded back would

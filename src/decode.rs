@@ -737,6 +737,136 @@ fn jpeg_exif_block(file: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// The XMP packet of a JPEG: the `http://ns.adobe.com/xap/1.0/\0` APP1
+/// segment, with any **ExtendedXMP** continuation chunks reassembled onto it.
+///
+/// **Why the second half is not optional** (R27, `P5-cropped-mask-frame.md`
+/// §8). A JPEG APP1 segment holds at most 65533 payload bytes, and a Lightroom
+/// develop block with masks routinely exceeds that: **13 exports in the user's
+/// own library** are split this way, including `DSC09024_1.jpg` — one of the
+/// seven photographs P3's crop model rests on. The continuation lives in
+/// further APP1 segments introduced by `http://ns.adobe.com/xmp/extension/\0`,
+/// each carrying the 32-hex GUID of the extension it belongs to, the total
+/// length, and its own byte offset. A reader that simply concatenates
+/// `<x:xmpmeta>…</x:xmpmeta>` out of the raw bytes bridges the segment headers
+/// and produces XML that is not well-formed; a reader that takes only the
+/// standard segment gets a truncated document. Both were observed on this
+/// library, in P5's own first pass.
+///
+/// The chunks are placed BY OFFSET, not by arrival order, and a chain with a
+/// hole in it is `Err` rather than a quietly short document — the same rule the
+/// caller applies to a packet it cannot decode. Only the GUID the standard
+/// packet names (`xmpNote:HasExtendedXMP`) is accepted, so a second edit
+/// generation's leftover chunks cannot splice themselves into this one.
+///
+/// The standard packet comes back FIRST and whole: `crs:` settings live in it,
+/// and the extension carries the overflow (usually the AI-mask rasters).
+fn jpeg_xmp_packet(file: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    const STD: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+    const EXT: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
+    /// GUID (32) + total length (4) + offset (4).
+    const EXT_HEADER: usize = 40;
+    let mut r = std::io::BufReader::new(file.by_ref().take(MAX_JPEG_HEADER_SCAN));
+    let mut soi = [0u8; 2];
+    if r.read_exact(&mut soi).is_err() || soi != [0xFF, 0xD8] {
+        return Ok(None);
+    }
+    let mut standard: Option<Vec<u8>> = None;
+    let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut total: Option<u32> = None;
+    loop {
+        let mut b = [0u8; 1];
+        if r.read_exact(&mut b).is_err() {
+            break;
+        }
+        if b[0] != 0xFF {
+            break; // desynchronised — not our business to repair
+        }
+        while b[0] == 0xFF {
+            if r.read_exact(&mut b).is_err() {
+                return Ok(standard);
+            }
+        }
+        let marker = b[0];
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            continue; // standalone, no length field
+        }
+        if marker == 0xDA || marker == 0xD9 {
+            break; // scan data / end of image — the header region is over
+        }
+        let mut len = [0u8; 2];
+        if r.read_exact(&mut len).is_err() {
+            break;
+        }
+        let payload = u64::from(u16::from_be_bytes(len)).saturating_sub(2);
+        if marker != 0xE1 {
+            if std::io::copy(&mut r.by_ref().take(payload), &mut std::io::sink()).is_err() {
+                break;
+            }
+            continue;
+        }
+        let mut buf = vec![0u8; payload as usize];
+        if r.read_exact(&mut buf).is_err() {
+            break;
+        }
+        if buf.starts_with(STD) {
+            standard.get_or_insert_with(|| buf[STD.len()..].to_vec());
+        } else if buf.starts_with(EXT) && buf.len() >= EXT.len() + EXT_HEADER {
+            let head = &buf[EXT.len()..EXT.len() + EXT_HEADER];
+            let guid = head[..32].to_ascii_uppercase();
+            // The standard packet NAMES the extension it owns; anything else
+            // belongs to some other generation of this file.
+            let owned = standard.as_deref().is_some_and(|s| {
+                twoway_contains(s, &guid)
+            });
+            if !owned {
+                continue;
+            }
+            let len = u32::from_be_bytes([head[32], head[33], head[34], head[35]]);
+            let off = u32::from_be_bytes([head[36], head[37], head[38], head[39]]);
+            if total.is_some_and(|t| t != len) {
+                anyhow::bail!("its ExtendedXMP chunks disagree about the total length");
+            }
+            total = Some(len);
+            chunks.push((off, buf[EXT.len() + EXT_HEADER..].to_vec()));
+        }
+    }
+    let Some(std_packet) = standard else { return Ok(None) };
+    if chunks.is_empty() {
+        return Ok(Some(std_packet));
+    }
+    chunks.sort_by_key(|(off, _)| *off);
+    let mut ext = Vec::new();
+    for (off, body) in chunks {
+        if off as usize != ext.len() {
+            anyhow::bail!(
+                "its ExtendedXMP chain has a gap at byte {off} (had {} bytes)",
+                ext.len()
+            );
+        }
+        ext.extend_from_slice(&body);
+    }
+    if total.is_some_and(|t| t as usize != ext.len()) {
+        anyhow::bail!("its ExtendedXMP chain is short of the length it declares");
+    }
+    // Two packets, one after the other: each is a complete `<x:xmpmeta>`
+    // document, and every reader in this crate scans for the settings rather
+    // than assuming one root (the same shape a RAW's own multi-packet files
+    // have — `P3-cropangle-model.md` §3.1 found a develop block in the SECOND
+    // packet of a real export).
+    let mut out = std_packet;
+    out.push(b'\n');
+    out.extend_from_slice(&ext);
+    Ok(Some(out))
+}
+
+/// `haystack.contains(needle)` for bytes, without pulling in a dependency.
+fn twoway_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= haystack.len()
+        && haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
+}
+
 /// Capture metadata for an already-baked raster (P2). Returns the maker, the
 /// model and rawler's own parsed [`rawler::exif::Exif`] — the SAME struct the
 /// RAW arm reads, so [`exif_facts`] serves both.
@@ -1042,17 +1172,36 @@ pub fn frame_size(path: &Path) -> Result<(usize, usize)> {
 }
 
 /// [`frame_size`] in the frame the photographer's own quarter turns produce.
-///
-/// **Not yet wired to the XMP aspect supplier** (`pipeline::photo_frame_aspect`
-/// still calls the un-turned door). The write side's `s = W/H` and the
-/// sidecar's declared `tiff:ImageWidth/ImageLength` must agree, and which way
-/// Lightroom writes those for a ROTATED frame is the measurement registered at
-/// `xmp::FrameAspect` — turning our half alone would move every portrait
-/// user's radial on a guess. R27 item A7; it opens the moment that one
-/// portrait export lands.
 pub fn frame_size_turned(path: &Path, quarter_turns: u8) -> Result<(usize, usize)> {
+    let ((w, h), exif) = source_frame(path)?;
+    let orientation = crate::render::compose_orientation(exif, quarter_turns);
+    Ok(if orientation_transposes(orientation) { (h, w) } else { (w, h) })
+}
+
+/// The frame the FILE STORES, un-turned, together with the turn its own
+/// metadata asks for — the two halves [`frame_size_turned`] folds together,
+/// and the pair `xmp::FrameAspect` needs whole (R27 A7/A8).
+///
+/// For a RAW that is [`default_crop`]'s rectangle in SENSOR orientation (the
+/// DNG `DefaultCropSize`, long axis left→right on an A7R IV whichever way the
+/// camera was held); for a baked image it is the header's own dimensions
+/// before its EXIF orientation is applied. **This — not the display frame — is
+/// what every normalised `crs:` coordinate is measured against**
+/// (`P1-portrait-mask-frame.md` §1 for the mask block,
+/// `P3-cropangle-model.md` §2 for the crop rectangle, both HIGH), and it is
+/// what a Lightroom sidecar's `tiff:ImageWidth/ImageLength` declare (F3's
+/// public census, 72/72).
+///
+/// ONE metadata read for both answers: the caller that needs the aspect needs
+/// the orientation too, and asking twice paid for the same header walk twice.
+///
+/// Metadata only: `dummy = true` on the RAW arm means no sensor
+/// decompression, and the baked arm decodes no pixel at all.
+pub fn source_frame(path: &Path) -> Result<((usize, usize), rawler::Orientation)> {
     if !is_raw(path) {
         use image::ImageDecoder as _;
+        use image::metadata::Orientation as ImgO;
+        use rawler::Orientation as O;
         // baked-by-construction: the `is_raw` gate above is this function's
         // own dispatch, the one `load_image_gated` enforces for pixels.
         let reader = image::ImageReader::open(path)
@@ -1062,19 +1211,22 @@ pub fn frame_size_turned(path: &Path, quarter_turns: u8) -> Result<(usize, usize
         let mut decoder = reader
             .into_decoder()
             .with_context(|| format!("read the header of {}", path.display()))?;
-        let transposes = matches!(
-            decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms),
-            image::metadata::Orientation::Rotate90
-                | image::metadata::Orientation::Rotate270
-                | image::metadata::Orientation::Rotate90FlipH
-                | image::metadata::Orientation::Rotate270FlipH
-        );
+        // `image`'s eight states ARE the EXIF eight, named after the motion
+        // that CORRECTS the file rather than after the tag number; the pairing
+        // below is that table (`Rotate90` = tag 6, `Rotate270` = tag 8), which
+        // is exactly how `rawler::Orientation::from_u16` spells them too.
+        let exif = match decoder.orientation().unwrap_or(ImgO::NoTransforms) {
+            ImgO::NoTransforms => O::Normal,
+            ImgO::FlipHorizontal => O::HorizontalFlip,
+            ImgO::Rotate180 => O::Rotate180,
+            ImgO::FlipVertical => O::VerticalFlip,
+            ImgO::Rotate90FlipH => O::Transpose,
+            ImgO::Rotate90 => O::Rotate90,
+            ImgO::Rotate270FlipH => O::Transverse,
+            ImgO::Rotate270 => O::Rotate270,
+        };
         let (w, h) = decoder.dimensions();
-        let (w, h) = (w as usize, h as usize);
-        let (w, h) = if transposes { (h, w) } else { (w, h) };
-        // …then the user's own turn, on the already-oriented frame — the same
-        // two-step the RAW arm below folds into one composed orientation.
-        return Ok(if quarter_turns % 2 == 1 { (h, w) } else { (w, h) });
+        return Ok(((w as usize, h as usize), exif));
     }
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
@@ -1090,9 +1242,7 @@ pub fn frame_size_turned(path: &Path, quarter_turns: u8) -> Result<(usize, usize
         Ok((md, raw))
     })?;
     let d = default_crop(&raw).d;
-    let orientation =
-        crate::render::compose_orientation(raw_orientation_of(&md), quarter_turns);
-    Ok(if orientation_transposes(orientation) { (d.h, d.w) } else { (d.w, d.h) })
+    Ok(((d.w, d.h), raw_orientation_of(&md)))
 }
 
 /// Does this orientation swap width and height in the display frame?
@@ -1621,7 +1771,17 @@ pub fn embedded_xmp(path: &Path) -> Result<Option<String>> {
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase());
-    let bytes: Option<Vec<u8>> = if matches!(ext.as_deref(), Some("cr3" | "raf")) {
+    let bytes: Option<Vec<u8>> = if matches!(ext.as_deref(), Some("jpg" | "jpeg" | "jpe")) {
+        // A JPEG is not a TIFF container: its packet rides in APP1 segments,
+        // and the walk below is the same marker walk `jpeg_exif_block` does
+        // for EXIF. Before R27 this fell into the TIFF arm, `GenericTiffReader`
+        // failed on the `FFD8` header and the answer came back as ABSENT — the
+        // silent-absence this function's own contract forbids.
+        let mut file = std::fs::File::open(path)
+            .with_context(|| format!("open image {}", path.display()))?;
+        jpeg_xmp_packet(&mut file)
+            .with_context(|| format!("read the XMP packet in {}", path.display()))?
+    } else if matches!(ext.as_deref(), Some("cr3" | "raf")) {
         guard_tiff_chain(path)?;
         let src =
             RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
@@ -2283,6 +2443,90 @@ mod tests {
             f.extend(payload);
         }
         f
+    }
+
+    /// A JPEG whose header carries the given APP1 payloads, in order. No scan
+    /// data — the packet reader stops at `SOS` and never looks at pixels.
+    fn jpeg_with_app1(segments: &[Vec<u8>]) -> Vec<u8> {
+        let mut f: Vec<u8> = vec![0xFF, 0xD8];
+        for payload in segments {
+            f.extend([0xFF, 0xE1]);
+            f.extend(((payload.len() + 2) as u16).to_be_bytes());
+            f.extend(payload);
+        }
+        f.extend([0xFF, 0xD9]);
+        f
+    }
+
+    /// R27 T3, `P5-cropped-mask-frame.md` §8. A JPEG's XMP rides in APP1, and
+    /// a develop block with masks routinely exceeds the 65533-byte segment
+    /// limit — **13 exports in the user's own library** are split into
+    /// GUID-keyed ExtendedXMP chunks, `DSC09024_1.jpg` (one of P3's seven crop
+    /// specimens) among them. Before R27 a JPEG fell into the TIFF arm,
+    /// `GenericTiffReader` failed on the `FFD8` header, and the packet came
+    /// back as ABSENT — the silent absence this reader's contract forbids
+    /// everywhere else.
+    ///
+    /// MUTATION THIS CATCHES: return the standard segment alone (drop the
+    /// chunk loop) and the second half of the document is gone; accept a chunk
+    /// whose GUID the standard packet does not name and the foreign chunk
+    /// splices itself in; place the chunks in arrival order rather than by
+    /// offset and the two come back swapped.
+    #[test]
+    fn a_jpeg_xmp_packet_reassembles_its_extended_chunks() {
+        const STD: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+        const EXT: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
+        const GUID: &[u8; 32] = b"5CA1AB1E5CA1AB1E5CA1AB1E5CA1AB1E";
+        let dir = std::env::temp_dir().join("autoshop-jpeg-xmp-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let standard = {
+            let mut v = STD.to_vec();
+            v.extend(
+                format!(
+                    "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF><rdf:Description \
+                     xmpNote:HasExtendedXMP=\"{}\"/></rdf:RDF></x:xmpmeta>",
+                    String::from_utf8_lossy(GUID)
+                )
+                .as_bytes(),
+            );
+            v
+        };
+        let chunk = |body: &str, off: u32, guid: &[u8; 32]| {
+            let mut v = EXT.to_vec();
+            v.extend(guid);
+            v.extend(12u32.to_be_bytes()); // total length of the extension
+            v.extend(off.to_be_bytes());
+            v.extend(body.as_bytes());
+            v
+        };
+        // Deliberately out of order, with a foreign chunk in the middle.
+        let jpg = dir.join("split.jpg");
+        std::fs::write(
+            &jpg,
+            jpeg_with_app1(&[
+                standard.clone(),
+                chunk("SECOND", 6, GUID),
+                chunk("XXXXXX", 0, b"0BADC0DE0BADC0DE0BADC0DE0BADC0DE"),
+                chunk("_FIRST", 0, GUID),
+            ]),
+        )
+        .unwrap();
+        let text = embedded_xmp(&jpg).expect("readable").expect("present");
+        assert!(text.contains("HasExtendedXMP"), "the standard packet comes first: {text}");
+        assert!(text.ends_with("_FIRSTSECOND"), "reassembled BY OFFSET: {text:?}");
+        assert!(!text.contains("XXXXXX"), "a foreign GUID's chunk must not join: {text:?}");
+
+        // A chain with a hole is an ERROR, never a quietly short document.
+        let holed = dir.join("holed.jpg");
+        std::fs::write(&holed, jpeg_with_app1(&[standard.clone(), chunk("SECOND", 6, GUID)]))
+            .unwrap();
+        let err = format!("{:#}", embedded_xmp(&holed).unwrap_err());
+        assert!(err.contains("gap"), "{err}");
+
+        // No XMP APP1 at all → absence, not an error.
+        let bare = dir.join("bare.jpg");
+        std::fs::write(&bare, jpeg_with_app1(&[b"Exif\0\0II".to_vec()])).unwrap();
+        assert!(embedded_xmp(&bare).expect("readable").is_none());
     }
 
     /// L05#6: the packet lives in TIFF tag 0x02BC for every TIFF-container
