@@ -771,6 +771,321 @@ pub fn run(dir: &Path, limit: usize) -> Result<()> {
 mod tests {
     use super::*;
 
+    // ---------------------------------------------------------------------
+    // The ESTIMATOR PROBE (M1_PLAN §8 #12)
+    //
+    // Three numbers this codebase computes about a photograph without asking
+    // any model — and which M1 labelled "estimates, not measurements" and
+    // never checked against anything:
+    //
+    //   E1  EV-offset       `advisor::HeuristicProposer::ev_offset_estimate`
+    //   E2  as-shot WB      `render::as_shot_wb` (McCamy CCT + Krystek Duv)
+    //   E3  gray-world WB   `render::solve_wb_from_neutral`, fed the frame's
+    //                       own mean RGB — the "gray-world-on-neutrals"
+    //                       heuristic of the same row, assembled from the
+    //                       shipped solver rather than reimplemented
+    //
+    // The ground truth is the photographer's real sidecar. The three do NOT
+    // share a truth standard, and the report says so per estimator, because
+    // the comparisons are not equally clean:
+    //
+    //   * E2 is a MEASUREMENT. Under `WhiteBalance="As Shot"` Adobe writes
+    //     its OWN reading of the camera's as-shot illuminant into
+    //     `crs:Temperature`/`crs:Tint`. Two programs, one file, one physical
+    //     quantity — a disagreement is our estimator being wrong, full stop.
+    //   * E1 and E3 are ESTIMATOR-vs-TASTE. The photographer's
+    //     `crs:Exposure2012` is not "the correct EV offset", it is what they
+    //     wanted; and their custom WB is a choice, not the illuminant. A weak
+    //     correlation there is a statement about how much of the user's
+    //     intent a content-blind heuristic can predict — which is precisely
+    //     what a fallback baseline is allowed to be — not a defect.
+    // ---------------------------------------------------------------------
+
+    /// One estimator's scatter against the photographer's own values.
+    #[derive(Default)]
+    struct Scatter {
+        /// `(stem, estimate, user value)`, one row per photograph.
+        pts: Vec<(String, f64, f64)>,
+    }
+
+    /// Mean of a sample, or 0 for an empty one.
+    fn mean(v: &[f64]) -> f64 {
+        if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 }
+    }
+
+    /// POPULATION standard deviation (the scatter is the whole cohort, not a
+    /// sample drawn from a larger one).
+    fn sd(v: &[f64]) -> f64 {
+        let m = mean(v);
+        (mean(&v.iter().map(|x| (x - m) * (x - m)).collect::<Vec<_>>())).sqrt()
+    }
+
+    impl Scatter {
+        fn push(&mut self, stem: &str, est: f64, user: f64) {
+            self.pts.push((stem.to_string(), est, user));
+        }
+
+        /// Print `n`, Pearson r, OLS slope/intercept (estimate regressed ON
+        /// the user's value), signed bias, MAE, both spreads, and the worst
+        /// rows by |estimate − user|.
+        ///
+        /// r and the slope are printed as `n/a` when either side has no
+        /// spread — a correlation against a constant column is 0/0, and
+        /// printing a number there would invent a finding.
+        fn report(&self, title: &str, truth: &str, unit: &str) {
+            let (est, user): (Vec<f64>, Vec<f64>) =
+                self.pts.iter().map(|(_, e, u)| (*e, *u)).unzip();
+            println!("\n--- {title}\n    truth = {truth}");
+            if est.is_empty() {
+                println!("    n=0 — no photograph in this cohort");
+                return;
+            }
+            let (se, su) = (sd(&est), sd(&user));
+            let (me, mu) = (mean(&est), mean(&user));
+            let cov = mean(
+                &self
+                    .pts
+                    .iter()
+                    .map(|(_, e, u)| (e - me) * (u - mu))
+                    .collect::<Vec<_>>(),
+            );
+            let fmt = |v: f64| {
+                if v.is_finite() { format!("{v:+.3}") } else { "n/a".to_string() }
+            };
+            let (r, slope, intercept) = if se > 1e-9 && su > 1e-9 {
+                let sl = cov / (su * su);
+                (cov / (se * su), sl, me - sl * mu)
+            } else {
+                (f64::NAN, f64::NAN, f64::NAN)
+            };
+            let errs: Vec<f64> = self.pts.iter().map(|(_, e, u)| e - u).collect();
+            println!(
+                "    n={:<4} r={:<8} slope={:<8} intercept={:<8}  [{unit}]",
+                self.pts.len(),
+                fmt(r),
+                fmt(slope),
+                fmt(intercept)
+            );
+            println!(
+                "    bias(est−user)={:<8} MAE={:<8.3} mean: est={:<8} user={:<8}  sd: est={:<8.3} user={:.3}",
+                fmt(mean(&errs)),
+                mean(&errs.iter().map(|e| e.abs()).collect::<Vec<_>>()),
+                fmt(me),
+                fmt(mu),
+                se,
+                su
+            );
+            let mut worst = self.pts.clone();
+            worst.sort_by(|a, b| {
+                (b.1 - b.2).abs().partial_cmp(&(a.1 - a.2).abs()).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let names: Vec<String> = worst
+                .iter()
+                .take(5)
+                .map(|(s, e, u)| format!("{s} (est {e:+.2} vs {u:+.2})"))
+                .collect();
+            println!("    worst 5 by |est−user|: {}", names.join(" · "));
+        }
+    }
+
+    /// Mean of one 256-bin channel histogram, on the 0..1 scale
+    /// `render::solve_wb_from_neutral` reads sRGB pixels in.
+    fn channel_mean_01(bins: &[u32]) -> f32 {
+        let total: u64 = bins.iter().map(|&v| v as u64).sum::<u64>().max(1);
+        let weighted: u64 = bins.iter().enumerate().map(|(i, &v)| i as u64 * v as u64).sum();
+        (weighted as f32 / total as f32) / 255.0
+    }
+
+    /// **M1_PLAN §8 #12** — measure the three no-model estimators against the
+    /// photographer's own sliders over a real RAW + `.xmp` library.
+    ///
+    /// Point `AUTOSHOP_ESTIMATOR_PROBE` at a folder scanned recursively for
+    /// RAW files with a sibling `.xmp` (the same pair rule [`run`] uses, via
+    /// the same `pipeline::find_raws`), and run:
+    ///
+    /// ```text
+    /// AUTOSHOP_ESTIMATOR_PROBE=<dir> cargo test --lib -- --ignored --nocapture estimator
+    /// ```
+    ///
+    /// `AUTOSHOP_ESTIMATOR_PROBE_LIMIT` caps the pair count for a quick pass.
+    ///
+    /// It costs NO API call and writes nothing — it decodes each RAW and
+    /// reads each sidecar, both read-only. It is `#[ignore]`d rather than
+    /// silently no-op because an unset probe that returns green measures
+    /// nothing while looking like it measured something (the L-29 risk), and
+    /// it PANICS on a decode failure rather than skipping the file: a
+    /// forensic probe whose specimens quietly stop arriving is worse than no
+    /// probe.
+    ///
+    /// It asserts only what a probe honestly can — every pair decodes, every
+    /// cohort is non-empty, every printed statistic is finite. Deliberately
+    /// NO correlation threshold: nobody has set an acceptance bar for these
+    /// heuristics, and inventing one here would turn a measurement into a
+    /// gate the user never agreed to.
+    ///
+    /// MUTATION THIS CATCHES: it is a report, and the estimator identities it
+    /// reports on are pinned by unit tests next to each estimator
+    /// (`ev_offset_estimator_is_signed_stops_and_feeds_the_recipe`,
+    /// `wb_eyedropper_neutralizes_a_synthetic_cast`). What THIS body catches
+    /// is the plumbing: point E2 at `crs:Tint` instead of `crs:Temperature`
+    /// and the Kelvin cohort's finiteness assertion still passes but `n`
+    /// collapses to the handful of sidecars carrying one and not the other;
+    /// drop the `crs_own_scope` call and a creative Look's baked temperature
+    /// is scored as the photographer's own, exactly the defect that scoping
+    /// exists to prevent.
+    #[test]
+    #[ignore = "forensic probe: needs AUTOSHOP_ESTIMATOR_PROBE=<dir of RAW+.xmp pairs>; decodes every pair (minutes)"]
+    fn estimators_against_the_photographers_own_sliders() {
+        let Ok(dir) = std::env::var("AUTOSHOP_ESTIMATOR_PROBE") else {
+            panic!(
+                "set AUTOSHOP_ESTIMATOR_PROBE to a folder of RAW files with sibling .xmp \
+                 sidecars (the eval corpus)"
+            );
+        };
+        let root = std::path::PathBuf::from(&dir);
+        assert!(root.is_dir(), "AUTOSHOP_ESTIMATOR_PROBE is not a directory: {dir}");
+        let limit: usize = std::env::var("AUTOSHOP_ESTIMATOR_PROBE_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(usize::MAX);
+        let raws = pipeline::find_raws(&root).expect("scan the probe directory");
+        let pairs: Vec<_> = raws
+            .iter()
+            .filter(|r| r.with_extension("xmp").exists())
+            .take(limit)
+            .collect();
+        assert!(
+            !pairs.is_empty(),
+            "AUTOSHOP_ESTIMATOR_PROBE ({dir}) holds no RAW with a sibling .xmp"
+        );
+
+        let (mut ev, mut wb_k, mut wb_t) = (Scatter::default(), Scatter::default(), Scatter::default());
+        let (mut gw_k_all, mut gw_t_all) = (Scatter::default(), Scatter::default());
+        let (mut gw_k_custom, mut gw_t_custom) = (Scatter::default(), Scatter::default());
+        let (mut as_shot_photos, mut custom_wb_photos, mut no_anchor) = (0u32, 0u32, 0u32);
+
+        for raw in &pairs {
+            let stem = pipeline::stem(raw);
+            let xmp_text = crate::store::read_sidecar(&raw.with_extension("xmp"))
+                .unwrap_or_else(|| panic!("sidecar for {stem} is missing or unreadable"));
+            // The Description's OWN scope — the same rule `run` applies, and
+            // for the same reason: a creative Look bakes its own crs values.
+            let scope = crate::xmp::crs_own_scope(&xmp_text);
+            let scope = scope.as_ref();
+            let user_wb = crate::xmp::crs_str(scope, "WhiteBalance").as_deref() != Some("As Shot");
+            let decoded = crate::decode::decode_any(raw)
+                .unwrap_or_else(|e| panic!("decode {stem}: {e:#}"));
+            let hist = &decoded.histogram;
+
+            // --- E1: EV offset vs the photographer's exposure slider -------
+            // An absent Exposure2012 means they left it at 0, the same
+            // neutral rule the ruler above uses.
+            let est_ev = crate::advisor::HeuristicProposer::ev_offset_estimate(hist);
+            ev.push(stem, est_ev as f64, crs_f32(scope, "Exposure2012").unwrap_or(0.0) as f64);
+
+            // --- E2: as-shot WB vs Adobe's own as-shot reading -------------
+            let as_shot = crate::render::as_shot_wb(raw);
+            if let Some((k, tint)) = as_shot {
+                if user_wb {
+                    custom_wb_photos += 1;
+                } else {
+                    // Adobe's reading of the SAME camera metadata. Only
+                    // meaningful while the photographer left WB as-shot;
+                    // once they drag Temp, crs:Temperature is their taste.
+                    as_shot_photos += 1;
+                    if let Some(t) = crs_f32(scope, "Temperature") {
+                        wb_k.push(stem, k as f64, t as f64);
+                    }
+                    if let Some(t) = crs_f32(scope, "Tint") {
+                        wb_t.push(stem, tint as f64, t as f64);
+                    }
+                }
+            } else {
+                no_anchor += 1;
+            }
+
+            // --- E3: gray-world on the frame's own mean --------------------
+            // "This frame averages to neutral" is the classic gray-world
+            // assumption; the shipped eyedropper solver turns that assumed
+            // neutral into the (K, tint) the render would need. Anchored on
+            // the photo's own as-shot Kelvin (the engine's 5500 K fallback
+            // when the file has none), exactly like the eyedropper.
+            let anchor = as_shot.map(|(k, _)| k).unwrap_or(5500.0);
+            let px = [
+                channel_mean_01(&hist.r),
+                channel_mean_01(&hist.g),
+                channel_mean_01(&hist.b),
+            ];
+            let (gk, gt) = crate::render::solve_wb_from_neutral(px, anchor);
+            let (uk, ut) = (crs_f32(scope, "Temperature"), crs_f32(scope, "Tint"));
+            if let Some(t) = uk {
+                gw_k_all.push(stem, gk as f64, t as f64);
+                if user_wb {
+                    gw_k_custom.push(stem, gk as f64, t as f64);
+                }
+            }
+            if let Some(t) = ut {
+                gw_t_all.push(stem, gt as f64, t as f64);
+                if user_wb {
+                    gw_t_custom.push(stem, gt as f64, t as f64);
+                }
+            }
+        }
+
+        println!(
+            "\n=== Estimator probe (M1_PLAN §8 #12) — {} RAW+.xmp pair(s) under {dir} ===\n\
+             as-shot WB kept: {as_shot_photos} · custom WB set: {custom_wb_photos} · \
+             no as-shot anchor readable: {no_anchor}",
+            pairs.len()
+        );
+        ev.report(
+            "E1 EV-offset — advisor::HeuristicProposer::ev_offset_estimate (raw, pre-clamp)",
+            "crs:Exposure2012 (the photographer's TASTE, not a correct answer)",
+            "stops",
+        );
+        wb_k.report(
+            "E2 as-shot Kelvin — render::as_shot_wb (McCamy CCT)",
+            "crs:Temperature under WhiteBalance=\"As Shot\" (Adobe's own reading — a MEASUREMENT)",
+            "K",
+        );
+        wb_t.report(
+            "E2 as-shot tint — render::as_shot_wb (Krystek Duv × 3000)",
+            "crs:Tint under WhiteBalance=\"As Shot\" (Adobe's own reading — a MEASUREMENT)",
+            "tint units",
+        );
+        gw_k_all.report(
+            "E3 gray-world Kelvin — render::solve_wb_from_neutral(frame mean)",
+            "crs:Temperature, every photograph",
+            "K",
+        );
+        gw_t_all.report(
+            "E3 gray-world tint — render::solve_wb_from_neutral(frame mean)",
+            "crs:Tint, every photograph",
+            "tint units",
+        );
+        gw_k_custom.report(
+            "E3 gray-world Kelvin — custom-WB cohort only",
+            "crs:Temperature where the photographer moved WB off As Shot",
+            "K",
+        );
+        gw_t_custom.report(
+            "E3 gray-world tint — custom-WB cohort only",
+            "crs:Tint where the photographer moved WB off As Shot",
+            "tint units",
+        );
+
+        // Every cohort measured something, and every number printed above is
+        // real: a NaN estimate would print as a plausible-looking row.
+        assert!(!ev.pts.is_empty(), "E1 measured nothing");
+        assert!(!wb_k.pts.is_empty(), "E2 measured nothing — no as-shot sidecar in the corpus");
+        assert!(!gw_k_all.pts.is_empty(), "E3 measured nothing");
+        for s in [&ev, &wb_k, &wb_t, &gw_k_all, &gw_t_all, &gw_k_custom, &gw_t_custom] {
+            for (stem, e, u) in &s.pts {
+                assert!(e.is_finite() && u.is_finite(), "non-finite row for {stem}: {e} vs {u}");
+            }
+        }
+    }
+
     // Values copied from the user's real DSC08724.xmp (read this session).
     const SAMPLE: &str = r#"<rdf:Description
         crs:Temperature="5650" crs:Tint="+13" crs:Exposure2012="0.00"
