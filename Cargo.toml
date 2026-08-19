@@ -49,7 +49,16 @@ dotenvy = "0.15"
 # anything seeded from the clock is guessable, which is the whole attack.
 # Already in the tree transitively, so this adds no new dependency.
 getrandom = "0.3.4"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+# Codec set, opt-in one at a time — `default-features = false` because the
+# crate's default pulls avif (ravif + rgb) and exr, and avif/heic mean a C
+# toolchain (dav1d), which this tree does not have and keeps not having (see
+# the qcms note below). R27 P4 added webp/bmp/gif after checking each one's
+# dependency closure in Cargo.lock: `bmp` is in-crate with no dependency at
+# all, `gif` pulls `gif` + `color_quant`, `webp` pulls `image-webp` — all three
+# pure Rust, no `build.rs`, no `links =`, no bundled C. avif/heic stay OUT.
+image = { version = "0.25", default-features = false, features = [
+    "jpeg", "png", "tiff", "webp", "bmp", "gif",
+] }
 rawler = "0.7.2"
 # ICC → sRGB for baked imports (the LR "Edit in…" round-trip exports ProPhoto
 # 16-bit TIFFs; treating those pixels as sRGB fed every tone decision wrong

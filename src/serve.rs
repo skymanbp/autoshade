@@ -2917,10 +2917,12 @@ fn api_settings_post(request: &mut Request, state: &AppState) -> Result<Response
 
 // --- helpers ---------------------------------------------------------------
 
+/// DERIVED, not re-typed (R27 A2): this was the second hand-written copy of
+/// the baked extension list, and a copy is a drift waiting to happen — the
+/// third copy, in `web/index.html`, had already lost `.orf`/`.rw2`/`.raw`.
+/// `pipeline::BAKED_EXTS` is the one source; `list_coherence` pins it.
 fn is_baked_ext(p: &Path) -> bool {
-    p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
-        matches!(x.to_ascii_lowercase().as_str(), "png" | "tif" | "tiff" | "jpg" | "jpeg")
-    })
+    pipeline::is_baked(p)
 }
 
 fn raw_for(request: &Request, state: &AppState) -> Result<PathBuf> {
@@ -3252,6 +3254,89 @@ fn precondition_failed(if_match: Option<&str>, current: Option<&str>) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R27 A2, tier 2 — the web page's `<input accept>` list against the
+    /// formats the app actually opens.
+    ///
+    /// This is the ONE copy of the extension set that cannot be derived at
+    /// runtime: `index.html` is a static asset (`include_str!` at the top of
+    /// this file), so a browser's file picker is filtered by a string nothing
+    /// checked. It had drifted exactly as you would expect — `.orf`, `.rw2`
+    /// and `.raw` were openable by the gallery, the desktop dialog and the
+    /// upload endpoint, and invisible in the web picker, for four releases.
+    ///
+    /// The assertion is set equality, not textual equality, so re-ordering the
+    /// attribute is allowed and dropping or inventing a format is not. The
+    /// failure message prints the exact replacement string.
+    ///
+    /// MUTATION THIS CATCHES: add a format to `decode::RAW_EXTS` (which R27
+    /// did, 15 of them) or to `pipeline::BAKED_EXTS` (3 more) and forget the
+    /// HTML — this fails and hands you the line to paste.
+    #[test]
+    fn the_web_accept_list_matches_the_formats_the_app_opens() {
+        let marker = "id=\"file-input\"";
+        let line = INDEX_HTML
+            .lines()
+            .find(|l| l.contains(marker))
+            .expect("index.html still has the file-input element");
+        let accept = line
+            .split("accept=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the file input still carries an accept attribute");
+        let mut declared: Vec<String> = accept
+            .split(',')
+            .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|e| !e.is_empty())
+            .collect();
+        let mut expected: Vec<String> =
+            pipeline::photo_exts().iter().map(|e| e.to_string()).collect();
+        declared.sort();
+        declared.dedup();
+        expected.sort();
+        expected.dedup();
+        let want_attr: String =
+            pipeline::photo_exts().iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(",");
+        assert_eq!(
+            declared, expected,
+            "the web accept list has drifted from decode::RAW_EXTS ∪ pipeline::BAKED_EXTS.\n\
+             Replace the attribute in src/web/index.html with:\n  accept=\"{want_attr}\""
+        );
+    }
+
+    /// R27 A2, tier 2 — the server's own baked gate is the SHARED list, not a
+    /// second copy of it. `is_baked_ext` is now a one-line delegation, and
+    /// this is what keeps it one: re-inline the `matches!` and any format
+    /// added to `pipeline::BAKED_EXTS` starts being refused by the add-path
+    /// and upload endpoints while the gallery scan accepts it.
+    ///
+    /// MUTATION THIS CATCHES: give `is_baked_ext` back its own hard-coded
+    /// arm — the three R27 additions (webp/bmp/gif) fail here immediately.
+    #[test]
+    fn the_servers_baked_gate_is_the_shared_list() {
+        for ext in pipeline::BAKED_EXTS {
+            let p = std::path::PathBuf::from(format!("photo.{ext}"));
+            assert!(is_baked_ext(&p), "{ext} is in BAKED_EXTS but the server refuses it");
+            // Case folding is part of the contract — cameras and editors write
+            // .JPG as often as .jpg.
+            let up = std::path::PathBuf::from(format!("photo.{}", ext.to_ascii_uppercase()));
+            assert!(is_baked_ext(&up), "{ext} must match case-insensitively");
+        }
+        for ext in crate::decode::RAW_EXTS {
+            let p = std::path::PathBuf::from(format!("photo.{ext}"));
+            assert!(
+                !is_baked_ext(&p),
+                "{ext} is a camera RAW — the baked gate must not claim it"
+            );
+        }
+        assert!(!is_baked_ext(std::path::Path::new("notes.txt")));
+        // The two endpoints' real predicate is the union.
+        assert!(
+            pipeline::is_source(std::path::Path::new("a.CR3"))
+                && pipeline::is_source(std::path::Path::new("b.WEBP")),
+            "add-path/upload accept both halves"
+        );
+    }
 
     /// R23-3 shell (feedback #5): the web body's own end of the grade-strength
     /// axis. An older tab that never sends the field must land on the SAME

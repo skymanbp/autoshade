@@ -498,6 +498,64 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   `catalogue.rs` 注释同步更正。M1_PLAN §8 #3（结构化输出 schema 上限文档锚）
   仍开，等下次带真机付费会话顺跑。
 
+- **通用输入格式（2026-08-19，R27 Batch-1b，未发版）** —— 项目自立项起**只
+  跑过 Sony ARW**（`ARCHITECTURE.md` 旧行「resolved: Sony `.ARW`」为证）。本批
+  把 RAW 从 9 扩展名扩到 **24**，把 baked 从 5 扩到 **8**，并**第一次**用 9 份
+  CC0 真机样张（raw.pixls.us，sha256 逐份核对，存仓库外
+  `~/autoshop-fixtures/raw-zoo/`）跑通 Canon CR2+CR3 / Nikon NEF / Fuji RAF /
+  Olympus ORF / Panasonic RW2 / Pentax PEF / Ricoh DNG / Sony ARW 九个厂牌。
+  **① 一份清单，处处派生**：`decode::RAW_EXTS` 与 `pipeline::BAKED_EXTS` 是全
+  仓库仅有的两份扩展名表。原先有**四份手抄副本**且 web 那份已漂移（`.orf`
+  `.rw2` `.raw` 四个版本里一直进不了网页选择框）；现 GUI 对话框 / serve 上传门
+  / 库扫描全部派生，唯一不可派生的 `index.html` `accept` 由测试钉死并在失败时
+  直接打印可粘贴的替换串。**② `.x3f` 永久排除**（rawler 0.7.2 的 `raw_metadata`
+  是字面 `todo!()`）。**③ ORF 类降级**：rawler 对 24 个格式中的 12 个不实现任何
+  内嵌预览方法，旧码把「格式本就不存预览」和「预览损坏」混成同一个错误，导致
+  `.orf` 在 CLI 上直接失败而同一文件在 GUI 里能开 —— 现降级为自家中性 develop
+  并**明说**。**④ CLI 补 `catch_unwind`**（GUI 自 v0.22 就有；第三方解析器一次
+  panic 旧行为是整个 `batch` 进程死）。**⑤ 拒绝分三种并各带 DNG 转换出路**
+  （未知厂牌 / 未知机型 / 无解码器；`decode::DNG_ONRAMP` 单一出处）。
+  **⑥ 单色与四色传感器改为 develop 之前拒收**（旧码跑完整条 demosaic 才 bail）。
+  **⑦ baked 真 EXIF**（ISO/快门/光圈/焦距/日期/厂牌/机型），走 rawler 自带
+  `Exif::new` + `GenericTiffReader`（JPEG 需先走 APP1 段），**零新依赖**，且与
+  RAW 臂**共用同一份提取**（`exif_facts`）。**⑧ 新增 webp/bmp/gif**（三者均纯
+  Rust、无 `build.rs`、无 `links =`，已逐一核 Cargo.lock；avif/heic 仍按
+  `Cargo.toml:54-56` 的「无 C 依赖」红线排除）。
+  **⑨ 三条实测新发现（读码猜不出来的）**：
+  (a) **rawler 用 Bayer 算法 demosaic X-Trans**（`PPGDemosaic` 自述只能用于
+  RGGB，而它的守卫 `CFA::is_rgb` 只检查 pattern **名字**里的字母、不看几何，
+  X-Trans 6×6 直接放行；`ppg.rs:126-136` 的绿通道插值假定四邻皆绿+隔行同色，
+  两条都只在 2×2 quincunx 成立）—— 原 B 报告列为「离线无法判定」的 R6 就此**判负**。
+  处置＝**每次渲染披露**而非拒收（色/影调/构图都对，只有极细节近似）。
+  (b) **v0.32.0 的 (32,20) 原点缺陷是 per-BODY，不是 per-make**：动物园里的
+  Sony A7 III **不需要**该修正，因为它的 `SonyRawImageSize` 交出的是**整块**
+  6048×4024，而 A7R IV 交出的是已裁的 9504×6336。九台机器**无一** fire，
+  R2 风险就此关闭（也说明扩格式没有偷偷扩大该修正的作用域）。
+  (c) **B 报告两处读码结论被实测更正**：`cr2.rs:284` 的
+  `active_area = crop_area` 只在 `cpp == 3`（sRAW/mRAW）分支里；NEF/ORF 的
+  `active_area` 并**非** `None`（相机库 borders）。tier-1 表已换成九组**实测**
+  数字，不再是猜测。
+  **⑩ 三处只披露不拒收**（连同 (a)）：DefaultCrop 越界（旧为静默 `None`，
+  `render.rs:164` 直接丢弃返回值）、16-bit 无 ICC（按 sRGB 读——8-bit JPEG 这
+  样几乎总对，16-bit 常错，故只对 16-bit 出声）、`.tif` 装 RAW 则**拒收**并点名
+  依据（旧行为是 `image` crate 解出 DNG 第一个 IFD ＝**缩略图**，照片会「打开成功」
+  却只有几百像素——开错比开不了更糟）。
+  **⑪ `batch --include-baked`（默认关）**；`eval` / `style-index` **明确不做**：
+  两者都靠兄弟 `.xmp` 判定「用户自己的编辑」，而 baked 的邻居 sidecar 按
+  `store.rs:3106-3111` 既定政策「不是我们该解释的」，加进去等于从后门推翻该决定。
+  **⑫ 本批门（未发版，仅记数）**：634 lib（+10）/ 9 CLI / 130 GUI / 2+2 合约，
+  `cargo clippy --all-targets` 与 `--features gui` 双 0，`AUTOSHOP_LR_PROBE_FIXTURES`
+  16 份 + `AUTOSHOP_MB_FIXTURES` 7 份仍绿，i18n audit exit 0（无新词条——新披露
+  都走既有英文 stderr 通道）。新增 tier-3 环境门探针 `AUTOSHOP_RAW_ZOO`（未设
+  静默、设了读不动就**响亮 panic**，同 `AUTOSHOP_MB_FIXTURES` 纪律），9/9 通过。
+  五条变异验证有转录。
+  **⑬ 本批发现的两处收尾**：CLI `decode` 把 `meta.width/height` 打成
+  `sensor:`，但按 L05-6 那两个字段描述的是**交付的预览**（Pentax 打 640×424、
+  DNG 打 160×120 即为此）——既有标签错误，**主审裁定＝修**（改标 `preview:`，
+  与项目一贯的 WYSIWYG 错位根修同理）；新披露只走 stderr，GUI 无控制台看不到
+  （与既有 `ValidatedRecipe::disclose`、embedded-XMP 警告同一现状，扩大到 GUI
+  toast 通道是带 i18n 面的独立改动，**登记不做**）。
+
 - **v0.32.0（2026-08-19，第二十六轮 = 径向蒙版几何根修）** ——
   素材＝**用户为此专门拍的 12 张受控 Lightroom 导出**（M-B ①结清）
   ＋对导出成片的像素级测量；证据档案

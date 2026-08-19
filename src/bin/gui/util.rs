@@ -18,22 +18,24 @@ pub(crate) fn model_opts(fetched: &[String], fallback: &[&str], current: &str) -
 }
 
 /// Every source type the app opens — ONE list shared by the file dialog, drag &
-/// drop, and any future association, so they can't drift apart. Must cover
-/// everything `decode::is_raw` accepts (the gallery + decoder already open
-/// ORF/RW2/RAW; the dialog refusing them was pure drift).
-pub(crate) const PHOTO_EXTS: [&str; 14] = [
-    "arw", "dng", "raf", "nef", "cr2", "cr3", "orf", "rw2", "raw", "png", "tif", "tiff", "jpg",
-    "jpeg",
-];
+/// drop, and any future association, so they can't drift apart.
+///
+/// R27 A2: this used to be a HAND-TYPED array of 14, and the drift it was
+/// meant to prevent had already happened elsewhere (the web `accept` list was
+/// missing three formats the gallery opened fine). It is now derived from
+/// `decode::RAW_EXTS ∪ pipeline::BAKED_EXTS` — the same two lists the engine,
+/// the scanners and the web server ask — so the dialog literally cannot offer
+/// a different set from the one that opens.
+pub(crate) fn photo_exts() -> Vec<&'static str> {
+    autoshop::pipeline::photo_exts()
+}
 
 pub(crate) fn is_photo_path(p: &std::path::Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| PHOTO_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+    autoshop::pipeline::is_source(p)
 }
 
 pub(crate) fn photo_file_dialog() -> Option<PathBuf> {
-    rfd::FileDialog::new().add_filter("Photos", &PHOTO_EXTS).pick_file()
+    rfd::FileDialog::new().add_filter("Photos", &photo_exts()).pick_file()
 }
 
 /// Visualise a mask geometry on the image: linear = the zero→full vector with

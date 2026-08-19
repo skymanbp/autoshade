@@ -20,7 +20,7 @@ The mechanical part is *applying* it. Autoshop splits exactly there:
 
 ```
  RAW ─► decode + features ─► [GPT vision advisor] ─► EditRecipe ─► [Claude verify] ─► Rust render engine
-  .ARW    preview+EXIF+hist        looks at photo        JSON          QA / accept           │
+ 24 fmts  preview+EXIF+hist        looks at photo        JSON          QA / accept           │
                                                                                              ▼
                                                                     XMP sidecar  +  16-bit master
 ```
@@ -204,9 +204,51 @@ autoshop heal      <src> [--mask m.png] [--no-auto]     # pixel heal: spot/blemi
 autoshop recipe-schema                       # print the EditRecipe JSON shape
 ```
 
-`<src>` is a RAW (`.arw/.dng/...`) **or** a baked image (`.png/.tif/.jpg`) — the
-develop pipeline runs on either. RAWs also get an `.xmp`; baked sources get
-`recipe.json` only (XMP is meaningful only for RAW in Lightroom).
+`<src>` is a RAW **or** a baked image — the develop pipeline runs on either.
+RAWs also get an `.xmp`; baked sources get `recipe.json` only (XMP is
+meaningful only for RAW in Lightroom).
+
+### Supported input formats
+
+**Camera RAW (24 extensions, one predicate app-wide — `decode::is_raw`):**
+
+```
+arw dng raw raf nef cr2 cr3 orf rw2 pef srw 3fr fff iiq
+mef mos erf kdc dcr dcs crw nrw mrw ari
+```
+
+Decoding is `rawler` 0.7.2, which carries **725 camera models**. An extension
+being on that list means the file reaches the RAW engine — not that your
+particular body is in the database.
+
+**If your camera is not recognised**, or its format is not listed: run the file
+through the free **Adobe DNG Converter** and open the `.dng`. That is not a
+second-class path — rawler builds a DNG's entire camera profile (colour
+matrices included) from the file's own tags, so a converted file needs no
+database entry at all. Autoshop's error message says this too, with the file
+named.
+
+**Baked rasters:** `png tif tiff jpg jpeg webp bmp gif`. All decoders are pure
+Rust. AVIF and HEIC are **deliberately excluded** — they need a C toolchain,
+and this tree has no C build dependency and keeps none.
+
+**Known limits, stated rather than hidden:**
+
+- **Monochrome and 4-colour (CYGM/RGBE) sensors are refused**, before the
+  develop rather than after it — the engine produces three-channel colour only.
+- **Non-Bayer colour filter arrays (Fuji X-Trans) develop approximately.**
+  rawler 0.7.2 demosaics them with a Bayer algorithm; colour, tone and framing
+  are correct, but very fine detail may show maze-like artifacts at 100 %.
+  Autoshop says so on every such render rather than letting you discover it by
+  comparing against Fuji's own converter.
+- **Formats that embed no preview** (ORF, SRW, NRW, MEF, MOS, KDC, DCR, DCS,
+  ERF, IIQ, CRW, ARI) show Autoshop's own neutral develop where other files
+  show the camera's JPEG — again, said out loud.
+- **A baked file with no ICC profile is read as sRGB.** For 8-bit JPEG that is
+  almost always right; for 16-bit it often is not (Lightroom's "Edit in…"
+  exports ProPhoto), so an untagged 16-bit import is flagged.
+- `.x3f` (Sigma Foveon) is **permanently excluded**: rawler 0.7.2's metadata
+  reader for it is a literal `todo!()`.
 
 ## AI setup
 
@@ -450,7 +492,7 @@ the list is there for everything the filter has never heard of.
 
 ## Tech
 
-Rust (rustc/cargo 1.94) · `rawler` (Sony ARW decode) · `image` · `rayon` ·
+Rust (rustc/cargo 1.94) · `rawler` (RAW decode, 24 formats / 725 bodies) · `image` · `rayon` ·
 `clap` · `serde` · `ureq` · `eframe`/`egui` (desktop GUI) · `tiny_http` (web UI) ·
 Python + PyTorch + SCUNet (denoise) · Claude CLI (verifier) ·
 OpenAI Responses + Images (advisor + generative).

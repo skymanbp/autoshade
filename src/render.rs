@@ -148,19 +148,30 @@ pub fn render_to_image_in(
         // and exported sideways. See `decode::raw_orientation_of`. Read
         // INSIDE this scope so the RawSource still lives; metadata only, no
         // second sensor read.
-        let md = decoder
-            .raw_metadata(&src, &params)
-            .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+        let md = crate::decode::guard_parser_panic(raw_path, "raw_metadata", || {
+            decoder.raw_metadata(&src, &params).map_err(|e| anyhow!("raw_metadata: {e}"))
+        })?;
         let orientation = crate::decode::raw_orientation_of(&md);
         // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
-        let mut raw = decoder
-            .raw_image(&src, &params, false)
-            .map_err(|e| anyhow!("raw_image: {e}"))?;
+        let mut raw = crate::decode::guard_parser_panic(raw_path, "raw_image", || {
+            decoder.raw_image(&src, &params, false).map_err(|e| anyhow!("raw_image: {e}"))
+        })?;
+        // A9: the sensor kinds render v1 cannot deliver are refused HERE, off
+        // the decoded RawImage's own declaration, instead of after the whole
+        // demosaic + colour pipeline has run and produced an `Intermediate`
+        // this function then throws away. On a 100 MP achromatic back that
+        // was tens of seconds and a full-frame float buffer spent to reach a
+        // verdict the metadata already contained.
+        refuse_unsupported_sensor(&raw, raw_path)?;
+        // …and for the sensors we DO render, say when the demosaic is only an
+        // approximation of this CFA (R6 — X-Trans through a Bayer algorithm).
+        disclose_approximate_demosaic(&raw, raw_path);
         // …developed from the frame the camera and Lightroom call the picture,
         // not from the sensor's top-left corner. v0.32.0 — see
         // `decode::align_default_crop` for the measurement (every Sony ARW
         // render sat 32 px right and 20 px down of Lightroom's) and for why
-        // rawler 0.7.2 skips this crop on its own.
+        // rawler 0.7.2 skips this crop on its own. The verdict is disclosed
+        // inside (A5) — an out-of-bounds refusal used to be a silent `None`.
         crate::decode::align_default_crop(&mut raw);
         (raw, orientation)
     };
@@ -210,6 +221,11 @@ pub fn render_to_image_in(
     // on; the ~120 MB u16 sensor mosaic would otherwise survive to the end of
     // the function, under denoise/tone/pack/geometry (A7).
     drop(rawimage);
+    // `refuse_unsupported_sensor` above has already answered this off the
+    // metadata (A9), so these two arms are now a BACKSTOP against rawler
+    // changing which `Intermediate` a given declaration produces — not the
+    // primary gate. They stay: an engine that silently rendered a monochrome
+    // frame as if it were RGB would be the worse failure.
     let rgb = match inter {
         Intermediate::ThreeColor(c) => c,
         Intermediate::Monochrome(_) => bail!("monochrome RAW not supported by render v1"),
@@ -300,6 +316,94 @@ pub fn render_to_image_in(
     Ok(apply_crop(dynimg, recipe.crop.as_ref()))
 }
 
+/// What `RawDevelop::default().develop_intermediate` WILL produce for this
+/// sensor, decided from the decoded `RawImage`'s own declaration instead of by
+/// running the develop and looking (A9).
+///
+/// The rule is rawler 0.7.2's, transcribed from `imgop/develop.rs:121-160`:
+/// `cpp` picks the starting `Intermediate` (1 → Monochrome, 3 → ThreeColor,
+/// 4 → FourColor, anything else → a literal `todo!()`), and then the
+/// `Demosaic` step — which `RawDevelop::default()` always carries
+/// (`develop.rs:84-92`) — promotes a Monochrome CFA frame to ThreeColor when
+/// `cfa.is_rgb()`, to FourColor when the pattern has four unique colours, and
+/// otherwise hits a second `todo!()`.
+///
+/// `Err` here therefore covers BOTH "render v1 has no path for these pixels"
+/// and "rawler itself would panic", which is why it is checked before the
+/// develop rather than after: the second class never reached the old
+/// post-develop `bail!` at all — it aborted.
+fn refuse_unsupported_sensor(raw: &rawler::RawImage, path: &Path) -> Result<()> {
+    use rawler::rawimage::RawPhotometricInterpretation as Photo;
+    let kind = match (raw.cpp, &raw.photometric) {
+        (3, _) => return Ok(()),
+        (1, Photo::Cfa(c)) if c.cfa.is_rgb() => return Ok(()),
+        (1, Photo::Cfa(c)) if c.cfa.unique_colors() == 4 => {
+            format!("a 4-colour {} sensor", c.cfa)
+        }
+        (1, Photo::Cfa(c)) => format!(
+            "a colour-filter array render v1 cannot demosaic ({}) — rawler has no path for it \
+             either",
+            c.cfa
+        ),
+        (1, _) => "a monochrome sensor".to_string(),
+        (4, _) => "4-colour sensor data".to_string(),
+        (n, _) => format!("{n} components per pixel, which no develop in this build handles"),
+    };
+    bail!(
+        "{} comes from {kind}, and Autoshop's develop engine produces three-channel colour only. \
+         Nothing was rendered. {}",
+        path.display(),
+        crate::decode::DNG_ONRAMP
+    )
+}
+
+/// Say so when the demosaic about to run is the WRONG ALGORITHM for this
+/// sensor's colour filter array — R27's answer to the format map's R6, which
+/// asked whether rawler 0.7.2 handles Fuji X-Trans properly and could not tell
+/// offline. It does not, and the reason is worth writing down because it is
+/// invisible from the outside: the file decodes, the dimensions are right, the
+/// colour matrix is right, and only fine detail is wrong.
+///
+/// `PPGDemosaic` is a **Bayer** algorithm — its own doc says "PPG can only
+/// applied to pure RGGB or variants" — and `interpolate_green`
+/// (`imgop/sensor/bayer/ppg.rs:126-136`) reads the four immediate neighbours
+/// of every non-green pixel as GREEN and `(row ± 2, col)` / `(row, col ± 2)`
+/// as the SAME colour as the centre. Both are properties of a 2×2 quincunx.
+/// But the guard that is supposed to keep non-Bayer patterns away from it,
+/// `CFA::is_rgb` (`cfa.rs:193-195`), only checks that the pattern NAME is
+/// spelled out of R, G and B — so X-Trans's 6×6 pattern (20 green / 8 red /
+/// 8 blue, verified from the zoo's X-S10 file's own `0x0131` record) sails
+/// straight through and is demosaiced as if it were Bayer.
+///
+/// So the test here is geometric, not nominal: an RGB pattern whose repeat is
+/// anything other than 2×2 is not a Bayer mosaic, whatever it is called.
+///
+/// This is a DISCLOSURE and not a refusal on purpose. The pixels are not
+/// wrong the way a bad colour matrix is wrong — tone, colour and geometry are
+/// all correct, and the image is perfectly usable; what suffers is
+/// fine-detail reconstruction (maze/worm artifacts at 100 %). Refusing would
+/// take a working develop away from every Fuji owner to avoid an artifact
+/// most of them will never enlarge far enough to see. Saying nothing, though,
+/// would leave someone comparing against Fuji's own converter with no
+/// explanation for the difference.
+fn disclose_approximate_demosaic(raw: &rawler::RawImage, path: &Path) {
+    use rawler::rawimage::RawPhotometricInterpretation as Photo;
+    let Photo::Cfa(c) = &raw.photometric else { return };
+    if !c.cfa.is_rgb() || (c.cfa.width == 2 && c.cfa.height == 2) {
+        return;
+    }
+    eprintln!(
+        "⚠ {} comes from a {}×{} non-Bayer colour filter array ({}), and the decoder in this \
+         build demosaics it with a Bayer algorithm. Colour, tone and framing are unaffected; \
+         very fine detail is reconstructed approximately and may show maze-like artifacts at \
+         100 % zoom",
+        path.display(),
+        c.cfa.width,
+        c.cfa.height,
+        c.cfa
+    );
+}
+
 /// The user crop — normalised [0,1] on the DISPLAYED frame, i.e. after
 /// orientation, lens geometry and straighten. Shared by the RAW and the baked
 /// paths so ONE rounding rule serves both (they must agree: the same recipe
@@ -335,10 +439,26 @@ fn rgb16_source(img: &DynamicImage) -> Cow<'_, ImageBuffer<Rgb<u16>, Vec<u16>>> 
 /// 5500 K default otherwise), so a baked sRGB image needs no raw WB
 /// coefficients of its own.
 /// Optional AI denoise runs first; output is 16-bit.
+///
+/// `max_edge` bounds the LONG EDGE of the working buffer, mirroring
+/// [`render_to_image`]'s parameter of the same name and obeying the same two
+/// rules: the shrink happens BEFORE denoise/tone/geometry (so a
+/// preview-resolution caller never pays a full-size develop), and it only ever
+/// goes DOWN — `thumbnail` would otherwise UPSCALE a source smaller than the
+/// cap, inflating a small image instead of bounding a large one. `None` = the
+/// source's own resolution, which is what the export path passes: a delivery
+/// render must not be developed at preview size.
+///
+/// Until this parameter existed the baked arm had no cap at all while the RAW
+/// arm had one — the asymmetry the format-support map filed as B2. The
+/// resolution-normalised stages (masks, sharpen, geometry) are what make the
+/// capped result meaningful rather than merely smaller; they are the same
+/// shared functions the RAW path calls, so the two arms cap identically.
 pub fn render_baked_to_image(
     img: &DynamicImage,
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
+    max_edge: Option<u32>,
 ) -> Result<DynamicImage> {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
@@ -347,6 +467,15 @@ pub fn render_baked_to_image(
     validated.disclose();
     let recipe = &*validated;
     let rasters = load_mask_raster_snapshot(recipe)?;
+    // Downscale-only, before anything else allocates a plane. `Cow` so the
+    // uncapped path (every shipped export) still borrows and copies nothing.
+    let capped: Cow<'_, DynamicImage> = match max_edge {
+        Some(edge) if img.width().max(img.height()) > edge => {
+            Cow::Owned(img.thumbnail(edge, edge))
+        }
+        _ => Cow::Borrowed(img),
+    };
+    let img = capped.as_ref();
     let rgb = img.to_rgb16();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     let mut data: Vec<[f32; 3]> = rgb
@@ -769,7 +898,15 @@ pub fn as_shot_wb(raw_path: &Path) -> Option<(f32, f32)> {
     crate::decode::guard_tiff_chain(raw_path).ok()?;
     let src = RawSource::new(raw_path).ok()?;
     let decoder = get_decoder(&src).ok()?;
-    let rawimage = decoder.raw_image(&src, &RawDecodeParams { image_index: 0 }, true).ok()?;
+    // A6: the last `get_decoder` caller in the crate, and the one that can
+    // least afford to abort — it is consulted on OPEN, for the WB anchor, and
+    // its whole contract is already "None on any trouble".
+    let rawimage = crate::decode::guard_parser_panic(raw_path, "as-shot WB", || {
+        decoder
+            .raw_image(&src, &RawDecodeParams { image_index: 0 }, true)
+            .map_err(|e| anyhow!("raw_image(dummy): {e}"))
+    })
+    .ok()?;
     let xyz2cam = camera_matrix(&rawimage).ok()?;
     let wb = rawimage.wb_coeffs;
     wb_to_kelvin_tint(&xyz2cam, [wb[0], wb[1], wb[2]])
@@ -1028,7 +1165,11 @@ pub fn render_to_file(
     } else {
         // baked-by-construction: the !is_raw_src arm (decided just above).
         let src = crate::decode::load_image_for_develop(src_path)?;
-        render_baked_to_image(&src, recipe, denoise)?
+        // `None`: this is the DELIVERY render. `opts.long_edge` below resizes
+        // the finished pixels, which is not the same thing as developing at a
+        // bounded working resolution and must not be quietly swapped for it —
+        // the RAW arm above passes `None` for exactly the same reason.
+        render_baked_to_image(&src, recipe, denoise, None)?
     };
     if let Some(le) = opts.long_edge
         && le > 0
@@ -5083,6 +5224,65 @@ mod tests {
         image::RgbImage::from_pixel(64, 48, image::Rgb([3, 4, 5])).save(&small).unwrap();
         assert_eq!(source_pixels(&small, Some(2048)).unwrap().dimensions(), (64, 48));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R27 P3 — the baked develop takes a working-resolution cap, and obeys
+    /// the RAW arm's two rules for it: bound the LONG edge, and only ever go
+    /// DOWN.
+    ///
+    /// Before this the baked arm had no cap while the RAW arm had one (the
+    /// format map's B2), so a 60 MP TIFF developed at full size wherever it
+    /// was developed at all. The downscale-only half matters as much as the
+    /// bound: plain `thumbnail` UPSCALES a source smaller than the cap, which
+    /// would invent pixels and then hand them on as a developed master.
+    ///
+    /// MUTATION THIS CATCHES: use `resize` instead of `thumbnail`'s
+    /// downscale-only guard and the third assertion inflates the 64×48 source
+    /// to 2048×1536; cap AFTER the develop instead of before and the first
+    /// assertion still passes while the memory saving — the entire point —
+    /// silently disappears, which is why the fourth assertion pins that the
+    /// tone stage saw the SMALL frame.
+    #[test]
+    fn the_baked_develop_caps_its_working_resolution_downward_only() {
+        let big = DynamicImage::ImageRgb8(image::RgbImage::from_fn(400, 200, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 241) as u8, 7])
+        }));
+        let r = EditRecipe::default();
+
+        // Uncapped = the source's own resolution (what the export path asks).
+        assert_eq!(
+            render_baked_to_image(&big, &r, None, None).unwrap().dimensions(),
+            (400, 200)
+        );
+        // Capped on the LONG edge, aspect kept.
+        assert_eq!(
+            render_baked_to_image(&big, &r, None, Some(100)).unwrap().dimensions(),
+            (100, 50)
+        );
+        // Never upsampled.
+        let small = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 48, image::Rgb([3, 4, 5])));
+        assert_eq!(
+            render_baked_to_image(&small, &r, None, Some(2048)).unwrap().dimensions(),
+            (64, 48)
+        );
+
+        // The cap runs BEFORE the develop, not after: a crop is expressed in
+        // normalised coordinates on the developed frame, so if the shrink
+        // happened last the crop would be taken from the 400-wide frame and
+        // then shrunk, landing on 100×50 either way. Ask instead for a frame
+        // whose SIZE reveals the order — a half-width crop of a capped
+        // develop is 50 px; of an uncapped one shrunk afterwards it would be
+        // 200 px before the shrink and the function returns the crop, not the
+        // cap, so the two disagree.
+        let cropped = EditRecipe {
+            crop: Some(crate::recipe::Crop { left: 0.0, top: 0.0, right: 0.5, bottom: 1.0 }),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_baked_to_image(&big, &cropped, None, Some(100)).unwrap().dimensions(),
+            (50, 50),
+            "the crop must be taken from the CAPPED frame — i.e. the cap ran first"
+        );
     }
 
     /// Patrol (the `find_raws_accepts_every_raw_format_the_app_can_decode`

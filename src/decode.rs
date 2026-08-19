@@ -89,15 +89,51 @@ fn fmt_shutter(r: &Rational) -> String {
     }
 }
 
+/// Every camera-RAW extension the app opens — THE list `is_raw` is, and the
+/// one every hand-copied extension list in the tree derives from (the GUI file
+/// dialog, the web `accept` attribute, the library scanners). A second copy is
+/// drift waiting to happen: `.orf`/`.rw2`/`.raw` were openable for four
+/// releases while the file dialog refused them.
+///
+/// **What is in it.** One entry per rawler 0.7.2 decoder that has a real
+/// filename extension. rawler dispatches on CONTENT (magic bytes, then the
+/// TIFF `Make` string — `decoders/mod.rs:847-994`), never on the extension, so
+/// this list only has to name files worth handing it; the decoder choice is
+/// rawler's. `3fr`/`fff` are Hasselblad (the `tfr` decoder), `mos` is Leaf,
+/// `nrw` is Nikon's compact line, `mrw` Minolta, `ari` ARRI.
+///
+/// **What is deliberately NOT in it.**
+///   * `x3f` (Sigma Foveon) — PERMANENTLY excluded. rawler 0.7.2's
+///     `decoders/x3f.rs:138` (`format_dump`) and `:146` (`raw_metadata`) are
+///     literal `todo!()`, i.e. a guaranteed panic, and we call `raw_metadata`
+///     directly rather than through rawler's own `catch_unwind` wrapper. The
+///     CLI guard added alongside this list ([`guard_parser_panic`]) turns that
+///     into a named error instead of an abort, but a format whose metadata
+///     reader cannot run at all has nothing to offer a photographer — listing
+///     it would only promise support that provably does not exist. Revisit
+///     when the upstream `todo!()`s become real code, not before.
+///   * `nkd` / "unwrapped" — rawler decoders with no extension of their own
+///     (CHDK-style naked dumps matched by FILE SIZE, `mod.rs:989-992`).
+///   * `qtk` — QuickTake, matched by magic bytes; the extension is `.qtk` but
+///     the format is a 1994 Apple curiosity with no develop path worth
+///     claiming.
+pub const RAW_EXTS: [&str; 24] = [
+    "arw", "dng", "raw", "raf", "nef", "cr2", "cr3", "orf", "rw2", "pef", "srw", "3fr", "fff",
+    "iiq", "mef", "mos", "erf", "kdc", "dcr", "dcs", "crw", "nrw", "mrw", "ari",
+];
+
 /// Does this path look like a camera RAW (vs an already-baked raster like a
 /// LR/PS-exported PNG/TIFF/JPEG)? Drives the raw-vs-baked dispatch.
+///
+/// Accepting an extension is NOT a promise that the body decodes: rawler
+/// carries 725 camera models and refuses anything outside them
+/// ([`describe_decoder_failure`] turns that into a sentence a photographer can
+/// act on). It IS a promise that the file reaches the RAW engine rather than
+/// the baked one, which is the only decision this predicate makes.
 pub fn is_raw(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "arw" | "dng" | "raw" | "raf" | "nef" | "cr2" | "cr3" | "orf" | "rw2"
-        )
-    })
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| RAW_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
 /// Transform profiled pixels into the sRGB working space the whole pipeline
@@ -281,6 +317,31 @@ fn decode_peak_bytes(need: u64, orientation: image::metadata::Orientation) -> u6
 /// sharpening) each drop their two planes before the next allocates
 /// (`render.rs`'s memory note on `apply_masks`), so adding one costs nothing
 /// here. A stage that holds a new buffer concurrently costs its full width.
+///
+/// **R27 R7 — re-derived, not re-assumed, when the RAW format list went from 9
+/// extensions to 24.** The worry raised was "this was tuned on a 61 MP Bayer
+/// A7; what about a 100 MP GFX or a Phase One back?". Two facts answer it:
+///
+/// 1. **It never applies to a RAW at all.** The only consumer is
+///    [`develop_peak_bytes`], reached only from `load_image_gated(develop =
+///    true)` — and that gate REFUSES a camera RAW by name a few lines in. A
+///    RAW's develop is budgeted by the decode-scope lifetimes in
+///    `render::render_to_image_in`, not here. So sensor size and CFA layout
+///    (Bayer vs X-Trans vs 4-colour) are outside this constant's world; what
+///    it budgets is a baked PNG/TIFF/JPEG, which has no CFA by definition.
+/// 2. **It is per-SOURCE-PIXEL, so it does not carry a resolution
+///    assumption.** Every term above is a fixed number of bytes for one pixel
+///    (12 B of `[f32; 3]`, 4 B luma, 6 B of Rgb16, …); the pixel COUNT is the
+///    other multiplicand in `develop_peak_bytes` and comes from the file's own
+///    header. Doubling the megapixels doubles the product, which is the
+///    intended behaviour — it is what makes the 4 GiB ceiling bite on a
+///    200 MP panorama and not on a 24 MP export.
+///
+/// What "tuned to that ceiling deliberately (the A7 batch)" refers to is WHICH
+/// STAGES exist and which of them overlap — the enumeration in
+/// `develop_peak_accounts_for_every_pass` — not a pixel count. That
+/// enumeration is what a new stage must update; the 61 MP number never enters
+/// the arithmetic.
 const PIPELINE_BYTES_PER_PIXEL: u64 = 24;
 
 /// [`decode_peak_bytes`] plus the develop chain's own full-frame buffers —
@@ -370,6 +431,26 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
         .with_guessed_format()
         .with_context(|| format!("probe image {}", path.display()))?;
     let format = reader.format();
+    // R11: a camera RAW wearing a `.tif` extension reaches HERE, because
+    // `is_raw` is extension-based and a DNG (or a CR2, or a NEF) really is a
+    // TIFF container. The `image` crate would then decode whichever IFD it
+    // finds first — on a DNG that is the small embedded THUMBNAIL, so the
+    // photo would open, look right at a glance, and be developed at a few
+    // hundred pixels. That is worse than a refusal, so it IS a refusal, and it
+    // names the way out. Placed BEFORE `into_decoder` so the answer is this
+    // sentence rather than whatever the TIFF codec makes of a sensor plane.
+    // Costs one header parse on a baked TIFF open, next to nothing beside the
+    // pixel decode below.
+    if format == Some(image::ImageFormat::Tiff)
+        && let Some(kind) = raw_in_tiff_clothing(path)
+    {
+        anyhow::bail!(
+            "{} is named .tif but is really a camera RAW ({kind}) — rename it to its real \
+             extension (e.g. .dng) so Autoshop develops the sensor instead of reading the \
+             thumbnail the `image` crate would find first",
+            path.display()
+        );
+    }
     let mut decoder = reader
         .into_decoder()
         .with_context(|| format!("decode image {}", path.display()))?;
@@ -381,6 +462,7 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
     let decoded_bytes = decoder.total_bytes();
+    let decoded_color = decoder.color_type();
     let (dw, dh) = decoder.dimensions();
     let need = if develop {
         develop_peak_bytes(
@@ -428,6 +510,29 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
         }
         None => None,
     };
+    // R10: the assume-sRGB fall-through `apply_icc_profile` refuses is only
+    // refusable when a profile EXISTS. An UNTAGGED file has nothing to refuse,
+    // and is read as sRGB — right for essentially every 8-bit JPEG (the web's
+    // default and what phones write), and a real risk for 16-bit, which is
+    // what an editor produces: Lightroom's "Edit in…" hands over ProPhoto,
+    // Photoshop happily saves untagged AdobeRGB. So the disclosure is aimed at
+    // exactly that population instead of warning on every ordinary snapshot —
+    // a warning that fires on the common correct case is one nobody reads.
+    if icc_profile.is_none()
+        && matches!(
+            decoded_color,
+            image::ColorType::Rgb16 | image::ColorType::Rgba16 | image::ColorType::La16
+                | image::ColorType::L16
+        )
+    {
+        eprintln!(
+            "⚠ {} is 16-bit but carries no ICC profile, so its pixels are being read as sRGB. \
+             If it was exported as ProPhoto or Adobe RGB (Lightroom's \"Edit in…\" default is \
+             ProPhoto), every tone and colour decision below is computed on the wrong numbers — \
+             re-export it with the profile embedded",
+            path.display()
+        );
+    }
     let mut img = DynamicImage::from_decoder(decoder)
         .with_context(|| format!("decode image {}", path.display()))?;
     if let Some(profile) = icc_profile {
@@ -435,6 +540,42 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     }
     img.apply_orientation(orientation);
     Ok(img)
+}
+
+/// Is this TIFF-container file actually a camera RAW (R11)? Names the marker
+/// that gave it away, or `None` for an ordinary baked TIFF.
+///
+/// Header-only, and deliberately conservative: it looks for the two tags that
+/// no photo editor writes into a delivery TIFF — `DNGVersion` (0xC612), which
+/// only a DNG carries, and `SubIFDs` combined with a `Make` string, which is
+/// the shape every TIFF-based RAW (CR2/NEF/ARW/ORF/PEF/SRW/…) uses to hang the
+/// sensor plane off the root IFD. A file that will not even parse as TIFF is
+/// not our problem here — the decoder below reports it.
+fn raw_in_tiff_clothing(path: &Path) -> Option<&'static str> {
+    /// `DNGVersion`, the tag that DEFINES a DNG (rawler dispatches on it —
+    /// `decoders/mod.rs:919-921`).
+    const DNG_VERSION: u16 = 0xC612;
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let tiff = GenericTiffReader::new(&mut reader, 0, 0, Some(16), &[]).ok()?;
+    // Same panic-shaped `root_ifd()` as `baked_exif`; a metadata probe must
+    // never be the thing that ends the process.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = tiff.root_ifd();
+        if root.get_entry(DNG_VERSION).is_some() {
+            return Some("it carries the DNGVersion tag");
+        }
+        let has_make = root
+            .get_entry(TiffCommonTag::Make)
+            .and_then(|e| e.value.as_string().cloned())
+            .is_some_and(|s| !s.trim().is_empty());
+        if has_make && root.get_sub_ifd(TiffCommonTag::SubIFDs).is_some() {
+            return Some("it names a camera and hangs its sensor data off a SubIFD");
+        }
+        None
+    }))
+    .ok()
+    .flatten()
 }
 
 /// Decode any supported source — a camera RAW or an already-baked image. The
@@ -449,22 +590,251 @@ pub fn decode_any(path: &Path) -> Result<Decoded> {
     }
 }
 
+/// The seven capture facts [`Meta`] carries that come from EXIF rather than
+/// from the sensor — ONE extraction shared by the RAW arm and the baked arm
+/// (P2). Splitting them was the old bug in miniature: the RAW side grew an
+/// APEX `ApertureValue` fallback and two finiteness filters that a
+/// hand-written baked copy would not have had, so the same JPEG would have
+/// reported a different f-number depending on which door it came through.
+struct ExifFacts {
+    lens: Option<String>,
+    iso: Option<u32>,
+    shutter: Option<String>,
+    aperture: Option<f32>,
+    focal_length_mm: Option<f32>,
+    exposure_bias_ev: Option<f32>,
+    date_time: Option<String>,
+}
+
+fn exif_facts(exif: &rawler::exif::Exif) -> ExifFacts {
+    ExifFacts {
+        lens: exif.lens_model.clone().or_else(|| exif.lens_make.clone()),
+        iso: exif.iso_speed_ratings.map(u32::from).or(exif.iso_speed),
+        shutter: exif.exposure_time.as_ref().map(fmt_shutter),
+        aperture: exif
+            .fnumber
+            .as_ref()
+            .map(ratio)
+            // An INVALID FNumber (0-denominator → 0.0, or non-finite) must
+            // fall through to the Av fallback, not suppress it: filtering
+            // only at the end let f/0 shadow a perfectly valid ApertureValue.
+            .filter(|v| v.is_finite() && *v > 0.0)
+            // ApertureValue is an APEX Av, not an f-number: N = 2^(Av/2)
+            // (Av 4 ⇒ f/4, Av 5 ⇒ f/5.7). Feeding it raw overstated fast
+            // lenses in metadata + the AI prompt whenever FNumber was absent.
+            .or_else(|| exif.aperture_value.as_ref().map(|v| (ratio(v) / 2.0).exp2()))
+            // Same physical-validity rule for the fallback (huge Av → ∞;
+            // serde_json refuses non-finite floats — the WB-coeff rule).
+            .filter(|v| v.is_finite() && *v > 0.0),
+        focal_length_mm: exif
+            .focal_length
+            .as_ref()
+            .map(ratio)
+            .filter(|v| v.is_finite() && *v > 0.0),
+        exposure_bias_ev: exif.exposure_bias.as_ref().map(sratio).filter(|v| v.is_finite()),
+        date_time: exif.date_time_original.clone(),
+    }
+}
+
+/// Largest EXIF block this reader will take from a baked file. A JPEG APP1
+/// segment cannot exceed 65533 payload bytes by construction (the length field
+/// is 16-bit); a TIFF's header chain is walked, not buffered. 1 MiB is
+/// therefore pure belt-and-braces against a hand-built file, and it is a
+/// REFUSAL rather than a truncation — half an IFD parses to different numbers,
+/// which is the failure mode this whole module refuses everywhere else.
+const MAX_BAKED_EXIF: usize = 1024 * 1024;
+
+/// How far into a JPEG this reader will hunt for the EXIF segment before
+/// giving up. EXIF is required to be the FIRST APP segment, so anything past
+/// a few hundred KB of headers is not a file that follows the spec; the cap
+/// stops a crafted file from turning a metadata read into a whole-file scan.
+const MAX_JPEG_HEADER_SCAN: u64 = 4 * 1024 * 1024;
+
+/// The TIFF/EXIF block of a JPEG: the payload of the first `APP1` segment
+/// whose six leading bytes are `Exif\0\0`, with that introducer stripped so
+/// what comes back starts at the TIFF header (`II`/`MM`) rawler's reader
+/// expects.
+///
+/// Markers are walked, not searched for: scanning the file for the byte pair
+/// would hit `FFE1` inside compressed scan data. `D0..=D7` (restart), `01` and
+/// `D8` are the standalone markers that carry no length; `DA` (start of scan)
+/// ends the header region — everything after it is entropy-coded.
+/// Read-only by construction — no `Seek`. Skipping a segment copies its bytes
+/// to a sink rather than seeking past them, so the walk cannot depend on how
+/// `Take`/`BufReader` compose their cursors; the cost is reading header bytes
+/// that were about to be read anyway, bounded by [`MAX_JPEG_HEADER_SCAN`].
+fn jpeg_exif_block(file: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    let mut r = std::io::BufReader::new(file.by_ref().take(MAX_JPEG_HEADER_SCAN));
+    let mut soi = [0u8; 2];
+    if r.read_exact(&mut soi).is_err() || soi != [0xFF, 0xD8] {
+        return Ok(None);
+    }
+    loop {
+        // Marker prefixes may be padded with any number of 0xFF fill bytes.
+        let mut b = [0u8; 1];
+        if r.read_exact(&mut b).is_err() {
+            return Ok(None);
+        }
+        if b[0] != 0xFF {
+            return Ok(None); // desynchronised — not our business to repair
+        }
+        while b[0] == 0xFF {
+            if r.read_exact(&mut b).is_err() {
+                return Ok(None);
+            }
+        }
+        let marker = b[0];
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            continue; // standalone, no length field
+        }
+        if marker == 0xDA || marker == 0xD9 {
+            return Ok(None); // scan data / end of image — no EXIF in this file
+        }
+        let mut len = [0u8; 2];
+        if r.read_exact(&mut len).is_err() {
+            return Ok(None);
+        }
+        let payload = u64::from(u16::from_be_bytes(len)).saturating_sub(2);
+        if marker != 0xE1 {
+            // A short copy (truncated file) is not an error here — the next
+            // read_exact fails and the walk ends with "no EXIF", which is the
+            // honest answer for a file that stops mid-header.
+            if std::io::copy(&mut r.by_ref().take(payload), &mut std::io::sink()).is_err() {
+                return Ok(None);
+            }
+            continue;
+        }
+        if payload > MAX_BAKED_EXIF as u64 {
+            anyhow::bail!("the EXIF segment is larger than the {MAX_BAKED_EXIF}-byte limit");
+        }
+        let mut buf = vec![0u8; payload as usize];
+        if r.read_exact(&mut buf).is_err() {
+            return Ok(None);
+        }
+        // An APP1 that is not EXIF is almost always the XMP packet
+        // (`http://ns.adobe.com/xap/1.0/`), which is not ours to read here.
+        if buf.starts_with(b"Exif\0\0") {
+            return Ok(Some(buf.split_off(6)));
+        }
+    }
+}
+
+/// Capture metadata for an already-baked raster (P2). Returns the maker, the
+/// model and rawler's own parsed [`rawler::exif::Exif`] — the SAME struct the
+/// RAW arm reads, so [`exif_facts`] serves both.
+///
+/// No new dependency, and no hand-rolled tag decoding: rawler's
+/// [`GenericTiffReader`] already parses a TIFF header chain (this module uses
+/// it for `embedded_xmp` and `lensmeta` uses it for the Sony spline tags), and
+/// `Exif::new` already walks the root IFD plus the `ExifIFD` sub-IFD that
+/// `wellknown_sub_ifd_tags` parses by default (tag 0x8769, spelled
+/// `ExifIFDPointer` there and `ExifOffset` in the EXIF table — verified the
+/// same number in `rawler/src/tags.rs:100` and `:369`). A JPEG needs one extra
+/// step, [`jpeg_exif_block`], because its TIFF block is wrapped in an APP1
+/// segment; a TIFF IS the container already.
+///
+/// PNG is deliberately NOT read: its EXIF lives in an `eXIf` chunk that needs
+/// its own chunk walk, and the format's own metadata story (`tEXt`) is not
+/// EXIF at all. A PNG import keeps the neutral stub, exactly as before.
+///
+/// Absent metadata is `Ok(None)`, not an error — an untagged export is the
+/// normal case, not a defect.
+fn baked_exif(path: &Path) -> Result<Option<(String, String, rawler::exif::Exif)>> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("open image {}", path.display()))?;
+    let mut magic = [0u8; 2];
+    if file.read_exact(&mut magic).is_err() {
+        return Ok(None);
+    }
+    use std::io::Seek as _;
+    // Both arms re-read from byte 0: the magic probe above consumed two
+    // bytes, and both readers below expect to start at the file header (the
+    // JPEG walker re-reads SOI itself, the TIFF reader wants `II`/`MM`).
+    file.rewind().with_context(|| format!("rewind {}", path.display()))?;
+    let tiff = if magic == [0xFF, 0xD8] {
+        // JPEG: the TIFF block rides inside APP1.
+        let Some(block) = jpeg_exif_block(&mut file)
+            .with_context(|| format!("read the EXIF segment of {}", path.display()))?
+        else {
+            return Ok(None);
+        };
+        GenericTiffReader::new_with_buffer(&block, 0, 0, Some(16)).ok()
+    } else if magic == *b"II" || magic == *b"MM" {
+        let mut reader = std::io::BufReader::new(&mut file);
+        // Same chain cap as `embedded_xmp` and `lensmeta::read` — a header
+        // parse, no pixel decode.
+        GenericTiffReader::new(&mut reader, 0, 0, Some(16), &[]).ok()
+    } else {
+        return Ok(None); // PNG and anything else: no EXIF route (see the doc)
+    };
+    let Some(tiff) = tiff else { return Ok(None) };
+    // `root_ifd()` PANICS on an empty chain (rawler's own `unwrap`-shaped
+    // guard, `formats/tiff/reader.rs:36-38`) and `Exif::new` walks
+    // third-party-parsed IFDs — both are exactly what `guard_parser_panic`
+    // exists for, and metadata is never worth aborting a batch over.
+    guard_parser_panic(path, "baked EXIF", || {
+        let root = tiff.root_ifd();
+        let text = |t: TiffCommonTag| {
+            root.get_entry(t)
+                .and_then(|e| e.value.as_string().cloned())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let exif = rawler::exif::Exif::new(root)
+            .map_err(|e| anyhow!("parse the EXIF of {}: {e}", path.display()))?;
+        Ok(Some((
+            text(TiffCommonTag::Make).unwrap_or_default(),
+            text(TiffCommonTag::Model).unwrap_or_default(),
+            exif,
+        )))
+    })
+}
+
 fn decode_baked(path: &Path) -> Result<Decoded> {
     // baked-by-construction: decode_any sends a RAW to decode_raw; this is the baked arm.
     let preview = load_image(path)?;
     let (w, h) = preview.dimensions();
+    // P2: a phone or Lightroom JPEG carries ISO, shutter, aperture, focal
+    // length and capture time in plain EXIF, and this arm used to throw all of
+    // it away and hand the AI advisor `model: "imported image"` and nothing
+    // else. A read FAILURE is disclosed and degrades to the old stub — the
+    // pixels are fine and refusing the photo over its metadata would be the
+    // wrong trade — but it is never folded into silence.
+    let facts = match baked_exif(path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("⚠ {e:#}");
+            None
+        }
+    };
+    let (make, model, exif) = match facts {
+        Some((make, model, exif)) => {
+            let f = exif_facts(&exif);
+            // "imported image" stays the answer for a file that names no
+            // camera: it is what every downstream consumer already reads as
+            // "no body", and an empty model string would print as a blank.
+            (make, if model.is_empty() { "imported image".to_string() } else { model }, Some(f))
+        }
+        None => (String::new(), "imported image".to_string(), None),
+    };
     let meta = Meta {
-        make: String::new(),
-        model: "imported image".to_string(),
-        lens: None,
-        iso: None,
-        shutter: None,
-        aperture: None,
-        focal_length_mm: None,
-        exposure_bias_ev: None,
-        date_time: None,
+        make,
+        model,
+        lens: exif.as_ref().and_then(|f| f.lens.clone()),
+        iso: exif.as_ref().and_then(|f| f.iso),
+        shutter: exif.as_ref().and_then(|f| f.shutter.clone()),
+        aperture: exif.as_ref().and_then(|f| f.aperture),
+        focal_length_mm: exif.as_ref().and_then(|f| f.focal_length_mm),
+        exposure_bias_ev: exif.as_ref().and_then(|f| f.exposure_bias_ev),
+        date_time: exif.as_ref().and_then(|f| f.date_time.clone()),
+        // DISPLAY-frame dims: `load_image` has already applied the EXIF
+        // orientation, so these describe the pixels actually delivered.
         width: w as usize,
         height: h as usize,
+        // A baked raster is not camera-referred — the develop anchors on the
+        // recipe's 5500 K instead (see `render::render_baked_to_image`).
         as_shot_wb_coeffs: [1.0, 1.0, 1.0, 1.0],
     };
     let histogram = compute_histogram(&hist_copy(&preview));
@@ -503,11 +873,12 @@ pub fn raw_orientation_of(md: &rawler::decoders::RawMetadata) -> rawler::Orienta
 pub fn raw_orientation(path: &Path) -> Result<rawler::Orientation> {
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
-    let decoder =
-        get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", path.display()))?;
-    let md = decoder
-        .raw_metadata(&src, &RawDecodeParams { image_index: 0 })
-        .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+    let decoder = decoder_for(path, &src)?;
+    let md = guard_parser_panic(path, "raw_metadata", || {
+        decoder
+            .raw_metadata(&src, &RawDecodeParams { image_index: 0 })
+            .map_err(|e| anyhow!("raw_metadata: {e}"))
+    })?;
     Ok(raw_orientation_of(&md))
 }
 
@@ -524,8 +895,9 @@ fn default_crop(raw: &rawler::RawImage) -> rawler::imgop::Rect {
     })
 }
 
-/// Move a decoded `RawImage`'s develop window onto that rectangle. Returns the
-/// origin it moved to, or `None` when nothing needed moving.
+/// Move a decoded `RawImage`'s develop window onto that rectangle. Returns
+/// [`CropAlignment`] — which of the three outcomes happened — and DISCLOSES
+/// the refusal on stderr (A5).
 ///
 /// **The defect this closes.** Block registration of eight Autoshop renders
 /// against their Lightroom exports put every one of them
@@ -565,10 +937,55 @@ fn default_crop(raw: &rawler::RawImage) -> rawler::imgop::Rect {
 /// and this leaves it alone. A rectangle that would run off the sensor is
 /// refused rather than clamped — a RAW whose tags disagree with its own
 /// dimensions is not a frame to guess at.
-pub fn align_default_crop(raw: &mut rawler::RawImage) -> Option<(usize, usize)> {
-    let moved = aligned_demosaic_roi(raw.crop_area, raw.active_area, raw.width, raw.height)?;
-    raw.active_area = Some(moved);
-    Some((moved.p.x, moved.p.y))
+pub fn align_default_crop(raw: &mut rawler::RawImage) -> CropAlignment {
+    let verdict = aligned_demosaic_roi(raw.crop_area, raw.active_area, raw.width, raw.height);
+    match verdict {
+        CropAlignment::Moved(moved) => raw.active_area = Some(moved),
+        // A5: the refusal used to be an indistinguishable `None`, discarded at
+        // the call site — so a non-Sony file with inconsistent tags rendered
+        // from the un-aligned window and said NOTHING, leaving any later
+        // diagnosis with zero telemetry. It is now a sentence on the same
+        // stderr channel every other render disclosure uses
+        // (`ValidatedRecipe::disclose`, the embedded-XMP read warning).
+        CropAlignment::OffSensor { crop, width, height } => eprintln!(
+            "⚠ this RAW's DefaultCrop rectangle ({}×{} at {},{}) runs off its own {width}×{height} \
+             sensor — developing from the un-aligned window instead. The frame is still the size \
+             the camera declares; its ORIGIN may differ from Lightroom's by the tag disagreement",
+            crop.d.w, crop.d.h, crop.p.x, crop.p.y
+        ),
+        CropAlignment::NothingToMove => {}
+    }
+    verdict
+}
+
+/// What [`align_default_crop`] decided. Three outcomes, not two: "moved" and
+/// "nothing to move" are both normal, and "the tags run off the sensor" is a
+/// fact about the FILE that a photographer chasing a misplaced mask needs to
+/// hear (A5). Carried as a value as well as printed so the `AUTOSHOP_RAW_ZOO`
+/// probe can record a verdict per make without scraping stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropAlignment {
+    /// The demosaic window moved onto the default-crop origin.
+    Moved(rawler::imgop::Rect),
+    /// Sizes differ (rawler's own `CropDefault` handles it), origins already
+    /// agree, or the RAW declares no default crop. Every non-Sony make in the
+    /// zoo lands here — see the table in
+    /// `the_demosaic_window_moves_onto_the_default_crop_rectangle`.
+    NothingToMove,
+    /// The rectangle would index past the sensor buffer. Refused, never
+    /// clamped — a RAW whose tags disagree with its own dimensions is not a
+    /// frame to guess at.
+    OffSensor { crop: rawler::imgop::Rect, width: usize, height: usize },
+}
+
+impl CropAlignment {
+    /// The origin the window moved to, for the callers that only wanted that.
+    pub fn moved_to(self) -> Option<(usize, usize)> {
+        match self {
+            CropAlignment::Moved(r) => Some((r.p.x, r.p.y)),
+            _ => None,
+        }
+    }
 }
 
 /// The decision half of [`align_default_crop`], as a function of the numbers
@@ -579,15 +996,17 @@ fn aligned_demosaic_roi(
     active: Option<rawler::imgop::Rect>,
     width: usize,
     height: usize,
-) -> Option<rawler::imgop::Rect> {
-    let (crop, active) = (crop?, active?);
+) -> CropAlignment {
+    let (Some(crop), Some(active)) = (crop, active) else {
+        return CropAlignment::NothingToMove;
+    };
     if crop.d != active.d || crop.p == active.p {
-        return None;
+        return CropAlignment::NothingToMove;
     }
     if crop.p.x + crop.d.w > width || crop.p.y + crop.d.h > height {
-        return None;
+        return CropAlignment::OffSensor { crop, width, height };
     }
-    Some(crop)
+    CropAlignment::Moved(crop)
 }
 
 /// The pixel frame a develop of `path` lands in — the frame every normalised
@@ -626,15 +1045,17 @@ pub fn frame_size(path: &Path) -> Result<(usize, usize)> {
     }
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
-    let decoder =
-        get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", path.display()))?;
+    let decoder = decoder_for(path, &src)?;
     let params = RawDecodeParams { image_index: 0 };
-    let md = decoder
-        .raw_metadata(&src, &params)
-        .map_err(|e| anyhow!("raw_metadata: {e}"))?;
-    let raw = decoder
-        .raw_image(&src, &params, true)
-        .map_err(|e| anyhow!("raw_image(dummy): {e}"))?;
+    let (md, raw) = guard_parser_panic(path, "frame size", || {
+        let md = decoder
+            .raw_metadata(&src, &params)
+            .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+        let raw = decoder
+            .raw_image(&src, &params, true)
+            .map_err(|e| anyhow!("raw_image(dummy): {e}"))?;
+        Ok((md, raw))
+    })?;
     let d = default_crop(&raw).d;
     Ok(if orientation_transposes(raw_orientation_of(&md)) {
         (d.h, d.w)
@@ -811,25 +1232,188 @@ pub(crate) fn guard_tiff_chain(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The one sentence that turns "your camera is not supported" into something a
+/// photographer can DO (A8, the DNG on-ramp). Every body Autoshop cannot read
+/// natively has this route, and it is not a downgrade: rawler's DNG decoder
+/// builds its whole `Camera` — colour matrices included — from the file's own
+/// tags (`decoders/dng.rs:270-289`), so a converted file needs no entry in the
+/// 725-model camera database at all. Kept as ONE constant so the CLI, the GUI
+/// toast and the web error body cannot drift into three different offers.
+pub const DNG_ONRAMP: &str = "Adobe DNG Converter (free, from Adobe) rewrites it as a .dng, \
+                              which Autoshop develops from the file's own colour tags — that \
+                              route works for any body";
+
+/// Turn rawler's `get_decoder` refusal into a sentence that names WHICH of the
+/// three quite different failures happened (A7). They used to arrive as one
+/// opaque `no rawler decoder for {path}: {e}` line, and the three want three
+/// different actions from the user:
+///
+///   * **unknown make** — the file IS a TIFF-shaped RAW, but its `Make` string
+///     matches none of rawler's table (`decoders/mod.rs:963-971`). Usually a
+///     body newer than the decoder crate.
+///   * **unknown model** — the make is known and the container parsed, but the
+///     exact model is missing from the 725-file camera database
+///     (`check_supported_with_everything`, `mod.rs:1003-1009`). This is the
+///     common case for a recent body, and the one the DNG on-ramp fixes best.
+///   * **no decoder at all** — nothing matched: not a RAW, or a container this
+///     rawler does not know. A `.tif`-named RAW lands here too (see
+///     [`load_image_gated`]'s DNG-in-TIFF refusal for the reverse direction).
+///
+/// The path is always named because a batch scan reports many files at once.
+fn describe_decoder_failure(path: &Path, e: &rawler::RawlerError) -> anyhow::Error {
+    let rawler::RawlerError::Unsupported { what, make, model, .. } = e else {
+        // DecoderFailed — the container was recognised and then would not
+        // read. That is a file-integrity story, not a camera-support one, so
+        // it keeps rawler's own words and gains no on-ramp advice.
+        return anyhow!("{} could not be decoded: {e}", path.display());
+    };
+    let (make, model) = (make.trim(), model.trim());
+    if !make.is_empty() && !model.is_empty() {
+        anyhow!(
+            "{} is a {make} {model}, and this build's RAW decoder has no calibration for that \
+             exact model (it carries 725). {DNG_ONRAMP}",
+            path.display()
+        )
+    } else if !make.is_empty() {
+        anyhow!(
+            "{} names its maker as \"{make}\", which this build's RAW decoder does not know at \
+             all — usually a body newer than the decoder. {DNG_ONRAMP}",
+            path.display()
+        )
+    } else {
+        anyhow!(
+            "{} does not read as any RAW format this build knows ({what}) — if it really is a \
+             camera RAW, {DNG_ONRAMP}",
+            path.display()
+        )
+    }
+}
+
+/// [`get_decoder`] with [`describe_decoder_failure`]'s wording — the ONE place
+/// a decoder refusal is turned into a sentence, so `decode_raw`, the preview
+/// path, `frame_size`, `raw_orientation` and the full-res render cannot answer
+/// the same file three different ways (they did: "no rawler decoder for …",
+/// "no decoder for …", and rawler's raw Display).
+pub(crate) fn decoder_for<'a>(
+    path: &Path,
+    src: &'a RawSource,
+) -> Result<Box<dyn rawler::decoders::Decoder + 'a>> {
+    get_decoder(src).map_err(|e| describe_decoder_failure(path, &e))
+}
+
+/// Run a THIRD-PARTY parser call so that a panic inside it becomes a named
+/// error instead of an aborted process.
+///
+/// The GUI has had this since v0.22 — every worker body runs inside
+/// `catch_unwind` (`src/bin/gui/workers.rs:29-38`) — and the CLI had nothing:
+/// the same malformed file that showed a toast in the app killed
+/// `autoshop batch` mid-library, losing the run. Widening [`RAW_EXTS`] to 24
+/// formats widens the surface exactly where the parsers are least exercised,
+/// so the guard goes in at the same time as the extensions.
+///
+/// `AssertUnwindSafe` is correct and not a shortcut here: the closure borrows
+/// a `RawSource` and a decoder that are DROPPED on the error path — nothing
+/// observes a half-updated value after a caught panic, because nothing
+/// survives the call. What crosses the boundary is the returned `T` alone.
+///
+/// This does NOT make a panicking decoder supported (see [`RAW_EXTS`] on
+/// `.x3f`); it makes one file's defect one file's error.
+pub(crate) fn guard_parser_panic<T>(
+    path: &Path,
+    what: &str,
+    call: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(anyhow!(
+                "the RAW parser panicked reading {} ({what}: {msg}) — that is a defect in the \
+                 third-party decoder for this format, not something wrong with the photograph. \
+                 {DNG_ONRAMP}",
+                path.display()
+            ))
+        }
+    }
+}
+
 /// The three-level embedded-rendition fallback: a level that ERRORS is a
 /// level that cannot answer — the chain's whole purpose is "this one can't,
 /// try the next" (L05-4/5: a corrupt mid-size preview used to abort files
 /// whose thumbnail or full-size JPEG was intact). Lazy, so a cheaper hit
 /// skips the larger decodes; the terminal failure names every reason.
 type RenditionLevel<'a, T> = (&'static str, &'a mut dyn FnMut() -> Result<Option<T>>);
-fn first_usable_rendition<T>(path: &Path, levels: &mut [RenditionLevel<'_, T>]) -> Result<T> {
+
+/// [`first_usable_rendition`], with the two "no" answers kept APART (A4).
+///
+/// `Ok(None)` means every level said "I do not carry one" — a fact about the
+/// FORMAT, not about this file. rawler 0.7.2 overrides none of the three
+/// rendition methods for ORF, SRW, NRW, MEF, MOS, KDC, DCR, DCS, ERF, IIQ,
+/// CRW or ARI (the trait defaults return `Ok(None)`, `decoders/mod.rs:340`,
+/// `:346`, `:351`), so an Olympus file has no embedded rendition to find no
+/// matter how healthy it is. Folding that into the same error as "the preview
+/// is corrupt" is what made `.orf` fail outright on the CLI while the very
+/// same file developed fine in the GUI.
+///
+/// `Err` still means the levels that COULD have answered tried and failed —
+/// a corrupt preview, an unreadable JPEG blob — and every reason is named.
+fn usable_rendition<T>(path: &Path, levels: &mut [RenditionLevel<'_, T>]) -> Result<Option<T>> {
     let mut why: Vec<String> = Vec::new();
     for (name, get) in levels.iter_mut() {
         match get() {
-            Ok(Some(v)) => return Ok(v),
+            Ok(Some(v)) => return Ok(Some(v)),
             Ok(None) => {}
             Err(e) => why.push(format!("{name}: {e:#}")),
         }
     }
     if why.is_empty() {
-        anyhow::bail!("no embedded preview/thumbnail/full image in {}", path.display());
+        return Ok(None);
     }
     anyhow::bail!("no usable embedded rendition in {} ({})", path.display(), why.join("; "))
+}
+
+/// Long edge for the stand-in develop [`neutral_rendition`] produces. 2048 px
+/// is the working edge the rest of the tree already treats as "preview-sized"
+/// (`pipeline`'s base-look estimation, `denoise`'s and `generative`'s
+/// pre-shrink), and it is chosen for the same reason here: the histogram this
+/// feeds is a 256-bin summary and the AI advisor is shown a downscaled image
+/// regardless, so paying a full-resolution develop would buy nothing.
+const NEUTRAL_PREVIEW_EDGE: u32 = 2048;
+
+/// The stand-in for a camera rendition on a format that embeds none (A4): our
+/// OWN neutral develop at working resolution, already in the display frame
+/// (`render_to_image` orients before anything else).
+///
+/// It says so, on stderr, every time — the GUI/web route their own copy of
+/// this line through their toast/warning channels. That disclosure is not
+/// decoration: the base-look estimator's whole method is comparing the
+/// CAMERA's rendering against a neutral one, so a neutral develop silently
+/// posing as a camera JPEG would make it measure zero difference and report a
+/// confident "no base look". [`embedded_preview`] — the estimator's own door —
+/// therefore keeps the strict "camera pixels or nothing" contract and never
+/// comes here.
+fn neutral_rendition(path: &Path) -> Result<DynamicImage> {
+    eprintln!(
+        "⚠ {} carries no embedded preview or thumbnail (its format does not store one), so \
+         Autoshop is showing its own neutral develop instead of the camera's rendering",
+        path.display()
+    );
+    crate::render::render_to_image(
+        path,
+        &crate::recipe::EditRecipe::default(),
+        None,
+        Some(NEUTRAL_PREVIEW_EDGE),
+    )
+    .with_context(|| {
+        format!(
+            "{} has no embedded rendition, and developing the sensor as a stand-in failed too",
+            path.display()
+        )
+    })
 }
 
 /// Decode a RAW file: embedded preview + metadata + histogram. Reads the file
@@ -837,8 +1421,7 @@ fn first_usable_rendition<T>(path: &Path, levels: &mut [RenditionLevel<'_, T>]) 
 pub fn decode_raw(path: &Path) -> Result<Decoded> {
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
-    let decoder = get_decoder(&src)
-        .map_err(|e| anyhow!("no rawler decoder for {}: {e}", path.display()))?;
+    let decoder = decoder_for(path, &src)?;
     let params = RawDecodeParams { image_index: 0 };
 
     // Prefer the mid-size embedded preview; fall back to the thumbnail, then
@@ -846,25 +1429,28 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
     // JPEGInterchangeFormat blob — it never develops the sensor; rawler's ARW
     // decoder in fact implements ONLY this level, so Sony files always
     // resolve here). Evaluated lazily to skip the larger JPEG decodes when a
-    // cheaper level exists.
-    let preview = first_usable_rendition(
-        path,
-        &mut [
-            ("preview_image", &mut || {
-                decoder.preview_image(&src, &params).map_err(|e| anyhow!("{e}"))
-            }),
-            ("thumbnail_image", &mut || {
-                decoder.thumbnail_image(&src, &params).map_err(|e| anyhow!("{e}"))
-            }),
-            ("full_image", &mut || {
-                decoder.full_image(&src, &params).map_err(|e| anyhow!("{e}"))
-            }),
-        ],
-    )?;
+    // cheaper level exists. `None` = the FORMAT embeds none (the ORF class) —
+    // degraded to our own develop below, never a hard failure (A4).
+    let camera_preview = guard_parser_panic(path, "embedded rendition", || {
+        usable_rendition(
+            path,
+            &mut [
+                ("preview_image", &mut || {
+                    decoder.preview_image(&src, &params).map_err(|e| anyhow!("{e}"))
+                }),
+                ("thumbnail_image", &mut || {
+                    decoder.thumbnail_image(&src, &params).map_err(|e| anyhow!("{e}"))
+                }),
+                ("full_image", &mut || {
+                    decoder.full_image(&src, &params).map_err(|e| anyhow!("{e}"))
+                }),
+            ],
+        )
+    })?;
 
-    let md = decoder
-        .raw_metadata(&src, &params)
-        .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+    let md = guard_parser_panic(path, "raw_metadata", || {
+        decoder.raw_metadata(&src, &params).map_err(|e| anyhow!("raw_metadata: {e}"))
+    })?;
     // Which way is up: EXIF tag 0x0112 off the metadata already in hand, NOT
     // the dummy raw's hard-coded field (see [`raw_orientation_of`]). Free —
     // `md` is decoded one line above.
@@ -872,39 +1458,23 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
 
     // `dummy = true`: populate dimensions / WB / levels without decompressing
     // the full sensor data — we only need the structural metadata here.
-    let raw = decoder
-        .raw_image(&src, &params, true)
-        .map_err(|e| anyhow!("raw_image(dummy): {e}"))?;
+    let raw = guard_parser_panic(path, "raw_image(dummy)", || {
+        decoder.raw_image(&src, &params, true).map_err(|e| anyhow!("raw_image(dummy): {e}"))
+    })?;
 
-    let exif = &md.exif;
+    // ONE EXIF extraction for both source kinds ([`exif_facts`]) — the APEX
+    // aperture fallback and the finiteness filters live there now.
+    let facts = exif_facts(&md.exif);
     let mut meta = Meta {
         make: md.make.trim().to_string(),
         model: md.model.trim().to_string(),
-        lens: exif.lens_model.clone().or_else(|| exif.lens_make.clone()),
-        iso: exif.iso_speed_ratings.map(|v| v as u32).or(exif.iso_speed),
-        shutter: exif.exposure_time.as_ref().map(fmt_shutter),
-        aperture: exif
-            .fnumber
-            .as_ref()
-            .map(ratio)
-            // An INVALID FNumber (0-denominator → 0.0, or non-finite) must
-            // fall through to the Av fallback, not suppress it: filtering
-            // only at the end let f/0 shadow a perfectly valid ApertureValue.
-            .filter(|v| v.is_finite() && *v > 0.0)
-            // ApertureValue is an APEX Av, not an f-number: N = 2^(Av/2)
-            // (Av 4 ⇒ f/4, Av 5 ⇒ f/5.7). Feeding it raw overstated fast
-            // lenses in metadata + the AI prompt whenever FNumber was absent.
-            .or_else(|| exif.aperture_value.as_ref().map(|v| (ratio(v) / 2.0).exp2()))
-            // Same physical-validity rule for the fallback (huge Av → ∞;
-            // serde_json refuses non-finite floats — the WB-coeff rule).
-            .filter(|v| v.is_finite() && *v > 0.0),
-        focal_length_mm: exif
-            .focal_length
-            .as_ref()
-            .map(ratio)
-            .filter(|v| v.is_finite() && *v > 0.0),
-        exposure_bias_ev: exif.exposure_bias.as_ref().map(sratio).filter(|v| v.is_finite()),
-        date_time: exif.date_time_original.clone(),
+        lens: facts.lens,
+        iso: facts.iso,
+        shutter: facts.shutter,
+        aperture: facts.aperture,
+        focal_length_mm: facts.focal_length_mm,
+        exposure_bias_ev: facts.exposure_bias_ev,
+        date_time: facts.date_time,
         // DISPLAY-frame dims, agreeing with the oriented preview below:
         // sensor width/height made every rotated (portrait) shot's aspect —
         // and the style index's portrait feature — read as landscape.
@@ -928,7 +1498,20 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
     // Orient the preview into the display frame (embedded previews are stored
     // in sensor orientation; see preview_only for the full rationale). Uses
     // the EXIF orientation resolved above — the same value Meta's dims used.
-    let preview = crate::render::oriented(preview, orientation);
+    // The A4 stand-in comes back from `render_to_image` ALREADY in the display
+    // frame (it orients before the develop), so it must not be oriented twice.
+    let preview = match camera_preview {
+        Some(p) => crate::render::oriented(p, orientation),
+        None => {
+            // The decoder + source go first: `render_to_image` maps the whole
+            // RAW again (~15-25 MB for the zoo's files, ~120 MB for a 61 MP
+            // ARW), and holding this one underneath would double that peak for
+            // no reason. Order matters — the decoder borrows the source.
+            drop(decoder);
+            drop(src);
+            neutral_rendition(path)?
+        }
+    };
     // The DELIVERED pixels are the embedded preview, and its dims are the
     // camera's choice — they can differ from the sensor math above (a DNG
     // can report 4024×6048 while its preview is 4000×6000). These numbers
@@ -1042,8 +1625,15 @@ pub fn preview_only(path: &Path) -> Result<DynamicImage> {
         // baked-by-construction: the !is_raw arm of preview_only.
         return load_image(path);
     }
-    camera_rendition(path)?
-        .ok_or_else(|| anyhow!("no preview/thumbnail/full image in {}", path.display()))
+    // A4: a format that embeds no rendition (the ORF class — see
+    // `usable_rendition`) is DEGRADED to our own neutral develop, with a word
+    // about it, instead of failing. This is the door the gallery grid and the
+    // web thumbnails use, and the old error blanked their cells after three
+    // silent retries (`bin/gui/workers.rs`), which reads as a broken file.
+    match camera_rendition(path)? {
+        Some(img) => Ok(img),
+        None => neutral_rendition(path),
+    }
 }
 
 /// The camera's own rendition of a RAW, oriented — `None` when it carries
@@ -1066,31 +1656,32 @@ pub fn preview_only(path: &Path) -> Result<DynamicImage> {
 fn camera_rendition(path: &Path) -> Result<Option<DynamicImage>> {
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
-    let decoder =
-        get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", path.display()))?;
+    let decoder = decoder_for(path, &src)?;
     let params = RawDecodeParams { image_index: 0 };
-    let img = if let Some(p) = decoder
-        .preview_image(&src, &params)
-        .map_err(|e| anyhow!("preview_image: {e}"))?
-    {
-        p
-    } else if let Some(t) = decoder
-        .thumbnail_image(&src, &params)
-        .map_err(|e| anyhow!("thumbnail_image: {e}"))?
-    {
-        t
-    } else if let Some(f) = decoder
-        .full_image(&src, &params)
-        .map_err(|e| anyhow!("full_image: {e}"))?
-    {
-        f
-    } else {
-        return Ok(None);
-    };
-    let md = decoder
-        .raw_metadata(&src, &params)
-        .map_err(|e| anyhow!("raw_metadata: {e}"))?;
-    Ok(Some(crate::render::oriented(img, raw_orientation_of(&md))))
+    guard_parser_panic(path, "camera rendition", || {
+        let img = if let Some(p) = decoder
+            .preview_image(&src, &params)
+            .map_err(|e| anyhow!("preview_image: {e}"))?
+        {
+            p
+        } else if let Some(t) = decoder
+            .thumbnail_image(&src, &params)
+            .map_err(|e| anyhow!("thumbnail_image: {e}"))?
+        {
+            t
+        } else if let Some(f) = decoder
+            .full_image(&src, &params)
+            .map_err(|e| anyhow!("full_image: {e}"))?
+        {
+            f
+        } else {
+            return Ok(None);
+        };
+        let md = decoder
+            .raw_metadata(&src, &params)
+            .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+        Ok(Some(crate::render::oriented(img, raw_orientation_of(&md))))
+    })
 }
 
 /// The camera's OWN rendition only — `None` for a non-RAW or a RAW that
@@ -1163,10 +1754,21 @@ mod tests {
 
     /// L05-4/5: a level that errors yields to the next level instead of
     /// aborting the file, and a fully-dry chain names every reason.
+    ///
+    /// R27 A4 adds the THIRD outcome the first two used to be confused with:
+    /// every level answering "I carry none" is `Ok(None)` — a fact about the
+    /// FORMAT (ORF, SRW, NRW, MEF, … override no rendition method in rawler
+    /// 0.7.2) — and must not be reported as the corruption case. That
+    /// conflation is what made `.orf` fail outright on the CLI.
+    ///
+    /// MUTATION THIS CATCHES: make the empty-`why` arm `bail!` again (the
+    /// pre-R27 code) and the third assertion fails; make the errors arm return
+    /// `Ok(None)` and the second fails, which would degrade a genuinely
+    /// corrupt preview into a silent neutral develop.
     #[test]
     fn a_corrupt_rendition_level_yields_to_the_next() {
         let p = Path::new("x.arw");
-        let got = first_usable_rendition::<u32>(
+        let got = usable_rendition::<u32>(
             p,
             &mut [
                 ("preview_image", &mut || Err(anyhow!("corrupt JPEG stream"))),
@@ -1175,9 +1777,9 @@ mod tests {
             ],
         )
         .expect("the intact thumbnail answers");
-        assert_eq!(got, 7);
+        assert_eq!(got, Some(7));
 
-        let e = first_usable_rendition::<u32>(
+        let e = usable_rendition::<u32>(
             p,
             &mut [
                 ("preview_image", &mut || Err(anyhow!("corrupt JPEG stream"))),
@@ -1190,6 +1792,21 @@ mod tests {
         assert!(
             e.contains("preview_image: corrupt JPEG stream") && e.contains("full_image: truncated blob"),
             "the terminal failure names each level's reason: {e}"
+        );
+
+        // The ORF class: nothing errored, nothing existed.
+        assert_eq!(
+            usable_rendition::<u32>(
+                p,
+                &mut [
+                    ("preview_image", &mut || Ok(None)),
+                    ("thumbnail_image", &mut || Ok(None)),
+                    ("full_image", &mut || Ok(None)),
+                ],
+            )
+            .expect("a format that embeds no rendition is not a failure"),
+            None,
+            "'this format carries none' must be Ok(None), never the corruption error"
         );
     }
 
@@ -1815,28 +2432,660 @@ mod tests {
         let sony_crop = r(32, 20, 9504, 6336);
         assert_eq!(
             aligned_demosaic_roi(Some(sony_crop), Some(r(0, 0, 9504, 6336)), 9600, 6376),
-            Some(sony_crop),
+            CropAlignment::Moved(sony_crop),
             "the A7R IV window starts at DefaultCropOrigin, not at the sensor corner"
         );
         assert_eq!(
             aligned_demosaic_roi(Some(r(32, 20, 9000, 6000)), Some(r(0, 0, 9504, 6336)), 9600, 6376),
-            None,
+            CropAlignment::NothingToMove,
             "a size-REDUCING default crop is rawler's own CropDefault step's job"
         );
         assert_eq!(
             aligned_demosaic_roi(Some(sony_crop), Some(sony_crop), 9600, 6376),
-            None,
+            CropAlignment::NothingToMove,
             "an already-aligned pair has nothing to move"
         );
+        let off = r(200, 20, 9504, 6336);
         assert_eq!(
-            aligned_demosaic_roi(Some(r(200, 20, 9504, 6336)), Some(r(0, 0, 9504, 6336)), 9600, 6376),
-            None,
-            "a window that would run off the sensor is refused, never clamped"
+            aligned_demosaic_roi(Some(off), Some(r(0, 0, 9504, 6336)), 9600, 6376),
+            CropAlignment::OffSensor { crop: off, width: 9600, height: 6376 },
+            "a window that would run off the sensor is refused, never clamped — and SAID (A5)"
         );
         assert_eq!(
             aligned_demosaic_roi(None, Some(r(0, 0, 9504, 6336)), 9600, 6376),
-            None,
+            CropAlignment::NothingToMove,
             "a RAW that declares no default crop keeps the window it had"
+        );
+    }
+
+    /// A little-endian TIFF block with an IFD0 (Make/Model/ExifIFDPointer) and
+    /// an ExifIFD (ISO / FNumber / ExposureTime / FocalLength /
+    /// DateTimeOriginal) — the exact shape a camera writes into a JPEG's APP1
+    /// segment, built by hand so the P2 tests need no photograph and no new
+    /// dependency.
+    ///
+    /// Values ≤ 4 bytes live inline in the entry; longer ones (the two ASCII
+    /// strings and the three rationals) are appended after both IFDs and
+    /// referenced by offset, which is what makes this a real exercise of the
+    /// reader rather than a straight-line one.
+    #[cfg(test)]
+    fn exif_block_fixture() -> Vec<u8> {
+        // Tag, type, count, then either the inline value or a pool entry.
+        const ASCII: u16 = 2;
+        const SHORT: u16 = 3;
+        const LONG: u16 = 4;
+        const RATIONAL: u16 = 5;
+        let make = b"TestCam Industries\0";
+        let model = b"TC-1\0";
+        let date = b"2026:08:19 11:22:33\0";
+        // header(8) + ifd0(2 + 4*12 + 4) + exif(2 + 5*12 + 4) = 8 + 54 + 66
+        let ifd0_at = 8u32;
+        let ifd0_len = 2 + 4 * 12 + 4;
+        let exif_at = ifd0_at + ifd0_len as u32;
+        let exif_len = 2 + 5 * 12 + 4;
+        let pool_at = exif_at + exif_len as u32;
+
+        let mut pool: Vec<u8> = Vec::new();
+        let push = |bytes: &[u8], pool: &mut Vec<u8>| -> u32 {
+            let at = pool_at + pool.len() as u32;
+            pool.extend_from_slice(bytes);
+            at
+        };
+        let make_at = push(make, &mut pool);
+        let model_at = push(model, &mut pool);
+        let date_at = push(date, &mut pool);
+        // f/2.8 = 28/10, 1/250 s, 35 mm.
+        let fnum_at = push(&[28, 0, 0, 0, 10, 0, 0, 0], &mut pool);
+        let time_at = push(&[1, 0, 0, 0, 250, 0, 0, 0], &mut pool);
+        let focal_at = push(&[35, 0, 0, 0, 1, 0, 0, 0], &mut pool);
+
+        let entry = |tag: u16, ty: u16, count: u32, val: u32| {
+            let mut e = Vec::with_capacity(12);
+            e.extend_from_slice(&tag.to_le_bytes());
+            e.extend_from_slice(&ty.to_le_bytes());
+            e.extend_from_slice(&count.to_le_bytes());
+            e.extend_from_slice(&val.to_le_bytes());
+            e
+        };
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"II");
+        out.extend_from_slice(&42u16.to_le_bytes());
+        out.extend_from_slice(&ifd0_at.to_le_bytes());
+        // IFD0 — entries MUST be in ascending tag order.
+        out.extend_from_slice(&4u16.to_le_bytes());
+        out.extend(entry(0x010F, ASCII, make.len() as u32, make_at)); // Make
+        out.extend(entry(0x0110, ASCII, model.len() as u32, model_at)); // Model
+        out.extend(entry(0x0112, SHORT, 1, 1)); // Orientation = Normal
+        out.extend(entry(0x8769, LONG, 1, exif_at)); // ExifIFDPointer
+        out.extend_from_slice(&0u32.to_le_bytes()); // no IFD1
+        // ExifIFD
+        out.extend_from_slice(&5u16.to_le_bytes());
+        out.extend(entry(0x829A, RATIONAL, 1, time_at)); // ExposureTime
+        out.extend(entry(0x829D, RATIONAL, 1, fnum_at)); // FNumber
+        out.extend(entry(0x8827, SHORT, 1, 640)); // ISOSpeedRatings
+        out.extend(entry(0x9003, ASCII, date.len() as u32, date_at)); // DateTimeOriginal
+        out.extend(entry(0x920A, RATIONAL, 1, focal_at)); // FocalLength
+        out.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(out.len() as u32, pool_at, "the fixture's offset arithmetic must be exact");
+        out.extend_from_slice(&pool);
+        out
+    }
+
+    /// R27 P2 — a baked photo's real EXIF reaches [`Meta`], through the SAME
+    /// extraction the RAW arm uses.
+    ///
+    /// Both containers are exercised, because they reach the TIFF block by
+    /// different routes: a TIFF IS the block, a JPEG wraps it in an APP1
+    /// segment that [`jpeg_exif_block`] has to walk the marker chain to find.
+    /// The JPEG case deliberately puts a decoy APP0 (JFIF) and a decoy
+    /// non-EXIF APP1 (an XMP packet, which is what really sits there in a
+    /// Lightroom export) BEFORE the real one.
+    ///
+    /// MUTATION THIS CATCHES: search the JPEG for the `FFE1` byte pair instead
+    /// of walking markers and the decoy APP1 is returned as the EXIF block;
+    /// drop the `Exif\0\0` check and the XMP packet is handed to the TIFF
+    /// reader; forget `split_off(6)` and the block starts six bytes early and
+    /// parses as nothing. Give `decode_baked` its own copy of the aperture
+    /// rule and the APEX fallback silently stops applying to baked photos.
+    #[test]
+    fn a_baked_photos_own_exif_reaches_its_metadata() {
+        let block = exif_block_fixture();
+
+        // --- TIFF: the block IS the file's header.
+        let dir = std::env::temp_dir().join(format!("autoshop_baked_exif_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let tif = dir.join("export.tif");
+        std::fs::write(&tif, &block).expect("write");
+        let (make, model, exif) =
+            baked_exif(&tif).expect("readable").expect("a TIFF header IS the EXIF block");
+        assert_eq!(make, "TestCam Industries");
+        assert_eq!(model, "TC-1");
+
+        // --- JPEG: SOI, a decoy APP0, a decoy non-EXIF APP1, then the real
+        // one. Nothing here has to DECODE — `baked_exif` reads headers only.
+        let mut jpg: Vec<u8> = vec![0xFF, 0xD8];
+        let seg = |marker: u8, payload: &[u8], out: &mut Vec<u8>| {
+            out.extend_from_slice(&[0xFF, marker]);
+            out.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+            out.extend_from_slice(payload);
+        };
+        seg(0xE0, b"JFIF\0\x01\x02\0\0\x01\0\x01\0\0", &mut jpg);
+        seg(0xE1, b"http://ns.adobe.com/xap/1.0/\0<x:xmpmeta/>", &mut jpg);
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&block);
+        seg(0xE1, &app1, &mut jpg);
+        jpg.extend_from_slice(&[0xFF, 0xD9]);
+        let jpeg = dir.join("phone.jpg");
+        std::fs::write(&jpeg, &jpg).expect("write");
+        let (jmake, jmodel, jexif) =
+            baked_exif(&jpeg).expect("readable").expect("the third segment is the EXIF one");
+        assert_eq!((jmake.as_str(), jmodel.as_str()), ("TestCam Industries", "TC-1"));
+
+        // --- The SAME extraction the RAW arm uses, on both.
+        for (what, e) in [("tiff", &exif), ("jpeg", &jexif)] {
+            let f = exif_facts(e);
+            assert_eq!(f.iso, Some(640), "{what}: ISO");
+            assert_eq!(f.shutter.as_deref(), Some("1/250"), "{what}: shutter");
+            assert_eq!(f.aperture, Some(2.8), "{what}: f-number");
+            assert_eq!(f.focal_length_mm, Some(35.0), "{what}: focal length");
+            assert_eq!(
+                f.date_time.as_deref(),
+                Some("2026:08:19 11:22:33"),
+                "{what}: capture time"
+            );
+        }
+
+        // --- Absence is Ok(None), not an error: an untagged export is the
+        // normal case. A PNG is the documented no-route container.
+        let png = dir.join("plain.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").expect("write");
+        assert!(
+            baked_exif(&png).expect("no EXIF route is not a failure").is_none(),
+            "PNG has no EXIF route in this build — absence, not an error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R27 P4 — the three codecs added to `pipeline::BAKED_EXTS` really
+    /// DECODE, rather than merely being named in a list.
+    ///
+    /// The two halves can drift apart in the worst direction: an extension in
+    /// `BAKED_EXTS` passes the file dialog, the drag-and-drop gate, the
+    /// gallery scan and the upload endpoint, and only then fails at the
+    /// decoder — a photo that appears to be accepted and then is not. Adding
+    /// the `Cargo.toml` feature and the list entry are two separate edits, so
+    /// this is the test that keeps them one change.
+    ///
+    /// MUTATION THIS CATCHES: remove `"webp"` (or `bmp`, or `gif`) from the
+    /// `image` dependency's feature list while leaving `BAKED_EXTS` alone —
+    /// the round trip stops finding an encoder and this fails, instead of a
+    /// user discovering it by dropping a photo on the window.
+    #[test]
+    fn every_baked_extension_has_a_working_codec() {
+        let dir = std::env::temp_dir().join(format!("autoshop_codecs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // A gradient, not a flat fill: GIF quantises to 256 colours and BMP/
+        // WebP have their own packings, so a uniform image could round-trip
+        // through a broken path by accident.
+        let src = image::RgbImage::from_fn(24, 16, |x, y| {
+            image::Rgb([(x * 10) as u8, (y * 15) as u8, 60])
+        });
+        for ext in crate::pipeline::BAKED_EXTS {
+            // "tif"/"tiff" and "jpg"/"jpeg" are the same codec twice; writing
+            // both is the point (the extension is what the gates see).
+            let at = dir.join(format!("probe.{ext}"));
+            image::DynamicImage::ImageRgb8(src.clone())
+                .save(&at)
+                .unwrap_or_else(|e| panic!("{ext}: the image crate cannot ENCODE it — {e}"));
+            // baked-by-construction: a file this test just wrote in a baked format.
+            let back = load_image(&at)
+                .unwrap_or_else(|e| panic!("{ext}: written, then not readable — {e:#}"));
+            assert_eq!(
+                back.dimensions(),
+                (24, 16),
+                "{ext}: round-tripped to the wrong size"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R27 R11 — a camera RAW wearing a `.tif` extension is REFUSED by name,
+    /// not silently decoded.
+    ///
+    /// `is_raw` is extension-based, so a DNG named `.tif` takes the baked arm;
+    /// a DNG really is a TIFF, so the `image` crate would decode its first IFD
+    /// — the embedded thumbnail — and the photo would open, look plausible,
+    /// and develop at a few hundred pixels. Opening wrong is worse than not
+    /// opening.
+    ///
+    /// MUTATION THIS CATCHES: drop the `DNGVersion` probe and the fixture
+    /// below opens as a 2×2 image with no complaint; move the check back after
+    /// `into_decoder` and the message becomes whatever the TIFF codec says
+    /// about a sensor plane.
+    #[test]
+    fn a_raw_named_tif_is_refused_by_name() {
+        let dir = std::env::temp_dir().join(format!("autoshop_tif_raw_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        // A real 2×2 TIFF, so the ONLY thing separating the two files below is
+        // the DNGVersion tag — not "one of them is malformed".
+        let plain = dir.join("export.tif");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([9, 9, 9])))
+            .save(&plain)
+            .expect("encode a plain TIFF");
+        // baked-by-construction: a .tif this test just wrote with the image crate.
+        assert!(load_image(&plain).is_ok(), "an ordinary baked TIFF still opens");
+
+        // The same bytes plus a DNGVersion entry. Built by hand: IFD0 with the
+        // minimum a TIFF reader needs, plus 0xC612.
+        let dng_ish = dir.join("actually-a-raw.tif");
+        let entry = |tag: u16, ty: u16, count: u32, val: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&tag.to_le_bytes());
+            e.extend_from_slice(&ty.to_le_bytes());
+            e.extend_from_slice(&count.to_le_bytes());
+            e.extend_from_slice(&val.to_le_bytes());
+            e
+        };
+        let mut t: Vec<u8> = Vec::new();
+        t.extend_from_slice(b"II");
+        t.extend_from_slice(&42u16.to_le_bytes());
+        t.extend_from_slice(&8u32.to_le_bytes());
+        t.extend_from_slice(&2u16.to_le_bytes());
+        t.extend(entry(0x010F, 2, 6, 0x0000_0000)); // Make (offset 0 — unread)
+        t.extend(entry(0xC612, 1, 4, 0x0000_0401)); // DNGVersion 1.4.0.0, inline
+        t.extend_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&dng_ish, &t).expect("write");
+
+        // baked-by-construction: the .tif fixture this test just wrote.
+        let e = format!("{:#}", load_image(&dng_ish).unwrap_err());
+        assert!(
+            e.contains("really a camera RAW") && e.contains("DNGVersion"),
+            "the refusal must name what gave the file away: {e}"
+        );
+        assert!(
+            e.contains("rename it"),
+            "…and what to do about it: {e}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R27 A7 — "your camera is not supported" is three different failures
+    /// wanting three different actions, and they used to arrive as one opaque
+    /// line. Every branch also carries the DNG on-ramp (A8), because for the
+    /// unknown-MODEL case — much the commonest — it is an actual remedy:
+    /// rawler builds a DNG's whole camera profile from the file's own tags,
+    /// so a converted file needs no database entry at all.
+    ///
+    /// MUTATION THIS CATCHES: collapse the make/model arms back into one and
+    /// the unknown-make file starts being described as an unsupported model of
+    /// a maker the decoder has never heard of; drop `DNG_ONRAMP` from an arm
+    /// and that failure becomes a dead end again.
+    #[test]
+    fn an_unreadable_camera_is_told_apart_from_an_unreadable_maker() {
+        let p = Path::new("D:/photos/DSC0001.cr3");
+        let unsupported = |what: &str, make: &str, model: &str| rawler::RawlerError::Unsupported {
+            what: what.to_string(),
+            make: make.to_string(),
+            model: model.to_string(),
+            mode: String::new(),
+        };
+
+        let model = format!(
+            "{:#}",
+            describe_decoder_failure(p, &unsupported("Unknown camera", "Canon", "EOS R9"))
+        );
+        assert!(
+            model.contains("Canon EOS R9") && model.contains("no calibration for that exact model"),
+            "the model case names the body: {model}"
+        );
+
+        let make = format!(
+            "{:#}",
+            describe_decoder_failure(
+                p,
+                &unsupported("Couldn't find a decoder for make \"Zorki\"", "Zorki", "")
+            )
+        );
+        assert!(
+            make.contains("\"Zorki\"") && make.contains("does not know at all"),
+            "the make case says the MAKER is unknown, not the model: {make}"
+        );
+
+        let none =
+            format!("{:#}", describe_decoder_failure(p, &unsupported("No decoder found", "", "")));
+        assert!(
+            none.contains("does not read as any RAW format"),
+            "the no-decoder case does not invent a camera: {none}"
+        );
+
+        for (what, msg) in [("model", &model), ("make", &make), ("none", &none)] {
+            assert!(msg.contains("DNG Converter"), "{what} must offer the on-ramp: {msg}");
+            assert!(msg.contains("DSC0001.cr3"), "{what} must name the file: {msg}");
+        }
+
+        // A DecoderFailed is a file-integrity story, not a camera-support one:
+        // it keeps rawler's own words and gains no advice about converters.
+        let corrupt = format!(
+            "{:#}",
+            describe_decoder_failure(
+                p,
+                &rawler::RawlerError::DecoderFailed("truncated strip".into())
+            )
+        );
+        assert!(
+            corrupt.contains("truncated strip") && !corrupt.contains("DNG Converter"),
+            "a corrupt file is not an unsupported camera: {corrupt}"
+        );
+    }
+
+    /// FORENSIC PROBE across MAKES, run against a directory of real camera
+    /// files — the R27 counterpart to `xmp.rs`'s `AUTOSHOP_MB_FIXTURES`, and
+    /// written to the same discipline for the same reason: the committed
+    /// fixtures above are synthetic by policy, so they prove the RULES and not
+    /// the FILES, and until this batch **not one non-Sony RAW had ever been
+    /// through this tree** (nothing in the repo, the tests, or the ROADMAP
+    /// recorded one; `docs/ARCHITECTURE.md` still scoped the app to Sony
+    /// `.ARW`). Widening `RAW_EXTS` from 9 extensions to 24 without running a
+    /// file from each make would have been a claim, not a feature.
+    ///
+    /// Point `AUTOSHOP_RAW_ZOO` at a directory (searched recursively) holding
+    /// one RAW per make. For every file whose extension [`is_raw`] accepts it
+    /// asserts:
+    ///
+    ///   * [`decode_raw`] succeeds — or, if it cannot, the reason is NAMED and
+    ///     the file counted, never skipped;
+    ///   * [`frame_size`] (metadata only) equals the dimensions
+    ///     `render::render_to_image` actually produces. These are computed by
+    ///     completely different routes — `default_crop().d` turned by the EXIF
+    ///     orientation, versus rawler's real develop — and every normalised
+    ///     coordinate in a recipe and in a Lightroom sidecar is measured
+    ///     against the frame they are supposed to agree on;
+    ///   * [`raw_orientation`] (no sensor read) equals the orientation
+    ///     `decode_raw` resolved from the metadata it decoded;
+    ///   * `render::as_shot_wb` is either `None` or inside the 1667–15000 K
+    ///     band `wb_to_kelvin_tint` promises — a per-make colour-matrix or
+    ///     WB-convention mismatch would show up here as a wild CCT;
+    ///   * [`align_default_crop`]'s verdict, recorded per file (R2: the
+    ///     v0.32.0 origin fix is narrow by design and this is what says which
+    ///     makes it fires on).
+    ///
+    /// Unset, it is a silent no-op — these are photographs, they are not in
+    /// this public repository, and no path to them appears in this test. SET
+    /// and unreadable, or set and holding a RAW that will not read, it
+    /// PANICS: a forensic probe whose files quietly stop arriving is a green
+    /// test that measures nothing.
+    ///
+    /// MUTATION THIS CATCHES: make `frame_size`'s RAW arm report
+    /// `active_area` instead of `default_crop` and the CR3 rows (whose two
+    /// rectangles differ in size) mismatch the rendered dimensions
+    /// immediately; drop the transpose in either function and every portrait
+    /// file reports a landscape frame.
+    #[test]
+    fn every_make_in_the_raw_zoo_decodes_and_agrees_with_itself() {
+        let Ok(dir) = std::env::var("AUTOSHOP_RAW_ZOO") else {
+            return;
+        };
+        fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                panic!("AUTOSHOP_RAW_ZOO holds an unreadable directory: {}", dir.display());
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if is_raw(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        let root = Path::new(&dir);
+        assert!(root.is_dir(), "AUTOSHOP_RAW_ZOO is set but is not a directory: {dir}");
+        let mut files = Vec::new();
+        walk(root, &mut files);
+        files.sort();
+        assert!(
+            !files.is_empty(),
+            "AUTOSHOP_RAW_ZOO ({dir}) holds no file this build calls a RAW — either the fixtures \
+             went missing or RAW_EXTS no longer covers them"
+        );
+
+        let mut report = Vec::new();
+        for path in &files {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            // NAMED, never skipped: an `if let Ok(..)` here would let a make
+            // stop decoding and the suite stay green.
+            let d = decode_raw(path)
+                .unwrap_or_else(|e| panic!("{name}: decode_raw failed — {e:#}"));
+
+            let orient = raw_orientation(path)
+                .unwrap_or_else(|e| panic!("{name}: raw_orientation failed — {e:#}"));
+
+            let (fw, fh) = frame_size(path)
+                .unwrap_or_else(|e| panic!("{name}: frame_size failed — {e:#}"));
+            let rendered = crate::render::render_to_image(
+                path,
+                &crate::recipe::EditRecipe::default(),
+                None,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{name}: render_to_image failed — {e:#}"));
+            assert_eq!(
+                (fw, fh),
+                (rendered.width() as usize, rendered.height() as usize),
+                "{name}: frame_size says {fw}x{fh} but the develop produced {}x{} — every \
+                 normalised recipe/sidecar coordinate is measured against that frame",
+                rendered.width(),
+                rendered.height()
+            );
+            // The DISPLAY frame the metadata predicted must be the one that
+            // came out: a transpose applied on one side only is the classic
+            // portrait-renders-sideways defect.
+            assert_eq!(
+                orientation_transposes(orient),
+                fh > fw || rendered.height() > rendered.width(),
+                "{name}: orientation {orient:?} disagrees with the {fw}x{fh} frame's aspect"
+            );
+
+            let wb = crate::render::as_shot_wb(path);
+            if let Some((k, tint)) = wb {
+                assert!(
+                    (1667.0..=15000.0).contains(&k) && tint.is_finite(),
+                    "{name}: as-shot WB {k} K / tint {tint} is outside the band \
+                     wb_to_kelvin_tint promises — a per-make colour-matrix or WB-convention \
+                     mismatch"
+                );
+            }
+
+            // The alignment verdict AND the two rectangles it was read from,
+            // recorded per make (R2). The rectangles are the evidence: a
+            // verdict alone cannot tell "sizes differ, so rawler's own
+            // CropDefault owns it" from "origins already agree", and those are
+            // different facts about a decoder. Re-decoded dummy so the numbers
+            // are the ones the render saw.
+            let (verdict, rects) = {
+                guard_tiff_chain(path).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+                let src = RawSource::new(path)
+                    .unwrap_or_else(|e| panic!("{name}: open failed — {e:#}"));
+                let decoder = decoder_for(path, &src)
+                    .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+                let mut raw = decoder
+                    .raw_image(&src, &RawDecodeParams { image_index: 0 }, true)
+                    .unwrap_or_else(|e| panic!("{name}: raw_image(dummy) failed — {e}"));
+                let show = |r: Option<rawler::imgop::Rect>| match r {
+                    Some(r) => format!("{}x{}@{},{}", r.d.w, r.d.h, r.p.x, r.p.y),
+                    None => "none".to_string(),
+                };
+                let rects = format!(
+                    "sensor {}x{} active {} crop {}",
+                    raw.width,
+                    raw.height,
+                    show(raw.active_area),
+                    show(raw.crop_area)
+                );
+                (align_default_crop(&mut raw), rects)
+            };
+            assert!(
+                !matches!(verdict, CropAlignment::OffSensor { .. }),
+                "{name}: the default-crop rectangle runs off its own sensor — that is a fact \
+                 about this fixture the round report has to hear, not something to pass over"
+            );
+
+            report.push(format!(
+                "{name} | {} {} | {fw}x{fh} | {orient:?} | wb={} | align={} | {rects}",
+                d.meta.make,
+                d.meta.model,
+                match wb {
+                    Some((k, t)) => format!("{k:.0}K/{t:+.2}"),
+                    None => "none".into(),
+                },
+                match verdict {
+                    CropAlignment::Moved(r) => format!("moved to ({},{})", r.p.x, r.p.y),
+                    CropAlignment::NothingToMove => "unchanged".into(),
+                    CropAlignment::OffSensor { .. } => "OFF-SENSOR".into(),
+                }
+            ));
+        }
+        // Printed, not asserted: the per-file table IS the deliverable of this
+        // probe, and `cargo test -- --nocapture` is how it is read.
+        println!("AUTOSHOP_RAW_ZOO — {} file(s)\n{}", files.len(), report.join("\n"));
+    }
+
+    /// R27 tier-1 fixture: the SHAPE of `(active_area, crop_area)` that each
+    /// make's rawler decoder produces, as pure numbers, so widening
+    /// [`RAW_EXTS`] from 9 extensions to 24 cannot silently change which files
+    /// the v0.32.0 origin fix fires on. Risk R2 in the format-support map:
+    /// that fix is narrow BY DESIGN, and the only way to know it stays narrow
+    /// for a make nobody owns a camera from is to pin the arithmetic.
+    ///
+    /// Rows 2-9 are MEASURED, not guessed: they are the `(sensor, active,
+    /// crop)` triples the `AUTOSHOP_RAW_ZOO` probe printed for nine real CC0
+    /// files, one per make, on 2026-08-19. That is why this test can exist in
+    /// a public repository without the photographs — the numbers are the
+    /// fixture. Row 1 (A7R IV) is the geometry the v0.32.0 defect was
+    /// originally measured on and has no zoo file.
+    ///
+    /// **What the measurement CORRECTED.** Two claims that a source read alone
+    /// had gotten wrong:
+    ///   * `cr2.rs:284`'s `img.active_area = img.crop_area` is inside an
+    ///     `if cpp == 3` — the sRAW/mRAW branch (`cr2.rs:281-285`). A normal
+    ///     CFA CR2 keeps camera-DB borders for `active` and the file's own
+    ///     rectangle for `crop`, and the EOS 40D measures them DIFFERENT
+    ///     (3908×2602@30,18 vs 3888×2592@40,23).
+    ///   * NEF and ORF do NOT leave `active_area` as `None`. Both get
+    ///     camera-DB borders from `RawImage::new`; the D700 measures
+    ///     4284×2844@2,0 and the E-M5 the whole 4640×3472@0,0.
+    ///
+    /// **What it CONFIRMED** — the point of the exercise: on all nine bodies
+    /// the two rectangles differ in SIZE (or coincide exactly), so
+    /// `align_default_crop` fires on NONE of them and rawler's own
+    /// `CropDefault` owns the crop everywhere. Risk R2 is answered: widening
+    /// the format list does not silently widen the v0.32.0 correction.
+    ///
+    /// And the A7 III is the sharpest instance — it is a SONY, and it does not
+    /// move either, because `SonyRawImageSize` hands rawler the FULL
+    /// 6048×4024 sensor there while on the A7R IV it hands over the
+    /// already-trimmed 9504×6336. The v0.32.0 defect is therefore per-BODY,
+    /// not per-make.
+    ///
+    /// MUTATION THIS CATCHES: widen the fix to fire when only the ORIGINS
+    /// differ (drop `crop.d != active.d`) and seven of these nine rows start
+    /// moving a window rawler already sized differently — a per-make offset
+    /// with no symptom until someone measures a Canon render against
+    /// Lightroom. Widen it to fire on `crop.p == active.p` and the RW2 row
+    /// (whose rectangles are identical) moves by zero and pays a pointless
+    /// re-index.
+    #[test]
+    fn every_makes_crop_and_active_rectangles_keep_their_shape() {
+        use rawler::imgop::{Dim2, Point, Rect};
+        let r = |x, y, w, h| Rect::new(Point::new(x, y), Dim2::new(w, h));
+
+        // --- Row 1: ARW / Sony A7R IV. `arw.rs:190-197` — active from the
+        // SonyRawImageSize tag at `Point::default()`, crop from
+        // DefaultCropOrigin/Size. Here the tag reports the TRIMMED size, so
+        // the two rectangles are the same size at different origins: the ONE
+        // shape the v0.32.0 fix exists for. Not a zoo file.
+        assert_eq!(
+            aligned_demosaic_roi(Some(r(32, 20, 9504, 6336)), Some(r(0, 0, 9504, 6336)), 9600, 6376),
+            CropAlignment::Moved(r(32, 20, 9504, 6336)),
+            "ARW (A7R IV): equal sizes at different origins is the case rawler skips"
+        );
+
+        // --- Rows 2-9: measured. Every one must be NothingToMove.
+        // (make, sensor w, sensor h, active, crop, why)
+        let measured: [(&str, usize, usize, Rect, Rect, &str); 8] = [
+            (
+                "ARW (A7 III)", 6048, 4024, r(0, 0, 6048, 4024), r(12, 12, 6000, 4000),
+                "SonyRawImageSize gives the FULL sensor here, so sizes differ and rawler's own \
+                 CropDefault does the trim — the v0.32.0 defect is per-body, not per-make",
+            ),
+            (
+                "CR2 (EOS 40D)", 3944, 2622, r(30, 18, 3908, 2602), r(40, 23, 3888, 2592),
+                "camera-DB borders vs the file's own crop; cr2.rs:284 only aliases them for \
+                 sRAW/mRAW (cpp == 3)",
+            ),
+            (
+                "CR3 (EOS R6)", 5568, 3708, r(72, 38, 5494, 3662), r(84, 50, 5472, 3648),
+                "cr3.rs:359-367 builds a separate active rect from IAD1 — different size",
+            ),
+            (
+                "NEF (D700)", 4288, 2844, r(2, 0, 4284, 2844), r(15, 6, 4256, 2832),
+                "nef.rs:302 sets crop only; active is camera-DB borders, and they differ",
+            ),
+            (
+                "ORF (E-M5)", 4640, 3472, r(0, 0, 4640, 3472), r(8, 8, 4608, 3456),
+                "orf.rs:222 sets crop only; active is the whole sensor",
+            ),
+            (
+                "RW2 (DMC-GX85)", 4816, 3464, r(8, 8, 4592, 3448), r(8, 8, 4592, 3448),
+                "IDENTICAL rectangles — the `crop.p == active.p` arm, nothing to move",
+            ),
+            (
+                "PEF (K-5)", 4992, 3284, r(0, 0, 4960, 3284), r(22, 10, 4928, 3264),
+                "camera-DB borders vs the file's crop",
+            ),
+            (
+                "DNG (Ricoh GR II)", 4960, 3280, r(496, 328, 3952, 2624), r(504, 336, 3936, 2608),
+                "dng.rs:249-252 pre-offsets the crop by the active origin; the sizes still differ",
+            ),
+        ];
+        for (make, w, h, active, crop, why) in measured {
+            assert_eq!(
+                aligned_demosaic_roi(Some(crop), Some(active), w, h),
+                CropAlignment::NothingToMove,
+                "{make}: expected the window to stay put — {why}"
+            );
+            // The rectangles are also self-consistent: a crop that ran off the
+            // sensor would mean the fixture itself was transcribed wrong.
+            assert!(
+                crop.p.x + crop.d.w <= w && crop.p.y + crop.d.h <= h,
+                "{make}: the transcribed crop does not fit its own sensor"
+            );
+        }
+
+        // --- The refusal arm, on the A7R IV geometry with an impossible
+        // origin: refused, never clamped, and now SAID (A5).
+        let off = r(200, 20, 9504, 6336);
+        assert_eq!(
+            aligned_demosaic_roi(Some(off), Some(r(0, 0, 9504, 6336)), 9600, 6376),
+            CropAlignment::OffSensor { crop: off, width: 9600, height: 6376 },
+            "a window that would run off the sensor is refused"
+        );
+
+        // --- TFR (Hasselblad, `.3fr`/`.fff`) — `tfr.rs:77` `Rect::from_tiff`
+        // against camera-DB borders: the same SHAPE as the A7R IV, so the fix
+        // is expected to fire there too, and that is correct (§3.1 of the
+        // format map). No zoo file — this row is the source read, and it is
+        // labelled as such rather than presented as a measurement.
+        assert!(
+            matches!(
+                aligned_demosaic_roi(Some(r(4, 4, 8272, 6200)), Some(r(0, 0, 8272, 6200)), 8280, 6208),
+                CropAlignment::Moved(_)
+            ),
+            "TFR: ARW-shaped, so the same correction applies"
         );
     }
 }

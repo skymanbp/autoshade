@@ -239,6 +239,19 @@
 > **vision model (GPT) does image processing**, **Claude does non-image analysis
 > + acceptance verification**.
 >
+> **Widened in R27 (2026-08-19).** The RAW scope is no longer one make: 24
+> extensions, every rawler 0.7.2 decoder with a filename (see
+> `decode::RAW_EXTS` — `.x3f` is permanently excluded because rawler's
+> metadata reader for it is a `todo!()`). Nine makes have now actually been
+> run end to end from CC0 sample files — Canon CR2 + CR3, Nikon NEF, Fuji RAF,
+> Olympus ORF, Panasonic RW2, Pentax PEF, Ricoh DNG, Sony ARW — which until
+> that batch no non-Sony file ever had been. **The DNG on-ramp is the stated
+> answer for anything else**: rawler builds a DNG's whole camera profile from
+> the file's own tags (`decoders/dng.rs:270-289`), so an Adobe DNG Converter
+> output works for any body without a camera-database entry. That sentence
+> lives in exactly one place in the code, `decode::DNG_ONRAMP`, so the CLI,
+> the GUI toast and the web error body cannot offer three different remedies.
+>
 > Since shipped, two *opt-in* pixel-level features were added alongside the
 > parametric core: **AI denoise** (a Python/SCUNet GPU sidecar, run before
 > tone/sharpen) and a **baked-source mode** (edit an already-exported PNG/TIFF,
@@ -473,7 +486,8 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | ID | Component | Crate/tool (actual) | Status |
 |----|-----------|---------------------|--------|
 | M0 | Data model + CLI scaffold | `clap`, `serde`, `serde_json`, `anyhow`, `thiserror` | **done** |
-| M1 | RAW decode + features (Sony ARW) | **`rawler` 0.7.2** (preview + EXIF + WB) | **done** |
+| M1 | RAW decode + features (24 formats; Sony ARW only until R27) | **`rawler` 0.7.2** (preview + EXIF + WB; 725 camera models). Missing-preview formats degrade to a neutral develop and say so; third-party parser panics are caught on the CLI as they already were in the GUI | **done** |
+| M1 | Baked-source EXIF (ISO/shutter/aperture/focal/date/make/model from JPEG APP1 + TIFF IFD) | rawler's own `Exif::new` + `GenericTiffReader` — no new dependency, and the SAME extraction the RAW arm uses | **done (R27)** |
 | M1 | Unified provider framework + GPT advisor + Claude verifier | `ureq` (HTTP) + `claude` CLI | **done** |
 | M2 | Deterministic render engine | `image`, custom tone/colour/WB/clarity/NR/sharpen ops | **done** |
 | M2 | XMP sidecar writer (ACR `crs:`, global + local masks) | hand-rolled XML | **done** |
@@ -492,8 +506,32 @@ Backed by **`rawler` 0.7.2** (chosen over the now-frozen `rawloader` for current
 Sony body coverage + embedded preview + full EXIF; see [`src/decode.rs`](../src/decode.rs)).
 It extracts the embedded JPEG preview (for the vision advisor + UI), a downscaled
 histogram with clipping stats, and EXIF (camera/lens/ISO/shutter/aperture/
-as-shot WB). Baked sources (PNG/TIFF/JPEG) skip this and load directly via the
-`image` crate with neutral metadata.
+as-shot WB). Baked sources skip the sensor path and load via the `image` crate —
+with their OWN EXIF since R27, read through rawler's `Exif::new` over the JPEG
+APP1 / TIFF IFD block, so the same extraction serves both arms.
+
+**Two lists, one definition each (R27).** `decode::RAW_EXTS` (24) and
+`pipeline::BAKED_EXTS` (8) are the only extension lists in the tree. Every gate
+derives from them — `is_raw`, `is_source`, `is_baked`, the CLI scanners, the
+web server's upload gate, the GUI file dialog. The one copy that cannot be
+derived, the static `<input accept>` in `web/index.html`, is pinned by a test
+that prints the exact replacement string when it drifts. Before this there were
+four hand-typed copies and the web one had already lost `.orf`, `.rw2` and
+`.raw`.
+
+**What the input path refuses, and what it merely discloses.** The dividing
+line is whether the NUMBERS are wrong or only the fine detail:
+
+| Situation | Response | Why |
+|---|---|---|
+| Unknown make / unknown model / no decoder | **Refuse**, each named separately, each offering `DNG_ONRAMP` | Three different failures wanting three different actions |
+| Monochrome or 4-colour (CYGM/RGBE) sensor | **Refuse**, before the develop (`render::refuse_unsupported_sensor`) | The engine emits three-channel colour only; deciding after the demosaic spent a full-frame buffer to learn what the metadata already said |
+| A camera RAW named `.tif` | **Refuse**, naming the marker that gave it away | The `image` crate would decode a DNG's first IFD — the *thumbnail* — so the photo would open, look right, and develop at a few hundred pixels. Opening wrong is worse than not opening |
+| Third-party parser panics | **Named error**, process survives (`decode::guard_parser_panic`) | The GUI has wrapped workers in `catch_unwind` since v0.22; the CLI had nothing, so one malformed file killed a whole `batch` run |
+| No embedded preview (ORF class) | **Degrade** to a neutral develop + say so | rawler overrides no rendition method for 12 of the 24 formats; that is a fact about the format, not a broken file. `embedded_preview` keeps the strict "camera pixels or nothing" contract, because the base-look estimator's method depends on it |
+| Non-Bayer CFA (X-Trans) | **Disclose** per render | rawler's `PPGDemosaic` is Bayer-only and its guard (`CFA::is_rgb`) checks the pattern's NAME, not its geometry, so a 6×6 X-Trans mosaic is demosaiced as if it were a 2×2 quincunx. Colour/tone/framing are right; fine detail is approximate |
+| DefaultCrop rectangle off the sensor | **Disclose** and develop un-aligned | Was a silent `None` until R27 — any diagnosis of a misplaced mask started with zero telemetry |
+| Untagged **16-bit** baked input | **Disclose** | It is read as sRGB. Right for 8-bit JPEG (web convention); often wrong for 16-bit, which is what an editor produces — LR's "Edit in…" exports ProPhoto. Warning on every untagged JPEG would be a warning nobody reads |
 
 **Which way is up comes from EXIF, not from `RawImage` (v0.30.0).** rawler
 0.7.2 hard-codes `RawImage.orientation` to `Normal` for every decoder except
@@ -1306,7 +1344,7 @@ Toolchain in use: rustc/cargo **1.94.1** (verified locally).
 | # | Question | Status |
 |---|----------|--------|
 | 1 | **Image library path** (originals + finished edits) | resolved: passed per invocation (`batch <dir>`, `serve --dir`, `style-index <dir>`, the GUI folder picker) — no configured library root; develop state is keyed by each photo's absolute path in the per-user store. One exception since R23-2: the STYLE library's source folder is remembered in the GUI prefs (`style_src_dir`) so a rebuild need not re-find it — a convenience, not a library root; the index records the folder it was built from as well |
-| 2 | Camera / RAW format | resolved: Sony `.ARW` |
+| 2 | Camera / RAW format | ~~resolved: Sony `.ARW`~~ **← R27 (2026-08-19) widened**: 24 RAW extensions (`decode::RAW_EXTS`) + 8 baked (`pipeline::BAKED_EXTS`), one predicate app-wide; 9 makes verified end to end on CC0 samples; Adobe DNG Converter is the documented on-ramp for the rest. Refusals are named per cause (unknown make / unknown model / no decoder); monochrome and 4-colour sensors are refused before the develop; X-Trans develops approximately and says so |
 | 3 | Output target | resolved: XMP sidecar **+** rendered, XMP-first |
 | 4 | AI roles | resolved: GPT=image, Claude=non-image+verify, unified framework |
 | 5 | Exact meaning of Claude's "收货验证" (data-level vs pixel-level) | resolved: **data-level**. The verifier is never sent pixels — it judges the recipe against EXIF/histogram/clipping stats and the advisor's rationale (§3, §4.3, [`src/advisor/claude.rs`](../src/advisor/claude.rs)) |

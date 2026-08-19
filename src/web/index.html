@@ -135,7 +135,10 @@
     <input class="path" id="import-path" placeholder="Import: paste a RAW/PNG/TIFF file or a folder path…" />
     <button id="import-btn">＋ Import</button>
     <button class="secondary" id="open-files" title="Pick files (or just drag photos onto the window)">Open files…</button>
-    <input type="file" id="file-input" multiple accept=".arw,.dng,.raf,.nef,.cr2,.cr3,.png,.tif,.tiff,.jpg,.jpeg" style="display:none" />
+    <!-- accept: generated from decode::RAW_EXTS ∪ pipeline::BAKED_EXTS and PINNED
+     by serve.rs's `the_web_accept_list_matches_the_formats_the_app_opens`
+     (R27 A2). Do not hand-edit — the test prints the exact replacement. -->
+<input type="file" id="file-input" multiple accept=".arw,.dng,.raw,.raf,.nef,.cr2,.cr3,.orf,.rw2,.pef,.srw,.3fr,.fff,.iiq,.mef,.mos,.erf,.kdc,.dcr,.dcs,.crw,.nrw,.mrw,.ari,.png,.tif,.tiff,.jpg,.jpeg,.webp,.bmp,.gif" style="display:none" />
     <span class="sep"></span>
     <button class="secondary" id="undo" disabled title="Undo (Ctrl+Z)">↶ Undo</button>
     <button class="secondary" id="redo" disabled title="Redo (Ctrl+Y)">↷ Redo</button>

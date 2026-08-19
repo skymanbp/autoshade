@@ -273,6 +273,13 @@ impl StyleIndex {
         dir: &Path,
         on_progress: &dyn Fn(usize, usize),
     ) -> Result<StyleIndex> {
+        // R27 P1, deliberate NON-action: RAW-only, for `eval`'s reason (see
+        // that call site) plus one of its own. The index learns the user's
+        // style from RAW+sidecar pairs, and its exemplars are compared against
+        // the CAMERA's own rendition — `decode::embedded_preview`, the one
+        // door that keeps the strict "camera pixels or nothing" contract. A
+        // baked source has no camera rendition at all, so it could contribute
+        // an exemplar to the index but never a comparable one.
         let raws = pipeline::find_raws(dir)?;
         let pairs: Vec<_> = raws.iter().filter(|r| r.with_extension("xmp").exists()).collect();
         println!("building style index from {} RAW+.xmp pairs ...", pairs.len());

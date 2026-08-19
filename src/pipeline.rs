@@ -3932,13 +3932,38 @@ fn walk_photos_counted(
     Ok((out, skipped))
 }
 
+/// Every ALREADY-BAKED raster extension the app opens — the counterpart to
+/// [`decode::RAW_EXTS`], and the second half of "a photo". One list, because
+/// there used to be four hand-typed copies of it (here, `serve::is_baked_ext`,
+/// the GUI's `PHOTO_EXTS`, the web `accept` attribute) with nothing pinning
+/// them together; the web copy had already drifted, silently refusing `.orf`,
+/// `.rw2` and `.raw` uploads that every other surface accepted.
+///
+/// Bounded by what the `image` crate is compiled to DECODE (`Cargo.toml`'s
+/// feature list) — adding an entry here without the matching codec feature
+/// would let a file through the dialog and then fail at decode.
+pub const BAKED_EXTS: [&str; 8] = ["png", "tif", "tiff", "jpg", "jpeg", "webp", "bmp", "gif"];
+
 /// Does this path name a photo — a camera RAW or an already-baked raster?
 /// Shared by the gallery scan and by [`guard_readonly`]'s never-clobber rule.
 pub fn is_source(p: &Path) -> bool {
-    crate::decode::is_raw(p)
-        || p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
-            matches!(x.to_ascii_lowercase().as_str(), "png" | "tif" | "tiff" | "jpg" | "jpeg")
-        })
+    crate::decode::is_raw(p) || is_baked(p)
+}
+
+/// The baked half of [`is_source`], on its own — what the web server's
+/// add-path and upload gates ask, and what the GUI's file dialog lists
+/// alongside the RAW set.
+pub fn is_baked(p: &Path) -> bool {
+    p.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|x| BAKED_EXTS.iter().any(|b| x.eq_ignore_ascii_case(b)))
+}
+
+/// Every extension the app opens, RAW and baked, for the surfaces that need a
+/// LIST rather than a predicate (a file dialog's filter, an `<input accept>`).
+/// Derived, never typed.
+pub fn photo_exts() -> Vec<&'static str> {
+    crate::decode::RAW_EXTS.iter().chain(BAKED_EXTS.iter()).copied().collect()
 }
 
 /// Like [`find_raws`] but also includes already-baked images (PNG/TIFF/JPEG), so
@@ -4052,17 +4077,33 @@ mod tests {
     /// find_raws must accept EVERY format decode::is_raw does (one definition of
     /// "a RAW" app-wide) and nothing else — a Canon/Nikon library used to scan
     /// as empty for batch/eval/style-index.
+    ///
+    /// R27: the RAW set went from 9 extensions to 24, so the fixture is
+    /// GENERATED from `decode::RAW_EXTS` rather than re-typed. A hand-written
+    /// list here would only have proven that the test agrees with itself.
+    /// Case and recursion are still exercised explicitly.
+    ///
+    /// MUTATION THIS CATCHES: give `find_raws` its own extension `matches!`
+    /// instead of `decode::is_raw` and every format the two disagree on shows
+    /// up by name.
     #[test]
     fn find_raws_accepts_every_raw_format_the_app_can_decode() {
         let dir = std::env::temp_dir().join(format!("autoshop_find_raws_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).expect("temp dir");
-        let raws = ["a.ARW", "b.dng", "c.NEF", "d.cr2", "e.cr3", "f.orf", "g.rw2", "h.raw"];
-        for name in raws {
-            std::fs::write(dir.join(name), b"").expect("write");
+        // One file per RAW extension, alternating case so a case-sensitive
+        // predicate fails on half of them rather than none.
+        let mut expected: Vec<String> = Vec::new();
+        for (i, ext) in decode::RAW_EXTS.iter().enumerate() {
+            let ext = if i % 2 == 0 { ext.to_ascii_uppercase() } else { (*ext).to_string() };
+            let name = format!("shot{i}.{ext}");
+            // Every other one goes in the subdirectory, so recursion is
+            // exercised across the whole set and not just once.
+            let at = if i % 3 == 0 { dir.join("sub").join(&name) } else { dir.join(&name) };
+            std::fs::write(&at, b"").expect("write");
+            expected.push(name.to_lowercase());
         }
-        std::fs::write(dir.join("sub").join("i.raf"), b"").expect("write"); // recursion
-        for name in ["note.txt", "baked.png", "export.jpg", "DSC0001.xmp"] {
+        for name in ["note.txt", "baked.png", "export.jpg", "shot.webp", "DSC0001.xmp"] {
             std::fs::write(dir.join(name), b"").expect("write");
         }
 
@@ -4072,13 +4113,67 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_lowercase())
             .collect();
         names.sort();
+        expected.sort();
         assert_eq!(
-            names,
-            ["a.arw", "b.dng", "c.nef", "d.cr2", "e.cr3", "f.orf", "g.rw2", "h.raw", "i.raf"],
+            names, expected,
             "find_raws must see every RAW format (case-insensitive, recursive) and no baked/sidecar files"
         );
         assert!(found.iter().all(|p| decode::is_raw(p)), "one RAW predicate, app-wide");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R27 A2, tier 2 — every extension list in the tree is the SAME two
+    /// lists, and the two lists do not overlap.
+    ///
+    /// Four surfaces used to keep their own hand-typed copy (`is_source`
+    /// here, `serve::is_baked_ext`, the GUI's `PHOTO_EXTS`, the web `accept`
+    /// attribute) with no test relating any of them; the format-support map
+    /// counted the duplication at four and found one already drifted. Three of
+    /// the four are now derivations, which makes drift impossible rather than
+    /// merely detectable; the fourth (the static HTML) is pinned by
+    /// `serve::tests::the_web_accept_list_matches_the_formats_the_app_opens`.
+    /// This test guards the properties the derivations rest on.
+    ///
+    /// MUTATION THIS CATCHES: add `"tif"` to `decode::RAW_EXTS` (the tempting
+    /// "fix" for a `.tif`-named DNG — see `decode::raw_in_tiff_clothing` for
+    /// why that is the wrong direction) and the disjointness assertion fires
+    /// before a single baked TIFF is misrouted into the RAW engine.
+    #[test]
+    fn one_raw_list_and_one_baked_list_serve_every_surface() {
+        // Disjoint: an extension that claimed to be both would make
+        // `is_source` true by two routes and `is_raw` decide the dispatch on
+        // its own, silently.
+        for raw in decode::RAW_EXTS {
+            assert!(
+                !BAKED_EXTS.contains(&raw),
+                "{raw} is in BOTH lists — the raw-vs-baked dispatch would be ambiguous"
+            );
+        }
+        // Lower-case, no dots: every consumer folds case itself and adds its
+        // own separator, so a stray "." or "PNG" here would break the derived
+        // `accept` string and the dialog filter at once.
+        for e in photo_exts() {
+            assert!(
+                !e.is_empty()
+                    && e.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "{e:?} must be lower-case alphanumeric with no leading dot"
+            );
+        }
+        // `photo_exts` IS the union — no third list.
+        assert_eq!(photo_exts().len(), decode::RAW_EXTS.len() + BAKED_EXTS.len());
+        for e in photo_exts() {
+            let p = std::path::PathBuf::from(format!("x.{e}"));
+            assert!(is_source(&p), "{e} is offered by the dialog but is_source refuses it");
+        }
+        // …and the predicates partition it.
+        for e in decode::RAW_EXTS {
+            let p = std::path::PathBuf::from(format!("x.{e}"));
+            assert!(decode::is_raw(&p) && !is_baked(&p));
+        }
+        for e in BAKED_EXTS {
+            let p = std::path::PathBuf::from(format!("x.{e}"));
+            assert!(is_baked(&p) && !decode::is_raw(&p));
+        }
     }
 
     /// Build a directory link `link` → `target` by ANY unprivileged means:

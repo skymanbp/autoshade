@@ -147,8 +147,8 @@ enum Command {
     /// already have a saved develop). Renders go to ./out; develop state goes
     /// to the per-user store — the photo library stays read-only.
     Batch {
-        /// Folder to scan recursively for RAW files (.arw/.dng/.nef/.cr2/.cr3/
-        /// .raf/.orf/.rw2 — the same set the GUI and web open).
+        /// Folder to scan recursively for RAW files (24 formats — the same set
+        /// `decode::is_raw` defines and the GUI and web open).
         dir: PathBuf,
         /// Also render a 16-bit developed TIFF per RAW (slower, large files).
         #[arg(long)]
@@ -156,6 +156,12 @@ enum Command {
         /// Max RAWs to process this run (cost guard; raise to do more).
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Also process already-baked photos (PNG/TIFF/JPEG/WebP/BMP/GIF), which
+        /// the GUI and web open but this scan skips by default. OPT-IN on
+        /// purpose: shooting RAW+JPEG is common, and including baked sources by
+        /// default would analyze — and BILL — the camera JPEG beside every RAW.
+        #[arg(long)]
+        include_baked: bool,
     },
     /// Evaluate AI edits against your own: for RAWs that have a sibling .xmp
     /// (your Lightroom/ACR edit), run the AI and report per-field error + bias.
@@ -323,7 +329,9 @@ fn main() -> Result<()> {
             )
         }
         Command::Denoise { input, out, strength, model } => denoise_cmd(&input, out, strength, model),
-        Command::Batch { dir, render, limit } => batch_cmd(&dir, render, limit),
+        Command::Batch { dir, render, limit, include_baked } => {
+            batch_cmd(&dir, render, limit, include_baked)
+        }
         Command::Eval { dir, limit } => eval::run(&dir, limit),
         Command::StyleIndex { dir } => style_index_cmd(&dir),
         Command::Reimagine { raw, prompt, fidelity, quality, out } => {
@@ -413,7 +421,10 @@ fn decode_cmd(raw: &Path, out: Option<PathBuf>) -> Result<()> {
         m.focal_length_mm.map(|v| format!("{v:.0}")).unwrap_or_else(dash),
         m.exposure_bias_ev.unwrap_or(0.0),
     );
-    println!("  sensor : {} x {}", m.width, m.height);
+    // R27: `meta.width/height` describe the DELIVERED preview (the L05-6 rule
+    // in decode.rs), not the sensor — the old `sensor :` label printed a
+    // Pentax as 640 x 424. Labelled for what it is.
+    println!("  preview: {} x {}", m.width, m.height);
     println!(
         "  wb     : [{:.3}, {:.3}, {:.3}, {:.3}]",
         m.as_shot_wb_coeffs[0], m.as_shot_wb_coeffs[1], m.as_shot_wb_coeffs[2], m.as_shot_wb_coeffs[3],
@@ -670,8 +681,17 @@ fn analyze_cmd(
                 autoshop::store::develop_dir(raw).display()
             );
         }
+        // R27 A3: this line used to end in a literal ".ARW", so
+        // `autoshop analyze shot.CR3` told the photographer to put the sidecar
+        // next to a "shot.ARW" that does not exist. The source's OWN file name
+        // is the only correct answer — and a sidecar's name must match the
+        // photo it belongs to for Lightroom to find it at all.
         let s = stem(raw);
-        println!("  (the library is read-only — copy {s}.xmp next to {s}.ARW to open it in Lightroom)");
+        let photo = raw
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| s.to_string());
+        println!("  (the library is read-only — copy {s}.xmp next to {photo} to open it in Lightroom)");
     } else {
         println!("  (baked source — recipe JSON only; XMP applies to RAW in Lightroom)");
     }
@@ -1304,10 +1324,38 @@ fn heal_cmd(
     Ok(())
 }
 
-fn batch_cmd(dir: &Path, render: bool, limit: usize) -> Result<()> {
+fn batch_cmd(dir: &Path, render: bool, limit: usize, include_baked: bool) -> Result<()> {
     let cfg = Config::load();
-    let raws = find_raws(dir)?;
-    println!("found {} RAW(s) under {}", raws.len(), dir.display());
+    // R27 P1. `batch` is the one of the three scanners where including baked
+    // photos is a real feature rather than a policy break — it develops
+    // sources, and a PNG/TIFF/JPEG is a source every other surface already
+    // opens. It is nevertheless OPT-IN, because the default would be
+    // expensive and surprising: RAW+JPEG is a standard camera setting, so a
+    // library folder routinely holds a baked twin of every RAW, and each twin
+    // is a paid analysis. `eval` and `style-index` do NOT get this flag — see
+    // their own call sites.
+    let raws = if include_baked {
+        autoshop::pipeline::find_sources(dir)?
+    } else {
+        find_raws(dir)?
+    };
+    println!(
+        "found {} {} under {}",
+        raws.len(),
+        if include_baked { "photo(s)" } else { "RAW(s)" },
+        dir.display()
+    );
+    if !include_baked {
+        // Say what was NOT scanned, rather than leaving a folder of exports
+        // looking empty (the failure mode the format-support map filed as B1).
+        let all = autoshop::pipeline::find_sources(dir).map(|v| v.len()).unwrap_or(raws.len());
+        if all > raws.len() {
+            println!(
+                "  ({} already-baked photo(s) skipped — pass --include-baked to develop them too)",
+                all - raws.len()
+            );
+        }
+    }
 
     // "Pending" = no saved develop anywhere — central store OR legacy ./out,
     // recipe OR XMP, OR the sidecar Lightroom itself writes beside the RAW
