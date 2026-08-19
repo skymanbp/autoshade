@@ -1489,9 +1489,11 @@ pub const LOCAL_CONTROLS: [Control; 28] = [
 ///
 /// `Radial::angle` IS here since R23-1b. Its absence used to be justified by
 /// the XMP omission ("our own field, unverified against `crs:Angle`"), but the
-/// two questions are separate: the sidecar omits the rotation because mapping
-/// it onto `crs:Angle` would rotate Lightroom's masks on a guess (and
-/// `xmp::MaskLossReason::Rotation` discloses that projection loss), while THIS
+/// two questions are separate — and v0.32.0 closed the XMP one anyway: the
+/// sidecar now carries the rotation, folded from this engine's normalised-frame
+/// convention into Lightroom's pixel-frame one (`xmp::engine_to_lr`), and
+/// `xmp::MaskLossReason::Rotation` is down to the case where the document
+/// declares no frame to fold against. THIS
 /// schema is the engine's own contract — `render::mask_weight` rotates the
 /// ellipse by exactly this field, the GUI edits it, and `recipe.json`
 /// round-trips it. Withholding it meant an oblique subject could only ever get

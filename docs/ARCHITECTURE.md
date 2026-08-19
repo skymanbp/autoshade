@@ -309,12 +309,17 @@ mask also carries **four point curves** of its own (`main_curve` /
 no `PV2012` suffix and no space after the comma — deliberately NOT the global
 curve's formatter), each independently sparse: 19 of the 160 reference
 sidecars use them, mostly one or two channels. Components, `color_gains` and
-`role` are **engine-only**; the radial `angle` is rendered, GUI-editable and
-AI-settable but is dropped by the classic-ACR XMP projection, which carries the
-base geometry alone (`crs:Angle`'s sign and pivot have no verified reference
-sidecar — the roundness rule: never reshape Lightroom masks on a guess; since
-R25 the writer's disclosure NAMES the angle it dropped, 「rotation 37° not
-written to XMP」, rather than saying only that something rotated). The radial's
+`role` are **engine-only**; the radial `angle` is rendered, GUI-editable,
+AI-settable and — since v0.32.0 — carried in BOTH XMP directions. It is not
+`crs:Angle` verbatim: Lightroom's is a tilt in PIXEL space and ours is a
+rotation applied in the normalised frame, and the two differ by up to
+11.2° of rendered tilt over the ±44° range real sidecars use, so the
+boundary folds one into the other (`xmp::lr_to_engine` / `engine_to_lr`,
+an SVD of the aspect-corrected ellipse matrix). The fold needs the frame's
+ASPECT, which a Lightroom sidecar declares as `tiff:ImageWidth/ImageLength`
+and a photo can be asked for; a document that declares none still exports the
+unrotated ellipse and discloses the angle it could not write — that is all
+`MaskLossReason::Rotation` covers now. The radial's
 `crs:Midpoint` and `crs:Version` are read and written back unchanged — carried,
 never interpreted. Bitmap rasters are immutable once referenced: every raster
 edit (brush add/erase, feather, expand/contract, the full-resolution guided
@@ -497,6 +502,28 @@ dimensions and preview transpose, and `camera_rendition`. A missing tag answers
 `Normal` where rawler's own `from_tiff` answers `Unknown`; the two are the same
 no-op on the pixel, coordinate and dimension chains, which is asserted rather
 than assumed (`unknown_and_normal_are_the_same_no_op`).
+
+**And WHERE the frame starts comes from the DefaultCrop rectangle, not from the
+sensor corner (v0.32.0).** Block registration of eight Autoshop renders against
+their Lightroom exports put every one of them **(+31 ± 6, +20 ± 1)**
+full-resolution pixels off, a pure translation with no scale component. The
+ARWs carry `DefaultCropOrigin = (32, 20)`, `DefaultCropSize = (9504, 6336)`
+inside a `9600 × 6376` raw frame: Autoshop emitted the right SIZE from the
+wrong ORIGIN, so recipe coordinates and Lightroom coordinates disagreed by
+0.34 % of the width at the frame edge. Two facts in the dependency compose to
+produce it, neither wrong on its own — rawler builds the ARW's `active_area`
+from the `SonyRawImageSize` tag, which carries a SIZE, so the origin is pinned
+at `(0, 0)` (`decoders/arw.rs:707`); and its `CropDefault` step applies the
+default crop only `if crop.d != intermediate.dim()` (`imgop/develop.rs:216`),
+which a pure TRANSLATION never satisfies. `decode::align_default_crop` moves
+the demosaic ROI onto the declared rectangle instead, which costs nothing (the
+buffer is the same size, read from the right place) where a post-hoc crop would
+pay a second full-frame copy. Narrow by construction: it fires only for a
+same-size, different-origin pair, refuses a rectangle that would run off the
+sensor, and leaves every size-reducing crop to rawler's own step. **Every Sony
+ARW render therefore shifts by (32, 20) from v0.32.0 on** — stored crops and
+mask coordinates now mean what Lightroom means by them, and a render made
+before the fix is 32 px right and 20 px down of one made after.
 
 Because the frame finally turns, **recipes saved before v0.30.0 hold their crop
 and mask coordinates in the SENSOR frame**. `EditRecipe.coord_era` records
@@ -762,9 +789,9 @@ The **export** direction is disclosed the same way (M6a). Classic ACR XMP
 cannot express everything the engine renders, so the writer names what it left
 behind while it emits: raster (bitmap) and muted masks are skipped whole, extra
 Add/Subtract/Intersect shapes flatten to the base geometry, a rotated radial
-exports unrotated (since R25 the note says by how many degrees, and why the
-angle is withheld rather than guessed), and per-channel recolour gains do not
-travel. The verdicts are
+exports unrotated **when and only when the document declares no frame** (v0.32.0
+narrowed it from every rotated radial; the note says by how many degrees and
+why), and per-channel recolour gains do not travel. The verdicts are
 the writer's own, produced by the ONE loop that emits the mask block (so the claim
 cannot drift from the file) and handed back with the document itself —
 `xmp::recipe_to_xmp_with_losses` / `MergeOutcome::losses`, one pass per save;
@@ -776,6 +803,62 @@ web reply carries it in the note it already had, and stderr gets one line from
 is what the disclosure says. Since v0.30.0 the GUI's line NAMES the masks
 rather than counting them (the CLI's has since M6a; 「which of my twelve?」 was
 the half a count could not answer).
+
+#### The radial ellipse, measured (v0.32.0)
+
+Both XMP directions used to read `crs:Top/Left/Bottom/Right` as a bounding box.
+**It is not one.** It is the pair of ROTATED CORNERS of the ellipse's own box,
+written in the frame's PIXEL coordinates, so the decode is
+
+```
+X = (R−L)/2·W          Y = (B−T)/2·H          SIGNED, never abs()
+a =  X·cos θ + Y·sin θ    b = −X·sin θ + Y·cos θ      guard: a > 0 ∧ b > 0
+```
+
+with `θ = crs:Angle`. The naive reading gets the axis RATIO wrong by a median
+factor of 1.84 over the user's rotated components (p90 4.86, max 40.7), often
+assigns the major axis to the wrong axis, and leaves 16 of 195 components
+literally unreadable (a negative semi-axis). The corner model is not a fit: with
+no free parameters it predicts that `Left > Right` forces `Angle > 0` and
+`Top > Bottom` forces `Angle < 0` and that both at once is impossible — the
+library agrees 16/16, p = 2.5 × 10⁻⁵ — and the two rendered subjects land on
+it at the pixel (`_DSC9689` 8.3 : 1 at +24.35°; `_DSC9685` decoded tilt
+−60.486° against a measured −60.5°).
+
+Three more constants ride with it, each measured on the same twelve-export
+experiment:
+
+* **the frame affine `k = 1.032`.** Lightroom draws the mask in a frame 1.032×
+  the export, concentric with it: `x_px = W·(k·n − (k−1)/2)`. The CENTRE moves,
+  not only the axes — settled on a hard-edged mask whose centre sits 2799 px
+  from the frame centre, where the affine lands to **3 px** and "the centre
+  stays put" misses by 88.
+* **the falloff endpoints.** Recovering the true mask WEIGHT from an 11-rung
+  exposure ladder across five frames (aspect 1.03 … 7.46, one rotated, one
+  corner-placed) fits a cubic smoothstep — the family the engine already used
+  — from `d_in = k(1−f)` to `d_out = k(1+f/2)`. The engine's outer edge had been
+  at `d = 1`; the measured one at `Feather = 50` is 1.25, i.e. **the mask was
+  29 % under-sized** and no amount of correct geometry upstream could recover
+  it. Since `k` is folded into the semi-axes at the XMP boundary, the engine's
+  own endpoints carry no `k` and engine-native radials share the law.
+* **`crs:LocalHue`'s scale is 180, not 100.** A controlled export with the mask
+  Hue slider at +50 wrote `crs:LocalHue="0.277778"`; 0.277778 × 180 = 50.00004.
+
+`W, H` are the exported pixel dimensions (= `DefaultCropSize`), and only their
+RATIO survives the algebra, which is why the boundary carries an
+`xmp::FrameAspect` rather than a size. The whole projection is `xmp::
+lr_to_engine` / `engine_to_lr`, an exact algebraic inverse: 16 real Lightroom
+radial sidecars round-trip their four corners **byte for byte** (the angle to
+10⁻⁴ °, bounded by the `f32` the recipe stores it in), including the rows where
+Lightroom itself writes `Left > Right`.
+
+**What this costs.** `recipe.json` is unchanged — no new field, so no older
+build refuses a v0.32.0 recipe over its masks — but the RENDER of a stored
+radial moves: the falloff's outer edge is wider, so a recipe saved before
+v0.32.0 draws a slightly larger, softer radial than it did. That is a
+deliberate, disclosed change (version snapshots keep the earlier render), and
+re-importing the original Lightroom sidecar is what recovers the intent for a
+mask that came from one.
 
 #### The five-tier control registry (v0.30.0; populated in v0.31.0)
 

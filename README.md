@@ -49,8 +49,22 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   masks actually arrive: every Lightroom mask used to be discarded on import,
   because LR writes `crs:Angle` and `crs:MaskBlendMode` on every one of them and
   either was enough to drop the whole correction. What still cannot be
-  represented is NAMED (「rotation angle」, 「local point curve」, 「unmodelled
-  slider」…) instead of counted, on both directions of the boundary.
+  represented is NAMED (「local point curve」, 「unmodelled slider」…) instead of
+  counted, on both directions of the boundary.
+- **The radial mask geometry is measured, not guessed (v0.32.0)** — twelve
+  purpose-shot Lightroom exports plus pixel measurement of the results settled
+  what `Mask/CircularGradient` actually means. `crs:Top/Left/Bottom/Right` is
+  not a bounding box: it is the pair of ROTATED CORNERS of the ellipse's own
+  box, in pixel space. Reading it naively — which this app, and every other
+  implementation in the searchable world, did — gets the axis ratio wrong by a
+  median factor of 1.84 and leaves 8 % of real masks unreadable. So a Lightroom
+  radial now arrives with the right shape, the right tilt and the right place,
+  and goes back out the same way: sixteen real sidecars round-trip their corners
+  byte for byte. Two more constants came with it — the mask lives in a frame
+  1.032× the export (so the CENTRE moves, not just the axes), and the feather's
+  outer edge is at `1 + f/2`, not `1`, which is to say **every radial this
+  engine drew was 29 % too small at Feather 50**. Fixing that changes how
+  radial masks in EXISTING recipes render; version snapshots keep the old one.
 - **Lightroom panel parity (v0.31.0)** — Texture, the Sharpening and
   Noise-Reduction sub-axes, colour noise reduction, manual + automatic CA,
   de-fringe, post-crop vignetting and film grain all have a home now. Each one
@@ -387,6 +401,23 @@ the list is there for everything the filter has never heard of.
   control says so on itself and the save names the active set, so the
   XMP→Lightroom path is still the faithful one — the difference is now stated
   rather than silent.
+- The radial mask geometry is measured (v0.32.0) and its remaining gaps are
+  named. `crs:Roundness` and `crs:Midpoint` are still carried and never
+  rendered — every radial reachable here writes their defaults and current
+  Lightroom has no slider for either on a radial, so there is nothing to
+  calibrate against. `Feather = 100` is the one point on the falloff law that
+  was never measured (the export shot at it covers the whole frame, leaving
+  nothing to anchor on). Portrait frames, cropped frames and `|Angle| > 45°`
+  are untested: the twelve exports the model rests on are all uncropped
+  landscape. And a sidecar that declares no frame size still exports a rotated
+  radial unrotated — the pixel↔normalised fold needs the aspect — which the
+  save says in those words.
+- **Every Sony ARW render moved by (32, 20) px in v0.32.0.** The develop window
+  now starts at the RAW's own `DefaultCropOrigin`, which is where the camera
+  and Lightroom put the picture; before, it started at the sensor's top-left
+  corner. Renders made before and after the change are offset by that much, and
+  a crop rectangle stored against the old window sits 32 px right and 20 px
+  down of where it was drawn.
 - AI denoise runs on the demosaiced RGB (not the raw Bayer mosaic like Adobe
   Denoise), and ~3 min for a 60 MP frame on an RTX 4060 Ti. Excellent, not
   identical to Adobe.

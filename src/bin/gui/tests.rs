@@ -5261,7 +5261,7 @@
             assert!(
                 out.contains(&trf(
                     lang,
-                    "Rotation {a}° not written to XMP (crs:Angle sign/pivot unverified)",
+                    "Rotation {a}° not written to XMP (frame size unknown)",
                     &[("a", "37")],
                 )),
                 "{lang:?}: the sentence must say why: {out}"
@@ -5300,7 +5300,7 @@
             assert!(
                 inn.contains(&trf(
                     lang,
-                    "Rotation {a}° read as 0 (crs:Angle sign/pivot unverified)",
+                    "Rotation {a}° read as 0 (frame size unknown)",
                     &[("a", "-44")],
                 )),
                 "{lang:?}: the sentence must say why: {inn}"

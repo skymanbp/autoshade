@@ -511,6 +511,138 @@ pub fn raw_orientation(path: &Path) -> Result<rawler::Orientation> {
     Ok(raw_orientation_of(&md))
 }
 
+/// The rectangle of the sensor that IS the picture — the DNG
+/// `DefaultCropOrigin` / `DefaultCropSize` pair, which is what the camera, the
+/// DNG spec and Lightroom all call the frame. Falls back to the active area
+/// and then to the whole sensor for a RAW that declares neither.
+fn default_crop(raw: &rawler::RawImage) -> rawler::imgop::Rect {
+    raw.crop_area.or(raw.active_area).unwrap_or_else(|| {
+        rawler::imgop::Rect::new(
+            rawler::imgop::Point::new(0, 0),
+            rawler::imgop::Dim2::new(raw.width, raw.height),
+        )
+    })
+}
+
+/// Move a decoded `RawImage`'s develop window onto that rectangle. Returns the
+/// origin it moved to, or `None` when nothing needed moving.
+///
+/// **The defect this closes.** Block registration of eight Autoshop renders
+/// against their Lightroom exports put every one of them
+/// `(+31 ± 6, +20 ± 1)` full-resolution pixels off, a pure translation with no
+/// scale component (`PROBE2-VERDICT.md` §9, re-confirmed at `(+34.4, +19.9)`
+/// in `PROBE4-FINAL.md` §3). The ARWs carry
+/// `DefaultCropOrigin = (32, 20)`, `DefaultCropSize = (9504, 6336)` inside a
+/// `9600 × 6376` raw frame: Autoshop emitted the right SIZE from the wrong
+/// ORIGIN, so recipe coordinates and Lightroom coordinates disagreed by 0.34 %
+/// of the width at the edges — and every mask this batch teaches the importer
+/// to place correctly would have landed 32 px right of where Lightroom draws
+/// it.
+///
+/// **Why rawler does not do it.** Two facts in the dependency compose, and
+/// neither is wrong on its own (rawler 0.7.2, read at
+/// `~/.cargo/registry/src/…/rawler-0.7.2/`):
+///   * `decoders/arw.rs:707-713` builds `active_area` from the
+///     `SonyRawImageSize` tag as `Rect::new(Point::default(), …)` — the tag
+///     carries a SIZE, so the origin is pinned at `(0, 0)`;
+///   * `imgop/develop.rs:216` applies the default crop only
+///     `if crop.d != intermediate.dim()`, and the demosaic ROI has already
+///     taken `active_area.d` pixels, so a default crop that is a pure
+///     TRANSLATION has exactly the same size and is skipped.
+///
+/// **The fix, and why it is this one.** Moving the demosaic ROI (i.e.
+/// `active_area`) to the default-crop origin costs nothing — the developed
+/// buffer is the same size, just read from the right place — where cropping
+/// afterwards would pay a second full-frame copy (~720 MB at 61 MP). rawler
+/// shifts the CFA pattern by the ROI origin itself
+/// (`imgop/sensor/bayer/ppg.rs:50`, `cfa.shift(roi.p.x, roi.p.y)`), so the
+/// Bayer phase follows; `apply_scaling` has already run over the whole frame
+/// in raw coordinates and is untouched by this.
+///
+/// Deliberately NARROW: it fires only when the two rectangles are the same
+/// SIZE and differ in origin, which is exactly the case rawler skips. When
+/// they differ in size, rawler's own `CropDefault` step does the right thing
+/// and this leaves it alone. A rectangle that would run off the sensor is
+/// refused rather than clamped — a RAW whose tags disagree with its own
+/// dimensions is not a frame to guess at.
+pub fn align_default_crop(raw: &mut rawler::RawImage) -> Option<(usize, usize)> {
+    let moved = aligned_demosaic_roi(raw.crop_area, raw.active_area, raw.width, raw.height)?;
+    raw.active_area = Some(moved);
+    Some((moved.p.x, moved.p.y))
+}
+
+/// The decision half of [`align_default_crop`], as a function of the numbers
+/// alone — a `RawImage` needs a whole `Camera` and a sensor buffer to build,
+/// and the thing worth pinning is which rectangles move and which do not.
+fn aligned_demosaic_roi(
+    crop: Option<rawler::imgop::Rect>,
+    active: Option<rawler::imgop::Rect>,
+    width: usize,
+    height: usize,
+) -> Option<rawler::imgop::Rect> {
+    let (crop, active) = (crop?, active?);
+    if crop.d != active.d || crop.p == active.p {
+        return None;
+    }
+    if crop.p.x + crop.d.w > width || crop.p.y + crop.d.h > height {
+        return None;
+    }
+    Some(crop)
+}
+
+/// The pixel frame a develop of `path` lands in — the frame every normalised
+/// coordinate in a recipe, and in a Lightroom sidecar, is measured against.
+///
+/// For a RAW that is [`default_crop`]'s rectangle, turned into the DISPLAY
+/// frame by the EXIF orientation, which is `render::render_to_image`'s own
+/// order (orientation first, everything else after). For a baked image it is
+/// the oriented header dimensions — `load_image` applies the orientation the
+/// same way.
+///
+/// Metadata only: `dummy = true` on the RAW arm means no sensor
+/// decompression, and the baked arm decodes no pixel at all.
+pub fn frame_size(path: &Path) -> Result<(usize, usize)> {
+    if !is_raw(path) {
+        use image::ImageDecoder as _;
+        // baked-by-construction: the `is_raw` gate above is this function's
+        // own dispatch, the one `load_image_gated` enforces for pixels.
+        let reader = image::ImageReader::open(path)
+            .with_context(|| format!("open image {}", path.display()))?
+            .with_guessed_format()
+            .with_context(|| format!("probe image {}", path.display()))?;
+        let mut decoder = reader
+            .into_decoder()
+            .with_context(|| format!("read the header of {}", path.display()))?;
+        let transposes = matches!(
+            decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms),
+            image::metadata::Orientation::Rotate90
+                | image::metadata::Orientation::Rotate270
+                | image::metadata::Orientation::Rotate90FlipH
+                | image::metadata::Orientation::Rotate270FlipH
+        );
+        let (w, h) = decoder.dimensions();
+        let (w, h) = (w as usize, h as usize);
+        return Ok(if transposes { (h, w) } else { (w, h) });
+    }
+    guard_tiff_chain(path)?;
+    let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
+    let decoder =
+        get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", path.display()))?;
+    let params = RawDecodeParams { image_index: 0 };
+    let md = decoder
+        .raw_metadata(&src, &params)
+        .map_err(|e| anyhow!("raw_metadata: {e}"))?;
+    let raw = decoder
+        .raw_image(&src, &params, true)
+        .map_err(|e| anyhow!("raw_image(dummy): {e}"))?;
+    let d = default_crop(&raw).d;
+    Ok(if orientation_transposes(raw_orientation_of(&md)) {
+        (d.h, d.w)
+    } else {
+        (d.w, d.h)
+    })
+}
+
 /// Does this EXIF orientation swap width and height in the display frame?
 fn orientation_transposes(o: rawler::Orientation) -> bool {
     matches!(
@@ -1655,6 +1787,56 @@ mod tests {
             (d.preview.width() as usize, d.preview.height() as usize),
             (d.meta.width, d.meta.height),
             "Meta dims must describe the delivered preview"
+        );
+    }
+
+    /// v0.32.0 — the develop window sits on the DefaultCrop rectangle, not on
+    /// the sensor's top-left corner.
+    ///
+    /// The first row is the real Sony A7R IV geometry the defect was measured
+    /// on: `9600 × 6376` raw, `SonyRawImageSize` giving rawler an active area
+    /// of `9504 × 6336` **at (0, 0)**, `DefaultCropOrigin = (32, 20)`. rawler
+    /// 0.7.2 skips its own `CropDefault` there (equal sizes — see
+    /// `align_default_crop`), which is why every ARW render landed 32 px right
+    /// and 20 px down of Lightroom's frame.
+    ///
+    /// The other rows are the cases that must NOT move: rawler's own crop step
+    /// already handles a size-reducing crop, an aligned pair has nothing to do,
+    /// and a rectangle that would run off the sensor is refused rather than
+    /// clamped.
+    ///
+    /// MUTATION THIS CATCHES: drop the `crop.d != active.d` guard and the
+    /// size-reducing row starts double-cropping; drop the bounds check and the
+    /// off-sensor row hands rawler a ROI it would index past the buffer with.
+    #[test]
+    fn the_demosaic_window_moves_onto_the_default_crop_rectangle() {
+        use rawler::imgop::{Dim2, Point, Rect};
+        let r = |x, y, w, h| Rect::new(Point::new(x, y), Dim2::new(w, h));
+        let sony_crop = r(32, 20, 9504, 6336);
+        assert_eq!(
+            aligned_demosaic_roi(Some(sony_crop), Some(r(0, 0, 9504, 6336)), 9600, 6376),
+            Some(sony_crop),
+            "the A7R IV window starts at DefaultCropOrigin, not at the sensor corner"
+        );
+        assert_eq!(
+            aligned_demosaic_roi(Some(r(32, 20, 9000, 6000)), Some(r(0, 0, 9504, 6336)), 9600, 6376),
+            None,
+            "a size-REDUCING default crop is rawler's own CropDefault step's job"
+        );
+        assert_eq!(
+            aligned_demosaic_roi(Some(sony_crop), Some(sony_crop), 9600, 6376),
+            None,
+            "an already-aligned pair has nothing to move"
+        );
+        assert_eq!(
+            aligned_demosaic_roi(Some(r(200, 20, 9504, 6336)), Some(r(0, 0, 9504, 6336)), 9600, 6376),
+            None,
+            "a window that would run off the sensor is refused, never clamped"
+        );
+        assert_eq!(
+            aligned_demosaic_roi(None, Some(r(0, 0, 9504, 6336)), 9600, 6376),
+            None,
+            "a RAW that declares no default crop keeps the window it had"
         );
     }
 }

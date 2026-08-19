@@ -2118,7 +2118,7 @@ pub fn write_xmp(
             )),
         }
     }
-    write_xmp_doc(target, recipe, base, notes)
+    write_xmp_doc(target, recipe, base, Some(raw), notes)
 }
 
 /// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
@@ -2127,6 +2127,7 @@ pub fn write_xmp(
 pub fn write_xmp_at(
     out: PathBuf,
     recipe: &EditRecipe,
+    photo: Option<&Path>,
 ) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
     use crate::store::SidecarRead;
     let mut notes: Vec<String> = Vec::new();
@@ -2142,7 +2143,7 @@ pub fn write_xmp_at(
             None
         }
     };
-    write_xmp_doc(out, recipe, base, notes)
+    write_xmp_doc(out, recipe, base, photo, notes)
 }
 
 /// Returns the published path and, when the merge could not run, a note naming
@@ -2161,6 +2162,7 @@ fn write_xmp_doc(
     out: PathBuf,
     recipe: &EditRecipe,
     merge_base: Option<(PathBuf, String)>,
+    photo: Option<&Path>,
     mut notes: Vec<String>,
 ) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
     ensure_parent(&out)?;
@@ -2173,7 +2175,19 @@ fn write_xmp_doc(
     bounded.clamp();
     let recipe = &bounded;
     let base_path = merge_base.as_ref().map(|(p, _)| p.clone());
-    let merged = merge_base.and_then(|(_, b)| xmp::merge_recipe_into_xmp(&b, recipe));
+    // The frame the radial projection writes INTO (v0.32.0, `xmp::FrameAspect`).
+    // Paid ONLY when the recipe holds a rotated radial: every other geometry
+    // projects without an aspect, and reading a 61 MP ARW's metadata on every
+    // save to serve a mask nobody rotated is a cost for nothing. A base sidecar
+    // that declares its own `tiff:ImageWidth/ImageLength` still wins over this
+    // — see `merge_recipe_into_xmp_in_frame`. Unreadable = no frame = the
+    // rotation is disclosed rather than guessed, the same tri-state
+    // `migrate_recipe_coord_frame` takes on the orientation it cannot read.
+    let frame = photo
+        .filter(|_| recipe_has_rotated_radial(recipe))
+        .and_then(photo_frame_aspect);
+    let merged =
+        merge_base.and_then(|(_, b)| xmp::merge_recipe_into_xmp_in_frame(&b, recipe, frame));
     // A merge that SUCCEEDED can still have losses it could not avoid (the
     // base's unrepresentable mask block giving way to the recipe's own
     // masks) — its notes ride the same channel as the regeneration note.
@@ -2234,7 +2248,7 @@ fn write_xmp_doc(
     // `mask_export_losses` and builds that block a second time per save.
     let (doc, mask_losses) = match merged {
         Some(pair) => pair,
-        None => xmp::recipe_to_xmp_with_losses(recipe),
+        None => xmp::recipe_to_xmp_in_frame(recipe, frame),
     };
     if let Some(m) = xmp::describe_mask_losses(&mask_losses) {
         eprintln!("⚠ {m}");
@@ -2247,6 +2261,44 @@ fn write_xmp_doc(
     crate::store::durable_write(&out, doc.as_bytes())
         .with_context(|| format!("publish xmp {}", out.display()))?;
     Ok((out, note, mask_losses))
+}
+
+/// Does this recipe hold a radial whose tilt the XMP projection needs a frame
+/// aspect to write? Nothing else in the projection is aspect-dependent, so this
+/// is the exact gate on paying for [`photo_frame_aspect`].
+fn recipe_has_rotated_radial(r: &EditRecipe) -> bool {
+    let rotated = |g: &crate::recipe::MaskGeometry| {
+        matches!(g, crate::recipe::MaskGeometry::Radial { angle, .. } if *angle != 0.0)
+    };
+    r.masks
+        .iter()
+        .any(|m| rotated(&m.mask) || m.components.iter().any(|c| rotated(&c.geometry)))
+}
+
+/// The photo's own frame aspect, memoised per file the way [`orient_memo`] is —
+/// both answers cost the same metadata read, and the strip-card and batch
+/// surfaces ask per recipe, not per photo. `None` for a photo whose frame
+/// cannot be read; the caller discloses that rather than guessing an aspect.
+fn photo_frame_aspect(photo: &Path) -> Option<xmp::FrameAspect> {
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, (usize, usize)>>,
+    > = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key = (photo.to_path_buf(), curve_ident(photo));
+    let cached = memo.lock().ok().and_then(|m| m.get(&key).copied());
+    let (w, h) = match cached {
+        Some(v) => v,
+        None => {
+            // Inabilities are NOT cached — a locked file must be retried, the
+            // rule the curve and orientation memos already follow.
+            let v = crate::decode::frame_size(photo).ok()?;
+            match memo.lock() {
+                Ok(mut m) => *m.entry(key).or_insert(v),
+                Err(_) => v,
+            }
+        }
+    };
+    xmp::FrameAspect::from_size(w as f64, h as f64)
 }
 
 /// Where the .xmp for `raw` goes — the photo's central develop dir (see

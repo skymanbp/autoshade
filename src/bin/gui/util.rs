@@ -392,7 +392,7 @@ pub(crate) fn xmp_loss_line(
             ) {
                 Some(a) => trf(
                     lang,
-                    "Rotation {a}° not written to XMP (crs:Angle sign/pivot unverified)",
+                    "Rotation {a}° not written to XMP (frame size unknown)",
                     &[("a", &a)],
                 ),
                 None => trf(lang, "radial rotation ×{n}", &[("n", &n)]),
@@ -574,7 +574,7 @@ pub(crate) fn xmp_import_line(
             ) {
                 Some(a) => trf(
                     lang,
-                    "Rotation {a}° read as 0 (crs:Angle sign/pivot unverified)",
+                    "Rotation {a}° read as 0 (frame size unknown)",
                     &[("a", &a)],
                 ),
                 None => tr(lang, "Rotation angle").into(),

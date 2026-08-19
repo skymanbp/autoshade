@@ -856,8 +856,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // says why, because 「radial rotation ×1」 leaves a photographer unable to
     // tell a deliberate limit from a bug. The bare label above stays as the
     // fallback for a rotation with no nameable angle (`util::rotation_degrees`).
-    ("Rotation {a}° not written to XMP (crs:Angle sign/pivot unverified)",
-        "旋转 {a}° 未写入 XMP（crs:Angle 的符号与旋转基准未经实测）"),
+    // v0.32.0 changed the REASON, not the line: `crs:Angle`'s sign and pivot are
+    // measured now and the projection carries the tilt, so what is left is a
+    // document that declares no frame — the pixel→normalised fold has no aspect
+    // to fold with (`xmp::FrameAspect`).
+    ("Rotation {a}° not written to XMP (frame size unknown)",
+        "旋转 {a}° 未写入 XMP（画幅尺寸未知）"),
     ("recolour gains ×{n}", "重上色增益 ×{n}"),
     // R24-5 M0: the same line NAMES the masks now (「which of my twelve?」 was
     // the half a count could not answer), and grew a GLOBAL bucket beside the
@@ -1365,8 +1369,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // R25 P5, the import twin of the export line's angle-naming head. Same
     // fallback rule: the bare label above serves a rotation whose angle we
     // could not read (`util::rotation_degrees`).
-    ("Rotation {a}° read as 0 (crs:Angle sign/pivot unverified)",
-        "旋转 {a}° 按 0 读入（crs:Angle 的符号与旋转基准未经实测）"),
+    ("Rotation {a}° read as 0 (frame size unknown)",
+        "旋转 {a}° 按 0 读入（画幅尺寸未知）"),
     ("Blend mode", "混合模式"),
     ("Extra shapes", "附加形状"),
     ("Range mask (foreign)", "值域蒙版（外部）"),

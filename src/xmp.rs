@@ -82,6 +82,363 @@ fn local_fmt(v: f32) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The radial ellipse — Lightroom's rotated-corner box ⇄ this engine's bbox
+// ---------------------------------------------------------------------------
+//
+// v0.32.0. Every constant and every formula below is MEASURED, on the user's
+// own twelve-frame controlled Lightroom experiment plus pixel measurement of
+// the exports (evidence: `~/.claude/plans/r25-materials/lr-experiment/`,
+// `probe4/PROBE4-FINAL.md` §4 is the settled statement, `probe3/
+// PROBE3-ADDENDUM.md` §3 the falloff, `probe2/PROBE2-VERDICT.md` §5 the
+// eight-frame table, `BBOX-DECODE.md` §2 the corner model's own statistics).
+// Nothing here is inferred from a family pattern; where a value is still
+// unmeasured it is named as such at the site that uses it.
+
+/// The affine constant Lightroom applies between a radial's stored normalised
+/// coordinates and the frame it draws them in: `x_px = W·(k·n − (k−1)/2)`, i.e.
+/// the mask lives in a frame `k`× the export, CONCENTRIC with it.
+///
+/// **MEASURED**, not assumed. `_DSC9687` (`Feather="0"`, so the rendered edge
+/// IS the ellipse) puts the semi-axis scale at 1.0326 ± 0.0004 by three
+/// independent methods (`PROBE2-VERDICT.md` §3.1); `_DSC9681` — a hard-edged
+/// mask whose centre sits 2799 px from the frame centre, which is what
+/// separates "scale the axes" from "scale the frame" — puts the map at
+/// 1.0315 ± 0.0005 and lands on this value to **3 px on a 2799 px lever**
+/// (`PROBE4-FINAL.md` §2.1). "The centre stays put" misses by 88 px and is
+/// dead twice over.
+///
+/// ONE loose end, registered by `PROBE4-FINAL.md` §3 and deliberately not
+/// modelled: the SEMI-AXIS scale measures 1.0325 on one hard-edge frame and
+/// 1.0065 on another, so a single affine cannot be exactly right for both.
+/// Carrying `k` on the axes too (what the code below does) is the recommended
+/// reading — one constant in one place, exact on the frame the falloff
+/// endpoints were calibrated against, and its worst case (2.6 % of a semi-axis)
+/// is *smaller* than the ±5 % frame-to-frame scatter already in those
+/// endpoints. TRIGGER for revisiting: two more `Feather = 0` exports, one small
+/// mask at 24 mm and one large at 105 mm, both centred (§3's "decisive
+/// follow-up"). WHERE IT GOES: this constant and this constant only.
+const LR_MASK_FRAME_SCALE: f64 = 1.032;
+
+/// The frame a mask's normalised coordinates are measured against, reduced to
+/// the ONE number the radial projection needs: `s = W / H`.
+///
+/// Only the RATIO enters. The decode multiplies the stored half-extents by
+/// `W` and `H` to reach pixels and divides by them again to reach the engine's
+/// own normalised frame, so `W` and `H` cancel and `s` is all that survives —
+/// which is why this is an aspect and not a size, and why a document that
+/// declares its dimensions in any unit can serve it.
+///
+/// `W, H` are the **exported** pixel dimensions = the DNG `DefaultCropSize`,
+/// NOT the raw `ImageWidth/Length` (`PROBE2-VERDICT.md` §3.3: decoding in the
+/// raw frame splits `k_A` and `k_B` by 0.35 % where the export frame holds them
+/// to 0.02 %). A Lightroom sidecar's own `tiff:ImageWidth/ImageLength` ARE
+/// those dimensions — verified on `_DSC9600.xmp`, `tiff:ImageWidth="9504"`
+/// against the ARW's `DefaultCropSize = (9504, 6336)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameAspect(f64);
+
+impl FrameAspect {
+    /// From a pixel size. `None` for anything that is not a positive, finite
+    /// rectangle — a zero dimension would make the projection singular.
+    pub fn from_size(w: f64, h: f64) -> Option<Self> {
+        (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then(|| FrameAspect(w / h))
+    }
+
+    /// The frame a sidecar DECLARES, from `tiff:ImageWidth` / `tiff:ImageLength`.
+    ///
+    /// Read off the whole document, not the crs scope: these are `tiff:`
+    /// properties and they sit on the same `rdf:Description` in every Lightroom
+    /// sidecar seen here, but nothing makes that structural.
+    ///
+    /// KNOWN BOUNDARY, and it is the untested one: for a ROTATED frame
+    /// (`tiff:Orientation` 5–8) these two are taken verbatim, where the mask
+    /// coordinates live in the sensor frame *before* orientation (johnrellis,
+    /// Adobe Community, quoted in `BBOX-DECODE.md` §5.1). Every frame in the
+    /// twelve-export experiment is `Orientation="1"`, so which way the swap
+    /// goes is unmeasured and guessing it would reshape a portrait user's mask
+    /// on nothing. TRIGGER: a portrait sidecar carrying a radial with a
+    /// non-zero `crs:Angle`. WHERE IT GOES: one portrait export with a known
+    /// angle settles it, and this function is the only place that changes.
+    fn from_xmp(doc: &str) -> Option<Self> {
+        FrameAspect::from_size(
+            declared_number(doc, "tiff:ImageWidth")?,
+            declared_number(doc, "tiff:ImageLength")?,
+        )
+    }
+}
+
+/// The number a document declares for `name`, in either XMP spelling —
+/// `name="9504"` (the attribute form Lightroom writes) or
+/// `<name>9504</name>` (the element form the same property is legal in).
+///
+/// Scanned with [`find_outside_constructs`], so a comment quoting the property
+/// cannot answer for the document — the rule this module already enforces for
+/// the merge splice. A hit whose next non-space character is neither `=` nor
+/// `>` (i.e. the needle was the prefix of a LONGER name) gives up rather than
+/// searching on: giving up costs the caller its frame, which is a disclosed,
+/// degraded path, where searching on could answer from an unrelated property.
+fn declared_number(doc: &str, name: &str) -> Option<f64> {
+    let at = find_outside_constructs(doc, name)?;
+    let rest = doc[at + name.len()..].trim_start();
+    let text = match rest.strip_prefix('=') {
+        Some(v) => {
+            let v = v.trim_start();
+            let quote = v.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            v[quote.len_utf8()..].split(quote).next()?
+        }
+        None => rest.strip_prefix('>')?.split('<').next()?,
+    };
+    xml_unescape(text).trim().trim_start_matches('+').parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// The five numbers Lightroom stores for one `Mask/CircularGradient`, in its
+/// own normalised frame. NOT a bounding box — see [`lr_to_engine`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LrRadial {
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+    angle_deg: f64,
+}
+
+/// The five numbers THIS engine stores for the same ellipse
+/// ([`MaskGeometry::Radial`]): an axis-aligned box in the engine's normalised
+/// frame plus a rotation applied in that frame. Same shape as [`LrRadial`],
+/// deliberately a different type — the two are not interchangeable and mixing
+/// them up is exactly the defect this batch closed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EngineRadial {
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+    angle_deg: f64,
+}
+
+/// What [`lr_to_engine`] could make of one stored radial.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RadialDecode {
+    /// Decoded whole: shape, tilt and position all carried.
+    Exact(EngineRadial),
+    /// The document declares no frame ([`FrameAspect::from_xmp`]), so a
+    /// non-zero `crs:Angle` cannot be decoded — the rotation is a PIXEL-frame
+    /// tilt and turning it into this engine's normalised-frame one needs the
+    /// aspect. The axis-aligned reading rides through (with the frame affine,
+    /// which needs no aspect) and the caller raises the rotation disclosure,
+    /// exactly as every build before v0.32.0 did for every rotated radial.
+    Unrotated(EngineRadial),
+    /// The corners do not describe an ellipse at the declared angle — the
+    /// decode's own `a > 0 ∧ b > 0` guard. Real Lightroom data satisfies it
+    /// 80/80 (`BBOX-DECODE.md` §2.1); a sidecar that does not is either
+    /// malformed or uses a convention outside `|θ| < 90°`, and rendering it
+    /// anyway would draw a mask the file does not describe.
+    Refused,
+}
+
+/// The 2×2 SVD in closed form: `m = R(θᵤ)·diag(σ₁, σ₂)·R(θᵥ)ᵀ`, returning
+/// `(σ₁, σ₂, θᵤ)` with `θᵤ` in radians and `σ₁ ≥ |σ₂|`.
+///
+/// `σ₂` comes out NEGATIVE when `det m < 0`; callers take `|σ₂|` and keep
+/// `R(θᵤ)` as the rotation. That is not a shortcut — `diag(σ₁, −|σ₂|)` is
+/// `diag(σ₁, |σ₂|)` composed with a reflection, and a reflection maps the unit
+/// circle to itself, so the ELLIPSE (which is all this is used for) is
+/// unchanged. It is also what `ANGLE-MODEL.md` §6.1's "force `det U > 0`"
+/// asks for, reached without a branch.
+///
+/// `m` is `[m00, m01, m10, m11]`.
+fn svd2(m: [f64; 4]) -> (f64, f64, f64) {
+    let (e, f) = ((m[0] + m[3]) / 2.0, (m[0] - m[3]) / 2.0);
+    let (g, h) = ((m[2] + m[1]) / 2.0, (m[2] - m[1]) / 2.0);
+    let (q, r) = (e.hypot(h), f.hypot(g));
+    (q + r, q - r, (h.atan2(e) + g.atan2(f)) / 2.0)
+}
+
+/// Fold an ellipse orientation into Lightroom's own canonical window.
+///
+/// An ellipse's orientation is defined mod 180°, so `(box, angle)` is redundant
+/// twice over and Lightroom resolves it by keeping `|θ| ≤ 45°` and letting the
+/// `a > b` / `a < b` distinction carry the other quadrant: all 195 radials in
+/// the user's library sit in `[−43.945, +44.793]`, zero rows outside ±45°
+/// (`BBOX-DECODE.md` §2.3), and LRTimelapse's author has the flip on the record
+/// ("Lightroom flips from +45 to −45"). Returns the folded angle in degrees and
+/// whether the semi-axes must be SWAPPED to go with it.
+fn canonical_lr_angle(deg: f64) -> (f64, bool) {
+    let mut d = deg.rem_euclid(180.0);
+    if d > 90.0 {
+        d -= 180.0;
+    }
+    if d.abs() > 45.0 { (d - 90.0 * d.signum(), true) } else { (d, false) }
+}
+
+/// Lightroom's stored radial → this engine's `MaskGeometry::Radial` geometry.
+///
+/// **`crs:Top/Left/Bottom/Right` is not a bounding box.** It is the pair of
+/// ROTATED CORNERS of the ellipse's own box, written in the frame's PIXEL
+/// coordinates (`BBOX-DECODE.md` §1):
+///
+/// ```text
+///     (Left, Top)     = centre + R(θ)·(−a, −b)
+///     (Right, Bottom) = centre + R(θ)·(+a, +b)
+/// ```
+///
+/// so the decode is
+///
+/// ```text
+///     X = (R−L)/2·W        Y = (B−T)/2·H          SIGNED, never abs()
+///     a =  X·cos θ + Y·sin θ     b = −X·sin θ + Y·cos θ
+/// ```
+///
+/// Read naively — `rx = (R−L)/2`, which is what every build up to v0.31.2 did
+/// and what every other implementation in the searchable world still does —
+/// the axis ratio is wrong by a median factor of 1.84 over the user's rotated
+/// components, p90 4.86, max 40.7; it frequently assigns the MAJOR axis to the
+/// wrong axis; and 16 of 195 components decode to a NEGATIVE semi-axis, i.e.
+/// they are not readable at all. The model is not a fit: it makes a sign
+/// prediction with no free parameters (`Left > Right` forces `Angle > 0`,
+/// `Top > Bottom` forces `Angle < 0`, both at once is impossible) which the
+/// library confirms 16/16 at p = 2.5 × 10⁻⁵, and the two rendered subjects
+/// `_DSC9689` (8.3 : 1 at +24.35°) and `_DSC9685` (1 : 2 at +29.51°, decoded
+/// tilt −60.486° against a measured −60.5°) land on it at the pixel
+/// (`PROBE2-VERDICT.md` §1, §5).
+///
+/// The `(a, b)` here are computed in units of the frame HEIGHT rather than in
+/// pixels — `W` and `H` cancel out of the whole projection and only `s = W/H`
+/// survives (see [`FrameAspect`]). The `a > 0 ∧ b > 0` guard is unaffected: `W`
+/// and `H` are positive, so scaling cannot change a sign.
+///
+/// [`MaskGeometry::Radial`]: crate::recipe::MaskGeometry::Radial
+fn lr_to_engine(lr: LrRadial, frame: Option<FrameAspect>) -> RadialDecode {
+    let k = LR_MASK_FRAME_SCALE;
+    let (ncx, ncy) = ((lr.left + lr.right) / 2.0, (lr.top + lr.bottom) / 2.0);
+    let (xn, yn) = ((lr.right - lr.left) / 2.0, (lr.bottom - lr.top) / 2.0);
+    // The centre moves with the frame, not just the axes — this is the half
+    // `PROBE4-FINAL.md` settled and the half a "scale the semi-axes" reading
+    // gets wrong by 88 px at a frame corner. It needs no aspect.
+    let boxed = |rx: f64, ry: f64, angle_deg: f64| EngineRadial {
+        left: k * ncx - (k - 1.0) / 2.0 - rx,
+        right: k * ncx - (k - 1.0) / 2.0 + rx,
+        top: k * ncy - (k - 1.0) / 2.0 - ry,
+        bottom: k * ncy - (k - 1.0) / 2.0 + ry,
+        angle_deg,
+    };
+    // An UNROTATED radial decodes identically under both readings (115 of the
+    // library's 195 components), and the identity needs no aspect and no SVD —
+    // taking it verbatim keeps those masks bit-stable instead of routing them
+    // through a numerical fold that can only lose digits.
+    //
+    // The guard still applies, and at `θ = 0` it reads as `R > L ∧ B > T`: an
+    // inverted corner pair at zero rotation decodes to a negative semi-axis
+    // (it is one of the 16 of 195 the naive reading could not read either),
+    // and the sign law forbids it — `Left > Right` occurs only with
+    // `Angle > 0`, 6/6. A DEGENERATE box (`R == L`) is refused by the same
+    // test: a zero-width ellipse is not an ellipse, where the renderer's
+    // `max(1e-4)` used to draw it as a hairline.
+    if lr.angle_deg == 0.0 {
+        return if xn > 0.0 && yn > 0.0 {
+            RadialDecode::Exact(boxed(k * xn, k * yn, 0.0))
+        } else {
+            RadialDecode::Refused
+        };
+    }
+    let Some(FrameAspect(s)) = frame else {
+        // No declared frame: the naive box, as before v0.32.0, with the
+        // rotation disclosed rather than silently applied or silently dropped.
+        //
+        // `abs()` here and nowhere else. A box on this path may legitimately
+        // carry `Left > Right` (it is rotated — that is why we are here), and
+        // the signed reading of it is exactly what needs the aspect we do not
+        // have. So the axis-aligned fallback takes the magnitudes, which is
+        // what `mask_weight` would have done with them anyway, and the
+        // disclosure says the rotation did not arrive. The cost is byte
+        // fidelity on re-export for that one shape: an inverted pair comes back
+        // sorted. It comes back describing what this build renders, which the
+        // alternative does not.
+        return RadialDecode::Unrotated(boxed(k * xn.abs(), k * yn.abs(), 0.0));
+    };
+    let (sin, cos) = lr.angle_deg.to_radians().sin_cos();
+    let (a, b) = (xn * s * cos + yn * sin, -xn * s * sin + yn * cos);
+    if !(a > 0.0 && b > 0.0) {
+        return RadialDecode::Refused;
+    }
+    // Into the engine's normalised frame: `rx = k·a/W`, `ry = k·b/H`, which in
+    // height units is `k·a/s` and `k·b`.
+    let (rx, ry) = (k * a / s, k * b);
+    // …and fold the PIXEL-frame rotation into the engine's NORMALISED-frame one
+    // (`ANGLE-MODEL.md` §6.1). The two differ by up to 11.2° of rendered tilt
+    // over the library's `|angle| ≤ 44°` range (§3.5), measured 28.554° against
+    // a normalised-frame prediction of 19.692° on `_DSC9600` (§3.2).
+    let m = [rx * cos, -ry * sin / s, rx * s * sin, ry * cos];
+    let (s1, s2, tu) = svd2(m);
+    RadialDecode::Exact(boxed(s1.abs(), s2.abs(), tu.to_degrees()))
+}
+
+/// This engine's radial geometry → Lightroom's stored corners. The exact
+/// inverse of [`lr_to_engine`]; `R(θ)` is orthogonal, so the round trip is
+/// algebraically exact and the two legal corner arrangements Lightroom writes
+/// (`Left < Right` and `Left > Right`) both come back byte-stable.
+///
+/// `None` for the frame means the caller could not learn the aspect, and a
+/// non-zero engine angle then cannot be projected: the unrotated ellipse is
+/// returned with the angle it could not write, for the caller to disclose.
+/// The frame AFFINE is applied either way — it needs no aspect, and leaving it
+/// off would make the writer the inverse of nothing.
+fn engine_to_lr(e: EngineRadial, frame: Option<FrameAspect>) -> (LrRadial, Option<f64>) {
+    let k = LR_MASK_FRAME_SCALE;
+    let (cx, cy) = ((e.left + e.right) / 2.0, (e.top + e.bottom) / 2.0);
+    let (rx, ry) = (((e.right - e.left) / 2.0).abs(), ((e.bottom - e.top) / 2.0).abs());
+    let (ncx, ncy) = ((cx + (k - 1.0) / 2.0) / k, (cy + (k - 1.0) / 2.0) / k);
+    let corners = |xn: f64, yn: f64, angle_deg: f64| LrRadial {
+        left: ncx - xn,
+        right: ncx + xn,
+        top: ncy - yn,
+        bottom: ncy + yn,
+        angle_deg,
+    };
+    let unrotated = |withheld: Option<f64>| (corners(rx / k, ry / k, 0.0), withheld);
+    if e.angle_deg == 0.0 {
+        return unrotated(None);
+    }
+    let Some(FrameAspect(s)) = frame else {
+        return unrotated(Some(e.angle_deg));
+    };
+    // `diag(s, 1)·R(angle)·diag(rx, ry)` — the ellipse carried into the
+    // isotropic (pixel-proportional) frame, whose SVD reads off the pixel tilt
+    // and the pixel semi-axes in units of the frame height.
+    let (sin, cos) = e.angle_deg.to_radians().sin_cos();
+    let (s1, s2, tu) = svd2([s * cos * rx, -s * sin * ry, sin * rx, cos * ry]);
+    let (mut a, mut b) = (s1.abs(), s2.abs());
+    let (deg, swap) = canonical_lr_angle(tu.to_degrees());
+    if swap {
+        std::mem::swap(&mut a, &mut b);
+    }
+    // Undo the frame affine on the axes, then re-encode the corners. Do NOT
+    // sort or clamp the result: when `tan θ > a/b` this legitimately emits
+    // `Left > Right`, which is byte-for-byte what Lightroom itself writes
+    // (6/6 such rows in the library carry `Angle > 0`, as the model requires),
+    // and normalising the box to min/max destroys the mask.
+    let (a, b) = (a / k, b / k);
+    let (sin, cos) = deg.to_radians().sin_cos();
+    (corners((a * cos - b * sin) / s, a * sin + b * cos, deg), None)
+}
+
+/// One radial coordinate the way Lightroom spells it: six decimals with the
+/// trailing zeros trimmed — `"0.114928"`, `"0.875"`, `"-0.153271"`, `"0"`.
+///
+/// Six decimals IS Lightroom's precision (every `crs:Top/Left/Bottom/Right/
+/// Angle` in the reference sidecars carries at most that many), and the trim is
+/// what makes a merged sidecar's untouched radial byte-identical to the one
+/// Lightroom wrote instead of merely equal to it — `crs:Bottom="0.875"` must
+/// not come back as `"0.875000"`.
+fn lr_num(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    // `-0.0000004` prints as `-0.000000` and trims to `-0`, which is a number
+    // no writer should emit.
+    if s == "-0" || s.is_empty() { "0".to_string() } else { s.to_string() }
+}
+
 /// A stable 32-uppercase-hex GUID derived from `seed` (no external uuid dep).
 /// Deterministic so re-emitting the same recipe yields the same sidecar; the
 /// per-mask seed includes the index so masks within a file stay unique.
@@ -123,31 +480,52 @@ fn lr_net_inverted(m: &LocalAdjustment) -> bool {
 /// belongs to — the radial arm needs it to write `crs:Flipped`, and the caller
 /// writes the SAME bit into `crs:MaskInverted`, so the pair leaves here in the
 /// only shape Lightroom itself ever writes.
-fn mask_geom_xml(g: &MaskGeometry, net_inverted: bool) -> Option<(&'static str, String)> {
+///
+/// The third element of the tuple is the rotation the projection could NOT
+/// write, in degrees — `None` whenever the geometry left here whole. See the
+/// radial arm.
+fn mask_geom_xml(
+    g: &MaskGeometry,
+    net_inverted: bool,
+    frame: Option<FrameAspect>,
+) -> Option<(&'static str, String, Option<f64>)> {
     match g {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => Some((
             "Mask/Gradient",
             format!(
                 " crs:ZeroX=\"{zero_x}\" crs:ZeroY=\"{zero_y}\" crs:FullX=\"{full_x}\" crs:FullY=\"{full_y}\""
             ),
+            None,
         )),
-        // `angle: _` — deliberately NOT projected onto crs:Angle: its
-        // sign/pivot semantics are unverified (the roundness rule — never
-        // reshape Lightroom masks on a guess), so a rotated radial exports as
-        // its UNROTATED ellipse: the same superset-approximation stance the
-        // radial placement takes under straighten. See MaskGeometry::Radial.
-        // (The attribute itself is still not emitted: writing crs:Angle="0"
-        // would be this writer ASSERTING an orientation on a scale it cannot
-        // read, where saying nothing lets Lightroom apply its own default.)
+        // v0.32.0: `angle` IS projected onto `crs:Angle` now, and the box is
+        // the ROTATED-CORNER encoding Lightroom actually reads — see
+        // `engine_to_lr` and `lr_to_engine`, which carry the measurement this
+        // rests on. The old stance ("export the UNROTATED ellipse, name the
+        // dropped angle") existed because the sign and the pivot were
+        // unverified; both are measured, so it retires. It survives in ONE
+        // narrower place: a document that declares no frame gives the
+        // pixel→normalised fold no aspect to fold with, and then the writer
+        // still emits the unrotated ellipse and hands the angle back for the
+        // caller to disclose.
         // `flipped: _` — NOT written straight out any more (R25 P9). See
         // `lr_flipped` below: this recipe's flip is half of an XOR, and the
         // attribute it used to be copied into is Lightroom's complement of
         // `crs:MaskInverted`, so copying it emitted pairs Lightroom never
         // writes and Lightroom rendered them inverted.
         MaskGeometry::Radial {
-            top, left, bottom, right, feather, roundness, flipped: _, angle: _, midpoint,
+            top, left, bottom, right, feather, roundness, flipped: _, angle, midpoint,
             mask_version,
         } => {
+            let (lr, withheld) = engine_to_lr(
+                EngineRadial {
+                    top: *top as f64,
+                    left: *left as f64,
+                    bottom: *bottom as f64,
+                    right: *right as f64,
+                    angle_deg: *angle as f64,
+                },
+                frame,
+            );
             Some((
                 "Mask/CircularGradient",
                 {
@@ -177,12 +555,26 @@ fn mask_geom_xml(g: &MaskGeometry, net_inverted: bool) -> Option<(&'static str, 
                     // rewrite without them is a sidecar that lost two of the
                     // file's own attributes to a reader that could not name
                     // them. Neither is interpreted — see MaskGeometry::Radial.
+                    //
+                    // The five geometry numbers go out through `lr_num` —
+                    // Lightroom's own spelling, and the precision the round
+                    // trip is stable to. The projection now runs in f64 while
+                    // the recipe stores f32, so printing the stored value's own
+                    // Display (as the writer did while the box passed through
+                    // verbatim) would publish the f32's decimal tail as data.
                     format!(
-                        " crs:Top=\"{top}\" crs:Left=\"{left}\" crs:Bottom=\"{bottom}\" crs:Right=\"{right}\" \
+                        " crs:Top=\"{top}\" crs:Left=\"{left}\" crs:Bottom=\"{bottom}\" \
+crs:Right=\"{right}\" crs:Angle=\"{angle}\" \
 crs:Feather=\"{lr_feather}\" crs:Roundness=\"{roundness}\" crs:Flipped=\"{lr_flipped}\" \
-crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\""
+crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
+                        top = lr_num(lr.top),
+                        left = lr_num(lr.left),
+                        bottom = lr_num(lr.bottom),
+                        right = lr_num(lr.right),
+                        angle = lr_num(lr.angle_deg),
                     )
                 },
+                withheld,
             ))
         }
         MaskGeometry::Bitmap { .. } => None,
@@ -262,8 +654,11 @@ pub enum MaskLossReason {
     /// The mask carries extra Add/Subtract/Intersect shapes; only the base
     /// geometry is projected (the render composes them all).
     ComponentsFlattened,
-    /// A rotated radial exports as its UNROTATED ellipse (`crs:Angle`
-    /// semantics unverified — see [`mask_geom_xml`]). The payload is the
+    /// A rotated radial exports as its UNROTATED ellipse. v0.32.0 NARROWED
+    /// this to one case: `crs:Angle`'s sign and pivot are measured now and the
+    /// projection carries the tilt, so what is left is a document with no
+    /// declared frame — the pixel↔normalised fold has no aspect to fold with
+    /// ([`FrameAspect`], and see [`mask_geom_xml`]). The payload is the
     /// dropped angle in WHOLE DEGREES, so a disclosure can say how much
     /// rotation the sidecar is missing instead of only that some is (R25 P5).
     /// Rounding is the display's, not the model's: `recipe.json` keeps the
@@ -489,7 +884,10 @@ pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
     }
     let authored_by_autoshop = is_autoshop_sidecar(xmp);
     let scope = crs_own_scope(xmp);
-    mask_summary(scope.as_ref(), authored_by_autoshop).losses
+    // The FRAME is read off the whole document — `tiff:` properties live
+    // outside the crs Description's own scope in principle, and the decode
+    // needs them (see `FrameAspect`).
+    mask_summary(scope.as_ref(), authored_by_autoshop, FrameAspect::from_xmp(xmp)).losses
 }
 
 /// One English sentence for what an import carried and what it left behind, or
@@ -550,8 +948,13 @@ pub fn describe_import_losses(imported: usize, losses: &[MaskImportLoss]) -> Opt
 /// save. What is left here is the standalone question ("what would this recipe
 /// lose?") with no document wanted; the crate's own tests are its only callers
 /// today.
+///
+/// Judged with NO frame ([`FrameAspect`]), which is the honest answer to a
+/// question asked without a photo: a rotated radial counts as a rotation loss
+/// here, and the writer that IS given the frame does not lose it. The two
+/// cannot disagree about a document, because this one produces none.
 pub fn mask_export_losses(r: &EditRecipe) -> Vec<MaskLoss> {
-    masks_xml(r).1
+    masks_xml(r, None).1
 }
 
 /// One English sentence naming what the sidecar left behind, or `None` when
@@ -917,7 +1320,7 @@ fn local_curve_elem(tag: &str, points: &[crate::recipe::CurvePoint]) -> String {
 /// sidecar; see docs/V2_PLAN.md §2a). All 26 `Local*` fields are emitted (the
 /// ones this engine has no model for as 0) as Lightroom expects the full block
 /// — `LocalHue` and `LocalSharpness` joined the carried set in R23-1b.
-fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
+fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLoss>) {
     let mut losses: Vec<MaskLoss> = Vec::new();
     if r.masks.is_empty() {
         return (String::new(), losses);
@@ -949,7 +1352,7 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
         let net_inv = lr_net_inverted(m);
         // Raster (bitmap) masks have no classic-XMP encoding — skip this
         // correction; the deterministic render still applies it (§A tradeoff).
-        let Some((what, geom)) = mask_geom_xml(&m.mask, net_inv) else {
+        let Some((what, geom, withheld)) = mask_geom_xml(&m.mask, net_inv, frame) else {
             losses.push(MaskLoss { name, reason: MaskLossReason::Bitmap });
             continue;
         };
@@ -962,15 +1365,16 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
                 reason: MaskLossReason::ComponentsFlattened,
             });
         }
-        if let MaskGeometry::Radial { angle, .. } = m.mask
-            && angle != 0.0
-        {
-            // The angle rides ALONG with the verdict so the disclosure can
-            // say how much tilt the sidecar is missing. `as i32` saturates,
-            // so a corrupt angle degrades to 0 ("no angle worth naming")
-            // rather than wrapping into a number that is not the mask's.
-            let deg = angle.round() as i32;
-            losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::Rotation(deg) });
+        // The rotation verdict now comes FROM THE EMITTER (v0.32.0): it is the
+        // one place that knows whether the angle reached the document, and
+        // re-deriving it here from `angle != 0.0` is exactly how the writer and
+        // its own disclosure would drift once the projection started carrying
+        // the tilt. `as i32` saturates, so a corrupt angle degrades to 0 ("no
+        // angle worth naming") rather than wrapping into a number that is not
+        // the mask's.
+        if let Some(deg) = withheld {
+            let reason = MaskLossReason::Rotation(deg.round() as i32);
+            losses.push(MaskLoss { name: name.clone(), reason });
         }
         // Neutral gains change nothing, so they are no loss — the same
         // is-it-actually-doing-anything test `render::engine_active` applies
@@ -1037,7 +1441,11 @@ fn masks_xml(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
             // included), so the ÷100 rests on the family pattern, not on a
             // measured non-zero. Both are re-rendered by Lightroom from its own
             // model in any case, like `manual_vignette_lut` and local texture.
-            hue = local_fmt(m.hue / 100.0),
+            // ÷180, not ÷100 — see the `q180` read in `parse_one_correction`
+            // for the measurement. `sharpness` keeps the family scale: its own
+            // Lightroom magnitude is still unmeasured (docs/V2_PLAN.md §7
+            // item 10), so it stays where the pattern puts it.
+            hue = local_fmt(m.hue / 180.0),
             sharp = local_fmt(m.sharpness / 100.0),
             exp = local_fmt(m.exposure_ev / 4.0),
             con = local_fmt(m.contrast / 100.0),
@@ -1380,8 +1788,12 @@ fn owned_attrs(r: &EditRecipe) -> String {
 /// preserving the base's own block): the caller has to disclose the recipe's
 /// losses either way, and running it here is what stops a save from building the
 /// mask XML twice (R22 NIT-1).
-fn owned_children(r: &EditRecipe, include_masks: bool) -> (String, Vec<MaskLoss>) {
-    let (masks, losses) = masks_xml(r);
+fn owned_children(
+    r: &EditRecipe,
+    include_masks: bool,
+    frame: Option<FrameAspect>,
+) -> (String, Vec<MaskLoss>) {
+    let (masks, losses) = masks_xml(r, frame);
 
     // Tone curves are child elements (rdf:Seq of "x, y" strings), not attributes.
     // One builder for the master + the three per-channel curves (verified key
@@ -1431,13 +1843,30 @@ pub fn recipe_to_xmp(r: &EditRecipe) -> String {
     recipe_to_xmp_with_losses(r).0
 }
 
+/// [`recipe_to_xmp_with_losses`] told what frame the photo is — the aspect the
+/// radial projection needs to write `crs:Angle` (see [`FrameAspect`]). A fresh
+/// document declares no `tiff:ImageWidth/ImageLength` of its own, so without
+/// this a rotated radial can only be written as its unrotated ellipse and
+/// disclosed; with it the tilt goes out.
+pub fn recipe_to_xmp_in_frame(
+    r: &EditRecipe,
+    frame: Option<FrameAspect>,
+) -> (String, Vec<MaskLoss>) {
+    let (desc, losses) = crs_description(r, frame);
+    (xmp_document(r, &desc), losses)
+}
+
 /// [`recipe_to_xmp`] and the writer's own per-mask loss verdicts, from ONE pass
 /// over the masks. `write_xmp_doc` used to build the document and then call
 /// [`mask_export_losses`], i.e. run `masks_xml` twice per save for a `Vec` the
 /// first pass had already produced and thrown away (R22 NIT-1).
 pub fn recipe_to_xmp_with_losses(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
-    let (desc, losses) = crs_description(r);
-    let doc = format!(
+    recipe_to_xmp_in_frame(r, None)
+}
+
+/// The document skeleton around one `rdf:Description`.
+fn xmp_document(r: &EditRecipe, desc: &str) -> String {
+    format!(
         "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Autoshop 2\">\n\
  <!-- Generated by Autoshop. AI rationale: {rationale} (confidence {conf:.2}) -->\n\
  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
@@ -1446,15 +1875,14 @@ pub fn recipe_to_xmp_with_losses(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
 </x:xmpmeta>\n",
         rationale = safe_rationale(r),
         conf = r.confidence,
-    );
-    (doc, losses)
+    )
 }
 
 /// The `rdf:Description` carrying everything this writer owns — the ONE
 /// definition, so a fresh document and a spliced-in one cannot drift. Carries
 /// the mask-loss verdicts out with it (see [`owned_children`]).
-fn crs_description(r: &EditRecipe) -> (String, Vec<MaskLoss>) {
-    let (children, losses) = owned_children(r, true);
+fn crs_description(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLoss>) {
+    let (children, losses) = owned_children(r, true, frame);
     let desc = format!(
         "<rdf:Description rdf:about=\"\"\n\
     xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"{attrs}>{children}\n\
@@ -1514,13 +1942,17 @@ fn find_outside_constructs(doc: &str, needle: &str) -> Option<usize> {
 /// caller has no loss to disclose. Returning `None` (no `rdf:RDF`, or a
 /// self-closing one) keeps the old regenerate-and-say-so behaviour — the
 /// document is then not one we can account for.
-fn insert_crs_description(existing: &str, r: &EditRecipe) -> Option<(String, Vec<MaskLoss>)> {
+fn insert_crs_description(
+    existing: &str,
+    r: &EditRecipe,
+    frame: Option<FrameAspect>,
+) -> Option<(String, Vec<MaskLoss>)> {
     let at = find_outside_constructs(existing, "<rdf:RDF")?;
     let (gt, self_closing) = scan_tag_end(existing, at)?;
     if self_closing {
         return None;
     }
-    let (desc, losses) = crs_description(r);
+    let (desc, losses) = crs_description(r, frame);
     let mut out = String::with_capacity(existing.len() + 512);
     out.push_str(&existing[..=gt]);
     out.push_str("\n  ");
@@ -2552,6 +2984,20 @@ fn era_suppressed_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&'stat
 }
 
 pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutcome> {
+    merge_recipe_into_xmp_in_frame(existing, r, None)
+}
+
+/// [`merge_recipe_into_xmp`] with a FALLBACK frame — the photo's own aspect,
+/// for the radial projection ([`FrameAspect`]). The base document's own
+/// `tiff:ImageWidth/ImageLength` still wins when it has them: those are what
+/// Lightroom itself measured this file's mask coordinates against, and a
+/// sidecar and its photo can legitimately disagree (a re-crop, a proxy).
+pub fn merge_recipe_into_xmp_in_frame(
+    existing: &str,
+    r: &EditRecipe,
+    frame: Option<FrameAspect>,
+) -> Option<MergeOutcome> {
+    let frame = FrameAspect::from_xmp(existing).or(frame);
     if existing.len() > MAX_XMP_BYTES {
         return None;
     }
@@ -2569,7 +3015,7 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
         // the user could take. There is nothing of ours to splice INTO, but
         // there is somewhere to put it: adding our own Description to the
         // existing `rdf:RDF` keeps the file verbatim and makes the merge real.
-        return insert_crs_description(existing, r)
+        return insert_crs_description(existing, r, frame)
             .map(|(doc, losses)| MergeOutcome { doc, notes, losses });
     };
     let (gt, self_closing) = scan_tag_end(existing, desc_start)?;
@@ -2610,7 +3056,7 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
     // attribute-only strip left the old element value in the body beside
     // the attribute we append — one document, two conflicting answers.
     let mask_scope = crs_own_scope(existing);
-    let summary = mask_summary(mask_scope.as_ref(), is_autoshop_sidecar(existing));
+    let summary = mask_summary(mask_scope.as_ref(), is_autoshop_sidecar(existing), frame);
     // Preserve the base's own mask block ONLY while this develop has not
     // moved away from it. The recipe in hand is the newest intent by
     // definition — it is what is being saved right now — so once it differs,
@@ -2695,7 +3141,7 @@ pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutc
     let mut out = String::with_capacity(existing.len() + 256);
     out.push_str(&existing[..desc_start]);
     out.push_str(&new_tag);
-    let (children, losses) = owned_children(r, !preserve_masks);
+    let (children, losses) = owned_children(r, !preserve_masks, frame);
     out.push_str(&children);
     out.push_str(body.trim_end());
     out.push_str("\n  </rdf:Description>");
@@ -3147,13 +3593,17 @@ fn parse_curve(xmp: &str, tag: &str) -> Vec<CurvePoint> {
 /// parametric geometries only, exactly what [`masks_xml`] can emit (LR brush /
 /// AI masks and our own Bitmap rasters have no classic-XMP encoding; those
 /// corrections are skipped, matching the writer's own skip rule).
-fn parse_masks(xmp: &str, authored_by_autoshop: bool) -> Vec<LocalAdjustment> {
+fn parse_masks(
+    xmp: &str,
+    authored_by_autoshop: bool,
+    frame: Option<FrameAspect>,
+) -> Vec<LocalAdjustment> {
     // Err (present-but-unterminated) imports no masks — the LOSS half of that
     // outcome is `mask_summary`'s to report, and it does.
     let Ok(Some(block)) = owned_element_body(xmp, "crs:MaskGroupBasedCorrections") else {
         return Vec::new();
     };
-    mask_summary_from_block(block, authored_by_autoshop).supported
+    mask_summary_from_block(block, authored_by_autoshop, frame).supported
 }
 
 /// How many corrections in this sidecar produced NO mask at all — brush / AI /
@@ -3173,7 +3623,7 @@ pub fn unsupported_corrections(xmp: &str) -> usize {
     }
     let authored_by_autoshop = is_autoshop_sidecar(xmp);
     let scope = crs_own_scope(xmp);
-    mask_summary(scope.as_ref(), authored_by_autoshop).dropped
+    mask_summary(scope.as_ref(), authored_by_autoshop, FrameAspect::from_xmp(xmp)).dropped
 }
 
 /// One correction's verdict. R25 P1 retired the third state ("Partial", which
@@ -3248,9 +3698,13 @@ impl MaskSummary {
     }
 }
 
-fn mask_summary(xmp: &str, authored_by_autoshop: bool) -> MaskSummary {
+fn mask_summary(
+    xmp: &str,
+    authored_by_autoshop: bool,
+    frame: Option<FrameAspect>,
+) -> MaskSummary {
     match owned_element_body(xmp, "crs:MaskGroupBasedCorrections") {
-        Ok(Some(block)) => mask_summary_from_block(block, authored_by_autoshop),
+        Ok(Some(block)) => mask_summary_from_block(block, authored_by_autoshop, frame),
         Ok(None) => MaskSummary::default(),
         // The group OPENS but never closes: whatever corrections it holds
         // cannot be counted, so the one honest summary is "a loss, and there
@@ -3280,7 +3734,11 @@ fn correction_name(seg: &str, position: usize) -> String {
         .unwrap_or_else(|| format!("Correction {position}"))
 }
 
-fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSummary {
+fn mask_summary_from_block(
+    block: &str,
+    authored_by_autoshop: bool,
+    frame: Option<FrameAspect>,
+) -> MaskSummary {
     const MAX_MASKS_FROM_XMP: usize = 64;
     const DESCRIPTION_CLOSE: &str = "</rdf:Description>";
 
@@ -3312,7 +3770,7 @@ fn mask_summary_from_block(block: &str, authored_by_autoshop: bool) -> MaskSumma
         let end = close + DESCRIPTION_CLOSE.len();
         let seg = &block[start..end];
         let name = correction_name(seg, seen);
-        match classify_correction(seg, authored_by_autoshop) {
+        match classify_correction(seg, authored_by_autoshop, frame) {
             MaskCorrectionParse::Supported(mask, reasons)
                 if summary.supported.len() < MAX_MASKS_FROM_XMP =>
             {
@@ -3460,13 +3918,27 @@ fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImpo
         "LocalTexture",
         "LocalSharpness",
         "LocalSaturation",
-        "LocalHue",
         "LocalTemperature",
         "LocalTint",
     ] {
         if !optional_scaled_number_in(seg, key, 100.0, -100.0, 100.0) {
             return Err(MaskImportReason::OutOfModel);
         }
+    }
+    // `LocalHue` left the loop above in v0.32.0: its file scale is 180, not
+    // 100 (`parse_one_correction`'s `q180`). The gate has to move WITH the
+    // reader or it stops meaning "inside Lightroom's own slider": at scale 100
+    // the band admitted a file value up to 1.0, which on the measured scale is
+    // a hue of 180 — half a turn past the slider's end stop, and a number the
+    // reader would hand on for the recipe clamp to crush in silence.
+    // (The old pairing was self-consistent, so this is not a refusal the old
+    // build made wrongly — it is the one it failed to make.)
+    // ±100.001, not ±100: Lightroom writes this key at SIX decimals, and the
+    // slider's own end stop ±100 is `±0.555556` there, which reads back as
+    // ±100.00008. Gating at exactly 100 would refuse a mask for the wire
+    // format's rounding — the band is one wire step wide and nothing else.
+    if !optional_scaled_number_in(seg, "LocalHue", 180.0, -100.001, 100.001) {
+        return Err(MaskImportReason::OutOfModel);
     }
     // Everything below this line is a NOTE, not a refusal.
     let mut reasons: Vec<MaskImportReason> = Vec::new();
@@ -3522,6 +3994,7 @@ fn component_import_reasons(
     tag: &str,
     what: &str,
     authored_by_autoshop: bool,
+    frame: Option<FrameAspect>,
 ) -> Result<Vec<MaskImportReason>, ()> {
     let expected_mode = if what == "Mask/RangeMask" { "1" } else { "0" };
     let expected_value = if what == "Mask/RangeMask" { 0.0 } else { 1.0 };
@@ -3572,13 +4045,28 @@ fn component_import_reasons(
     // false loss on half the catalog — the same "alarm on every save is alarm
     // the user learns to ignore" rule R24 applied to the export line. Present
     // but unreadable counts as rotated: we cannot say it is zero.
+    //
+    // v0.32.0 NARROWED this to what it now costs. The rotation used to be
+    // dropped from EVERY radial, because the sign and pivot were unverified;
+    // both are measured and `lr_to_engine` carries the tilt through. What is
+    // left is one case — a document that declares no `tiff:ImageWidth /
+    // ImageLength`, so the pixel→normalised fold has no aspect to fold with
+    // (`FrameAspect`). Then, and only then, the ellipse arrives axis-aligned
+    // and this says so. Asked of the DECODER rather than re-derived here, so
+    // the sentence the user reads and the geometry the render draws cannot
+    // disagree.
     if crs_str(tag, "Angle").is_some() && crs_f32(tag, "Angle").is_none_or(|v| v != 0.0) {
         // The angle rides along so the disclosure can NAME it; an unreadable
         // one is a rotation we cannot measure, and `0` is this payload's word
         // for that (see the variant's doc). `as i32` saturates rather than
         // wrapping.
-        let deg = crs_f32(tag, "Angle").map_or(0, |v| v.round() as i32);
-        reasons.push(MaskImportReason::Rotation(deg));
+        let readable = crs_f32(tag, "Angle");
+        // Two ways the tilt fails to arrive, and the frame narrows only ONE of
+        // them: a value we cannot PARSE is a rotation nobody can apply however
+        // well the frame is known, and `parse_one_correction` reads it as 0.
+        if readable.is_none() || frame.is_none() {
+            reasons.push(MaskImportReason::Rotation(readable.map_or(0, |v| v.round() as i32)));
+        }
     }
     // `crs:MaskBlendMode` sits on every component Lightroom writes, and the
     // overwhelming majority carry the DEFAULT — the plain composition this
@@ -3647,7 +4135,34 @@ fn component_import_reasons(
                 return Err(());
             };
             let feather = if raw > 1.0 || raw == raw.trunc() { raw / 100.0 } else { raw };
-            if (0.0..=1.0).contains(&feather) { Ok(reasons) } else { Err(()) }
+            if !(0.0..=1.0).contains(&feather) {
+                return Err(());
+            }
+            // v0.32.0 — the corner decode's OWN gate, run here so a component
+            // that cannot be decoded is refused by the same pass that refuses
+            // every other unreadable value, with the geometry arm's cost
+            // (`OutOfModel` takes the whole correction). Real Lightroom data
+            // clears it 80/80 (`BBOX-DECODE.md` §2.1); what does not is a box
+            // that decodes to a NEGATIVE semi-axis at the declared angle, i.e.
+            // not an ellipse this model can name. `OutOfModel` is the honest
+            // existing reason — "a value we can read that lands outside this
+            // engine's model" — and needs no new word in any UI language.
+            if matches!(
+                lr_to_engine(
+                    LrRadial {
+                        top: crs_f32(tag, "Top").unwrap_or(0.0) as f64,
+                        left: crs_f32(tag, "Left").unwrap_or(0.0) as f64,
+                        bottom: crs_f32(tag, "Bottom").unwrap_or(0.0) as f64,
+                        right: crs_f32(tag, "Right").unwrap_or(0.0) as f64,
+                        angle_deg: crs_f32(tag, "Angle").unwrap_or(0.0) as f64,
+                    },
+                    frame,
+                ),
+                RadialDecode::Refused
+            ) {
+                return Err(());
+            }
+            Ok(reasons)
         }
         // Someone else's range encoding is not ours to interpret — but that
         // is a reason to leave the RANGE behind, not the mask (R25 P1). The
@@ -3683,7 +4198,11 @@ fn range_values_are_supported(range: &RangeMask) -> bool {
     }
 }
 
-fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionParse {
+fn classify_correction(
+    seg: &str,
+    authored_by_autoshop: bool,
+    frame: Option<FrameAspect>,
+) -> MaskCorrectionParse {
     let mut geometry_count = 0usize;
     let mut range_count = 0usize;
     let mut unknown_component = false;
@@ -3714,7 +4233,7 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
             && let Some((_, raw)) = xml_attribute_raw(tag, "crs:What")
         {
             let what = xml_unescape(raw);
-            let verdict = component_import_reasons(tag, what.as_ref(), authored_by_autoshop);
+            let verdict = component_import_reasons(tag, what.as_ref(), authored_by_autoshop, frame);
             match what.as_ref() {
                 "Mask/Gradient" | "Mask/CircularGradient" => {
                     geometry_count += 1;
@@ -3790,7 +4309,7 @@ fn classify_correction(seg: &str, authored_by_autoshop: bool) -> MaskCorrectionP
         Err(reason) => return MaskCorrectionParse::Unsupported(reason),
     }
 
-    let Some(mut parsed) = parse_one_correction(seg) else {
+    let Some(mut parsed) = parse_one_correction(seg, frame) else {
         return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel);
     };
     // A range we cannot honour costs the RANGE, not the mask: the geometry is
@@ -3879,9 +4398,12 @@ fn base_geometry_at(seg: &str) -> Option<usize> {
 /// invert the writer's: exposure ×4 (a power-of-two rescale, exact in binary
 /// FP), every other slider ×100 snapped to 4 decimals so `"0.3" → 30.0` lands
 /// back on the UI grid instead of 30.000002.
-fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
-    let q100 =
-        |k: &str| crs_f32(seg, k).map_or(0.0, |v| (v * 100.0 * 10_000.0).round() / 10_000.0);
+fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAdjustment> {
+    let scaled = |k: &str, scale: f32| {
+        crs_f32(seg, k).map_or(0.0, |v| (v * scale * 10_000.0).round() / 10_000.0)
+    };
+    let q100 = |k: &str| scaled(k, 100.0);
+    let q180 = |k: &str| scaled(k, 180.0);
     // The geometry component decides the mask shape; a correction with no
     // parametric geometry is not representable here. `base_geometry_at` picks
     // WHICH component that is when there are several — read its doc, the choice
@@ -3934,12 +4456,37 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         } else {
             feather_raw
         };
+        // v0.32.0: the stored corners are the ROTATED corners of the ellipse's
+        // box in PIXEL space, not a bounding box — decoded (with the `k` frame
+        // affine and the pixel→normalised rotation fold) by `lr_to_engine`,
+        // whose doc carries the evidence. `Refused` is the decode's own
+        // `a > 0 ∧ b > 0` guard: `None` here takes the WHOLE correction, which
+        // is what `component_import_reasons` has already independently decided
+        // for the same component, so the two arms cannot disagree about what
+        // the file says.
+        let decoded = lr_to_engine(
+            LrRadial {
+                top: crs_f32(g, "Top")? as f64,
+                left: crs_f32(g, "Left")? as f64,
+                bottom: crs_f32(g, "Bottom")? as f64,
+                right: crs_f32(g, "Right")? as f64,
+                // Absent = unrotated. Lightroom writes the attribute on every
+                // radial, but an Autoshop sidecar written before v0.32.0 does
+                // not, and its box IS the axis-aligned ellipse.
+                angle_deg: crs_f32(geom_tag, "Angle").unwrap_or(0.0) as f64,
+            },
+            frame,
+        );
+        let e = match decoded {
+            RadialDecode::Exact(e) | RadialDecode::Unrotated(e) => e,
+            RadialDecode::Refused => return None,
+        };
         (
             MaskGeometry::Radial {
-                top: crs_f32(g, "Top")?,
-                left: crs_f32(g, "Left")?,
-                bottom: crs_f32(g, "Bottom")?,
-                right: crs_f32(g, "Right")?,
+                top: e.top as f32,
+                left: e.left as f32,
+                bottom: e.bottom as f32,
+                right: e.right as f32,
                 feather,
                 roundness: crs_f32(g, "Roundness")?,
                 // NOT `crs:Flipped` (R25 P9 — the defect this batch closed).
@@ -3974,10 +4521,18 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
                 // the whole point. Sidecars written from v0.31.2 on round-trip
                 // their net exactly (`mask_geom_xml`).
                 flipped: false,
-                // A Lightroom crs:Angle is deliberately NOT mapped onto our
-                // engine angle (unverified sign/pivot — the roundness rule);
-                // the import reads the axis-aligned ellipse, as before.
-                angle: 0.0,
+                // v0.32.0: `crs:Angle` IS mapped now. It used to be dropped
+                // because its sign and pivot were unverified; both are
+                // measured — positive is CLOCKWISE on a y-down screen (three
+                // independent determinations, `PROBE2-VERDICT.md` §5's
+                // `_DSC9685` decoded −60.486° against a measured −60.5°), the
+                // pivot is the ellipse centre (25 px against 218 px for the
+                // frame centre, `ANGLE-MODEL.md` §3.4), and the rotation
+                // happens in PIXEL space (28.554° measured against 19.692°
+                // predicted by the normalised-frame reading, §3.2). What lands
+                // here is not `crs:Angle` itself but its fold into this
+                // engine's normalised-frame convention — see `lr_to_engine`.
+                angle: e.angle_deg as f32,
                 // R25 P5: the two attributes on every Lightroom radial that
                 // this reader could not see until now. OPTIONAL, not `?`:
                 // sidecars we wrote before this batch carry neither, and a
@@ -4062,7 +4617,20 @@ fn parse_one_correction(seg: &str) -> Option<LocalAdjustment> {
         texture: q100("LocalTexture"),
         sharpness: q100("LocalSharpness"),
         saturation: q100("LocalSaturation"),
-        hue: q100("LocalHue"),
+        // NOT `q100` — `crs:LocalHue` is the ONE local key measured off its
+        // slider on a different scale (v0.32.0). The user's controlled
+        // Lightroom export put the mask Hue slider at +50 and the sidecar came
+        // back `crs:LocalHue="0.277778"` (`_DSC9594.xmp`, verbatim), and
+        // 0.277778 × 180 = 50.00004 — no other simple scale lands on it (÷100
+        // would read 27.8, ÷360 would read 100). The recipe's own domain is
+        // unchanged at ±100 (`LocalAdjustment::hue`), so this is a boundary
+        // conversion exactly like `crs:Feather`'s, not a widening.
+        //
+        // What is measured is the SCALE, not the meaning: what Lightroom does
+        // with a +50 hue is its own model, and this engine keeps rendering the
+        // value through `render::apply_masks`'s ±30° rotation — the same
+        // honest split `texture` and local `sharpness` already carry.
+        hue: q180("LocalHue"),
         temperature: q100("LocalTemperature"),
         tint: q100("LocalTint"),
         noise_reduction: q100("LocalLuminanceNoise"),
@@ -4290,7 +4858,7 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
         red_curve: parse_curve(scope, "ToneCurvePV2012Red"),
         green_curve: parse_curve(scope, "ToneCurvePV2012Green"),
         blue_curve: parse_curve(scope, "ToneCurvePV2012Blue"),
-        masks: parse_masks(scope, ours),
+        masks: parse_masks(scope, ours, FrameAspect::from_xmp(xmp)),
 
         // The PASS-THROUGH blocks (R25 B4), read as STRINGS and stored
         // verbatim. `crs_str` already reads BOTH spellings — the
@@ -5075,12 +5643,12 @@ mod tests {
         // one, tag-scans the same block itself — so the fixture was the thing
         // that did not look like a sidecar.
         let li = r#"<rdf:li crs:What="Mask/CircularGradient" crs:Top="0.2" crs:Left="0.2" crs:Bottom="0.8" crs:Right="0.8" crs:Feather="72" crs:Roundness="0" crs:Flipped="false"/>"#;
-        let m = parse_one_correction(li).expect("radial parses");
+        let m = parse_one_correction(li, None).expect("radial parses");
         let MaskGeometry::Radial { feather, .. } = m.mask else { panic!("radial") };
         assert!((feather - 0.72).abs() < 1e-6, "LR 72 → 0.72, got {feather}");
         // …while a legacy own-writer value (≤ 1.0) passes through verbatim.
         let legacy = li.replace(r#"crs:Feather="72""#, r#"crs:Feather="0.4""#);
-        let m = parse_one_correction(&legacy).expect("legacy radial parses");
+        let m = parse_one_correction(&legacy, None).expect("legacy radial parses");
         let MaskGeometry::Radial { feather, .. } = m.mask else { panic!("radial") };
         assert!((feather - 0.4).abs() < 1e-6, "legacy 0.4 stays 0.4, got {feather}");
     }
@@ -6299,7 +6867,17 @@ mod tests {
             panic!("expected a radial, got {:?}", r.masks[0].mask);
         };
         assert_eq!(angle, 0.0, "crs:Angle is disclosed, not guessed at");
-        assert_eq!(top, 0.114928, "the geometry is the file's, verbatim");
+        // v0.32.0: `lr_doc` declares no `tiff:ImageWidth/ImageLength`, so the
+        // pixel→normalised fold has no aspect and the tilt is disclosed rather
+        // than applied (the assert above, and the `Rotation` note below) — but
+        // the FRAME AFFINE needs no aspect and is applied to every radial, so
+        // the corner is Lightroom's own `k`-image of `0.114928`, not the stored
+        // number. Hand-checked: `cy = 1.032·0.4588875 − 0.016 = 0.45757190`,
+        // `k·ry = 1.032·0.3439595 = 0.35496620`, top = 0.10260570.
+        assert!(
+            (top as f64 - 0.102605696).abs() < 1e-7,
+            "the geometry is the file's, carried through the measured frame affine: {top}"
+        );
         assert_eq!(feather, 1.0, "crs:Feather=100 is Lightroom's 0..100 scale");
         // R25 P9: `crs:Flipped="true"` beside `crs:MaskInverted="false"` is
         // Lightroom's NOT-inverted spelling — one bit written twice — so the
@@ -6417,12 +6995,452 @@ mod tests {
         let MaskGeometry::Radial { top, bottom, .. } = r.masks[0].mask else {
             panic!("expected a radial, got {:?}", r.masks[0].mask);
         };
-        assert_eq!(top, -0.153271, "a corner above the frame is a real value");
-        assert_eq!(bottom, 1.802847, "and so is one below it");
+        // The corners come in through Lightroom's frame affine (v0.32.0), which
+        // pushes an already-off-frame one FURTHER off — the point of the test
+        // is that nothing pulls them back to 0..1, and that is now true on both
+        // boundaries and through the affine.
+        assert!(
+            (top as f64 - -0.174175672).abs() < 1e-7,
+            "a corner above the frame is a real value: {top}"
+        );
+        assert!(
+            (bottom as f64 - 1.844538104).abs() < 1e-7,
+            "and so is one below it: {bottom}"
+        );
         let out = recipe_to_xmp(&r);
+        // …and the WRITER hands the file its own numbers back, to the byte.
         assert!(out.contains("crs:Top=\"-0.153271\""), "written raw, not clamped: {out}");
         assert!(out.contains("crs:Bottom=\"1.802847\""), "written raw, not clamped: {out}");
         assert_eq!(xmp_to_recipe(&out).masks[0].mask, r.masks[0].mask, "and it is stable");
+    }
+
+    // ── v0.32.0: the radial geometry projection ─────────────────────────────
+    //
+    // The fixtures below are the SIDECAR NUMBERS of the user's own twelve-frame
+    // controlled Lightroom experiment, transcribed from
+    // `~/.claude/plans/r25-materials/lr-experiment/probe2/probe2-extract.txt`
+    // and `.../lr-experiment/extract.txt`. No photograph and no export is in
+    // the repository — the RENDERED measurements those exports produced are
+    // quoted in the assertions, and the fixtures that reproduce them from the
+    // real files live behind `AUTOSHOP_LR_PROBE_FIXTURES` (see
+    // `the_probe_sidecars_decode_to_their_measured_ellipses`).
+
+    /// A radial component with arbitrary corners, otherwise byte-shaped like
+    /// [`lr_radial`] (which is transcribed from a real Lightroom write).
+    fn lr_radial_at(t: &str, l: &str, b: &str, r: &str, angle: &str) -> String {
+        lr_radial(angle, "0")
+            .replace("crs:Top=\"0.114928\"", &format!("crs:Top=\"{t}\""))
+            .replace("crs:Left=\"0.590368\"", &format!("crs:Left=\"{l}\""))
+            .replace("crs:Bottom=\"0.802847\"", &format!("crs:Bottom=\"{b}\""))
+            .replace("crs:Right=\"0.921381\"", &format!("crs:Right=\"{r}\""))
+    }
+
+    /// Declare the frame on a document that had none. [`lr_doc`] deliberately
+    /// does NOT — that keeps every older test on the no-frame arm, which is a
+    /// real arm and has to stay covered — so the tests that need the aspect
+    /// add it here. Every real Lightroom sidecar carries these two
+    /// (`_DSC9600.xmp`: `tiff:ImageWidth="9504" tiff:ImageLength="6336"`,
+    /// which is the ARW's own `DefaultCropSize`).
+    fn in_frame(doc: &str, w: u32, h: u32) -> String {
+        doc.replace(
+            "crs:Version=\"15.5.1\"",
+            &format!("tiff:ImageWidth=\"{w}\"\n   tiff:ImageLength=\"{h}\"\n   crs:Version=\"15.5.1\""),
+        )
+    }
+
+    /// The engine's stored radial re-expressed as the PIXEL ellipse it draws:
+    /// `(semi-axis along the tilt, the other one, tilt in degrees)`, both axes
+    /// in pixels of a `w × h` frame. This is the quantity the probes measured,
+    /// so it is the quantity the assertions can quote.
+    fn engine_pixel_ellipse(m: &MaskGeometry, w: f64, h: f64) -> (f64, f64, f64) {
+        let MaskGeometry::Radial { top, left, bottom, right, angle, .. } = m else {
+            panic!("expected a radial, got {m:?}");
+        };
+        let (rx, ry) = (
+            ((*right as f64 - *left as f64) / 2.0).abs() * w,
+            ((*bottom as f64 - *top as f64) / 2.0).abs() * h,
+        );
+        // The engine rotates in the NORMALISED frame, so the pixel ellipse is
+        // `diag(w, h)·R(angle)·diag(rx/w, ry/h)` — written out with the `w`/`h`
+        // already folded into `rx`/`ry` above.
+        let (sin, cos) = (*angle as f64).to_radians().sin_cos();
+        let (s1, s2, tu) = svd2([cos * rx, -sin * ry * w / h, sin * rx * h / w, cos * ry]);
+        (s1.abs(), s2.abs(), tu.to_degrees())
+    }
+
+    /// §0 OF v0.32.0. `crs:Top/Left/Bottom/Right` are the ROTATED CORNERS of
+    /// the ellipse's box in pixel space, and reading them as a bounding box —
+    /// which every build up to v0.31.2 did — gets the SHAPE wrong by factors,
+    /// not percentages.
+    ///
+    /// Both rotated probes are here, and they are the two that discriminate:
+    ///
+    /// | probe | file | `crs:Angle` | naive `a/b` | corner `a/b` | measured |
+    /// |---|---|---|---|---|---|
+    /// | #4 | `_DSC9689` | +24.348422 | **1.652** | **8.332** | 6.3–9.8, scan optimum 7.92 |
+    /// | #8 | `_DSC9685` | +29.513785 | **−0.032** (impossible) | **0.524** | 1.84–2.09, scan optimum 1.907 |
+    ///
+    /// and `#8`'s decoded MAJOR axis is `b`, so its predicted screen tilt is
+    /// `θ + 90 = −60.486°` against a measured **−60.5° ± 0.9** (mean over the
+    /// τ ≥ 0.8 level sets). `PROBE2-VERDICT.md` §1, §5.
+    ///
+    /// MUTATION THIS CATCHES: take `abs()` on `X`/`Y` in `lr_to_engine` and
+    /// `#8` — whose `Left > Right` — decodes to the naive sliver again; drop
+    /// the `sin`/`cos` mixing and both ratios collapse onto the naive column.
+    #[test]
+    fn a_rotated_lightroom_radial_decodes_to_the_measured_ellipse() {
+        let (w, h) = (9504.0, 6336.0);
+        // probe #4 — `_DSC9689`, an 8:1 sliver rotated +24.35°.
+        let doc = in_frame(
+            &lr_doc(&lr_correction(
+                "R",
+                "",
+                &lr_radial_at("-0.045582", "-0.056408", "0.9708", "1.062771", "24.348422"),
+            )),
+            9504,
+            6336,
+        );
+        let m = &xmp_to_recipe(&doc).masks[0].mask;
+        // The RATIO is the model's zero-free-parameter prediction and carries
+        // no `k`; the axes themselves are the decode × the frame scale, so they
+        // are quoted against `k · a` and `k · b`.
+        let k = LR_MASK_FRAME_SCALE;
+        let (a, b, tilt) = engine_pixel_ellipse(m, w, h);
+        assert!((a - k * 6172.8).abs() < 0.5, "semi-major {a} px, decoded 6172.8 × k");
+        assert!((b - k * 740.8).abs() < 0.5, "semi-minor {b} px, decoded 740.8 × k");
+        assert!((a / b - 8.332).abs() < 0.01, "axis ratio {} — the naive read is 1.652", a / b);
+        assert!((tilt - 24.348422).abs() < 1e-3, "screen tilt {tilt}°, declared +24.348422");
+
+        // probe #8 — `_DSC9685`, TALL (1:2) and rotated past the inversion
+        // point, so Lightroom wrote `Left > Right`. The naive read makes
+        // `X = −122 px` and the shape a sliver on the wrong axis.
+        let doc = in_frame(
+            &lr_doc(&lr_correction(
+                "R",
+                "",
+                &lr_radial_at("-0.088191", "0.520214", "1.113528", "0.494492", "29.513785"),
+            )),
+            9504,
+            6336,
+        );
+        let m = &xmp_to_recipe(&doc).masks[0].mask;
+        let (a, b, tilt) = engine_pixel_ellipse(m, w, h);
+        // The SVD reports the MAJOR axis first, and here that is the decoded
+        // `b = 3373.2` at `θ + 90`.
+        assert!((a - k * 3373.2).abs() < 0.5, "semi-major {a} px, decoded 3373.2 × k");
+        assert!((b - k * 1769.1).abs() < 0.5, "semi-minor {b} px, decoded 1769.1 × k");
+        assert!((b / a - 0.524).abs() < 0.001, "axis ratio {} — the naive read is −0.032", b / a);
+        assert!((tilt - -60.486).abs() < 1e-2, "major-axis tilt {tilt}°, measured −60.5 ± 0.9");
+    }
+
+    /// The corner encoding is a bijection, and the WRITER is its other half.
+    /// Both of Lightroom's legal corner arrangements go out byte-identical to
+    /// the way they came in — `Left < Right` (probe #4) and `Left > Right`
+    /// (probe #8, which the model REQUIRES to carry `Angle > 0`, 6/6 in the
+    /// user's library, `BBOX-DECODE.md` §2.1). Sorting or clamping the box on
+    /// the way out destroys the second one.
+    ///
+    /// MUTATION THIS CATCHES: `min`/`max` the corners in `engine_to_lr`, or
+    /// drop the `|θ| ≤ 45°` canonicalisation, and probe #8 comes back as a
+    /// different ellipse.
+    #[test]
+    fn the_radial_corner_encoding_round_trips_both_lightroom_arrangements() {
+        let frame = FrameAspect::from_size(9504.0, 6336.0);
+        for (t, l, b, r, angle) in [
+            ("-0.045582", "-0.056408", "0.9708", "1.062771", "24.348422"),
+            ("-0.088191", "0.520214", "1.113528", "0.494492", "29.513785"),
+            // `_DSC9600`, the subject the whole angle model was measured on.
+            ("-0.082402", "-0.008723", "1.109604", "1.090228", "28.229232"),
+            // …and an UNROTATED one, which must not acquire an angle.
+            ("0.069396", "-0.059577", "0.855822", "1.06594", "0"),
+        ] {
+            let doc = in_frame(
+                &lr_doc(&lr_correction("R", "", &lr_radial_at(t, l, b, r, angle))),
+                9504,
+                6336,
+            );
+            let recipe = xmp_to_recipe(&doc);
+            let out = recipe_to_xmp_in_frame(&recipe, frame).0;
+            let shown = &out[out.find("CircularGradient").unwrap_or(0)..];
+            let shown = &shown[..shown.len().min(400)];
+            // The four CORNERS come back to the byte.
+            for (key, want) in [("Top", t), ("Left", l), ("Bottom", b), ("Right", r)] {
+                assert!(
+                    out.contains(&format!("crs:{key}=\"{want}\"")),
+                    "crs:{key} must come back as {want}: {shown}"
+                );
+            }
+            // The ANGLE cannot, and the reason is arithmetic rather than
+            // geometric: `MaskGeometry::Radial::angle` is an `f32`, whose
+            // ~6 × 10⁻⁸ relative precision is 2 × 10⁻⁶ of a 34° engine angle
+            // and 7.6 × 10⁻⁶ of a 73° one — a unit or two in the sixth decimal
+            // Lightroom writes. Measured here: 2 × 10⁻⁶ ° on `#4`, the worst
+            // 1.4 × 10⁻⁵ ° on `#8` (whose engine angle is −73.198° and whose
+            // decode goes through the ±45° axis swap). Bounded at 10⁻⁴ °, four
+            // orders under the +0.33° systematic the tilt measurement that
+            // calibrated this carries.
+            let at = out.find("crs:Angle=\"").expect("an angle is written") + 11;
+            let got: f64 = out[at..][..out[at..].find('"').unwrap()].parse().expect("a number");
+            let want: f64 = angle.parse().unwrap();
+            assert!((got - want).abs() < 1e-4, "crs:Angle {got} vs {want}: {shown}");
+        }
+    }
+
+    /// The decode's own guard. `a > 0 ∧ b > 0` holds for 80/80 rotated
+    /// components in the user's library and is not a fit — it is what the model
+    /// PREDICTS (`Left > Right` forces `Angle > 0`, `Top > Bottom` forces
+    /// `Angle < 0`, both at once impossible; the library agrees 16/16,
+    /// p = 2.5 × 10⁻⁵). A box that violates it is not an ellipse this model can
+    /// name, so the correction is refused and NAMED rather than rendered as
+    /// some other shape.
+    ///
+    /// MUTATION THIS CATCHES: delete the guard and the mask imports as a
+    /// mirrored ellipse with no disclosure at all.
+    #[test]
+    fn a_radial_whose_corners_do_not_decode_is_refused_and_named() {
+        // `Left > Right` with a NEGATIVE angle — the one combination the sign
+        // law forbids.
+        let doc = in_frame(
+            &lr_doc(&lr_correction(
+                "Impossible",
+                "",
+                &lr_radial_at("-0.088191", "0.520214", "1.113528", "0.494492", "-29.513785"),
+            )),
+            9504,
+            6336,
+        );
+        assert!(xmp_to_recipe(&doc).masks.is_empty(), "a box that cannot decode must not render");
+        assert_eq!(unsupported_corrections(&doc), 1, "and it is counted as a drop");
+        assert_eq!(
+            import_losses(&doc),
+            vec![MaskImportLoss {
+                name: "Impossible".into(),
+                reason: MaskImportReason::OutOfModel
+            }],
+            "…and NAMED"
+        );
+        // The same box with the angle the law requires decodes fine — so the
+        // refusal is about the geometry, not about the file being unusual.
+        let ok = in_frame(
+            &lr_doc(&lr_correction(
+                "Fine",
+                "",
+                &lr_radial_at("-0.088191", "0.520214", "1.113528", "0.494492", "29.513785"),
+            )),
+            9504,
+            6336,
+        );
+        assert_eq!(xmp_to_recipe(&ok).masks.len(), 1);
+    }
+
+    /// The frame affine moves the mask CENTRE, not only its axes — the half
+    /// probe 4 settled and the half a "dilate the semi-axes" reading gets wrong
+    /// by 88 px at a frame corner.
+    ///
+    /// `_DSC9681` is the frame that separates them: `Feather="0"` (so the
+    /// rendered edge IS the ellipse, measurable without any falloff model) and
+    /// a mask centre **2799 px** from the frame centre, i.e. a long lever. A
+    /// windowed per-ray edge search over 2880 rays plus a robust conic fit put
+    /// the rendered centre at **(2571.0, 5060.0)** px with a radial scatter of
+    /// 0.4 px, cross-checked fit-free by median transects. `PROBE4-FINAL.md`
+    /// §2.
+    ///
+    /// MUTATION THIS CATCHES: apply `k` to the semi-axes only (drop the
+    /// `− (k−1)/2` term, or the `k·` on the centre) and the centre lands
+    /// 29–88 px out — far outside the 5 px this asserts.
+    #[test]
+    fn the_frame_affine_moves_the_mask_centre_not_only_its_axes() {
+        let (w, h) = (9504.0, 6336.0);
+        let doc = in_frame(
+            &lr_doc(&lr_correction(
+                "R",
+                "",
+                &lr_radial_at("0.597862", "0.009087", "0.981315", "0.546133", "0"),
+            )),
+            9504,
+            6336,
+        );
+        let MaskGeometry::Radial { top, left, bottom, right, .. } =
+            xmp_to_recipe(&doc).masks[0].mask
+        else {
+            panic!("expected a radial");
+        };
+        let (cx, cy) = (
+            (left as f64 + right as f64) / 2.0 * w,
+            (top as f64 + bottom as f64) / 2.0 * h,
+        );
+        assert!((cx - 2571.0).abs() < 5.0, "centre x {cx} px, measured 2571.0");
+        assert!((cy - 5060.0).abs() < 5.0, "centre y {cy} px, measured 5060.0");
+        // The stored centre, read verbatim, is 88 px away — that is the whole
+        // discriminator, quoted so the tolerance above is legible.
+        let stored = ((0.009087 + 0.546133) / 2.0 * w, (0.597862 + 0.981315) / 2.0 * h);
+        assert!(
+            (stored.0 - cx).hypot(stored.1 - cy) > 80.0,
+            "the verbatim reading is the one this replaces: {stored:?}"
+        );
+    }
+
+    /// v0.32.0 narrowed the rotation disclosure to "the document declares no
+    /// frame" — but there are TWO ways the tilt fails to arrive, and the frame
+    /// narrows only one. An angle that cannot be PARSED is a rotation nobody
+    /// can apply however well the frame is known: `parse_one_correction` reads
+    /// it as 0, so the mask arrives axis-aligned and the file's own intent is
+    /// gone. That has to keep saying so.
+    ///
+    /// MUTATION THIS CATCHES: gate the reason on `frame.is_none()` alone and
+    /// this correction imports rotated-to-zero in silence.
+    #[test]
+    fn an_unreadable_angle_is_disclosed_even_when_the_frame_is_known() {
+        let doc = in_frame(
+            &lr_doc(&lr_correction(
+                "Garbled",
+                "",
+                &lr_radial_at("-0.045582", "-0.056408", "0.9708", "1.062771", "twenty-four"),
+            )),
+            9504,
+            6336,
+        );
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the shape is still readable, so the mask arrives");
+        let MaskGeometry::Radial { angle, .. } = r.masks[0].mask else { panic!("radial") };
+        assert_eq!(angle, 0.0, "an angle we cannot parse is not an angle we can apply");
+        assert_eq!(
+            import_losses(&doc),
+            vec![MaskImportLoss {
+                name: "Garbled".into(),
+                // `0` is this payload's word for "no angle to name" — see the
+                // variant's doc.
+                reason: MaskImportReason::Rotation(0)
+            }],
+            "…and it is NAMED, frame or no frame"
+        );
+    }
+
+    /// `crs:LocalHue` rides a 180 scale, not the ÷100 every other local key
+    /// uses. MEASURED, 2026-08-18: the user's controlled export put the mask
+    /// Hue slider at **+50** and Lightroom wrote **`crs:LocalHue="0.277778"`**
+    /// (`_DSC9594.xmp`, verbatim). 0.277778 × 180 = 50.00004; ÷100 would read
+    /// 27.8 and ÷360 would read 100.
+    ///
+    /// The gate moves with the reader: at the old 100 scale a slider past
+    /// ±55.6 refused the WHOLE correction as out of model.
+    ///
+    /// MUTATION THIS CATCHES: put `q100("LocalHue")` back and the anchor reads
+    /// 27.7778; leave the domain gate on the 100 scale and the ±100 row
+    /// refuses.
+    #[test]
+    fn local_hue_rides_the_measured_180_scale() {
+        let doc = lr_doc(&lr_correction("Hue", "", &lr_radial("0", "0")))
+            .replace("crs:LocalHue=\"0\"", "crs:LocalHue=\"0.277778\"");
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the correction imports");
+        assert!((r.masks[0].hue - 50.0).abs() < 1e-3, "UI +50 ⇒ {}", r.masks[0].hue);
+        // The whole ±100 slider is inside the model — including its end
+        // stops, which land on ±0.555556 and read back as ±100.00008 through
+        // the wire's six decimals.
+        for (text, want) in [("0.555556", 100.0), ("-0.555556", -100.0)] {
+            let doc = lr_doc(&lr_correction("Hue", "", &lr_radial("0", "0")))
+                .replace("crs:LocalHue=\"0\"", &format!("crs:LocalHue=\"{text}\""));
+            let r = xmp_to_recipe(&doc);
+            assert_eq!(r.masks.len(), 1, "{text} is inside Lightroom's own slider");
+            assert!((r.masks[0].hue - want).abs() < 1e-2, "{text} ⇒ {}", r.masks[0].hue);
+        }
+        // …and a value PAST it is out of model and refused, which is the half
+        // the gate exists for: 0.7 is a hue of 126, half a turn's worth beyond
+        // the slider. On the old 100 scale the same file read 70 and sailed
+        // through.
+        let doc = lr_doc(&lr_correction("Hue", "", &lr_radial("0", "0")))
+            .replace("crs:LocalHue=\"0\"", "crs:LocalHue=\"0.7\"");
+        assert!(xmp_to_recipe(&doc).masks.is_empty(), "a hue past the slider is out of model");
+        assert_eq!(
+            import_losses(&doc),
+            vec![MaskImportLoss { name: "Hue".into(), reason: MaskImportReason::OutOfModel }],
+            "…and NAMED"
+        );
+        // …and the writer is its inverse.
+        let mine = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Radial {
+                    top: 0.3, left: 0.35, bottom: 0.7, right: 0.65,
+                    feather: 0.5, roundness: 0.0, flipped: false, angle: 0.0,
+                    midpoint: 50.0, mask_version: 2,
+                },
+                hue: 50.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = recipe_to_xmp(&mine);
+        assert!(out.contains("crs:LocalHue=\"0.2777778\""), "{out}");
+        assert!((xmp_to_recipe(&out).masks[0].hue - 50.0).abs() < 1e-3);
+    }
+
+    /// The REAL probe sidecars, when they are on the machine. Twelve controlled
+    /// Lightroom exports live at
+    /// `~/.claude/plans/r25-materials/lr-experiment/`; point
+    /// `AUTOSHOP_LR_PROBE_FIXTURES` at that directory and this walks every
+    /// `.xmp` in it (and its `probe*/` subdirectories), asserting that every
+    /// radial imports and round-trips its corners byte-for-byte.
+    ///
+    /// SILENTLY SKIPPED when the variable is unset — the files are the user's
+    /// photographs' metadata and are deliberately not in the repository, so
+    /// this cannot be a CI gate. The synthetic fixtures above carry the same
+    /// numbers; this is what proves the transcription.
+    #[test]
+    fn the_probe_sidecars_decode_to_their_measured_ellipses() {
+        let Ok(dir) = std::env::var("AUTOSHOP_LR_PROBE_FIXTURES") else { return };
+        let mut checked = 0usize;
+        let mut roots = vec![std::path::PathBuf::from(dir)];
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        while let Some(root) = roots.pop() {
+            let Ok(entries) = std::fs::read_dir(&root) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    roots.push(p);
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("xmp")) {
+                    files.push(p);
+                }
+            }
+        }
+        files.sort();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            if !text.contains("Mask/CircularGradient") {
+                continue;
+            }
+            let frame = FrameAspect::from_xmp(&text);
+            assert!(frame.is_some(), "{}: a Lightroom sidecar declares its frame", path.display());
+            let r = xmp_to_recipe(&text);
+            assert!(!r.masks.is_empty(), "{}: its radial must import", path.display());
+            let out = recipe_to_xmp_in_frame(&r, frame).0;
+            let read = |doc: &str, key: &str| -> Option<String> {
+                let name = format!("crs:{key}=\"");
+                let at = doc.find(&name)? + name.len();
+                Some(doc[at..][..doc[at..].find('"')?].to_string())
+            };
+            // Every corner the file wrote comes back BYTE-identical — the
+            // decode/encode pair is an algebraic inverse and `lr_num` is
+            // Lightroom's own spelling.
+            for key in ["Top", "Left", "Bottom", "Right"] {
+                let Some(want) = read(&text, key) else { continue };
+                assert_eq!(
+                    read(&out, key).as_deref(),
+                    Some(want.as_str()),
+                    "{}: crs:{key} did not survive the round trip",
+                    path.display()
+                );
+            }
+            // The angle to 10⁻⁴ °, for the `f32` reason the synthetic
+            // round-trip test spells out.
+            if let (Some(w), Some(g)) = (read(&text, "Angle"), read(&out, "Angle")) {
+                let (w, g): (f64, f64) = (w.parse().unwrap(), g.parse().unwrap());
+                assert!((w - g).abs() < 1e-4, "{}: crs:Angle {g} vs {w}", path.display());
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "AUTOSHOP_LR_PROBE_FIXTURES held no radial sidecar");
+        eprintln!("AUTOSHOP_LR_PROBE_FIXTURES: {checked} radial sidecar(s) round-tripped");
     }
 
     /// R25 P5: both rotation verdicts CARRY the angle, so a disclosure can
@@ -6692,7 +7710,13 @@ mod tests {
         let MaskGeometry::Radial { top, left, .. } = r.masks[0].mask else {
             panic!("expected a radial, got {:?}", r.masks[0].mask);
         };
-        assert_eq!((top, left), (0.114928, 0.590368), "the real coordinates arrived");
+        // The file's own `(0.114928, 0.590368)`, carried through Lightroom's
+        // measured frame affine (v0.32.0 — see
+        // `a_lightroom_radial_with_angle_imports` for the hand-check).
+        assert!(
+            (top as f64 - 0.102605696).abs() < 1e-7 && (left as f64 - 0.593259776).abs() < 1e-7,
+            "the real coordinates arrived: {top} {left}"
+        );
         assert_eq!(r.masks[0].amount, 1.0, "MaskValue=0 is an encoding, never a pre-multiplier");
         assert_eq!(r.masks[0].contrast, 43.0, "and the sliders are untouched by it");
 
@@ -9009,7 +10033,34 @@ mod tests {
         };
         *flipped = false;
         expect[1].inverted = true;
+        // …and ONE more, from v0.32.0: the radial's box no longer passes
+        // through verbatim. It goes out through the inverse of Lightroom's
+        // frame affine and comes back through the affine, and the WIRE carries
+        // six decimals — Lightroom's own precision, which is the precision any
+        // value that has ever been through Lightroom actually has. So the
+        // corners settle by up to half a wire step, measured here at
+        // 4.6 × 10⁻⁷ of the frame = 0.005 px on a 9504 px export. It is a
+        // one-time settle onto the wire grid, not a drift: the second round
+        // trip is exact, which the re-emit below is what pins.
+        let approx = |a: &MaskGeometry, b: &MaskGeometry| match (a, b) {
+            (
+                MaskGeometry::Radial { top: t1, left: l1, bottom: b1, right: r1, .. },
+                MaskGeometry::Radial { top: t2, left: l2, bottom: b2, right: r2, .. },
+            ) => [(t1, t2), (l1, l2), (b1, b2), (r1, r2)]
+                .iter()
+                .all(|(x, y)| (**x - **y).abs() < 1e-6),
+            _ => false,
+        };
+        assert!(approx(&back.masks[1].mask, &expect[1].mask), "{:?}", back.masks[1].mask);
+        expect[1].mask = back.masks[1].mask.clone();
         assert_eq!(back.masks, expect);
+        // The wire grid is a FIXED POINT, not a ratchet: once a box has been
+        // through the projection its own re-emit reproduces it to the bit.
+        assert_eq!(
+            xmp_to_recipe(&recipe_to_xmp(&back)).masks[1].mask,
+            back.masks[1].mask,
+            "the second round trip is exact"
+        );
         for (i, (was, now)) in r.masks.iter().zip(&back.masks).enumerate() {
             assert_eq!(
                 lr_net_inverted(was),

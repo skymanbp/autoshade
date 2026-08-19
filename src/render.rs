@@ -153,9 +153,15 @@ pub fn render_to_image_in(
             .map_err(|e| anyhow!("raw_metadata: {e}"))?;
         let orientation = crate::decode::raw_orientation_of(&md);
         // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
-        let raw = decoder
+        let mut raw = decoder
             .raw_image(&src, &params, false)
             .map_err(|e| anyhow!("raw_image: {e}"))?;
+        // …developed from the frame the camera and Lightroom call the picture,
+        // not from the sensor's top-left corner. v0.32.0 — see
+        // `decode::align_default_crop` for the measurement (every Sony ARW
+        // render sat 32 px right and 20 px down of Lightroom's) and for why
+        // rawler 0.7.2 skips this crop on its own.
+        crate::decode::align_default_crop(&mut raw);
         (raw, orientation)
     };
 
@@ -1946,10 +1952,36 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             }
             let d = ((px / rx).powi(2) + (py / ry).powi(2)).sqrt();
             let f = feather.clamp(0.0, 1.0);
+            // The falloff endpoints, MEASURED (v0.32.0). Lightroom's feather
+            // moves BOTH boundaries, not just the inner one — the sourced claim
+            // that it moves only the inner circle is refuted on the outer, which
+            // is the load-bearing half. Recovering the true mask WEIGHT from an
+            // 11-rung exposure ladder on five frames spanning aspect 1.03 … 7.46
+            // (one rotated +28.2°, one corner-placed, two exposure levels) puts
+            // the profile's contour positions at ±0.02 in `d` over w = 0.05…0.4
+            // and fits `d_in = k(1−f)`, `d_out = k(1+f/2)` with coefficients
+            // 0.99 and 0.45 against the law's exactly 1 and ½ (chi2/dof 1.52 at
+            // zero free parameters against 1.37 at two; `PROBE3-ADDENDUM.md`
+            // §3.1). The `k = 1.032` of that law is a COORDINATE-FRAME constant
+            // and lives on the XMP boundary (`xmp::LR_MASK_FRAME_SCALE`), where
+            // it is folded into the semi-axes — so the engine's own `d` is the
+            // measured `d` divided by `k`, and the endpoints here carry no `k`.
+            // Engine-native radials and imported ones therefore share ONE
+            // falloff law, which is what the user ruled.
+            //
+            // What this replaces: `d_out = 1`, i.e. the effect reaching zero
+            // exactly on the ellipse. Measured at f = 0.5 it reaches 1.25 —
+            // the old outer edge was a 29 % under-sized mask (PROBE3 §4), and
+            // no amount of correct geometry upstream could recover it.
+            //
+            // The SHAPE is unchanged and was already right: `ramp` is the cubic
+            // smoothstep 3t²−2t³, and `1 − S(t)` on [d_in, d_out] is exactly
+            // `S((d_out−d)/(d_out−d_in))`, the form the fit was run in.
+            //
             // Guarded ramp, not raw `smoothstep`: feather 0 makes the edges
             // equal, and 0/0 would be NaN exactly on the ellipse boundary
             // (NaN survives the `wgt <= 0.001` early-out and casts to black).
-            let wgt = 1.0 - ramp(1.0 - f, 1.0, d);
+            let wgt = 1.0 - ramp(1.0 - f, 1.0 + f / 2.0, d);
             if *flipped {
                 1.0 - wgt
             } else {
@@ -7070,6 +7102,135 @@ mod tests {
             out.as_raw().iter().all(|&v| v > 100),
             "feather 0 must brighten or leave pixels alone, never produce black"
         );
+    }
+
+    /// v0.32.0 — the radial falloff's two ENDPOINTS, pinned at the numbers the
+    /// exposure-ladder recovery measured (`PROBE3-ADDENDUM.md` §3): the effect
+    /// reaches full strength at `d = 1 − f` and zero at `d = 1 + f/2`.
+    ///
+    /// The one that was wrong is the OUTER: it used to sit at `d = 1`, so at
+    /// `Feather = 50` the mask stopped 25 % of a semi-axis short of where
+    /// Lightroom's does — a 29 % under-sized mask, and the one defect no amount
+    /// of correct geometry upstream could recover.
+    ///
+    /// A unit circle at the frame centre makes `d` readable straight off the
+    /// sample point: `mask_weight` at `(0.5 + t/2, 0.5)` is the weight at
+    /// `d = t`.
+    ///
+    /// MUTATION THIS CATCHES: put `1.0` back as the outer edge and the
+    /// `d = 1.10` and `d = 1.24` rows go to zero; drop the `f/2` to `f` and
+    /// `d = 1.49` stops being zero.
+    #[test]
+    fn the_radial_falloff_endpoints_are_the_measured_ones() {
+        use crate::recipe::MaskGeometry;
+        let g = |feather: f32| MaskGeometry::Radial {
+            top: -0.5,
+            left: -0.5,
+            bottom: 1.5,
+            right: 1.5,
+            feather,
+            roundness: 0.0,
+            flipped: false,
+            angle: 0.0,
+            midpoint: 50.0,
+            mask_version: 2,
+        };
+        // rx = ry = 1 about (0.5, 0.5), so the sample at `(0.5 + d, 0.5)` sits
+        // at elliptical distance exactly `d`.
+        let at = |feather: f32, d: f32| mask_weight(&g(feather), 0.5 + d, 0.5, None);
+        // f = 0: a hard step exactly on the ellipse — `ramp`'s degenerate-edge
+        // guard, which the endpoints must not disturb.
+        assert_eq!(at(0.0, 0.99), 1.0, "f=0 is solid right up to the ellipse");
+        assert_eq!(at(0.0, 1.01), 0.0, "…and zero immediately outside it");
+        // f = 0.5: the measured transition is [0.50, 1.25].
+        assert_eq!(at(0.5, 0.49), 1.0, "f=0.5 is full strength inside d = 1−f");
+        assert_eq!(at(0.5, 0.51), 1.0 - smoothstep(0.5, 1.25, 0.51));
+        assert!(at(0.5, 1.10) > 0.02, "the old outer edge at d=1 is dead: {}", at(0.5, 1.10));
+        assert!(at(0.5, 1.24) > 0.0, "…and the effect still reaches d = 1.24");
+        assert_eq!(at(0.5, 1.26), 0.0, "…but is gone by d = 1 + f/2");
+        // The half-strength point of a cubic smoothstep is its midpoint, so the
+        // law predicts w = 0.5 at d = (d_in + d_out)/2 = 0.875 — against the
+        // pooled five-frame measurement of 0.889 ± 0.067 in RAW decoded units,
+        // i.e. 0.861 ± 0.065 once the frame scale k = 1.032 is folded into the
+        // axes (PROBE3 §3). Well inside.
+        assert!((at(0.5, 0.875) - 0.5).abs() < 1e-6, "{}", at(0.5, 0.875));
+        // f = 1: `d_in` collapses to 0 — Feather 100 leaves no full-strength
+        // core at all. UNMEASURED and named as such (PROBE3 §5, PROBE4 §5
+        // item 2): the fit's `A = 0.99 ± …` makes it the elegant reading, and
+        // the one frame shot at Feather 100 covers the whole export so nothing
+        // anchors the link. Pinned so a future measurement changes it here.
+        assert_eq!(at(1.0, 0.01), 1.0 - smoothstep(0.0, 1.5, 0.01));
+        assert_eq!(at(1.0, 1.49), 1.0 - smoothstep(0.0, 1.5, 1.49));
+        assert_eq!(at(1.0, 1.51), 0.0);
+    }
+
+    /// v0.32.0 — the polarity truth table, all four cells, closed on the pixel.
+    ///
+    /// This engine spells "which side gets the effect" as the XOR of TWO flags
+    /// (`Radial::flipped` in `mask_weight`, `LocalAdjustment::inverted` in the
+    /// weight loop); Lightroom spells it once. Both of Lightroom's observed
+    /// spellings are rendered here as the flags the importer produces for them,
+    /// and both were measured on real exports: `crs:Flipped="true"` +
+    /// `crs:MaskInverted="false"` darkens the ellipse INTERIOR (8 frames,
+    /// `#6` at +4.4 stops inside), `crs:Flipped="false"` +
+    /// `crs:MaskInverted="true"` darkens the EXTERIOR (`_DSC9688`, +3.40 stops
+    /// exterior-minus-interior, with the level sets GROWING as the threshold
+    /// rises). `PROBE2-VERDICT.md` §6.
+    ///
+    /// The other two cells are engine-only — 201/201 real radials are
+    /// anti-correlated, so Lightroom writes neither — and they are pinned
+    /// because the recipe can hold them and a user's Flip checkbox produces
+    /// one of them.
+    ///
+    /// MUTATION THIS CATCHES: change either XOR arm (drop the `1.0 - wgt` in
+    /// `mask_weight`, or the `1.0 - wgt` in the weight loop) and two rows flip.
+    #[test]
+    fn the_radial_polarity_truth_table_is_closed_on_all_four_cells() {
+        use crate::recipe::MaskGeometry;
+        // A small centred ellipse, hard-edged so "inside" and "outside" are
+        // unambiguous at the two sample points.
+        let g = |flipped: bool| MaskGeometry::Radial {
+            top: 0.3,
+            left: 0.3,
+            bottom: 0.7,
+            right: 0.7,
+            feather: 0.0,
+            roundness: 0.0,
+            flipped,
+            angle: 0.0,
+            midpoint: 50.0,
+            mask_version: 2,
+        };
+        // (flipped, inverted) → does the effect land INSIDE?
+        for (flipped, inverted, inside) in [
+            // Lightroom's `Flipped="true" MaskInverted="false"`, as the
+            // importer reads it (the bit comes from MaskInverted alone).
+            (false, false, true),
+            // Lightroom's `Flipped="false" MaskInverted="true"` — `_DSC9688`.
+            (false, true, false),
+            // Engine-only, from this app's own Flip checkbox.
+            (true, false, false),
+            (true, true, true),
+        ] {
+            let m = LocalAdjustment {
+                mask: g(flipped),
+                inverted,
+                exposure_ev: -3.0,
+                ..Default::default()
+            };
+            let base =
+                DynamicImage::ImageRgb8(RgbImage::from_pixel(40, 40, image::Rgb([160, 160, 160])));
+            let r = EditRecipe { masks: vec![m], ..Default::default() };
+            let out = develop_preview(&base, &r).to_rgb8();
+            let centre = out.get_pixel(20, 20)[0];
+            let corner = out.get_pixel(1, 1)[0];
+            assert!(
+                if inside { centre < corner } else { corner < centre },
+                "flipped={flipped} inverted={inverted}: expected the effect \
+                 {} — centre {centre}, corner {corner}",
+                if inside { "INSIDE" } else { "OUTSIDE" }
+            );
+        }
     }
 
     #[test]

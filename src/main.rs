@@ -607,7 +607,7 @@ fn analyze_cmd(
                     recipe_path.display()
                 ))
             } else {
-                pipeline::write_xmp_at(side, &recipe)
+                pipeline::write_xmp_at(side, &recipe, Some(raw))
             }
         } else {
             write_xmp(raw, &recipe)

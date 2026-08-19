@@ -942,12 +942,21 @@ pub enum MaskGeometry {
     /// very same rotation reads counter-clockwise in a y-UP maths frame, which
     /// is the reading this line used to print while claiming the screen one.
     /// Measured on the released binary's own output, not derived: E1-verdict
-    /// §4a, R25 P9) IS rendered and
-    /// GUI-editable, but is OUR OWN field, not `crs:Angle`: the XMP writer
-    /// emits the UNROTATED ellipse (the same superset-approximation stance as
-    /// radial placement under straighten) because crs:Angle's sign/pivot
-    /// semantics are unverified — mapping our angle onto it would rotate
-    /// Lightroom masks on a guess.
+    /// §4a, R25 P9) IS rendered and GUI-editable, and is still OUR OWN field
+    /// rather than `crs:Angle` — but v0.32.0 mapped the two onto each other in
+    /// both directions. They are not the same number: `crs:Angle` is a tilt in
+    /// PIXEL space and this one is a rotation applied in the NORMALISED frame,
+    /// which differ by up to 11.2° of rendered tilt over the ±44° range real
+    /// sidecars use. The fold between them is `xmp::lr_to_engine` /
+    /// `xmp::engine_to_lr`, and it needs the frame's aspect ratio; a document
+    /// that declares none still exports the UNROTATED ellipse and discloses the
+    /// angle it could not write.
+    ///
+    /// The bbox is likewise no longer the sidecar's bbox: Lightroom's stored
+    /// corners are the ROTATED corners of the ellipse's box, and the whole
+    /// normalised frame is scaled by `xmp::LR_MASK_FRAME_SCALE` between the two
+    /// conventions. What is stored HERE is the engine's own ellipse; the
+    /// projection to and from Lightroom's is `xmp.rs`'s alone.
     ///
     /// `midpoint` and `mask_version` are the two attributes Lightroom writes on
     /// EVERY radial that this engine could not even read until R25 P5 — see
