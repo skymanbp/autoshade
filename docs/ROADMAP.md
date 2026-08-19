@@ -556,6 +556,31 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   （与既有 `ValidatedRecipe::disclose`、embedded-XMP 警告同一现状，扩大到 GUI
   toast 通道是带 i18n 面的独立改动，**登记不做**）。
 
+- **90° 手动旋转骨架（2026-08-19，R27 Batch-2，未发版）** —— v0.33 首项落地。
+  骨架表（本文件下方 v0.31.0 段）已就地补「落地状态」栏并按删除线纪律更正三处
+  滞后断言（消费点**五个**不是三个、缓存盐**两个**不是一个、`↶/↷` 字形**撞门**）。
+  **① 根因洞见成立**：EXIF 八态就是正方形的二面体群、对复合封闭，所以用户的
+  四分之一圈与相机方向能合成**同一个** `Orientation`，引擎**不新增第二个旋转
+  阶段**——`render::compose_orientation` 是全部改动，`oriented`/`orient_point`/
+  `orient_recipe_coords` 原样复用。
+  **② 一个 mover**：`pipeline::rotate_recipe` 同时管几何（走 delta）、栅格蒙版
+  （真转、新号、全有或全无）与转数本身；GUI 的画布靠 `sync_base_turns` 每帧
+  按 `base_turns` 与 `recipe.quarter_turns` 的差把**底片像素**转过去——不给画布
+  加旋转阶段，是因为 `canvas.rs` 里每一处屏幕↔画幅映射（`view_norm_to_orig`、
+  裁剪把手、涂抹画布、覆盖层、修复选区）都以底片为准，转像素等于一次性把它们
+  全转了。撤销/重做/切换变体/载入版本因此各自**不需要**旋转代码。
+  **③ 三类前向后果**（`deny_unknown_fields` 既定姿态）：v0.32 exe 对**带转数**
+  的 recipe 按字段名硬拒；**未旋转**的 recipe 与 v0.32 逐字节相同故照读不误
+  （`skip_serializing_if` 换来的）；R21 结构指纹**无需**重归档。
+  **④ 门**：642 lib（+8）/ 9 CLI / 131 GUI（+1）/ 2+2 合约（主审第一方复跑核
+  实——本条初稿误记 646/+12/6 条），`cargo clippy --all-targets` 与
+  `--features gui` 双 0，audit_i18n exit 0（新增
+  7 对 en+zh 词条），`subset_gui_fonts.py --check` **803/803**（`⭯`/`⭮` 早在子集
+  内，免再生成；四个汉字撞门改写），`AUTOSHOP_LR_PROBE_FIXTURES` 16 份仍绿，
+  `AUTOSHOP_RAW_ZOO` 9/9 仍绿（并加了两条转数臂）。六条新测试全做变异验证。
+  **⑤ 登记不做**：A7/A8（XMP `tiff:Orientation` + 画幅供给）等一份竖幅 LR 导出；
+  带烘焙像素的照片不可旋转（按钮禁用并说明理由）；web UI 缩略图不跟随转数。
+
 - **v0.32.0（2026-08-19，第二十六轮 = 径向蒙版几何根修）** ——
   素材＝**用户为此专门拍的 12 张受控 Lightroom 导出**（M-B ①结清）
   ＋对导出成片的像素级测量；证据档案
@@ -605,7 +630,9 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   46c474a6901d8280ac2cabf4508a340ba843213c184714d18f2a70d0a4660812
   =29,108,942 B / gui
   6f6b388664b46c6bb4cde4da2e207cf6ea90c7f7444dc2fb0027ed816b209a19
-  =38,583,788 B。**待办**：90° 旋转骨架仍留 v0.33；竖幅/裁剪帧/`|Angle|>45°`
+  =38,583,788 B。**待办**：~~90° 旋转骨架仍留 v0.33~~ **← R27 Batch-2 已落地
+  （引擎侧 A1-A6+A9+A10；XMP 侧 A7/A8 仍等竖幅实测，见本文件 Batch-2 段）**；
+  竖幅/裁剪帧/`|Angle|>45°`
   未验证（已在码内登记触发条件）；半轴尺度分歧（1.0325 vs 1.0065）需两张
   `Feather=0` 导出才能定。
 
@@ -847,19 +874,39 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   **90° 手动旋转设计骨架（~~v0.32 首项~~ **← 归属更正 2026-08-19：v0.33**，
   本轮拍板推迟，骨架入库以免再丢）**
 
-  | # | 位置 | 设计 |
-  |---|---|---|
-  | 7.1 | `src/recipe.rs` | 新 `quarter_turns: u8`（0..3）。**不复用** `straighten_deg`（它是 ±45 且直接映射 `crs:CropAngle`） |
-  | 7.2 | `src/render.rs` / `src/decode.rs` | 根因洞见：**EXIF 方向与用户四分之一圈可以合成同一个 `image::metadata::Orientation`**。改动＝一个 `compose(exif, quarter_turns)` + `raw_orientation_of` 三个消费点读合成值；`orient_f32`/`oriented`/`orient_point` 原样复用 |
-  | 7.3 | 坐标 | 显示帧改变 → 存量 crop / 蒙版几何随转，**复用 `orient_recipe_coords`**（已 8 态全覆盖） |
-  | 7.4 | 栅格蒙版 | v0.30 的迁移刻意不转位图；**这次不同**——栅格是我们自己写的 PNG，`image::rotate90` 无损，应真的转（新号落盘，旧的按 R21 纪律） |
-  | 7.5 | XMP | LR 的 90° 不是 `crs:CropAngle`（±45）而是 `tiff:Orientation` + 裁剪矩形落在旋转后的帧里；我们今天完全不写 `tiff:Orientation` |
-  | 7.6 | 缓存 | decode 缓存盐 3 → 4 |
-  | 7.7 | GUI | 工具栏 `↶ / ↷` 两个按钮，各一步撤销 |
+  | # | 位置 | 设计 | 落地状态（R27 Batch-2，2026-08-19） |
+  |---|---|---|---|
+  | 7.1 | `src/recipe.rs` | 新 `quarter_turns: u8`（0..3）。**不复用** `straighten_deg`（它是 ±45 且直接映射 `crs:CropAngle`） | ✅ 已做。`clamp` 用 `%= 4`（**同余类不是区间**：4 意为「不转」而非「最大合法转角」）；序列化用 `skip_serializing_if`（全库唯一一处——纪元戳「缺席」与「值为 0」含义不同故必须常写，而缺席的转数就是 0，跳过无损。收益：未旋转的 recipe 与 v0.32 写出的**逐字节相同** ⇒ R21 结构指纹**不需要**像 v0.31.0 那样做重归档）。`catalogue.rs` 注册表新增 `engine_only` 行（第六类理由：模型看到的**已经是**显示帧，问它「该转多少」只能得到猜测；required 字段还会在每次 Refine 返回 0，把照片转回去、却把裁剪与蒙版留在转后的位置） |
+  | 7.2 | `src/render.rs` / `src/decode.rs` | 根因洞见：**EXIF 方向与用户四分之一圈可以合成同一个 `image::metadata::Orientation`**。改动＝一个 `compose(exif, quarter_turns)` + `raw_orientation_of` ~~三个~~消费点读合成值；`orient_f32`/`oriented`/`orient_point` 原样复用 | ✅ 已做，**但是五个消费点不是三个** ← 勘误：骨架写于 v0.32.0 之前，`frame_size` 是那一版新增的第四个，另有 `pipeline` 里基于路径的迁移点。`render::compose_orientation` 走 `to_flips`/`from_flips` 位代数（第一个映射发生转置时，第二个映射的两个翻转**交叉**再异或），穷尽测试对 9×4 全部 (态, 转数) × 四个探点核对它等于两次 `orient_point` 复合。`decode` 侧新增 `*_turned` 门（`decode_raw_turned` / `decode_any_turned` / `preview_only_turned` / `embedded_preview_turned` / `frame_size_turned`），旧签名**保留为「转数 0」那扇门**——多数调用者确实没有 recipe 可读，让它们各自默认 0 正是 v0.30 之前方向漂移的成因 |
+  | 7.3 | 坐标 | 显示帧改变 → 存量 crop / 蒙版几何随转，**复用 `orient_recipe_coords`**（已 8 态全覆盖） | ✅ 已做，`pipeline::rotate_recipe` 一处统管。**传的是 delta 不是累计值**（骨架点名的双转危险）。四次 1/4 圈回到原点：栅格层面无损，坐标层面精确到 f32 舍入（~1e-7，非累积——`1.0 - v` 是一次 f32 减法，多转几圈也不增长） |
+  | 7.4 | 栅格蒙版 | v0.30 的迁移刻意不转位图；**这次不同**——栅格是我们自己写的 PNG，`image::rotate90` 无损，应真的转（新号落盘，旧的按 R21 纪律） | ✅ 已做，且是**全有或全无**：先把所有栅格转进新号文件，一张读不出就整个操作报错、recipe 一个字段都不动（半转的显影——参数蒙版转了、手绘蒙版没转——下游无从分辨，正是 `backup_saved_develop` 拒绝的那类静默损坏）。旧文件留在原地（版本快照与别的 recipe 可能仍指向它） |
+  | 7.5 | XMP | LR 的 90° 不是 `crs:CropAngle`（±45）而是 `tiff:Orientation` + 裁剪矩形落在旋转后的帧里；我们今天完全不写 `tiff:Orientation` | ⛔ **本批不做（A7/A8）**，卡在同一份竖幅实测上：写侧 `s = W/H` 与 sidecar 自报的 `tiff:ImageWidth/ImageLength` 必须一致，而 LR 对旋转帧怎么写那两个数正是 `xmp::FrameAspect` 已登记的未测项。`frame_size_turned` 已备好、`photo_frame_aspect` **仍走未转的那扇门**。后果登记：本 build 写出的 sidecar 描述的是**未转**的画幅 |
+  | 7.6 | 缓存 | decode 缓存盐 3 → 4 | ✅ 已做，**但是两个盐不是一个** ← 勘误：骨架漏了 `style::CURRENT_INDEX_VERSION`，它的 v3 语义字面就是竖幅特征。缩略图盐 3→4 **并把转数本身加进 key**（旋转不改源文件，`(path, mtime, size)` 会永远命中横躺的旧条目）；风格索引 3→4 且建索引时按转数解码。两处共用新增的 `store::saved_quarter_turns`（廉价、无副作用、按 `Value` 解析以免新版 recipe 的未知字段把缓存 key 打成硬失败、任何失败回落 0） |
+  | 7.7 | GUI | 工具栏 ~~`↶ / ↷`~~ 两个按钮，各一步撤销 | ✅ 已做，**但换了字形** ← 勘误：`↶`/`↷` 一格之隔就是撤销/重做，`↺`/`↻` 也早被「↺ 全部重置」「↺ 清除」「↻ 重画」占了 ⇒ 改用 `⭯`/`⭮`（U+2B6F/U+2B6E，全树未用，且已在 `NotoSansSymbols2-autoshop.ttf` 子集内，免再生成）。中文词条为过字体子集改写过：`逆 圈 命 落` 四字不在成品 cmap 内，故写作「向左/右转 90 度」「待用」「写入磁盘」 |
 
   **风险**：坐标帧是 v0.30 的根修主场，任何回归都会以「竖图横躺」复发；且
   `quarter_turns`（用户**意图**）与 `coord_era`（存储**纪元**）正交，不可合并成
   一个整数——`recipe.rs` 已为 `version` 写过完全同构的论证。**工作量**≈2 包。
+  **← 落地补记（Batch-2）**：该风险由
+  `a_quarter_turn_on_any_exif_state_transposes_the_dims_iff_it_transposes_the_pixels`
+  兜住——8 态 × 4 转数断言「合成方向转置 ⟺ 渲染帧转置」，并顺带核对
+  `decode::orientation_transposes` 与 `render::oriented` 的真实输出一致；RAW zoo
+  探针（9 厂牌）另加两臂（四个转数的 `frame_size_turned` + 一次真转渲染），
+  `AUTOSHOP_ORIENT_PROBE_RAW` 竖幅探针加了「+1 转 ⇒ 横幅、+2 ⇒ 仍竖幅」四行。
+  实际工作量＝**1 包**（A1-A6+A9+A10），A7/A8 单列。
+
+  **本批已登记不做的三条**（各有成文理由，不是遗漏）：
+  ① **XMP 侧 90°**（见 7.5，等一份竖幅 LR 导出）；
+  ② **带烘焙像素的照片不可旋转**——修复/AI 主图是一张按烘焙时画幅落盘的文件，
+     本 build 没有「该文件早于某次旋转」的记法，转画布等于让主图在下次打开时
+     重新横躺。GUI 两个按钮在整条变体带**任一**卡片带像素时禁用，并在悬停里
+     说明理由（R24 #7 立的「像素态禁用带理由」规矩）；正确用法是**先转、再修**；
+  ③ **web UI 的缩略图不跟随转数**——`serve.rs` 那条路不读显影库；桌面画廊已跟随；
+  ④ **旋转后不能做像素修复**（修复 / 生成填充）——两个 worker 拿的是**照片路径**，
+     经 `render::source_pixels` 重新显影（只应用 EXIF 方向），而画布导出的蒙版画在
+     转后的画幅里；两个帧不同就会修错像素，且**烘焙进主图、任何滑杆都撤不回**。
+     故**带理由拒绝**而非近似。把转数穿进 `source_pixels` 是独立一改：那是
+     raw-vs-baked 的唯一分派点，降噪 / match / 反推都共用它。
 
 - **v0.30.0 RELEASED（2026-08-17，第二十四轮=17 条反馈三轮清账收官之 R24：数
   据模型+方向根修+梯子定稿）** — 锁定计划之 R24 全量落地+素材自采反哺的两个

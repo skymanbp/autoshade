@@ -1660,6 +1660,15 @@ pub fn migrate_recipe_coord_frame(raw: &Path, r: &mut EditRecipe) -> Option<Coor
             }
         }
     };
+    // The composed orientation, not the EXIF one (R27): era 0 means "these
+    // numbers are in the SENSOR frame", and the frame they must reach is the
+    // one this build DISPLAYS — EXIF plus the photographer's own turns. Today
+    // the two are always equal here (`quarter_turns` did not exist before
+    // v0.33, and no era-0 recipe can carry one), so this is correctness by
+    // construction rather than a behaviour change; writing `raw_orientation`
+    // alone would be a latent bug the day a v0.33 recipe is hand-edited to
+    // era 0, or the day a future era forces a second migration.
+    let orientation = crate::render::compose_orientation(orientation, r.quarter_turns);
     let rasters_left = crate::render::recipe_has_raster_masks(r);
     let moved = crate::render::orient_recipe_coords(r, orientation);
     // The stamp lands either way once the orientation is KNOWN: a Normal
@@ -1721,6 +1730,118 @@ pub fn coord_migration_note(c: CoordMigration) -> String {
     } else {
         base
     }
+}
+
+/// What a [`rotate_recipe`] call actually did, for the caller's disclosure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RotateOutcome {
+    /// The recipe's `quarter_turns` AFTER the turn (0..=3).
+    pub quarter_turns: u8,
+    /// How many raster masks were re-written, turned, under fresh names.
+    pub rasters_turned: usize,
+}
+
+/// Turn a photo's saved develop by `delta` CLOCKWISE quarter turns: the
+/// photographer's rotate action, in one place for every surface.
+///
+/// Three things move together, and they have to move together or the photo
+/// comes back with its masks somewhere else:
+///
+///  1. **The stored geometry**, through [`crate::render::orient_recipe_coords`]
+///     — crop rectangle, every mask geometry, the Range-Mask sample point, the
+///     straighten sign. That function is the era-0 → era-1 migration's own
+///     engine, proven exact for tilted radials by
+///     `rotated_radial_mask_covers_the_rotated_pixels`.
+///  2. **The raster masks** — really turned, unlike the `coord_era` migration,
+///     which could only disclose them. The difference is ownership: those were
+///     files an OLD build had already written against a frame nobody could
+///     re-derive, whereas these are our own PNGs and `image`'s `rotate90` is
+///     lossless. Turned copies land under FRESHLY CLAIMED names
+///     (`store::claim_raster`) and the old files stay put — version snapshots
+///     freeze their own copies and a saved recipe elsewhere may still point at
+///     them, so rewriting in place would silently change what an old version
+///     renders (the same rule the zoned reverse-fit follows).
+///  3. **`quarter_turns` itself**, which is what makes the render, the export
+///     and the next load agree with the geometry above.
+///
+/// **The turn passed to `orient_recipe_coords` is the DELTA, never the composed
+/// value.** The stored coordinates are already in the CURRENT display frame;
+/// re-applying the accumulated turn would move them a second time. (This is
+/// the one hazard the ROADMAP skeleton called out by name.)
+///
+/// **All-or-nothing.** Every raster is turned into its new file BEFORE the
+/// recipe is touched; if one cannot be read or written, nothing changes and
+/// the caller gets the error. A half-turned develop — parametric masks moved,
+/// a painted mask left behind — is the exact silent-corruption shape
+/// `backup_saved_develop` refuses for the same reason.
+///
+/// `delta` folds `% 4`; `0` is a no-op that still reports the current state.
+pub fn rotate_recipe(
+    r: &mut EditRecipe,
+    src: &Path,
+    delta: u8,
+) -> std::io::Result<RotateOutcome> {
+    let delta = delta % 4;
+    if delta == 0 {
+        return Ok(RotateOutcome { quarter_turns: r.quarter_turns % 4, rasters_turned: 0 });
+    }
+    let o = crate::render::quarter_turn_orientation(delta);
+
+    // --- Phase 1: turn every raster into a fresh file. Nothing in `r` moves
+    // until all of them are on disk.
+    let mut rewritten: Vec<(String, String)> = Vec::new();
+    {
+        let mut probe = r.clone();
+        for m in probe.masks.iter_mut() {
+            for path in m.bitmap_paths_mut() {
+                if rewritten.iter().any(|(from, _)| from == path.as_str()) {
+                    continue; // one file, several masks — turn it once
+                }
+                let turned = turn_raster_file(Path::new(path.as_str()), src, o)?;
+                rewritten.push((path.clone(), turned));
+            }
+        }
+    }
+
+    // --- Phase 2: commit. Geometry, then the raster references, then the
+    // turn count.
+    crate::render::orient_recipe_coords(r, o);
+    for m in r.masks.iter_mut() {
+        for path in m.bitmap_paths_mut() {
+            if let Some((_, to)) = rewritten.iter().find(|(from, _)| from == path.as_str()) {
+                *path = to.clone();
+            }
+        }
+    }
+    r.quarter_turns = (r.quarter_turns + delta) % 4;
+    Ok(RotateOutcome { quarter_turns: r.quarter_turns, rasters_turned: rewritten.len() })
+}
+
+/// One raster mask, turned by `o` into a freshly claimed file inside `src`'s
+/// develop dir. Returns the new ABSOLUTE path (the frame every live recipe
+/// holds; `store::relativize_mask_paths` bares it again at write time).
+///
+/// The claim prefix is the old file's stem with any `-<n>` claim suffix
+/// stripped, so turning `mask-sky-2.png` produces `mask-sky-3.png` rather than
+/// `mask-sky-2-2.png` — the same numbering `store::claim_raster` hands out
+/// everywhere else.
+fn turn_raster_file(
+    from: &Path,
+    src: &Path,
+    o: rawler::Orientation,
+) -> std::io::Result<String> {
+    let img = crate::render::open_mask_bounded(from).map_err(|e| {
+        std::io::Error::other(format!("turn the mask raster {}: {e:#}", from.display()))
+    })?;
+    let turned = crate::render::oriented(img, o);
+    let stem = from.file_stem().and_then(|s| s.to_str()).unwrap_or("mask");
+    let prefix = stem.rsplit_once('-').filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty()).map_or(stem, |(head, _)| head);
+    let target = crate::store::claim_raster(src, prefix)?;
+    turned
+        .to_luma8()
+        .save(&target)
+        .map_err(|e| std::io::Error::other(format!("write {}: {e}", target.display())))?;
+    Ok(target.to_string_lossy().into_owned())
 }
 
 /// [`repair_pre_era_base_curve`] + [`migrate_recipe_coord_frame`], in that
@@ -4389,6 +4510,211 @@ mod tests {
         assert!(migrate_recipe_coord_frame(Path::new("no-such-file-ever.arw"), &mut legacy)
             .is_none());
         assert_eq!(legacy, untouched, "an inability must not move or stamp anything");
+    }
+
+    /// A scratch photo path whose develop dir is wiped clean, so a raster
+    /// claim starts from `<prefix>.png` every run.
+    fn scratch_photo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("autoshop-rotate-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join(format!("{tag}.arw"));
+        std::fs::write(&raw, b"raw").unwrap();
+        let _ = std::fs::remove_dir_all(crate::store::develop_dir(&raw));
+        raw
+    }
+
+    /// THE hazard the ROADMAP skeleton named: the turn handed to
+    /// `orient_recipe_coords` is the DELTA, never the accumulated
+    /// `quarter_turns`. Stored coordinates already live in the CURRENT display
+    /// frame, so re-applying the total moves them a second time.
+    ///
+    /// Two single turns must land exactly where one double turn does, and
+    /// four must return to the start — the group property, checked on real
+    /// geometry rather than on the orientation enum.
+    ///
+    /// MUTATION THIS CATCHES: pass `r.quarter_turns + delta` (the composed
+    /// value) to `orient_recipe_coords` instead of `delta`. The first turn
+    /// still looks right; the second lands 180° out, which is precisely how a
+    /// double-application bug hides.
+    #[test]
+    fn rotating_turns_the_geometry_by_the_delta_not_by_the_running_total() {
+        use crate::recipe::{Crop, LocalAdjustment, MaskGeometry};
+        let raw = scratch_photo("delta");
+        let seed = EditRecipe {
+            crop: Some(Crop { left: 0.10, top: 0.20, right: 0.80, bottom: 0.90 }),
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Linear {
+                    zero_x: 0.25,
+                    zero_y: 0.10,
+                    full_x: 0.75,
+                    full_y: 0.60,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let mut once = seed.clone();
+        rotate_recipe(&mut once, &raw, 2).unwrap();
+        let mut twice = seed.clone();
+        rotate_recipe(&mut twice, &raw, 1).unwrap();
+        rotate_recipe(&mut twice, &raw, 1).unwrap();
+        assert_eq!(twice, once, "two quarter turns must equal one half turn");
+        assert_eq!(once.quarter_turns, 2);
+
+        let mut full = seed.clone();
+        for _ in 0..4 {
+            rotate_recipe(&mut full, &raw, 1).unwrap();
+        }
+        assert_eq!(full.quarter_turns, 0, "four quarter turns is the identity");
+        // The identity in EXACT arithmetic — `orient_point` restricted to the
+        // unit square is an isometry — but `1.0 - v` is an f32 subtraction, so
+        // four of them drift by an ulp or two (0.2 comes back 0.19999999).
+        // That is rounding, not accumulation: the bound below is ~1e-7 and
+        // does not grow with more circles. Stated rather than hidden behind a
+        // loose epsilon, because "a turn is lossless" is the claim item 7.4
+        // rests on and the honest version of it is "lossless in the raster,
+        // exact-up-to-f32 in the coordinates".
+        let fc = full.crop.unwrap();
+        let sc = seed.crop.unwrap();
+        for (got, want) in
+            [(fc.left, sc.left), (fc.top, sc.top), (fc.right, sc.right), (fc.bottom, sc.bottom)]
+        {
+            assert!((got - want).abs() < 1e-6, "a full circle moved the crop: {got} != {want}");
+        }
+        let (crate::recipe::MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }, _) =
+            (&full.masks[0].mask, ())
+        else {
+            panic!("still linear")
+        };
+        for (got, want) in [(*zero_x, 0.25), (*zero_y, 0.10), (*full_x, 0.75), (*full_y, 0.60)] {
+            assert!((got - want).abs() < 1e-6, "a full circle moved the mask: {got} != {want}");
+        }
+    }
+
+    /// R27 A4 — raster masks are REALLY turned, unlike the `coord_era`
+    /// migration, which could only disclose them.
+    ///
+    /// The turned bytes land under a FRESH claimed name and the old file stays
+    /// on disk: version snapshots freeze their own copies and another saved
+    /// recipe may still point at the original, so an in-place rewrite would
+    /// silently change what an old version renders.
+    ///
+    /// MUTATION THIS CATCHES: write the turned image back over `from` instead
+    /// of `store::claim_raster`'s new name — the old-file assertion fails, and
+    /// with it the promise every version snapshot depends on.
+    #[test]
+    fn rotating_really_turns_a_raster_mask_into_a_fresh_file() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let raw = scratch_photo("raster");
+        let original = crate::store::claim_raster(&raw, "mask-sky").unwrap();
+        // 4 wide × 2 high, one white pixel at (3,0) — a frame whose turn is
+        // unambiguous in both dims and in content.
+        let mut g = image::GrayImage::new(4, 2);
+        g.put_pixel(3, 0, image::Luma([255]));
+        g.save(&original).unwrap();
+
+        let mut r = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap {
+                    path: original.to_string_lossy().into_owned(),
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = rotate_recipe(&mut r, &raw, 1).unwrap();
+        assert_eq!(out.rasters_turned, 1);
+
+        let MaskGeometry::Bitmap { path } = &r.masks[0].mask else { panic!("still a bitmap") };
+        assert_ne!(
+            std::path::Path::new(path),
+            original.as_path(),
+            "the turned raster must claim a NEW name"
+        );
+        assert!(original.exists(), "the old raster stays — a version snapshot may share it");
+        let turned = image::open(path).unwrap().to_luma8();
+        assert_eq!(turned.dimensions(), (2, 4), "a quarter turn transposes the raster");
+        // `rotate90` is clockwise: source (x, y) of a W×H frame lands at
+        // (H−1−y, x), so (3, 0) → (1, 3).
+        assert_eq!(turned.get_pixel(1, 3)[0], 255, "the white pixel moved with the frame");
+        assert_eq!(turned.get_pixel(0, 0)[0], 0);
+    }
+
+    /// R27 A4, the all-or-nothing half: a raster that cannot be read leaves
+    /// the recipe COMPLETELY untouched. A half-turned develop — parametric
+    /// masks moved, a painted mask left behind — is worse than a refusal,
+    /// because nothing downstream can tell.
+    ///
+    /// MUTATION THIS CATCHES: move the raster loop after
+    /// `orient_recipe_coords` (i.e. turn geometry first, rasters second) and
+    /// the crop below comes back moved with the error.
+    #[test]
+    fn a_raster_that_cannot_be_turned_leaves_the_whole_recipe_untouched() {
+        use crate::recipe::{Crop, LocalAdjustment, MaskGeometry};
+        let raw = scratch_photo("refuse");
+        let mut r = EditRecipe {
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: "no-such-raster-ever.png".to_string() },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let before = r.clone();
+        assert!(rotate_recipe(&mut r, &raw, 1).is_err());
+        assert_eq!(r, before, "a refused turn must move nothing at all");
+    }
+
+    /// R27 A9 — the crop rectangle and the straighten angle under a quarter
+    /// turn, which is where a double application would show up first.
+    ///
+    /// `Crop` is normalised against the STRAIGHTENED frame, and `inscribed_dims`
+    /// is swap-equivariant, so a PURE rotation is exact and leaves the
+    /// straighten angle alone (only a MIRROR reverses the sense of a rotation
+    /// — R27 Batch-1a's fix, and no quarter turn is a mirror). What must hold:
+    /// the rectangle's corners map through `orient_point` and the angle does
+    /// NOT change sign.
+    ///
+    /// MUTATION THIS CATCHES: negate `straighten_deg` on a pure rotation (the
+    /// natural over-generalisation of the mirror rule) and the tilt flips,
+    /// re-cropping content that has been rotated out from under the box.
+    #[test]
+    fn a_quarter_turn_moves_the_crop_box_once_and_leaves_the_tilt_alone() {
+        use crate::recipe::Crop;
+        let raw = scratch_photo("crop");
+        let mut r = EditRecipe {
+            crop: Some(Crop { left: 0.10, top: 0.20, right: 0.80, bottom: 0.90 }),
+            straighten_deg: -3.5,
+            ..Default::default()
+        };
+        rotate_recipe(&mut r, &raw, 1).unwrap();
+        // Clockwise: (u, v) → (1−v, u). Corners (0.10,0.20) and (0.80,0.90)
+        // land at (0.80,0.10) and (0.10,0.80), re-ordered into a rectangle.
+        let c = r.crop.unwrap();
+        for (got, want) in [(c.left, 0.10), (c.top, 0.10), (c.right, 0.80), (c.bottom, 0.80)] {
+            assert!((got - want).abs() < 1e-6, "crop {got} != {want} ({c:?})");
+        }
+        assert_eq!(r.straighten_deg, -3.5, "a pure rotation must not touch the tilt");
+        assert_eq!(r.quarter_turns, 1);
+        // …and the XMP writer's crop pair reads the TURNED rectangle back
+        // unchanged, so a round trip cannot apply the turn a second time.
+        let doc = crate::xmp::recipe_to_xmp(&r);
+        assert!(doc.contains("crs:HasCrop=\"True\""), "{doc}");
+        assert!(doc.contains("crs:CropAngle=\"-3.5\""), "{doc}");
+        let back = crate::xmp::xmp_to_recipe(&doc);
+        let bc = back.crop.expect("the crop survives the sidecar");
+        for (got, want) in
+            [(bc.left, c.left), (bc.top, c.top), (bc.right, c.right), (bc.bottom, c.bottom)]
+        {
+            assert!((got - want).abs() < 1e-6, "crop round trip {got} != {want}");
+        }
+        assert_eq!(
+            back.quarter_turns, 0,
+            "classic ACR has no place for a quarter turn (`tiff:Orientation` is R27 A8), so a \
+             re-import must report NO turn rather than invent one — the crop it carries is \
+             already in the turned frame"
+        );
     }
 
     /// The two load-time migrations are INDEPENDENT facts and are disclosed

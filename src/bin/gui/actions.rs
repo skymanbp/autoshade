@@ -2008,6 +2008,126 @@ impl AutoshopApp {
         self.paint_last = None;
     }
 
+    /// May the photographer turn this photo right now? (Drives both the
+    /// toolbar buttons' enabled state and the plate reconciler's own gate, so
+    /// the two can never disagree about which photos rotate.)
+    ///
+    /// The one exclusion is BAKED PIXELS. A retouched/generated master is a
+    /// raster on disk in the frame it was baked in, and this build has no way
+    /// to record that a file was written before a turn — so turning the canvas
+    /// under it would put the master back sideways on the next open, which is
+    /// the silent-corruption shape the whole orientation chain exists to
+    /// prevent. Rotate FIRST, bake after: the master is then written in the
+    /// turned frame and everything agrees. The whole strip counts, not just
+    /// the active card — an inactive variant's master is on disk exactly the
+    /// same way. (Registered limitation, R27 A6.)
+    ///
+    /// An ARMED tool is excluded for a smaller reason: brush and retouch
+    /// gestures bind screen coordinates to plate pixels mid-drag, and the
+    /// plate is about to move under them.
+    pub(crate) fn can_rotate(&self) -> bool {
+        self.src_path.is_some()
+            && self.base_preview.is_some()
+            && !self.busy
+            && !self.open_in_flight
+            && !self.paint_mode
+            && self.region.is_none()
+            && self.variants.iter().all(|v| v.base.is_none() && v.origin.is_none())
+    }
+
+    /// Turn the open photo by `delta` clockwise quarter turns — ONE undo step,
+    /// the whole develop moving together ([`autoshop::pipeline::rotate_recipe`]
+    /// owns geometry + raster masks + the turn count).
+    ///
+    /// The plates are NOT turned here: `sync_base_turns` sees the changed
+    /// `recipe.quarter_turns` on the next frame and moves them, which is the
+    /// same path an UNDO of this action takes. One mover, so the two
+    /// directions cannot drift.
+    pub(crate) fn rotate_photo(&mut self, delta: u8, ctx: &egui::Context) {
+        if !self.can_rotate() {
+            return;
+        }
+        let Some(src) = self.src_path.clone() else { return };
+        let lang = self.lang;
+        // The step BEFORE the turn, so one Ctrl+Z puts it back (7.7).
+        self.commit_now();
+        let mut next = self.recipe.clone();
+        match autoshop::pipeline::rotate_recipe(&mut next, &src, delta) {
+            Ok(_) => {
+                self.recipe = next;
+                self.dirty = true;
+                self.sync_base_turns(ctx);
+                self.resync_recipe_display();
+                // …and SEAL it, rather than waiting for `commit_if_settled`
+                // on the next frame: a click is already a settled gesture, and
+                // the one-frame window let a same-frame Ctrl+Z undo the step
+                // BEFORE this one (the hazard `commit_now`'s own doc records).
+                self.commit_now();
+            }
+            Err(e) => {
+                // All-or-nothing (see `rotate_recipe`): the recipe is the
+                // untouched clone, so nothing moved and nothing needs undoing.
+                let t = trf(
+                    lang,
+                    "could not turn this photo: {err} — nothing was changed",
+                    &[("err", &e.to_string())],
+                );
+                self.toast(ToastKind::Error, t);
+            }
+        }
+    }
+
+    /// Bring the base plates into the frame `recipe.quarter_turns` asks for.
+    ///
+    /// Called once per frame (`app.rs` update) rather than from each of the
+    /// eight places that can change the turn — undo, redo, a variant switch, a
+    /// version load, a paste, the rotate buttons. `image`'s rotate is
+    /// LOSSLESS and the plate is preview-sized, and the common case is a `u8`
+    /// comparison that returns immediately.
+    ///
+    /// Turning the PIXELS rather than teaching the canvas a rotation is
+    /// deliberate, and it is the same decision `render_to_image_in` makes:
+    /// every screen↔frame mapping downstream (`view_norm_to_orig`, the crop
+    /// handles, the paint canvas, the coverage overlay, the retouch region)
+    /// is defined against the plate, so one turn here moves all of them and
+    /// none of them needs to know.
+    pub(crate) fn sync_base_turns(&mut self, ctx: &egui::Context) {
+        let want = self.recipe.quarter_turns % 4;
+        let delta = (want + 4 - self.base_turns % 4) % 4;
+        if delta == 0 {
+            return;
+        }
+        // A baked master is on disk in its own frame; `can_rotate` refuses to
+        // create a delta over one, and this is the same gate seen from the
+        // other side — without it a photo that was rotated BEFORE its retouch
+        // would have its master turned a second time on every open.
+        if self.variants.iter().any(|v| v.base.is_some() || v.origin.is_some()) {
+            self.base_turns = want;
+            return;
+        }
+        let turn = |p: &Arc<image::DynamicImage>| {
+            Arc::new(autoshop::render::turn_image((**p).clone(), delta))
+        };
+        self.source_preview = self.source_preview.as_ref().map(&turn);
+        self.base_preview = self.base_preview.as_ref().map(&turn);
+        self.base_turns = want;
+        // Everything derived from the plate's frame. The Before texture is
+        // rebuilt here rather than invalidated: `set_before` is the only
+        // writer, and leaving a stale one on screen for a frame is the
+        // sideways-preview bug in miniature.
+        if let Some(b) = self.base_preview.clone() {
+            let curve = self.recipe.base_curve.clone();
+            self.set_before(ctx, &b, &curve);
+        }
+        self.overlay_ref = None;
+        self.overlay_stale = true;
+        self.last_rgb = None;
+        self.mask_tex = None;
+        self.mask_overlay_tex = None;
+        self.overlay_key = None;
+        self.dirty = true;
+    }
+
     pub(crate) fn undo(&mut self, ctx: &egui::Context) {
         if let Some(prev) = self.undo_stack.pop() {
             self.redo_stack.push(self.committed.clone());

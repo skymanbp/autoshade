@@ -7055,3 +7055,69 @@
         // line is built at all and the caller falls back to `Command::arg`.
         assert_eq!(q("C:\\odd\"q"), None);
     }
+
+    /// R27 A6 — the toolbar rotate is a RECIPE edit, and the base plates
+    /// follow it through `sync_base_turns` rather than through a rotation
+    /// stage in the canvas. Everything downstream (`view_norm_to_orig`, the
+    /// crop handles, the coverage overlay, the paint canvas) is defined
+    /// against the plate, so turning the pixels turns all of them at once.
+    ///
+    /// Drives the pure pieces with a headless egui context — never
+    /// `run_native`.
+    ///
+    /// MUTATION THIS CATCHES: make `sync_base_turns` turn by
+    /// `recipe.quarter_turns` instead of by the delta against `base_turns` and
+    /// the SECOND turn below over-rotates (the plate ends 6x8, not 8x6) —
+    /// the double-application hazard, on the GUI side of the fence.
+    #[test]
+    fn the_toolbar_turn_moves_the_recipe_and_the_plate_together() {
+        let (mut app, _scrub) = app_with_masked_photo("rotate-plate");
+        let ctx = egui::Context::default();
+        // A deliberately non-square plate, so a turn is visible in the dims.
+        let plate = std::sync::Arc::new(image::DynamicImage::new_rgb8(8, 6));
+        app.base_preview = Some(plate.clone());
+        app.source_preview = Some(plate);
+        app.base_turns = 0;
+        let src = std::env::temp_dir().join("autoshop-rotate-plate.arw");
+        std::fs::write(&src, b"raw").unwrap();
+        app.src_path = Some(src);
+
+        assert!(app.can_rotate(), "a parametric photo with a plate is rotatable");
+        app.rotate_photo(1, &ctx);
+        assert_eq!(app.recipe.quarter_turns, 1);
+        assert_eq!(app.base_turns, 1);
+        assert_eq!(
+            app.base_preview.as_ref().unwrap().dimensions(),
+            (6, 8),
+            "one clockwise quarter turn transposes the plate"
+        );
+        assert_eq!(app.source_preview.as_ref().unwrap().dimensions(), (6, 8));
+
+        // A second turn moves by the DELTA, not by the running total.
+        app.rotate_photo(1, &ctx);
+        assert_eq!(app.recipe.quarter_turns, 2);
+        assert_eq!(app.base_preview.as_ref().unwrap().dimensions(), (8, 6));
+
+        // An UNDO changes only the recipe; the per-frame reconciler is what
+        // brings the plate back — one mover for both directions.
+        app.undo(&ctx);
+        assert_eq!(app.recipe.quarter_turns, 1, "one Ctrl+Z per turn (7.7)");
+        app.sync_base_turns(&ctx);
+        assert_eq!(app.base_preview.as_ref().unwrap().dimensions(), (6, 8));
+        assert_eq!(app.base_turns, 1);
+
+        // Idempotent: the common per-frame call is a u8 compare that moves
+        // nothing (a reconciler that turned on every frame would spin the
+        // canvas).
+        app.sync_base_turns(&ctx);
+        assert_eq!(app.base_preview.as_ref().unwrap().dimensions(), (6, 8));
+
+        // BAKED PIXELS close the door, whole strip (registered limitation):
+        // a master raster is a file in the frame it was baked in, and this
+        // build cannot record that it predates a turn.
+        app.variants[0].origin = Some("master.png".into());
+        assert!(!app.can_rotate(), "a baked master must block the turn, not be turned under");
+        let before = app.recipe.quarter_turns;
+        app.rotate_photo(1, &ctx);
+        assert_eq!(app.recipe.quarter_turns, before, "a refused turn changes nothing");
+    }

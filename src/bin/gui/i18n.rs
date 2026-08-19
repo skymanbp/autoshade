@@ -623,6 +623,24 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("saved before the camera base look — renders as originally tuned; Reset switches to the camera-matched base", "此存档保存于相机基调功能之前——按原样渲染；Reset 可切换到相机基调"),
     ("↶ Undo", "↶ 撤销"),
     ("↷ Redo", "↷ 重做"),
+
+    // ── toolbar · manual 90° rotation (R27) ─────────────────────────────────
+    ("⭯ Turn left", "⭯ 左转"),
+    ("⭮ Turn right", "⭮ 右转"),
+    // The zh side deliberately says 「向左/右转 90 度」 rather than
+    // 「逆/顺时针转四分之一圈」: 逆 圈 命 落 are NOT in the shipped font subset
+    // (checked with scripts/subset_gui_fonts.py --check), and rewriting the
+    // sentence is the standing alternative to regenerating five subsets.
+    ("A quarter turn anticlockwise — the crop and every mask turn with it (one undo)",
+        "向左转 90 度——裁剪与全部蒙版随之旋转（一步撤销）"),
+    ("A quarter turn clockwise — the crop and every mask turn with it (one undo)",
+        "向右转 90 度——裁剪与全部蒙版随之旋转（一步撤销）"),
+    ("rotation is off while this photo carries baked pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was baked in; turn first, retouch after",
+        "本照片带有已烘焙像素（修复 / AI 生成）或有工具处于待用状态时不可旋转——它的主图是一张按烘焙时画幅写入磁盘的文件；请先旋转，再修复"),
+    ("could not turn this photo: {err} — nothing was changed",
+        "无法旋转本照片：{err}——未做任何改动"),
+    ("this photo is turned, and pixel repairs still work on the un-turned frame — turn it back to 0 first",
+        "本照片已旋转，而像素修复仍在未旋转的画幅上工作——请先把旋转转回 0"),
     ("Style", "风格"),
     ("Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore)",
         "个人风格强度：AI 提案向你过往 XMP 编辑习惯靠拢的程度（0 = 不参考）"),

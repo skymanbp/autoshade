@@ -1197,6 +1197,32 @@ pub fn recipe_target(src: &Path) -> PathBuf {
     develop_dir(src).join("recipe.json")
 }
 
+/// How many clockwise quarter turns the photo's SAVED develop asks for
+/// (`EditRecipe::quarter_turns`), or 0 when there is no saved develop, it
+/// cannot be read, or it predates the field.
+///
+/// A deliberately CHEAP, side-effect-free reader for the two places that need
+/// only this one number and must not pay a full restore:
+/// `gui::thumb_cache_file` (the gallery cache key — a rotate has to miss it or
+/// the grid keeps serving the sideways thumbnail, which is exactly the v0.30
+/// staleness the salt beside it documents) and `style::build_index` (the
+/// aspect feature). It parses the JSON as a `Value` rather than an
+/// `EditRecipe` on purpose: a recipe from a NEWER build carries fields
+/// `deny_unknown_fields` would reject, and a cache key that hard-fails on a
+/// forward file would silently un-rotate every thumbnail instead of one.
+///
+/// Fails toward 0 = "no turn", which is what every recipe written before
+/// v0.33 means and what a corrupt one is indistinguishable from here. The
+/// cost of being wrong is a stale thumbnail, not a wrong pixel: the RENDER
+/// reads the real recipe.
+pub fn saved_quarter_turns(src: &Path) -> u8 {
+    let text = std::fs::read_to_string(recipe_target(src)).ok();
+    text.as_deref()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+        .and_then(|v| v.get("quarter_turns").and_then(serde_json::Value::as_u64))
+        .map_or(0, |k| (k % 4) as u8)
+}
+
 /// The Lightroom XMP projection. Keeps the `<stem>.xmp` name so copying it
 /// beside the RAW for Lightroom needs no rename.
 pub fn xmp_target(src: &Path) -> PathBuf {

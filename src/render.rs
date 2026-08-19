@@ -151,7 +151,11 @@ pub fn render_to_image_in(
         let md = crate::decode::guard_parser_panic(raw_path, "raw_metadata", || {
             decoder.raw_metadata(&src, &params).map_err(|e| anyhow!("raw_metadata: {e}"))
         })?;
-        let orientation = crate::decode::raw_orientation_of(&md);
+        // …composed with the photographer's own quarter turns (R27), so the
+        // whole pipeline still sees ONE orientation and no second rotation
+        // stage exists to disagree with this one.
+        let orientation =
+            compose_orientation(crate::decode::raw_orientation_of(&md), recipe.quarter_turns);
         // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
         let mut raw = crate::decode::guard_parser_panic(raw_path, "raw_image", || {
             decoder.raw_image(&src, &params, false).map_err(|e| anyhow!("raw_image: {e}"))
@@ -467,6 +471,17 @@ pub fn render_baked_to_image(
     validated.disclose();
     let recipe = &*validated;
     let rasters = load_mask_raster_snapshot(recipe)?;
+    // The photographer's quarter turns FIRST — before the cap and before every
+    // develop stage, exactly where `orient_f32` sits on the RAW path, and for
+    // the same reason: masks / crop / straighten are defined against what the
+    // user sees. Only the USER's half is applied here; the EXIF half is
+    // already in these pixels (`decode::load_image` applies it at decode).
+    // `Cow` so an un-rotated baked export still copies nothing.
+    let turned: Cow<'_, DynamicImage> = match quarter_turn_orientation(recipe.quarter_turns) {
+        Orientation::Normal | Orientation::Unknown => Cow::Borrowed(img),
+        o => Cow::Owned(oriented(img.clone(), o)),
+    };
+    let img = turned.as_ref();
     // Downscale-only, before anything else allocates a plane. `Cow` so the
     // uncapped path (every shipped export) still borrows and copies nothing.
     let capped: Cow<'_, DynamicImage> = match max_edge {
@@ -4096,6 +4111,18 @@ pub(crate) fn oriented(img: DynamicImage, o: Orientation) -> DynamicImage {
     }
 }
 
+/// [`oriented`]'s public door, for the photographer's own quarter turns.
+///
+/// The GUI is a separate crate and cannot reach `oriented` (deliberately
+/// `pub(crate)`: the EIGHT-state transform belongs to the decode/render pair,
+/// and a UI that could pass an arbitrary `Orientation` could mirror a photo by
+/// accident). A quarter turn is the one rotation a UI legitimately asks for,
+/// so that is the shape of the door. Lossless — a pure axis swap on the
+/// image's own pixel type.
+pub fn turn_image(img: DynamicImage, quarter_turns: u8) -> DynamicImage {
+    oriented(img, quarter_turn_orientation(quarter_turns))
+}
+
 /// [`oriented`]'s coordinate twin: where a NORMALISED point of the sensor
 /// frame lands in the display frame.
 ///
@@ -4121,6 +4148,67 @@ pub fn orient_point(o: Orientation, u: f32, v: f32) -> (f32, f32) {
         Orientation::Transverse => (1.0 - v, 1.0 - u),
         Orientation::Rotate270 => (v, 1.0 - u),
     }
+}
+
+/// The orientation of `quarter_turns` CLOCKWISE quarter turns on their own —
+/// the photographer's half of [`compose_orientation`].
+///
+/// Clockwise because [`oriented`] is: `image`'s `rotate90` turns clockwise
+/// (its derivation is spelled out on [`orient_point`]), so `Rotate90` here and
+/// a click on the 「turn right」 button mean the same motion. Values outside
+/// 0..=3 fold (`% 4`), the same residue-class rule
+/// `EditRecipe::clamp` applies to the field itself.
+pub fn quarter_turn_orientation(quarter_turns: u8) -> Orientation {
+    match quarter_turns % 4 {
+        1 => Orientation::Rotate90,
+        2 => Orientation::Rotate180,
+        3 => Orientation::Rotate270,
+        _ => Orientation::Normal,
+    }
+}
+
+/// The ONE orientation every consumer reads: the camera's EXIF state followed
+/// by the photographer's `quarter_turns` clockwise quarter turns, composed
+/// into a single [`Orientation`].
+///
+/// This is the skeleton's root insight (ROADMAP 7.2): the eight EXIF states
+/// ARE the dihedral group of the square, which is CLOSED under composition, so
+/// a user turn on top of a `Transpose` file lands on a state [`oriented`],
+/// [`orient_point`] and [`orient_recipe_coords`] already handle exactly. No
+/// second rotation stage anywhere in the pipeline, no new geometry code.
+///
+/// **Composition order is `exif` FIRST**: `orient_point(compose(e, k), p) ==
+/// orient_point(R90^k, orient_point(e, p))`. That is the order the pixels take
+/// — `render_to_image_in` orients the sensor buffer into the display frame and
+/// the user's turn is a turn OF that display frame — and it is asserted
+/// exhaustively over all 9×4 (state, turn) pairs by
+/// `compose_orientation_is_the_composition_of_the_two_coordinate_maps`.
+///
+/// **Implementation.** Each state is `(swap, flip_h, flip_v)` with the flips
+/// taken in the SOURCE frame and the swap last — rawler's own `to_flips`
+/// contract ("flipping must be done before transposing"), which is
+/// bit-for-bit the convention [`orient_point`] was independently derived in
+/// (checked state by state in the test above). Composing two such triples:
+/// the flips XOR, and when the first map swaps, the second map's flips arrive
+/// on exchanged axes and cross over. `Unknown` is [`Orientation::Normal`]'s
+/// twin on the way in and never appears on the way out — the group has eight
+/// elements, not nine.
+pub fn compose_orientation(exif: Orientation, quarter_turns: u8) -> Orientation {
+    compose_two(exif, quarter_turn_orientation(quarter_turns))
+}
+
+/// `b ∘ a` in coordinate terms — apply `a`, then `b`. Private because the only
+/// composition the pipeline needs is [`compose_orientation`]'s; exposing a
+/// general group operation would invite a second place to decide the order.
+fn compose_two(a: Orientation, b: Orientation) -> Orientation {
+    let (t1, h1, v1) = a.to_flips();
+    let (t2, h2, v2) = b.to_flips();
+    // `a` did not swap: `b`'s flips act on the same axes, so they simply XOR
+    // and `b`'s swap is the composed swap. `a` DID swap: `b`'s horizontal flip
+    // now lands on what was the vertical source axis (and vice versa), so the
+    // two cross before XOR-ing, and the swaps XOR.
+    let (h, v) = if t1 { (h1 ^ v2, v1 ^ h2) } else { (h1 ^ h2, v1 ^ v2) };
+    Orientation::from_flips((t1 ^ t2, h, v))
 }
 
 /// Does this orientation MIRROR the frame (an odd number of reflections)?
@@ -7818,6 +7906,116 @@ mod tests {
                         "{o:?}: source ({x},{y}) should land at ({dx},{dy})"
                     );
                 }
+            }
+        }
+    }
+
+    /// The nine `Orientation` values under `to_flips`/`from_flips` and the nine
+    /// under [`orient_point`] are the SAME group, so [`compose_orientation`]'s
+    /// bit algebra and the geometry it claims to describe cannot drift apart.
+    ///
+    /// Checked exhaustively: for every (EXIF state, quarter turn) pair and
+    /// four probe points, `orient_point(compose(e, k), p)` equals
+    /// `orient_point(R90^k, orient_point(e, p))` — composition IS "apply the
+    /// EXIF state, then turn the display frame", which is the order the pixels
+    /// take. The probe set includes an off-frame point, because mask gradients
+    /// legitimately live outside the unit square.
+    ///
+    /// MUTATION THIS CATCHES: swap the two arms of `compose_two`'s
+    /// `if t1 { … } else { … }` (i.e. cross the flips on the wrong side) and
+    /// every transposing EXIF state composes to its mirror — the 「竖图横躺」
+    /// failure, one composition step upstream of where it used to live.
+    #[test]
+    fn compose_orientation_is_the_composition_of_the_two_coordinate_maps() {
+        const STATES: [Orientation; 9] = [
+            Orientation::Normal,
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Transverse,
+            Orientation::Rotate270,
+            Orientation::Unknown,
+        ];
+        for e in STATES {
+            for k in 0u8..4 {
+                let composed = compose_orientation(e, k);
+                // The group is CLOSED: nine values in, never `Unknown` out
+                // (it is Normal's twin, and a composition that produced it
+                // would make `to_u16` write 0 into a sidecar one day).
+                assert_ne!(composed, Orientation::Unknown, "{e:?} + {k} quarter turns");
+                for (u, v) in [(0.0f32, 0.0f32), (0.13, 0.87), (1.0, 0.25), (-0.4, 1.6)] {
+                    let (a, b) = orient_point(e, u, v);
+                    let want = orient_point(quarter_turn_orientation(k), a, b);
+                    let got = orient_point(composed, u, v);
+                    assert!(
+                        (got.0 - want.0).abs() < 1e-6 && (got.1 - want.1).abs() < 1e-6,
+                        "{e:?} then {k} quarter turns = {composed:?}: ({u},{v}) → {got:?}, \
+                         but applying the two in order gives {want:?}"
+                    );
+                }
+            }
+        }
+        // …and the identity/period facts the field's 0..3 domain rests on.
+        assert_eq!(compose_orientation(Orientation::Rotate90, 0), Orientation::Rotate90);
+        assert_eq!(compose_orientation(Orientation::Rotate90, 2), Orientation::Rotate270);
+        assert_eq!(compose_orientation(Orientation::Rotate270, 1), Orientation::Normal);
+        assert_eq!(compose_orientation(Orientation::Normal, 4), Orientation::Normal);
+    }
+
+    /// The 竖图横躺 regression net (R27 A10), stated as the property that
+    /// actually matters: the composed orientation TRANSPOSES exactly when the
+    /// rendered frame does.
+    ///
+    /// Pure code — the pixel side is [`oriented`] on a deliberately
+    /// non-square frame, which is the same function `orient_f32` round-trips
+    /// through, so no RAW is needed to pin the chain. The real-file arm lives
+    /// in `decode::portrait_raw_reaches_the_pipeline_as_rotate270` and the RAW
+    /// zoo probe.
+    ///
+    /// MUTATION THIS CATCHES: drop `Rotate270` from `decode`'s
+    /// `orientation_transposes` list (or add `Rotate180` to it) and the
+    /// declared dims part company with the pixels for half the states — the
+    /// exact shape of the v0.30 root fix, now with the user's turn on top.
+    #[test]
+    fn a_quarter_turn_on_any_exif_state_transposes_the_dims_iff_it_transposes_the_pixels() {
+        const STATES: [Orientation; 8] = [
+            Orientation::Normal,
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Transverse,
+            Orientation::Rotate270,
+        ];
+        // 7×5: both dims distinct AND distinct from each other's, so a
+        // transpose is visible and a square frame cannot hide a bug.
+        let src = DynamicImage::ImageRgb8(RgbImage::new(7, 5));
+        for e in STATES {
+            for k in 0u8..4 {
+                let composed = compose_orientation(e, k);
+                let (w, h) = oriented(src.clone(), composed).dimensions();
+                let transposed = (w, h) == (5, 7);
+                assert!(
+                    transposed || (w, h) == (7, 5),
+                    "{e:?} + {k}: a rotation/flip produced {w}×{h} from 7×5"
+                );
+                assert_eq!(
+                    transposed,
+                    crate::decode::orientation_transposes(composed),
+                    "{e:?} + {k} = {composed:?}: pixels {w}×{h} but the dims predicate disagrees"
+                );
+                // The user's turn applied to the ALREADY-oriented pixels must
+                // give the same frame as the composed one — the property that
+                // lets `render_to_image_in` keep exactly one orientation stage.
+                let two_step = turn_image(oriented(src.clone(), e), k);
+                assert_eq!(
+                    two_step.dimensions(),
+                    (w, h),
+                    "{e:?} + {k}: one composed turn and two sequential turns disagree"
+                );
             }
         }
     }

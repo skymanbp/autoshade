@@ -10,6 +10,17 @@ pub(crate) struct AutoshopApp {
     // The pristine source neutral (RAW develop / loaded image), decoded once
     // per open. Source-based variants share this same allocation.
     pub(crate) source_preview: Option<Arc<image::DynamicImage>>,
+    /// How many clockwise quarter turns are currently BAKED INTO the plates
+    /// above (R27). The canvas has no rotation stage of its own — every
+    /// screen↔frame mapping in `canvas.rs` (`view_norm_to_orig`, the crop
+    /// handles, the paint canvas, the mask overlay) is defined against the
+    /// plate, so a turn is applied to the PIXELS, exactly as the engine
+    /// applies orientation before every other stage. This field is the one
+    /// place that records which frame those pixels are in;
+    /// `sync_base_turns` reconciles it against `recipe.quarter_turns` once per
+    /// frame, so an undo, a variant switch or a version load needs no rotation
+    /// code of its own.
+    pub(crate) base_turns: u8,
     pub(crate) before_tex: Option<egui::TextureHandle>,
     pub(crate) after_tex: Option<egui::TextureHandle>,
     pub(crate) recipe: EditRecipe,
@@ -1025,6 +1036,48 @@ impl AutoshopApp {
                     self.redo(&ctx);
                 }
                 ui.add_space(SPACE_LG);
+                // Rotate (R27). NOT ↶/↷ — those two glyphs are Undo/Redo one
+                // button to the left, and ↺/↻ are already 「reset all」/
+                // 「Clear」/「↻ Redraw」 in the panels. ⭯/⭮ (U+2B6F/U+2B6E) are
+                // unused anywhere in the tree and both ship in
+                // NotoSansSymbols2-autoshop.ttf, so no subset regeneration.
+                let can_rotate = self.can_rotate();
+                // Disabled buttons state their reason (the pixel-state rule):
+                // a control that greys out in silence reads as a broken app.
+                // Spelled at each site rather than through a helper — the
+                // i18n audit reads `tr()` LEXICALLY, and a key that reaches it
+                // through a closure parameter is a key it cannot check.
+                let blocked = tr(
+                    lang,
+                    "rotation is off while this photo carries baked pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was baked in; turn first, retouch after",
+                );
+                let left_hover = if can_rotate {
+                    tr(lang, "A quarter turn anticlockwise — the crop and every mask turn with it (one undo)")
+                } else {
+                    blocked
+                };
+                if ui
+                    .add_enabled(can_rotate, egui::Button::new(tr(lang, "⭯ Turn left")))
+                    .on_hover_text(left_hover)
+                    .clicked()
+                {
+                    let ctx = ui.ctx().clone();
+                    self.rotate_photo(3, &ctx); // anticlockwise = three clockwise
+                }
+                let right_hover = if can_rotate {
+                    tr(lang, "A quarter turn clockwise — the crop and every mask turn with it (one undo)")
+                } else {
+                    blocked
+                };
+                if ui
+                    .add_enabled(can_rotate, egui::Button::new(tr(lang, "⭮ Turn right")))
+                    .on_hover_text(right_hover)
+                    .clicked()
+                {
+                    let ctx = ui.ctx().clone();
+                    self.rotate_photo(1, &ctx);
+                }
+                ui.add_space(SPACE_LG);
                 // View mode: side-by-side vs a full-width edit (hold B =
                 // compare). ◫ lives in egui's bundled fonts — the old ⿲
                 // (U+2FF2) only rendered when the OPTIONAL CJK fallback font
@@ -1470,6 +1523,7 @@ impl Default for AutoshopApp {
             src_path: None,
             base_preview: None,
             source_preview: None,
+            base_turns: 0,
             before_tex: None,
             after_tex: None,
             recipe: EditRecipe::default(),
@@ -1758,6 +1812,12 @@ impl eframe::App for AutoshopApp {
         self.upd_status_bar(ctx);
 
         self.upd_strips_and_side_panels(ctx);
+        // The plates follow `recipe.quarter_turns` (R27) BEFORE the Before
+        // rebuild and the redevelop dispatch below, so a turn — however it
+        // arrived: the toolbar, an undo, a variant switch, a version load —
+        // lands in the same frame it was asked for. Returns on a `u8` compare
+        // when nothing turned, which is every frame but the one.
+        self.sync_base_turns(ctx);
         // Reset re-stamping a legacy photo, a paste, or a restore would
         // otherwise leave the compare against a stale starting point. One
         // cheap LUT-only develop, and only when the curve actually changed.

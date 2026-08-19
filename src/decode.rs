@@ -583,11 +583,28 @@ fn raw_in_tiff_clothing(path: &Path) -> Option<&'static str> {
 /// sensor metadata, so [`Meta`] is filled with neutral defaults and the
 /// histogram is computed from the pixels.
 pub fn decode_any(path: &Path) -> Result<Decoded> {
+    decode_any_turned(path, 0)
+}
+
+/// [`decode_any`] in the frame the photographer's quarter turns produce — the
+/// dispatch twin of [`decode_raw_turned`]. The baked arm turns the decoded
+/// pixels directly: `load_image` has already applied their EXIF orientation,
+/// so only the user's half is left, and `Meta`'s dims are re-read from the
+/// turned image rather than swapped by hand.
+pub fn decode_any_turned(path: &Path, quarter_turns: u8) -> Result<Decoded> {
     if is_raw(path) {
-        decode_raw(path)
-    } else {
-        decode_baked(path)
+        return decode_raw_turned(path, quarter_turns);
     }
+    let mut d = decode_baked(path)?;
+    match crate::render::quarter_turn_orientation(quarter_turns) {
+        rawler::Orientation::Normal | rawler::Orientation::Unknown => {}
+        o => {
+            d.preview = crate::render::oriented(d.preview, o);
+            d.meta.width = d.preview.width() as usize;
+            d.meta.height = d.preview.height() as usize;
+        }
+    }
+    Ok(d)
 }
 
 /// The seven capture facts [`Meta`] carries that come from EXIF rather than
@@ -1021,6 +1038,19 @@ fn aligned_demosaic_roi(
 /// Metadata only: `dummy = true` on the RAW arm means no sensor
 /// decompression, and the baked arm decodes no pixel at all.
 pub fn frame_size(path: &Path) -> Result<(usize, usize)> {
+    frame_size_turned(path, 0)
+}
+
+/// [`frame_size`] in the frame the photographer's own quarter turns produce.
+///
+/// **Not yet wired to the XMP aspect supplier** (`pipeline::photo_frame_aspect`
+/// still calls the un-turned door). The write side's `s = W/H` and the
+/// sidecar's declared `tiff:ImageWidth/ImageLength` must agree, and which way
+/// Lightroom writes those for a ROTATED frame is the measurement registered at
+/// `xmp::FrameAspect` — turning our half alone would move every portrait
+/// user's radial on a guess. R27 item A7; it opens the moment that one
+/// portrait export lands.
+pub fn frame_size_turned(path: &Path, quarter_turns: u8) -> Result<(usize, usize)> {
     if !is_raw(path) {
         use image::ImageDecoder as _;
         // baked-by-construction: the `is_raw` gate above is this function's
@@ -1041,7 +1071,10 @@ pub fn frame_size(path: &Path) -> Result<(usize, usize)> {
         );
         let (w, h) = decoder.dimensions();
         let (w, h) = (w as usize, h as usize);
-        return Ok(if transposes { (h, w) } else { (w, h) });
+        let (w, h) = if transposes { (h, w) } else { (w, h) };
+        // …then the user's own turn, on the already-oriented frame — the same
+        // two-step the RAW arm below folds into one composed orientation.
+        return Ok(if quarter_turns % 2 == 1 { (h, w) } else { (w, h) });
     }
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
@@ -1057,15 +1090,16 @@ pub fn frame_size(path: &Path) -> Result<(usize, usize)> {
         Ok((md, raw))
     })?;
     let d = default_crop(&raw).d;
-    Ok(if orientation_transposes(raw_orientation_of(&md)) {
-        (d.h, d.w)
-    } else {
-        (d.w, d.h)
-    })
+    let orientation =
+        crate::render::compose_orientation(raw_orientation_of(&md), quarter_turns);
+    Ok(if orientation_transposes(orientation) { (d.h, d.w) } else { (d.w, d.h) })
 }
 
-/// Does this EXIF orientation swap width and height in the display frame?
-fn orientation_transposes(o: rawler::Orientation) -> bool {
+/// Does this orientation swap width and height in the display frame?
+/// `pub(crate)`: the render side's quarter-turn contract test asserts that
+/// THIS predicate and `render::oriented`'s actual output agree for all eight
+/// states — two modules, one answer, checked rather than assumed.
+pub(crate) fn orientation_transposes(o: rawler::Orientation) -> bool {
     matches!(
         o,
         rawler::Orientation::Rotate90
@@ -1396,7 +1430,7 @@ const NEUTRAL_PREVIEW_EDGE: u32 = 2048;
 /// confident "no base look". [`embedded_preview`] — the estimator's own door —
 /// therefore keeps the strict "camera pixels or nothing" contract and never
 /// comes here.
-fn neutral_rendition(path: &Path) -> Result<DynamicImage> {
+fn neutral_rendition(path: &Path, quarter_turns: u8) -> Result<DynamicImage> {
     eprintln!(
         "⚠ {} carries no embedded preview or thumbnail (its format does not store one), so \
          Autoshop is showing its own neutral develop instead of the camera's rendering",
@@ -1404,7 +1438,10 @@ fn neutral_rendition(path: &Path) -> Result<DynamicImage> {
     );
     crate::render::render_to_image(
         path,
-        &crate::recipe::EditRecipe::default(),
+        // NEUTRAL except for the turn: the develop must land in the same frame
+        // as an extracted rendition would have, and `render_to_image` is the
+        // one place that applies the composed orientation.
+        &crate::recipe::EditRecipe { quarter_turns, ..Default::default() },
         None,
         Some(NEUTRAL_PREVIEW_EDGE),
     )
@@ -1418,7 +1455,24 @@ fn neutral_rendition(path: &Path) -> Result<DynamicImage> {
 
 /// Decode a RAW file: embedded preview + metadata + histogram. Reads the file
 /// only; never writes near the source.
+///
+/// The EXIF orientation only — the door for a caller that holds no recipe (the
+/// `decode` CLI command, the style-index scan of a foreign library). A caller
+/// that DOES hold one takes [`decode_raw_turned`].
 pub fn decode_raw(path: &Path) -> Result<Decoded> {
+    decode_raw_turned(path, 0)
+}
+
+/// [`decode_raw`] with the photographer's own quarter turns folded in
+/// ([`crate::render::compose_orientation`]), so `Meta`'s display dims and the
+/// oriented preview describe the frame the render and the export will produce
+/// — not the one the camera happened to write.
+///
+/// A SEPARATE entry point rather than a parameter on `decode_raw` because most
+/// callers genuinely have no recipe to read a turn from, and defaulting them
+/// to 0 at each site is how the pre-v0.30 orientation drift happened. Here the
+/// turn is impossible to forget: the un-turned door SAYS 0 in one place.
+pub fn decode_raw_turned(path: &Path, quarter_turns: u8) -> Result<Decoded> {
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
     let decoder = decoder_for(path, &src)?;
@@ -1452,9 +1506,10 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
         decoder.raw_metadata(&src, &params).map_err(|e| anyhow!("raw_metadata: {e}"))
     })?;
     // Which way is up: EXIF tag 0x0112 off the metadata already in hand, NOT
-    // the dummy raw's hard-coded field (see [`raw_orientation_of`]). Free —
-    // `md` is decoded one line above.
-    let orientation = raw_orientation_of(&md);
+    // the dummy raw's hard-coded field (see [`raw_orientation_of`]), COMPOSED
+    // with the photographer's quarter turns (R27). Free — `md` is decoded one
+    // line above, and the composition is a bit-twiddle.
+    let orientation = crate::render::compose_orientation(raw_orientation_of(&md), quarter_turns);
 
     // `dummy = true`: populate dimensions / WB / levels without decompressing
     // the full sensor data — we only need the structural metadata here.
@@ -1509,7 +1564,10 @@ pub fn decode_raw(path: &Path) -> Result<Decoded> {
             // no reason. Order matters — the decoder borrows the source.
             drop(decoder);
             drop(src);
-            neutral_rendition(path)?
+            // The stand-in develops through `render_to_image`, which applies
+            // the COMPOSED orientation itself — so it is handed the turn, not
+            // oriented afterwards (that would turn it twice).
+            neutral_rendition(path, quarter_turns)?
         }
     };
     // The DELIVERED pixels are the embedded preview, and its dims are the
@@ -1621,18 +1679,29 @@ pub fn embedded_xmp(path: &Path) -> Result<Option<String>> {
 /// Just the embedded preview, skipping metadata/histogram — for the UI grid and
 /// before/after, where only the image is needed.
 pub fn preview_only(path: &Path) -> Result<DynamicImage> {
+    preview_only_turned(path, 0)
+}
+
+/// [`preview_only`] in the frame the photographer's quarter turns produce —
+/// what the gallery grid and the web thumbnails show, so a rotated photo reads
+/// the way the export will.
+pub fn preview_only_turned(path: &Path, quarter_turns: u8) -> Result<DynamicImage> {
     if !is_raw(path) {
         // baked-by-construction: the !is_raw arm of preview_only.
-        return load_image(path);
+        let img = load_image(path)?;
+        return Ok(crate::render::oriented(
+            img,
+            crate::render::quarter_turn_orientation(quarter_turns),
+        ));
     }
     // A4: a format that embeds no rendition (the ORF class — see
     // `usable_rendition`) is DEGRADED to our own neutral develop, with a word
     // about it, instead of failing. This is the door the gallery grid and the
     // web thumbnails use, and the old error blanked their cells after three
     // silent retries (`bin/gui/workers.rs`), which reads as a broken file.
-    match camera_rendition(path)? {
+    match camera_rendition(path, quarter_turns)? {
         Some(img) => Ok(img),
-        None => neutral_rendition(path),
+        None => neutral_rendition(path, quarter_turns),
     }
 }
 
@@ -1653,7 +1722,7 @@ pub fn preview_only(path: &Path) -> Result<DynamicImage> {
 /// [`raw_orientation_of`] on the RAW's metadata — strictly cheaper than the
 /// dummy `raw_image` this used to build, and the only field of it we ever
 /// read was the one rawler hard-codes.
-fn camera_rendition(path: &Path) -> Result<Option<DynamicImage>> {
+fn camera_rendition(path: &Path, quarter_turns: u8) -> Result<Option<DynamicImage>> {
     guard_tiff_chain(path)?;
     let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
     let decoder = decoder_for(path, &src)?;
@@ -1680,7 +1749,10 @@ fn camera_rendition(path: &Path) -> Result<Option<DynamicImage>> {
         let md = decoder
             .raw_metadata(&src, &params)
             .map_err(|e| anyhow!("raw_metadata: {e}"))?;
-        Ok(Some(crate::render::oriented(img, raw_orientation_of(&md))))
+        Ok(Some(crate::render::oriented(
+            img,
+            crate::render::compose_orientation(raw_orientation_of(&md), quarter_turns),
+        )))
     })
 }
 
@@ -1696,10 +1768,19 @@ fn camera_rendition(path: &Path) -> Result<Option<DynamicImage>> {
 /// contract — a neutral develop standing in would make the camera-vs-neutral
 /// CDF comparison meaningless.
 pub fn embedded_preview(path: &Path) -> Result<Option<DynamicImage>> {
+    embedded_preview_turned(path, 0)
+}
+
+/// [`embedded_preview`] in the frame the photographer's quarter turns produce.
+/// The base-look estimator pairs it with a develop of the same photo, and a
+/// luma CDF is orientation-blind — but the two images are also compared for
+/// SIZE, and handing it the un-turned twin of a turned develop would be a
+/// silent frame disagreement in the one place this module exists to prevent.
+pub fn embedded_preview_turned(path: &Path, quarter_turns: u8) -> Result<Option<DynamicImage>> {
     if !is_raw(path) {
         return Ok(None);
     }
-    camera_rendition(path)
+    camera_rendition(path, quarter_turns)
 }
 
 fn compute_histogram(img: &DynamicImage) -> Histogram {
@@ -2405,6 +2486,36 @@ mod tests {
             (d.meta.width, d.meta.height),
             "Meta dims must describe the delivered preview"
         );
+        // R27 A10 — the photographer's own quarter turns, on the one file
+        // where the EXIF half is not `Normal`. `Rotate270 + 1 = Normal`, so
+        // ONE clockwise turn of a portrait ARW is a LANDSCAPE frame, and two
+        // turns bring the portrait back the other way up. This is the arm the
+        // pure-code contract test cannot reach: it proves the composed value
+        // travels from tag 0x0112 all the way to delivered pixels.
+        for (k, want_portrait) in [(1u8, false), (2, true), (3, false), (4, true)] {
+            let t = decode_raw_turned(p, k).unwrap_or_else(|e| panic!("decode +{k}: {e:#}"));
+            eprintln!("  +{k} quarter turns → {}x{}", t.meta.width, t.meta.height);
+            assert_eq!(
+                t.meta.height > t.meta.width,
+                want_portrait,
+                "+{k} quarter turns gave {}x{}",
+                t.meta.width,
+                t.meta.height
+            );
+            assert_eq!(
+                (t.preview.width() as usize, t.preview.height() as usize),
+                (t.meta.width, t.meta.height),
+                "+{k}: Meta dims must still describe the delivered preview"
+            );
+        }
+        assert_eq!(
+            frame_size_turned(p, 1).expect("frame_size +1"),
+            {
+                let (w, h) = frame_size(p).expect("frame_size");
+                (h, w)
+            },
+            "one quarter turn must transpose the develop frame"
+        );
     }
 
     /// v0.32.0 — the develop window sits on the DefaultCrop rectangle, not on
@@ -2888,6 +2999,47 @@ mod tests {
                 orientation_transposes(orient),
                 fh > fw || rendered.height() > rendered.width(),
                 "{name}: orientation {orient:?} disagrees with the {fw}x{fh} frame's aspect"
+            );
+            // R27 A10 — and the photographer's own quarter turns compose with
+            // whatever that make wrote into 0x0112. Metadata-only for all four
+            // turns (no second develop), plus ONE capped turned render so the
+            // claim is anchored in real pixels rather than in the predicate.
+            for k in 0u8..4 {
+                let (tw, th) = frame_size_turned(path, k)
+                    .unwrap_or_else(|e| panic!("{name}: frame_size_turned({k}) failed — {e:#}"));
+                let want = if k % 2 == 1 { (fh, fw) } else { (fw, fh) };
+                assert_eq!(
+                    (tw, th),
+                    want,
+                    "{name}: {orient:?} + {k} quarter turns says {tw}x{th}, but composing \
+                     {orient:?} with {k} turns transposes {}",
+                    if k % 2 == 1 { "once" } else { "not at all" }
+                );
+                assert_eq!(
+                    orientation_transposes(crate::render::compose_orientation(orient, k)),
+                    th > tw,
+                    "{name}: the composed orientation and the {tw}x{th} frame disagree"
+                );
+            }
+            let turned = crate::render::render_to_image(
+                path,
+                &crate::recipe::EditRecipe { quarter_turns: 1, ..Default::default() },
+                None,
+                Some(256),
+            )
+            .unwrap_or_else(|e| panic!("{name}: turned render failed — {e:#}"));
+            let flat = crate::render::render_to_image(
+                path,
+                &crate::recipe::EditRecipe::default(),
+                None,
+                Some(256),
+            )
+            .unwrap_or_else(|e| panic!("{name}: capped render failed — {e:#}"));
+            assert_eq!(
+                (turned.width(), turned.height()),
+                (flat.height(), flat.width()),
+                "{name}: a quarter turn must transpose the rendered pixels, not just the \
+                 declared dims"
             );
 
             let wb = crate::render::as_shot_wb(path);

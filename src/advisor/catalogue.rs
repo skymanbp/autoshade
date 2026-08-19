@@ -400,7 +400,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 63] = [
+pub const RECIPE_CONTROLS: [Control; 64] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -985,6 +985,31 @@ pub const RECIPE_CONTROLS: [Control; 63] = [
         crs: CrsKey::Attr("CropAngle"),
         tier: Some(Tier::Rendered),
         purpose: "clockwise straighten angle in degrees, for a tilted horizon",
+    },
+    Control {
+        name: "quarter_turns",
+        shape: Shape::Integer,
+        range: Some((0.0, 3.0)),
+        neutral: "0 = no turn",
+        // ENGINE-ONLY, and for a stronger reason than `coord_era`'s: the model
+        // is shown the photo ALREADY in its display frame, so "how far should
+        // this be turned" is a question whose answer it can only get wrong —
+        // and getting it wrong turns the user's crop and every mask with it.
+        // Which way is up is the photographer's call, taken with a toolbar
+        // button, not a proposal.
+        engine_only: true,
+        // NOT `CropAngle` (that is `straighten_deg`, ±45): Lightroom expresses
+        // a quarter turn as `tiff:Orientation`, which this build does not yet
+        // write at all (R27 item A8, gated on the portrait measurement at
+        // `xmp::FrameAspect`). So the turn is engine-side only for now, and a
+        // sidecar we write describes the UNTURNED frame — registered in
+        // ROADMAP, not silently implied by a `crs:` key that means something
+        // else.
+        crs: CrsKey::None,
+        tier: None,
+        purpose: "engine bookkeeping: the photographer's own clockwise quarter turns (0..3), \
+                  composed with the camera's EXIF orientation into the one frame the render, \
+                  the crop and every mask geometry live in",
     },
     Control {
         name: "crop",
@@ -2115,6 +2140,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         grain_size,
         grain_rough,
         straighten_deg,
+        quarter_turns,
         crop,
         tone_curve,
         red_curve,
@@ -2180,6 +2206,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "grain_size" => GlobalValue::Num(*grain_size),
         "grain_rough" => GlobalValue::Num(*grain_rough),
         "straighten_deg" => GlobalValue::Num(*straighten_deg),
+        "quarter_turns" => GlobalValue::Int(u32::from(*quarter_turns)),
         "crop" => GlobalValue::Crop(crop.as_ref()),
         "tone_curve" => GlobalValue::Curve(tone_curve),
         "red_curve" => GlobalValue::Curve(red_curve),
@@ -2461,7 +2488,17 @@ mod tests {
     #[test]
     fn registry_serde_and_schema_agree_on_both_mirrors() {
         let schema = edit_recipe_schema();
-        let recipe = serde_keys(&serde_json::to_value(EditRecipe::default()).unwrap());
+        // The probe must show the FULL serde shape, not the default one:
+        // `quarter_turns` carries `skip_serializing_if` (its doc says why — an
+        // un-rotated recipe stays byte-identical to what the previous build
+        // wrote, so R21's structure fingerprint needs no re-archive), and a
+        // DEFAULT value would hide it from this tripwire — letting the NEXT
+        // skipped field escape the registry in silence. Every skip-if-default
+        // field gets a non-default value here. The skip itself is pinned
+        // separately, by
+        // `recipe::an_unrotated_recipe_serialises_exactly_as_the_previous_build_wrote_it`.
+        let probe = EditRecipe { quarter_turns: 1, ..EditRecipe::default() };
+        let recipe = serde_keys(&serde_json::to_value(probe).unwrap());
         assert_same(
             "EditRecipe",
             ("the registry", &names(&RECIPE_CONTROLS, None)),
@@ -2894,6 +2931,14 @@ mod tests {
                 "post_crop_vignette_mid",
                 "post_crop_vignette_round",
                 "post_crop_vignette_style",
+                // R27 adds a SIXTH kind: `quarter_turns` is the
+                // photographer's own hand on the frame. The model is shown the
+                // photo ALREADY in its display frame, so "how far should this
+                // be turned" is a question it can only answer by guessing —
+                // and a required schema field would answer 0 on every Refine,
+                // silently un-rotating the photo AND leaving the crop and the
+                // masks turned. Which way is up is a toolbar button.
+                "quarter_turns",
                 // R25 P8: `schema_era` joins for `coord_era`'s reason exactly
                 // — a declaration ABOUT the file the recipe came from, which
                 // the model has never seen and could only guess at. A wrong

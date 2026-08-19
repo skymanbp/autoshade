@@ -169,6 +169,31 @@ impl AutoshopApp {
         }
     }
 
+    /// R27 — the pixel workers (heal, generative fill) take the PHOTO PATH and
+    /// re-develop it through `render::source_pixels`, which applies the EXIF
+    /// orientation and NOTHING else, while the mask exported from the canvas
+    /// is drawn in the frame `recipe.quarter_turns` produces. On a turned
+    /// photo those are different frames, so the repair would land on the wrong
+    /// pixels — and it lands BAKED, into a master no slider can undo.
+    ///
+    /// Refused with a reason rather than approximated. Threading the turn
+    /// through `source_pixels` is its own change: that function is THE
+    /// raw-vs-baked dispatch and denoise / match / reverse-fit share it.
+    /// Registered limitation (ROADMAP, R27 Batch-2 ②).
+    ///
+    /// Returns `true` when the caller must stop.
+    fn refuse_pixel_work_on_a_turned_photo(&mut self) -> bool {
+        if self.recipe.quarter_turns.is_multiple_of(4) {
+            return false;
+        }
+        self.status = tr(
+            self.lang,
+            "this photo is turned, and pixel repairs still work on the un-turned frame — turn it back to 0 first",
+        )
+        .into();
+        true
+    }
+
     /// Generative fill: regenerate the painted area (gpt-image), composite onto
     /// the source, save to ./out. Runs on a worker thread.
     pub(crate) fn start_fill(&mut self) {
@@ -176,7 +201,7 @@ impl AutoshopApp {
         // PNG), not the raw negative — otherwise a fill on the AI image would
         // splice in original pixels.
         let Some(path) = self.active_source_path() else { return };
-        if self.busy {
+        if self.busy || self.refuse_pixel_work_on_a_turned_photo() {
             return;
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
@@ -251,7 +276,7 @@ impl AutoshopApp {
     pub(crate) fn start_heal(&mut self, use_mask: bool) {
         // Heal the ACTIVE variant's pixels (Generated → its origin PNG).
         let Some(path) = self.active_source_path() else { return };
-        if self.busy {
+        if self.busy || self.refuse_pixel_work_on_a_turned_photo() {
             return;
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)

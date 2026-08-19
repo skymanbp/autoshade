@@ -237,8 +237,16 @@ impl AutoshopApp {
                     } else {
                         None
                     };
-                    let thumb =
-                        autoshop::decode::preview_only(&path)?.thumbnail(THUMB_EDGE, THUMB_EDGE);
+                    // In the frame the develop asks for, so a rotated photo
+                    // reads the same way in the grid as on the canvas and in
+                    // the export. The same number keys the cache file above —
+                    // read once here rather than threaded from it, because the
+                    // cache may legitimately be absent (unstattable source).
+                    let thumb = autoshop::decode::preview_only_turned(
+                        &path,
+                        autoshop::store::saved_quarter_turns(&path),
+                    )?
+                    .thumbnail(THUMB_EDGE, THUMB_EDGE);
                     if let Some(p) = &cache {
                         save_thumb_cache(p, &thumb); // best-effort write-through
                     }
@@ -793,6 +801,13 @@ impl AutoshopApp {
                                 self.toast(ToastKind::Error, t);
                             } else {
                                 self.source_preview = Some(base.clone());
+                                // Fresh decode = the EXIF display frame,
+                                // i.e. turn 0 (`render_to_image` is given
+                                // a NEUTRAL recipe). Declaring it here is
+                                // what lets `sync_base_turns` put the plate
+                                // into the recipe's own frame on the next
+                                // frame — one mover for every path (R27).
+                                self.base_turns = 0;
                                 if active_source {
                                     let curve = self.recipe.base_curve.clone();
                                     self.set_before(ctx, &base, &curve);
@@ -875,6 +890,13 @@ impl AutoshopApp {
                             // below — the Before pane carries the canvas
                             // recipe's own base_curve.
                             self.source_preview = Some(base.clone());
+                                // Fresh decode = the EXIF display frame,
+                                // i.e. turn 0 (`render_to_image` is given
+                                // a NEUTRAL recipe). Declaring it here is
+                                // what lets `sync_base_turns` put the plate
+                                // into the recipe's own frame on the next
+                                // frame — one mover for every path (R27).
+                                self.base_turns = 0;
                             self.base_preview = Some(base);
                             let RestoredDevelop {
                                 saved,

@@ -308,6 +308,41 @@ pub struct EditRecipe {
     // --- Geometry (optional) ------------------------------------------------
     /// Clockwise straighten angle in degrees, e.g. -2.5..=2.5 for horizons.
     pub straighten_deg: f32,
+    /// How many CLOCKWISE quarter turns the PHOTOGRAPHER asked for, on top of
+    /// whatever the camera's EXIF orientation already says. 0..=3, 0 = none.
+    ///
+    /// Composed with the EXIF value into ONE
+    /// [`crate::render::compose_orientation`] result, which is what every
+    /// orientation consumer reads — the engine's eight-state dihedral group is
+    /// closed under composition, so a user turn on a `Transpose`-oriented file
+    /// lands on a state `oriented`/`orient_point` already handle. The
+    /// coordinates in [`crop`](Self::crop) and every `masks` geometry are
+    /// stored in the frame this turn PRODUCES, exactly as they are stored in
+    /// the frame the EXIF orientation produces (see [`COORD_ERA`]).
+    ///
+    /// Deliberately NOT folded into [`coord_era`](Self::coord_era) — the
+    /// argument that field already carries, one step further: `coord_era` is
+    /// which frame the stored numbers are IN (a storage epoch, migrated once
+    /// and never again), `quarter_turns` is what the photographer ASKED FOR (a
+    /// live edit, changed as often as any slider). Merging them would make an
+    /// undo of a rotation look like a re-migration.
+    ///
+    /// **Serialisation: skipped when zero**, unlike `coord_era`/`schema_era`,
+    /// which are always written. The difference is not style: an ABSENT era
+    /// key means something DIFFERENT from the value a fresh recipe stamps
+    /// (absent = legacy, so it must always be spelled out), whereas an absent
+    /// `quarter_turns` means exactly 0, which is what it would have written.
+    /// Skipping is therefore lossless, and it buys two things. (1) A recipe
+    /// nobody rotated stays BYTE-IDENTICAL to what v0.32 wrote, so the R21
+    /// deleted-version registry's structural arm (`store::recipe_struct_hash`
+    /// re-serialises the whole recipe) keeps matching and needs no re-archive
+    /// pass. (2) The class-① forward break that `deny_unknown_fields` above
+    /// makes unavoidable is confined to recipes that actually carry a turn: a
+    /// v0.32 exe still reads every un-rotated v0.33 `recipe.json`, and hard-
+    /// rejects — by field name — exactly the ones it would have rendered
+    /// sideways.
+    #[serde(skip_serializing_if = "no_quarter_turn")]
+    pub quarter_turns: u8,
     /// Optional crop as normalised [0,1] coordinates of the kept region.
     pub crop: Option<Crop>,
 
@@ -415,6 +450,15 @@ fn schema_era_legacy() -> u32 {
     0
 }
 
+/// `skip_serializing_if` predicate for [`EditRecipe::quarter_turns`] — see
+/// that field's doc for why THIS field is skipped when the era stamps beside
+/// it never are. Pinned by
+/// `an_unrotated_recipe_serialises_exactly_as_the_previous_build_wrote_it`.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's predicate signature
+fn no_quarter_turn(k: &u8) -> bool {
+    *k == 0
+}
+
 impl Default for EditRecipe {
     fn default() -> Self {
         Self {
@@ -478,6 +522,7 @@ impl Default for EditRecipe {
             // must not be written into somebody's sidecar.
             passthrough: std::collections::BTreeMap::new(),
             straighten_deg: 0.0,
+            quarter_turns: 0,
             crop: None,
             tone_curve: Vec::new(),
             red_curve: Vec::new(),
@@ -1473,6 +1518,12 @@ impl EditRecipe {
         self.grain_rough = c(self.grain_rough, 0.0, 100.0);
         self.lens_profile.clamp();
         self.straighten_deg = c(self.straighten_deg, -45.0, 45.0);
+        // A quarter turn is CYCLIC, so out-of-domain folds rather than
+        // saturating: 4 is not "the largest legal turn", it is no turn at all,
+        // and clamping it to 3 would invent a three-quarter rotation nobody
+        // asked for. The rest of this function clamps because its ranges are
+        // intervals; this one is a residue class.
+        self.quarter_turns %= 4;
         self.confidence = c(self.confidence, 0.0, 1.0);
         self.temperature_k = match self.temperature_k {
             // Ceiling matches the render engine's blackbody fit validity (kelvin_to_rgb
@@ -2495,6 +2546,62 @@ mod tests {
         // A mask WITHOUT a "range" key (pre-range recipes) defaults to None.
         let old_mask = r#"{ "masks": [ { "name": "sky" } ] }"#;
         assert_eq!(serde_json::from_str::<EditRecipe>(old_mask).unwrap().masks[0].range, None);
+    }
+
+    /// The serialisation choice `quarter_turns` makes and the two things it
+    /// buys (R27 A1) — see the field's doc for the argument.
+    ///
+    /// 1. An UN-ROTATED recipe's JSON carries no `quarter_turns` key at all,
+    ///    so `store::recipe_struct_hash` (which re-serialises the whole
+    ///    recipe) still answers exactly what the previous build's bytes
+    ///    answered. The R21 deleted-version registry's STRUCTURAL arm
+    ///    therefore keeps matching, and no re-archive pass is needed — unlike
+    ///    v0.31.0, which had to describe one.
+    /// 2. A ROTATED one does carry it, which is precisely the recipe an
+    ///    older exe must refuse (`deny_unknown_fields`) rather than render
+    ///    sideways.
+    ///
+    /// MUTATION THIS CATCHES: delete the `skip_serializing_if` attribute and
+    /// assertion (1) fails — every v0.33 recipe.json would then differ from
+    /// its v0.32 self, breaking the fingerprint for photos nobody rotated.
+    #[test]
+    fn an_unrotated_recipe_serialises_exactly_as_the_previous_build_wrote_it() {
+        let neutral = serde_json::to_string(&EditRecipe::default()).unwrap();
+        assert!(
+            !neutral.contains("quarter_turns"),
+            "an un-rotated recipe must be byte-identical to what v0.32 wrote: {neutral}"
+        );
+        let turned = serde_json::to_string(&EditRecipe { quarter_turns: 1, ..Default::default() })
+            .unwrap();
+        assert!(turned.contains("\"quarter_turns\":1"), "{turned}");
+        // …and reads back, so the skip is lossless in both directions.
+        assert_eq!(serde_json::from_str::<EditRecipe>(&turned).unwrap().quarter_turns, 1);
+        // Absent = 0. The container's `#[serde(default)]` is enough here (the
+        // legacy meaning and the type's default AGREE), which is exactly why
+        // this field carries no `coord_era`-style field-level default.
+        assert_eq!(
+            serde_json::from_str::<EditRecipe>(r#"{"version":2}"#).unwrap().quarter_turns,
+            0
+        );
+        // A turn is an EDIT, not bookkeeping: it must light ● and outrank a
+        // sidecar, or a rotated photo would look clean and never be saved.
+        assert!(!EditRecipe { quarter_turns: 1, ..Default::default() }.is_noop());
+    }
+
+    /// A quarter turn is a RESIDUE CLASS, so `clamp` folds it instead of
+    /// saturating — 4 means "no turn", not "the largest legal turn".
+    ///
+    /// MUTATION THIS CATCHES: replace `%= 4` with `= self.quarter_turns.min(3)`
+    /// and a recipe carrying 4 (a hand edit, a foreign writer) renders a
+    /// three-quarter rotation nobody asked for, with the crop and every mask
+    /// left where they were.
+    #[test]
+    fn an_out_of_domain_quarter_turn_folds_rather_than_saturating() {
+        for (raw, want) in [(0u8, 0u8), (3, 3), (4, 0), (7, 3), (255, 3)] {
+            let mut r = EditRecipe { quarter_turns: raw, ..Default::default() };
+            r.clamp();
+            assert_eq!(r.quarter_turns, want, "clamp({raw})");
+        }
     }
 
     /// R25 P5's forward-compatibility contract — the THIRD shape this

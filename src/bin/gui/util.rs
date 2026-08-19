@@ -1499,12 +1499,20 @@ pub(crate) fn thumb_cache_file(src: &std::path::Path) -> Option<PathBuf> {
     // thumb LOOKS like (v2 = EXIF orientation applied to baked images;
     // v3 = the same for RAW, where the orientation FIRST TAKES EFFECT — every
     // v2 cache entry for a portrait ARW is a sideways thumbnail, because
-    // rawler reported `Normal` for it) — an unchanged file otherwise keeps
-    // serving its stale sideways thumbnail.
-    3u32.hash(&mut h);
+    // rawler reported `Normal` for it; v4 = the composed orientation, i.e.
+    // v3 plus the photographer's own `quarter_turns`, R27) — an unchanged file
+    // otherwise keeps serving its stale sideways thumbnail.
+    4u32.hash(&mut h);
     std::path::absolute(src).unwrap_or_else(|_| src.to_path_buf()).hash(&mut h);
     meta.modified().ok().hash(&mut h);
     meta.len().hash(&mut h);
+    // …and the turn itself, not just the salt: a rotate changes NOTHING about
+    // the source file, so (path, mtime, size) would keep hitting the sideways
+    // entry forever. This is the one part of the key that comes from the
+    // develop store rather than the photo (`store::saved_quarter_turns` —
+    // cheap, side-effect-free, fails toward "no turn").
+    let turns = autoshop::store::saved_quarter_turns(src);
+    turns.hash(&mut h);
     Some(dir.join(format!("{:016x}.jpg", h.finish())))
 }
 

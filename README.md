@@ -90,7 +90,9 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   / brush / AI-selected — rotatable radials, add/subtract/intersect shape
   composition, per-mask eye toggle & duplicate, per-mask point curves,
   brush-editable AI rasters with feather/expand/contract and full-resolution
-  guided refine), crop & straighten, spot heal, reverse-fit, before/after,
+  guided refine), crop & straighten, 90° rotation (⭯/⭮ — the crop, every mask
+  and every painted raster turn with the frame, one undo each), spot heal,
+  reverse-fit, before/after,
   per-photo version snapshots and variant strips that survive a reopen
   (`variants.json`), and Ctrl+S to a Lightroom XMP. English / 中文.
 - **Web UI** — `serve` opens a local gallery: pick a photo, Analyze, tweak the

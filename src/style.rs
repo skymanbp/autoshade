@@ -27,8 +27,11 @@ const WEIGHTS: [f32; NDIM] = [
 ];
 /// Slider keys shown as the reference (crs key → label). Tint/Saturation/Dehaze
 /// were added in index v2 so the style blend captures the user's colour habits.
-/// Bump when the FEATURE semantics change (v3: display-frame Meta dims).
-const CURRENT_INDEX_VERSION: u32 = 3;
+/// Bump when the FEATURE semantics change (v3: display-frame Meta dims, i.e.
+/// the EXIF orientation reaching the aspect feature at last; v4: the COMPOSED
+/// orientation — v3 plus the photographer's own `quarter_turns`, R27, so a
+/// hand-rotated shot is retrieved as the portrait/landscape it now IS).
+const CURRENT_INDEX_VERSION: u32 = 4;
 // Load-time bounds: an index is disk input that reaches the model prompt, so
 // its size, shape and values get invariants at the door (there is no
 // exfiltration channel — the response is strict json_schema — but an
@@ -311,7 +314,17 @@ impl StyleIndex {
                     // Destructured, not bound whole: `preview` (~181 MB at
                     // 61 MP) is never read here, yet bound as `d` it stayed
                     // alive across the sidecar read below.
-                    let ex = match decode::decode_raw(raw) {
+                    // In the frame the photo's own saved develop asks for
+                    // (R27): the aspect feature is a retrieval discriminator
+                    // with weight 1.5, so indexing a hand-rotated shot as the
+                    // landscape it no longer is biases every neighbour it
+                    // answers. `saved_quarter_turns` is one small read beside
+                    // a ~1 s decode, and answers 0 for the common case (a
+                    // foreign Lightroom library this app has never developed).
+                    let ex = match decode::decode_raw_turned(
+                        raw,
+                        crate::store::saved_quarter_turns(raw),
+                    ) {
                         Ok(decode::Decoded { meta, histogram, .. }) => {
                             let feat = feature_vector(&meta, &histogram);
                             // An unreadable sidecar must SKIP the photo, not

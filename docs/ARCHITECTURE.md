@@ -540,12 +540,45 @@ Orientation::Normal, //cam.orientation, // TODO fixme`), so until v0.30.0 a
 portrait ARW was displayed, developed and exported sideways even though the
 orientation stage had been at the head of the chain since 55e7e07. The real
 value rides in `RawMetadata.exif` (IFD0 tag `0x0112`), and
-`decode::raw_orientation_of` is now the single accessor all three consumers
-read — the render/export hook in `render_to_image_in`, `decode_raw`'s display
-dimensions and preview transpose, and `camera_rendition`. A missing tag answers
+`decode::raw_orientation_of` is now the single accessor all ~~three~~ **five**
+consumers read — the render/export hook in `render_to_image_in`, `decode_raw`'s
+display dimensions and preview transpose, `camera_rendition`, `frame_size`
+(added v0.32.0, and the one that feeds the LR radial projection's aspect) and
+`pipeline::migrate_recipe_coord_frame`'s path-based twin. A missing tag answers
 `Normal` where rawler's own `from_tiff` answers `Unknown`; the two are the same
 no-op on the pixel, coordinate and dimension chains, which is asserted rather
 than assumed (`unknown_and_normal_are_the_same_no_op`).
+
+**…and the photographer's own quarter turns compose with it into ONE
+orientation (v0.33 / R27).** `EditRecipe.quarter_turns` (0..3, clockwise) is
+what the toolbar's ⭯/⭮ write, and `render::compose_orientation` folds it into
+the EXIF state before any consumer sees either. This works because the eight
+EXIF states ARE the dihedral group of the square and are closed under
+composition: a user turn on top of a `Transpose` file lands on a state
+`oriented` / `orient_point` / `orient_recipe_coords` already handle, so the
+engine gains **no second rotation stage** — the property
+`compose_orientation_is_the_composition_of_the_two_coordinate_maps` checks
+exhaustively over all 9 × 4 pairs. `quarter_turns` is a separate field from
+`coord_era` on the same argument `coord_era` is separate from `version`, one
+step further: `coord_era` is which frame the stored numbers are IN (a storage
+epoch, migrated once), `quarter_turns` is what the photographer ASKED FOR (a
+live edit, undone as easily as a slider). It is the only recipe field written
+`skip_serializing_if` — an absent era stamp means something different from a
+present zero, whereas an absent turn means exactly zero, so skipping is
+lossless AND keeps an un-rotated recipe byte-identical to what v0.32 wrote (R21's
+structure fingerprint therefore needs no re-archive pass, unlike v0.31.0's).
+`pipeline::rotate_recipe` is the one mover: geometry through
+`orient_recipe_coords` **by the delta, never the running total**, raster masks
+really turned (`image::rotate90` is lossless and these are our own PNGs — the
+`coord_era` migration could only disclose them because those files predated a
+frame nobody could re-derive) into freshly claimed names with the originals left
+in place, and the turn count last; a raster that cannot be turned refuses the
+whole operation rather than leaving a half-turned develop. Not yet turned: the
+XMP sidecar, which has no place for a quarter turn until `tiff:Orientation` is
+written (R27 A8, gated on one portrait Lightroom export), and a photo carrying
+BAKED pixels — a retouch/AI master is a raster on disk in the frame it was baked
+in, so the GUI refuses the turn with that reason on the button rather than
+turning the canvas out from under it.
 
 **And WHERE the frame starts comes from the DefaultCrop rectangle, not from the
 sensor corner (v0.32.0).** Block registration of eight Autoshop renders against
