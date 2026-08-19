@@ -2151,6 +2151,23 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             Some(b) => sample_gray_norm(b, nx, ny),
             None => 0.0,
         },
+        // Brush group: CARRIED, NOT RENDERED (R27 Batch-4, L-08). Weight 0
+        // everywhere, which is the SAME inert contract a raster mask with an
+        // unreadable file gets — and it is inert in both compositions: an
+        // `Add` component folds in as `1−(1−w)(1−0) = w` and a `Subtract` as
+        // `w·(1−0) = w`, so a correction that also holds a real gradient
+        // renders exactly the gradient. Nothing is invented.
+        //
+        // WHY, precisely: the geometry is fully measured (dab stream, frame,
+        // spacing law — see `MaskGeometry::Brush` and `BrushStroke::dabs`) and
+        // the alpha KERNEL is not. The file stores the stroke, never the
+        // alpha. Drawing on the only published kernel — a third-party
+        // decompile reconstruction — would reshape every imported brush mask
+        // on a guess, which is the decision `MaskGeometry::Radial::roundness`
+        // was kept out of the renderer for. Both disclosure channels name this
+        // (`MaskImportReason::BrushCarried`, `MaskLossReason::BrushCarried`),
+        // so it is a stated limit and not a silent zero.
+        MaskGeometry::Brush { .. } => 0.0,
     }
 }
 
@@ -4328,6 +4345,14 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
         }
         // Raster masks carry no coordinates — see the doc comment.
         MaskGeometry::Bitmap { .. } => {}
+        // A brush group DOES carry coordinates — thousands of them, inside
+        // `crs:Dabs` — and they are deliberately NOT turned. The stream is
+        // carried VERBATIM so a republished sidecar is byte-faithful to what
+        // Lightroom wrote; rewriting every dab would forfeit exactly that, to
+        // migrate a geometry nothing renders yet. So the brush shares the
+        // raster's honest status here: `recipe_has_raster_masks` counts it, and
+        // the migration's disclosure says the mask could not be turned.
+        MaskGeometry::Brush { .. } => {}
     };
     for m in r.masks.iter_mut() {
         turn(&mut m.mask);
@@ -4365,21 +4390,37 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
 pub fn recipe_has_frame_coords(r: &EditRecipe) -> bool {
     r.crop.is_some()
         || r.masks.iter().any(|m| {
-            let parametric = |g: &MaskGeometry| !matches!(g, MaskGeometry::Bitmap { .. });
+            // Brush joins Bitmap on the NOT-turnable side: `orient_recipe_
+            // coords` leaves its dab stream alone on purpose, so counting it
+            // here would claim the migration moved something it did not.
+            // `recipe_has_raster_masks` is what speaks for both of them.
+            let parametric = |g: &MaskGeometry| {
+                !matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. })
+            };
             parametric(&m.mask)
                 || m.components.iter().any(|c| parametric(&c.geometry))
                 || matches!(m.range, Some(RangeMask::Color { .. }))
         })
 }
 
-/// Does this recipe carry a RASTER mask — the one geometry the `coord_era`
-/// migration cannot turn (see [`orient_recipe_coords`])? Drives the honest
-/// half of the migration's disclosure.
+/// Does this recipe carry a geometry the `coord_era` migration cannot turn
+/// (see [`orient_recipe_coords`])? Drives the honest half of the migration's
+/// disclosure.
+///
+/// TWO members, not one: a raster [`MaskGeometry::Bitmap`] (the pixels are a
+/// FILE, and rewriting someone's PNG is not a coordinate migration) and a
+/// [`MaskGeometry::Brush`] group (its dabs are carried VERBATIM so the sidecar
+/// round-trips byte-faithfully — turning them would forfeit that for a
+/// geometry nothing renders yet). The function keeps its raster NAME because
+/// that is what every call site and every disclosure string says; what it
+/// MEANS is "cannot be turned", and both members qualify for the same reason
+/// stated two different ways.
 pub fn recipe_has_raster_masks(r: &EditRecipe) -> bool {
-    r.masks.iter().any(|m| {
-        matches!(m.mask, MaskGeometry::Bitmap { .. })
-            || m.components.iter().any(|c| matches!(c.geometry, MaskGeometry::Bitmap { .. }))
-    })
+    let unturnable =
+        |g: &MaskGeometry| matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. });
+    r.masks
+        .iter()
+        .any(|m| unturnable(&m.mask) || m.components.iter().any(|c| unturnable(&c.geometry)))
 }
 
 /// In-place horizontal flip that stays in the image's OWN pixel type.
@@ -8311,6 +8352,72 @@ mod tests {
         let before = r.clone();
         orient_recipe_coords(&mut r, Orientation::Rotate270);
         assert_eq!(r, before, "the raster path must survive byte-for-byte");
+    }
+
+    /// R27 Batch-4 (L-08): a carried brush group draws NOTHING, anywhere.
+    ///
+    /// This is the assertion that turns "we have not measured the alpha
+    /// kernel yet" from a comment into a behaviour. Weight 0 is inert under
+    /// BOTH compositions — `Add` folds a component in as `1−(1−w)(1−0) = w`
+    /// and `Subtract` as `w·(1−0) = w` — so a correction that also holds a
+    /// real gradient renders exactly that gradient, and a brush-only
+    /// correction renders nothing rather than something invented.
+    ///
+    /// MUTATION-LINED: returning any non-zero constant from `mask_weight`'s
+    /// `Brush` arm fails here; so does answering `1.0`, which is the shape a
+    /// "just treat it as fully painted" shortcut would take.
+    #[test]
+    fn a_carried_brush_group_draws_nothing_anywhere() {
+        use crate::recipe::BrushStroke;
+        let g = MaskGeometry::Brush {
+            name: "Brush 1".into(),
+            blend_mode: 0,
+            value: 1.0,
+            inverted: false,
+            strokes: vec![BrushStroke {
+                value: 0.439815,
+                radius: 0.582157,
+                flow: 1.0,
+                center_weight: 0.0,
+                sync_id: "FA7459A9F5626F4881D7B730C3093F95".into(),
+                // `_DSC9583` Mask 7 -> Brush 1, stroke 1: dabs at
+                // (0.000684, 0.940004) and (0.113862, 0.987261), radius 0.5818.
+                dabs: "r 0.581835
+d 0.000684 0.940004
+r 0.581172
+d 0.113862 0.987261"
+                    .into(),
+            }],
+        };
+        // Sampled ON the dabs, at their rim, at the frame centre and at the
+        // corners: every one of them is a point a renderer WOULD paint.
+        for (nx, ny) in [
+            (0.0f32, 0.0f32),
+            (0.5, 0.5),
+            (0.000684, 0.940004),
+            (0.113862, 0.987261),
+            (0.4, 0.9),
+            (1.0, 1.0),
+        ] {
+            assert_eq!(
+                mask_weight(&g, nx, ny, None),
+                0.0,
+                "a carried brush must not draw at ({nx}, {ny})"
+            );
+        }
+        // And the migration treats it like a raster: carried verbatim for the
+        // sidecar round trip, so it is REPORTED as unturnable rather than
+        // quietly rewritten dab by dab.
+        use crate::recipe::LocalAdjustment;
+        let mut r = EditRecipe {
+            masks: vec![LocalAdjustment { mask: g, ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(recipe_has_raster_masks(&r), "a brush group cannot be turned either");
+        assert!(!recipe_has_frame_coords(&r), "so it must not claim to have been turned");
+        let before = r.clone();
+        orient_recipe_coords(&mut r, Orientation::Rotate270);
+        assert_eq!(r, before, "the dab stream must survive byte-for-byte");
     }
 
     /// Real-machine probe, never run in CI (it allocates gigabytes): the

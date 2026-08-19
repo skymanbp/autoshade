@@ -20,7 +20,13 @@ use crate::config::Config;
 pub struct SegmentOpts {
     pub python_bin: String,
     pub script: PathBuf,
-    /// `"subject"` (U²-Net salient object) or `"sky"` (SegFormer ADE20K).
+    /// `"subject"` (U²-Net salient object) or `"sky"` (OneFormer ADE20K
+    /// Swin-L). Both backends are licence-pinned on the Python side — see
+    /// `python/segment.py`'s module docstring: the sky model was SegFormer-B0
+    /// until R27 Batch-4, whose weights are licensed for "research or
+    /// evaluation purposes only", and the subject backend now names its rembg
+    /// session explicitly so an upstream default change cannot swap a
+    /// pay-to-use model into a public build.
     pub target: String,
 }
 

@@ -410,6 +410,101 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **画笔蒙版结构落地 + 分割许可证根修（2026-08-19，R27 Batch-4，未发版）** ——
+  L-08 由「登记不修」转正为**根实现**（用户裁决：最高质量、笔刷必须无损往返、
+  不许位图降级）。**一句话**：`Mask/Aggregate` + `Mask/Paint` 从此是一等几何，
+  **读进来、存进 recipe.json、原样写回 sidecar**；唯独**不渲染**——因为
+  sidecar 存的是**笔画**，从来不存 **alpha**，落笔核（硬度→衰减 + 逐 dab 累积律）
+  只能靠一次受控 LR 实验测出来，而那次实验尚在途中。这是**结构，不是渲染**。
+
+  **① 新几何 `MaskGeometry::Brush`（recipe.rs）**。按 F2 实测编码逐字承载：组级
+  `(MaskBlendMode, MaskValue, MaskInverted)` + `MaskName`，子级每条 `BrushStroke`
+  带 `MaskValue`/`Radius`/`Flow`/`CenterWeight`/`MaskSyncID` 与 **`crs:Dabs` 令牌流
+  （逐字符串携带，换行分隔）**。令牌语法 `r <f>` / `f <f>` / `h <f>` / `d <x> <y>`
+  四型（22,966 token / 382 组件，零畸形）写在类型文档里但**本轮不求值**。
+  **为什么是字符串而不是 `Vec<Dab>`**：唯一缺的是 alpha 核，先给流套一个结构等于
+  围着一个还没人写的渲染器把形状冻死；逐字承载则保证这期间往返精确。schema 变更
+  搭 v0.33 已有的破坏性变更（`deny_unknown_fields` 早已拒未来字段）。
+  **② 导入解锁**。带 Paint/Aggregate 的 correction 整条进来了——不再连同**旁边
+  那些引擎本来就画得出的参数化形状**一起丢掉（这正是 L-08 登记文本自己的抱怨：
+  全库 18 条 correction + 14 个可绘形状因邻居是笔刷而被扔）。有参数化形状时它作
+  base、笔刷组作 `MaskComponent`；纯笔刷 correction 则第一个组当 base。
+  **③ 写回**。`brush_mask_xml` 按实测形状重发 `Mask/Aggregate` + `Mask/Paint` +
+  `crs:Dabs`；数字走 `f32` 的 `Display`（最短往返表示），**不过 `local_fmt`/
+  `lr_num`**——这些值是从同一份 sidecar 抄进来的、从未参与运算，四舍五入等于替
+  摄影师改了他没改的数。`crs:MaskSyncID` 按 writer 既有规则重新铸造（**已接受的
+  代价**：Lightroom 给某条笔画的 ID 只活过一次保存，描述**笔画本身**的一切则每次
+  保存都活着）。
+  **④ 两向具名披露**。`MaskImportReason::BrushCarried` /
+  `MaskLossReason::BrushCarried`，英文一致为「brush mask(s) carried, not yet
+  rendered - kernel measurement in flight」。导出侧这一条是这个枚举里**唯一
+  反向**的成员：投影是完整的，**渲染器**才是缺的，所以它的中文没有套在
+  「不会带走」那句框架里。`render::mask_weight` 对 Brush 恒返 0——在 Add
+  (`1−(1−w)(1−0)=w`) 与 Subtract (`w·(1−0)=w`) 下**都惰性**，旁边的渐变照画不误。
+  **⑤ 三处解析隐患一次修完（F2 §5.1，本轮之前都是「还没被踩到」）**。
+  `classify_correction` 原来**平铺**走蒙版块 → 组内 Paint 被当成组的**兄弟**；
+  `base_geometry_at` 原来扫**整段 correction**、不辨嵌套 → **嵌套 Look 里那条
+  `Mask/Gradient` 会被选成 correction 的 base**（变异实测：导入成
+  `Linear{0.9,0.9→0.1,0.1}`，摄影师从没画过的形状）；`parse_one_correction` 的
+  几何键读的是**一路读到 correction 结尾**的切片 → 后面组件的 `MaskValue` /
+  `MaskInverted` 可以替省略了该属性的 base 回答。三者统一走新的 `components_in`
+  深度遍历 + `base_element` 元素定界，各配回归测试。
+  **⑥ 不猜的边界**：Aggregate 子级非 Paint、嵌套深度 >2、空组、Paint 自带
+  `MaskBlendMode≠0` 或 `MaskInverted=true`、缺九属性之一、`{r,d,f,h}` 之外的
+  token、无 `crs:Dabs`——171 份真实 sidecar 里**零反例**，一律 `OutOfModel` 拒收
+  并具名，绝不猜（roundness 那条纪律用在笔画上）。
+  **⑦ `Mask/Image` 仍拒**（全库 105 个、78 条 correction、40 个文件）。它**没有
+  栅格载荷也没有几何载荷**（全库最长属性值 55 字符），只有意图
+  （`MaskSubType`/`MaskName`/`ReferencePoint`）、溯源摘要与代理帧尺寸。要复现得
+  自己跑分割器出自己的 alpha——那是**另一个功能**（近似再导出、并如实披露），
+  不是解析器够得着的东西。**这是剩余拒收的主项，任何笔刷工作都碰不到它。**
+
+  **⑧ 分割 sidecar 许可证根修（D1；PUBLIC repo + 版权登记在即）**。
+  `python/segment.py:65` 的 `nvidia/segformer-b0-finetuned-ade-512-512`，其权重
+  许可证「NVIDIA Source Code License for SegFormer」原文：*"The Work and any
+  derivative works thereof only may be used or intended for use
+  non-commercially. Notwithstanding the foregoing, NVIDIA and its affiliates may
+  use the Work and any derivative works commercially. As used herein,
+  'non-commercially' means for research or evaluation purposes only."*
+  （本轮直连 `raw.githubusercontent.com/NVlabs/SegFormer/master/LICENSE` 复核原文）
+  ——它限制的是**使用**，不是分发，所以「我们只下载不分发」治不了。换成
+  `shi-labs/oneformer_ade20k_swin_large`（HF `cardData.license == "mit"`、非
+  gated，本轮直连 HF API 复核），**且是更强的模型**：ADE20K mIoU 57.0 单尺度
+  对 SegFormer-B5 的约 51，更远高于实际在跑的 B0——**许可证干净的那个同时是更好的
+  那个，没有质量取舍**。第二处 `segment.py:45` 的裸 `remove(img, only_mask=True)`
+  会解析到**该次安装的默认模型**：2.0.76 上是 `u2net`（Apache-2.0）没问题，但
+  上游已把默认换成 `bria-rmbg`（商用需付费协议）——一次 `pip install -U rembg`
+  就能在源码零改动的情况下把付费模型换进公开产品。改成显式
+  `new_session("u2net")` 钉死。
+  **实现要点**：OneFormer 是**掩码分类**模型，没有逐像素类 logits 可 softmax；
+  transformers 自己的 `post_process_semantic_segmentation` 求
+  `seg = Σ_q softmax(class)·sigmoid(mask)` 后**取 argmax**（把软 alpha 扔了）。
+  我们要 alpha 且只要 150 类中的 1 类，所以只对 sky 那一列做 query 轴收缩
+  （`einsum("bq,bqhw->bhw")`）——**算术与上式完全一致**，且从不物化 150 平面。
+  原来「低分辨率 softmax + 单平面上采样」的省内存推理**原样保留**（61MP 全平面
+  上采样是 ~36GB float32）。`id2label` 查表仍**动态**，但改成**先精确匹配**：
+  ADE20K 同时有 `2=sky` 与 `48=skyscraper`，旧的子串匹配两个都中、再靠 dict 插入
+  序取第一个——摩天楼不是天空。另加确定性开关（cudnn.benchmark off /
+  deterministic on / TF32 off：这份 mask 是被 recipe 引用的**文件**，R21 的版本指纹
+  要比它的字节）与 GPU 自动选择（Swin-L 是原 B0 的约 60 倍参数，纯 CPU 会把约 1s
+  变成一分钟）。**登记不修**：`from_pretrained(revision=...)` 只钉**哪棵树**，不
+  证明**字节**；denoise.py 那种 sha256 逐文件闸需要自己取文件再本地目录加载
+  （D1 §3.3），比一次许可证修复大，明写在 `SKY_MODEL` 注释里而不是留给以后被发现。
+
+  **门**：clippy ×2 = 0；`cargo test` + `--bins --features gui` 全绿（662+9+131+2+2）；
+  `AUTOSHOP_LR_PROBE_FIXTURES` 16/16 字节往返；`AUTOSHOP_MB_FIXTURES` 全绿；
+  `AUTOSHOP_RAW_ZOO` 9/9；`audit_i18n` 0；字体 cmap 门绿（新增 zh 词条逐字过成品
+  子集）。**6 条变异**逐条验证红→回滚。
+  **M-B 计数未动，且原因可测**：那 7 份 sidecar 里带 Aggregate 的 3 条 correction
+  **同时**带 `Mask/Image`，所以仍拒——33/42 前后一致。真正的改善在有纯笔刷素材的
+  目录上：`_DSC9583` **8/11 → 10/11**（Mask 1 与 Mask 7 进来了，各带
+  `BrushCarried`）。Mask 2 仍拒但**换了正确的理由**：`CorrectionAmount="1.1"`
+  超出 `LocalAdjustment::amount` 的 0..1，`OutOfModel`——从前它被含混地报成
+  「AI / brush correction(s) skipped」。
+  **待办**：alpha 核实验（`~/.claude/plans/lr-brush-kernel-*.md`）落地后才谈渲染；
+  `Mask/Image` 需自有分割器；brush 的 dab 坐标不参与 `coord_era` 迁移（与位图同列，
+  `recipe_has_raster_masks` 一起报「转不了」）；`crs:MaskSyncID` 单次存活已接受。
+
 - **台账勘误 + 登记转正（2026-08-19，R27 Batch-1a，未发版）** —— 不是一次发布，
   是一次**审计留痕**：R27 立案时对全部文档做了穷尽扫描（`A-leftover-ledger.md`
   33 项），查出台账多处滞后于事实，以及若干「登记不修」在本轮被用户裁决为「修」。
@@ -4473,6 +4568,10 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   引擎位图 mask 通路（MaskGeometry::Bitmap + 双线性采样 + XMP 跳过）+
   `python/segment.py` sidecar（subject=rembg U²-Net / sky=SegFormer
   ADE20K，实测均通）+ GUI 两键入口，72 lib + 4 gui 测试。
+  **← 天空后端已于 R27 Batch-4 换成 OneFormer ADE20K Swin-L（MIT）**：
+  SegFormer 权重许可证只许「research or evaluation purposes only」，见
+  「当前状态」R27 Batch-4 条 ⑧。下面各处 SegFormer / ~14MB 的字样是**当时的
+  记录**，一律以那一条为准。
 - **三大项至此全部触底。** 剩余工作 = 各节「未做/已知边界」小项（去紫边、
   Upright、lensfun、位图 overlay 半透明显示、tile 金字塔、水印等）+
   真机验收清单；无未开工的大工程。
@@ -4529,7 +4628,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   无紫（CLI 无头链路 v4 已目视+数值验收，GUI 点击链路同函数）；② 地景若嫌
   暗，在蒙版面板拖「反推·地景」的 Exposure——蒙版滑杆现已实时渲染（顺带验
   Temp/Tint 从"仅 XMP"组移入实时区后拖动即时生效）；③ 首跑天空分割会下载
-  segformer-b0（~14MB，看状态栏提示）；python 依赖缺失时应静默回退纯全局
+  ~~segformer-b0（~14MB，看状态栏提示）~~ **← R27 Batch-4 起为 OneFormer
+  Swin-L（~880MB）**；python 依赖缺失时应静默回退纯全局
   反推且 rationale 有说明。
 
 ## 关键架构事实（新会话必读）
@@ -4726,7 +4826,9 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   - **sidecar**（`python/segment.py` + `src/segment.rs` 桥，循 denoise.py
     模式；config `segment_script` / `AUTOSHOP_SEGMENT_SCRIPT`）：
     `--target subject` = rembg U²-Net 显著主体软 alpha（`pip install rembg`，
-    模型首跑自动下载 ~/.u2net，176MB）；`--target sky` = SegFormer-B0
+    模型首跑自动下载 ~/.u2net，176MB；**R27 Batch-4 起显式
+    `new_session("u2net")`，防上游默认改成付费模型**）；
+    ~~`--target sky` = SegFormer-B0~~ **← R27 Batch-4 起 = OneFormer Swin-L**
     ADE20K 天空类概率（transformers，~14MB 自动下载；sky 类号从模型
     id2label 解析、不硬编码）。缺依赖时 exit 2 + 打印确切 pip 命令。
   - **GUI**：局部调整区「🤖 AI 选主体」「☁ AI 选天空」→ worker 喂

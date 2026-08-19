@@ -87,7 +87,9 @@ detail. (Three *opt-in*, clearly-labelled exceptions touch pixels: AI **denoise*
   photos already have a saved develop, the full develop panel (tone, presence
   incl. Texture, curves, 8-band HSL, colour grading, detail & lens, effects,
   and a read-only Transform/Calibration read-out), local masks (linear / radial
-  / brush / AI-selected — rotatable radials, add/subtract/intersect shape
+  / brush / AI-selected — rotatable radials, Lightroom brush groups imported and
+  round-tripped verbatim (drawn once the alpha kernel is measured),
+  add/subtract/intersect shape
   composition, per-mask eye toggle & duplicate, per-mask point curves,
   brush-editable AI rasters with feather/expand/contract and full-resolution
   guided refine), crop & straighten, 90° rotation (⭯/⭮ — the crop, every mask

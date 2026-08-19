@@ -618,6 +618,11 @@ open, the variant strip, version snapshots, batch export, `api_recipe`, CLI
 `apply`); recipes arriving from the browser or from the model are stamped
 current-frame at their boundary instead. Raster (painted / AI-segmented) masks
 are image files, not coordinates: they are left alone and the user is told so.
+Imported BRUSH groups join them on that side of the line for a different reason
+— their dab coordinates are carried verbatim so the sidecar round-trips
+byte-faithfully, and rewriting every dab would forfeit exactly that in order to
+migrate a geometry nothing renders yet (`render::recipe_has_raster_masks` is the
+predicate for both).
 v0.31.0 adds a second stamp built field-for-field on this precedent —
 `schema_era` (0 = written before the R25 control set existed) — for the same
 class of reason: see 「the merge treats ignorance as ignorance」 in §4.5.
@@ -885,11 +890,11 @@ file we did not author (all 1048 mask components in the 160-sidecar reference
 library carry one). Both were the same root as five more 「don't recognise it →
 discard the correction, keep an integer count」 gates, while the EXPORT side had
 had a named `MaskLoss{name, reason}` since R22 — the asymmetry WAS the defect.
-The import side now mirrors it: `MaskImportReason` names eight LOSSY-but-
+The import side now mirrors it: `MaskImportReason` names nine LOSSY-but-
 imported cases (rotation / blend mode / inert local slider / unknown local key /
-extra shapes / foreign range mask / unreadable local curve / curve-refine
-saturation) — the geometry still arrives — and two DROPS kept deliberately
-distinct from them, `Unrepresentable` (no parametric geometry to stand on) and
+extra shapes / brush carried-not-rendered / foreign range mask / unreadable
+local curve / curve-refine saturation) — the geometry still arrives — and two
+DROPS kept deliberately distinct from them, `Unrepresentable` (no parametric geometry to stand on) and
 `OutOfModel` (values that read fine but land outside the model), so a sentence
 saying 「imported with N features unmodelled」 cannot be told about a correction
 that was not imported at all. The banner names what it could not model instead
@@ -898,11 +903,40 @@ its 42 corrections after, with `imported + refused == corrections` holding file
 by file. (Re-measured at HEAD on 2026-08-19 through the `AUTOSHOP_MB_FIXTURES`
 probe: **33 of 42**, the two extra being v0.31.2's multi-component base-geometry
 fix, which stopped a Correction whose base shape sat behind a Subtract component
-from being read as the subtracted shape.) What still refuses is the component
-types nobody outside Lightroom can
-reconstruct — `Mask/Paint`, `Mask/Image`, `Mask/Aggregate`, `Mask/Ellipse` —
-brush / AI / depth masks LR recomputes from a digest, which the disclosure says
-in those words.
+from being read as the subtracted shape.)
+
+**R27 Batch-4 (L-08) took the brush half of the remaining refusal.** A
+`Mask/Aggregate` and its `Mask/Paint` children are now a first-class geometry,
+`MaskGeometry::Brush` — the group's `(MaskBlendMode, MaskValue, MaskInverted)`
+and each stroke's `Radius`/`Flow`/`CenterWeight`/`MaskSyncID` plus its `crs:Dabs`
+token stream, the stream carried VERBATIM as a string. It is parsed, kept in
+`recipe.json`, and written back into the sidecar as the same `Mask/Aggregate`
+element it arrived as. What it is NOT is rendered: the one input a rasterizer
+needs that no sidecar contains is the alpha kernel (the falloff versus hardness
+and the per-dab accumulation law — the file stores the STROKE, never the alpha),
+so `render::mask_weight` answers 0 and both disclosure channels carry a named
+reason, `MaskImportReason::BrushCarried` / `MaskLossReason::BrushCarried`
+(「brush mask carried, not yet rendered — kernel measurement in flight」). The
+measurement is one controlled Lightroom export away and it is a gate on
+RENDERING, not on carrying. Measured on the specimen folder that has brush work
+in it: `_DSC9583` went from 8 of 11 corrections imported to 10 of 11, and the
+one still refused is refused for `CorrectionAmount="1.1"`, not for its brush.
+
+Reading a Paint required three parser fixes in the same batch, all of them
+latent-until-now: `classify_correction` walked the component list FLAT (so a
+stroke inside a group read as a sibling of it), `base_geometry_at` searched the
+whole correction segment nesting-blind (so a gradient nested in a group could
+have been promoted to the correction's base shape), and `parse_one_correction`
+read its geometry keys from a slice running to the END of the correction (so a
+later component's `MaskValue` could answer for a base that omitted its own).
+All three are nesting-aware now, through one shared `components_in` walk.
+
+What still refuses is `Mask/Image` — the AI subject/sky/object masks. Those
+carry no raster and no geometry payload at all: only the INTENT (`MaskSubType`,
+`MaskName`, `ReferencePoint`), the provenance digests, and the proxy geometry
+the model ran in. Reproducing one needs a segmenter of our own producing our own
+alpha, which is a different feature (approximate re-derivation, disclosed as
+such) rather than anything a parser can reach.
 
 **Every front-end hears it, the CLI included (R27).** `xmp::import_losses` →
 `xmp::describe_import_losses` is the one producer; the GUI localises it into the

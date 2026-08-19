@@ -8,7 +8,10 @@
 //! `"x, y"` strings (see `docs/M1_PLAN.md` §5 and §9). We emit only the keys we
 //! set; Lightroom fills the rest from defaults.
 
-use crate::recipe::{ColorGrade, Crop, CurvePoint, EditRecipe, Hsl, LocalAdjustment, MaskGeometry, RangeMask};
+use crate::recipe::{
+    BrushStroke, ColorGrade, Crop, CurvePoint, EditRecipe, Hsl, LocalAdjustment, MaskCombine,
+    MaskComponent, MaskGeometry, RangeMask,
+};
 
 const MAX_XMP_BYTES: usize = 16 * 1024 * 1024;
 
@@ -993,7 +996,89 @@ crs:Midpoint=\"{midpoint}\" crs:Version=\"{mask_version}\"",
             ))
         }
         MaskGeometry::Bitmap { .. } => None,
+        // A brush group is not an ATTRIBUTE-form component: it carries a
+        // `crs:Masks` child holding its strokes, each with a `crs:Dabs` child
+        // of its own, so it cannot be expressed as this function's
+        // `(what, attributes)` pair. [`brush_mask_xml`] emits the whole
+        // element instead and [`masks_xml`] routes to it BEFORE reaching here,
+        // so the `None` below is never the answer that decides anything — it
+        // exists so this function stays total.
+        MaskGeometry::Brush { .. } => None,
     }
+}
+
+/// One [`MaskGeometry::Brush`] group as a complete `crs:CorrectionMasks`
+/// member: the `Mask/Aggregate` element, its `crs:Masks` list, one
+/// `Mask/Paint` per stroke and each stroke's `crs:Dabs` token stream.
+///
+/// **Byte-faithful to the measured shape** (F2 §1.1 / §2, verified against
+/// `_DSC9583` Mask 7 → Brush 1): the Aggregate's seven attributes in
+/// Lightroom's own order, the Paint's nine in Lightroom's own order, one
+/// `<rdf:li>` per dab token. Three of those attributes are LITERALS because
+/// they are invariants rather than data — `MaskActive="true"` on both,
+/// `MaskBlendMode="0"` and `MaskInverted="false"` on the Paint (382/382), and
+/// the reader refuses anything else rather than storing it.
+///
+/// The numbers go out through plain `Display`, NOT through `local_fmt` or
+/// `lr_num`. They were carried into the recipe from this same sidecar and
+/// never computed on, and `f32`'s `Display` prints the shortest decimal that
+/// round-trips — so `crs:Radius="0.582157"` comes back as `0.582157`, exactly
+/// the string the file used. A rounding formatter would republish a value the
+/// photographer never chose.
+///
+/// `sync_seed` is hashed into fresh `crs:MaskSyncID`s by the writer's own
+/// [`guid`] rule, like every other component this module emits. The IDs the
+/// file used are carried in `recipe.json` ([`BrushStroke::sync_id`]) but not
+/// re-emitted: a sidecar we rewrite is OUR document, and minting IDs is what
+/// the rest of this writer already does.
+fn brush_mask_xml(g: &MaskGeometry, sync_seed: &str) -> Option<String> {
+    let MaskGeometry::Brush { name, blend_mode, value, inverted, strokes } = g else {
+        return None;
+    };
+    let mut painted = String::new();
+    for (k, s) in strokes.iter().enumerate() {
+        let dabs: String = s
+            .dabs
+            .split('\n')
+            // The storage form joins tokens with '\n' and the reader refuses a
+            // token that contains one, so this split is the exact inverse.
+            .map(|t| format!("               <rdf:li>{}</rdf:li>\n", xml_attr_escape(t)))
+            .collect();
+        painted.push_str(&format!(
+            "            <rdf:li>\n\
+             <rdf:Description\n\
+              crs:What=\"Mask/Paint\" crs:MaskActive=\"true\" crs:MaskBlendMode=\"0\"\n\
+              crs:MaskInverted=\"false\" crs:MaskSyncID=\"{id}\" crs:MaskValue=\"{v}\"\n\
+              crs:Radius=\"{r}\" crs:Flow=\"{f}\" crs:CenterWeight=\"{cw}\">\n\
+             <crs:Dabs>\n\
+              <rdf:Seq>\n\
+{dabs}              </rdf:Seq>\n\
+             </crs:Dabs>\n\
+             </rdf:Description>\n\
+            </rdf:li>\n",
+            id = guid(&format!("{sync_seed}-stroke-{k}")),
+            v = s.value,
+            r = s.radius,
+            f = s.flow,
+            cw = s.center_weight,
+        ));
+    }
+    Some(format!(
+        "         <rdf:li>\n\
+          <rdf:Description\n\
+           crs:What=\"Mask/Aggregate\" crs:MaskActive=\"true\" crs:MaskName=\"{mname}\"\n\
+           crs:MaskBlendMode=\"{blend_mode}\" crs:MaskInverted=\"{inverted}\" \
+crs:MaskSyncID=\"{id}\"\n\
+           crs:MaskValue=\"{value}\">\n\
+          <crs:Masks>\n\
+           <rdf:Seq>\n\
+{painted}           </rdf:Seq>\n\
+          </crs:Masks>\n\
+          </rdf:Description>\n\
+         </rdf:li>\n",
+        mname = xml_attr_escape(name),
+        id = guid(sync_seed),
+    ))
 }
 
 /// A `Mask/RangeMask` component `<rdf:li>` intersected with the correction's
@@ -1068,7 +1153,33 @@ pub enum MaskLossReason {
     Disabled,
     /// The mask carries extra Add/Subtract/Intersect shapes; only the base
     /// geometry is projected (the render composes them all).
+    ///
+    /// SINCE R27 Batch-4 this counts the shapes the projection really drops.
+    /// A [`MaskGeometry::Brush`] component is emitted in full (see
+    /// [`brush_mask_xml`]), so a mask whose only extra component is a brush
+    /// group loses nothing here and this is not raised for it — what that mask
+    /// gets instead is [`BrushCarried`], which is a statement about the RENDER
+    /// and not about the sidecar.
+    ///
+    /// [`BrushCarried`]: MaskLossReason::BrushCarried
     ComponentsFlattened,
+    /// A brush group (`Mask/Aggregate` + its `Mask/Paint` strokes) rides out
+    /// into the sidecar COMPLETE — and this engine does not draw it, so the
+    /// XMP Lightroom reads and the pixels Autoshop shows do not agree about
+    /// that mask.
+    ///
+    /// The odd one out in this enum, deliberately: every other variant names
+    /// something the PROJECTION could not carry. This one names something the
+    /// projection carries perfectly and the RENDERER does not honour, which is
+    /// the opposite direction of loss and needs saying in the same breath —
+    /// a photographer who exports a brush mask to Lightroom and sees it appear
+    /// there has to know why it was invisible here.
+    ///
+    /// The blocker is the alpha KERNEL alone (`recipe::BrushStroke::dabs`):
+    /// the sidecar stores the stroke and never the alpha, so the falloff and
+    /// the accumulation law come from a controlled Lightroom measurement or
+    /// from a guess, and this project does not guess about mask shape.
+    BrushCarried,
     /// A rotated radial exports as its UNROTATED ellipse. v0.32.0 NARROWED
     /// this to one case: `crs:Angle`'s sign and pivot are measured now and the
     /// projection carries the tilt, so what is left is a document with no
@@ -1106,10 +1217,11 @@ impl MaskLossReason {
     /// [`en`]: MaskLossReason::en
     /// [`Rotation`]: MaskLossReason::Rotation
     /// [`same_kind`]: MaskLossReason::same_kind
-    pub const ALL: [MaskLossReason; 5] = [
+    pub const ALL: [MaskLossReason; 6] = [
         MaskLossReason::Bitmap,
         MaskLossReason::Disabled,
         MaskLossReason::ComponentsFlattened,
+        MaskLossReason::BrushCarried,
         MaskLossReason::Rotation(0),
         MaskLossReason::Recolour,
     ];
@@ -1129,6 +1241,9 @@ impl MaskLossReason {
             MaskLossReason::Bitmap => "bitmap mask(s) skipped",
             MaskLossReason::Disabled => "muted mask(s) skipped",
             MaskLossReason::ComponentsFlattened => "extra shape component(s) flattened",
+            MaskLossReason::BrushCarried => {
+                "brush mask(s) carried, not yet rendered - kernel measurement in flight"
+            }
             MaskLossReason::Rotation(_) => "radial rotation dropped",
             MaskLossReason::Recolour => "recolour gains dropped",
         }
@@ -1167,10 +1282,27 @@ pub struct MaskLoss {
 /// [`is_drop`]: MaskImportReason::is_drop
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MaskImportReason {
-    /// DROP. No parametric geometry to stand on: a brush / AI / depth /
-    /// heal component (`Mask/Paint`, `Mask/Image`, `Mask/Aggregate`,
-    /// `Mask/Ellipse`), or no `crs:CorrectionMasks` at all. Lightroom
-    /// recomputes these from a digest, so there are no pixels to take.
+    /// DROP. No geometry this engine can stand on: an AI / depth component
+    /// (`Mask/Image`), a component nested somewhere this reader cannot account
+    /// for, or no `crs:CorrectionMasks` at all.
+    ///
+    /// NARROWED TWICE, and the list it used to carry is worth stating
+    /// correctly because two of its four members were never right:
+    ///  * `Mask/Aggregate` and `Mask/Paint` LEFT in R27 Batch-4 — a brush
+    ///    group is a first-class geometry now ([`MaskGeometry::Brush`]),
+    ///    imported, carried and written back, with [`BrushCarried`] as its
+    ///    note. It is not a drop and has not been one since.
+    ///  * `Mask/Ellipse` was never a member in the first place. It is the
+    ///    spot-healing shape and lives under `crs:RetouchAreas` ONLY — 84 of
+    ///    84 instances in the reference library, never inside a correction —
+    ///    so no correction has ever been refused for one.
+    ///
+    /// What genuinely lands here is `Mask/Image`: Lightroom stores the INTENT
+    /// and recomputes the alpha from a model, so the sidecar holds no pixels
+    /// and no geometry to take.
+    ///
+    /// [`BrushCarried`]: MaskImportReason::BrushCarried
+    /// [`MaskGeometry::Brush`]: crate::recipe::MaskGeometry::Brush
     Unrepresentable,
     /// DROP. The values READ fine but land outside this engine's model (an
     /// exposure past ±5 EV, `crs:CorrectionActive="false"`, a component whose
@@ -1194,7 +1326,29 @@ pub enum MaskImportReason {
     BlendMode,
     /// More than one geometry component: the base shape imports, the extra
     /// shapes do not (the import twin of [`MaskLossReason::ComponentsFlattened`]).
+    ///
+    /// PARAMETRIC shapes only. A brush group is imported as a real component
+    /// since R27 Batch-4, so it is not one of the "extra shapes that do not"
+    /// and does not raise this; [`BrushCarried`] speaks for it.
+    ///
+    /// [`BrushCarried`]: MaskImportReason::BrushCarried
     MultiComponent,
+    /// A `Mask/Aggregate` brush group imported WHOLE — strokes, dab streams,
+    /// group blend mode and all — and the engine does not draw it yet.
+    ///
+    /// R27 Batch-4 (L-08). Before it, a correction holding one of these was
+    /// refused entire under [`Unrepresentable`], which cost the photographer
+    /// not only the brush but every gradient standing beside it: 18 corrections
+    /// and 14 already-drawable parametric shapes across the reference library,
+    /// thrown away because a neighbouring component was a brush. The geometry
+    /// is now read, carried in `recipe.json` and written back to the sidecar
+    /// intact, so the only thing still missing is the RENDER — and the one
+    /// input a renderer needs that no sidecar contains is the alpha kernel
+    /// (`recipe::BrushStroke::dabs`). A note, therefore, not a drop: the
+    /// correction and its neighbours arrive.
+    ///
+    /// [`Unrepresentable`]: MaskImportReason::Unrepresentable
+    BrushCarried,
     /// A `Mask/RangeMask` we cannot honour (someone else's encoding, or more
     /// than one) — the geometry imports without the range refinement.
     ForeignRangeMask,
@@ -1238,12 +1392,13 @@ impl MaskImportReason {
     /// [`en`]: MaskImportReason::en
     /// [`InertLocal`]: MaskImportReason::InertLocal
     /// [`same_kind`]: MaskImportReason::same_kind
-    pub const ALL: [MaskImportReason; 10] = [
+    pub const ALL: [MaskImportReason; 11] = [
         MaskImportReason::Unrepresentable,
         MaskImportReason::OutOfModel,
         MaskImportReason::Rotation(0),
         MaskImportReason::BlendMode,
         MaskImportReason::MultiComponent,
+        MaskImportReason::BrushCarried,
         MaskImportReason::ForeignRangeMask,
         MaskImportReason::LocalCurve,
         MaskImportReason::CurveRefineSaturation,
@@ -1275,6 +1430,9 @@ impl MaskImportReason {
             MaskImportReason::Rotation(_) => "radial rotation(s) read as 0",
             MaskImportReason::BlendMode => "non-default blend mode(s) ignored",
             MaskImportReason::MultiComponent => "extra shape component(s) dropped",
+            MaskImportReason::BrushCarried => {
+                "brush mask(s) carried, not yet rendered - kernel measurement in flight"
+            }
             MaskImportReason::ForeignRangeMask => "range mask(s) dropped",
             MaskImportReason::LocalCurve => "local point curve(s) unreadable",
             MaskImportReason::CurveRefineSaturation => "curve refine saturation not modelled",
@@ -1777,20 +1935,65 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
         // geometry's `crs:Flipped` is its complement, the correction's
         // `crs:MaskInverted` is it. Computed ONCE so the two can never drift.
         let net_inv = lr_net_inverted(m);
-        // Raster (bitmap) masks have no classic-XMP encoding — skip this
-        // correction; the deterministic render still applies it (§A tradeoff).
-        let Some((what, geom, withheld)) = mask_geom_xml(&m.mask, net_inv, frame) else {
-            losses.push(MaskLoss { name, reason: MaskLossReason::Bitmap });
-            continue;
+        // THREE shapes for the base component now, not two (R27 Batch-4):
+        //  * a brush group emits its whole `Mask/Aggregate` element;
+        //  * a parametric shape emits the attribute-form `<rdf:li/>` below;
+        //  * a raster (bitmap) mask has no classic-XMP encoding at all — skip
+        //    this correction; the deterministic render still applies it
+        //    (§A tradeoff).
+        let mut withheld: Option<f64> = None;
+        let base_li = if matches!(m.mask, MaskGeometry::Brush { .. }) {
+            match brush_mask_xml(&m.mask, &guid(&format!("brush-{i}-{name}"))) {
+                Some(li) => li,
+                None => unreachable!("brush_mask_xml answers every Brush geometry"),
+            }
+        } else {
+            let Some((what, geom, w)) = mask_geom_xml(&m.mask, net_inv, frame) else {
+                losses.push(MaskLoss { name, reason: MaskLossReason::Bitmap });
+                continue;
+            };
+            withheld = w;
+            format!(
+                "         <rdf:li crs:What=\"{what}\" crs:MaskActive=\"true\" crs:MaskName=\"{mname}\"\n\
+          crs:MaskBlendMode=\"0\" crs:MaskInverted=\"{inv}\" crs:MaskSyncID=\"{mask_id}\"\n\
+          crs:MaskValue=\"1\"{geom}/>\n",
+                mname = xml_attr_escape(&format!("{name} mask")),
+                // NOT `m.inverted`: a radial's flip is the other half of the
+                // same bit (R25 P9, `lr_net_inverted`). Leaving the flip out
+                // here is what silently dropped it on export — Lightroom has
+                // one inversion flag per correction and this is it.
+                inv = net_inv,
+            )
         };
+        // Extra components. A BRUSH one is emitted in full beside the base —
+        // the whole point of L-08 is that a brush mask round-trips — so only
+        // the others are flattened, and `ComponentsFlattened` now counts what
+        // the projection really drops instead of "this mask had components".
+        let mut extra_lis = String::new();
+        let mut flattened = 0usize;
+        for (k, c) in m.components.iter().enumerate() {
+            match brush_mask_xml(&c.geometry, &guid(&format!("brush-{i}-{name}-{k}"))) {
+                Some(li) => extra_lis.push_str(&li),
+                None => flattened += 1,
+            }
+        }
         // DEGRADATIONS (the correction IS emitted, just not whole) — each is
         // read off the same field the emitter above ignores, so adding a
         // projection later deletes its entry here in the same edit.
-        if !m.components.is_empty() {
+        if flattened > 0 {
             losses.push(MaskLoss {
                 name: name.clone(),
                 reason: MaskLossReason::ComponentsFlattened,
             });
+        }
+        // The other direction of loss: the sidecar gets the brush WHOLE and
+        // this engine does not draw it. Raised once per mask that carries one
+        // anywhere — base or component — because it is a fact about the mask,
+        // not about how many groups it holds.
+        if matches!(m.mask, MaskGeometry::Brush { .. })
+            || m.components.iter().any(|c| matches!(c.geometry, MaskGeometry::Brush { .. }))
+        {
+            losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::BrushCarried });
         }
         // The rotation verdict now comes FROM THE EMITTER (v0.32.0): it is the
         // one place that knows whether the angle reached the document, and
@@ -1841,10 +2044,7 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
 {curves}\
        <crs:CorrectionMasks>\n\
         <rdf:Seq>\n\
-         <rdf:li crs:What=\"{what}\" crs:MaskActive=\"true\" crs:MaskName=\"{mname}\"\n\
-          crs:MaskBlendMode=\"0\" crs:MaskInverted=\"{inv}\" crs:MaskSyncID=\"{mask_id}\"\n\
-          crs:MaskValue=\"1\"{geom}/>\n\
-{range}\
+{base_li}{extra_lis}{range}\
         </rdf:Seq>\n\
        </crs:CorrectionMasks>\n\
       </rdf:Description>\n\
@@ -1886,17 +2086,8 @@ fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLos
             tint = local_fmt(m.tint / 100.0),
             tex = local_fmt(m.texture / 100.0),
             nr = local_fmt(m.noise_reduction / 100.0),
-            what = what,
-            mname = xml_attr_escape(&format!("{name} mask")),
-
-
-            // NOT `m.inverted`: a radial's flip is the other half of the same
-            // bit (R25 P9, `lr_net_inverted`). Leaving the flip out here is
-            // what silently dropped it on export — Lightroom has one inversion
-            // flag per correction and this is it.
-            inv = net_inv,
-            mask_id = mask_id,
-            geom = geom,
+            base_li = base_li,
+            extra_lis = extra_lis,
         ));
     }
     // All masks may have been raster-skipped — no empty wrapper block then.
@@ -3114,21 +3305,129 @@ fn element_close_start(doc: &str, name: &str, open_gt: usize) -> Option<usize> {
 /// fold into "absent" (a curve that cannot be read imports as a silent
 /// neutral, and the next save persists the neutral).
 pub(crate) fn owned_element_body<'a>(scope: &'a str, name: &str) -> Result<Option<&'a str>, ()> {
+    Ok(owned_element_body_span(scope, name)?.map(|(a, b)| &scope[a..b]))
+}
+
+/// [`owned_element_body`]'s answer as a byte SPAN `[start, end)` into `scope`,
+/// with the same three verdicts and the same reasons.
+///
+/// Exists because a caller that has to hand offsets back in the ORIGINAL
+/// string's coordinates cannot use a subslice: `base_geometry_at` returns a
+/// position inside the whole correction segment while it must SEARCH only the
+/// component list (R27 Batch-4 hazard 2), and re-deriving the offset from a
+/// slice's address is pointer arithmetic dressed up as parsing.
+/// [`owned_element_body`] is written in terms of this one so the two can never
+/// answer differently.
+fn owned_element_body_span(scope: &str, name: &str) -> Result<Option<(usize, usize)>, ()> {
     let mut from = 0;
     while let Some((start, end, self_closing)) = next_xml_tag(scope, from) {
         let tag = &scope[start..=end];
         if !tag.starts_with("</") && tag_name(tag) == name {
             if self_closing {
-                return Ok(Some(""));
+                // An empty body, spelled as the empty span just past the tag —
+                // `&scope[end+1..end+1]` is `""`, which is what the slicing
+                // form has always returned here.
+                return Ok(Some((end + 1, end + 1)));
             }
             return match element_close_start(scope, name, end) {
-                Some(close) => Ok(Some(&scope[end + 1..close])),
+                Some(close) => Ok(Some((end + 1, close))),
                 None => Err(()),
             };
         }
         from = end + 1;
     }
     Ok(None)
+}
+
+/// One `crs:What`-carrying component found by [`components_in`].
+///
+/// The `crs:What` may sit on the `<rdf:li>` itself (Lightroom's attribute form
+/// for parametric shapes) or on an `<rdf:Description>` inside it (the element
+/// form every `Mask/Aggregate`, `Mask/Paint` and `Mask/Image` uses). Both are
+/// the same thing to every caller here, so both arrive as one struct.
+struct XmlComponent<'a> {
+    /// The tag that carries `crs:What`, `<` to `>` inclusive.
+    tag: &'a str,
+    /// `<` offset of that tag inside the walked body.
+    start: usize,
+    /// `>` offset of that tag inside the walked body.
+    gt: usize,
+    self_closing: bool,
+    /// How many component elements are OPEN above this one: `0` = a direct
+    /// member of the walked list, `1` = a member of a list nested inside one
+    /// component (a `Mask/Paint` inside a `Mask/Aggregate`'s `crs:Masks`), and
+    /// so on.
+    depth: usize,
+    what: std::borrow::Cow<'a, str>,
+}
+
+/// Every `crs:What` component in `body`, in document order, each tagged with
+/// its NESTING DEPTH — the walk R27 Batch-4 replaced a flat scan with, and the
+/// reason it had to.
+///
+/// `classify_correction` used to walk the mask block with a bare
+/// [`next_xml_tag`] loop, which sees a `Mask/Paint` inside a `Mask/Aggregate`
+/// as a SIBLING of it. That was harmless only while both answers were "refuse
+/// the correction": the moment a Paint means something, a flat walk
+/// double-counts every stroke as a top-level component and loses the group's
+/// own blend mode. Nesting-awareness is step 0 of the brush arm, not a
+/// tidy-up.
+///
+/// Malformed markup degrades toward REFUSAL rather than toward a wrong answer:
+/// a close tag that does not match the innermost open element pops nothing
+/// (the same recovery [`find_crs_description`] takes), so depth stays high and
+/// the components below it read as nested — which every caller here refuses.
+fn components_in(body: &str) -> Vec<XmlComponent<'_>> {
+    let mut out: Vec<XmlComponent<'_>> = Vec::new();
+    // (element name, does it contribute a level of component depth?)
+    let mut stack: Vec<(&str, bool)> = Vec::new();
+    let mut depth = 0usize;
+    let mut from = 0;
+    while let Some((start, gt, self_closing)) = next_xml_tag(body, from) {
+        let tag = &body[start..=gt];
+        from = gt + 1;
+        let name = tag_name(tag);
+        if tag.starts_with("</") {
+            if stack.last().is_some_and(|(n, _)| *n == name)
+                && let Some((_, was_component)) = stack.pop()
+                && was_component
+            {
+                depth -= 1;
+            }
+            continue;
+        }
+        let what = xml_attribute_raw(tag, "crs:What").map(|(_, raw)| xml_unescape(raw));
+        if let Some(w) = &what {
+            out.push(XmlComponent {
+                tag,
+                start,
+                gt,
+                self_closing,
+                depth,
+                what: w.clone(),
+            });
+        }
+        if !self_closing {
+            stack.push((name, what.is_some()));
+            if what.is_some() {
+                depth += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The BODY of one component's own element — `Ok(None)` when the component is
+/// self-closing (Lightroom's attribute form, which has no body by
+/// construction), `Err(())` when it opens and never closes.
+fn component_body<'a>(scope: &'a str, c: &XmlComponent<'_>) -> Result<Option<&'a str>, ()> {
+    if c.self_closing {
+        return Ok(None);
+    }
+    match element_close_start(scope, tag_name(c.tag), c.gt) {
+        Some(close) => Ok(Some(&scope[c.gt + 1..close])),
+        None => Err(()),
+    }
 }
 
 /// Byte spans of the body's TOP-LEVEL owned property elements, in reverse
@@ -4151,9 +4450,11 @@ fn parse_curve(xmp: &str, tag: &str) -> Vec<CurvePoint> {
 
 
 /// Local-mask corrections back from `<crs:MaskGroupBasedCorrections>` —
-/// parametric geometries only, exactly what [`masks_xml`] can emit (LR brush /
-/// AI masks and our own Bitmap rasters have no classic-XMP encoding; those
-/// corrections are skipped, matching the writer's own skip rule).
+/// exactly what [`masks_xml`] can emit, which since R27 Batch-4 is the
+/// parametric geometries PLUS `Mask/Aggregate` brush groups. What still has no
+/// classic-XMP encoding is our own `Bitmap` rasters (skipped by the writer, so
+/// symmetric) and Lightroom's AI `Mask/Image` masks (skipped by this reader,
+/// because the sidecar carries no pixels for them to be read from).
 fn parse_masks(
     xmp: &str,
     authored_by_autoshop: bool,
@@ -4167,12 +4468,16 @@ fn parse_masks(
     mask_summary_from_block(block, authored_by_autoshop, frame).supported
 }
 
-/// How many corrections in this sidecar produced NO mask at all — brush / AI /
-/// depth geometry Lightroom recomputes from a digest, plus the ones whose
-/// values land outside this engine's model. The skip itself is by design (the
-/// writer skips the same shapes symmetrically); what was missing is the
-/// DISCLOSURE: a user importing their own Lightroom work lost every brush mask
-/// with no indication anything was dropped.
+/// How many corrections in this sidecar produced NO mask at all — AI / depth
+/// geometry Lightroom recomputes from its own model, plus the ones whose values
+/// land outside this engine's model. What was missing before R25 P1 was the
+/// DISCLOSURE: a user importing their own Lightroom work lost every one of
+/// these with no indication anything had been dropped.
+///
+/// BRUSH corrections stopped being counted here in R27 Batch-4: a
+/// `Mask/Aggregate` group imports, so it is no longer a refusal at all. It
+/// carries a `BrushCarried` note instead, which [`import_losses`] reports and
+/// this counter deliberately does not (see below).
 ///
 /// COUNTS DROPS ONLY, not every import defect (R25 P1) — a correction that
 /// imports carrying a note is not a refusal, and `eval` reads
@@ -4741,6 +5046,192 @@ fn component_import_reasons(
     }
 }
 
+/// One `crs:What="Mask/Aggregate"` component → [`MaskGeometry::Brush`], or
+/// `Err(())` when the file breaks an invariant this parser refuses to guess
+/// past. `scope` is the string `agg`'s offsets are measured in.
+///
+/// **What is refused, and why refusing beats guessing.** Every gate below has
+/// ZERO counter-examples in the 171-sidecar reference library, so a document
+/// that trips one was written by something other than Lightroom and this
+/// module has no measurement to model it with. The caller turns the `Err` into
+/// [`MaskImportReason::OutOfModel`] — "a value we can read that lands outside
+/// this engine's model" — which costs the correction and says so, rather than
+/// importing a shape the file does not describe.
+///
+///  * a child that is not `Mask/Paint` (measured: 300/300 children are Paint,
+///    never a Gradient, Radial, RangeMask, Image or another Aggregate);
+///  * anything nested BELOW the Paints (measured: maximum component nesting
+///    depth in the whole library is exactly 2);
+///  * a group with no strokes at all — not a measured shape, and re-emitting
+///    an empty `<crs:Masks>` would put a construct into a sidecar that
+///    Lightroom never writes;
+///  * the per-stroke gates in [`parse_paint_stroke`].
+fn parse_brush_group(scope: &str, agg: &XmlComponent<'_>) -> Result<MaskGeometry, ()> {
+    let tag = agg.tag;
+    // A muted component changes what the mask covers — refused for exactly the
+    // reason `component_import_reasons` refuses a muted parametric shape.
+    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true")) {
+        return Err(());
+    }
+    // The group's three composition attributes, carried VERBATIM. Absent reads
+    // as Lightroom's default in each case (it writes all three on 39/39 real
+    // Aggregates, so absence is a foreign writer's terseness, not a value).
+    let blend_mode = match crs_str(tag, "MaskBlendMode") {
+        None => 0u32,
+        Some(v) => v.trim().parse::<u32>().map_err(|_| ())?,
+    };
+    let value = match crs_str(tag, "MaskValue") {
+        None => 1.0f32,
+        Some(_) => crs_f32(tag, "MaskValue").filter(|v| v.is_finite()).ok_or(())?,
+    };
+    let inverted = match crs_str(tag, "MaskInverted").as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err(()),
+    };
+    let name = crs_str(tag, "MaskName").map(|v| v.into_owned()).unwrap_or_default();
+
+    let Some(body) = component_body(scope, agg)? else {
+        // Self-closing: an Aggregate with no `crs:Masks` child is a group with
+        // no strokes, refused by the same rule as an empty one.
+        return Err(());
+    };
+    let kids = components_in(body);
+    if kids.iter().any(|k| k.depth > 0) {
+        return Err(());
+    }
+    let mut strokes = Vec::new();
+    for k in &kids {
+        if k.what.as_ref() != "Mask/Paint" {
+            return Err(());
+        }
+        strokes.push(parse_paint_stroke(body, k)?);
+    }
+    if strokes.is_empty() {
+        return Err(());
+    }
+    Ok(MaskGeometry::Brush { name, blend_mode, value, inverted, strokes })
+}
+
+/// One `crs:What="Mask/Paint"` child of a brush group → [`BrushStroke`].
+///
+/// The three attribute INVARIANTS are gates, not fields: `MaskActive="true"`,
+/// `MaskBlendMode="0"` and `MaskInverted="false"` hold on 382/382 real Paints,
+/// so a Paint that says otherwise is asserting a composition inside a group
+/// that has never been observed to have one. The four NUMBERS are required
+/// rather than defaulted for the same reason — all nine attributes sit on
+/// 300/300 in-correction instances, with no optional fields and no variation,
+/// so a missing one means this is not the encoding we measured.
+fn parse_paint_stroke(scope: &str, p: &XmlComponent<'_>) -> Result<BrushStroke, ()> {
+    let tag = p.tag;
+    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true"))
+        || !matches!(crs_str(tag, "MaskBlendMode").as_deref(), None | Some("0"))
+        || !matches!(crs_str(tag, "MaskInverted").as_deref(), None | Some("false"))
+    {
+        return Err(());
+    }
+    let num = |k: &str| crs_f32(tag, k).filter(|v| v.is_finite()).ok_or(());
+    Ok(BrushStroke {
+        value: num("MaskValue")?,
+        radius: num("Radius")?,
+        flow: num("Flow")?,
+        center_weight: num("CenterWeight")?,
+        sync_id: crs_str(tag, "MaskSyncID").map(|v| v.into_owned()).unwrap_or_default(),
+        dabs: parse_dabs(scope, p)?,
+    })
+}
+
+/// The `crs:Dabs` token stream of one Paint, VERBATIM — one token per line, in
+/// the order the file lists its `<rdf:li>` items.
+///
+/// Each token is VALIDATED against the measured grammar (§[`BrushStroke::dabs`])
+/// and then stored unchanged. Validating without parsing is the whole point:
+/// the stream is the one payload whose MEANING waits on a measurement the
+/// sidecar cannot supply, so this proves it is a stream we recognise and
+/// refuses to impose a structure on it.
+fn parse_dabs(scope: &str, p: &XmlComponent<'_>) -> Result<String, ()> {
+    /// Far past the largest real stroke (645 dabs / 1,267 tokens) and far
+    /// past the whole reference library (15,964 dabs), but still a bound — a
+    /// hand-written sidecar must not be able to make one correction cost an
+    /// unbounded allocation.
+    const MAX_DAB_TOKENS: usize = 65_536;
+    let Some(body) = component_body(scope, p)? else {
+        return Err(());
+    };
+    let Some(seq) = owned_element_body(body, "crs:Dabs")? else {
+        // Present on 382/382. A Paint without one is not a stroke.
+        return Err(());
+    };
+    let mut out = String::new();
+    let mut tokens = 0usize;
+    let mut from = 0;
+    while let Some((start, end, self_closing)) = next_xml_tag(seq, from) {
+        let tag = &seq[start..=end];
+        if tag.starts_with("</") || tag_name(tag) != "rdf:li" {
+            from = end + 1;
+            continue;
+        }
+        if self_closing || tokens >= MAX_DAB_TOKENS {
+            return Err(()); // an empty <rdf:li/> holds no token
+        }
+        let close = element_close_start(seq, "rdf:li", end).ok_or(())?;
+        let token = xml_unescape(&seq[end + 1..close]);
+        dab_token_is_known(token.as_ref())?;
+        if tokens > 0 {
+            out.push('\n');
+        }
+        out.push_str(token.as_ref());
+        tokens += 1;
+        from = close + 1;
+    }
+    if tokens == 0 {
+        return Err(());
+    }
+    Ok(out)
+}
+
+/// Is this one `crs:Dabs` item a token of the measured grammar? `r <f>`,
+/// `f <f>`, `h <f>` or `d <x> <y>`, and nothing else — 22,966 tokens over 382
+/// components, zero malformed, four forms.
+///
+/// The newline check is not decoration. [`parse_dabs`] joins tokens with
+/// `'\n'` and the writer splits them back on it, so a token carrying one would
+/// silently become two on the round trip. No real token spans a line; this
+/// makes the storage form lossless by construction rather than by luck.
+fn dab_token_is_known(t: &str) -> Result<(), ()> {
+    if t.contains('\n') || t.contains('\r') {
+        return Err(());
+    }
+    let mut it = t.split_whitespace();
+    let arity = match it.next() {
+        Some("r" | "f" | "h") => 1,
+        Some("d") => 2,
+        _ => return Err(()),
+    };
+    for _ in 0..arity {
+        let v = it.next().ok_or(())?.parse::<f32>().map_err(|_| ())?;
+        if !v.is_finite() {
+            return Err(());
+        }
+    }
+    if it.next().is_some() {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// How a brush group composes onto the coverage built so far — the ONE place
+/// `crs:MaskBlendMode` is mapped onto this engine's [`MaskCombine`].
+///
+/// `1` is Lightroom's subtract (paired with `MaskValue="0"`, 23 of 39 real
+/// Aggregates); every other value, `0` included, is the plain union. The
+/// carried `blend_mode` stays the authority for the WRITER, so an unmapped
+/// mode still rides back out as itself instead of being normalised to what we
+/// happened to render it as.
+fn brush_combine(blend_mode: u32) -> MaskCombine {
+    if blend_mode == 1 { MaskCombine::Subtract } else { MaskCombine::Add }
+}
+
 fn range_values_are_supported(range: &RangeMask) -> bool {
     match range {
         RangeMask::Luminance { lo_outer, lo, hi, hi_outer } => {
@@ -4765,6 +5256,7 @@ fn classify_correction(
     frame: Option<FrameAspect>,
 ) -> MaskCorrectionParse {
     let mut geometry_count = 0usize;
+    let mut brush_count = 0usize;
     let mut range_count = 0usize;
     let mut unknown_component = false;
     let mut geometry_unusable = false;
@@ -4787,13 +5279,20 @@ fn classify_correction(
         .and_then(|p| next_xml_tag(seg, p))
         .map(|(s, e, _)| &seg[s..=e]);
 
-    let mut at = 0;
-    while let Some((start, end, _)) = next_xml_tag(mask_block, at) {
-        let tag = &mask_block[start..=end];
-        if !tag.starts_with("</")
-            && let Some((_, raw)) = xml_attribute_raw(tag, "crs:What")
+    // R27 Batch-4 hazard 1: NESTING-AWARE. This loop used to be a flat
+    // `next_xml_tag` walk, which reads the `Mask/Paint` strokes inside a
+    // `Mask/Aggregate` as SIBLINGS of it — harmless only while both answers
+    // were "refuse", and fatal the moment a Paint means something. Only
+    // `depth == 0` components belong to THIS correction's list; everything
+    // deeper belongs to the component that contains it, and is validated by
+    // that component's own parser (see `parse_brush_group`).
+    let components = components_in(mask_block);
+    // The extents of the groups that own the nested components, so a nested
+    // component sitting somewhere we do NOT model cannot pass unnoticed.
+    let mut owned_nesting: Vec<(usize, usize)> = Vec::new();
+    for component in components.iter().filter(|c| c.depth == 0) {
         {
-            let what = xml_unescape(raw);
+            let (tag, what) = (component.tag, &component.what);
             let verdict = component_import_reasons(tag, what.as_ref(), authored_by_autoshop, frame);
             match what.as_ref() {
                 "Mask/Gradient" | "Mask/CircularGradient" => {
@@ -4826,44 +5325,87 @@ fn classify_correction(
                         range_usable = false;
                     }
                 }
-                // Brush / AI / depth / heal components. Lightroom recomputes
-                // these from a digest, so there is nothing to take — and
-                // importing the parametric shape BESIDE one would render a
-                // mask the file does not describe. Still refused (R24
-                // decision: bitmap masks are not exportable either), now with
-                // a sentence that says why.
+                // BRUSH GROUP — imported since R27 Batch-4 (L-08). The
+                // registration that used to stand here said this whole arm was
+                // a disclosure-granularity question and not a parser bug; F2's
+                // measurement settled it the other way. `Mask/Aggregate` is a
+                // one-level container of `Mask/Paint` strokes whose encoding is
+                // fully determined by the sidecar (see `MaskGeometry::Brush`),
+                // so it is read, carried and written back — and the correction
+                // it sits in, plus every parametric shape standing beside it,
+                // arrives instead of being thrown away. What is NOT determined
+                // by the sidecar is the alpha kernel, so the render leaves the
+                // group inert and `BrushCarried` says so in both directions.
                 //
-                // REGISTERED, NOT FIXED (R25 P9) — this flag PRE-EMPTS the
-                // shape accounting below: the `unknown_component` return fires
-                // before `MultiComponent` is pushed, so a correction that mixes
-                // brush components WITH parametric geometry is disclosed only
-                // as "AI / brush correction(s) skipped" and the parametric
-                // shapes it also held are never counted anywhere.
-                // TRIGGER: any correction carrying both a `Mask/Paint` /
-                // `Mask/Aggregate` / `Mask/Image` component and a
-                // `Mask/Gradient` / `Mask/CircularGradient` one.
-                // WHERE IT GOES: `_DSC9583` Mask 2 (4 radials + Aggregate +
-                // 14 Paint) and Mask 7 (2 gradients + Aggregate + 3 Paint) —
-                // 6 representable shapes in one file, refused correctly per
-                // the R24 decision but unaccounted for in the sentence the
-                // user reads. Fixing it is a DISCLOSURE-GRANULARITY design
-                // question (does the user want to hear about shapes inside a
-                // correction that was right to refuse whole?), not a parser
-                // bug, so it is not folded into this batch.
+                // `verdict` is deliberately unused here: the attribute checks
+                // it performs are the PARAMETRIC ones (Angle, the subtract
+                // pair, `MaskValue == 1`), and a brush group's own attributes
+                // mean different things — `MaskValue="0"` on an Aggregate is
+                // half of Lightroom's subtract pair and the shared code would
+                // read it as a mute. `parse_brush_group` is this component's
+                // validator and it is stricter, not looser.
+                "Mask/Aggregate" => {
+                    brush_count += 1;
+                    // The group's EXTENT is recorded whether or not it parses.
+                    // A component nested inside a brush group is accounted for
+                    // by definition — we know exactly what contains it — so a
+                    // group we cannot model must not ALSO make its children
+                    // look like markup from nowhere. Getting this backwards
+                    // costs the user the accurate sentence: the correction
+                    // would be refused as "AI / brush correction(s) skipped"
+                    // when what actually happened is "a shape inside the group
+                    // that Lightroom has never been observed to write".
+                    if let Some(close) =
+                        element_close_start(mask_block, tag_name(tag), component.gt)
+                    {
+                        owned_nesting.push((component.gt, close));
+                    }
+                    // Same cost as an unreadable parametric component: the
+                    // values are legible and the SHAPE is outside the model
+                    // this parser measured, which takes the correction.
+                    if parse_brush_group(mask_block, component).is_err() {
+                        geometry_unusable = true;
+                    }
+                }
+                // AI / depth / heal components (`Mask/Image` above all — 105
+                // instances in the reference library, 78 corrections still
+                // refused because of them). Lightroom stores only the INTENT
+                // (`MaskSubType` + `MaskName` + `ReferencePoint`) and the
+                // provenance digests: there is no raster payload and no
+                // geometry payload anywhere on one, longest attribute value 55
+                // characters. Reproducing them needs a segmenter of our own
+                // producing our own alpha, which is a different feature from
+                // import (approximate re-derivation, disclosed as such) and
+                // not something a parser can reach.
                 _ => unknown_component = true,
             }
         }
-        at = end + 1;
+    }
+    // A component nested inside something we did NOT model as a container is
+    // markup this reader cannot account for. Refusing it keeps the depth-0
+    // filter above honest: without this, a foreign writer could hide a whole
+    // second mask inside an element we walked past.
+    if components.iter().filter(|c| c.depth > 0).any(|c| {
+        !owned_nesting.iter().any(|(open, close)| c.start > *open && c.start < *close)
+    }) {
+        unknown_component = true;
     }
 
-    if geometry_count == 0 || unknown_component {
+    if (geometry_count == 0 && brush_count == 0) || unknown_component {
         return MaskCorrectionParse::Unsupported(MaskImportReason::Unrepresentable);
     }
     if geometry_unusable {
         return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel);
     }
+    // PARAMETRIC extras only. A brush group is imported as a real component
+    // now, so it is not one of the "extra shapes that do not" — counting it
+    // here would tell the photographer a shape was dropped while the same run
+    // writes it back into their sidecar.
     if geometry_count > 1 {
         reasons.push(MaskImportReason::MultiComponent);
+    }
+    if brush_count > 0 {
+        reasons.push(MaskImportReason::BrushCarried);
     }
     match correction_value_reasons(seg) {
         Ok(rs) => reasons.extend(rs),
@@ -4928,31 +5470,74 @@ fn classify_correction(
 /// all — a correction made of nothing but subtractions has no base to find, and
 /// some shape beats no shape.
 ///
-/// Scanned over the whole correction segment, like the reads in
-/// `parse_one_correction`: `crs:What="Mask/…"` occurs only inside
-/// `crs:CorrectionMasks` within one correction.
+/// R27 Batch-4 hazard 2 — it used to scan the WHOLE correction segment for the
+/// first `crs:What="Mask/Gradient"` / `"Mask/CircularGradient"`, nesting-blind.
+/// No Aggregate in the reference library contains a parametric shape (300/300
+/// children are Paint), so it could not fire — but nothing in the code enforced
+/// that, and a foreign writer that DID nest a gradient inside a brush group
+/// would have had it promoted to the correction's base shape. The search is now
+/// over this correction's OWN component list, top level only.
 fn base_geometry_at(seg: &str) -> Option<usize> {
+    let (block_at, _block, comps) = correction_mask_components(seg)?;
     let (mut first, mut first_base) = (None, None);
-    let mut at = 0;
-    while let Some((s, e, _)) = next_xml_tag(seg, at) {
-        at = e + 1;
-        let tag = &seg[s..=e];
-        if tag.starts_with("</") {
+    for c in comps.iter().filter(|c| c.depth == 0) {
+        if !matches!(c.what.as_ref(), "Mask/Gradient" | "Mask/CircularGradient") {
             continue;
         }
-        let Some((_, raw)) = xml_attribute_raw(tag, "crs:What") else { continue };
-        if !matches!(xml_unescape(raw).as_ref(), "Mask/Gradient" | "Mask/CircularGradient") {
-            continue;
-        }
-        first = first.or(Some(s));
+        // Offsets come back in `seg`'s coordinates — every caller slices `seg`.
+        let at = block_at + c.start;
+        first = first.or(Some(at));
         // Absent counts as default: Lightroom writes the attribute on every
         // component it emits, and a component without one is not asserting a
         // composition (the same reading `component_import_reasons` takes).
-        if crs_str(tag, "MaskBlendMode").is_none_or(|m| m.as_ref() == "0") {
-            first_base = first_base.or(Some(s));
+        if crs_str(c.tag, "MaskBlendMode").is_none_or(|m| m.as_ref() == "0") {
+            first_base = first_base.or(Some(at));
         }
     }
     first_base.or(first)
+}
+
+/// One correction's OWN `crs:CorrectionMasks` list: `(offset of the list body
+/// inside `seg`, the list body, its components)`.
+///
+/// The one place the "this correction's components" question is answered, so
+/// the base selector and the geometry parser cannot disagree about which
+/// components those are.
+fn correction_mask_components(seg: &str) -> Option<(usize, &str, Vec<XmlComponent<'_>>)> {
+    let (b0, b1) = owned_element_body_span(seg, "crs:CorrectionMasks").ok().flatten()?;
+    let block = &seg[b0..b1];
+    Some((b0, block, components_in(block)))
+}
+
+/// The base component's OWN element, from its `<` to just before its close tag
+/// — R27 Batch-4 hazard 3.
+///
+/// `parse_one_correction` read its geometry keys out of `&seg[p..]`, a slice
+/// running from the base component to the END of the correction. That was safe
+/// only because Lightroom writes the shared attributes (`MaskValue`,
+/// `MaskBlendMode`, `MaskInverted`) on EVERY component, so the first hit was
+/// always the base's own — a coincidence, not an invariant, and one that stops
+/// holding the moment brush components are legal in an imported correction: an
+/// Aggregate at `MaskValue="0"` sitting after a base that omitted the attribute
+/// would have donated its subtract half-pair to the base's reads.
+///
+/// Real Lightroom parametric components are self-closing, so this equals the
+/// base TAG on every file in the reference library and the change is invisible
+/// there. It is the element-form spelling it makes safe.
+fn base_element(seg: &str, p: usize) -> &str {
+    let Some((s, e, self_closing)) = next_xml_tag(seg, p) else {
+        return &seg[p..];
+    };
+    if self_closing {
+        return &seg[s..=e];
+    }
+    match element_close_start(seg, tag_name(&seg[s..=e]), e) {
+        Some(close) => &seg[s..close],
+        // Unterminated markup: fall back to the old unbounded slice rather
+        // than losing the geometry entirely — a document this malformed is
+        // already refused by `owned_element_body`'s own `Err` upstream.
+        None => &seg[s..],
+    }
 }
 
 /// One `crs:What="Correction"` segment → a [`LocalAdjustment`]. Slider scales
@@ -4965,18 +5550,46 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
     };
     let q100 = |k: &str| scaled(k, 100.0);
     let q180 = |k: &str| scaled(k, 180.0);
-    // The geometry component decides the mask shape; a correction with no
-    // parametric geometry is not representable here. `base_geometry_at` picks
-    // WHICH component that is when there are several — read its doc, the choice
-    // used to invert the user's intent.
-    let p = base_geometry_at(seg)?;
+    // BRUSH GROUPS (R27 Batch-4). Parsed once, up front, and then split
+    // between the base slot and the component list — `parse_brush_group` is
+    // the strict validator, so a `?` here refuses the correction exactly as
+    // `classify_correction`'s own call did, and the two cannot disagree about
+    // what the file says.
+    let (_, block, comps) = correction_mask_components(seg)?;
+    let mut brushes: Vec<MaskGeometry> = Vec::new();
+    for c in comps.iter().filter(|c| c.depth == 0 && c.what.as_ref() == "Mask/Aggregate") {
+        brushes.push(parse_brush_group(block, c).ok()?);
+    }
+    // The geometry component decides the mask shape. `base_geometry_at` picks
+    // WHICH parametric component that is when there are several — read its
+    // doc, the choice used to invert the user's intent. `None` no longer ends
+    // the correction: a brush-only correction takes its first group as the
+    // base (F2 §7.3), which is the half of L-08 that rescues the 9 corrections
+    // holding nothing but strokes.
+    let (mask, base_el) = match base_geometry_at(seg) {
+        None => {
+            if brushes.is_empty() {
+                return None;
+            }
+            // Scope `""` for the inversion read below, deliberately. A brush
+            // group's `crs:MaskInverted` is CARRIED INSIDE the geometry
+            // (`MaskGeometry::Brush::inverted`) and written back from there,
+            // so lifting it into `LocalAdjustment::inverted` as well would
+            // spell one bit twice — and the second spelling is the one the
+            // render's weight loop reads, which on an inert brush would flip a
+            // zero-coverage mask into a WHOLE-FRAME adjustment. The same
+            // one-bit-one-home rule `lr_net_inverted` enforces for radials.
+            (brushes.remove(0), "")
+        }
+        Some(p) => {
     let base_tag = next_xml_tag(seg, p).map_or(&seg[p..], |(s, e, _)| &seg[s..=e]);
     let base_is_linear = xml_attribute_raw(base_tag, "crs:What")
         .is_some_and(|(_, raw)| xml_unescape(raw).as_ref() == "Mask/Gradient");
-    let (mask, geom_at) = if base_is_linear {
-
-
-        let g = &seg[p..];
+    // HAZARD 3 (R27 Batch-4): every geometry read below is bounded to the base
+    // component's OWN element instead of running to the end of the correction.
+    // See `base_element` for the bleed this closes.
+    let g = base_element(seg, p);
+    if base_is_linear {
         (
             MaskGeometry::Linear {
                 zero_x: crs_f32(g, "ZeroX")?,
@@ -4984,17 +5597,14 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
                 full_x: crs_f32(g, "FullX")?,
                 full_y: crs_f32(g, "FullY")?,
             },
-            p,
+            g,
         )
     } else {
-
-
-        let g = &seg[p..];
-        // The component's OWN tag — `base_geometry_at` returns a tag START, so
+        // The component's OWN TAG — `base_geometry_at` returns a tag START, so
         // this is the `<rdf:li …/>` that carries `crs:What`, and every geometry
-        // attribute Lightroom (and this writer) puts on it. Used by the two
-        // reads below whose attribute NAME recurs later in the correction; see
-        // there.
+        // attribute Lightroom (and this writer) puts on it. Still narrower than
+        // `g` after hazard 3: `g` is the base ELEMENT (tag plus any body), and
+        // the two reads below ask for names that recur in a body; see there.
         let geom_tag = base_tag;
         // Lightroom's Feather is 0..100 (reference sidecars: 50 / 72 …); the
         // engine's is 0..1. Three writers share this attribute, disambiguated
@@ -5115,12 +5725,31 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
                     .and_then(|v| v.trim().parse::<u32>().ok())
                     .unwrap_or(2),
             },
-            p,
+            g,
         )
+    }
+        }
     };
+    // Every brush group that did NOT become the base rides along as a real
+    // component (F2 §7.3): the group's own `crs:MaskBlendMode` is what it
+    // composes with, mapped ONCE by `brush_combine`. This is the first time
+    // this reader has ever populated `components` — the parametric extras are
+    // still dropped and still disclosed as `MultiComponent`, because there is
+    // no second parametric shape to keep without changing which shape the
+    // photo is (`base_geometry_at`'s whole subject).
+    let components: Vec<MaskComponent> = brushes
+        .into_iter()
+        .map(|geometry| {
+            let mode = match &geometry {
+                MaskGeometry::Brush { blend_mode, .. } => brush_combine(*blend_mode),
+                _ => MaskCombine::Add,
+            };
+            MaskComponent { geometry, mode }
+        })
+        .collect();
     // Optional range component. Its head repeats `MaskInverted="true"` as part
     // of the intersect ENCODING (see `range_mask_xml`), so user intent is read
-    // from the geometry component only — hence the `geom_at`-anchored scan.
+    // from the geometry component only — hence the `base_el`-anchored scan.
     let range = find_crs_value_at(seg, "What", "Mask/RangeMask").and_then(|p| {
 
 
@@ -5166,7 +5795,8 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
             })
             .unwrap_or_default(),
         amount: crs_f32(seg, "CorrectionAmount").unwrap_or(1.0),
-        inverted: crs_str(&seg[geom_at..], "MaskInverted").as_deref() == Some("true"),
+        components,
+        inverted: crs_str(base_el, "MaskInverted").as_deref() == Some("true"),
         exposure_ev: crs_f32(seg, "LocalExposure2012").unwrap_or(0.0) * 4.0,
         contrast: q100("LocalContrast2012"),
         highlights: q100("LocalHighlights2012"),
@@ -6229,7 +6859,16 @@ mod tests {
         // caller already hands whole markup — `classify_correction`, the only
         // one, tag-scans the same block itself — so the fixture was the thing
         // that did not look like a sidecar.
-        let li = r#"<rdf:li crs:What="Mask/CircularGradient" crs:Top="0.2" crs:Left="0.2" crs:Bottom="0.8" crs:Right="0.8" crs:Feather="72" crs:Roundness="0" crs:Flipped="false"/>"#;
+        //
+        // R27 Batch-4 took the same step again, one level out: the component
+        // list is now located by NAME (`crs:CorrectionMasks`) rather than
+        // scanned for anywhere in the segment, because "which components are
+        // this correction's own" is the question hazards 1 and 2 turned on.
+        // `classify_correction` has always required that element — it returns
+        // `Unrepresentable` without one — so the two now agree about where a
+        // correction's components live, and the fixture wears the wrapper its
+        // production caller always supplies.
+        let li = r#"<crs:CorrectionMasks><rdf:Seq><rdf:li crs:What="Mask/CircularGradient" crs:Top="0.2" crs:Left="0.2" crs:Bottom="0.8" crs:Right="0.8" crs:Feather="72" crs:Roundness="0" crs:Flipped="false"/></rdf:Seq></crs:CorrectionMasks>"#;
         let m = parse_one_correction(li, None).expect("radial parses");
         let MaskGeometry::Radial { feather, .. } = m.mask else { panic!("radial") };
         assert!((feather - 0.72).abs() < 1e-6, "LR 72 → 0.72, got {feather}");
@@ -7239,8 +7878,9 @@ mod tests {
                 MaskLossReason::Bitmap => 0,
                 MaskLossReason::Disabled => 1,
                 MaskLossReason::ComponentsFlattened => 2,
-                MaskLossReason::Rotation(_) => 3,
-                MaskLossReason::Recolour => 4,
+                MaskLossReason::BrushCarried => 3,
+                MaskLossReason::Rotation(_) => 4,
+                MaskLossReason::Recolour => 5,
             }
         }
         for (i, r) in MaskLossReason::ALL.into_iter().enumerate() {
@@ -9549,11 +10189,12 @@ mod tests {
                 MaskImportReason::Rotation(_) => 2,
                 MaskImportReason::BlendMode => 3,
                 MaskImportReason::MultiComponent => 4,
-                MaskImportReason::ForeignRangeMask => 5,
-                MaskImportReason::LocalCurve => 6,
-                MaskImportReason::CurveRefineSaturation => 7,
-                MaskImportReason::InertLocal(_) => 8,
-                MaskImportReason::UnknownLocalKey => 9,
+                MaskImportReason::BrushCarried => 5,
+                MaskImportReason::ForeignRangeMask => 6,
+                MaskImportReason::LocalCurve => 7,
+                MaskImportReason::CurveRefineSaturation => 8,
+                MaskImportReason::InertLocal(_) => 9,
+                MaskImportReason::UnknownLocalKey => 10,
             }
         }
         for (i, r) in MaskImportReason::ALL.into_iter().enumerate() {
@@ -9787,6 +10428,489 @@ mod tests {
         );
     }
 
+    // ── R27 Batch-4 (L-08): the brush arm ────────────────────────────────────
+
+    /// One `Mask/Paint` stroke. Attribute VALUES are `_DSC9583` Mask 7 →
+    /// Aggregate "Brush 1" verbatim (the F2 anatomy's reference specimen,
+    /// `D:/Photography/Raw/2024/24-12-New York-Raw/_DSC9583.xmp`, 75,935 B);
+    /// the indentation is not, because whitespace between attributes is
+    /// insignificant and a fixture whose mutations depend on counting spaces
+    /// is a fixture that tests the spaces.
+    fn lr_paint(sync: &str, value: &str, blend: &str, inverted: &str, dabs: &[&str]) -> String {
+        let items: String =
+            dabs.iter().map(|t| format!("<rdf:li>{t}</rdf:li>\n")).collect();
+        format!(
+            "<rdf:li>\n\
+             <rdf:Description crs:What=\"Mask/Paint\" crs:MaskActive=\"true\"\n\
+             crs:MaskBlendMode=\"{blend}\" crs:MaskInverted=\"{inverted}\"\n\
+             crs:MaskSyncID=\"{sync}\" crs:MaskValue=\"{value}\"\n\
+             crs:Radius=\"0.582157\" crs:Flow=\"1\" crs:CenterWeight=\"0\">\n\
+             <crs:Dabs>\n\
+             <rdf:Seq>\n\
+             {items}\
+             </rdf:Seq>\n\
+             </crs:Dabs>\n\
+             </rdf:Description>\n\
+             </rdf:li>\n"
+        )
+    }
+
+    /// Stroke 1 of `_DSC9583` Mask 7 → Brush 1: `MaskValue="0.439815"`,
+    /// `Radius="0.582157"`, and the eight dab tokens §1.1 of the anatomy
+    /// prints as its worked example.
+    fn lr_paint_specimen() -> String {
+        lr_paint(
+            "FA7459A9F5626F4881D7B730C3093F95",
+            "0.439815",
+            "0",
+            "false",
+            &[
+                "r 0.581835",
+                "d 0.000684 0.940004",
+                "r 0.581172",
+                "d 0.113862 0.987261",
+                "r 0.580873",
+                "d 0.229292 1.011389",
+                "r 0.581205",
+                "d 0.112441 1.007149",
+            ],
+        )
+    }
+
+    /// The `Mask/Aggregate` group itself — two strokes, the second exercising
+    /// the `f` and `h` state tokens. `(MaskBlendMode, MaskValue) = (0, 1)` is
+    /// Lightroom's plain ADD, 16 of the 39 real Aggregates; `extra_child` is
+    /// spliced as a THIRD member of `crs:Masks` for the nesting tests.
+    fn lr_brush_group(group_inverted: &str, extra_child: &str) -> String {
+        let s1 = lr_paint_specimen();
+        let s2 = lr_paint(
+            "1111111111111111111111111111111A",
+            "1",
+            "0",
+            "false",
+            &["f 1", "h 1", "d 0.500000 0.500000"],
+        );
+        format!(
+            "<rdf:li>\n\
+             <rdf:Description crs:What=\"Mask/Aggregate\" crs:MaskActive=\"true\"\n\
+             crs:MaskName=\"Brush 1\" crs:MaskBlendMode=\"0\"\n\
+             crs:MaskInverted=\"{group_inverted}\"\n\
+             crs:MaskSyncID=\"0000000000000000000000000000000D\" crs:MaskValue=\"1\">\n\
+             <crs:Masks>\n\
+             <rdf:Seq>\n\
+             {extra_child}{s1}{s2}\
+             </rdf:Seq>\n\
+             </crs:Masks>\n\
+             </rdf:Description>\n\
+             </rdf:li>\n"
+        )
+    }
+
+    /// The `_DSC9583` Mask 7 shape — a linear gradient plus the brush group —
+    /// imports WHOLE, where before R27 Batch-4 the whole correction was thrown
+    /// away and the gradient with it. That is the L-08 registration's own
+    /// complaint: 14 already-drawable parametric shapes across the reference
+    /// library were being discarded because a NEIGHBOURING component was a
+    /// brush.
+    ///
+    /// MUTATION-LINED. Verified red three independent ways (transcripts in the
+    /// batch report): reverting the `"Mask/Aggregate"` arm of
+    /// `classify_correction` to `unknown_component = true`; deleting
+    /// `parse_one_correction`'s brush-component collection; never pushing
+    /// `MaskImportReason::BrushCarried`, which imports the correction SILENTLY
+    /// — the failure mode this project treats as worse than the refusal it
+    /// replaced.
+    #[test]
+    fn a_lightroom_brush_group_imports_beside_the_shapes_it_used_to_take_down() {
+        let doc = lr_doc(&lr_correction(
+            "Mask 7",
+            "",
+            &format!("{}{}", lr_gradient("0"), lr_brush_group("false", "")),
+        ));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the correction must import: {:?}", r.masks);
+        let m = &r.masks[0];
+        // The parametric shape is still the BASE — a brush does not displace a
+        // gradient that was there first (`base_geometry_at`).
+        assert!(matches!(m.mask, MaskGeometry::Linear { .. }), "{:?}", m.mask);
+        assert_eq!(m.components.len(), 1, "the brush group rides as a component");
+        assert_eq!(m.components[0].mode, MaskCombine::Add, "MaskBlendMode=0 is a union");
+        let MaskGeometry::Brush { name, blend_mode, value, inverted, strokes } =
+            &m.components[0].geometry
+        else {
+            panic!("expected a brush group, got {:?}", m.components[0].geometry);
+        };
+        assert_eq!((name.as_str(), *blend_mode, *value, *inverted), ("Brush 1", 0, 1.0, false));
+        assert_eq!(strokes.len(), 2, "both Mask/Paint children arrive");
+        assert_eq!(strokes[0].value, 0.439815);
+        assert_eq!(strokes[0].radius, 0.582157);
+        assert_eq!(strokes[0].flow, 1.0);
+        assert_eq!(strokes[0].center_weight, 0.0);
+        assert_eq!(strokes[0].sync_id, "FA7459A9F5626F4881D7B730C3093F95");
+        // The dab stream, token for token, in document order.
+        assert_eq!(
+            strokes[0].dabs,
+            "r 0.581835\nd 0.000684 0.940004\nr 0.581172\nd 0.113862 0.987261\n\
+             r 0.580873\nd 0.229292 1.011389\nr 0.581205\nd 0.112441 1.007149"
+        );
+        assert_eq!(strokes[1].dabs, "f 1\nh 1\nd 0.500000 0.500000");
+        // And the import SAYS so — carried, not rendered.
+        let losses = import_losses(&doc);
+        assert!(
+            losses.iter().any(|l| l.reason == MaskImportReason::BrushCarried),
+            "a carried-but-unrendered brush must be disclosed: {losses:?}"
+        );
+        assert!(
+            !losses.iter().any(|l| l.reason.is_drop()),
+            "nothing about this correction was dropped: {losses:?}"
+        );
+    }
+
+    /// A correction whose ONLY component is a brush group imports too — its
+    /// first Aggregate becomes the base geometry (F2 §7.3). Nine of the
+    /// eighteen corrections this batch rescues have exactly that shape.
+    ///
+    /// MUTATION-LINED: deleting `parse_one_correction`'s brush fallback (the
+    /// `None => { … brushes.remove(0) … }` arm) makes it return `None`, the
+    /// correction lands on `OutOfModel`, and this goes to 0 masks.
+    #[test]
+    fn a_brush_only_correction_takes_its_first_group_as_the_base() {
+        let doc = lr_doc(&lr_correction("Mask 1", "", &lr_brush_group("false", "")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "brush-only corrections import now: {:?}", r.masks);
+        assert!(matches!(r.masks[0].mask, MaskGeometry::Brush { .. }));
+        assert!(r.masks[0].components.is_empty(), "one group, no extras");
+        // Inert, NOT inverted: the group's own inversion bit lives inside the
+        // geometry, and lifting it here as well would turn a zero-coverage
+        // mask into a whole-frame adjustment.
+        assert!(!r.masks[0].inverted);
+    }
+
+    /// The write-back is faithful to the measured `Mask/Aggregate` shape:
+    /// import → write puts every attribute and every dab token back, and a
+    /// second import is a FIXED POINT. (The `crs:MaskSyncID`s are the writer's
+    /// own by design — it mints them for every component it emits — so the
+    /// comparison that has to be exact is the recipe, not the ID text.)
+    ///
+    /// MUTATION-LINED: dropping `extra_lis` from the emitted `<rdf:Seq>` makes
+    /// the group vanish from the sidecar and the fixed-point half fails.
+    #[test]
+    fn a_brush_group_round_trips_back_into_the_sidecar() {
+        // BOTH slots the group can occupy, because the writer reaches them
+        // through different code: as the correction's BASE (a brush-only
+        // correction) and as an extra COMPONENT beside a parametric shape
+        // (`_DSC9583` Mask 7's own shape). A round-trip test that only ever
+        // saw the base would stay green while the component arm dropped the
+        // group on the floor.
+        for components in [
+            lr_brush_group("false", ""),
+            format!("{}{}", lr_gradient("0"), lr_brush_group("false", "")),
+        ] {
+            brush_round_trip_case(&components);
+        }
+    }
+
+    fn brush_round_trip_case(components: &str) {
+        let doc = lr_doc(&lr_correction("Mask 7", "", components));
+        let once = xmp_to_recipe(&doc);
+        let written = recipe_to_xmp(&once);
+        // 1. The dab tokens ride out verbatim, in order.
+        for token in [
+            "<rdf:li>r 0.581835</rdf:li>",
+            "<rdf:li>d 0.000684 0.940004</rdf:li>",
+            "<rdf:li>d 0.112441 1.007149</rdf:li>",
+            "<rdf:li>f 1</rdf:li>",
+            "<rdf:li>h 1</rdf:li>",
+        ] {
+            assert!(written.contains(token), "missing {token} in:\n{written}");
+        }
+        // 2. The components' own attributes, in Lightroom's own spelling.
+        for attr in [
+            r#"crs:What="Mask/Aggregate""#,
+            r#"crs:MaskName="Brush 1""#,
+            r#"crs:What="Mask/Paint""#,
+            r#"crs:MaskValue="0.439815""#,
+            r#"crs:Radius="0.582157""#,
+            r#"crs:Flow="1""#,
+            r#"crs:CenterWeight="0""#,
+        ] {
+            assert!(written.contains(attr), "missing {attr} in:\n{written}");
+        }
+        // 3. FIXED POINT, at the level that has to be one — the DOCUMENT.
+        // Reading our own sidecar back and writing it again is byte-identical,
+        // which is the assertion that fails if any value is reformatted on the
+        // way out: an `f32` printed through a rounding formatter, a token
+        // re-spaced, a stroke re-ordered, an attribute dropped.
+        let twice = xmp_to_recipe(&written);
+        assert_eq!(written, recipe_to_xmp(&twice), "the sidecar is not a fixed point");
+        assert_eq!(once.masks.len(), twice.masks.len());
+        let (a, b) = (&once.masks[0], &twice.masks[0]);
+        // The RECIPE is a fixed point too, with exactly one NAMED exception:
+        // `crs:MaskSyncID`. The writer mints its own for every component it
+        // emits (`guid`), so a group that came in with Lightroom's IDs goes out
+        // with ours and comes back carrying those. That is the writer's
+        // standing rule rather than anything about brushes — and it is an
+        // ACCEPTED COST, stated here so it is a decision and not a surprise:
+        // the ID Lightroom used for a stroke survives one save and no more.
+        // Everything that describes the STROKE survives every save.
+        let strip = |g: &MaskGeometry| match g {
+            MaskGeometry::Brush { name, blend_mode, value, inverted, strokes } => {
+                let bare: Vec<_> = strokes
+                    .iter()
+                    .map(|s| BrushStroke { sync_id: String::new(), ..s.clone() })
+                    .collect();
+                MaskGeometry::Brush {
+                    name: name.clone(),
+                    blend_mode: *blend_mode,
+                    value: *value,
+                    inverted: *inverted,
+                    strokes: bare,
+                }
+            }
+            other => other.clone(),
+        };
+        assert_eq!(strip(&a.mask), strip(&b.mask), "the brush geometry is not a fixed point");
+        assert_eq!(a.components.len(), b.components.len());
+        for (ca, cb) in a.components.iter().zip(&b.components) {
+            assert_eq!(ca.mode, cb.mode);
+            assert_eq!(strip(&ca.geometry), strip(&cb.geometry));
+        }
+        // 4. And the WRITER discloses the same fact the reader did.
+        let losses = mask_export_losses(&once);
+        assert!(
+            losses.iter().any(|l| l.reason == MaskLossReason::BrushCarried),
+            "the writer must say the brush it emitted is not rendered: {losses:?}"
+        );
+        assert!(
+            !losses.iter().any(|l| l.reason == MaskLossReason::ComponentsFlattened),
+            "nothing was flattened — the brush went out whole: {losses:?}"
+        );
+    }
+
+    /// HAZARD 1 (`classify_correction` walked the mask block FLAT). A flat walk
+    /// sees the `Mask/Paint` strokes inside a group as SIBLINGS of it: they are
+    /// none of the four kinds the classifier knows, so each one sets
+    /// `unknown_component` and the whole correction is refused — the brush arm
+    /// would import nothing at all.
+    ///
+    /// MUTATION-LINED: replacing the `components.iter().filter(|c| c.depth ==
+    /// 0)` walk with the old `next_xml_tag` loop over `mask_block` refuses this
+    /// document (`Unrepresentable`, 0 masks).
+    #[test]
+    fn nested_paint_strokes_are_not_siblings_of_their_group() {
+        let doc = lr_doc(&lr_correction("Mask 1", "", &lr_brush_group("false", "")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "a nested Paint must not read as an unknown component");
+        let MaskGeometry::Brush { strokes, .. } = &r.masks[0].mask else { panic!() };
+        // Counted ONCE each, as children — a flat walk would also have made
+        // them top-level components and double-counted the strokes.
+        assert_eq!(strokes.len(), 2);
+        // And the depth filter is not a hiding place: a component nested inside
+        // a container we do NOT model is markup this reader cannot account for,
+        // so it refuses rather than walking past it.
+        let smuggled = doc.replace(
+            "<crs:Masks>",
+            "<crs:Masks>\n<crs:Decoy><rdf:li crs:What=\"Mask/Gradient\" crs:ZeroX=\"0\" \
+             crs:ZeroY=\"0\" crs:FullX=\"1\" crs:FullY=\"1\"/></crs:Decoy>",
+        );
+        assert_ne!(smuggled, doc, "the mutation did not apply");
+        assert_eq!(
+            xmp_to_recipe(&smuggled).masks.len(),
+            0,
+            "a component in an unmodelled container is markup we cannot account for"
+        );
+    }
+
+    /// HAZARD 2 (`base_geometry_at` scanned the WHOLE correction segment for a
+    /// `crs:What="Mask/Gradient"` tag, nesting-blind). The correction here has
+    /// one real component — a SUBTRACT radial in `crs:CorrectionMasks` — and a
+    /// nested creative-Look block beside it holding a `Mask/Gradient` of its
+    /// own. F2 found that shape in the reference library: one of the 105
+    /// `Mask/Image` components lives inside a `crs:Preset`/`crs:Parameters`
+    /// block rather than in any correction's component list.
+    ///
+    /// The old scan starts at byte 0 of the correction and takes the first
+    /// default-blend geometry tag it meets, which is the LOOK's gradient — so
+    /// the correction imported as a Linear mask built from a profile's baked
+    /// parameters, a shape the photographer never drew. The selector now
+    /// searches this correction's OWN component list, finds no default-blend
+    /// member there, and falls back to the subtract radial (some shape beats no
+    /// shape — see the function's doc).
+    ///
+    /// MUTATION-LINED: reverting `base_geometry_at` to the old flat
+    /// `next_xml_tag` scan over `seg` imports the Look's gradient and this
+    /// fails on the geometry KIND.
+    #[test]
+    fn a_shape_nested_beside_the_component_list_is_never_the_corrections_base() {
+        // A creative Look's baked parameters — owned-LOOKING crs markup that
+        // belongs to the profile, not to this correction (the same trap
+        // `top_level_owned_spans` documents for the merge).
+        let look = concat!(
+            "       <crs:Look>\n        <rdf:Description>\n         <crs:Parameters>\n",
+            "         <rdf:Description>\n",
+            "          <rdf:li crs:What=\"Mask/Gradient\" crs:MaskActive=\"true\"\n",
+            "           crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\" crs:MaskValue=\"1\"\n",
+            "           crs:ZeroX=\"0.9\" crs:ZeroY=\"0.9\" crs:FullX=\"0.1\" crs:FullY=\"0.1\"/>\n",
+            "         </rdf:Description>\n        </crs:Parameters>\n",
+            "        </rdf:Description>\n       </crs:Look>\n",
+        );
+        let doc =
+            lr_doc(&lr_correction_with_curves("Mask 1", "", look, &lr_radial("0", "1")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the correction still imports: {:?}", r.masks);
+        assert!(
+            matches!(r.masks[0].mask, MaskGeometry::Radial { .. }),
+            "the base must come from this correction's OWN component list, never from a \
+             nested Look: {:?}",
+            r.masks[0].mask
+        );
+    }
+
+    /// The other half of the same rule, and the one the brush arm needs: a
+    /// parametric shape nested INSIDE a brush group is refused rather than
+    /// promoted. "An Aggregate whose child is not a Paint" has zero
+    /// counter-examples in 171 real sidecars, so a document with one was
+    /// written by something other than Lightroom.
+    ///
+    /// MUTATION-LINED: loosening `parse_brush_group`'s child-kind gate from
+    /// `return Err(())` to `continue` imports the correction.
+    #[test]
+    fn a_shape_nested_inside_a_brush_group_is_refused_not_promoted() {
+        let nested = "<rdf:li crs:What=\"Mask/Gradient\" crs:MaskActive=\"true\" \
+                      crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\" crs:MaskValue=\"1\" \
+                      crs:ZeroX=\"0.1\" crs:ZeroY=\"0.2\" crs:FullX=\"0.3\" \
+                      crs:FullY=\"0.4\"/>\n";
+        let doc = lr_doc(&lr_correction("Mask 1", "", &lr_brush_group("false", nested)));
+        let r = xmp_to_recipe(&doc);
+        assert!(
+            r.masks.is_empty(),
+            "a gradient inside an Aggregate is a shape Lightroom never writes — refuse it, \
+             do not promote it: {:?}",
+            r.masks
+        );
+        assert!(
+            import_losses(&doc).iter().any(|l| l.reason == MaskImportReason::OutOfModel),
+            "and say which kind of refusal it was — the NESTING is accounted for, it is the \
+             shape that is outside the model"
+        );
+    }
+
+    /// HAZARD 3 (`parse_one_correction` read geometry keys from a slice running
+    /// to the END of the correction). The base gradient here omits
+    /// `crs:MaskInverted`; the brush group AFTER it carries
+    /// `crs:MaskInverted="true"`. The unbounded scan finds the GROUP's bit and
+    /// inverts a mask the base never asked to invert.
+    ///
+    /// MUTATION-LINED: changing `base_element(seg, p)` back to `&seg[p..]`
+    /// makes `inverted` read `true` and the first assertion fails.
+    #[test]
+    fn a_later_components_attribute_cannot_answer_for_the_base_shape() {
+        let bare = lr_gradient("0").replace("crs:MaskInverted=\"false\"\n", "");
+        assert!(!bare.contains("MaskInverted"), "the base must declare no inversion");
+        let group = lr_brush_group("true", "");
+        let doc = lr_doc(&lr_correction("Mask 7", "", &format!("{bare}{group}")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "{:?}", r.masks);
+        assert!(
+            !r.masks[0].inverted,
+            "the base gradient declares no inversion — the group's bit is the GROUP's"
+        );
+        // And the group keeps its own bit, carried where it belongs.
+        let MaskGeometry::Brush { inverted, .. } = &r.masks[0].components[0].geometry else {
+            panic!("expected the group as a component")
+        };
+        assert!(*inverted, "the Aggregate's own MaskInverted rides in the geometry");
+    }
+
+    /// The measured INVARIANTS are gates, not fields: a `Mask/Paint` that
+    /// asserts a composition, a missing attribute, a dab token outside
+    /// `{r,d,f,h}`, a Paint with no `crs:Dabs`. Each has zero counter-examples
+    /// in 171 real sidecars, so each costs the correction rather than being
+    /// guessed past — the roundness rule, applied to a stroke.
+    ///
+    /// MUTATION-LINED: loosening any one gate in `parse_brush_group` /
+    /// `parse_paint_stroke` / `dab_token_is_known` imports the corresponding
+    /// document and fails the matching assertion.
+    #[test]
+    fn a_brush_group_outside_the_measured_encoding_is_refused_not_guessed() {
+        let base = lr_doc(&lr_correction("Mask 1", "", &lr_brush_group("false", "")));
+        assert_eq!(xmp_to_recipe(&base).masks.len(), 1, "the control must import");
+        for (what, doc) in [
+            (
+                "a Paint asserting its own blend mode",
+                base.replace(
+                    "crs:What=\"Mask/Paint\" crs:MaskActive=\"true\"\ncrs:MaskBlendMode=\"0\"",
+                    "crs:What=\"Mask/Paint\" crs:MaskActive=\"true\"\ncrs:MaskBlendMode=\"1\"",
+                ),
+            ),
+            (
+                "a Paint that inverts itself",
+                base.replace(
+                    "crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\"",
+                    "crs:MaskBlendMode=\"0\" crs:MaskInverted=\"true\"",
+                ),
+            ),
+            (
+                "a Paint missing one of its nine attributes",
+                base.replace(" crs:Flow=\"1\"", ""),
+            ),
+            (
+                "a dab token of an unknown form",
+                base.replace("<rdf:li>r 0.581835</rdf:li>", "<rdf:li>q 0.581835</rdf:li>"),
+            ),
+            (
+                "a dab token of the wrong arity",
+                base.replace("<rdf:li>r 0.581835</rdf:li>", "<rdf:li>r 0.5 0.6</rdf:li>"),
+            ),
+            (
+                "a dab coordinate that is not a number",
+                base.replace(
+                    "<rdf:li>d 0.000684 0.940004</rdf:li>",
+                    "<rdf:li>d 0.000684 nine</rdf:li>",
+                ),
+            ),
+            (
+                "a Paint with no Dabs at all",
+                base.replace("crs:Dabs>", "crs:NotDabs>"),
+            ),
+            (
+                "an Aggregate with no strokes at all",
+                lr_doc(&lr_correction(
+                    "Mask 1",
+                    "",
+                    "<rdf:li>\n<rdf:Description crs:What=\"Mask/Aggregate\" \
+                     crs:MaskActive=\"true\" crs:MaskName=\"Brush 1\" crs:MaskBlendMode=\"0\" \
+                     crs:MaskInverted=\"false\" crs:MaskValue=\"1\">\n<crs:Masks>\n\
+                     <rdf:Seq>\n</rdf:Seq>\n</crs:Masks>\n</rdf:Description>\n</rdf:li>\n",
+                )),
+            ),
+        ] {
+            assert_ne!(doc, base, "the mutation for {what:?} did not apply");
+            assert!(
+                xmp_to_recipe(&doc).masks.is_empty(),
+                "{what} must refuse the correction, not be imported as if understood"
+            );
+        }
+    }
+
+    /// A brush group is INERT in the render and NAMED in both disclosure
+    /// channels — it neither silently covers the frame nor silently covers
+    /// nothing.
+    #[test]
+    fn a_carried_brush_is_named_in_both_channels_and_is_not_a_drop() {
+        // Import twin and export twin describe the SAME fact, so both `ALL`
+        // arrays — the lists every disclosure surface iterates — must hold it.
+        assert!(MaskImportReason::ALL.contains(&MaskImportReason::BrushCarried));
+        assert!(MaskLossReason::ALL.contains(&MaskLossReason::BrushCarried));
+        assert!(!MaskImportReason::BrushCarried.is_drop(), "the correction DID import");
+        for phrase in [MaskImportReason::BrushCarried.en(), MaskLossReason::BrushCarried.en()] {
+            assert!(phrase.contains("carried"), "{phrase}");
+            assert!(phrase.contains("not yet rendered"), "{phrase}");
+        }
+        // The RENDER half of the same claim lives in render.rs, where
+        // `mask_weight` is: `a_carried_brush_group_draws_nothing_anywhere`.
+    }
+
     /// FORENSIC REGRESSION, run against the user's own Lightroom library.
     /// The inline fixtures above are synthetic by policy, which means they
     /// prove the RULES and not the FILES — and §0 of this round was a defect
@@ -9907,8 +11031,16 @@ mod tests {
                 corrections,
                 "{name}: every correction must be either imported or counted as refused"
             );
+            // GATED on the sidecar actually HAVING a correction (R27 Batch-4).
+            // The bare `imported > 0` was true of the seven M-B fixtures and
+            // false of the assertion's own sentence: pointed at any real
+            // catalogue folder it failed on the first sidecar carrying nothing
+            // but global sliders, claiming a file "with 0 correction(s) must
+            // import at least one". A probe that cannot be aimed at a
+            // directory of real photographs is a probe that only ever sees the
+            // seven files someone already curated.
             assert!(
-                imported > 0,
+                corrections == 0 || imported > 0,
                 "{name}: a real Lightroom sidecar with {corrections} correction(s) must import \
                  at least one — importing none is the defect this batch closed"
             );

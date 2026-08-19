@@ -144,6 +144,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Linear", "线性"),
     ("Radial", "径向"),
     ("Bitmap", "位图"),
+    // The mask-row kind label for a Lightroom `Mask/Aggregate` group.
+    ("Brush", "画笔"),
     ("mask", "蒙版"),
     ("Sky (reverse-fit)", "天空（反推）"),
     ("Land (reverse-fit)", "地景（反推）"),
@@ -460,8 +462,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("U²-Net salient-subject segmentation → bitmap mask (python sidecar: pip install rembg; first run auto-downloads the model to ~/.u2net)",
         "U²-Net 显著主体分割 → 位图蒙版（python sidecar：pip install rembg；首次运行自动下载模型到 ~/.u2net）"),
     ("🤖 AI select sky", "🤖 AI 选天空"),
-    ("SegFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~14MB model)",
-        "SegFormer-ADE20K 天空分割 → 位图蒙版（python sidecar：pip install transformers；首次运行自动下载约 14MB 模型）"),
+    // R27 Batch-4: the model NAME and its download size both changed with the
+    // licence fix (SegFormer-B0's weights are "research or evaluation purposes
+    // only"; OneFormer Swin-L is MIT). 14 MB -> 880 MB is a number the user
+    // acts on before clicking, so the tooltip has to carry the real one.
+    ("OneFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~880MB model)",
+        "OneFormer-ADE20K 天空分割 → 位图蒙版（python sidecar：pip install transformers；首次运行自动下载约 880MB 模型）"),
     ("this build did not ship the python sidecar — run Autoshop from the project directory, or point AUTOSHOP_SEGMENT_SCRIPT at python/segment.py",
         "本版本未随发布包分发 python 边车——请从项目目录运行 Autoshop，或用 AUTOSHOP_SEGMENT_SCRIPT 指向 python/segment.py"),
 
@@ -766,6 +772,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Canvas mask badge + model-picker placeholder ─────────────────────────
     ("▨ Bitmap mask", "▨ 位图蒙版"),
+    ("▨ Brush mask (carried, not rendered)", "▨ 画笔蒙版（已带走，未渲染）"),
     ("Select…", "选择… / pick"),
     ("or type a custom id", "或输入自定义模型 id"),
 
@@ -865,6 +872,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("bitmap masks ×{n}", "位图蒙版 ×{n}"),
     ("muted masks ×{n}", "已静音蒙版 ×{n}"),
     ("shape components flattened ×{n}", "形状组件已压平 ×{n}"),
+    // R27 Batch-4 (L-08). The odd member of the export bucket: the brush group
+    // IS written to the sidecar, complete — what is missing is this engine's
+    // rendering of it, so the phrase has to break out of the frame sentence's
+    // 「不会带走」 rather than sit inside it. Every glyph checked against the
+    // shipped CJK subset first: 「画」「笔」「蒙」「版」「已」「带」「走」「但」
+    // 「此」「处」「未」「渲」「染」 all already occur in this table.
+    ("brush masks ×{n} carried but not rendered here",
+        "画笔蒙版 ×{n} 已带走，但此处未渲染"),
     // No 「未带走」 on these two: the frame sentence above is already
     // 「…不会带走：」, and "will not carry: radial rotation NOT CARRIED" reads as
     // the opposite of what happened (R22 L5). The English labels are bare nouns
@@ -1391,6 +1406,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "旋转 {a}° 按 0 读入（画幅尺寸未知）"),
     ("Blend mode", "混合模式"),
     ("Extra shapes", "附加形状"),
+    // R27 Batch-4 (L-08). Import twin of the export line above — the strokes,
+    // their dab streams and the group's blend mode all arrive and round-trip;
+    // the alpha kernel is what is still being measured, so nothing is drawn.
+    ("Brush mask (carried, not rendered)", "画笔蒙版（已带走，未渲染）"),
     ("Range mask (foreign)", "值域蒙版（外部）"),
     // R25 P6: the four local point curves are modelled now, so this verdict
     // no longer means "not supported" — it means the sidecar's own curve did

@@ -1085,6 +1085,153 @@ pub enum MaskGeometry {
     /// §B retouch-master limitation). A missing/unreadable file renders the
     /// mask inert (weight 0) with a stderr warning rather than failing.
     Bitmap { path: String },
+    /// Lightroom's BRUSH group — one `crs:What="Mask/Aggregate"` component and
+    /// the `Mask/Paint` strokes it contains (R27 Batch-4, L-08). CARRIED, NOT
+    /// RENDERED: [`render::mask_weight`] answers 0 for this geometry and the
+    /// import/export disclosures both say so by name. The reason is the alpha
+    /// KERNEL, and only the kernel — see [`BrushStroke::dabs`].
+    ///
+    /// **The encoding, as measured** (F2 anatomy, 2026-08-19: 171 sidecars of
+    /// the user's own library, real XML parser, 0 parse failures; 39
+    /// `Mask/Aggregate` and 382 `Mask/Paint` instances):
+    ///
+    ///  * an Aggregate is a ONE-LEVEL group. Its children are `Mask/Paint`,
+    ///    300/300 — never a Gradient, a Radial, a RangeMask, an Image or
+    ///    another Aggregate — and the maximum component nesting depth in the
+    ///    whole library is exactly 2. `Mask/Paint` is NEVER a top-level
+    ///    correction component (300/300 of the in-correction Paints are
+    ///    children of an Aggregate).
+    ///  * the composition mode relative to the rest of the correction sits on
+    ///    the GROUP: `(blend_mode, value, inverted)` measured as `(1, 0, false)`
+    ///    ×22, `(0, 1, false)` ×16, `(1, 0, true)` ×1 — Lightroom's subtract
+    ///    pair and its plain add, the same encoding v0.31.1 taught the reader
+    ///    for parametric components.
+    ///  * the strokes INSIDE only ever union with each other: `MaskBlendMode`
+    ///    is `"0"` on 382/382 Paints and `MaskInverted` `"false"` on 382/382.
+    ///    Anything else is someone else's writer and is refused, not guessed
+    ///    (the roundness rule).
+    ///
+    /// All four numbers ride out into the sidecar exactly as they rode in, so
+    /// a brush mask this app imports and republishes still says what Lightroom
+    /// said. `blend_mode` is therefore stored HERE as well as being projected
+    /// onto the owning [`MaskComponent`]'s [`MaskCombine`] on import: the
+    /// component's mode is what a future renderer will compose with, and this
+    /// is what the WRITER re-emits. They are two spellings of one fact and the
+    /// import is the only place that maps between them.
+    ///
+    /// [`render::mask_weight`]: crate::render
+    Brush {
+        /// `crs:MaskName` on the Aggregate — always "Brush *n*" in some UI
+        /// language (`画笔 1` ×23, `Brush 1` ×7, `画笔 2` ×6, …). Carried so a
+        /// republished sidecar keeps the photographer's own label.
+        name: String,
+        /// `crs:MaskBlendMode` on the Aggregate, VERBATIM. 0 = union onto the
+        /// correction's coverage, 1 = subtract (paired with `value` 0).
+        blend_mode: u32,
+        /// `crs:MaskValue` on the Aggregate, VERBATIM — the other half of the
+        /// subtract pair, never a strength (see `component_import_reasons` in
+        /// xmp.rs for why reading it as one neutralises real masks).
+        value: f32,
+        /// `crs:MaskInverted` on the Aggregate.
+        inverted: bool,
+        /// The group's `Mask/Paint` children, in DOCUMENT ORDER. Order is
+        /// load-bearing for the eventual raster (dabs accumulate), so it is
+        /// preserved rather than sorted.
+        strokes: Vec<BrushStroke>,
+    },
+}
+
+/// One `crs:What="Mask/Paint"` stroke inside a [`MaskGeometry::Brush`] group.
+///
+/// Exactly nine attributes on 300/300 in-correction instances, no optional
+/// fields and no variation: `What`, `MaskActive`, `MaskBlendMode`,
+/// `MaskInverted`, `MaskSyncID`, `MaskValue`, `Radius`, `Flow`, `CenterWeight`,
+/// plus exactly one child element, `crs:Dabs`. The three whose value is an
+/// invariant (`MaskActive="true"`, `MaskBlendMode="0"`, `MaskInverted="false"`)
+/// are NOT fields here: a constant is not data, and the reader refuses a
+/// component that breaks one rather than storing the surprise.
+///
+/// Denies unknown fields for the same reason [`MaskGeometry`] does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrushStroke {
+    /// `crs:MaskValue` — a genuine 0..1 stroke DENSITY here, not the subtract
+    /// half-pair: `MaskBlendMode` is 0 on every Paint, so the pairing rule
+    /// cannot apply. Measured `"1"` ×305 and 10 distinct fractional values on
+    /// the rest. This is the missing member of the "`BlendMode=0` with
+    /// `MaskValue≠1`" bucket the R25 census counted and could not explain.
+    pub value: f32,
+    /// `crs:Radius` — the brush size in WIDTH units (a dab is a circle in
+    /// PIXELS, hence semi-axes `(r, r·W/H)` in the normalised frame). The
+    /// component attribute is the stream's INITIAL state; an `r` token
+    /// overrides it. 102 components carry no `r` token at all and every one of
+    /// them has a non-zero radius here, so the value is never undefined.
+    pub radius: f32,
+    /// `crs:Flow` — initial flow state. Exactly redundant with the stream's
+    /// first `f` token wherever one exists (72/72).
+    pub flow: f32,
+    /// `crs:CenterWeight` — HARDNESS on 0..1, the same quantity the stream's
+    /// `h` token sets (the two observed `h` values, 1.0000 and 0.0006, are
+    /// members of this attribute's own value set to 4 dp).
+    pub center_weight: f32,
+    /// `crs:MaskSyncID` as the file spelled it. Carried so `recipe.json`
+    /// remembers Lightroom's own identity for the stroke; the WRITER mints a
+    /// fresh one exactly like it does for every other component it emits, so
+    /// this never travels back out (see `masks_xml`).
+    pub sync_id: String,
+    /// The `crs:Dabs` token stream, VERBATIM — one token per line, in the
+    /// order the file lists its `<rdf:li>` items.
+    ///
+    /// **The grammar, measured** (22,966 tokens over 382 components, zero
+    /// malformed): four forms and no others —
+    ///
+    /// | token | meaning |
+    /// |---|---|
+    /// | `r <f>` | set the current radius |
+    /// | `f <f>` | set the current flow |
+    /// | `h <f>` | set the current hardness |
+    /// | `d <x> <y>` | stamp a dab at (x, y) with the current state |
+    ///
+    /// Initial state comes from the attributes above; tokens override in
+    /// stream order. The polyline is ALREADY DENSIFIED by Lightroom at
+    /// 0.2000 · r (15,582 consecutive-dab steps, IQR [0.1998, 0.2001], and
+    /// **zero steps exceed 1.0 r — there are no pen-lifts inside a Paint**), so
+    /// a renderer interpolates nothing: it stamps the dabs it is given. The
+    /// coordinate frame is the PLAIN image frame, `k = 1.00001 ± 2×10⁻⁵` —
+    /// **not** the 1.032 concentric frame `xmp::LR_MASK_FRAME_SCALE` folds
+    /// radial corners through. Both facts are calibrated against Lightroom's
+    /// own `crs:pm_*` pixel boxes on 79 spots, sub-pixel.
+    ///
+    /// **Why this is a STRING and not a parsed `Vec<Dab>`.** The one thing the
+    /// sidecar does not carry is the alpha KERNEL — the falloff as a function
+    /// of hardness, and the per-dab accumulation law. The file stores the
+    /// stroke, never the alpha, so no amount of parsing recovers it, and the
+    /// only published model for it is a third-party decompile reconstruction
+    /// whose `Density` field does not exist in any of the 382 real components.
+    /// Structuring the stream before that measurement exists would freeze a
+    /// shape around a renderer nobody has written; carrying it verbatim
+    /// guarantees the round trip is exact meanwhile. The measurement is one
+    /// controlled Lightroom export away (docs/V2_PLAN.md) and it is a GATE on
+    /// rendering, not on carrying.
+    pub dabs: String,
+}
+
+impl Default for BrushStroke {
+    fn default() -> Self {
+        // Lightroom's own neutrals for a stroke that says nothing: full
+        // density, full flow, a soft edge, no dabs. Not the TYPE's defaults —
+        // `flow: 0.0` would be a stroke that paints nothing, which is a
+        // legitimate value and therefore the wrong reading of "absent" (the
+        // same trap `radial_midpoint_centre` documents).
+        Self {
+            value: 1.0,
+            radius: 0.0,
+            flow: 1.0,
+            center_weight: 0.0,
+            sync_id: String::new(),
+            dabs: String::new(),
+        }
+    }
 }
 
 /// Serde default for [`MaskGeometry::Radial::midpoint`] — deliberately NOT the
@@ -1157,6 +1304,15 @@ fn geometry_is_finite(g: &MaskGeometry) -> bool {
             [top, left, bottom, right, feather, roundness, angle].iter().all(|v| v.is_finite())
         }
         MaskGeometry::Bitmap { .. } => true,
+        // Every number a stroke carries, including the ones nothing renders
+        // yet: a NaN that survives here reaches the sidecar writer, and "NaN"
+        // is not something Lightroom can parse back.
+        MaskGeometry::Brush { value, strokes, .. } => {
+            value.is_finite()
+                && strokes.iter().all(|s| {
+                    [s.value, s.radius, s.flow, s.center_weight].iter().all(|v| v.is_finite())
+                })
+        }
     }
 }
 
@@ -1213,6 +1369,28 @@ fn clamp_geometry(g: &mut MaskGeometry) {
             }
         }
         MaskGeometry::Bitmap { .. } => {}
+        // A brush group is CARRIED, so the bands here are the SIDECAR's, not a
+        // render's: every one of the 382 measured Paints already sits inside
+        // them, which makes this a guard against a hand-edited recipe.json and
+        // nothing else. `blend_mode` is deliberately not touched — it is a
+        // Lightroom enum we re-emit verbatim, and there is no "nearest legal
+        // value" for an enum (same rule `mask_version` is left alone under).
+        MaskGeometry::Brush { value, strokes, .. } => {
+            let unit = |v: &mut f32, neutral: f32| {
+                *v = if v.is_finite() { v.clamp(0.0, 1.0) } else { neutral };
+            };
+            unit(value, 1.0);
+            for s in strokes.iter_mut() {
+                unit(&mut s.value, 1.0);
+                unit(&mut s.flow, 1.0);
+                unit(&mut s.center_weight, 0.0);
+                // Radius is a normalised length, so it takes the coordinate
+                // limit rather than the unit band — the measured maximum is
+                // 0.582, but a brush wider than the frame is a shape, not a
+                // corruption.
+                s.radius = if s.radius.is_finite() { s.radius.clamp(0.0, COORD_LIMIT) } else { 0.0 };
+            }
+        }
     }
 }
 
@@ -1388,6 +1566,13 @@ impl EditRecipe {
         const MAX_NAME: usize = 256;
         /// A path, not a payload — comfortably past Windows' extended limit.
         const MAX_PATH: usize = 4096;
+        /// Strokes in ONE brush group. The largest Aggregate in the reference
+        /// library holds 14; 256 is abuse-only headroom, sized like MAX_MASKS.
+        const MAX_BRUSH_STROKES: usize = 256;
+        /// One stroke's `crs:Dabs` stream. The largest real stroke is 645 dabs
+        /// / 1,267 tokens ≈ 13 KB, and the WHOLE library is 15,964 dabs — so
+        /// 256 KiB is twenty times the worst case and still a bound.
+        const MAX_DABS: usize = 256 * 1024;
         /// Truncate on a char boundary: `String::truncate` panics off one, and
         /// this runs on input nobody validated. Returns the bytes cut so the
         /// summary can report string loss instead of hiding it.
@@ -1401,6 +1586,27 @@ impl EditRecipe {
                 s.truncate(end);
             }
             before - s.len()
+        }
+        /// Every STRING and every VECTOR one geometry carries, bounded —
+        /// shared by the base `mask` and by each component, because a carrier
+        /// bounded in one of the two loops and trusted in the other is exactly
+        /// the hole `bitmap_paths_mut` exists to stop reopening. Returns
+        /// `(bytes cut, strokes dropped)`.
+        fn cap_geometry(g: &mut MaskGeometry, name_max: usize) -> (usize, usize) {
+            match g {
+                MaskGeometry::Bitmap { path } => (cap(path, MAX_PATH), 0),
+                MaskGeometry::Brush { name, strokes, .. } => {
+                    let mut bytes = cap(name, name_max);
+                    let dropped = strokes.len().saturating_sub(MAX_BRUSH_STROKES);
+                    strokes.truncate(MAX_BRUSH_STROKES);
+                    for s in strokes.iter_mut() {
+                        bytes += cap(&mut s.sync_id, name_max);
+                        bytes += cap(&mut s.dabs, MAX_DABS);
+                    }
+                    (bytes, dropped)
+                }
+                MaskGeometry::Linear { .. } | MaskGeometry::Radial { .. } => (0, 0),
+            }
         }
         summary.truncated_string_bytes += cap(&mut self.rationale, MAX_RATIONALE);
         // The pass-through block is STRINGS from a foreign document, so it
@@ -1424,9 +1630,14 @@ impl EditRecipe {
         self.masks.truncate(MAX_MASKS);
         for m in &mut self.masks {
             summary.truncated_string_bytes += cap(&mut m.name, MAX_NAME);
-            if let MaskGeometry::Bitmap { path } = &mut m.mask {
-                summary.truncated_string_bytes += cap(path, MAX_PATH);
-            }
+            // Strokes cut from an over-long brush group count as COMPONENTS:
+            // `Mask/Paint` is a component in Lightroom's own vocabulary (it
+            // lives in the group's `<crs:Masks>` list), and the existing word
+            // says what happened without inventing a fifth counter no
+            // disclosure surface would print.
+            let (bytes, strokes) = cap_geometry(&mut m.mask, MAX_NAME);
+            summary.truncated_string_bytes += bytes;
+            summary.dropped_components += strokes;
         }
         summary.truncated_curve_points +=
             self.base_curve.len().saturating_sub(MAX_BASE_KNOTS);
@@ -1610,9 +1821,9 @@ impl EditRecipe {
                 .saturating_add(m.components.len().saturating_sub(MAX_MASK_COMPONENTS));
             m.components.truncate(MAX_MASK_COMPONENTS);
             for c in m.components.iter_mut() {
-                if let MaskGeometry::Bitmap { path } = &mut c.geometry {
-                    summary.truncated_string_bytes += cap(path, MAX_PATH);
-                }
+                let (bytes, strokes) = cap_geometry(&mut c.geometry, MAX_NAME);
+                summary.truncated_string_bytes += bytes;
+                summary.dropped_components += strokes;
             }
         }
         // Finite is NOT sufficient. Mask coordinates are NORMALISED (0..1

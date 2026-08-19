@@ -113,6 +113,19 @@ pub(crate) fn draw_mask_overlay(
                 ACCENT,
             );
         }
+        // A brush group has thousands of dab coordinates and no outline. It
+        // gets the same badge treatment as a raster, with the honest extra
+        // half of the sentence: the strokes are in the recipe and in the
+        // sidecar, and this build does not draw them (R27 Batch-4, L-08).
+        MaskGeometry::Brush { .. } => {
+            p.text(
+                xf.rect.left_top() + egui::vec2(10.0, 10.0),
+                egui::Align2::LEFT_TOP,
+                tr(lang, "▨ Brush mask (carried, not rendered)"),
+                egui::FontId::proportional(14.0),
+                ACCENT,
+            );
+        }
     }
 }
 
@@ -153,7 +166,8 @@ pub(crate) fn mask_handle_points(geom: &MaskGeometry, xf: ViewXform) -> Vec<(u8,
                 (5, xf.to_screen(grip.0, grip.1)),
             ]
         }
-        MaskGeometry::Bitmap { .. } => Vec::new(),
+        // Neither raster nor brush geometry has a parametric knob to drag.
+        MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. } => Vec::new(),
     }
 }
 
@@ -379,6 +393,13 @@ pub(crate) fn xmp_loss_line(
             R::Bitmap => trf(lang, "bitmap masks ×{n}", &[("n", &n)]),
             R::Disabled => trf(lang, "muted masks ×{n}", &[("n", &n)]),
             R::ComponentsFlattened => trf(lang, "shape components flattened ×{n}", &[("n", &n)]),
+            // The one entry in this list that is NOT about the XMP: the brush
+            // rides out COMPLETE and the engine does not draw it, so the frame
+            // sentence 「the Lightroom XMP does not carry:」 would be a lie
+            // about this item alone. Its own phrase carries the correction.
+            R::BrushCarried => {
+                trf(lang, "brush masks ×{n} carried but not rendered here", &[("n", &n)])
+            }
             // R25 P5: the rotation loss SAYS THE ANGLE and says why. 「radial
             // rotation ×1」 told a photographer that something about rotation
             // was dropped, and left both actionable halves out — how much, and
@@ -583,6 +604,10 @@ pub(crate) fn xmp_import_line(
             },
             R::BlendMode => tr(lang, "Blend mode").into(),
             R::MultiComponent => tr(lang, "Extra shapes").into(),
+            // NOT a loss of the mask: the strokes arrived and they round-trip.
+            // What did not arrive is the DRAWING of them, which waits on the
+            // alpha-kernel measurement — so the label says both halves.
+            R::BrushCarried => tr(lang, "Brush mask (carried, not rendered)").into(),
             R::ForeignRangeMask => tr(lang, "Range mask (foreign)").into(),
             // R25 P6 narrowed this verdict from "we do not model local point
             // curves" to "this one could not be READ" — the label moved with
@@ -767,9 +792,13 @@ pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist
         return geom.clone();
     }
     match *geom {
-        // Raster masks carry no parametric anchor points to remap; their
-        // overlay is a screen-anchored badge (see draw_mask_overlay).
-        MaskGeometry::Bitmap { .. } => geom.clone(),
+        // Raster and brush masks carry no parametric anchor points to remap;
+        // their overlay is a screen-anchored badge (see draw_mask_overlay).
+        // A brush group DOES hold coordinates, but they are carried verbatim
+        // for the sidecar round trip and nothing draws them, so remapping
+        // them would be work with no observer (`render::orient_recipe_coords`
+        // makes the same call for the same reason).
+        MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. } => geom.clone(),
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
             let a = orig_norm_to_view(zero_x, zero_y, dims, deg, dist);
             let b = orig_norm_to_view(full_x, full_y, dims, deg, dist);
