@@ -148,7 +148,17 @@ fn local_fmt(v: f32) -> String {
 /// uses Sony EXIF knots — a DIFFERENT polynomial). This constant is
 /// therefore wrong in BOTH toggle arms; the decision between 1.0 / Sony-warp
 /// / LCP is with the user (`batch10-report.md` §7.5) and lands here only.
-const LR_MASK_FRAME_SCALE: f64 = 1.032;
+///
+/// **RULED 2026-08-19 (user): `1.0`** — render the geometry the sidecar
+/// actually stores (the plain frame, measured 0.998 with the profile off)
+/// and leave Adobe's warp UNMODELLED, disclosed here rather than faked with
+/// one frame's polynomial sample. Strictly better than 1.032 on every frame
+/// measured in Batches 8 and 10; the residual error on any frame is now the
+/// frame's own lens-profile warp (0–3.4 % observed), which only an `.lcp`
+/// reader can remove — registered as the R28 candidate. The `k` plumbing
+/// below is kept (it is exactly the shape a future warp model needs to slot
+/// into); at 1.0 every affine below is the identity.
+const LR_MASK_FRAME_SCALE: f64 = 1.0;
 
 /// The frame every normalised `crs:` coordinate — mask box AND crop rectangle
 /// — is measured against: the SOURCE frame's pixel size, plus the turn that
@@ -8561,14 +8571,16 @@ mod tests {
         assert_eq!(angle, 0.0, "crs:Angle is disclosed, not guessed at");
         // v0.32.0: `lr_doc` declares no `tiff:ImageWidth/ImageLength`, so the
         // pixel→normalised fold has no aspect and the tilt is disclosed rather
-        // than applied (the assert above, and the `Rotation` note below) — but
-        // the FRAME AFFINE needs no aspect and is applied to every radial, so
-        // the corner is Lightroom's own `k`-image of `0.114928`, not the stored
-        // number. Hand-checked: `cy = 1.032·0.4588875 − 0.016 = 0.45757190`,
-        // `k·ry = 1.032·0.3439595 = 0.35496620`, top = 0.10260570.
+        // than applied (the assert above, and the `Rotation` note below). The
+        // FRAME AFFINE is applied to every radial — and since the 2026-08-19
+        // ruling set `LR_MASK_FRAME_SCALE = 1.0` (Batch-10: the sidecar's
+        // geometry lives in the PLAIN frame; the old 1.032 was one frame's
+        // lens-profile warp), the affine is the identity and the corner is
+        // the STORED number. Hand-checked: `cy = 0.4588875`,
+        // `ry = 0.3439595`, top = cy − ry = 0.1149280.
         assert!(
-            (top as f64 - 0.102605696).abs() < 1e-7,
-            "the geometry is the file's, carried through the measured frame affine: {top}"
+            (top as f64 - 0.1149280).abs() < 1e-7,
+            "the geometry is the file's, in the plain frame: {top}"
         );
         assert_eq!(feather, 1.0, "crs:Feather=100 is Lightroom's 0..100 scale");
         // R25 P9: `crs:Flipped="true"` beside `crs:MaskInverted="false"` is
@@ -8687,16 +8699,16 @@ mod tests {
         let MaskGeometry::Radial { top, bottom, .. } = r.masks[0].mask else {
             panic!("expected a radial, got {:?}", r.masks[0].mask);
         };
-        // The corners come in through Lightroom's frame affine (v0.32.0), which
-        // pushes an already-off-frame one FURTHER off — the point of the test
-        // is that nothing pulls them back to 0..1, and that is now true on both
-        // boundaries and through the affine.
+        // The corners arrive VERBATIM (the frame affine is the identity since
+        // the 2026-08-19 `LR_MASK_FRAME_SCALE = 1.0` ruling) — the point of
+        // the test is that nothing pulls an off-frame corner back to 0..1,
+        // and that holds on both boundaries.
         assert!(
-            (top as f64 - -0.174175672).abs() < 1e-7,
+            (top as f64 - -0.153271).abs() < 1e-7,
             "a corner above the frame is a real value: {top}"
         );
         assert!(
-            (bottom as f64 - 1.844538104).abs() < 1e-7,
+            (bottom as f64 - 1.802847).abs() < 1e-7,
             "and so is one below it: {bottom}"
         );
         let out = recipe_to_xmp(&r);
@@ -8925,23 +8937,26 @@ mod tests {
         assert_eq!(xmp_to_recipe(&ok).masks.len(), 1);
     }
 
-    /// The frame affine moves the mask CENTRE, not only its axes — the half
-    /// probe 4 settled and the half a "dilate the semi-axes" reading gets wrong
-    /// by 88 px at a frame corner.
+    /// The frame affine is the IDENTITY — the 2026-08-19 ruling set
+    /// `LR_MASK_FRAME_SCALE = 1.0` after R27 Batches 8+10 proved the old
+    /// `k = 1.032` was one frame's LENS-PROFILE WARP mistaken for a constant
+    /// (`batch10-report.md` §5: the `LensProfileEnable` toggle moves the
+    /// implied scale 0.984 → 0.998, and 11 dabs displace as a radial
+    /// distortion polynomial, not a scale). The recipe carries the sidecar's
+    /// STORED geometry verbatim.
     ///
-    /// `_DSC9681` is the frame that separates them: `Feather="0"` (so the
-    /// rendered edge IS the ellipse, measurable without any falloff model) and
-    /// a mask centre **2799 px** from the frame centre, i.e. a long lever. A
-    /// windowed per-ray edge search over 2880 rays plus a robust conic fit put
-    /// the rendered centre at **(2571.0, 5060.0)** px with a radial scatter of
-    /// 0.4 px, cross-checked fit-free by median transects. `PROBE4-FINAL.md`
-    /// §2.
+    /// The history this test used to pin, kept legible: `_DSC9681`
+    /// (`Feather="0"`, centre 2799 px off frame-centre) RENDERS its centre at
+    /// **(2571.0, 5060.0)** px (`PROBE4-FINAL.md` §2, 2880-ray edge fit) —
+    /// ~88 px from the stored (2638.4, 5002.8), because THAT frame's warp is
+    /// ≈1.0315. That warp is now UNMODELLED BY DECISION (batch10 §7.5: no
+    /// `.lcp` reader yet), so the recipe must hold the stored centre and the
+    /// 88 px is the disclosed residual, not something to bake in.
     ///
-    /// MUTATION THIS CATCHES: apply `k` to the semi-axes only (drop the
-    /// `− (k−1)/2` term, or the `k·` on the centre) and the centre lands
-    /// 29–88 px out — far outside the 5 px this asserts.
+    /// MUTATION THIS CATCHES: put any `k ≠ 1` back (1.032, or half-apply it
+    /// to axes only) and the verbatim assertions fail by 29–88 px.
     #[test]
-    fn the_frame_affine_moves_the_mask_centre_not_only_its_axes() {
+    fn the_frame_affine_is_the_identity_since_the_lens_warp_ruling() {
         let (w, h) = (9504.0, 6336.0);
         let doc = in_frame(
             &lr_doc(&lr_correction(
@@ -8961,14 +8976,15 @@ mod tests {
             (left as f64 + right as f64) / 2.0 * w,
             (top as f64 + bottom as f64) / 2.0 * h,
         );
-        assert!((cx - 2571.0).abs() < 5.0, "centre x {cx} px, measured 2571.0");
-        assert!((cy - 5060.0).abs() < 5.0, "centre y {cy} px, measured 5060.0");
-        // The stored centre, read verbatim, is 88 px away — that is the whole
-        // discriminator, quoted so the tolerance above is legible.
+        // The STORED centre, verbatim.
         let stored = ((0.009087 + 0.546133) / 2.0 * w, (0.597862 + 0.981315) / 2.0 * h);
+        assert!((cx - stored.0).abs() < 0.01, "centre x {cx} px must be the stored {}", stored.0);
+        assert!((cy - stored.1).abs() < 0.01, "centre y {cy} px must be the stored {}", stored.1);
+        // …and PROBE4's warped-render measurement stays ~88 px away — the
+        // known, disclosed, unmodelled lens warp of that frame.
         assert!(
-            (stored.0 - cx).hypot(stored.1 - cy) > 80.0,
-            "the verbatim reading is the one this replaces: {stored:?}"
+            (2571.0f64 - cx).hypot(5060.0 - cy) > 80.0,
+            "the warp residual on _DSC9681 is real and unmodelled: ({cx}, {cy})"
         );
     }
 
@@ -9456,7 +9472,12 @@ mod tests {
             (bottom as f64 - top as f64) / 2.0 * 9504.0,
         );
         assert!((cy - 4748.0).abs() < 1.5, "the band's display centre is y = {cy:.0}, not 4748");
-        assert!((ry - 4315.0).abs() < 1.5, "its display half-extent is {ry:.0}, not 4315");
+        // P1 §4.2's own pixel number was 4315 — measured on the EXPORT, i.e.
+        // the k-image (4315 = 1.032 × 4182). Since the 2026-08-19 ruling set
+        // `LR_MASK_FRAME_SCALE = 1.0` the recipe carries the STORED extent,
+        // 0.4399965 × 9504 = 4181.7; the residual vs the export is that
+        // frame's lens-profile warp, unmodelled by decision (batch10 §7.5).
+        assert!((ry - 4182.0).abs() < 1.5, "its display half-extent is {ry:.0}, not 4182");
         // …and the OTHER axis is the one that overflows the frame, which is
         // what makes it a band rather than an ellipse.
         let rx = (right as f64 - left as f64) / 2.0 * 6336.0;
@@ -9899,11 +9920,11 @@ mod tests {
         let MaskGeometry::Radial { top, left, .. } = r.masks[0].mask else {
             panic!("expected a radial, got {:?}", r.masks[0].mask);
         };
-        // The file's own `(0.114928, 0.590368)`, carried through Lightroom's
-        // measured frame affine (v0.32.0 — see
-        // `a_lightroom_radial_with_angle_imports` for the hand-check).
+        // The file's own `(0.114928, 0.590368)`, VERBATIM: the frame affine is
+        // the identity since the 2026-08-19 `LR_MASK_FRAME_SCALE = 1.0` ruling
+        // (see `a_lightroom_radial_with_angle_imports`).
         assert!(
-            (top as f64 - 0.102605696).abs() < 1e-7 && (left as f64 - 0.593259776).abs() < 1e-7,
+            (top as f64 - 0.114928).abs() < 1e-7 && (left as f64 - 0.590368).abs() < 1e-7,
             "the real coordinates arrived: {top} {left}"
         );
         assert_eq!(r.masks[0].amount, 1.0, "MaskValue=0 is an encoding, never a pre-multiplier");
