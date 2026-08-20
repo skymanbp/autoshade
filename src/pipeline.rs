@@ -1774,7 +1774,15 @@ pub fn coord_migration_note(c: CoordMigration) -> String {
 pub struct RotateOutcome {
     /// The recipe's `quarter_turns` AFTER the turn (0..=3).
     pub quarter_turns: u8,
-    /// How many raster masks were re-written, turned, under fresh names.
+    /// How many raster masks were re-written, turned, under fresh names — and
+    /// then actually RE-ATTACHED to the recipe.
+    ///
+    /// `Bitmap` masks only. An `AiMask`'s cached alpha used to be counted here
+    /// (it rides the storage walk, `recipe::LocalAdjustment::bitmap_paths_mut`)
+    /// although phase 2 discards it, so the number promised turned masks the
+    /// recipe no longer carried — R28 Batch-3 3b removed it from the walk
+    /// rather than from the count, which is the same fix seen from the other
+    /// side (adjudication F8-B).
     pub rasters_turned: usize,
 }
 
@@ -1798,6 +1806,9 @@ pub struct RotateOutcome {
 ///     freeze their own copies and a saved recipe elsewhere may still point at
 ///     them, so rewriting in place would silently change what an old version
 ///     renders (the same rule the zoned reverse-fit follows).
+///     **`Bitmap` rasters only** (`LocalAdjustment::turnable_raster_paths_mut`):
+///     an `AiMask`'s alpha is a CACHE this turn invalidates, and item 1 clears
+///     it so the next develop re-segments at the turned reference point.
 ///  3. **`quarter_turns` itself**, which is what makes the render, the export
 ///     and the next load agree with the geometry above.
 ///
@@ -1806,11 +1817,16 @@ pub struct RotateOutcome {
 /// re-applying the accumulated turn would move them a second time. (This is
 /// the one hazard the ROADMAP skeleton called out by name.)
 ///
-/// **All-or-nothing.** Every raster is turned into its new file BEFORE the
-/// recipe is touched; if one cannot be read or written, nothing changes and
-/// the caller gets the error. A half-turned develop — parametric masks moved,
-/// a painted mask left behind — is the exact silent-corruption shape
-/// `backup_saved_develop` refuses for the same reason.
+/// **All-or-nothing, in memory AND on disk.** Every raster is turned into its
+/// new file BEFORE the recipe is touched; if one cannot be read or written,
+/// nothing changes and the caller gets the error. A half-turned develop —
+/// parametric masks moved, a painted mask left behind — is the exact
+/// silent-corruption shape `backup_saved_develop` refuses for the same reason.
+/// The DISK half is R28 Batch-3 3b (adjudication F8-A): a failure now also
+/// deletes the turned copies already written and the claim of the raster that
+/// failed, because "nothing was changed" was a sentence the GUI printed
+/// (`gui/actions.rs`) over a develop dir that had grown a fresh orphan PNG per
+/// attempt.
 ///
 /// `delta` folds `% 4`; `0` is a no-op that still reports the current state.
 pub fn rotate_recipe(
@@ -1826,25 +1842,52 @@ pub fn rotate_recipe(
 
     // --- Phase 1: turn every raster into a fresh file. Nothing in `r` moves
     // until all of them are on disk.
+    //
+    // `turnable_raster_paths_mut`, NOT `bitmap_paths_mut`: the storage walk
+    // includes an AI mask's cached alpha and this one does not (R28 Batch-3 3b,
+    // adjudication F8-B). See that method for why the two sets differ — in
+    // short, phase 2 below DROPS the AI cache by design, so turning it produced
+    // an orphan file and a `rasters_turned` count that over-promised.
     let mut rewritten: Vec<(String, String)> = Vec::new();
-    {
+    let staged = {
         let mut probe = r.clone();
-        for m in probe.masks.iter_mut() {
-            for path in m.bitmap_paths_mut() {
-                if rewritten.iter().any(|(from, _)| from == path.as_str()) {
-                    continue; // one file, several masks — turn it once
+        (|| -> std::io::Result<()> {
+            for m in probe.masks.iter_mut() {
+                for path in m.turnable_raster_paths_mut() {
+                    if rewritten.iter().any(|(from, _)| from == path.as_str()) {
+                        continue; // one file, several masks — turn it once
+                    }
+                    let turned = turn_raster_file(Path::new(path.as_str()), src, o)?;
+                    rewritten.push((path.clone(), turned));
                 }
-                let turned = turn_raster_file(Path::new(path.as_str()), src, o)?;
-                rewritten.push((path.clone(), turned));
             }
+            Ok(())
+        })()
+    };
+    if let Err(e) = staged {
+        // ALL-OR-NOTHING ON DISK TOO (R28 Batch-3 3b, adjudication F8-A). The
+        // in-memory half was already true — `r` has not been touched yet — but
+        // the rasters turned BEFORE the failure were finished files in the
+        // photo's develop dir that nothing would ever reference again, and the
+        // GUI told the photographer "nothing was changed" (`gui/actions.rs`)
+        // while they accumulated one per attempt. `turn_raster_file` releases
+        // the claim of the raster that failed; these are the ones that
+        // succeeded. Best-effort per file, like every other cleanup in the
+        // store (`store::detach_rasters`, `gui/masks.rs`): a delete that cannot
+        // happen must not replace the real error with a filesystem one.
+        for (_, made) in rewritten.iter() {
+            let _ = std::fs::remove_file(made);
         }
+        return Err(e);
     }
 
     // --- Phase 2: commit. Geometry, then the raster references, then the
     // turn count.
     crate::render::orient_recipe_coords(r, o);
     for m in r.masks.iter_mut() {
-        for path in m.bitmap_paths_mut() {
+        // The SAME walk phase 1 staged from, so a path can never be re-pointed
+        // at a file that phase never made.
+        for path in m.turnable_raster_paths_mut() {
             if let Some((_, to)) = rewritten.iter().find(|(from, _)| from == path.as_str()) {
                 *path = to.clone();
             }
@@ -1874,10 +1917,16 @@ fn turn_raster_file(
     let stem = from.file_stem().and_then(|s| s.to_str()).unwrap_or("mask");
     let prefix = stem.rsplit_once('-').filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty()).map_or(stem, |(head, _)| head);
     let target = crate::store::claim_raster(src, prefix)?;
-    turned
-        .to_luma8()
-        .save(&target)
-        .map_err(|e| std::io::Error::other(format!("write {}: {e}", target.display())))?;
+    if let Err(e) = turned.to_luma8().save(&target) {
+        // RELEASE THE CLAIM WE COULD NOT FILL — `claim_raster` reserves the
+        // name by creating a 0-byte file, so a failed write leaves a file that
+        // looks like a mask, decodes as nothing, and burns the name for every
+        // later claim. Same rule at the repo's two other claim sites
+        // (`store::detach_rasters`, `gui/masks.rs`'s failed segment run), and
+        // it is what lets `rotate_recipe`'s caller be told nothing changed.
+        let _ = std::fs::remove_file(&target);
+        return Err(std::io::Error::other(format!("write {}: {e}", target.display())));
+    }
     Ok(target.to_string_lossy().into_owned())
 }
 
@@ -4695,10 +4744,28 @@ mod tests {
         assert_eq!(turned.get_pixel(0, 0)[0], 0);
     }
 
+    /// Every file in one develop directory, sorted — the shape a filesystem
+    /// assertion needs. Missing directory = no files, so a test may take the
+    /// "before" picture before anything has been created.
+    fn develop_listing(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
     /// R27 A4, the all-or-nothing half: a raster that cannot be read leaves
     /// the recipe COMPLETELY untouched. A half-turned develop — parametric
     /// masks moved, a painted mask left behind — is worse than a refusal,
     /// because nothing downstream can tell.
+    ///
+    /// IN MEMORY only, which was this test's blind spot until R28 Batch-3 3b:
+    /// one mask cannot fail AFTER another has already been turned, so nothing
+    /// here could see the orphan files a partial phase 1 left on disk. That is
+    /// `a_failed_turn_leaves_nothing_behind_on_disk` below.
     ///
     /// MUTATION THIS CATCHES: move the raster loop after
     /// `orient_recipe_coords` (i.e. turn geometry first, rasters second) and
@@ -4718,6 +4785,129 @@ mod tests {
         let before = r.clone();
         assert!(rotate_recipe(&mut r, &raw, 1).is_err());
         assert_eq!(r, before, "a refused turn must move nothing at all");
+    }
+
+    /// R28 Batch-3 3b (adjudication F8-A) — all-or-nothing ON DISK.
+    ///
+    /// TWO rasters, the first sound and the second unreadable: phase 1 turns
+    /// the first into a freshly claimed file and only then fails, which is the
+    /// arrangement the single-mask test above cannot produce. Before the fix
+    /// that finished file stayed in the photo's develop dir, referenced by
+    /// nothing, one more per attempt — while the GUI toast said "nothing was
+    /// changed" (`gui/actions.rs`). The assertion is deliberately the whole
+    /// directory rather than one name: it also covers the 0-byte
+    /// `store::claim_raster` slot, which is the other thing a failed turn can
+    /// leave behind.
+    ///
+    /// MUTATION THIS CATCHES: delete the `rewritten` cleanup loop in
+    /// `rotate_recipe`'s error path and `mask-a-2.png` appears in the listing.
+    #[test]
+    fn a_failed_turn_leaves_nothing_behind_on_disk() {
+        use crate::recipe::{Crop, LocalAdjustment, MaskGeometry};
+        let raw = scratch_photo("rollback");
+        let dev = crate::store::develop_dir(&raw);
+
+        // Mask A: a real 4×2 raster, turnable.
+        let good = crate::store::claim_raster(&raw, "mask-a").unwrap();
+        let mut g = image::GrayImage::new(4, 2);
+        g.put_pixel(3, 0, image::Luma([255]));
+        g.save(&good).unwrap();
+        // Mask B: a file that EXISTS and is not an image, so the refusal lands
+        // in `open_mask_bounded` — after A is already on disk, turned.
+        let bad = crate::store::claim_raster(&raw, "mask-b").unwrap();
+        std::fs::write(&bad, b"this is not a png").unwrap();
+
+        let before = develop_listing(&dev);
+        assert_eq!(before.len(), 2, "the fixture is two rasters: {before:?}");
+
+        let mut r = EditRecipe {
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            masks: vec![
+                LocalAdjustment {
+                    mask: MaskGeometry::Bitmap { path: good.to_string_lossy().into_owned() },
+                    ..Default::default()
+                },
+                LocalAdjustment {
+                    mask: MaskGeometry::Bitmap { path: bad.to_string_lossy().into_owned() },
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let untouched = r.clone();
+        assert!(rotate_recipe(&mut r, &raw, 1).is_err(), "an unreadable raster refuses the turn");
+        assert_eq!(r, untouched, "the in-memory half, as before");
+        assert_eq!(
+            develop_listing(&dev),
+            before,
+            "a refused turn must leave the develop dir exactly as it found it — no turned copy \
+             of the raster that DID succeed, no unfilled claim"
+        );
+    }
+
+    /// R28 Batch-3 3b (adjudication F8-B) — an AI mask's alpha is a CACHE, and
+    /// a turn invalidates it rather than migrating it.
+    ///
+    /// `orient_recipe_coords` moves the reference point and clears the raster
+    /// so the next develop re-segments in the turned frame
+    /// (`segment::resolve_ai_masks`, whose key now carries the frame). Phase 1
+    /// used to turn the alpha anyway, because it walked the STORAGE set
+    /// (`bitmap_paths_mut`) rather than the turnable one: the correctly-turned
+    /// file was orphaned the moment phase 2 dropped the reference, and it was
+    /// counted in `rasters_turned` as if the recipe still held it.
+    ///
+    /// MUTATION THIS CATCHES: put `MaskGeometry::AiMask { raster: Some(path) }`
+    /// back into `turnable_raster_paths_mut` — a turned copy appears in the
+    /// listing and `rasters_turned` reads 1.
+    #[test]
+    fn rotating_invalidates_an_ai_mask_alpha_instead_of_turning_it() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let raw = scratch_photo("aicache");
+        let dev = crate::store::develop_dir(&raw);
+        // The name `segment::ai_cache_key` mints, so this is the real file the
+        // real cache would have left there.
+        let alpha = crate::store::claim_raster(&raw, "ai-mask-0123456789abcdef").unwrap();
+        let mut g = image::GrayImage::new(4, 2);
+        g.put_pixel(3, 0, image::Luma([255]));
+        g.save(&alpha).unwrap();
+        let before = develop_listing(&dev);
+        let alpha_bytes = std::fs::read(&alpha).unwrap();
+
+        let mut r = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::AiMask {
+                    name: "Sky 1".into(),
+                    subtype: 2,
+                    ref_x: 0.25,
+                    ref_y: 0.10,
+                    blend_mode: 0,
+                    value: 1.0,
+                    inverted: false,
+                    mask_version: 1,
+                    provenance: Vec::new(),
+                    gesture: Vec::new(),
+                    raster: Some(alpha.to_string_lossy().into_owned()),
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = rotate_recipe(&mut r, &raw, 1).unwrap();
+        assert_eq!(out.quarter_turns, 1);
+        assert_eq!(out.rasters_turned, 0, "a cache is not a raster mask this turn owns");
+
+        let MaskGeometry::AiMask { raster, ref_x, ref_y, .. } = &r.masks[0].mask else {
+            panic!("still an AI mask")
+        };
+        assert!(raster.is_none(), "the stale alpha is dropped, not carried into the new frame");
+        // Clockwise: (u, v) → (1−v, u), so (0.25, 0.10) → (0.90, 0.25).
+        assert!((*ref_x - 0.90).abs() < 1e-6 && (*ref_y - 0.25).abs() < 1e-6, "{ref_x} {ref_y}");
+        assert_eq!(
+            develop_listing(&dev),
+            before,
+            "no turned copy and no fresh claim — the alpha is re-derived, not migrated"
+        );
+        assert_eq!(std::fs::read(&alpha).unwrap(), alpha_bytes, "and the old file is untouched");
     }
 
     /// R27 A9 — the crop rectangle and the straighten angle under a quarter

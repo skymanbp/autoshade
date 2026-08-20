@@ -1213,29 +1213,29 @@ pub fn recipe_target(src: &Path) -> PathBuf {
 /// (`EditRecipe::quarter_turns`), or 0 when there is no saved develop, it
 /// cannot be read, or it predates the field.
 ///
-/// A deliberately CHEAP, side-effect-free reader for the FOUR places that need
+/// A deliberately CHEAP, side-effect-free reader for the THREE places that need
 /// only this one number and must not pay a full restore. R27 wrote "the two
-/// places" here and there were four by then; R28 2a counted them:
+/// places" here and there were four by then; R28 2a counted them and R28
+/// Batch-3 removed one:
 ///   * `gui::thumb_cache_file` (`bin/gui/util.rs:1593`) — the gallery cache
 ///     key: a rotate has to miss it or the grid keeps serving the sideways
 ///     thumbnail, exactly the v0.30 staleness the salt beside it documents;
 ///   * the gallery thumbnail worker (`bin/gui/workers.rs:247`), which decodes
 ///     in the frame that key was built for;
-///   * `style::build_index` (`style.rs:571`) — the aspect feature;
-///   * `segment::stage_source_frame` (`segment.rs:370`) — the frame the AI
-///     segmenter's source PNG is staged in.
+///   * `style::build_index` (`style.rs:571`) — the aspect feature.
 ///
 /// Fails toward 0 = "no turn", which is what every recipe written before
 /// v0.33 means and what a corrupt one is indistinguishable from here.
 ///
-/// What this doc claimed until R28 2a and CANNOT: that "the cost of being
-/// wrong is a stale thumbnail, not a wrong pixel". True of the three cache
-/// consumers, false of the fourth — `segment.rs:370` decodes the frame the
-/// segmentation is computed in, so a disagreement between this number and the
-/// `quarter_turns` the renderer actually holds lands an alpha built in one
-/// frame on pixels in another, cached under a key with no frame in it
-/// (adjudication F1-B; the fix is registered as R28 Batch-3 3a and belongs in
-/// `segment.rs`, not here).
+/// **"The cost of being wrong is a stale thumbnail, not a wrong pixel" is true
+/// again, and only because the fourth consumer is gone.** R28 2a found
+/// `segment::stage_source_frame` reading this number to decode the frame an AI
+/// mask is SEGMENTED in — a pixel decision, taken from the store while the
+/// renderer used the recipe's own `quarter_turns` (adjudication F1-B). R28
+/// Batch-3 gave that function the recipe's turn as a parameter, so nothing here
+/// decides pixels any more. The rule this leaves behind: a caller that needs
+/// the frame the RENDER will use must take it from the recipe it holds, never
+/// from this file.
 ///
 /// Bounded like every other read of a file this app persists but an untrusted
 /// photo pack can replace ([`read_text_capped`] / [`MAX_STORE_JSON`], 24 other
@@ -5520,8 +5520,9 @@ mod tests {
     ///
     /// `segment.rs` is scanned too although it has no such call today: it is
     /// the module that turned `saved_quarter_turns` from a cache key into a
-    /// PIXEL decision (F1-B), so a bare read appearing there is precisely the
-    /// drift worth hearing about early rather than in the next review.
+    /// PIXEL decision (F1-B, undone by R28 Batch-3 — the staged frame now comes
+    /// from the recipe), so a bare read appearing there is precisely the drift
+    /// worth hearing about early rather than in the next review.
     ///
     /// Two deliberate narrownesses, both in the SAFE direction:
     ///   * line comments are stripped, block comments are not — neither file

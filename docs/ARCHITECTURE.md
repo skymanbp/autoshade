@@ -341,8 +341,10 @@
 > instances, 21 attribute names, longest value 55 characters — only the intent
 > (`MaskSubType` + `ReferencePoint` + `MaskName`) and provenance digests. So
 > `segment::resolve_ai_masks` runs OUR segmenter at develop time and caches the
-> alpha beside the develop, keyed by photo + subtype + click + backend
-> generation. The result is an approximation of the photographer's intent, never
+> alpha beside the develop, keyed by photo + subtype + click + frame
+> (quarter turns, v0.34.0) + backend generation — staged from the render
+> source's pixels in the recipe's own frame, so the alpha is segmented in the
+> frame it will be sampled in. The result is an approximation of the photographer's intent, never
 > a reproduction of Adobe's mask, and `MaskImportReason::AiMaskRecomputed` /
 > `MaskLossReason::AiMaskRecomputed` say that in both languages and in both
 > directions.

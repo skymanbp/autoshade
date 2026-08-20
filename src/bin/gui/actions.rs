@@ -2067,6 +2067,9 @@ impl AutoshopApp {
             Err(e) => {
                 // All-or-nothing (see `rotate_recipe`): the recipe is the
                 // untouched clone, so nothing moved and nothing needs undoing.
+                // The sentence below covers the DISK too since R28 Batch-3 3b —
+                // a failed turn used to leave one orphan PNG per attempt in the
+                // develop dir while this toast said nothing was changed.
                 let t = trf(
                     lang,
                     "could not turn this photo: {err} — nothing was changed",

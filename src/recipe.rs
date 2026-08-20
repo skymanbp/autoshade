@@ -1579,6 +1579,16 @@ fn truncate_chars(s: &mut String, max: usize) {
 }
 
 impl LocalAdjustment {
+    /// Every geometry this adjustment carries — the base mask and each
+    /// component — as ONE walk.
+    ///
+    /// The two path walks below differ only in which geometries they accept, so
+    /// the walk itself lives here once: a new geometry carrier is added in a
+    /// single place and neither membership rule can silently miss it.
+    fn geometries_mut(&mut self) -> impl Iterator<Item = &mut MaskGeometry> {
+        std::iter::once(&mut self.mask).chain(self.components.iter_mut().map(|c| &mut c.geometry))
+    }
+
     /// Mutable references to every Bitmap raster path this adjustment holds
     /// (base geometry + components) — the ONE walk the store's path
     /// relativize/resolve/detach/snapshot helpers share, so a new geometry
@@ -1590,23 +1600,39 @@ impl LocalAdjustment {
         // be relativized on save, resolved on load, copied when a version
         // snapshot becomes live, and swept with a deleted version — so the
         // AiMask one goes through the same door rather than growing a second.
-        fn raster_of(g: &mut MaskGeometry) -> Option<&mut String> {
-            match g {
+        self.geometries_mut()
+            .filter_map(|g| match g {
                 MaskGeometry::Bitmap { path } => Some(path),
                 MaskGeometry::AiMask { raster: Some(path), .. } => Some(path),
                 _ => None,
-            }
-        }
-        let mut out = Vec::new();
-        if let Some(p) = raster_of(&mut self.mask) {
-            out.push(p);
-        }
-        for c in self.components.iter_mut() {
-            if let Some(p) = raster_of(&mut c.geometry) {
-                out.push(p);
-            }
-        }
-        out
+            })
+            .collect()
+    }
+
+    /// The subset of [`bitmap_paths_mut`](Self::bitmap_paths_mut) a FRAME TURN
+    /// owns: the explicit `Bitmap` rasters, and NOT an `AiMask`'s cached alpha.
+    ///
+    /// The distinction is the root of R28 Batch-3 3b (adjudication F8-B). The
+    /// two walks answer different questions and the rotate was asking the wrong
+    /// one: `bitmap_paths_mut` means "machine-local PNGs this recipe owns and
+    /// the STORE must carry along", while a rotate needs "rasters that must be
+    /// turned or the photo comes back with its masks somewhere else". A
+    /// `Bitmap` qualifies — its pixels are the mask, and nothing can re-derive
+    /// them. An `AiMask`'s raster does not: it is a CACHE of a recomputation,
+    /// and the rotation's own semantics already discard it in both of the
+    /// places that decide (`render::orient_recipe_coords` clears it so the next
+    /// develop re-segments at the turned point, and `render::
+    /// recipe_has_raster_masks` refuses to count it as something the migration
+    /// could not turn). Turning it too produced a correctly-turned file nothing
+    /// ever pointed at, plus a `rasters_turned` count that promised work the
+    /// recipe did not keep.
+    pub fn turnable_raster_paths_mut(&mut self) -> Vec<&mut String> {
+        self.geometries_mut()
+            .filter_map(|g| match g {
+                MaskGeometry::Bitmap { path } => Some(path),
+                _ => None,
+            })
+            .collect()
     }
 }
 

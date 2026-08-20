@@ -417,6 +417,29 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R28 Batch-3：AI 蒙版帧身份 + rotate 文件系统原子性（2026-08-20，未发版）** ——
+  3a（F1 两根一修）：resolve_ai_masks 改双参 `(raw=身份, src=像素)`（F1-C：两调用点
+  曾把烘焙母版当唯一参，键与缓存家落在不属于任何照片的 develop 目录）；
+  stage_source_frame 改 `decode_any_turned(src, recipe.quarter_turns)`（F1-B：帧
+  从配方取非从盘取，与 render 两臂同门同折，烘焙母版从「解码失败披露不渲染」变
+  「正常解码渲染」）；**ai_cache_key 加帧项** `…|t{turns%4}|…`（F1-A：(0.5,0.5) 不动
+  点修死；%4 与 render 折叠对齐防手改 5 铸双键）；staging 名加 AtomicU64 序号
+  （F1-D 潜在碰撞，对齐 style.rs:400 形制）。**行为披露=v0.33 及以前的全部 AI 蒙版
+  缓存换键一次性重算**（秒级 GPU/蒙版，经 describe 通道如实报告；旧 PNG 留盘=既
+  接受的 superseded 残留）。3b（F8）：**根修=集合错配**——新 turnable_raster_paths_mut
+  （只含 Bitmap）与 bitmap_paths_mut（存储集）成为共享 geometries_mut 走查上的两条
+  成员规则；phase1 跳 AI 缓存；错误路径删已转副本+turn_raster_file 释放未填 claim
+  （对齐 store::detach_rasters/gui masks.rs 两先例）；GUI「nothing was changed」
+  toast 对盘面也成真；rasters_turned 只计实际重指的。**附带行为变更（复审裁可）**：
+  AiMask raster 指向缺失文件曾整转失败，现按旋转语义跳过清引用。store.rs 文档=
+  消费者 4→3、「stale thumbnail 非 wrong pixel」句因第四消费者移除而重新为真+
+  留规则句（要渲染帧必须从手里的配方取）。门（主审复跑）=clippy0×2+**711**(+4)/
+  11/131/2+2+zoo 全名 9/9；变异三组（代理）+帧项变异主审亲手复现。**未验证登记**：
+  turn_raster_file 的 claim 释放支无确定性触发法（构造性证明+全目录不变式兜底）；
+  AI 路径无端到端实跑（帧相等性为代码论证：decode_any_turned 与 render 两臂同折）。
+  **代理过程自纠**：中途 git checkout 误废自家 segment.rs 编辑，重施并复验（diffstat
+  前后一致）——后续变异改用 scratchpad 备份。ARCHITECTURE AI 蒙版键描述同批补帧项。
+
 - **R28 Batch-2：防御性收口五项（2026-08-20，未发版）** —— 2a **无界 store 读类**：
   saved_quarter_turns 改 read_text_capped+单字段 SavedTurn（无 deny_unknown_fields
   =前向兼容保留、%4 与 clamp 对齐）；兄弟 adopting-from.txt 两处改 64KiB 专帽

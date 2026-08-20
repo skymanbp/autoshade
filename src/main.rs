@@ -807,7 +807,14 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
     // nothing because the alpha is cached in the photo's develop dir
     // (`segment::resolve_ai_masks`). A failure leaves the mask carried and
     // inert, and says so; it never fails the develop.
-    let ai = autoshop::segment::resolve_ai_masks(&Config::load(), &src, &mut recipe);
+    //
+    // BOTH paths, and they are different things (R28 Batch-3, adjudication
+    // F1-C): `raw` is the photo the cache is keyed and homed on, `src` is the
+    // pixels the render below will use — a baked retouch master when one is
+    // recorded. This site used to pass `src` for both, so a photo with a saved
+    // master keyed its alpha on the master's path and looked for the cache in a
+    // develop directory belonging to no photo.
+    let ai = autoshop::segment::resolve_ai_masks(&Config::load(), raw, &src, &mut recipe);
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }
@@ -919,11 +926,12 @@ fn auto_cmd(
     if src != raw {
         println!("  (rendering the saved pixel master {})", src.display());
     }
-    // Same develop-time resolution as `apply` (see there). `render_recipe` is
-    // the render's own copy, so the resolved raster paths never reach the
-    // saved recipe from here — the cache is keyed by the photo and the intent,
-    // so the next develop finds the same file anyway.
-    let ai = autoshop::segment::resolve_ai_masks(&cfg, &src, &mut render_recipe);
+    // Same develop-time resolution as `apply` (see there, including the
+    // photo-vs-pixels split). `render_recipe` is the render's own copy, so the
+    // resolved raster paths never reach the saved recipe from here — the cache
+    // is keyed by the photo, the intent and the frame, so the next develop
+    // finds the same file anyway.
+    let ai = autoshop::segment::resolve_ai_masks(&cfg, raw, &src, &mut render_recipe);
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }

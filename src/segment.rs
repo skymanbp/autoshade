@@ -236,25 +236,54 @@ impl AiMaskResolution {
 /// The cache key for one AI mask's recomputed alpha: everything that decides
 /// the pixels, and nothing that does not.
 ///
-/// `(photo identity, subtype, reference point, backend generation)` — so a
-/// re-render of the same recipe reuses the file, a moved click recomputes, and
-/// a photo's two AI masks never collide. The NAME is deliberately absent: it is
-/// a localised label the photographer may rename without changing one pixel.
+/// `(photo identity, subtype, reference point, FRAME, backend generation)` — so
+/// a re-render of the same recipe reuses the file, a moved click recomputes, a
+/// TURNED photo recomputes, and a photo's two AI masks never collide. The NAME
+/// is deliberately absent: it is a localised label the photographer may rename
+/// without changing one pixel.
+///
+/// **The frame term is R28 Batch-3 (adjudication F1-A), and the sentence above
+/// was FALSE without it.** The segmenter runs on the frame
+/// [`stage_source_frame`] stages, and that frame is chosen by the recipe's
+/// `quarter_turns` — so the turn decides the pixels as surely as the click
+/// does. A rotate normally moves the click too
+/// ([`crate::render::orient_recipe_coords`] turns `ref_x`/`ref_y` with the
+/// frame), which hid the omission behind a key that changed anyway — except at
+/// the ONE point every quarter turn leaves where it was, the frame centre
+/// `(0.5, 0.5)`. A mask clicked there kept its key across a rotate and the
+/// cache served the alpha segmented in the OLD frame, sideways, with every
+/// surface reporting a normal cache hit.
+///
+/// **Behaviour disclosure: every alpha cached by v0.33 and earlier re-derives
+/// once.** Adding a field re-spells every key, so the first develop after this
+/// build runs the segmenter again per mask (seconds of GPU) and reports it
+/// through [`AiMaskResolution::describe`] as the re-derivation it is. That is
+/// cache invalidation doing its job — the alternative is serving alphas whose
+/// frame nobody recorded. The superseded PNGs stay in the develop dir, the
+/// same accepted residue as any superseded raster ([`crate::store::claim_raster`]).
 ///
 /// `AI_BACKEND_GENERATION` is bumped whenever the segmenter's own output would
 /// change — a model re-pin, a preprocessing change, the mask-size cap. Without
 /// it the cache would happily serve an alpha produced by a model this build no
-/// longer runs, which is the one way a cache can lie about provenance.
+/// longer runs, which is the one way a cache can lie about provenance. It is
+/// deliberately NOT bumped for the frame term: the model did not change, the
+/// key's shape did, and conflating the two would leave the next reader thinking
+/// this build's segmenter differs from v0.33's.
 const AI_BACKEND_GENERATION: u32 = 1;
 
-fn ai_cache_key(src: &Path, subtype: u32, ref_x: f32, ref_y: f32) -> String {
+fn ai_cache_key(raw: &Path, subtype: u32, ref_x: f32, ref_y: f32, quarter_turns: u8) -> String {
     // FNV-1a over the identity string: small, stable across runs and platforms
     // (unlike `DefaultHasher`, whose output std explicitly does not guarantee
     // between releases — a cache name that moved between builds would silently
     // re-run the model on every upgrade).
+    //
+    // `% 4` because that is what the RENDER folds the field by
+    // (`render::quarter_turn_orientation`): a hand-edited `quarter_turns: 5`
+    // renders as one turn, and the key must not invent a second frame for it.
     let ident = format!(
-        "{}|{subtype}|{ref_x:.6}|{ref_y:.6}|{AI_BACKEND_GENERATION}",
-        crate::store::photo_key(src)
+        "{}|{subtype}|{ref_x:.6}|{ref_y:.6}|t{}|{AI_BACKEND_GENERATION}",
+        crate::store::photo_key(raw),
+        quarter_turns % 4
     );
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in ident.as_bytes() {
@@ -284,6 +313,26 @@ fn ai_cache_key(src: &Path, subtype: u32, ref_x: f32, ref_y: f32) -> String {
 /// [`ai_cache_key`], so it is swept, snapshotted and relativized with every
 /// other mask raster (`LocalAdjustment::bitmap_paths_mut`).
 ///
+/// **TWO paths, and they are not interchangeable (R28 Batch-3, adjudication
+/// F1-C).** `raw` is the PHOTO — the identity every cache decision is made on:
+/// [`ai_cache_key`] hashes it and [`crate::store::raster_target`] homes the
+/// alpha in ITS develop dir, which is what makes the file relativizable,
+/// snapshottable and sweepable. `src` is the PIXELS the render will use, and
+/// that may be a baked retouch master (`store::render_source_checked`) living
+/// somewhere else entirely. Both call sites used to hand the master in as the
+/// only argument, so the key and the cache home were computed from the master's
+/// path — a develop directory belonging to no photo — and the staging decoder
+/// (RAW-only, then) simply failed on it.
+///
+/// **The frame is the RECIPE's, not the disk's (adjudication F1-B).** The
+/// staged frame is decoded at `recipe.quarter_turns`, the same number
+/// `render::render_to_image_in` and `render::render_baked_to_image` turn by, so
+/// the alpha is segmented in the frame it will be sampled in. Reading the turn
+/// back off the SAVED develop instead (`store::saved_quarter_turns`) made a
+/// recipe that disagrees with the store — an external `apply`, a rotate not yet
+/// saved — segment one frame and render another, and cached the result under a
+/// key that recorded neither.
+///
 /// **A failure is never silent and never fatal.** A missing sidecar, a missing
 /// dependency, a declined mask (the sidecar's exit 3) or an undecodable output
 /// all leave `raster` at `None` — which the render treats as "this mask needs
@@ -292,12 +341,17 @@ fn ai_cache_key(src: &Path, subtype: u32, ref_x: f32, ref_y: f32) -> String {
 /// frame). The reason is carried out in `unresolved`.
 pub fn resolve_ai_masks(
     cfg: &Config,
+    raw: &Path,
     src: &Path,
     recipe: &mut crate::recipe::EditRecipe,
 ) -> AiMaskResolution {
     use crate::recipe::MaskGeometry;
 
     let mut out = AiMaskResolution::default();
+    // Read the frame ONCE, before the mask walk borrows the recipe mutably —
+    // and read it from the recipe being resolved, which is the whole point of
+    // handing this function the authoritative recipe in the first place.
+    let turns = recipe.quarter_turns % 4;
     // The source frame the sidecar segments in. Produced ONCE and only when
     // something actually needs it — a recipe with no unresolved AI mask must
     // not pay a RAW decode.
@@ -309,7 +363,9 @@ pub fn resolve_ai_masks(
         {
             let MaskGeometry::AiMask { subtype, ref_x, ref_y, raster, .. } = g else { continue };
             let (subtype, rx, ry) = (*subtype, *ref_x, *ref_y);
-            let target = crate::store::raster_target(src, &ai_cache_key(src, subtype, rx, ry));
+            // KEYED AND HOMED ON THE PHOTO, never on the pixel source (F1-C).
+            let target =
+                crate::store::raster_target(raw, &ai_cache_key(raw, subtype, rx, ry, turns));
             // CACHE HIT, and it is checked by DECODING, not by `exists()`: a
             // half-written or truncated PNG on disk is exactly the file a
             // cheap existence test would serve forever.
@@ -330,8 +386,9 @@ pub fn resolve_ai_masks(
                 ));
                 continue;
             }
-            // The preview, decoded at most once per call.
-            let input = preview.get_or_insert_with(|| stage_source_frame(src));
+            // The preview, decoded at most once per call — from the RENDER
+            // SOURCE's pixels, in the RECIPE's frame.
+            let input = preview.get_or_insert_with(|| stage_source_frame(src, turns));
             let Some(input) = input.as_ref() else {
                 out.unresolved
                     .push((mask_name.clone(), "the source frame could not be decoded".into()));
@@ -357,24 +414,33 @@ pub fn resolve_ai_masks(
     out
 }
 
-/// Stage the photo's ORIGINAL-frame preview as a PNG for the sidecar, or
-/// `None` if it cannot be decoded.
+/// Stage the render source's preview as a PNG for the sidecar, in the frame
+/// `quarter_turns` produces — or `None` if it cannot be decoded.
 ///
-/// The ORIGINAL frame specifically: a `crs:ReferencePoint` is normalised to it,
-/// and the mask this produces is sampled in the same normalised space
-/// (`render::sample_gray_norm`), so both ends agree without either one knowing
-/// the photo's pixel dimensions.
-fn stage_source_frame(src: &Path) -> Option<PathBuf> {
-    let decoded = crate::decode::decode_raw_turned(
-        src,
-        crate::store::saved_quarter_turns(src),
-    )
-    .map_err(|e| {
-        eprintln!("⚠ AI mask: cannot decode {} for segmentation: {e:#}", src.display());
-    })
-    .ok()?;
-    let out = std::env::temp_dir()
-        .join(format!("autoshop-ai-src-{}-{}.png", std::process::id(), crate::pipeline::stem(src)));
+/// **The RECIPE's frame, and the same door the render uses.**
+/// [`crate::decode::decode_any_turned`] dispatches RAW → `decode_raw_turned`
+/// (EXIF composed with the turn) and baked → `decode_baked` + the turn, which
+/// is exactly the pair `render::render_to_image_in` / `render::
+/// render_baked_to_image` apply — so the frame the segmenter sees IS the frame
+/// the alpha will be sampled in, for a camera RAW and for a baked retouch
+/// master alike. Before R28 Batch-3 this called the RAW-only decoder with the
+/// turn read off the saved develop: a baked master could not be decoded at all
+/// (the mask was carried, disclosed, and never rendered), and a recipe whose
+/// turn differed from the store's produced a correct-looking alpha in the wrong
+/// frame (adjudication F1-B/C).
+///
+/// A `crs:ReferencePoint` is normalised to the frame the photographer clicked
+/// in, and `orient_recipe_coords` turns it with every rotate, so the click and
+/// this frame stay in the same space; the mask is sampled in that same
+/// normalised space (`render::sample_gray_norm`), so both ends agree without
+/// either one knowing the photo's pixel dimensions.
+fn stage_source_frame(src: &Path, quarter_turns: u8) -> Option<PathBuf> {
+    let decoded = crate::decode::decode_any_turned(src, quarter_turns)
+        .map_err(|e| {
+            eprintln!("⚠ AI mask: cannot decode {} for segmentation: {e:#}", src.display());
+        })
+        .ok()?;
+    let out = staging_path(src);
     decoded
         .preview
         .to_rgb8()
@@ -382,6 +448,28 @@ fn stage_source_frame(src: &Path) -> Option<PathBuf> {
         .map_err(|e| eprintln!("⚠ AI mask: cannot stage the source frame {}: {e}", out.display()))
         .ok()?;
     Some(out)
+}
+
+/// A FRESH temp name for one staged source frame.
+///
+/// pid + seq + stem, the shape `style::embed_preview` settled on
+/// (`style.rs:400`) after the pid + tag pair proved insufficient there for
+/// exactly this reason. `resolve_ai_masks` has two single-photo callers today
+/// (`apply`, `auto`) and neither runs concurrently, so the collision is LATENT
+/// rather than live — which is precisely why the sequence belongs here and not
+/// in a future incident report: the day a pool calls this (the `--jobs`
+/// sequencer already runs `process_one` three-wide) two workers staging the
+/// same stem would overwrite each other's frame and each other's cleanup, and
+/// the symptom would be one photo's mask computed on another photo's pixels.
+/// R28 Batch-3, adjudication F1-D.
+fn staging_path(src: &Path) -> PathBuf {
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "autoshop-ai-src-{}-{}-{}.png",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        crate::pipeline::stem(src)
+    ))
 }
 
 #[cfg(test)]
@@ -503,9 +591,10 @@ mod tests {
     }
 
     /// The cache key is exactly the things that decide the PIXELS: the photo,
-    /// the subtype (which backend runs), the click (where it is prompted) and
-    /// the backend generation. Nothing else — the mask NAME is a localised
-    /// label the photographer may rename without changing one pixel.
+    /// the subtype (which backend runs), the click (where it is prompted), the
+    /// FRAME it is segmented in and the backend generation. Nothing else — the
+    /// mask NAME is a localised label the photographer may rename without
+    /// changing one pixel.
     ///
     /// MUTATION-LINED. Verified red by dropping `ref_x`/`ref_y` from
     /// `ai_cache_key`'s identity string (transcript in the batch report): two
@@ -515,12 +604,12 @@ mod tests {
     fn the_ai_cache_key_covers_the_photo_the_subtype_and_the_click() {
         let a = Path::new("D:/rolls/2024/DSC0001.ARW");
         let b = Path::new("D:/rolls/2024/DSC0002.ARW");
-        let base = ai_cache_key(a, 2, 0.5, 0.5);
-        assert_eq!(base, ai_cache_key(a, 2, 0.5, 0.5), "the key is stable across calls");
-        assert_ne!(base, ai_cache_key(b, 2, 0.5, 0.5), "a different photo, a different alpha");
-        assert_ne!(base, ai_cache_key(a, 0, 0.5, 0.5), "a different backend, a different alpha");
-        assert_ne!(base, ai_cache_key(a, 2, 0.9, 0.5), "a moved click, a different alpha");
-        assert_ne!(base, ai_cache_key(a, 2, 0.5, 0.9), "…in either axis");
+        let base = ai_cache_key(a, 2, 0.5, 0.5, 0);
+        assert_eq!(base, ai_cache_key(a, 2, 0.5, 0.5, 0), "the key is stable across calls");
+        assert_ne!(base, ai_cache_key(b, 2, 0.5, 0.5, 0), "a different photo, a different alpha");
+        assert_ne!(base, ai_cache_key(a, 0, 0.5, 0.5, 0), "a different backend, a different alpha");
+        assert_ne!(base, ai_cache_key(a, 2, 0.9, 0.5, 0), "a moved click, a different alpha");
+        assert_ne!(base, ai_cache_key(a, 2, 0.5, 0.9, 0), "…in either axis");
         // A plain file name, safe to hand `store::raster_target`.
         assert!(
             base.starts_with("ai-mask-")
@@ -528,6 +617,65 @@ mod tests {
                 && base.len() == 8 + 16,
             "the key must be a bare, filesystem-safe stem: {base}"
         );
+    }
+
+    /// R28 Batch-3 (adjudication F1-A) — THE fixed-point pin.
+    ///
+    /// A rotate turns the reference point with the frame, so for almost every
+    /// click the key moves on its own and the missing frame term stayed
+    /// invisible. `(0.5, 0.5)` is the one point all three quarter turns leave
+    /// exactly where it is (`render::orient_point`), so a subject clicked at
+    /// the frame centre — the default a point-prompted `Mask/Image` lands on —
+    /// kept its key across a rotate and the cache served an alpha segmented in
+    /// the OLD frame, sideways, reported as an ordinary cache hit.
+    ///
+    /// MUTATION THIS CATCHES: drop the `t{quarter_turns}` field from
+    /// `ai_cache_key`'s identity string and the four keys below collapse into
+    /// one.
+    #[test]
+    fn the_ai_cache_key_separates_the_frames_even_at_the_rotation_fixed_point() {
+        let a = Path::new("D:/rolls/2024/DSC0001.ARW");
+        // The fixed point of every quarter turn — verified against the
+        // coordinate map rather than asserted from memory.
+        for t in 1u8..4 {
+            let o = crate::render::quarter_turn_orientation(t);
+            assert_eq!(crate::render::orient_point(o, 0.5, 0.5), (0.5, 0.5), "{o:?}");
+        }
+        let keys: Vec<String> = (0u8..4).map(|t| ai_cache_key(a, 2, 0.5, 0.5, t)).collect();
+        for i in 0..keys.len() {
+            for j in (i + 1)..keys.len() {
+                assert_ne!(
+                    keys[i], keys[j],
+                    "{i} and {j} quarter turns segment different pixels and must not share an alpha"
+                );
+            }
+        }
+        // …and the fold matches the render's own `% 4`, so a hand-edited
+        // `quarter_turns: 5` cannot mint a second cache entry for one frame.
+        assert_eq!(keys[1], ai_cache_key(a, 2, 0.5, 0.5, 5));
+    }
+
+    /// R28 Batch-3 (adjudication F1-D) — two staged frames never share a name.
+    ///
+    /// LATENT, not live: today's only callers (`apply`, `auto`) run one photo
+    /// at a time. The pin is here because the collision is invisible until a
+    /// pool calls this, and then it presents as one photo's mask computed on
+    /// another photo's pixels.
+    ///
+    /// MUTATION THIS CATCHES: drop the sequence from `staging_path` and the two
+    /// paths below become the same file.
+    #[test]
+    fn two_staged_source_frames_never_share_a_name() {
+        let p = Path::new("D:/rolls/2024/DSC0001.ARW");
+        let (a, b) = (staging_path(p), staging_path(p));
+        assert_ne!(a, b, "same process, same stem — the names must still differ");
+        // Both still name THIS process and THIS photo: the sequence is an
+        // addition to the identity, not a replacement for it.
+        for path in [&a, &b] {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.starts_with(&format!("autoshop-ai-src-{}-", std::process::id())), "{name}");
+            assert!(name.ends_with("-DSC0001.png"), "{name}");
+        }
     }
 
     /// A sidecar that cannot run leaves the mask CARRIED and names the reason.
@@ -545,7 +693,8 @@ mod tests {
         // launched, so this test never depends on the machine's interpreter.
         cfg.segment_script = "no-such-segment-script-for-this-test.py".into();
         let mut r = ai_recipe(ai_geometry(2, 0.5, 0.5));
-        let got = resolve_ai_masks(&cfg, Path::new("D:/rolls/2024/DSC0001.ARW"), &mut r);
+        let raw = Path::new("D:/rolls/2024/DSC0001.ARW");
+        let got = resolve_ai_masks(&cfg, raw, raw, &mut r);
         assert_eq!(got.resolved, 0);
         assert_eq!(got.unresolved.len(), 1, "{got:?}");
         assert_eq!(got.unresolved[0].0, "Mask 1", "the sentence names WHICH mask");
@@ -583,7 +732,8 @@ mod tests {
         };
         // The path does not exist: if anything tried to decode it, this would
         // print a warning and still answer "nothing to do".
-        let got = resolve_ai_masks(&cfg, Path::new("D:/nope/nothing-here.ARW"), &mut r);
+        let nope = Path::new("D:/nope/nothing-here.ARW");
+        let got = resolve_ai_masks(&cfg, nope, nope, &mut r);
         assert_eq!(got, AiMaskResolution::default(), "{got:?}");
         assert!(got.describe().is_none(), "nothing happened, so nothing is claimed");
     }
