@@ -17,8 +17,12 @@
 **/__pycache__/
 
 # Local config that may hold secrets (OpenAI/analysis API keys, model choices).
-# Written by the in-app Settings panel; never commit it.
+# Written by the in-app Settings panel; never commit it. The glob also covers
+# .env.evalbak — eval batches shelve .env aside for their duration so the
+# process environment wins the dotenv precedence, and the shelved copy holds
+# the same secret the bare name does.
 .env
+.env.*
 autoshop.local.toml
 autoshop.local.json
 
