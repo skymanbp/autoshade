@@ -1784,6 +1784,66 @@ impl EditRecipe {
             }
             before - s.len()
         }
+        /// [`cap`] for a `'\n'`-separated TOKEN stream — today only
+        /// [`BrushStroke::dabs`]. Cuts at the last separator at or before the
+        /// byte cap, so every survivor is a WHOLE token.
+        ///
+        /// Why `cap` is the wrong tool here (R28 2b, adjudication F5). A char
+        /// boundary is not a token boundary: 65,536 `"d 0 0"` tokens are
+        /// 393,215 bytes, `MAX_DABS` is 262,144, and `cap` cut that stream
+        /// mid-token (`"d 0 "`). The writer then emitted the fragment
+        /// unchanged — its `split('\n')` is documented as the EXACT INVERSE of
+        /// the reader's join (xmp.rs `brush_mask_xml`) — and our own next read
+        /// refused the fragment, taking the whole Aggregate with it: every
+        /// brush mask in the group disappeared. Structured payload, byte
+        /// truncator; the units never matched.
+        ///
+        /// The cap is therefore a CEILING, not an exact size. The result is
+        /// the longest whole-token prefix that fits, which is at most `max`
+        /// bytes and can be shorter by up to one token. A stream whose FIRST
+        /// token already exceeds `max` truncates to empty — the caller drops
+        /// such a stroke rather than emit a dab-less Paint (a Paint with no
+        /// dabs is not a stroke; the reader says so by refusing one).
+        ///
+        /// Returns the bytes cut, like `cap`.
+        fn cap_tokens(s: &mut String, max: usize) -> usize {
+            let before = s.len();
+            if s.len() > max {
+                // `max < s.len()`, so `max` is a valid byte index. '\n' is
+                // ASCII, hence always a char boundary — truncating AT the
+                // separator drops it too, which is the storage form (tokens
+                // joined by '\n', no trailing one).
+                match s.as_bytes()[..=max].iter().rposition(|&b| b == b'\n') {
+                    Some(nl) => s.truncate(nl),
+                    None => s.clear(),
+                }
+            }
+            before - s.len()
+        }
+        /// One brush group's strokes, bounded — sync IDs and each stroke's
+        /// token stream. Shared by [`cap_geometry`]'s `Brush` and `AiMask`
+        /// arms, because a carrier bounded in one and trusted in the other is
+        /// the hole that function exists to keep shut. Returns
+        /// `(bytes cut, strokes dropped)`.
+        ///
+        /// A stroke whose stream truncates to EMPTY is dropped, not kept: the
+        /// writer would otherwise emit `<rdf:li></rdf:li>` and our own reader
+        /// refuses a Paint with zero tokens (`xmp::parse_dabs`), which loses
+        /// the whole Aggregate — the identical failure `cap_tokens` exists to
+        /// prevent, arriving one step later. Only a hand-edited `recipe.json`
+        /// can reach it: on the import path no single token survives 256 bytes
+        /// (`xmp::dab_token_is_known`), so a 256 KiB budget always fits
+        /// hundreds of them.
+        fn cap_strokes(strokes: &mut Vec<BrushStroke>, name_max: usize) -> (usize, usize) {
+            let mut bytes = 0;
+            for s in strokes.iter_mut() {
+                bytes += cap(&mut s.sync_id, name_max);
+                bytes += cap_tokens(&mut s.dabs, MAX_DABS);
+            }
+            let before = strokes.len();
+            strokes.retain(|s| !s.dabs.is_empty());
+            (bytes, before - strokes.len())
+        }
         /// Every STRING and every VECTOR one geometry carries, bounded —
         /// shared by the base `mask` and by each component, because a carrier
         /// bounded in one of the two loops and trusted in the other is exactly
@@ -1793,14 +1853,11 @@ impl EditRecipe {
             match g {
                 MaskGeometry::Bitmap { path } => (cap(path, MAX_PATH), 0),
                 MaskGeometry::Brush { name, strokes, .. } => {
-                    let mut bytes = cap(name, name_max);
-                    let dropped = strokes.len().saturating_sub(MAX_BRUSH_STROKES);
+                    let bytes = cap(name, name_max);
+                    let over = strokes.len().saturating_sub(MAX_BRUSH_STROKES);
                     strokes.truncate(MAX_BRUSH_STROKES);
-                    for s in strokes.iter_mut() {
-                        bytes += cap(&mut s.sync_id, name_max);
-                        bytes += cap(&mut s.dabs, MAX_DABS);
-                    }
-                    (bytes, dropped)
+                    let (stroke_bytes, emptied) = cap_strokes(strokes, name_max);
+                    (bytes + stroke_bytes, over + emptied)
                 }
                 // Every string an AI mask carries, including the ones only the
                 // WRITER reads. `provenance` is capped by ENTRY COUNT in
@@ -1812,17 +1869,15 @@ impl EditRecipe {
                     if let Some(p) = raster.as_mut() {
                         bytes += cap(p, MAX_PATH);
                     }
-                    let dropped = gesture.len().saturating_sub(MAX_BRUSH_STROKES);
+                    let over = gesture.len().saturating_sub(MAX_BRUSH_STROKES);
                     gesture.truncate(MAX_BRUSH_STROKES);
-                    for s in gesture.iter_mut() {
-                        bytes += cap(&mut s.sync_id, name_max);
-                        bytes += cap(&mut s.dabs, MAX_DABS);
-                    }
+                    let (stroke_bytes, emptied) = cap_strokes(gesture, name_max);
+                    bytes += stroke_bytes;
                     for (k, v) in provenance.iter_mut() {
                         bytes += cap(k, name_max);
                         bytes += cap(v, name_max);
                     }
-                    (bytes, dropped)
+                    (bytes, over + emptied)
                 }
                 MaskGeometry::Linear { .. } | MaskGeometry::Radial { .. } => (0, 0),
             }
@@ -3307,6 +3362,92 @@ mod tests {
         assert_eq!(d.truncated_curve_points, 44, "300 points over the 256 cap");
         assert_eq!(d.truncated_string_bytes, 5000 - 4096, "rationale past its cap");
         assert!(!d.is_empty(), "curve/string loss alone must flip is_empty");
+    }
+
+    /// The dab cap cuts on a TOKEN boundary, not a byte one (R28 2b,
+    /// adjudication F5).
+    ///
+    /// `BrushStroke::dabs` is a `'\n'`-separated token stream that the writer
+    /// splits back apart as "the exact inverse" of the reader's join, so a cut
+    /// inside a token (`"d 0 "`) rides back out into the sidecar and our own
+    /// next read refuses the whole Aggregate — every brush mask in the group
+    /// gone, over a size cap.
+    ///
+    /// MUTATION THIS KILLS: put `cap(&mut s.dabs, MAX_DABS)` back into
+    /// `cap_strokes` (a byte truncator on a structured stream). The last
+    /// surviving line is then the fragment `"d 0 "` and the whole-token
+    /// assertion below fails.
+    #[test]
+    fn an_over_cap_dab_stream_is_cut_between_tokens_never_inside_one() {
+        // 65,536 x "d 0 0" joined by '\n' = 393,215 bytes against the 256 KiB
+        // cap — the exact construction the adjudication measured.
+        let dabs = std::iter::repeat_n("d 0 0", 65_536).collect::<Vec<_>>().join("\n");
+        assert_eq!(dabs.len(), 393_215, "premise: the payload really is over the cap");
+        let mut r = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Brush {
+                    name: "brush".into(),
+                    blend_mode: 0,
+                    value: 1.0,
+                    inverted: false,
+                    strokes: vec![BrushStroke { dabs: dabs.clone(), ..Default::default() }],
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let dropped = r.clamp();
+        let MaskGeometry::Brush { strokes, .. } = &r.masks[0].mask else { panic!() };
+        let kept = &strokes[0].dabs;
+
+        assert!(kept.len() <= 256 * 1024, "the cap is still a bound: {}", kept.len());
+        // The property that matters: EVERY surviving line is a whole token of
+        // the grammar, and the stream carries no trailing separator.
+        assert!(!kept.ends_with('\n'), "storage form joins, never terminates");
+        for (i, tok) in kept.split('\n').enumerate() {
+            assert_eq!(tok, "d 0 0", "token {i} was cut apart: {tok:?}");
+        }
+        // A ceiling, not an exact size: the cut lands on the last separator at
+        // or before the cap, so up to one token's worth is given up.
+        let n = kept.split('\n').count();
+        assert_eq!(n, 43_690, "43,690 x 6 - 1 = 262,139 bytes, the largest whole-token fit");
+        assert_eq!(dropped.truncated_string_bytes, 393_215 - 262_139);
+        // Truncating a stream is not dropping a stroke.
+        assert_eq!(dropped.dropped_components, 0);
+    }
+
+    /// The other end of the ceiling: a stream whose FIRST token is already
+    /// over the cap truncates to nothing, and a Paint with no dabs is not a
+    /// stroke — the reader refuses one (`xmp::parse_dabs` errors on zero
+    /// tokens), so keeping it would hand the writer an empty `<rdf:li>` and
+    /// lose the whole Aggregate at the next read anyway. Dropped and COUNTED
+    /// instead of silently emitted.
+    ///
+    /// Only a hand-edited `recipe.json` reaches this: the import path bounds
+    /// one token at 256 bytes (`xmp::dab_token_is_known`).
+    #[test]
+    fn a_single_token_larger_than_the_cap_drops_the_stroke_and_says_so() {
+        let mut r = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Brush {
+                    name: "brush".into(),
+                    blend_mode: 0,
+                    value: 1.0,
+                    inverted: false,
+                    strokes: vec![
+                        BrushStroke { dabs: format!("d 0 {}", "9".repeat(300_000)), ..Default::default() },
+                        BrushStroke { dabs: "r 0.5\nd 0 0".into(), ..Default::default() },
+                    ],
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let dropped = r.clamp();
+        let MaskGeometry::Brush { strokes, .. } = &r.masks[0].mask else { panic!() };
+        assert_eq!(strokes.len(), 1, "the dab-less stroke is gone");
+        assert_eq!(strokes[0].dabs, "r 0.5\nd 0 0", "the healthy stroke is untouched");
+        assert_eq!(dropped.dropped_components, 1, "and it was disclosed, not swallowed");
     }
 
     /// 16-lane scan L14/L15/L16: field-by-field accumulator copies silently

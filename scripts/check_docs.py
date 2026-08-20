@@ -80,25 +80,51 @@ class Skip(NamedTuple):
 # ── Truth extractors ────────────────────────────────────────────────────────
 
 
+_ARRAY_LEN = re.compile(r"\[\s*&\s*(?:'[A-Za-z_]\w*\s+)?str\s*;\s*(\d+)\s*\]")
+
+
 def _literals_in_const(src: str, anchor: str) -> list[str]:
-    """String literals inside `const <NAME>: [...] = [ ... ];`.
+    """String literals inside `const <NAME>: [&str; N] = [ ... ];`.
 
     The bracket scan starts at the `=`, NOT at the anchor: the declaration's
     TYPE carries its own bracket (`[&str; 24]`), so opening on the first `[`
     after the name would measure the type and extract nothing. The span is
     bracket-MATCHED rather than line-matched, so an initialiser that wraps
     across source lines (RAW_EXTS spans three) counts the same as a one-liner.
+
+    Both Rust comment forms are skipped. `//` always was; `/* */` was NOT until
+    R28 2c, so a literal commented out with a block comment counted as live and
+    the docs were checked against a number the compiler never saw. (Nesting is
+    not modelled — Rust's block comments nest, this stops at the first `*/`.
+    The residue is then ordinary text to this scanner, so the failure direction
+    is a wrong count, which the length cross-check below catches.)
+
+    The count is CROSS-CHECKED against the declared `[&str; N]`, which the
+    compiler enforces and this scanner does not: any drift between what the
+    lexer sees and what the type says is a broken lexer, and a broken lexer
+    that returns a plausible number is exactly what a doc gate must never do.
     """
     at = src.find(anchor)
     if at < 0:
         raise LookupError(f"anchor {anchor!r} not found (const renamed/moved?)")
     i = src.index("[", src.index("=", at))
+    declared = _ARRAY_LEN.search(src[at:i])
+    if not declared:
+        raise LookupError(
+            f"{anchor}: no `[&str; N]` type annotation — not a fixed-size array any more"
+        )
     depth = 0
     out: list[str] = []
     while i < len(src):
         c = src[i]
         if src.startswith("//", i):
             i = src.index("\n", i)
+            continue
+        if src.startswith("/*", i):
+            shut = src.find("*/", i + 2)
+            if shut < 0:
+                raise LookupError(f"unterminated block comment in {anchor!r}")
+            i = shut + 2
             continue
         if c == '"':
             j = i + 1
@@ -112,6 +138,13 @@ def _literals_in_const(src: str, anchor: str) -> list[str]:
         elif c == "]":
             depth -= 1
             if depth == 0:
+                n = int(declared.group(1))
+                if len(out) != n:
+                    raise LookupError(
+                        f"{anchor}: extracted {len(out)} literal(s) but the type "
+                        f"declares [&str; {n}] — the scanner and the compiler "
+                        "disagree; fix the scanner, not the doc"
+                    )
                 return out
         i += 1
     raise LookupError(f"unclosed initialiser for {anchor!r}")
@@ -120,9 +153,33 @@ def _literals_in_const(src: str, anchor: str) -> list[str]:
 # Self-check (the font gate's notdef idiom): a broken scanner must fail HERE,
 # never pass by extracting nothing — "0 extensions" would otherwise sail
 # through as a number the docs simply never claim.
-_PROBE = 'pub const P: [&str; 3] = [\n    "a", "b\\"x", // "not a literal"\n    "c",\n];'
+_PROBE = (
+    'pub const P: [&str; 3] = [\n'
+    '    "a", "b\\"x", // "not a literal"\n'
+    '    /* "nor is this" */ "c",\n'
+    "];"
+)
 assert _literals_in_const(_PROBE, "const P") == ["a", 'b\\"x', "c"], (
     "const-literal self-check: type bracket / escape / comment handling drifted"
+)
+
+
+def _raises_lookup(fn: Callable[[], object]) -> bool:
+    """Did `fn` reject its input? The self-checks below assert the FAILING
+    direction of a guard, and a guard only ever exercised on input it accepts
+    cannot be told apart from a deleted one (R28 2c). LookupError is caught
+    rather than swallowed because it is precisely the verdict under test — any
+    other exception is a real defect and propagates.
+    """
+    try:
+        fn()
+    except LookupError:
+        return True
+    return False
+
+
+assert _raises_lookup(lambda: _literals_in_const('pub const Q: [&str; 4] = ["a", "b"];', "const Q")), (
+    "const-literal self-check: a count that disagrees with [&str; N] was accepted"
 )
 
 
@@ -169,19 +226,42 @@ def _strip_toml_comment(line: str) -> str:
     return "".join(out)
 
 
-def cargo_dependency_names() -> list[str]:
-    """Every DIRECT dependency name: [dependencies] (the optional gui crates
-    live there behind `optional = true`), the per-target tables, build- and
-    dev-dependencies.
+def _mask_toml_strings(line: str) -> str:
+    """Blank the CONTENT of every quoted span, keeping the line's shape.
 
-    Only column-0 `name =` lines at bracket depth 0 count, so a multi-line
-    inline table (`image = { ... features = [\\n "jpeg", ... \\n] }`) yields
-    the crate and not its feature strings.
+    The depth counter below is a bracket census, and a `[` inside a string
+    value is not structure — `note = "see [x"` used to leave the counter stuck
+    at depth 1, after which every remaining dependency AND every section header
+    was skipped (the `depth == 0` guard covers both). The empty-list guard in
+    `check_tech_stack` only catches a TOTAL loss, so a half-lost inventory
+    passed as coverage (R28 2c).
+
+    Line-local, and deliberately so: Cargo.toml's strings are basic ones that
+    cannot span lines, and this file has no `\"\"\"` literals.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    for ch in line:
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            out.append(" ")
+        elif ch in "\"'":
+            quote = ch
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _dep_names_from(src: str) -> list[str]:
+    """[`cargo_dependency_names`] over any TOML text — split out so the
+    self-check below can feed it a synthetic table instead of the repo's own
+    (a scanner probed only against the file it already handles proves nothing).
     """
     names: list[str] = []
     section: str | None = None
     depth = 0
-    src = text("Cargo.toml")
     for raw in src.split("\n"):
         line = _strip_toml_comment(raw)
         if depth == 0:
@@ -197,9 +277,30 @@ def cargo_dependency_names() -> list[str]:
                 k = re.match(r"([A-Za-z0-9_-]+)\s*=", line)
                 if k:
                     names.append(k.group(1))
-        depth = max(0, depth + sum(line.count(c) for c in "[{")
-                    - sum(line.count(c) for c in "]}"))
+        counted = _mask_toml_strings(line)
+        depth = max(0, depth + sum(counted.count(c) for c in "[{")
+                    - sum(counted.count(c) for c in "]}"))
     return sorted(set(names))
+
+
+# A bracket inside a quoted value must not derail the census. Without the mask
+# the `"see [x"` line leaves depth at 1 and `beta` is never seen.
+_TOML_PROBE = '[dependencies]\nalpha = { version = "1", note = "see [x" }\nbeta = "2"\n'
+assert _dep_names_from(_TOML_PROBE) == ["alpha", "beta"], (
+    "dependency-census self-check: a bracket inside a quoted value broke the depth counter"
+)
+
+
+def cargo_dependency_names() -> list[str]:
+    """Every DIRECT dependency name: [dependencies] (the optional gui crates
+    live there behind `optional = true`), the per-target tables, build- and
+    dev-dependencies.
+
+    Only column-0 `name =` lines at bracket depth 0 count, so a multi-line
+    inline table (`image = { ... features = [\\n "jpeg", ... \\n] }`) yields
+    the crate and not its feature strings.
+    """
+    return _dep_names_from(text("Cargo.toml"))
 
 
 def check_tech_stack(_args: argparse.Namespace) -> tuple[str, list[str]]:

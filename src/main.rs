@@ -536,14 +536,23 @@ fn lightroom_import_note(raw: &Path) -> Option<String> {
     let losses = autoshop::xmp::import_losses(&text);
     // The count the reader WOULD carry — the same number the GUI's open path
     // passes (`bin/gui/export.rs`), so the two surfaces cannot report the same
-    // file differently.
-    let imported = autoshop::xmp::xmp_to_recipe(&text).masks.len();
+    // file differently. Taken through the CLAMPED door (R28 2b) because the
+    // third sentence below needs what the size caps cut, and re-parsing the
+    // document to learn it would be a second producer of one fact.
+    let (parsed, clamped) = autoshop::xmp::xmp_to_recipe_clamped(&text);
+    let imported = parsed.masks.len();
     // The mask sentence and the CROP sentence (R27) ride together: a file can
     // lose either, both or neither, and a `?` on the first would have swallowed
-    // the second on every sidecar whose masks arrived whole.
+    // the second on every sidecar whose masks arrived whole. The CLAMP
+    // sentence (R28 2b) joins them on the same terms: `import_losses` reads
+    // the DOCUMENT and cannot see what the recipe's own size caps then cut —
+    // a 393 KB dab stream truncated to 256 KiB is a real change to the mask
+    // this photo will render, and it used to be said nowhere at all.
     let line = [
         autoshop::xmp::describe_import_losses(imported, &losses),
         autoshop::xmp::crop_import_note(&text),
+        (!clamped.is_empty())
+            .then(|| format!("recipe limits then discarded {}", clamped.describe())),
     ]
     .into_iter()
     .flatten()
@@ -1429,8 +1438,19 @@ fn batch_cmd(
     // measured one 61 MP photo's pass at ~1.77 GB of peak commit, so three
     // unbudgeted workers could ask a tight machine for ~5.3 GB at once — which
     // is the wall a 147-photo `eval` hit. process_one already runs
-    // produce_recipe with verbose=false, so workers print nothing until their
-    // one completion line below.
+    // produce_recipe with verbose=false, so workers write nothing to STDOUT
+    // until their one completion line below — which is what lets the
+    // sequencer make the parallel transcript byte-identical in order to a
+    // serial one.
+    //
+    // STDERR is NOT covered, and this comment claimed it was until R28 2e
+    // (adjudication F6). `verbose` gates the progress chatter, not the
+    // warnings: pipeline.rs:390 (proposer fallback), :2220 (clamp
+    // disclosure), :2454 and :2473, main.rs:1586 below, and the render's own
+    // warnings (render.rs:1430 ICC embed, :3083 inert bitmap mask) are
+    // ungated `eprintln!`s that land in COMPLETION order and mostly name no
+    // photo. `jobs`' module docs disclose the channel; stamping those lines
+    // with a stem is registered as R28 Batch-5 5c.
     let work: Vec<&Path> = pending.iter().take(n).map(|p| p.as_path()).collect();
     // Deliverables are stem-keyed and one library can hold two DSC00001.ARW
     // (counter rollover — four review units reported the silent overwrite).
@@ -2028,6 +2048,86 @@ mod tests {
         let bare = root.join("bare.arw");
         std::fs::write(&bare, b"stub").unwrap();
         assert_eq!(lightroom_import_note(&bare), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R28 2b, the CLI half: what the recipe's SIZE CAPS cut on import is
+    /// disclosed too, and on its own terms.
+    ///
+    /// `import_losses` reads the DOCUMENT and cannot see this — the caps run
+    /// on the recipe the document produced. The fixture's correction imports
+    /// perfectly (an ordinary gradient, no named loss at all), so the only
+    /// thing this sentence can be reporting is the clamp; a mask NAME 400
+    /// bytes long is the cheapest trip of a size cap there is (`MAX_NAME` =
+    /// 256), and the same channel carries the 393 KB dab stream the xmp-side
+    /// test exercises.
+    ///
+    /// MUTATION THIS CATCHES: revert `lightroom_import_note` to
+    /// `xmp_to_recipe` + a two-element `line`, or revert `xmp_to_recipe`'s
+    /// tail to a bare `r.clamp();` — the note goes back to `None` and the
+    /// truncation is once again said nowhere.
+    #[test]
+    fn an_import_truncated_by_the_recipe_caps_is_disclosed_on_the_cli() {
+        let root = std::env::temp_dir()
+            .join(format!("autoshop-cli-clamp-note-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let long_name = "N".repeat(400);
+        let doc = format!(
+            "\
+<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.6-c145\">
+ <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">
+  <rdf:Description rdf:about=\"\"
+    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"
+    crs:Version=\"15.5.1\"
+    crs:ProcessVersion=\"15.4\"
+    crs:HasSettings=\"True\">
+   <crs:MaskGroupBasedCorrections>
+    <rdf:Seq>
+     <rdf:li>
+      <rdf:Description
+       crs:What=\"Correction\"
+       crs:CorrectionAmount=\"1\"
+       crs:CorrectionActive=\"true\"
+       crs:CorrectionName=\"{long_name}\"
+       crs:LocalExposure2012=\"0.1\">
+      <crs:CorrectionMasks>
+       <rdf:Seq>
+        <rdf:li
+         crs:What=\"Mask/Gradient\"
+         crs:MaskActive=\"true\"
+         crs:MaskBlendMode=\"0\"
+         crs:MaskInverted=\"false\"
+         crs:MaskValue=\"1\"
+         crs:ZeroX=\"0.1\" crs:ZeroY=\"0.1\"
+         crs:FullX=\"0.9\" crs:FullY=\"0.9\"/>
+       </rdf:Seq>
+      </crs:CorrectionMasks>
+      </rdf:Description>
+     </rdf:li>
+    </rdf:Seq>
+   </crs:MaskGroupBasedCorrections>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+"
+        );
+        let raw = root.join("capped.arw");
+        std::fs::write(&raw, b"stub").unwrap();
+        std::fs::write(raw.with_extension("xmp"), &doc).unwrap();
+
+        // Premise: nothing about this document is a NAMED import loss, so a
+        // sentence here can only come from the clamp.
+        assert!(
+            autoshop::xmp::import_losses(&doc).is_empty(),
+            "premise: the gradient imports whole — {:?}",
+            autoshop::xmp::import_losses(&doc)
+        );
+        let note = lightroom_import_note(&raw).expect("a truncated import must not be silent");
+        assert!(note.contains("recipe limits then discarded"), "{note}");
+        assert!(note.contains("144 string byte(s)"), "400 - 256 = 144: {note}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

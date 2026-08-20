@@ -133,8 +133,18 @@ pub fn free_memory_mb() -> Option<u64> {
 /// when the machine could not be measured. Never 0: one photo at a time is the
 /// serial behaviour, and refusing to run at all because memory is tight would
 /// be worse than running slowly.
+/// Saturating like [`free_memory_mb`]'s own Linux arm (`saturating_mul` at the
+/// page-count multiply): this is a public `lib` entry point via [`plan_with`],
+/// so the reading is not always one this module produced. `plan()`'s own path
+/// cannot overflow by construction — both `free_memory_mb` arms divide by 2^20
+/// last, leaving four orders of magnitude of headroom under `×50` — but an
+/// injected `u64::MAX` panicked here under debug overflow checks while the
+/// identical hazard one function up was already handled (R28 2d, adjudication
+/// F10). Saturating then dividing keeps the arithmetic honest at the top: a
+/// saturated budget still divides down to a worker count, and the `.max(1)`
+/// below means no reading can ever produce "run nothing".
 fn memory_cap(headroom_mb: Option<u64>) -> Option<usize> {
-    let budget = headroom_mb? * BUDGET_PCT / 100;
+    let budget = headroom_mb?.saturating_mul(BUDGET_PCT) / 100;
     Some(((budget / PER_PHOTO_PEAK_COMMIT_MB) as usize).max(1))
 }
 
@@ -366,6 +376,27 @@ mod tests {
         assert!(note.contains("not 8") && note.contains("8192"), "{note}");
         // …and it stays quiet when it did not intervene.
         assert!(plan_with(2, 100, Some(64_000)).note.is_none());
+    }
+
+    /// [`plan_with`] is a public `lib` entry point, so the memory reading is
+    /// not always one [`free_memory_mb`] produced — and the whole point of
+    /// injecting it is that a caller supplies the number.
+    ///
+    /// MUTATION THIS KILLS: revert `memory_cap`'s `saturating_mul` to the bare
+    /// `headroom_mb? * BUDGET_PCT`. `u64::MAX × 50` overflows and this test
+    /// panics with "attempt to multiply with overflow" under the debug
+    /// overflow checks the test profile compiles with (adjudication F10).
+    #[test]
+    fn an_absurd_memory_reading_plans_a_pool_instead_of_panicking() {
+        let p = plan_with(1, 10, Some(u64::MAX));
+        // Saturated budget / 1800 MB is astronomically more than the ask, so
+        // the cap never binds: the ask wins and nothing is disclosed.
+        assert_eq!(p, Plan { jobs: 1, note: None });
+        // The whole neighbourhood of the boundary, not just the top value.
+        for h in [u64::MAX, u64::MAX / 2, u64::MAX / 50 + 1] {
+            let cap = memory_cap(Some(h)).expect("a measured machine is capped");
+            assert!(cap >= 1, "headroom {h} planned {cap} workers");
+        }
     }
 
     /// The pool itself: out-of-order completion, in-order output, in-order

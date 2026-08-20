@@ -142,11 +142,17 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
     // in silence (Codex 32-#1).
     let mut xmp_bad: Vec<String> = Vec::new();
     if let Some((text, kind)) = lr {
-        let mut r = autoshop::xmp::xmp_to_recipe(&text);
+        // CLAMPED door (R28 2b): the reader clamps on its way out, so the
+        // `r.clamp()` below saw an already-cut recipe and reported an empty
+        // summary — a sidecar whose brush dabs were truncated on import
+        // toasted nothing. Both halves are absorbed, and they cannot double
+        // count: the second clamp is idempotent over the first.
+        let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped(&text);
         xmp_bad = autoshop::xmp::unparsable_crs_numbers(&text);
         // Neutral / foreign content restores nothing — the store answers
         // exactly as before.
         if !r.is_noop() {
+            clamp_dropped.absorb(imported_clamp);
             clamp_dropped.absorb(r.clamp());
             let mask_import = autoshop::xmp::import_losses(&text);
             let imported_masks = r.masks.len();
@@ -234,7 +240,8 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
             }
         };
         any = true;
-        let mut r = autoshop::xmp::xmp_to_recipe(&text);
+        // Clamped door, same reason as the Lightroom branch above (R28 2b).
+        let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped(&text);
         // Accumulated regardless of noop-ness (dedup vs the LR sidecar's
         // list) — see the accumulator's contract above.
         for k in autoshop::xmp::unparsable_crs_numbers(&text) {
@@ -245,6 +252,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         // A foreign / neutral sidecar parses to a no-op recipe — "restoring"
         // it would only produce a misleading status line.
         if !r.is_noop() {
+            clamp_dropped.absorb(imported_clamp);
             clamp_dropped.absorb(r.clamp());
             mask_import = autoshop::xmp::import_losses(&text);
             imported_masks = r.masks.len();
@@ -265,13 +273,15 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
     if fallback.is_none() && !any {
         match autoshop::store::embedded_packet_for_restore(src) {
             Ok(Some(text)) => {
-                let mut r = autoshop::xmp::xmp_to_recipe(&text);
+                // Clamped door (R28 2b), like both branches above.
+                let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped(&text);
                 for k in autoshop::xmp::unparsable_crs_numbers(&text) {
                     if !xmp_bad.contains(&k) {
                         xmp_bad.push(k);
                     }
                 }
                 if !r.is_noop() {
+                    clamp_dropped.absorb(imported_clamp);
                     clamp_dropped.absorb(r.clamp());
                     mask_import = autoshop::xmp::import_losses(&text);
                     imported_masks = r.masks.len();

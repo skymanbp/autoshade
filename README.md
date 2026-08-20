@@ -197,7 +197,8 @@ in-process.
 
 Cross-platform **compilation** is CI-verified: the
 [`build` workflow](.github/workflows/build.yml) compiles both feature
-configurations on `ubuntu-latest` and `macos-latest` on every push (first
+configurations on `ubuntu-latest` and `macos-latest` on every push to `main`
+and on every pull request (first
 verified run:
 [32346678287](https://github.com/skymanbp/autoshop/actions/runs/32346678287),
 2026-08-20, 7m27s). That proves the source *builds* there and exactly that —

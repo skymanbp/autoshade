@@ -556,9 +556,14 @@ impl StyleIndex {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&raw) = pairs.get(i) else { break };
                     let permit = decode::DecodePermit::acquire();
-                    // Destructured, not bound whole: `preview` (~181 MB at
-                    // 61 MP) is never read here, yet bound as `d` it stayed
-                    // alive across the sidecar read below.
+                    // Destructured, not bound whole: bound as `d`, the entire
+                    // `Decoded` — rawler's sensor buffers included — stayed
+                    // alive across the sidecar read below, when all this loop
+                    // wants is `meta`, `histogram` and (~181 MB at 61 MP)
+                    // `preview`. R28 2e corrects the second half of what this
+                    // comment used to say: `preview` IS read here now, by the
+                    // embedding arm below (R27 Batch-5); "never read here"
+                    // described the loop as it stood before that landed.
                     // In the frame the photo's own saved develop asks for
                     // (R27): the aspect feature is a retrieval discriminator
                     // with weight 1.5, so indexing a hand-rotated shot as the
@@ -572,10 +577,21 @@ impl StyleIndex {
                     ) {
                         Ok(decode::Decoded { meta, histogram, preview, .. }) => {
                             let feat = feature_vector(&meta, &histogram);
-                            // The embedding, BEFORE `preview` goes out of scope
-                            // — and `preview` is dropped immediately after, so
-                            // the ~181 MB buffer is not held across the
-                            // sidecar's seconds-long model load.
+                            // The embedding, with `preview` STILL ALIVE:
+                            // `embed_preview` borrows it, so the ~181 MB
+                            // buffer is held for the whole call — the
+                            // sidecar's seconds-long model load included
+                            // (~1.5 GB of fp32 SigLIP weights per worker
+                            // process, up to `MAX_CONCURRENT_DECODES` of
+                            // them). This comment asserted the opposite from
+                            // the day it was written (git -S: bae6d99, R27
+                            // Batch-5); the `drop(preview)` below sits AFTER
+                            // the call, not before it, and moving it earlier
+                            // is impossible because the sidecar is fed FROM
+                            // the buffer. The real fix is on the sidecar side
+                            // — pass the already-implemented `--fp16` and
+                            // load the model once instead of per worker —
+                            // registered as R28 Batch-4 4b (adjudication F3).
                             let embed = embedder.as_ref().and_then(|o| {
                                 let r = embed_preview(
                                     o,

@@ -56,7 +56,7 @@ pub(crate) fn resolve_snapshot_develop(
         // recipe with extreme-but-finite geometry rendered NaN weights into
         // a published export. render_to_file now clamps too — this keeps
         // the batch recipe equal to what OPENING the photo would show.
-        clamp_disclosed(&mut r, warns);
+        clamp_disclosed(&mut r, Default::default(), warns);
         // Rasters re-anchor to whichever dir the recipe was read from
         // (central store first, else a legacy ./out sidecar).
         if let Some(base) = from.parent() {
@@ -99,7 +99,10 @@ fn xmp_arm(
     kind: &'static str,
     warns: &mut Vec<String>,
 ) -> Option<(EditRecipe, &'static str)> {
-    let mut r = autoshop::xmp::xmp_to_recipe(text);
+    // Clamped door (R28 2b): what the recipe's SIZE caps cut on the way in is
+    // loss `import_losses` below cannot see — it reads the document, this
+    // reads the recipe the document produced.
+    let (mut r, imported_clamp) = autoshop::xmp::xmp_to_recipe_clamped(text);
     // Collected for EVERY consulted file — a no-op import included (the
     // persist.rs rule, Codex 32-#1 + review R12-11): a sidecar whose ONLY
     // edit is corrupt restores nothing, and the next save overwrites it in
@@ -145,7 +148,7 @@ fn xmp_arm(
     if r.is_noop() {
         return None;
     }
-    clamp_disclosed(&mut r, warns);
+    clamp_disclosed(&mut r, imported_clamp, warns);
     let knots = autoshop::pipeline::photo_base_knots(p);
     if !knots.is_empty() {
         r.base_curve = knots;
@@ -160,8 +163,20 @@ fn xmp_arm(
 }
 
 /// Clamp with the open path's disclosure — a batch drop was silent (L16-2).
-fn clamp_disclosed(r: &mut EditRecipe, warns: &mut Vec<String>) {
-    let dropped = r.clamp();
+///
+/// What clamping this recipe cost, said once. `already` folds in a summary the
+/// caller has ALREADY paid — the XMP reader clamps on its way out
+/// (`xmp::xmp_to_recipe_clamped`), so `r.clamp()` here sees an already-cut
+/// recipe and reports nothing about it (R28 2b, adjudication F5). A caller
+/// with no earlier clamp passes `Default::default()`; absorbing cannot double
+/// count, since the second clamp is idempotent over the first.
+fn clamp_disclosed(
+    r: &mut EditRecipe,
+    already: autoshop::recipe::ClampSummary,
+    warns: &mut Vec<String>,
+) {
+    let mut dropped = already;
+    dropped.absorb(r.clamp());
     if !dropped.is_empty() {
         warns.push(format!("out-of-range values discarded ({})", dropped.describe()));
     }

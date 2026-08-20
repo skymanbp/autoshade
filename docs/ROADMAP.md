@@ -417,6 +417,31 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R28 Batch-2：防御性收口五项（2026-08-20，未发版）** —— 2a **无界 store 读类**：
+  saved_quarter_turns 改 read_text_capped+单字段 SavedTurn（无 deny_unknown_fields
+  =前向兼容保留、%4 与 clamp 对齐）；兄弟 adopting-from.txt 两处改 64KiB 专帽
+  （Windows 路径上限论证）；**扫描门顺手抓出第四处旁路** export_xmp_beside 一并收口；
+  新源扫描门 every_store_read_goes_through_the_capped_reader（扫 store.rs+segment.rs
+  前向哨、两条前提断言防空转）；文档撤回「错的代价只是陈旧缩略图」句（segment.rs
+  第四消费者证伪它，指针指 F1-B/B3）。2b **笔刷帽根修**：cap_tokens 按 '\n' 界切
+  （帽=上限非精确尺寸）；cap_strokes 共享 Brush/AiMask 两臂；截空整笔丢弃并计数；
+  xmp_to_recipe_clamped 新门（薄包装 28 调用点不动）接三披露面=CLI 第三句+GUI 三
+  restore 分支+export（**零新字符串**=复用既有本地化键，无 cmap/i18n 暴露）；
+  dab token 加 256B 长度界。2c **check_docs 加固**：块注释跳过+_PROBE 加案例+
+  [&str;N] 交叉核对（含失败向自检 _raises_lookup）+括号计数前遮引号段（_TOML_PROBE
+  合成自检）。2d jobs.rs saturating_mul+u64::MAX 邻域测试。2e **三注释谎言改真**：
+  style.rs:559/575（citing git -S bae6d99、真修指 B4-4b）+main.rs:1431 限定到
+  stdout（stderr 站点按 HEAD 重枚举、指 B5-5c）+store.rs 文档随 2a。
+  **裁决档案勘误（代理实测）**：F5 加重项示例「30 万整数位」错——溢出成 inf 早被
+  有限性检查拒收，可达形是小数形 0.111…（fixture 与注释已按实况记录）；F6 引行
+  render.rs:1133/2786 因 B1 移位失效，注释按 HEAD 重枚（:1430/:3083）。
+  **代理自纠**：cap_strokes 首版插错位吞掉 cap_geometry 文档块——读自家 diff 抓出
+  非门抓出。**具名不改**：serve.rs 三处+store.rs:3907 留 xmp_to_recipe（无披露面
+  可喂）。门（主审复跑）=clippy0×2+**707**(+5)/**11**(+1)/131/2+2+zoo 全名 9/9；
+  9 组变异证据（代理）+saturating 变异主审亲手复现。cap() 13 调用点普查=2 改
+  11 留（全非 token 域）；read 普查=4 改 2 惯用法留 14 read_dir 留。
+  README CI 句精确化（every push→push to main+PR，Show HN 材料代理发现）同批。
+
 - **R28 Batch-1 1a+1b：X-Trans 色偏根修 + 两披露句改真（2026-08-20，未发版）** ——
   确诊=rawler PPG 色度插值按 Bayer 公理从「右+下」邻取 R/B（ppg.rs:185-203），
   X-Trans 每 36 像素的四个 2×2 全绿块使其失败 16 次：8 相位 R 从未被写（=0）、

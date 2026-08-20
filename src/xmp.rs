@@ -5608,6 +5608,30 @@ fn parse_dabs(scope: &str, p: &XmlComponent<'_>) -> Result<String, ()> {
 /// silently become two on the round trip. No real token spans a line; this
 /// makes the storage form lossless by construction rather than by luck.
 fn dab_token_is_known(t: &str) -> Result<(), ()> {
+    /// A LENGTH bound as well as a shape one (R28 2b, adjudication F5's
+    /// aggravator). Real tokens run ~10-30 bytes over the 22,966-token census
+    /// above; 256 is eight times the widest of them, and still comfortably
+    /// past the ~100 bytes two full-precision `f32` `Display`s plus the `d `
+    /// prefix could occupy, so no token the grammar can legitimately produce
+    /// is refused here.
+    ///
+    /// What it stops: a coordinate written as `0.` plus 300,000 digits parses
+    /// to a perfectly finite `f32` (0.111…) and passes every check below,
+    /// while the token COUNT gate (`MAX_DAB_TOKENS` = 65,536) never fires —
+    /// ONE token then blows the storage-side 256 KiB byte cap by itself.
+    /// Refused the way every other malformed token is: the Paint does not
+    /// import, which by this parser's all-or-nothing group rule refuses the
+    /// Aggregate and discloses it as `OutOfModel`.
+    ///
+    /// The FRACTIONAL form is the reachable one, and the distinction is not
+    /// pedantry: the adjudication's own example — 300,000 integer digits —
+    /// overflows to `inf` and was already refused by the finiteness check
+    /// below, so only the `0.…` shape ever needed this bound (measured while
+    /// writing the mutation test, R28 2b).
+    const MAX_TOKEN_BYTES: usize = 256;
+    if t.len() > MAX_TOKEN_BYTES {
+        return Err(());
+    }
     if t.contains('\n') || t.contains('\r') {
         return Err(());
     }
@@ -6350,8 +6374,27 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
 /// The returned recipe is clamped before it crosses the parser boundary, using
 /// the same ranges and size caps as every other untrusted recipe input.
 pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
+    xmp_to_recipe_clamped(xmp).0
+}
+
+/// [`xmp_to_recipe`] plus WHAT THE CLAMP COST — the door for every surface
+/// that DISCLOSES import loss.
+///
+/// The clamp result used to be dropped on the floor here (`r.clamp();`), and
+/// that single discarded value made the whole import-side truncation channel
+/// silent: the GUI's own second clamp (`bin/gui/persist.rs`,
+/// `bin/gui/export.rs`) ran on the already-cut recipe and correctly reported
+/// nothing, so a sidecar that lost 131 KB of brush dabs and a mask component
+/// on the way in looked exactly like one that arrived whole (R28 2b,
+/// adjudication F5). The summary is a property of the READ, so it is produced
+/// where the read is and returned rather than re-derived by anyone.
+///
+/// Callers that only want the recipe keep using [`xmp_to_recipe`] — the
+/// unclamped-summary form stays the exception, not the default, so no caller
+/// is obliged to handle a value it has no surface for.
+pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSummary) {
     if xmp.len() > MAX_XMP_BYTES {
-        return EditRecipe::default();
+        return (EditRecipe::default(), crate::recipe::ClampSummary::default());
     }
     // The disclosure scan answers a namespace conflict with "its camera-raw
     // settings were not imported" — and every restore surface pairs the two
@@ -6360,7 +6403,7 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     // one document contradicted each other. Neutral is the only import the
     // disclosure sentence keeps honest.
     if xmlns_conflict(xmp).is_some() {
-        return EditRecipe::default();
+        return (EditRecipe::default(), crate::recipe::ClampSummary::default());
     }
     let ours = is_autoshop_sidecar(xmp);
 
@@ -6585,8 +6628,13 @@ pub fn xmp_to_recipe(xmp: &str) -> EditRecipe {
     // named by `unparsable_crs_numbers` when that changes a foreign value.
     // Compound crop and mask data are rejected earlier because clamping only
     // part of their geometry would silently change coverage.
-    r.clamp();
-    r
+    //
+    // The summary RIDES OUT rather than being discarded (R28 2b): what the
+    // SIZE caps cut — dab bytes, strokes, curve knots — is loss no other
+    // channel here can see, because `import_losses` reads the document and
+    // this reads the recipe the document produced.
+    let dropped = r.clamp();
+    (r, dropped)
 }
 
 #[cfg(test)]
@@ -11208,6 +11256,90 @@ mod tests {
             xmp_to_recipe(&smuggled).masks.len(),
             0,
             "a component in an unmodelled container is markup we cannot account for"
+        );
+    }
+
+    /// The F5 chain, end to end (R28 2b): an over-cap dab stream is
+    /// TRUNCATED, the truncation is DISCLOSED, and what we republish is still
+    /// a document our own reader accepts.
+    ///
+    /// The construction is the adjudication's: 65,536 `"d 0 0"` tokens sit
+    /// exactly on the read side's token ceiling and pass it, then arrive at a
+    /// store-side cap counted in BYTES (393,215 vs 262,144). Before this
+    /// batch, `cap` cut that inside a token, `xmp_to_recipe` dropped the
+    /// `ClampSummary` on the floor so nothing said a word, and the writer —
+    /// whose split is the exact inverse of the reader's join — put the
+    /// fragment back into the sidecar, where our next read refused the whole
+    /// Aggregate and the group's masks vanished.
+    ///
+    /// MUTATION THIS KILLS, three ways: revert `cap_tokens` to `cap` (a
+    /// republished `<rdf:li>d 0 </rdf:li>` fails `dab_token_is_known` below);
+    /// revert `xmp_to_recipe`'s tail to a bare `r.clamp();` (the summary is
+    /// empty and the disclosure assertion fails); drop the length bound in
+    /// `dab_token_is_known` (the single-huge-token arm at the end imports).
+    #[test]
+    fn an_oversized_dab_stream_is_disclosed_and_republished_whole_token_only() {
+        let many = vec!["d 0 0"; 65_536];
+        let big = lr_paint("2222222222222222222222222222222B", "1", "0", "false", &many);
+        let doc = lr_doc(&lr_correction("Mask 1", "", &lr_brush_group("false", &big)));
+        assert!(doc.len() < MAX_XMP_BYTES, "premise: the fixture is a readable document");
+
+        let (r, clamped) = xmp_to_recipe_clamped(&doc);
+        assert_eq!(r.masks.len(), 1, "premise: the brush group imports");
+        // DISCLOSED, not swallowed — the single fact this whole item exists
+        // for. `xmp_to_recipe`'s own clamp used to be the only one that saw
+        // it, and it threw the answer away.
+        assert!(
+            clamped.truncated_string_bytes > 100_000,
+            "the import cut ~131 KB of dabs and must say so: {clamped:?}"
+        );
+
+        // …and the projection we would hand back to Lightroom carries only
+        // tokens of the measured grammar. `dab_token_is_known` is the reader's
+        // own judge, so this asserts the round trip against the exact rule
+        // that used to reject it.
+        let out = recipe_to_xmp(&r);
+        let mut checked = 0usize;
+        let mut rest = out.as_str();
+        while let Some(open) = rest.find("<crs:Dabs>") {
+            let close = rest[open..].find("</crs:Dabs>").expect("closed Dabs block") + open;
+            let mut seq = &rest[open..close];
+            while let Some(i) = seq.find("<rdf:li>") {
+                let j = seq[i..].find("</rdf:li>").expect("closed item") + i;
+                let token = &seq[i + "<rdf:li>".len()..j];
+                assert!(
+                    dab_token_is_known(token).is_ok(),
+                    "republished a token our own reader refuses: {token:?}"
+                );
+                checked += 1;
+                seq = &seq[j..];
+            }
+            rest = &rest[close..];
+        }
+        assert!(checked > 40_000, "premise: the republished stream is the big one ({checked})");
+
+        // The aggravator, same door: ONE token whose coordinate is `0.` plus
+        // 300,000 digits parses to a finite `f32` (0.111…), passes every
+        // shape check, and blows the byte cap by itself while the token COUNT
+        // gate never fires. Refused at the token now — which, by this
+        // reader's existing all-or-nothing rule for a group
+        // (`parse_brush_group` propagates one bad Paint), refuses the
+        // Aggregate and DISCLOSES it. That is the same verdict any other
+        // malformed token already earns; the bound only stops the malformed
+        // one from being called well-formed.
+        //
+        // FRACTIONAL, not the adjudication's 300,000 INTEGER digits: those
+        // overflow to `inf` and the finiteness check already refused them, so
+        // this is the shape that actually needed a length bound.
+        let huge = format!("d 0 0.{}", "1".repeat(300_000));
+        let mono = lr_paint("3333333333333333333333333333333C", "1", "0", "false", &[&huge]);
+        let mono_doc = lr_doc(&lr_correction("Mask 1", "", &lr_brush_group("false", &mono)));
+        let (mr, _) = xmp_to_recipe_clamped(&mono_doc);
+        assert_eq!(mr.masks.len(), 0, "an unbounded token cannot import as a stroke");
+        assert!(
+            import_losses(&mono_doc).iter().any(|l| l.reason == MaskImportReason::OutOfModel),
+            "and the refusal is named: {:?}",
+            import_losses(&mono_doc)
         );
     }
 

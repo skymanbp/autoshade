@@ -856,13 +856,23 @@ fn resume_orphan_adoption_once(root: &Path, ck: &str) {
     }
 }
 
+/// The adoption marker holds ONE path and a newline, nothing else — so it gets
+/// its own, far tighter ceiling rather than [`MAX_STORE_JSON`]'s 16 MiB.
+/// Windows' extended path limit is 32,767 UTF-16 units, which cannot exceed
+/// 128 KiB of UTF-8; 64 KiB is past any spelling a filesystem will actually
+/// hand back and still refuses a planted gigabyte. Bounded for the same reason
+/// every other read in this module is (R28 2a, adjudication F7's sibling): the
+/// `<temp>/autoshop` fallback root is world-writable, so the file this reads
+/// is not always one this app wrote.
+const MAX_ADOPTION_MARKER: u64 = 64 * 1024;
+
 /// Finish a marker-fenced adoption whose source is read from the marker
 /// itself — a resume must copy from the dir the CRASHED attempt was copying,
 /// never from whatever spelling the current session happens to hold: with
 /// three spellings in play, mixing the two merges two generations into one
 /// dir.
 fn resume_marked_adoption(cd: &Path) -> std::io::Result<()> {
-    let recorded = std::fs::read_to_string(cd.join("adopting-from.txt"))?;
+    let recorded = read_text_capped(&cd.join("adopting-from.txt"), MAX_ADOPTION_MARKER)?;
     let source = PathBuf::from(recorded.trim());
     if source.as_os_str().is_empty() {
         return Err(std::io::Error::other("adopting-from.txt names no source"));
@@ -917,7 +927,9 @@ fn adopt_or_choose(root: &Path, abs: &Path, ck: &str, lk: &str) -> Option<String
     // from this session's spelling: with three spellings in play, copying
     // from the current one would mix two generations into one dir.
     let source = if resume {
-        match std::fs::read_to_string(cd.join("adopting-from.txt")) {
+        // Capped like the resume path above; an over-cap marker takes the
+        // same "cannot be read" branch a corrupt one already took.
+        match read_text_capped(&cd.join("adopting-from.txt"), MAX_ADOPTION_MARKER) {
             Ok(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
             _ => {
                 eprintln!(
@@ -1201,26 +1213,57 @@ pub fn recipe_target(src: &Path) -> PathBuf {
 /// (`EditRecipe::quarter_turns`), or 0 when there is no saved develop, it
 /// cannot be read, or it predates the field.
 ///
-/// A deliberately CHEAP, side-effect-free reader for the two places that need
-/// only this one number and must not pay a full restore:
-/// `gui::thumb_cache_file` (the gallery cache key — a rotate has to miss it or
-/// the grid keeps serving the sideways thumbnail, which is exactly the v0.30
-/// staleness the salt beside it documents) and `style::build_index` (the
-/// aspect feature). It parses the JSON as a `Value` rather than an
-/// `EditRecipe` on purpose: a recipe from a NEWER build carries fields
-/// `deny_unknown_fields` would reject, and a cache key that hard-fails on a
-/// forward file would silently un-rotate every thumbnail instead of one.
+/// A deliberately CHEAP, side-effect-free reader for the FOUR places that need
+/// only this one number and must not pay a full restore. R27 wrote "the two
+/// places" here and there were four by then; R28 2a counted them:
+///   * `gui::thumb_cache_file` (`bin/gui/util.rs:1593`) — the gallery cache
+///     key: a rotate has to miss it or the grid keeps serving the sideways
+///     thumbnail, exactly the v0.30 staleness the salt beside it documents;
+///   * the gallery thumbnail worker (`bin/gui/workers.rs:247`), which decodes
+///     in the frame that key was built for;
+///   * `style::build_index` (`style.rs:571`) — the aspect feature;
+///   * `segment::stage_source_frame` (`segment.rs:370`) — the frame the AI
+///     segmenter's source PNG is staged in.
 ///
 /// Fails toward 0 = "no turn", which is what every recipe written before
-/// v0.33 means and what a corrupt one is indistinguishable from here. The
-/// cost of being wrong is a stale thumbnail, not a wrong pixel: the RENDER
-/// reads the real recipe.
+/// v0.33 means and what a corrupt one is indistinguishable from here.
+///
+/// What this doc claimed until R28 2a and CANNOT: that "the cost of being
+/// wrong is a stale thumbnail, not a wrong pixel". True of the three cache
+/// consumers, false of the fourth — `segment.rs:370` decodes the frame the
+/// segmentation is computed in, so a disagreement between this number and the
+/// `quarter_turns` the renderer actually holds lands an alpha built in one
+/// frame on pixels in another, cached under a key with no frame in it
+/// (adjudication F1-B; the fix is registered as R28 Batch-3 3a and belongs in
+/// `segment.rs`, not here).
+///
+/// Bounded like every other read of a file this app persists but an untrusted
+/// photo pack can replace ([`read_text_capped`] / [`MAX_STORE_JSON`], 24 other
+/// call sites) — this was the one remaining bypass, and the cap's own doc
+/// names exactly this scenario (adjudication F7).
 pub fn saved_quarter_turns(src: &Path) -> u8 {
-    let text = std::fs::read_to_string(recipe_target(src)).ok();
-    text.as_deref()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
-        .and_then(|v| v.get("quarter_turns").and_then(serde_json::Value::as_u64))
-        .map_or(0, |k| (k % 4) as u8)
+    /// ONE field out of a recipe that may be megabytes: a `serde_json::Value`
+    /// tree costs roughly ten times the document in RAM for this one `u8`,
+    /// which is why `pixels.json` refuses `Value` too.
+    ///
+    /// Deliberately NOT `deny_unknown_fields`, and not `EditRecipe`: a recipe
+    /// from a NEWER build carries fields the strict form would reject, and a
+    /// cache key that hard-fails on a forward file would silently un-rotate
+    /// EVERY thumbnail instead of one. A plain derive ignores what it does not
+    /// know, so the forward-compat property the `Value` tree provided survives
+    /// the switch. `#[serde(default)]` keeps the pre-v0.33 recipes (no such
+    /// key at all) on the same 0 the field's own default gives them.
+    #[derive(serde::Deserialize)]
+    struct SavedTurn {
+        #[serde(default)]
+        quarter_turns: u8,
+    }
+    read_text_capped(&recipe_target(src), MAX_STORE_JSON)
+        .ok()
+        .and_then(|t| serde_json::from_str::<SavedTurn>(&t).ok())
+        // `% 4` exactly as `EditRecipe::clamp` normalises the real field, so
+        // this reader and the render cannot disagree about a legal recipe.
+        .map_or(0, |v| v.quarter_turns % 4)
 }
 
 /// The Lightroom XMP projection. Keeps the `<stem>.xmp` name so copying it
@@ -1319,7 +1362,11 @@ fn sweep_stale_sidecar_stages(to: &Path, grace: std::time::Duration) {
 /// Autoshop happens to be saving.
 pub fn export_xmp_beside(src: &Path, overwrite: bool) -> std::io::Result<PathBuf> {
     let stored = xmp_target(src);
-    let bytes = std::fs::read(&stored).map_err(|e| {
+    // Bounded like every other read in this module (R28 2a): the projection
+    // lives in the develop dir, which under the `<temp>/autoshop` fallback
+    // root is world-writable. `NotFound` passes through `read_bytes_capped`
+    // untouched, so the workflow-state message below keeps its trigger.
+    let bytes = read_bytes_capped(&stored, MAX_STORE_JSON).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             // "Nothing there" is a WORKFLOW state, not a missing file: the
             // develop has not been saved (or this photo is not a RAW), and the
@@ -5459,6 +5506,95 @@ mod tests {
     // moved to `LocalAdjustment::bitmap_paths_mut`; the fixtures here still
     // construct geometries directly.
     use crate::recipe::{LocalAdjustment, MaskGeometry};
+
+    /// Every read of a file this module PERSISTS goes through the capped
+    /// reader. A SOURCE-SCANNING gate, in the shape of the GUI's font gate
+    /// (`bin/gui/tests.rs`), because "bounded reads only" is a convention no
+    /// type enforces — and a convention with 24 obedient call sites is exactly
+    /// the kind that rots without anyone noticing.
+    ///
+    /// Provenance: R28 2a. FOUR bare bypasses had accumulated beside those 24
+    /// — `saved_quarter_turns`, both `adopting-from.txt` reads, and
+    /// `export_xmp_beside` (adjudication F7 and the verification agents'
+    /// sibling finding). Nothing in the tree would have caught the fifth.
+    ///
+    /// `segment.rs` is scanned too although it has no such call today: it is
+    /// the module that turned `saved_quarter_turns` from a cache key into a
+    /// PIXEL decision (F1-B), so a bare read appearing there is precisely the
+    /// drift worth hearing about early rather than in the next review.
+    ///
+    /// Two deliberate narrownesses, both in the SAFE direction:
+    ///   * line comments are stripped, block comments are not — neither file
+    ///     contains a `/* */` today, and a block comment quoting a bare read
+    ///     could only ever raise a false positive, never hide a real one;
+    ///   * `read_to_end` counts as bounded when the same line bounds it with
+    ///     `.take(` — that is not a spelling exemption but the bounded IDIOM
+    ///     itself, and it is how both capped readers are written.
+    ///
+    /// MUTATION THIS CATCHES: put `std::fs::read_to_string(recipe_target(src))`
+    /// back into `saved_quarter_turns` and this test fails, naming the line.
+    #[test]
+    fn every_store_read_goes_through_the_capped_reader() {
+        // Spelled as they appear in a CALL. `fs::read_dir(` is deliberately
+        // absent: it enumerates a directory, it never materialises a file.
+        const BARE: [&str; 3] = ["read_to_string(", "fs::read(", "read_to_end("];
+        const SCANNED: [&str; 2] = ["src/store.rs", "src/segment.rs"];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut capped = 0usize;
+        let mut scanned_lines = 0usize;
+        for rel in SCANNED {
+            // LF-normalised first: this repo has MIXED line endings by design
+            // (per-file `.gitattributes` + `core.autocrlf`), and the CRLF
+            // spelling of the anchor below is what `scripts/check_docs.py`
+            // normalises for the same reason.
+            let text = std::fs::read_to_string(root.join(rel))
+                .expect("source readable")
+                .replace("\r\n", "\n");
+            // Tests read fixture files by the armful and must not be scanned;
+            // the anchor is asserted rather than defaulted, so renaming the
+            // test module makes this gate fail loudly instead of quietly
+            // widening its scope.
+            let anchor = "\n#[cfg(test)]\nmod tests {";
+            let end = text.find(anchor).unwrap_or_else(|| {
+                panic!("{rel}: no `#[cfg(test)] mod tests` anchor — re-anchor this gate")
+            });
+            for (i, line) in text[..end].split('\n').enumerate() {
+                scanned_lines += 1;
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if line.contains("read_text_capped(") || line.contains("read_bytes_capped(") {
+                    capped += 1;
+                }
+                for pat in BARE {
+                    if line.contains(pat) && !(pat == "read_to_end(" && line.contains(".take(")) {
+                        offenders.push(format!("{rel}:{}  {}", i + 1, line.trim()));
+                    }
+                }
+            }
+        }
+
+        // PREMISE (the font gate's notdef idiom): a scanner that reads the
+        // wrong file, or whose comment stripper eats everything, also finds
+        // zero offenders and would pass vacuously.
+        assert!(
+            scanned_lines > 4_000,
+            "scanner saw only {scanned_lines} lines of source — it is broken"
+        );
+        assert!(
+            capped >= 15,
+            "scanner found only {capped} capped-reader mentions — it is broken"
+        );
+
+        assert!(
+            offenders.is_empty(),
+            "unbounded read(s) outside the capped reader — route through \
+             read_text_capped/read_bytes_capped (or bound with `.take(`):\n  {}",
+            offenders.join("\n  ")
+        );
+    }
 
     /// One file must never produce two develop directories.
     ///
