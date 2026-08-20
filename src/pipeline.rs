@@ -4431,29 +4431,58 @@ mod tests {
 
     #[test]
     fn guard_refuses_writes_into_the_source_library() {
+        // The library fixture is spelled from the host's own ROOT. `D:/…` is
+        // an absolute, prefix-rooted path on Windows and a plain RELATIVE
+        // directory literally named `D:` everywhere else — where the
+        // root-level `..` case below folds to a cwd sibling instead of
+        // bumping against a root, so the regression this test exists for
+        // could not even be spelled and the guard (correctly) allowed the
+        // write. That is how it failed on both Unix legs of CI run
+        // 32398395462. The GUARD is portable as it stands: `normalize_lexical`
+        // folds `..` against `Component::RootDir` and `Component::Prefix`
+        // alike, which is `/` on Unix and `D:` on Windows — only the fixture
+        // spelling was Windows-only.
+        #[cfg(windows)]
+        const ROOT: &str = "D:/";
+        #[cfg(not(windows))]
+        const ROOT: &str = "/";
         // A RAW living in the (read-only) photo library.
-        let raw = Path::new("D:/Photography/Raw/2024/Trip/DSC0001.ARW");
+        let lib = PathBuf::from(ROOT).join("Photography/Raw/2024/Trip");
+        let raw = lib.join("DSC0001.ARW");
         // Writing a sibling INTO that folder must be refused.
-        let sibling = Path::new("D:/Photography/Raw/2024/Trip/DSC0001.developed.tif");
-        assert!(guard_readonly(sibling, raw).is_err(), "must refuse a sibling write");
+        let sibling = lib.join("DSC0001.developed.tif");
+        assert!(guard_readonly(&sibling, &raw).is_err(), "must refuse a sibling write");
         // A subfolder under the RAW's folder is refused too.
-        let under = Path::new("D:/Photography/Raw/2024/Trip/out/DSC0001.tif");
-        assert!(guard_readonly(under, raw).is_err(), "must refuse a subfolder write");
+        let under = lib.join("out/DSC0001.tif");
+        assert!(guard_readonly(&under, &raw).is_err(), "must refuse a subfolder write");
         // The default ./out (outside the library) is allowed.
-        let safe = default_out(raw, "developed", "tif");
-        assert!(guard_readonly(&safe, raw).is_ok(), "./out must be allowed");
+        let safe = default_out(&raw, "developed", "tif");
+        assert!(guard_readonly(&safe, &raw).is_ok(), "./out must be allowed");
         // A source that itself lives in OUR ./out (e.g. `match` on an exported
         // preview) may be written beside — the guard protects the library only.
         let out_src = Path::new("out/DSC0001.preview.jpg");
         let out_dst = Path::new("out/DSC0001.matched.json");
         assert!(guard_readonly(out_dst, out_src).is_ok(), "our ./out is always writable");
         // A `..` bumping against the ROOT must fold like the filesystem does
-        // ("D:/../Photography" = "D:/Photography") — popping the root used to
-        // produce the drive-relative "D:Photography", which dodged every
-        // starts_with check and slipped a library write past the guard.
-        let root_dodge = Path::new("D:/../Photography/Raw/2024/Trip/DSC0001.x.tif");
+        // ("D:/../Photography" = "D:/Photography", "/../Photography" =
+        // "/Photography") — popping the root used to produce the
+        // drive-relative "D:Photography", which dodged every starts_with
+        // check and slipped a library write past the guard.
+        //
+        // The UNIX half of that fold is provable on any host, and is proven
+        // here rather than only in CI: `Path` parses "/x" into RootDir +
+        // Normal on Windows too, so `normalize_lexical`'s RootDir arm runs
+        // everywhere. The reverse does NOT hold — "D:" is a `Prefix` only on
+        // Windows and a plain directory name elsewhere — which is exactly why
+        // the fixture above has to be spelled per platform.
+        assert_eq!(
+            normalize_lexical(Path::new("/../Photography/x")),
+            PathBuf::from("/Photography/x"),
+            "the root's parent is the root"
+        );
+        let root_dodge = PathBuf::from(ROOT).join("../Photography/Raw/2024/Trip/DSC0001.x.tif");
         assert!(
-            guard_readonly(root_dodge, raw).is_err(),
+            guard_readonly(&root_dodge, &raw).is_err(),
             "a root-level .. must not bypass the library guard"
         );
     }

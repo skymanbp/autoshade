@@ -482,6 +482,22 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// the one-key guarantee to begin with, and keeps any old mixed-case dirs
 /// as orphans; the store's stem-cased artifact names assume a
 /// case-insensitive root on Windows throughout.)
+///
+/// OFF Windows the fold does NOT run, and that is the decision, not an
+/// omission: case-insensitivity is a property of the VOLUME, and only Windows
+/// guarantees it for every local one. Linux is case-sensitive on every
+/// ordinary filesystem, and macOS ships APFS case-insensitive by default but
+/// formats case-SENSITIVE on request — so a compile-time fold there is a
+/// guess, and the two ways of guessing wrong are not symmetric. Folding on a
+/// case-sensitive volume MERGES two genuinely different photos into one
+/// develop dir and one develop lock, and each save then overwrites the
+/// other's recipe; not folding on a case-insensitive one costs at most a
+/// second develop dir for one photo, with both still readable and neither
+/// destroyed. Aliases off Windows are handled where they can be handled
+/// truthfully instead: [`identity_of`] resolves the spelling
+/// through `fs::canonicalize`, which collapses symlink and `..` aliases on
+/// every platform (whether a given libc's `realpath` ALSO normalises case is
+/// not relied on here — nothing in this module reads case out of it).
 pub fn photo_key(src: &Path) -> String {
     key_from_spelling(&identity_of(src))
 }
@@ -496,6 +512,17 @@ pub(crate) fn photo_key_lexical(src: &Path) -> String {
 }
 
 fn key_from_spelling(abs: &Path) -> String {
+    // The ONE place the platform's case rule is decided; see `photo_key` for
+    // why it is a compile-time constant and not a per-volume probe.
+    key_from_spelling_folded(abs, cfg!(windows))
+}
+
+/// [`key_from_spelling`] with that case rule handed IN, so BOTH halves of it
+/// are exercised on every host the suite runs on: a Linux runner proves the
+/// folding branch and a Windows runner proves the case-sensitive one (see
+/// `the_stem_fold_never_invents_a_name_ntfs_cannot_resolve`). Nothing but
+/// that test passes anything other than `cfg!(windows)`.
+fn key_from_spelling_folded(abs: &Path, fold_case: bool) -> String {
     let mut s = abs.to_string_lossy().into_owned();
     // BOTH halves normalise, from the SAME string. The hash was taken from
     // `abs` while the stem was taken from the raw `src`, so a spelling that
@@ -507,7 +534,7 @@ fn key_from_spelling(abs: &Path) -> String {
     // develop beside it. For every ordinary path the two agree, so this
     // re-keys nothing that exists.
     let mut stem = crate::pipeline::stem(abs).to_string();
-    if cfg!(windows) {
+    if fold_case {
         s = s.to_lowercase();
         // ASCII-only for the DIRECTORY NAME half. Rust's full Unicode
         // lowercase and NTFS's $UpCase table disagree — and where they do,
@@ -552,17 +579,49 @@ fn key_from_spelling(abs: &Path) -> String {
 /// Two spellings of the same photo must land in the same develop dir on a
 /// case-insensitive volume — and the folded name must actually RESOLVE to any
 /// directory an earlier build created.
+///
+/// The FOLD ITSELF is checked on every host, both ways round, by driving
+/// [`key_from_spelling_folded`] directly: a case-insensitive volume owes one
+/// key for two spellings, a case-sensitive one owes two. Only the WIRING —
+/// which of the two `photo_key` is actually given — is `cfg`-gated, and that
+/// gate is two asserts wide. This test used to assert the folding half
+/// UNCONDITIONALLY and so failed on both Unix runners of CI run 32398395462;
+/// the fix is not to weaken it but to stop calling one platform's rule
+/// universal.
 #[cfg(test)]
 #[test]
 fn the_stem_fold_never_invents_a_name_ntfs_cannot_resolve() {
-    // ASCII case folds (the reason the fold exists).
-    assert_eq!(photo_key(Path::new("D:/p/DSC001.ARW")), photo_key(Path::new("D:/p/dsc001.arw")));
-    // Non-ASCII stems are left ALONE: Rust's full lowercase maps these to
-    // names NTFS does not consider equal to the original, so folding them
-    // would point at a directory that does not exist.
+    let (upper, lower) = (Path::new("D:/p/DSC001.ARW"), Path::new("D:/p/dsc001.arw"));
+    // ASCII case folds (the reason the fold exists): on a case-insensitive
+    // volume these two spellings open ONE file, so they owe one develop dir.
+    assert_eq!(
+        key_from_spelling_folded(upper, true),
+        key_from_spelling_folded(lower, true),
+        "a folding host owes one key for two spellings of one file"
+    );
+    // And where paths are case-SENSITIVE the same two spellings are two
+    // FILES. Folding them would hand two different photos one develop dir and
+    // one develop lock, so each save would overwrite the other's recipe —
+    // distinct keys is the correct answer there, not a missing feature.
+    assert_ne!(
+        key_from_spelling_folded(upper, false),
+        key_from_spelling_folded(lower, false),
+        "a case-sensitive host must not merge two photos into one develop"
+    );
+    // The wiring: `photo_key` folds exactly where the platform guarantees
+    // case-insensitive paths for every local volume (see its doc comment).
+    if cfg!(windows) {
+        assert_eq!(photo_key(upper), photo_key(lower), "NTFS: one file, one key");
+    } else {
+        assert_ne!(photo_key(upper), photo_key(lower), "case-sensitive host: two files, two keys");
+    }
+    // Non-ASCII stems are left ALONE even on the folding branch: Rust's full
+    // lowercase maps these to names NTFS does not consider equal to the
+    // original, so folding them would point at a directory that does not
+    // exist. Driven through `folded = true` so the check runs everywhere.
     for stem in ["\u{130}MG_001", "\u{3a3}\u{391}\u{3a3}", "\u{1e9e}"] {
         let p = format!("D:/p/{stem}.ARW");
-        let key = photo_key(Path::new(&p));
+        let key = key_from_spelling_folded(Path::new(&p), true);
         let folded = key.rsplit_once('-').expect("key is <stem>-<hash>").0;
         // Each fixture is a case where Rust's full lowercase and NTFS's own
         // folding disagree — that is what makes it a fixture at all.
@@ -5837,11 +5896,12 @@ mod tests {
     /// half-copied dir as if complete.
     #[test]
     fn a_canonical_session_finishes_an_alias_sessions_crashed_adoption() {
-        let root = std::env::temp_dir().join("autoshop-store-test-orphan-resume");
-        let _ = std::fs::remove_dir_all(&root);
-        let dir = std::env::temp_dir().join("autoshop-store-test-orphan-resume-photos");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let root = canonical_temp("orphan-resume");
+        // `canonical_temp`, not `env::temp_dir()`: the ck == lk precondition
+        // below is a statement about a canonically-spelled photo, and a temp
+        // dir reached through a symlink (macOS `/var`) or an 8.3/off-case env
+        // var breaks it before the code under test runs. See the helper.
+        let dir = canonical_temp("orphan-resume-photos");
         let raw = dir.join("_orphan_resume.arw");
         std::fs::write(&raw, b"raw").unwrap();
         let ck = photo_key(&raw);
@@ -7695,6 +7755,16 @@ mod tests {
     /// A temp-dir fixture base spelled CANONICALLY (env vars can carry an
     /// off-case or 8.3 spelling of the temp dir, which would make lexical
     /// and canonical keys differ for reasons unrelated to the test).
+    ///
+    /// Not a Windows nicety: on macOS `env::temp_dir()` answers
+    /// `/var/folders/…`, and `/var` is a SYMLINK to `/private/var`, so
+    /// `identity_of` resolves every fixture photo to a spelling the lexical
+    /// key never sees. Any test whose subject is "canonical == lexical here"
+    /// must build its photos under THIS base, or it is measuring the runner's
+    /// temp dir. That is what failed
+    /// `a_canonical_session_finishes_an_alias_sessions_crashed_adoption` on
+    /// the macOS leg of CI run 32398395462 while ubuntu (`/tmp`, no symlink)
+    /// passed.
     fn canonical_temp(tag: &str) -> PathBuf {
         let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let base = strip_verbatim(&base).join(format!("autoshop-store-test-{tag}"));
