@@ -6913,7 +6913,18 @@
             Some(dir.as_path()),
             "the folder is remembered"
         );
-        assert!(app.style_info_loading, "a build invalidates the cached status");
+        // The landing ARMS a fresh status read (start_style_info), but that
+        // read runs on a real worker thread and `poll_workers` drains up to 64
+        // messages per call — on a fast scheduler the StyleInfo answer lands
+        // inside this same drain and legitimately clears the flag again (first
+        // observed losing that race on CI ubuntu). The durable claim is "the
+        // build asked for a fresh read": still in flight OR already answered.
+        // A fresh app starts with `style_info = None`, so dropping the
+        // `start_style_info` call from the landing fails both halves.
+        assert!(
+            app.style_info_loading || app.style_info.is_some(),
+            "a build invalidates the cached status"
+        );
         assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Success)));
 
         // R28 Batch-4 4b: a build where the embedding sidecar failed must NOT
