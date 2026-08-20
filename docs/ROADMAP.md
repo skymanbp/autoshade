@@ -423,6 +423,27 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **CI test 作业收口（2026-08-20，未发版）：双 OS 全绿、README 宣称句改真** ——
+  B1a 登记 (b) 的同根一批修 `dd95a35`：四测一类根＝「测试把宿主 Windows
+  平台语义钉成普适」，全部测试层、产品码经复审零缺陷（①stem_fold 折叠缝
+  `key_from_spelling_folded` 两半全平台断言＋不对称性文档＝敏感卷上折叠会
+  毁灭性合并两照；②canonical_session 败在 **macOS**（/var→/private/var
+  符号链接、canonical≠词法）而非先判的 ubuntu——带 job 名的日志纠正了按
+  时间戳归属的错法；③dehaze 金样哈希系 libm 舍入（ubuntu x86_64 精确复现
+  +60 哈希＝libc 数学非字长），金样门控 cfg(all(windows,x86_64))、7 条无
+  门控性质测试保跨平台覆盖；④guard 夹具 `D:/` 在 Unix 是相对路径＝回归
+  场景从未搭起，每平台 ROOT 常量＋新增无门控 `normalize_lexical` 折叠断言）。
+  test 步首执行又暴露新类 `7c222da`：ubuntu gui 131 中 1 败＝测试断**瞬态
+  旗**与自家 `start_style_info` 工作线程赛跑（`poll_workers` 单次排空 64
+  条，同轮吃掉 StyleInfo 合法清旗；任何平台皆可闪红）；产品行为正确，断言
+  改持久真值（在飞∨已应答），变异亲证（删 workers.rs:1879 调用→红→字节
+  还原）；类扫 gui 测试档 10 处 loading/inflight/busy 断言唯此一处赛形。
+  **全绿 run `32405954918`**：双 OS×双配置 728 lib(8i)/10 CLI/131 GUI/2+2，
+  与 Windows 738(9i)/11 的**集差＝12 条刻意 Windows 门控**（lib 10+1i、
+  CLI 1＝main.rs:1849 绝叶大小写折叠）。README CI 段 compile-only→
+  compile+test 带全绿 run 链接同批改真；check_docs 22 条 20 PASS 0 FAIL
+  2 SKIP（测试计数类按设计仅发版电池转录下可证）。
+
 - **R29 Batch-1a 已落地（2026-08-20，未发版）：「单点故障废整跑」类根因两臂合修** ——
   用户令（先修传输重试→升级为断点续传必做）。①**传输重试**：唯一咽喉点
   `advisor::post_ai_json_with`（六个 OpenAI 兼容调用面全经它；claude/generative
@@ -448,7 +469,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   会绕过重试；实测两次废稿消息均以类型名开头＝中转真实事件不带顶层 error
   键，潜伏非现行；(b) CI test 作业首跑双 OS 红＝四测把 Windows 平台语义当
   宇宙不变量（NTFS 折叠/卷大小写/本机位哈希 golden/夹具路径），同根一批修
-  排在本批后，README CI 宣称句在其转绿前保持「仅编译」不动。M-C attempt-1/2
+  排在本批后，README CI 宣称句在其转绿前保持「仅编译」不动（✅ 2026-08-20
+  已收口＝dd95a35+7c222da 双 OS 全绿，见上条）。M-C attempt-1/2
   废稿转录：`~/.claude/plans/r28-materials/mc-eval-147-v0340-attempt{1,2}-aborted.txt`；
   attempt-3 用本批 dev build（渲染路径零文件改动＝与发布 exe 渲染同义，
   diff 可证）跑。README 的 eval `--fresh`/`--state` 两旗文档随 v0.35.0 发版补。

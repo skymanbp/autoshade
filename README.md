@@ -196,15 +196,16 @@ never pulls in eframe + winit + the GL stack. Both binaries link the same engine
 library — the desktop app is not a wrapper around the CLI, it links the crate
 in-process.
 
-Cross-platform **compilation** is CI-verified: the
+Cross-platform **compilation and the test battery** are CI-verified: the
 [`build` workflow](.github/workflows/build.yml) compiles both feature
-configurations on `ubuntu-latest` and `macos-latest` on every push to `main`
-and on every pull request (first
-verified run:
-[32346678287](https://github.com/skymanbp/autoshop/actions/runs/32346678287),
-2026-08-20, 7m27s). That proves the source *builds* there and exactly that —
-runtime behaviour on those platforms has not been verified, and prebuilt
-binaries remain Windows-only.
+configurations and runs `cargo test --locked` (default and `--features gui`)
+on `ubuntu-latest` and `macos-latest` on every push to `main` and on every
+pull request (first fully green run:
+[32405954918](https://github.com/skymanbp/autoshop/actions/runs/32405954918),
+2026-08-20 — 728 library, 10 CLI, 131 GUI and 4 contract tests per platform;
+the 12 Windows-gated tests, the byte-exact dehaze golden among them, compile
+only on Windows). Interactive runtime behaviour on those platforms is still
+unverified, and prebuilt binaries remain Windows-only.
 
 ### Three front-ends, one engine
 
