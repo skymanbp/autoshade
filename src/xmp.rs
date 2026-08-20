@@ -129,15 +129,25 @@ fn local_fmt(v: f32) -> String {
 /// magnitude on all five frames but is contradicted by radial uniformity
 /// (`s` behaves as a pure similarity, which distortion is not).
 ///
-/// WHY THE VALUE STILL STANDS UNCHANGED: with no mechanism there is nothing
-/// principled to derive `s` from, and any other constant is equally wrong on
-/// some measured frame (1.032 is exact on the probe frames, ~3.5 % off on
-/// Batch-8's). NEW TRIGGER, which decides the mechanism in one 5-minute
-/// export: the SAME capture exported twice with `LensProfileEnable` 0 and 1,
-/// identical centred `Feather = 0` radial (`batch8-report.md` §7 item 4). If
-/// `s` tracks the toggle this becomes a per-frame value read from the lens
-/// profile; if not, the constant is simply wrong and a measured per-frame
-/// table replaces it. WHERE IT GOES: this constant and this constant only.
+/// ~~WHY THE VALUE STILL STANDS UNCHANGED: with no mechanism there is nothing
+/// principled to derive `s` from…~~ **The trigger above ALSO fired, same day
+/// (R27 Batch-10, `batch10-report.md` §5): the mechanism is Adobe's
+/// LENS-PROFILE DISTORTION.** Toggling `LensProfileEnable` 1→0 on the same
+/// capture and radial moves the implied scale 0.98396 → 0.99826 (batch-8's
+/// own edge finder, unchanged); independently 11 disjoint brush dabs are
+/// displaced PURELY RADIALLY by `dr = −0.02487·r + 2.285e−9·r³` (rms 2.94 px;
+/// any pure scale refuted at 11×, this constant at 30×). Batch-8's
+/// "pure similarity" counter-argument dissolves: over one mask's narrow
+/// annulus a distortion polynomial is locally indistinguishable from a
+/// scale — which is exactly why three frames read 0.984/1.000/1.004 and the
+/// probe frames read ≈1.032. So the sidecar's stored geometry lives in the
+/// PLAIN frame (measures 0.998 with the profile off), Lightroom rasterises
+/// the mask BEFORE its lens correction, and the export shows it warped by a
+/// per-lens per-focal polynomial this engine does not model (no `.lcp`
+/// parser; `crs:LensProfileEnable` is never read; our own geometry stage
+/// uses Sony EXIF knots — a DIFFERENT polynomial). This constant is
+/// therefore wrong in BOTH toggle arms; the decision between 1.0 / Sony-warp
+/// / LCP is with the user (`batch10-report.md` §7.5) and lands here only.
 const LR_MASK_FRAME_SCALE: f64 = 1.032;
 
 /// The frame every normalised `crs:` coordinate — mask box AND crop rectangle
