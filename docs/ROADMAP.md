@@ -423,6 +423,22 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R29 已锁定（2026-08-20，用户三拍板）** —— 计划书
+  `~/.claude/plans/r29-plan-proposal.md`（12 条载荷引用经独立 verifier 全 intact）。
+  ①范围＝**全池（选项 C）**：B1 R28 遗留收口（诊断 sink + XMP Scope 非 crs 余项）→
+  B2 export-at-size（只做 CLI 旗）→ B3 `.lcp` → B4 BiRefNet（闸=用户目检结论）→
+  素材到齐后 B7 羽化+Angle 折叠 / B8 texture 负半支 / B6 笔刷核
+  （CenterWeight+κ+核加密 h 采样；渲染解锁仍以 B3 落地为前提，V2 §7-13 两门）。
+  ②**`.lcp` 解算结果落进 `LensProfile`（schema +1）＝R29 出货即 v0.35.0
+  硬前向断裂轮**（第三次；发版说明须置顶，先例 v0.30/v0.33）。③M-E 素材清单
+  **已下发**（10 类一次 LR 会话，
+  `~/.claude/plans/r29-materials/me-material-checklist.md`；第 10 类回灌
+  sidecar 由我方生成另发）。M-C 147 对重基线用户已批、v0.34.0 发布 exe +
+  中转端点在跑（跑前抓获并根修一处险情：`.env` 直连 key 经 dotenv 优先级压过
+  进程 env 会毒化基线——config.rs `resolve_env` Secret 名 .env 先于 live env，
+  Destination 名相反；处置＝跑批期间移开 `.env`、try/finally 还原，key 零落盘）。
+  `.lcp` 可得性已核：本机 `C:\ProgramData\Adobe\CameraRaw\LensProfiles` 3576 档。
+
 - **R28 v0.34.0 已发布（2026-08-20，全五批+发版链；托管夜间轮）** —— 批次范围
   `307211b..5059df0`（B1 X-Trans 根修 / B2 防御收口 / B3 帧身份 / B4 资源预算 /
   B5 语义+XMP 类型化——各批细账见下方五条）。**行为变更（发版说明全文）**：
