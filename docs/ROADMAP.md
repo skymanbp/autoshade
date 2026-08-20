@@ -417,6 +417,24 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **Codex gpt-5.6-sol 只读审阅 + 十发现全裁决（2026-08-20）** —— 审阅基线
+  012cb60（代码域 src/scripts/python/Cargo.* 与 HEAD 字节同；rollout 文件证实
+  gpt-5.6-sol/xhigh/只读沙箱，33m49s，porcelain 双证零写）。回传 2H/5M/2L/1N、
+  零 CRITICAL；十条经 10 个 Opus 对抗核实代理逐行验证 + 主审亲读关键行后裁定：
+  **0 fix-now / 9 登记 R28 / 1 note-only**。两 HIGH 均降档：F1 AI 蒙版帧身份
+  →MEDIUM（站点 D「同名并发污染」证伪=全树无并发调用者；A 仅正中心点 (0.5,0.5)
+  可达；B=外部配方 quarter_turns 与库不一致才出无声错像素——唯一带成功报告的
+  错像素臂；C 已披露非静默、根在调用点非 resolver）；F2 计划器 1800MB
+  →MEDIUM-HIGH 且真根更深：常数无量纲、RAW 路径根本无单文件上限（150MP IIQ
+  默认 --jobs 3 比 Codex 的 baked 场景更糟、零 opt-in），decode.rs:350 单文件
+  峰值已存在但从不进计划器；1771MB 实测只覆盖 produce_recipe，batch --render
+  全分辨率尾巴未测=待延长 Batch-7 探针复测。核实另掘 Codex 未列同类兄弟 7 项
+  （store.rs:865/920 无界读、三处注释谎言 style.rs:575-578（git -S 证生来就错）
+  /main.rs:1431-1433/store.rs:1204-1217（消费者 2 实为 4）、dab token 无长度界、
+  --fp16 未接线+DecodePermit 扣穿 sidecar、segment staging 名缺序号、RAW 无上限
+  变体）；Codex 两处引行有误已更正（F9 真源=check_docs.py:200-201）。逐条证据
+  （file:line+反驳尝试+上游根评估）：`~/.claude/plans/codex-r27-review-adjudication.md`。
+
 - **发布批 P4 收尾三轨落地（2026-08-20）** —— ①**eCO 定稿**：申报草稿占位符清零（v0.33.0 / 首发 2026-08-19 / Domicile=United States 用户确认），Circular 61 交存 PDF 已生成（源码首尾各 25 页 / 全listing 1854 页 / 51 页 PDF 经 pypdf 验证+50 页逐行比对零错位；**交存内容取自 tag v0.33.0 而非工作树**——HEAD 领先 4 个 src 注释文件，交存须与登记版本逐字节一致=主审裁可），逐屏填表指南就绪（费用不编造、以付款页为准）——只欠用户上 eCO 网站填表付费；②**GitHub 完备化**落地（8556e7f：bug/feature 双 issue 表单（披露行一等字段）+ SECURITY.md（私密通道）+ PR 模板=真实发版电池清单；Discussions 已开 has_discussions=true）；③**目检包**建成 ~38MB（10 条登记项全带台账出处：Duv/λ限幅/kelvin 接缝/M-C 判读/L-12/常数极值/L-18/W_EMB/L-13/subject 三案——第三案 BiRefNet 码内不存在=阻塞如实标注；26 配方渲染+24 裁片+5 全分辨率差分图；旧引擎复现=解锚点使增益恰等旧系数 f32<4e-8 非模拟）。**目检包顺手三发现**：ROADMAP:2944 暖侧数字系台账错误（同日勘误）、texture=−100 端点=彻底高斯糊非 LR 保边语义（σ−92%）、eval shadow_hue mean|Δ|=141 是 sat=0 不查饱和度的记账假象（真事实=AI 加阴影染色 sat bias +9.02）——后两条入 R28。
 - **发布批 P2 README 展示重写落地（2026-08-20，用户拍板=混合图源、三组全批、不规则水印、RAF 保留诚实标注）** —— README 全量重写（14 节：闭环叙事 / 三组 before/after（用户照片缩 1200px，含 524 退化被验证人拒收的失败案例、两组「天空比中性版发白=全局提亮盖过天空蒙版」反例如实标注）/ 九格式 CC0 条带 / 147 对实测数字逐字引台账 / 诚实模型披露表 / 信任模型 / 完整命令与 env 表；check_docs 两锚点保留）。对比图保护（用户令）＝**不规则水印**（组间角度/位置随 stem 哈希 22–38°、组内 before/after 一致不扰对比）+ EXIF Artist/Copyright + Credits 版权保留声明（**照片不随 MIT**）；入库 docs/images/ 16 图 ~1.9MB，EXIF 隐私核=零 GPS/序列号。**新缺陷入 R28：X-Trans 通道映射色偏**——RAF 中性显影 G/R=1.55 vs 相机自带预览 0.95（其余八格式 0.81–1.08；as-shot WB 读取正确）⇒ Bayer-on-X-Trans 疑通道错排，且 render.rs 披露句「颜色不受影响」被实测证伪，README 按诚实模型照登（「X-Trans, restated」节）。另录：CLI 无 export-at-size（README 如实脚注，候选功能）；渲染沙箱=AUTOSHOP_DATA_DIR，真库/真配置零触碰。
 - **发布批 P3 仓库瘦身（2026-08-20，用户令「清理脚手架/过程/过时/测试代码，M1_PLAN 之类撤出远端」）** —— 普查 92 个跟踪文件：**无**脚手架/草稿/一次性调试物（src 51 全产品码、scripts 3 全发版门、tests 2 全合约回归）；「过程」类=三份台账。用户三拍板：**只撤 M1_PLAN+V2_PLAN**（ROADMAP 留远端）、**原地留盘+gitignore**（路径不变、代码注释与台账纪律照旧；git 历史仍含旧版，未洗史——洗史需重写+强推会断已发布 tag，且两档无秘密）、**测试全保留**（695 单测内嵌 src、发布构建本不含）。机制=`git rm --cached`+.gitignore 两行；ARCHITECTURE:1197 加「私档」注记；src 约 30 处注释引用两档=既有私档引用类（PROBE3-ADDENDUM 先例）不动；README 的一处引用随 P2 重写落地时处理。**台账章新增步骤（见发版链）**：把两份 gitignored 台账快照到`~/.claude/plans/autoshop-ledger-snapshots/<日期>/`（首份快照 2026-08-20 已存）。
@@ -455,7 +473,24 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   **X-Trans 通道映射色偏根查**（RAF 中性显影发绿发暗，证据见 P2 条目）、
   **texture=−100 端点语义**（实测彻底高斯糊 σ−92%、非 LR 保边中频平滑；材料=目检包
   crops/D-texture-m100__branches.jpg）、**eval shadow_hue 口径修正**（eval.rs:664-665
-  任一侧动了就计入但不查饱和度，sat=0 的 hue 无色仍记差致 141° 假象——修口径非修数字）。
+  任一侧动了就计入但不查饱和度，sat=0 的 hue 无色仍记差致 141° 假象——修口径非修数字）、
+  **Codex 审阅九根因（2026-08-20 裁决；逐条证据见
+  `~/.claude/plans/codex-r27-review-adjudication.md`）**：①AI 蒙版帧身份（缓存键
+  无帧项+staging 用盘上 saved_quarter_turns 非配方值；修=decode_any_turned(src,
+  recipe.quarter_turns)+键加帧项+身份归 raw，一修闭 F1-B/C）②计划器无量纲
+  1800MB（单文件峰值 decode.rs:350 已存在不进计划器；RAW 无上限变体更糟；
+  jobs.rs:137 saturating 搭车）③GPU sidecar 无 VRAM 预算（RAM 形状预算嵌套
+  GPU 加载；manifest 批处理死代码+--fp16 不传+DecodePermit 扣穿+发布版 GUI
+  全败仍成功 toast）④XMP 作用域=惯例非类型（crs_str tag/subtree 过载+
+  crs_attributes 只认双引号→单引号文档 11 来源键静默丢）⑤笔刷帽单位错配
+  （tokens 65,536 vs bytes 256KiB+字节切断 token 破坏存储不变式+ClampSummary
+  xmp.rs:6586 落地即弃+writer 原样发坏 token→下次打开整组消失）⑥诊断行无
+  身份（无调用方 sink+batch main.rs:1550 弃 _notes+main.rs:1431-1433 假注释）
+  ⑦无界 store 读类（store.rs:1219+兄弟 865/920——capped reader 24 调用点的
+  仅有旁路）⑧rotate_recipe 文件系统原子性（错误路径孤儿无回滚+phase1 集合
+  错配含 AI 缓存；成功路径孤儿证伪=无发货写入者）⑨check_docs 词法器加固
+  （块注释盲+括号计数不遮字符串；当下 012cb60 无触发已逐行验；修=_PROBE 加
+  案例+[&str;N] 交叉核对+遮引号段）。
 
 - **第二轮实验消费：流量律关闭、两定律再反转、L-05 机制定案（2026-08-19，
   R27 Batch-9+10，零码变更）** —— 用户「操作想吐」后改**合成 sidecar** 路线：
