@@ -1,0 +1,172 @@
+name: Bug report
+description: Autoshop did something it should not have, or refused something it should have done.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Two things make a report from this project unusually
+        cheap to diagnose, so please spend a minute on them:
+
+        1. **The disclosure lines.** Autoshop names its own degradations out
+           loud rather than hiding them. Pasting those lines is often half the
+           answer — there is a field for them below.
+        2. **The `recipe.json`.** Every edit is a small readable JSON of slider
+           values. It reproduces the render exactly, and it carries no pixels.
+
+        If what you hit is already written down as a known limit —
+        [Honest scope](https://github.com/skymanbp/autoshop#honest-scope),
+        [the honesty model](https://github.com/skymanbp/autoshop#the-honesty-model-is-a-feature),
+        [X-Trans](https://github.com/skymanbp/autoshop#x-trans-restated) — an
+        issue is still welcome if the *documented* behaviour is wrong or the
+        wording misleads. Say which line you are reading against.
+
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the existing issues, open and closed, and this is not one of them.
+          required: true
+
+  - type: dropdown
+    id: version
+    attributes:
+      label: Version
+      description: "`autoshop --version`, or the title bar of the desktop app."
+      options:
+        - v0.33.0 (latest release)
+        - older — please say which, in the next field
+    validations:
+      required: true
+
+  - type: input
+    id: version_detail
+    attributes:
+      label: If older — which one?
+      description: >-
+        A tag (`v0.32.0`), or the commit you built. Render behaviour changed at
+        real, documented boundaries — imported radial geometry at v0.33.0, the
+        Sony ARW develop window moving by (32, 20) px at v0.32.0, and the
+        white-balance gains when the blackbody curve was repaired. Knowing which
+        side of those you are on matters; they are all listed under
+        [Honest scope](https://github.com/skymanbp/autoshop#honest-scope).
+      placeholder: "v0.31.2 — or: built from main at abc1234"
+
+  - type: dropdown
+    id: frontend
+    attributes:
+      label: Which front-end?
+      description: >-
+        All three link the same engine, so a render bug usually reproduces
+        everywhere — but the disclosure surfaces differ, and so do the bugs that
+        live in them.
+      options:
+        - CLI (autoshop.exe)
+        - Desktop app (autoshop-gui.exe)
+        - Local web UI (autoshop serve / Autoshop-UI.bat)
+        - More than one of them
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: camera_format
+    attributes:
+      label: Camera and file format
+      description: >-
+        The body and the extension. rawler carries 725 camera models across 24
+        RAW extensions, and an extension being supported does not mean your
+        particular body is in the database — so the body is the load-bearing
+        half. Baked sources are a supported input too — eight extensions, PNG
+        and TIFF and JPEG among them — so say so, and name the bit depth and
+        colour profile if you know them.
+      placeholder: "Sony α7R V, .ARW — or: Fujifilm X-S10, .RAF (X-Trans) — or: 16-bit ProPhoto .TIF from Lightroom"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: >-
+        The command you ran or the buttons you pressed, then what came out.
+        Paste error text verbatim rather than paraphrasing it — the refusal
+        messages are deliberately specific (unknown make, unknown model, and
+        no decoder are three different failures), and the exact wording says
+        which one you hit.
+      placeholder: |
+        autoshop auto "D:\photos\_DSC1234.ARW" --guidance "warm, lift shadows"
+
+        ...and the highlights came out clipped flat, where the recipe says
+        Highlights -38.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: >-
+        Be concrete. "It should look better" cannot be tested; "the recipe says
+        Highlights −38 and the render is brighter than the neutral base" can.
+        If the expectation is "Lightroom does X", say which control and what
+        Lightroom's own render looks like.
+    validations:
+      required: true
+
+  - type: textarea
+    id: disclosure_lines
+    attributes:
+      label: What did the disclosure lines say?
+      description: |
+        This is the field this project earns. Autoshop announces every
+        degradation by name, on whichever surface you are using:
+
+        - **CLI** — lines beginning `⚠` on **stderr**, printed beside the
+          `xmp    -> …` line by `analyze`, `auto` and `match`. If you redirected
+          output to a file, stderr may not be in it — use
+          `autoshop auto photo.ARW 2> log.txt` to capture it.
+        - **Desktop app** — the banner shown when the photo is opened, naming
+          what its Lightroom sidecar cost on the way in.
+        - **Local web UI** — the same sentence in the reply text.
+        - **The save side** — what the written `.xmp` could not carry, and why.
+
+        Lines such as `brush mask(s) carried, not yet rendered - kernel
+        measurement in flight`, `AI mask(s) re-derived by the local segmenter -
+        not Adobe's own raster`, `radial rotation(s) read as 0`, `local point
+        curve(s) unreadable`, `unmodelled local slider(s)` or the X-Trans note
+        are **expected behaviour, disclosed on purpose** — and they very often
+        explain the difference you are looking at.
+
+        Paste them verbatim. **If there were none, write "none"** — that is a
+        real data point: it means the engine believes it rendered your edit
+        whole, which narrows the bug considerably.
+      placeholder: |
+        ⚠ imported 12 Lightroom mask(s); 2 brush mask(s) carried, not yet rendered - kernel measurement in flight (Sky brush, Skin brush); 1 radial rotation(s) read as 0 (Lift porch) — the sidecar itself is not modified
+    validations:
+      required: true
+
+  - type: textarea
+    id: recipe
+    attributes:
+      label: "recipe.json (optional, but the fastest possible repro)"
+      description: >-
+        The recipe is the whole edit — a couple of KB of readable JSON — and it
+        contains **no pixel data**, so pasting it does not share your
+        photograph. One caveat worth knowing before you paste: if the edit uses
+        an AI or painted mask, the recipe holds a *local file path* to that
+        mask's grey PNG in your develop store, and paths can contain your
+        username. Trim it if you would rather not publish it.
+      render: json
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Anything else
+      description: >-
+        OS, GPU if this is about AI denoise or segmentation, which AI endpoint
+        was configured, whether the photo has a Lightroom `.xmp` beside it, a
+        screenshot of a visual defect. **Never paste an API key** — Autoshop
+        does not print one, and neither should an issue.

@@ -1,0 +1,96 @@
+name: Feature request
+description: A problem this tool does not solve yet — and, if you have one, a proposal.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Problem first, proposal second. A well-stated problem outlives whatever
+        solution either of us thinks of today; a proposal without one is hard to
+        argue with and easy to build wrong.
+
+        Worth a look before you write: several things that read as missing are
+        *deliberately* missing and say so —
+        [Honest scope](https://github.com/skymanbp/autoshop#honest-scope) lists
+        the known limits, and
+        [the honesty model](https://github.com/skymanbp/autoshop#the-honesty-model-is-a-feature)
+        explains why some controls are **carried, not rendered**: the operator
+        behind them is unpublished, and approximating it would mean putting an
+        operator *we invented* between you and your picture. "Render this
+        control" is a fine request — it just needs to arrive as "here is what it
+        should do", not only "make it move pixels".
+
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the existing issues, open and closed, and this is not one of them.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What are you trying to do, and where does Autoshop stop you? Describe
+        the actual photograph or workflow if you can — how often it comes up,
+        and what you do instead today. Do not describe a solution yet.
+      placeholder: >-
+        I develop 200-frame event sets and cull in Lightroom afterwards. Autoshop
+        writes the sidecar next to the recipe, so I have to copy each .xmp beside
+        its RAW by hand before Lightroom sees any of it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Your proposal, if you have one
+      description: >-
+        Concretely: the command, flag, panel or behaviour you have in mind. If
+        it involves an AI role, say which — the vision advisor (sees the photo),
+        the verifier (data only, never sent pixels), or the visual judge.
+        Alternatives you rejected, and why, are useful.
+    validations:
+      required: false
+
+  - type: textarea
+    id: lightroom_parity
+    attributes:
+      label: "Lightroom parity? (optional)"
+      description: |
+        If the ask is *"match Lightroom's behaviour X"*, this field is where the
+        request becomes buildable. Please name:
+
+        - **The control**, by the name Lightroom shows it under — Texture,
+          Roundness, Point Colour, the radial Feather falloff.
+        - **What Lightroom writes in the XMP**, if you know it — the property
+          name and a value or two, e.g. `crs:Texture="+10"`,
+          `crs:MaskBlendMode="1"`, `crs:Roundness="-33"`. Pasting the relevant
+          lines from a real `.xmp` beats describing them.
+        - **A controlled pair, if you can make one.** The way this project
+          settles what a control means is a purpose-shot export: the same RAW
+          with the slider at two known values, plus Lightroom's own render.
+          That is how radial geometry, the flow law and the 1.032 frame scale
+          were each decided — and how the last of those got *refuted*. An
+          offered pair moves a request further than any amount of description.
+
+        No obligation. An honest "I don't know what LR writes, but here is what
+        it looks like" is still a usable report.
+      placeholder: |
+        Control: radial mask Roundness
+        XMP: crs:Roundness="-33" on the Mask/CircularGradient node
+        I can shoot a pair at Roundness -100 / 0 / +100 on the same frame if useful.
+
+  - type: checkboxes
+    id: frontends
+    attributes:
+      label: Where would this live?
+      description: Tick every surface it should reach. Leave blank if you are not sure.
+      options:
+        - label: CLI
+        - label: Desktop app
+        - label: Local web UI
+        - label: The XMP sidecar (read, write, or both)

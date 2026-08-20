@@ -1,0 +1,9 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions, ideas, and "is this supposed to happen?"
+    url: https://github.com/skymanbp/autoshop/discussions
+    about: >-
+      Not sure whether it is a bug? Ask in Discussions. A lot of what looks
+      wrong is a disclosed limitation the tool announced on itself — carried
+      masks, re-derived AI masks, the X-Trans path — and that conversation is
+      quicker there than in an issue.
