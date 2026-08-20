@@ -161,8 +161,26 @@ global/local composition, and it is written down rather than curated away.
 > The retry went through cleanly.
 >
 > **Reproducibility footnote:** the JPEGs above are downscaled from full-sensor
-> renders (9504×6336 / 6336×9504). The resize was done outside Autoshop —
-> there is no export-at-size command (see [Honest scope](#honest-scope)).
+> renders (9504×6336 / 6336×9504), and the resize was done **outside** Autoshop,
+> because at the time there was no export-at-size command. There is one now —
+> `apply … --long-edge 1200`. How much it matters, measured on a 9504×6336
+> frame at `--long-edge 2048` against the resize applied to the 16-bit render
+> (the reference, since that is the same Lanczos3 kernel with no encoder in the
+> way — from a *lossless* intermediate the two routes are identical, worst
+> channel difference **0**):
+>
+> | route | mean \|Δ\| vs the 16-bit reference | worst |
+> |---|---|---|
+> | `--long-edge 2048` straight to JPEG q95 | **1.82**/255 | 22/255 |
+> | full-res JPEG q95, then resample it | **3.11**/255 | 70/255 |
+>
+> So the flag is worth about **one JPEG generation** — the two deliverables
+> differ from each other by a mean 3.00/255 (worst 76/255). Notably it is *not*
+> the intermediate's block noise doing the damage: resampling averages nearly
+> all of that away (0.22/255 before the second encode). It is simply that the
+> old route encodes twice. It also skips writing a 33 MB file to deliver a
+> 1.3 MB one.
+>
 > The faint `© skymanbp` watermark protects the author's photographs and sits
 > identically on both halves of every pair — it is not part of the develop.
 
@@ -683,10 +701,10 @@ high-ISO/astro), `color_real_gan`, `color_15/25/50`.
 ```
 autoshop decode  <src>                       # preview + EXIF + histogram
 autoshop analyze <src> [--guidance "..."] [--style 0..1] [--strength 0..1]   # AI → recipe.json + .xmp (no render; incl. visual review loop)
-autoshop apply   <src> <recipe.json> -o out  # render a recipe to an image
-autoshop auto    <src> [--denoise] [--guidance "..."] [--style 0..1] [--strength 0..1]   # analyze + render, end-to-end
+autoshop apply   <src> <recipe.json> -o out [--long-edge N]  # render a recipe to an image
+autoshop auto    <src> [--denoise] [--guidance "..."] [--style 0..1] [--strength 0..1] [--long-edge N]   # analyze + render, end-to-end
 autoshop denoise <src> [--strength 0..1] [--model ...]  # AI denoise → clean 16-bit master
-autoshop batch   <dir> [--render] [--limit N] [--jobs N] [--include-baked]  # a whole folder (--jobs = photos in flight, default 3)
+autoshop batch   <dir> [--render] [--limit N] [--jobs N] [--include-baked] [--long-edge N]  # a whole folder (--jobs = photos in flight, default 3)
 autoshop eval    <dir> [--limit N] [--jobs N]  # compare AI edits vs your own .xmp (--jobs default 1 = serial)
 autoshop style-index <dir>                   # build the "your taste" reference index (also in the GUI: AI panel › Style reference library)
 autoshop serve   <dir> [--port 8080]         # local web UI
@@ -702,6 +720,17 @@ RAWs also get an `.xmp`; baked sources get `recipe.json` only, because XMP is
 meaningful only for RAW in Lightroom. `batch` skips baked photos by default and
 takes `--include-baked` to opt in: shooting RAW+JPEG is common, and analyzing —
 and **billing** — the camera JPEG beside every RAW is not a default.
+
+`--long-edge N` **exports at a size**: the develop still runs at full sensor
+resolution and the finished pixels are resampled last (Lanczos3, aspect kept,
+**never** enlarged — a frame already under `N` is saved untouched, and `0` means
+full resolution). It is a flag, not a recipe field, because one develop
+legitimately delivers both a 61 MP master and a 2048 px web copy; nothing is
+written into `recipe.json`. On `batch` it applies per photo — a portrait and a
+landscape in the same folder each come out at `N` on **their** long edge — and
+it requires `--render`, since a size for files that are never written is a typo.
+`denoise` deliberately has no such flag: its output is a master a later develop
+reads back, not a deliverable.
 
 ---
 
@@ -796,8 +825,14 @@ per-user `autoshop.local.json` overrides the environment. The two sidecar knobs
   sampling surrounding real pixels. Best on fairly uniform backgrounds (sky,
   skin, wall, water); busy backgrounds heal approximately. AI auto-detection
   needs the vision key; painting a mask works offline.
-- **There is no export-at-size command.** `apply` renders at native resolution;
-  resizing for the web happens outside Autoshop.
+- **Export-at-size is one knob, not an export panel.** `apply`, `auto` and
+  `batch --render` take `--long-edge N` (Lanczos3, aspect kept, never enlarged,
+  `0` = full resolution), applied to the finished pixels after a full-resolution
+  develop. That is the whole CLI delivery surface: JPEG quality, output
+  sharpening, 8-bit TIFF/PNG and the Display P3 / Adobe RGB delivery spaces are
+  all things the engine can do and only the desktop **Export** panel exposes, so
+  a CLI-only workflow still gets q95 sRGB and nothing else. `denoise` has no
+  size flag on purpose — its output is a master, not a deliverable.
 
 ---
 

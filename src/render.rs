@@ -7589,6 +7589,205 @@ mod tests {
         }
     }
 
+    /// R29 Batch-2 acceptance ①: WHAT `--long-edge` is, stated as an equality.
+    ///
+    /// The CLI's new `--long-edge N` reaches [`ExportOpts::long_edge`], which
+    /// `render_to_file` applies as its LAST pixel stage — after the whole
+    /// develop, after output sharpening's own input is chosen, before the
+    /// encode. So the delivered file is exactly the full-resolution render
+    /// resampled, and the equality below says so with no tolerance at all:
+    /// `long_edge = k` is Lanczos3 downscale of the k-less render, to the
+    /// 16-bit code, at every k.
+    ///
+    /// That is a REAL claim and not a tautology, because three plausible
+    /// implementations break it and one of them was on the table:
+    ///
+    /// * resampling with a different kernel (`serve`'s preview arm uses
+    ///   `Triangle`, `src/serve.rs:860`, while `decode::preview_resized` uses
+    ///   `Lanczos3`, `src/decode.rs:2146` — the two spellings already in this
+    ///   tree). The CLI flag inherits the EXPORT path's `Lanczos3`
+    ///   (`src/render.rs:1564`) because it is that path; no third choice was
+    ///   added.
+    /// * developing at the capped resolution instead of capping the developed
+    ///   pixels — see acceptance ② below for how far apart those two are.
+    /// * doing the resize before output sharpening's measurement, or after the
+    ///   colour-space transform.
+    ///
+    /// MEASURED, on the 800×600 fixture below with sharpening 60 / clarity 40 /
+    /// texture 50: mean |Δ| = 0.000000 and worst |Δ| = 0 sixteen-bit codes at
+    /// both k = 400 and k = 200. Pinned at 0, since anything else means one of
+    /// the three above happened.
+    #[test]
+    fn export_at_size_is_exactly_a_downscale_of_the_full_render() {
+        std::fs::create_dir_all("out").ok();
+        let src_p = std::path::Path::new("out/_le_src.png");
+        // Detail at all three scales the normalised operators work on: a
+        // deterministic hash for pixel-scale grain (texture/sharpening), the
+        // sinusoids for mid-band structure, the ramp for the tonal range
+        // clarity's midtone mask needs. A flat fixture would satisfy this test
+        // with every stage deleted.
+        RgbImage::from_fn(800, 600, |x, y| {
+            let hash = x.wrapping_mul(2_654_435_761u32).wrapping_add(y.wrapping_mul(40_503)) >> 13;
+            let grain = (hash & 31) as f32 - 15.5;
+            let mid = 40.0 * ((x as f32 / 9.0).sin() + (y as f32 / 7.0).cos());
+            let ramp = 90.0 + 100.0 * x as f32 / 800.0;
+            let v = |off: f32| (ramp + mid + grain + off).clamp(0.0, 255.0) as u8;
+            Rgb([v(0.0), v(-8.0), v(12.0)])
+        })
+        .save(src_p)
+        .unwrap();
+        let recipe =
+            EditRecipe { sharpening: 60.0, clarity: 40.0, texture: 50.0, ..Default::default() };
+
+        let full_p = std::path::Path::new("out/_le_full.png");
+        let (fw, fh) =
+            render_to_file(src_p, &recipe, full_p, None, None, crate::diag::stderr()).unwrap();
+        assert_eq!((fw, fh), (800, 600), "no export opts = the source's own resolution");
+        // 16-bit PNG, so the round trip through the file is lossless and the
+        // comparison below measures the RESIZE and nothing else.
+        let full = image::open(full_p).unwrap();
+
+        for k in [400u32, 200] {
+            let opts = ExportOpts { long_edge: Some(k), ..Default::default() };
+            let p = format!("out/_le_{k}.png");
+            let (w, h) = render_to_file(
+                src_p,
+                &recipe,
+                std::path::Path::new(&p),
+                None,
+                Some(&opts),
+                crate::diag::stderr(),
+            )
+            .unwrap();
+            assert_eq!(w.max(h), k, "the LONG edge is what the flag bounds");
+            assert_eq!((w, h), (k, k * 3 / 4), "…and the aspect ratio is kept");
+            let got = image::open(&p).unwrap().to_rgb16();
+            let want = full.resize(k, k, image::imageops::FilterType::Lanczos3).to_rgb16();
+            assert_eq!(got.dimensions(), want.dimensions());
+            let worst = got
+                .as_raw()
+                .iter()
+                .zip(want.as_raw())
+                .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+                .max()
+                .unwrap();
+            assert_eq!(
+                worst, 0,
+                "long_edge {k} must BE the Lanczos3 downscale of the full render — \
+                 worst channel difference {worst} sixteen-bit codes"
+            );
+        }
+
+        // `Some(0)` is FULL RESOLUTION, not "resize to nothing": the guard is
+        // `le > 0` (this file, the `opts.long_edge` block), and the CLI folds
+        // its own `--long-edge 0` to `None` on top of that so the two surfaces
+        // cannot disagree. Pinned here because a `saturating`-flavoured
+        // rewrite of that guard would produce a 1×1 deliverable in silence.
+        let zero = ExportOpts { long_edge: Some(0), ..Default::default() };
+        let z_p = std::path::Path::new("out/_le_zero.png");
+        let (zw, zh) =
+            render_to_file(src_p, &recipe, z_p, None, Some(&zero), crate::diag::stderr()).unwrap();
+        assert_eq!((zw, zh), (800, 600), "long_edge 0 = full resolution");
+        assert_eq!(
+            image::open(z_p).unwrap().to_rgb16().as_raw(),
+            full.to_rgb16().as_raw(),
+            "long_edge 0 must not touch a single pixel"
+        );
+    }
+
+    /// R29 Batch-2 acceptance ②: the R25 B2 RESOLUTION-NORMALISATION promise,
+    /// measured — and the boundary of what acceptance ① above buys.
+    ///
+    /// The promise (`apply_develop` stages 3/3b/5, and the `texture_pass` doc)
+    /// is that clarity, texture and sharpening have radii expressed as a
+    /// FRACTION of the frame, so one slider value means the same structure on a
+    /// 1280 px preview and on a 61 MP export. Nothing in the tree measured it;
+    /// the promise lived in four comments.
+    ///
+    /// This measures it where it is checkable: clarity's radius is 2 % of the
+    /// short edge (`src/render.rs:1833`), and a three-pass box blur of radius r
+    /// reaches 3r, so a step edge's halo must be 3 × 0.02 × short-edge px wide —
+    /// i.e. the SAME fraction of the frame at both resolutions. Doubling the
+    /// working resolution must double the halo in pixels.
+    ///
+    /// MUTATION THIS KILLS: replacing the radius with any constant (the shape
+    /// the code had before R25 B2 — `unsharp_luma(data, w, h, 8, …)`), which
+    /// makes the ratio 1.0 instead of 2.0 while every other clarity test in
+    /// this file still passes, because they all work at ONE resolution.
+    ///
+    /// **What this does NOT say, and it matters for `--long-edge`.** Acceptance
+    /// ① shows the export resize happens AFTER the develop, so `--long-edge`
+    /// never exercises this promise at all: the develop runs at full sensor
+    /// resolution and the resampler then averages its halos down with
+    /// everything else. Developing at the capped resolution instead is a
+    /// visibly different picture, and it is worth knowing by how much.
+    ///
+    /// The five figures below are PROVENANCED but not gate-checked: they come
+    /// from a throwaway harness run once during R29 Batch-2 over the
+    /// acceptance-① fixture and functions named here, and no test re-derives
+    /// them, so treat them as a recorded observation rather than a pinned
+    /// quantity. `render_baked_to_image(max_edge = k)` differs from
+    /// the same-resampler downscale of the full develop by a mean 5.7 codes8 at
+    /// k = 400 and 19.8 codes8 at k = 200, against 19.1 / 30.0 codes8 for the
+    /// entire effect of that recipe (neutral vs graded at the same size), with
+    /// a resampler-only control of 0.25 codes8. That is not a defect in either
+    /// path — normalised operators are SUPPOSED to place their halos at the
+    /// working resolution's scale, so the two disagree by construction — but it
+    /// is exactly why the delivery flag resizes finished pixels instead of
+    /// quietly reusing the preview path.
+    #[test]
+    fn the_develop_radius_is_a_fraction_of_the_frame_not_a_pixel_count() {
+        // Clarity alone: its radius is the largest of the three, so the halo is
+        // the easiest to measure, and its midtone weight is ~0.75 at both
+        // plateau levels below (m = 1 − (2l − 1)²), so neither side is starved.
+        let recipe = EditRecipe { clarity: 60.0, ..Default::default() };
+        // Halo width in PIXELS: walk left from the step and count how far the
+        // overshoot is still visible against the far-field plateau.
+        let halo = |w: usize, h: usize| -> usize {
+            let mut data: Vec<[f32; 3]> = (0..w * h)
+                .map(|i| if i % w < w / 2 { [0.25; 3] } else { [0.75; 3] })
+                .collect();
+            apply_develop_anon(&mut data, w, h, &recipe);
+            let row = h / 2;
+            // The plateau as DEVELOPED (x = 0 is beyond any halo at these
+            // radii), not the literal 0.25 — the tone stage is free to move it.
+            let plateau = data[row * w][0];
+            (0..w / 2)
+                .rev()
+                .take_while(|x| (data[row * w + x][0] - plateau).abs() > 1e-3)
+                .count()
+        };
+        // 2 % of the short edge: 24 px at 1200, 12 px at 600 — both clear of
+        // the 8 px floor, which would otherwise flatten the ratio by itself.
+        let big = halo(1600, 1200);
+        let small = halo(800, 600);
+        assert!(big > 0 && small > 0, "clarity must produce a halo at all: {big} / {small}");
+        // MEASURED: 59 px at 1600×1200, 30 px at 800×600 — ratio 1.967.
+        let ratio = big as f64 / small as f64;
+        assert!(
+            (ratio - 2.0).abs() < 0.15,
+            "clarity's radius must scale with the frame: halo {big} px at 1600×1200 vs \
+             {small} px at 800×600 (ratio {ratio:.3}, expected 2.0 ± 0.15)"
+        );
+        // …and each halo really is the reach of a 2 %-of-short-edge blur, not
+        // some other quantity that happens to double. Three box passes of
+        // radius r reach 3r, so the ceiling is exact; the floor is 70 % of it
+        // because the 1e-3 detection threshold above cuts the blur's thin outer
+        // tail short (measured 59 of a possible 72, and 30 of 36 — the same
+        // fraction at both sizes, which is itself the shape being preserved).
+        // A constant radius fails this at 1600×1200 whatever it is set to.
+        for (short, measured) in [(1200usize, big), (600, small)] {
+            let radius = (0.02 * short as f64).round() as usize;
+            let reach = 3 * radius;
+            assert!(
+                measured <= reach && measured * 10 >= reach * 7,
+                "a {short} px short edge gives clarity a {radius} px radius, so the halo must \
+                 land in {}..={reach} px — measured {measured}",
+                reach * 7 / 10
+            );
+        }
+    }
+
     #[test]
     fn kelvin_to_rgb_warm_is_redder_than_cool() {
         let warm = kelvin_to_rgb(3000.0);

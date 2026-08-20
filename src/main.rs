@@ -94,6 +94,15 @@ enum Command {
         /// Output image path (extension selects format: .jpg / .png / .tif).
         #[arg(short, long)]
         out: PathBuf,
+        /// Export at a SIZE: resize the finished render so its LONG edge is
+        /// this many pixels (aspect kept, Lanczos3, NEVER upscaled — a value
+        /// past the sensor's own long edge saves at full resolution). 0 or
+        /// omitted = full resolution, the same spelling the desktop Export
+        /// panel uses. The develop itself always runs at full resolution and
+        /// the resize is the last pixel stage, so this changes the SIZE of the
+        /// deliverable and not its look.
+        #[arg(long)]
+        long_edge: Option<u32>,
     },
     /// End-to-end for one RAW: analyze (recipe + xmp) then render an image.
     Auto {
@@ -126,6 +135,11 @@ enum Command {
         /// SCUNet model: color_real_psnr (default) / color_real_gan / color_15|25|50.
         #[arg(long, requires = "denoise")]
         denoise_model: Option<String>,
+        /// Export at a SIZE (see `apply --long-edge`): long edge in pixels,
+        /// aspect kept, Lanczos3, never upscaled. 0 or omitted = full
+        /// resolution.
+        #[arg(long)]
+        long_edge: Option<u32>,
     },
     /// AI-denoise a RAW or an already-baked image (PNG/TIFF/JPEG) into a clean
     /// 16-bit master in ./out. Manual, GPU-accelerated (SCUNet sidecar). Default
@@ -170,6 +184,15 @@ enum Command {
         /// when it does.
         #[arg(long, default_value_t = 3)]
         jobs: usize,
+        /// Export at a SIZE (see `apply --long-edge`), applied PER PHOTO: long
+        /// edge in pixels, aspect kept, Lanczos3, never upscaled, so a folder
+        /// of mixed orientations and sensors comes out with one bounded long
+        /// edge each rather than one bounded width. 0 = full resolution.
+        /// Requires --render, which is what produces the deliverable at all:
+        /// without it this run writes recipes and sidecars and no pixels, and
+        /// a size for files that are never written is a typo, not a setting.
+        #[arg(long, requires = "render")]
+        long_edge: Option<u32>,
     },
     /// Evaluate AI edits against your own: for RAWs that have a sibling .xmp
     /// (your Lightroom/ACR edit), run the AI and report per-field error + bias.
@@ -337,7 +360,9 @@ fn main() -> Result<()> {
         Command::Analyze { raw, out, guidance, style, strength, deep } => {
             analyze_cmd(&raw, out, guidance, style, strength, deep)
         }
-        Command::Apply { raw, recipe, out } => apply_cmd(&raw, &recipe, &out),
+        Command::Apply { raw, recipe, out, long_edge } => {
+            apply_cmd(&raw, &recipe, &out, long_edge)
+        }
         Command::Auto {
             raw,
             out,
@@ -348,15 +373,16 @@ fn main() -> Result<()> {
             denoise,
             denoise_strength,
             denoise_model,
+            long_edge,
         } => {
             auto_cmd(
                 &raw, out, guidance, style, strength, deep, denoise, denoise_strength,
-                denoise_model,
+                denoise_model, long_edge,
             )
         }
         Command::Denoise { input, out, strength, model } => denoise_cmd(&input, out, strength, model),
-        Command::Batch { dir, render, limit, include_baked, jobs } => {
-            batch_cmd(&dir, render, limit, include_baked, jobs)
+        Command::Batch { dir, render, limit, include_baked, jobs, long_edge } => {
+            batch_cmd(&dir, render, limit, include_baked, jobs, long_edge)
         }
         Command::Eval { dir, limit, jobs, fresh, state } => {
             eval::run(&dir, limit, jobs, fresh, state.as_deref())
@@ -754,7 +780,38 @@ fn analyze_cmd(
     }
 }
 
-fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
+/// The CLI's DELIVERY options, from the one knob the CLI exposes.
+///
+/// R29 Batch-2. The engine has carried [`render::ExportOpts`] since the gap
+/// batches and the desktop Export panel has driven all five of its fields for
+/// as long; the CLI passed `None` at every one of its four render sites, so the
+/// only way to hand somebody a 2048 px JPEG was to render at full sensor
+/// resolution and resize the result in another program — which is what the
+/// README's own showcase footnote had to admit.
+///
+/// **A FLAG, not a recipe field** (user ruling, 2026-08-20). A delivery size is
+/// a property of one export, not of the develop: the same recipe legitimately
+/// produces a 61 MP master and a 2048 px web copy, and writing the size into
+/// `recipe.json` would make those two the same photograph edited two ways.
+/// Nothing about the schema moves for this batch.
+///
+/// `0` is FULL RESOLUTION, not "resize to nothing" — the same spelling the
+/// GUI's Export panel uses (`exp_long_edge == 0` → `long_edge: None`,
+/// `src/bin/gui/export.rs:445`) and what the engine already does with it
+/// (`render::render_to_file`'s `le > 0` guard, `src/render.rs:1560`). The two
+/// surfaces must not disagree about what the same number means, so the CLI
+/// folds it to `None` HERE rather than leaving one surface's zero to be
+/// absorbed by a guard three modules down.
+///
+/// Every other field stays at its default: this batch adds a size, not a
+/// delivery panel, and a flag that silently also moved JPEG quality or the
+/// colour space would be a second change wearing the first one's name.
+fn export_opts(long_edge: Option<u32>) -> Option<render::ExportOpts> {
+    let le = long_edge.filter(|n| *n > 0)?;
+    Some(render::ExportOpts { long_edge: Some(le), ..Default::default() })
+}
+
+fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>) -> Result<()> {
     let text = autoshop::store::read_text_capped(recipe_path, autoshop::store::MAX_STORE_JSON)
         .with_context(|| format!("read recipe {}", recipe_path.display()))?;
     let mut recipe: EditRecipe =
@@ -831,7 +888,13 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
         println!("ai mask : {line}");
     }
     println!("rendering {} with {} ...", raw.display(), recipe_path.display());
-    let (w, h) = render::render_to_file(&src, &recipe, out, None, None, autoshop::diag::stderr())?;
+    // The delivery size, if one was asked for. The develop above and the render
+    // below are unchanged by it — `render_to_file` resizes the FINISHED pixels
+    // as its last stage — so `--long-edge` never buys a different look, only a
+    // different file size.
+    let export = export_opts(long_edge);
+    let (w, h) =
+        render::render_to_file(&src, &recipe, out, None, export.as_ref(), autoshop::diag::stderr())?;
     println!("render -> {} ({} x {})", out.display(), w, h);
     Ok(())
 }
@@ -847,6 +910,7 @@ fn auto_cmd(
     denoise: bool,
     denoise_strength: Option<f32>,
     denoise_model: Option<String>,
+    long_edge: Option<u32>,
 ) -> Result<()> {
     let cfg = Config::load();
     // Validate the render target BEFORE the PAID AI call (and before touching
@@ -863,6 +927,9 @@ fn auto_cmd(
     pipeline::preflight_out(&out, raw)?;
     image::ImageFormat::from_path(&out)
         .with_context(|| format!("unsupported output format {}", out.display()))?;
+    // Resolved BEFORE the paid call so the banner below can say what is coming
+    // (it also costs nothing and cannot fail).
+    let export = export_opts(long_edge);
     let req = analyze_request(style, strength, deep, &cfg);
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
@@ -873,8 +940,18 @@ fn auto_cmd(
     let dn = denoise
         .then(|| denoise::DenoiseOpts::from_config(&cfg, denoise_model, denoise_strength.unwrap_or(1.0)));
     println!(
-        "verdict: {:?}; rendering full-resolution ({}){} ...",
+        "verdict: {:?}; rendering {} ({}){} ...",
         verdict.decision,
+        // The SIZE, honestly: this banner said "full-resolution" unconditionally,
+        // and with `--long-edge` in the parser that sentence would have been
+        // false for exactly the runs that asked for something else. The develop
+        // still runs at full resolution — only the delivered file is bounded —
+        // and "at most" is the truth for a frame already smaller than the cap,
+        // which `render_to_file` saves untouched rather than upscaling.
+        match export.and_then(|o| o.long_edge) {
+            Some(le) => format!("to at most {le} px on the long edge"),
+            None => "full-resolution".to_string(),
+        },
         // Bit depth follows the chosen extension — claiming "16-bit" for a
         // requested .jpg was a lie the line above explicitly disclaims.
         // LOWERCASED first: the renderer matches the extension
@@ -948,7 +1025,14 @@ fn auto_cmd(
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }
-    let (w, h) = render::render_to_file(&src, &render_recipe, &out, dn.as_ref(), None, autoshop::diag::stderr())?;
+    let (w, h) = render::render_to_file(
+        &src,
+        &render_recipe,
+        &out,
+        dn.as_ref(),
+        export.as_ref(),
+        autoshop::diag::stderr(),
+    )?;
     println!("render -> {} ({} x {})", out.display(), w, h);
     // XMP only for a RAW (Lightroom reads it beside the RAW); a baked source
     // (PNG/TIFF) gets the recipe JSON only. A projection failure is a WARNING:
@@ -978,6 +1062,22 @@ fn auto_cmd(
 
 /// Standalone AI denoise: RAW → neutral-developed denoised master, or a baked
 /// PNG/TIFF/JPEG → denoised copy. Always writes to ./out (library read-only).
+///
+/// **No `--long-edge` here, and the reason is not "we forgot"** (R29 Batch-2).
+/// Two independent ones, either sufficient:
+///
+/// * This output is a MASTER, not a deliverable — its whole purpose is to be
+///   the source of a later develop (`apply`/`auto` read it back through
+///   `store::render_source_checked`). Delivering it at 2048 px would hand the
+///   next develop a downscaled source and quietly cap every export made from
+///   it, which is the opposite of what a master is for.
+/// * Only the RAW arm below goes through `render_to_file` at all; the baked arm
+///   calls `denoise::denoise_active`, which has no delivery pipeline. A flag on
+///   this command would resize `.arw` inputs and silently ignore `.png` ones —
+///   one flag with two behaviours decided by a file extension.
+///
+/// The route for a small denoised deliverable is the honest one: denoise to a
+/// master, then `apply … --long-edge N` from it.
 fn denoise_cmd(
     input: &Path,
     out: Option<PathBuf>,
@@ -1404,8 +1504,14 @@ fn batch_cmd(
     limit: usize,
     include_baked: bool,
     jobs: usize,
+    long_edge: Option<u32>,
 ) -> Result<()> {
     let cfg = Config::load();
+    // PER PHOTO, and it has to be: one `ExportOpts` shared by every worker
+    // still bounds each photo's own long edge, because the cap is applied to
+    // the frame being rendered — a portrait and a landscape in the same folder
+    // both come out at N on THEIR long edge, not at one common width.
+    let export = export_opts(long_edge);
     // R27 P1. `batch` is the one of the three scanners where including baked
     // photos is a real feature rather than a policy break — it develops
     // sources, and a PNG/TIFF/JPEG is a source every other surface already
@@ -1514,6 +1620,12 @@ fn batch_cmd(
         }
         outs
     };
+    // Said UP FRONT, like the same-name deviations above: an unattended run
+    // over a library is exactly where a size nobody meant to ask for is
+    // expensive to discover afterwards.
+    if let Some(le) = export.and_then(|o| o.long_edge) {
+        println!("  deliverables capped at {le} px on the long edge (aspect kept, never upscaled).");
+    }
     // `plan_for`, not `plan`: `--include-baked` puts Lightroom "Edit in…"
     // exports on this list, and a native-resolution 16-bit TIFF can peak far
     // past the corpus constant on its own (R28 Batch-4 4a). Their headers are
@@ -1544,7 +1656,7 @@ fn batch_cmd(
         // three photos' warnings in completion order again, only inside a
         // Vec instead of on a stream.
         let diags = autoshop::diag::Collector::new();
-        let res = process_one(raw, &cfg, outs[i].as_deref(), &diags);
+        let res = process_one(raw, &cfg, outs[i].as_deref(), export.as_ref(), &diags);
         let outcome = match &res {
             Ok((v, _)) if v.decision == autoshop::advisor::Decision::Accept => {
                 let _ = writeln!(block, "[{}/{n}] {} ... {:?}", i + 1, stem(raw), v.decision);
@@ -1649,6 +1761,7 @@ fn process_one(
     raw: &Path,
     cfg: &Config,
     render_to: Option<&Path>,
+    export: Option<&render::ExportOpts>,
     sink: &dyn autoshop::diag::Sink,
 ) -> Result<(Verdict, Vec<autoshop::rationale::Note>)> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
@@ -1719,9 +1832,11 @@ fn process_one(
     if let Some(out) = render_to {
         // 16-bit master at the batch-claimed name — claimed up front by the
         // caller so same-stem photos in one batch each keep a deliverable
-        // and worker scheduling cannot reorder the names.
+        // and worker scheduling cannot reorder the names. `export` is the
+        // caller's `--long-edge`, and it bounds THIS photo's own long edge
+        // (R29 Batch-2): the develop is unaffected, the delivered file is not.
         ensure_parent(out)?;
-        if let Err(e) = render::render_to_file(raw, &recipe, out, None, None, sink) {
+        if let Err(e) = render::render_to_file(raw, &recipe, out, None, export, sink) {
             // A render failure must not discard the PAID, verified analysis:
             // with sidecars-last ordering the photo stayed pending and a
             // re-run RE-BILLED it. Persist the develop first — it is
@@ -2001,6 +2116,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -2044,6 +2160,176 @@ mod tests {
         // than the parser refusing, so a script that computes the value from
         // `nproc - 1` on a single-core box still runs.
         assert_eq!(autoshop::jobs::plan_with(0, 10, None).jobs, 1);
+    }
+
+    /// R29 Batch-2: `--long-edge` is on every command that DELIVERS an image,
+    /// and on none that does not.
+    ///
+    /// The engine has carried `ExportOpts` for several rounds and the desktop
+    /// Export panel drove all five of its fields, while all four CLI render
+    /// sites passed `None` — so the README had to admit, twice, that resizing
+    /// for the web happened in another program. The three commands that hand
+    /// the photographer a finished picture (`apply`, `auto`, `batch --render`)
+    /// now take the size; `denoise` does not, and `denoise_cmd`'s own doc says
+    /// why (its output is a MASTER a later develop reads back, and only its RAW
+    /// arm goes through `render_to_file` at all — one flag with two behaviours
+    /// decided by a file extension).
+    ///
+    /// MUTATION THIS KILLS: wiring the flag into the parser and dropping it on
+    /// the way to `render_to_file` (every "does it parse" assertion still
+    /// passes); folding `0` to `Some(0)` instead of `None`, which the engine
+    /// currently absorbs but which makes the CLI and the GUI mean different
+    /// things by the same number; letting `--long-edge` also move JPEG quality
+    /// or the delivery colour space while wearing the size's name.
+    #[test]
+    fn long_edge_is_the_export_size_on_the_commands_that_deliver_an_image() {
+        let parsed = |args: &[&str]| -> Option<u32> {
+            match Cli::try_parse_from(args)
+                .unwrap_or_else(|e| panic!("{args:?} must parse: {e}"))
+                .command
+            {
+                Command::Apply { long_edge, .. }
+                | Command::Auto { long_edge, .. }
+                | Command::Batch { long_edge, .. } => long_edge,
+                _ => panic!("{args:?} parsed as some other subcommand"),
+            }
+        };
+        // Carried, not dropped, on all three.
+        assert_eq!(
+            parsed(&["autoshop", "apply", "p.arw", "r.json", "-o", "x.jpg", "--long-edge", "2048"]),
+            Some(2048)
+        );
+        assert_eq!(parsed(&["autoshop", "auto", "p.arw", "--long-edge", "1600"]), Some(1600));
+        assert_eq!(
+            parsed(&["autoshop", "batch", "dir", "--render", "--long-edge", "1024"]),
+            Some(1024)
+        );
+        // Omitted stays omitted — an unflagged run is byte-for-byte the run the
+        // release before this one made.
+        assert_eq!(parsed(&["autoshop", "apply", "p.arw", "r.json", "-o", "x.jpg"]), None);
+        assert_eq!(parsed(&["autoshop", "auto", "p.arw"]), None);
+        assert_eq!(parsed(&["autoshop", "batch", "dir", "--render"]), None);
+
+        // `batch --long-edge` without `--render` writes no pixels at all, so a
+        // size for it is a typo rather than a setting: refused at the parser,
+        // the same door `--denoise-strength` without `--denoise` uses.
+        let Err(e) = Cli::try_parse_from(["autoshop", "batch", "dir", "--long-edge", "1024"])
+        else {
+            panic!("a delivery size with no deliverable must be refused");
+        };
+        let e = e.to_string();
+        assert!(e.contains("--render"), "the refusal must name the missing flag: {e}");
+
+        // NOT on `denoise` — see `denoise_cmd`'s doc for the two reasons.
+        assert!(
+            Cli::try_parse_from(["autoshop", "denoise", "p.arw", "--long-edge", "1024"]).is_err(),
+            "denoise delivers a master, not a sized deliverable"
+        );
+
+        // A negative size is not a size (u32 at the parser, not a late clamp).
+        assert!(Cli::try_parse_from(["autoshop", "auto", "p.arw", "--long-edge", "-1"]).is_err());
+
+        // …and the RESOLUTION of the flag into delivery options, which is the
+        // half a parse test cannot see.
+        assert_eq!(export_opts(None), None, "omitted = the shipped full-resolution path");
+        assert_eq!(
+            export_opts(Some(0)),
+            None,
+            "0 = full resolution, the same spelling the GUI Export panel uses \
+             (src/bin/gui/export.rs:445) — not a 0 px deliverable"
+        );
+        let opts = export_opts(Some(2048)).expect("a positive size is a size");
+        assert_eq!(opts.long_edge, Some(2048));
+        assert_eq!(
+            render::ExportOpts { long_edge: None, ..opts },
+            render::ExportOpts::default(),
+            "the size flag must move the size and nothing else"
+        );
+    }
+
+    /// The WIRE, EXECUTED — the one assertion the parse test above cannot make.
+    ///
+    /// Every assertion in `long_edge_is_the_export_size_…` is satisfied by a
+    /// parser that carries the number to a `render_to_file` call still passing
+    /// `None`, and that is not hypothetical: dropping `export.as_ref()` in
+    /// `apply_cmd` leaves the ENTIRE battery green (measured while writing
+    /// this — 749 lib / 13 CLI / 2 / 2 all pass, and only `-D warnings`
+    /// notices, because the binding goes unused). So this runs the command and
+    /// reads the dimensions off the file it wrote.
+    ///
+    /// `auto` and `batch --render` build their options through the same
+    /// `export_opts` and hand them to the same parameter of the same function;
+    /// neither is executable in a test, because both begin with a billed API
+    /// call. That is stated rather than papered over.
+    #[test]
+    fn apply_delivers_at_the_size_it_was_asked_for() {
+        let root =
+            std::env::temp_dir().join(format!("autoshop-long-edge-wire-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = root.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        // A baked source: the develop engine takes either, and this keeps the
+        // test free of a RAW fixture the repo does not carry.
+        let src = library.join("frame.png");
+        image::RgbImage::from_fn(400, 300, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 233) as u8])
+        })
+        .save(&src)
+        .unwrap();
+        let recipe_p = library.join("r.json");
+        std::fs::write(&recipe_p, serde_json::to_string(&EditRecipe::default()).unwrap()).unwrap();
+
+        // The size asked for is the size delivered — 400×300 fitted to a 100 px
+        // long edge is 100×75, and the file on disk has to say so.
+        let out = root.join("deliver").join("small.png");
+        apply_cmd(&src, &recipe_p, &out, Some(100)).unwrap();
+        assert_eq!(
+            image::image_dimensions(&out).unwrap(),
+            (100, 75),
+            "--long-edge must reach the engine, not just the parser"
+        );
+
+        // …and the three ways of asking for "no resize" all deliver the
+        // source's own resolution: omitted, 0, and a cap past the frame.
+        for (i, le) in [None, Some(0), Some(9999)].into_iter().enumerate() {
+            let p = root.join("deliver").join(format!("full{i}.png"));
+            apply_cmd(&src, &recipe_p, &p, le).unwrap();
+            assert_eq!(
+                image::image_dimensions(&p).unwrap(),
+                (400, 300),
+                "--long-edge {le:?} must deliver the frame untouched"
+            );
+        }
+
+        // The store-test pattern: this photo hashes to its own develop dir, and
+        // nothing here is entitled to leave one behind.
+        let _ = std::fs::remove_dir_all(autoshop::store::develop_dir(&src));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The `--long-edge` help has to answer the three questions a photographer
+    /// asks before trusting a resize to a batch they will not watch: which
+    /// resampler, does it ever ENLARGE, and what does 0 do. All three are
+    /// behaviours this repo already has somewhere else in a different spelling
+    /// (`serve`'s preview resizes with `Triangle`, `src/serve.rs:860`), so
+    /// "read the code" is not an answer.
+    ///
+    /// MUTATION THIS KILLS: swapping the export resampler in
+    /// `render::render_to_file` without touching the sentence that promises
+    /// Lanczos3 — the doc-drift failure `scripts/check_docs.py` exists for,
+    /// caught here for a claim that lives in `--help` rather than in a `.md`.
+    #[test]
+    fn the_long_edge_help_names_the_resampler_and_the_two_edge_cases() {
+        use clap::CommandFactory as _;
+        let cmd = Cli::command();
+        let apply =
+            cmd.get_subcommands().find(|c| c.get_name() == "apply").expect("apply subcommand");
+        let arg =
+            apply.get_arguments().find(|a| a.get_id() == "long_edge").expect("--long-edge arg");
+        let help = arg.get_long_help().or_else(|| arg.get_help()).expect("help text").to_string();
+        assert!(help.contains("Lanczos3"), "the resampler must be named: {help}");
+        assert!(help.contains("upscale"), "the never-enlarge rule must be stated: {help}");
+        assert!(help.contains('0'), "what 0 means must be stated: {help}");
     }
 
     /// L09#4: the `heal --full-res` help names the baked-source downsample
