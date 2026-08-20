@@ -945,6 +945,15 @@ pub(crate) fn post_ai_json_with(
     // A caller that built its own `reasoning` object owns it completely —
     // neither knob is grafted on top of a hand-written one.
     let caller_owns_reasoning = body.get("reasoning").is_some();
+    // ONE extra POST per request, never a loop. Measured upstream rate is
+    // ~0.8% of calls, so a single repeat rescues almost every run that a lone
+    // `response.failed` used to scrap (two 147-photo evals died to exactly one
+    // such event) while a SECOND repeat mostly buys charges from a provider
+    // that is actually down. Deliberately NOT part of `Refused`: that carries
+    // what the endpoint cannot ACCEPT, and a caller with a retry of its own
+    // (`openai_verify` drops the temperature pin) is posting a DIFFERENT body,
+    // which is its own request and gets its own single repeat.
+    let mut transient_retried = false;
 
     loop {
         // Derived fresh each attempt: what this call WOULD send, minus
@@ -1012,18 +1021,39 @@ pub(crate) fn post_ai_json_with(
                     let gate = std::time::Duration::from_secs(effective_stall_secs(
                         budget_secs.max(STREAM_STALL_FLOOR_SECS),
                     ));
-                    return assemble_sse(r.into_reader(), family, Some(gate)).map_err(|e| match e {
-                        AdvisorError::ModelFailure(body) => AdvisorError::ModelFailure(
-                            BoundedUntrustedText::diagnostic(&body, &[key]).into_string(),
-                        ),
-                        AdvisorError::Transport(msg) if msg.starts_with("read AI stream:") => {
-                            AdvisorError::Transport(format!(
-                                "{msg} — the request was accepted (2xx) and may already be \
-                                 billed, so it is not re-posted automatically; re-run to retry"
-                            ))
+                    let assembled =
+                        assemble_sse(r.into_reader(), family, Some(gate)).map_err(|e| match e {
+                            AdvisorError::ModelFailure(body) => AdvisorError::ModelFailure(
+                                BoundedUntrustedText::diagnostic(&body, &[key]).into_string(),
+                            ),
+                            AdvisorError::Transport(msg) if msg.starts_with("read AI stream:") => {
+                                AdvisorError::Transport(format!(
+                                    "{msg} — the request was accepted (2xx) and may already be \
+                                     billed, so it is not re-posted automatically; re-run to retry"
+                                ))
+                            }
+                            other => other,
+                        });
+                    // The one narrow hole in the no-re-POST-past-a-2xx rule
+                    // above, and it is narrow on purpose: here the upstream
+                    // SAID the response failed, so the re-post is a decision
+                    // about money rather than a guess about it. Disclosed
+                    // because the second call is billed too — this layer knows
+                    // no photo, so the stem comes from the caller's own line
+                    // when the retry also fails (pipeline.rs's proposer arm).
+                    match assembled {
+                        Err(e) if !transient_retried && transient_stream_failure(&e) => {
+                            transient_retried = true;
+                            eprintln!(
+                                "  ⚠ the AI reported the response failed mid-stream ({e}) — \
+                                 retrying once (a SECOND paid call; the request is re-posted \
+                                 unchanged)"
+                            );
+                            std::thread::sleep(TRANSIENT_RETRY_BACKOFF);
+                            continue;
                         }
-                        other => other,
-                    });
+                        other => return other,
+                    }
                 }
                 // NO re-POST on the blocking path either — read OR parse: a
                 // 2xx means the endpoint accepted the request, did the work
@@ -1139,6 +1169,37 @@ pub(crate) fn post_ai_json_with(
     }
 }
 
+/// The `/responses` stream events that mean the upstream ACCEPTED the request
+/// and then the RESPONSE died — as opposed to the request being wrong.
+///
+/// Named once because two sites have to agree on the set: the arm below that
+/// reports them, and [`transient_stream_failure`], which decides whether the
+/// identical request is worth posting a second time. A duplicated list would
+/// let one drift past the other silently.
+const TRANSIENT_STREAM_EVENTS: [&str; 2] = ["response.failed", "response.incomplete"];
+
+/// The single prefix every stream-failure message carries, so the classifier
+/// reads a marker this module STAMPS rather than pattern-matching prose.
+const STREAM_FAILURE_PREFIX: &str = "AI stream error: ";
+
+/// The pause before the one repeat. Long enough for a brief upstream blip to
+/// clear, short enough that a 147-photo run does not notice it.
+const TRANSIENT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Is this failure one the SAME request is worth posting again?
+///
+/// ONLY the upstream reporting that an accepted response died
+/// ([`TRANSIENT_STREAM_EVENTS`]). Everything else stays terminal for one of
+/// two reasons: a stream `error` event, a truncating `finish_reason` and every
+/// 4xx name something wrong with the REQUEST, which a byte-identical second
+/// POST reproduces at full price; a transport abort or a stream that ends
+/// without a result leaves it UNKNOWN whether the work was already done and
+/// billed, which is the `post_ai_json` rule that forbids re-POSTing past a 2xx.
+fn transient_stream_failure(e: &AdvisorError) -> bool {
+    let AdvisorError::ModelFailure(m) = e else { return false };
+    TRANSIENT_STREAM_EVENTS.iter().any(|ev| m.starts_with(&format!("{STREAM_FAILURE_PREFIX}{ev}")))
+}
+
 /// Reassemble a streamed AI response into the endpoint's BLOCKING shape, so
 /// every caller's existing parsing stays untouched. Fails loudly on error /
 /// failed / incomplete events and on a stream that ends without a result.
@@ -1168,7 +1229,9 @@ fn assemble_sse(
                         out = v.get("response").cloned();
                         Break(())
                     }
-                    ty @ ("response.failed" | "response.incomplete") => {
+                    ty if TRANSIENT_STREAM_EVENTS.contains(&ty) => {
+                        // The event name leads the message: it is the marker
+                        // `transient_stream_failure` reads back.
                         failure = Some(format!("{ty}: {v}"));
                         Break(())
                     }
@@ -1181,7 +1244,7 @@ fn assemble_sse(
                 // not a transport problem: classifying it as Transport made
                 // every consumer's messaging blame the network.
                 let safe = BoundedUntrustedText::diagnostic(
-                    &format!("AI stream error: {f}"),
+                    &format!("{STREAM_FAILURE_PREFIX}{f}"),
                     &[],
                 );
                 return Err(AdvisorError::ModelFailure(safe.into_string()));
@@ -1255,7 +1318,7 @@ fn assemble_sse(
                 // not a transport problem: classifying it as Transport made
                 // every consumer's messaging blame the network.
                 let safe = BoundedUntrustedText::diagnostic(
-                    &format!("AI stream error: {f}"),
+                    &format!("{STREAM_FAILURE_PREFIX}{f}"),
                     &[],
                 );
                 return Err(AdvisorError::ModelFailure(safe.into_string()));
@@ -2570,6 +2633,160 @@ Final answer: {"decision":"accept","reasons":[]}"#;
             seen.lock().unwrap().len(),
             1,
             "a non-negotiable status never renegotiates"
+        );
+    }
+
+    /// The classifier and the arm that feeds it must agree on ONE set. This
+    /// pins the whole failure taxonomy, not just the happy pair: everything
+    /// outside `TRANSIENT_STREAM_EVENTS` is terminal, so widening the retry by
+    /// accident (e.g. "any ModelFailure") fails here.
+    fn responses_failure(body: &str) -> AdvisorError {
+        assemble_sse(body.as_bytes(), SseFamily::Responses, None)
+            .expect_err("the scenario is a failing stream")
+    }
+
+    #[test]
+    fn only_a_failed_or_incomplete_response_event_counts_as_transient() {
+        assert!(transient_stream_failure(&responses_failure(
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n"
+        )));
+        assert!(transient_stream_failure(&responses_failure(
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n"
+        )));
+        // A stream `error` event names something wrong with the REQUEST — a
+        // byte-identical second POST reproduces it at full price.
+        assert!(!transient_stream_failure(&responses_failure(
+            "data: {\"error\":{\"code\":\"invalid_prompt\",\"message\":\"schema refused\"}}\n\n"
+        )));
+        // A stream that simply stops leaves the billing question open.
+        assert!(!transient_stream_failure(&responses_failure(
+            "data: {\"type\":\"response.created\",\"response\":{}}\n\n"
+        )));
+        // Chat truncation is a completed, billed generation, not a blip.
+        let truncated = assemble_sse(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\
+\"finish_reason\":\"length\"}]}\n\n"
+                .as_bytes(),
+            SseFamily::Chat,
+            None,
+        )
+        .expect_err("a non-stop finish is a failure");
+        assert!(!transient_stream_failure(&truncated));
+        assert!(!transient_stream_failure(&AdvisorError::Http {
+            status: 401,
+            body: BoundedUntrustedText::diagnostic("invalid api key", &[]),
+        }));
+        assert!(!transient_stream_failure(&AdvisorError::Transport("connection reset".into())));
+    }
+
+    /// One `response.failed` used to scrap a whole 147-photo eval run (twice,
+    /// R29). The retry is bounded and PAID, so only a counted transport can
+    /// assert "exactly one repeat" — a source grep cannot.
+    #[test]
+    fn a_failed_response_stream_is_retried_exactly_once_and_then_succeeds() {
+        let (url, seen, handle) = stub_endpoint(vec![
+            (
+                200,
+                "text/event-stream",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":\
+{\"message\":\"upstream blip\"}}}\n\n"
+                    .into(),
+            ),
+            (
+                200,
+                "text/event-stream",
+                "data: {\"type\":\"response.completed\",\"response\":{\"answer\":42}}\n\n".into(),
+            ),
+        ]);
+        let v = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            None,
+        )
+        .expect("the single retry recovers the run");
+        assert_eq!(v["answer"], 42);
+        join_stub(handle);
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2, "exactly one repeat — two POSTs, two charges: {bodies:?}");
+        assert_eq!(bodies[0], bodies[1], "the retry re-posts the request UNCHANGED");
+    }
+
+    /// The repeat is once, not "until it works": a provider that is actually
+    /// down must not be paid a third time for the same photo.
+    #[test]
+    fn a_second_consecutive_stream_failure_is_terminal() {
+        let failed = "data: {\"type\":\"response.failed\",\"response\":{\"error\":\
+{\"message\":\"still down\"}}}\n\n";
+        let (url, seen, handle) = stub_endpoint(vec![
+            (200, "text/event-stream", failed.into()),
+            (200, "text/event-stream", failed.into()),
+        ]);
+        let err = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            None,
+        )
+        .expect_err("a second failure surfaces the existing error");
+        assert!(matches!(err, AdvisorError::ModelFailure(_)), "{err}");
+        assert!(err.to_string().contains("response.failed"), "the cause survives: {err}");
+        join_stub(handle);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "one repeat, never two — no third charge"
+        );
+    }
+
+    /// Non-transient classes keep posting exactly once. An auth status never
+    /// negotiated and must not start now, and a mid-stream `error` event is a
+    /// rejected REQUEST: re-posting it byte-identically buys the same refusal.
+    #[test]
+    fn a_non_transient_failure_is_never_retried() {
+        let (url, seen, handle) = stub_endpoint(vec![(
+            401,
+            "application/json",
+            r#"{"error":{"message":"invalid api key"}}"#.into(),
+        )]);
+        let err = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            None,
+        )
+        .expect_err("an auth status is terminal");
+        assert!(matches!(err, AdvisorError::Http { status: 401, .. }), "{err}");
+        join_stub(handle);
+        assert_eq!(seen.lock().unwrap().len(), 1, "401 posts once");
+
+        let (url, seen, handle) = stub_endpoint(vec![(
+            200,
+            "text/event-stream",
+            "data: {\"error\":{\"code\":\"unsupported_parameter\",\"param\":\"temperature\"}}\n\n"
+                .into(),
+        )]);
+        let err = post_ai_json(
+            &url,
+            "test-key",
+            serde_json::json!({"model": "m"}),
+            5,
+            SseFamily::Responses,
+            None,
+        )
+        .expect_err("a rejected parameter is terminal");
+        assert!(matches!(err, AdvisorError::ModelFailure(_)), "{err}");
+        join_stub(handle);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "a param rejection posts once — a second identical POST buys the same refusal"
         );
     }
 }

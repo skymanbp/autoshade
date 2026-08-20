@@ -21,7 +21,7 @@
 //! while the AI ignored it now counts as the miss it always was.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // `Context` is gone since R27 Batch-7: the one `?` in `run` (an unreadable
 // sidecar) cannot propagate out of a worker closure any more, so that failure
@@ -496,7 +496,7 @@ pub(crate) fn user_family_summary(xmp: &str) -> Option<FamilySummary> {
     (out != FamilySummary::default()).then_some(out)
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Acc {
     sum_abs: f64,
     sum_signed: f64,
@@ -527,6 +527,10 @@ impl Acc {
 /// as a value and be acted on in index order.
 enum PhotoOutcome {
     Stats(Box<PhotoStats>),
+    /// A saved row already answers for this photograph, so nothing was
+    /// decoded, asked or billed for it — its stats are folded from the state
+    /// file at the same index, through the same [`Acc::merge`].
+    Restored,
     /// `produce_recipe` failed; the FAILED line is already in this photo's
     /// block and the run continues, exactly as the serial `continue` did.
     Failed,
@@ -556,7 +560,15 @@ fn emit(live: bool, block: &mut String, text: &str) {
 
 /// Everything ONE photograph contributes to the report — produced on a worker,
 /// folded on the main thread in index order (see [`Acc::merge`]).
-#[derive(Default)]
+///
+/// Serialisable since the resume work below: this struct IS the state file's
+/// payload, so a photograph measured in one run folds into another run's
+/// report through the same [`Acc::merge`] it would have taken fresh. NO
+/// `#[serde(default)]` on purpose — a truncated last line (the crash this
+/// whole mechanism exists for) must fail to parse and be re-measured, not
+/// deserialise into an all-zero contribution that claims the photograph was
+/// measured.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct PhotoStats {
     /// This photo's per-control contributions, keyed exactly like the report.
     acc: BTreeMap<String, Acc>,
@@ -569,7 +581,370 @@ struct PhotoStats {
     masks: Option<(usize, usize, usize)>,
 }
 
-pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
+// ── resumable progress ──────────────────────────────────────────────────────
+//
+// Two 147-photo PAID runs were thrown away whole (2026-08-20) because ONE
+// upstream stream error poisoned each of them, and the transcript held no
+// per-photo numbers to salvage: the report table below prints once, at the end,
+// so a run that does not reach the end measured nothing anybody can use. This
+// is the second arm of that one root cause — "a single mid-run failure forfeits
+// the whole run"; the first is the transport retry in `advisor`.
+//
+// Every photograph whose measurement COMPLETED and came from the vision
+// proposer is appended here as it lands, and a rerun folds those rows back in
+// instead of re-buying them. The rows are the same `PhotoStats` the pool
+// produces and take the same fold at the same index, so the arithmetic does not
+// depend on where a run was interrupted.
+
+/// The state file's FIRST line: what the rows below it were measured under.
+///
+/// Deliberately narrow, and deliberately not a machine description. A run is
+/// resumable only against the same build and the same two models, so those are
+/// what is recorded and compared. NO endpoint URL, NO key, and no path but the
+/// folder the user themselves typed — this file lives in the per-user store,
+/// but it is still a file a user may hand to somebody else when reporting a bad
+/// baseline.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StateHeader {
+    autoshop_version: String,
+    /// The vision proposer's model id (`Config::openai_model`).
+    proposer_model: String,
+    /// The verifier's model id (`Config::analysis_model`).
+    analysis_model: String,
+    limit: usize,
+    /// The folder AS THE USER GAVE IT.
+    dir: String,
+    /// Unix seconds. Provenance only — never compared.
+    started: u64,
+}
+
+/// One measured photograph, as one line of the state file.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StateRow {
+    /// Readability of the file itself; `rel` is what a resume matches on.
+    stem: String,
+    /// The photograph's path RELATIVE to the eval folder, which is what
+    /// actually identifies it: `pipeline::find_raws` RECURSES, so two shoot
+    /// folders under one library can each hold a `DSC00001`, and a stem-keyed
+    /// row would answer for the wrong photograph. Falls back to the stem when
+    /// the path cannot be expressed under the folder — never an absolute path,
+    /// which would put a machine path into a file the user may share.
+    rel: String,
+    /// SHA-256 of the sidecar this measurement was taken against: the
+    /// photographer re-editing that photo invalidates the row.
+    xmp_sha256: String,
+    stats: PhotoStats,
+}
+
+/// SHA-256, lowercase hex.
+///
+/// In tree rather than as a dependency: this hash names a state file and
+/// decides whether a saved measurement still describes the sidecar it was taken
+/// from, and `Cargo.toml` carries no crypto crate to borrow one from (adding
+/// one for a drift check would be a supply-chain decision this change has no
+/// business making). Pinned by known-answer tests against the published
+/// vectors, so a mistyped constant cannot pass.
+fn sha256_hex(bytes: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut hash: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let mut msg = bytes.to_vec();
+    let bit_len = (bytes.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+    for block in msg.chunks_exact(64) {
+        let mut sched = [0u32; 64];
+        for (word, bs) in sched.iter_mut().zip(block.chunks_exact(4)) {
+            *word = u32::from_be_bytes([bs[0], bs[1], bs[2], bs[3]]);
+        }
+        for i in 16..64 {
+            let s0 = sched[i - 15].rotate_right(7)
+                ^ sched[i - 15].rotate_right(18)
+                ^ (sched[i - 15] >> 3);
+            let s1 = sched[i - 2].rotate_right(17)
+                ^ sched[i - 2].rotate_right(19)
+                ^ (sched[i - 2] >> 10);
+            sched[i] = sched[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(sched[i - 7])
+                .wrapping_add(s1);
+        }
+        // The eight working registers a..h, as a rotating array: the round's
+        // shift-down (h←g, g←f, … b←a) IS a rotate, and naming them
+        // individually costs eight single-letter bindings for nothing.
+        let mut r = hash;
+        for (kc, wc) in K.iter().zip(sched.iter()) {
+            let s1 = r[4].rotate_right(6) ^ r[4].rotate_right(11) ^ r[4].rotate_right(25);
+            let ch = (r[4] & r[5]) ^ (!r[4] & r[6]);
+            let t1 = r[7]
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(*kc)
+                .wrapping_add(*wc);
+            let s0 = r[0].rotate_right(2) ^ r[0].rotate_right(13) ^ r[0].rotate_right(22);
+            let maj = (r[0] & r[1]) ^ (r[0] & r[2]) ^ (r[1] & r[2]);
+            let t2 = s0.wrapping_add(maj);
+            r.rotate_right(1);
+            r[4] = r[4].wrapping_add(t1);
+            r[0] = t1.wrapping_add(t2);
+        }
+        for (h, v) in hash.iter_mut().zip(r) {
+            *h = h.wrapping_add(v);
+        }
+    }
+    hash.iter().map(|v| format!("{v:08x}")).collect()
+}
+
+/// A photograph's identity INSIDE the eval folder — see [`StateRow::rel`].
+fn photo_rel(dir: &Path, raw: &Path) -> String {
+    raw.strip_prefix(dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| pipeline::stem(raw).to_string())
+}
+
+/// Where a run's progress lives when the caller names no path.
+///
+/// Under the per-user store ([`crate::store::store_root`]), NEVER beside the
+/// photographs: the library is read-only by settled project law. The name is
+/// derived from the two things that decide the work list — the folder and
+/// `--limit` — so re-running the same command finds its own file and no other
+/// run's. Windows spellings fold case, the rule `store::photo_key` already
+/// follows, so `d:\pics` and `D:\Pics` are one run.
+fn default_state_path(dir: &Path, limit: usize) -> PathBuf {
+    let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let spelling = abs.to_string_lossy().into_owned();
+    let spelling = if cfg!(windows) { spelling.to_lowercase() } else { spelling };
+    let key = sha256_hex(format!("{spelling}|{limit}").as_bytes());
+    crate::store::store_root().join("eval-state").join(format!("{}.jsonl", &key[..16]))
+}
+
+/// The saved rows at `path`, or an empty vec when there is nothing there.
+///
+/// `Err` is a REFUSAL, not a failure to read: a file whose header describes a
+/// different build or different models must not be folded into this run's
+/// table, because one table measured by two different things is not a
+/// measurement. Both sides are printed so the reader can see WHICH moved.
+fn load_state(path: &Path, want: &StateHeader) -> Result<Vec<StateRow>> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Ok(Vec::new()) };
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines = text.lines();
+    let Some(Ok(head)) = lines.next().map(serde_json::from_str::<StateHeader>) else {
+        anyhow::bail!(
+            "the saved eval progress at {} does not begin with a readable header — re-run with \
+             --fresh to discard it, or --state <path> to write this run somewhere else",
+            path.display()
+        );
+    };
+    if head.autoshop_version != want.autoshop_version
+        || head.proposer_model != want.proposer_model
+        || head.analysis_model != want.analysis_model
+    {
+        anyhow::bail!(
+            "the saved eval progress at {p} was measured under autoshop {hv} (proposer {hp}, \
+             analysis {ha}); this run is autoshop {wv} (proposer {wp}, analysis {wa}). Folding \
+             them into one table would report a gap score measured by two different things — \
+             re-run with --fresh to start over, or --state <path> to keep both.",
+            p = path.display(),
+            hv = head.autoshop_version,
+            hp = head.proposer_model,
+            ha = head.analysis_model,
+            wv = want.autoshop_version,
+            wp = want.proposer_model,
+            wa = want.analysis_model,
+        );
+    }
+    // A line that does not parse is a line that is not trusted — a crash
+    // mid-write leaves exactly one of those at the end of the file, and the
+    // photograph it half-described is simply measured again.
+    Ok(lines.filter_map(|l| serde_json::from_str::<StateRow>(l).ok()).collect())
+}
+
+/// Which of `work`'s photographs the saved rows still answer for, by index,
+/// plus the stems whose row was thrown away as stale.
+///
+/// A row is honoured only when it names this photograph AND the sidecar on disk
+/// still hashes to what the measurement was taken against: the photographer
+/// re-editing a photo invalidates the measurement OF that photo, and silently
+/// reusing the row would score the AI against an edit that no longer exists.
+/// The sidecar is read through the same capped reader [`run`] measures with
+/// (`store::read_sidecar`), so the hash covers exactly the text that was read.
+fn resume_plan(
+    dir: &Path,
+    work: &[&Path],
+    rows: Vec<StateRow>,
+) -> (Vec<Option<Box<PhotoStats>>>, Vec<String>) {
+    // Last row wins: a photograph re-measured after a stale row was discarded
+    // has both lines in the file, and the newer one is the live measurement.
+    let mut by_rel: BTreeMap<String, StateRow> = BTreeMap::new();
+    for row in rows {
+        by_rel.insert(row.rel.clone(), row);
+    }
+    let mut restored = Vec::with_capacity(work.len());
+    let mut stale = Vec::new();
+    for raw in work {
+        let Some(row) = by_rel.remove(&photo_rel(dir, raw)) else {
+            restored.push(None);
+            continue;
+        };
+        let now = crate::store::read_sidecar(&raw.with_extension("xmp"))
+            .map(|t| sha256_hex(t.as_bytes()));
+        if now.as_deref() == Some(row.xmp_sha256.as_str()) {
+            restored.push(Some(Box::new(row.stats)));
+        } else {
+            stale.push(row.stem.clone());
+            restored.push(None);
+        }
+    }
+    (restored, stale)
+}
+
+/// Appends one row per completed photograph, as it completes.
+///
+/// Flushed per row on purpose: the whole point is that a run killed by the next
+/// upstream stream error keeps everything measured before it.
+struct StateLog {
+    path: PathBuf,
+    /// `None` = writing is off, because it failed. A state file that cannot be
+    /// written DEGRADES the run to un-resumable and says so; it does not fail a
+    /// run whose expensive half is the API spend.
+    sink: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+impl StateLog {
+    /// The file itself: appended to when this is a resume, created with its
+    /// header line when it is not.
+    fn open_sink(
+        path: &Path,
+        header: &StateHeader,
+        resuming: bool,
+    ) -> std::io::Result<std::fs::File> {
+        use std::io::Write as _;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if resuming {
+            return std::fs::OpenOptions::new().append(true).open(path);
+        }
+        let mut f = std::fs::File::create(path)?;
+        let head = serde_json::to_string(header).map_err(std::io::Error::other)?;
+        writeln!(f, "{head}")?;
+        Ok(f)
+    }
+
+    /// Open the file, writing the header when this is not a resume.
+    fn open(path: &Path, header: &StateHeader, resuming: bool) -> Self {
+        let sink = match Self::open_sink(path, header, resuming) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!(
+                    "⚠ eval progress cannot be saved to {} ({e}) — this run still measures, but \
+                     a rerun will have to re-buy every photograph.",
+                    path.display()
+                );
+                None
+            }
+        };
+        Self { path: path.to_path_buf(), sink: std::sync::Mutex::new(sink) }
+    }
+
+    fn record(&self, row: &StateRow) {
+        use std::io::Write as _;
+        let mut guard = self.sink.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(file) = guard.as_mut() else { return };
+        let wrote = serde_json::to_string(row)
+            .map_err(std::io::Error::other)
+            .and_then(|line| writeln!(file, "{line}").and_then(|()| file.flush()));
+        if let Err(e) = wrote {
+            eprintln!(
+                "⚠ eval progress stopped being saved to {} ({e}) — the rows already written are \
+                 still good.",
+                self.path.display()
+            );
+            *guard = None;
+        }
+    }
+}
+
+/// Did the VISION proposer answer for this photograph, or did the run fall back
+/// to the deterministic baseline?
+///
+/// Read off the typed note channel `produce_recipe` already returns — no new
+/// field, no new global, because the fact was already on the wire. The
+/// heuristic stands in under exactly two keys: `HEURISTIC_UNAVAILABLE` (the
+/// proposer WAS tried and failed — the mid-run stream error that cost two paid
+/// 147-photo runs) and `HEURISTIC_NO_KEY` (no proposer was configured at all).
+/// Both mean the numbers came from arithmetic over the histogram rather than
+/// from the model this measurement is about, so neither may be saved as
+/// progress: a rerun that folded them back in would print a baseline built
+/// partly out of the fallback, which is the poisoning this file exists to
+/// prevent.
+///
+/// The note cannot be lost on THIS path: it is pushed first, and the two places
+/// that clear the note vec (an adopted verifier revision, an adopted visual
+/// round) are both unreachable here — a fallback proposal sets
+/// `can_revise = false`, and `eval` passes `judge = false`.
+fn proposer_answered(notes: &[crate::rationale::Note]) -> bool {
+    use crate::rationale::keys;
+    !notes
+        .iter()
+        .any(|n| n.key == keys::HEURISTIC_UNAVAILABLE || n.key == keys::HEURISTIC_NO_KEY)
+}
+
+/// Append this photograph's row unless the proposer fell back. Returns whether
+/// the row was persisted — the caller discloses the `false` case in the
+/// transcript and in the report's provenance line.
+fn record_measured(log: &StateLog, notes: &[crate::rationale::Note], row: &StateRow) -> bool {
+    if !proposer_answered(notes) {
+        return false;
+    }
+    log.record(row);
+    true
+}
+
+/// The pool body's FIRST decision: a photograph a valid saved row already
+/// answers for is not measured — no decode, no API call, no spend.
+///
+/// Separated from the body so that promise is testable without a network: the
+/// test counts how often `measure` runs.
+fn restore_or_measure<M>(
+    live: bool,
+    block: &mut String,
+    restored: bool,
+    measure: M,
+) -> PhotoOutcome
+where
+    M: FnOnce(&mut String) -> PhotoOutcome,
+{
+    if restored {
+        emit(live, block, "from saved progress\n");
+        return PhotoOutcome::Restored;
+    }
+    measure(block)
+}
+
+pub fn run(
+    dir: &Path,
+    limit: usize,
+    jobs: usize,
+    fresh: bool,
+    state: Option<&Path>,
+) -> Result<()> {
     let cfg = Config::load();
     // R27 P1, deliberate NON-action: this stays RAW-only, and not for want of
     // a flag. `eval` scores the AI against the user's OWN edit, which it reads
@@ -605,6 +980,49 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
     // replaces, line for line and sum for sum.
     let work: Vec<&Path> = pairs.iter().take(limit).map(|p| p.as_path()).collect();
     let n = work.len();
+
+    // ── resumable progress ───────────────────────────────────────────────
+    let state_path = match state {
+        Some(p) => p.to_path_buf(),
+        None => default_state_path(dir, limit),
+    };
+    let header = StateHeader {
+        autoshop_version: env!("CARGO_PKG_VERSION").to_string(),
+        proposer_model: cfg.openai_model.clone(),
+        analysis_model: cfg.analysis_model.clone(),
+        limit,
+        dir: dir.display().to_string(),
+        started: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    println!("progress: {}", state_path.display());
+    if fresh && state_path.exists() {
+        std::fs::remove_file(&state_path).map_err(|e| {
+            anyhow::anyhow!("--fresh could not discard {}: {e}", state_path.display())
+        })?;
+        println!("  --fresh: saved progress discarded; every photograph is measured again.");
+    }
+    let saved = load_state(&state_path, &header)?;
+    // Append to a file that already carries a valid header; write a new one
+    // otherwise. An existing file whose rows all turned out stale is still
+    // appended to — its stale lines stay, and the fresh row for the same
+    // photograph, written later, is the one a later resume reads.
+    let resuming = !saved.is_empty();
+    let (mut restored, stale) = resume_plan(dir, &work, saved);
+    for stem in &stale {
+        println!("  {stem}: its .xmp changed since it was measured — measuring it again.");
+    }
+    let loaded = restored.iter().filter(|r| r.is_some()).count();
+    if loaded > 0 {
+        println!("resuming: {loaded} of {n} already measured, {} to go.", n - loaded);
+    }
+    let log = StateLog::open(&state_path, &header, resuming);
+    // How many photographs this run measured with the deterministic fallback
+    // standing in for the proposer. A COUNT, order-independent, so an atomic
+    // is honest here where an f64 sum would not be.
+    let fallbacks = std::sync::atomic::AtomicU32::new(0);
     // `plan_for` for the same reason `batch` uses it (R28 Batch-4 4a), even
     // though `eval`'s work list is RAW+.xmp pairs by construction and the
     // survey therefore finds nothing to raise: the door a caller takes should
@@ -650,195 +1068,217 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
         }
         let raw: &Path = work[i];
         emit(live, block, &format!("[{}/{}] {} ... ", i + 1, n, pipeline::stem(raw)));
-        let Some(xmp_text) = crate::store::read_sidecar(&raw.with_extension("xmp")) else {
-            aborted.store(true, std::sync::atomic::Ordering::Relaxed);
-            emit(live, block, "FAILED\n");
-            return PhotoOutcome::Aborted(format!("read user xmp for {}", raw.display()));
-        };
-        let mut stats = PhotoStats::default();
-        // The Description's OWN scope, like every other whole-document reader
-        // (`xmp::crs_own_scope`): a nested creative Look's baked parameters are
-        // the PROFILE's, not the photographer's, and scoring the AI against
-        // them charged it for matching a look no slider in the sidecar states.
-        let scope = crate::xmp::crs_own_scope(&xmp_text);
-        let scope = Scope::new(scope.as_ref());
-        // Any value OTHER than "As Shot" is a user WB decision; an absent
-        // attribute (non-LR / hand-trimmed sidecar) keeps the Kelvin as
-        // intentional.
-        let user_wb = scope.crs_str("WhiteBalance").as_deref() != Some("As Shot");
-        let has_crop = scope.crs_str("HasCrop").as_deref() == Some("True");
-        // style_strength = 0 AND judge = false: eval measures the RAW AI
-        // proposal vs your edits, so it must NOT pull toward your historical
-        // style and must NOT let the visual closed loop revise the proposal
-        // (either would bias the gap — and the judge is a paid vision call
-        // per photo, unasked-for in a measurement run).
-        let (ai, _verdict, notes) =
-            match pipeline::produce_recipe(
-                raw,
-                &cfg,
-                false,
-                None,
-                None,
-                // The CALIBRATION point, named: eval is the measurement
-                // baseline R23-5's wider ruler is calibrated against, so it must
-                // not drift when the product default moves (R23-3).
-                //
-                // What this pins is the NUMBER axis — the prompt's ±50/±35 pair
-                // and temper's knees are bit-for-bit pre-R23 here. It does NOT
-                // freeze the request: R23-1 rewrote the proposer prose at every
-                // strength (and the verbatim old wording now lives in the ≤ 0.4
-                // band, where soft_cap_factor is 0.93 and the numbers would drift
-                // instead). So scores from this harness are not comparable across
-                // R23 whatever value stands here — the same break the module doc
-                // already records for the widened ruler — and the 147-photo set
-                // has to be re-measured to give the new baseline a number.
-                pipeline::GradeRequest {
-                    strength: crate::recipe::GradeStrength::calibrated(),
-                    ..Default::default()
-                },
-                false,
-            ) {
-            Ok(v) => v,
-            Err(e) => {
-                emit(live, block, &format!("FAILED: {e}\n"));
-                return PhotoOutcome::Failed;
-            }
-        };
-        for row in ruler.iter() {
-            let eps = row.eps();
-            let n0 = neutral(row, &ai);
-            let user_val = user_value(row, scope, user_wb, has_crop);
-            // "Used" is measured against the control's NEUTRAL, not against
-            // zero: `color_grade.blending` sits at 50 untouched, so a
-            // zero-based test called every neutral wheel a ±50 disagreement.
-            let user_used = user_val.is_some_and(|u| (u - n0).abs() > eps);
-            let ai_used = match row.metric.as_str() {
-                // Stating an absolute Kelvin AT ALL is a WB decision, even one
-                // that lands on the as-shot value.
-                "temperature_k" => ai.temperature_k.is_some(),
-                _ => ai_value(row, &ai).is_some_and(|a| (a - n0).abs() > eps),
+        restore_or_measure(live, block, restored[i].is_some(), |block| {
+            let Some(xmp_text) = crate::store::read_sidecar(&raw.with_extension("xmp")) else {
+                aborted.store(true, std::sync::atomic::Ordering::Relaxed);
+                emit(live, block, "FAILED\n");
+                return PhotoOutcome::Aborted(format!("read user xmp for {}", raw.display()));
             };
-            // An absent slider means the photographer left it at its neutral,
-            // an absent white balance means they kept as-shot — so a one-sided
-            // disagreement still compares two real numbers instead of being
-            // dropped from the aggregate (which understated the gap score).
-            let u = user_val.unwrap_or(n0);
-            let ai_val = ai_value(row, &ai);
-            // A both-neutral row is not a comparison: Lightroom writes EVERY
-            // slider explicitly (Contrast2012="0"), so counting 0↔0 rows
-            // inflated n and diluted each control's MAE toward zero — the gap
-            // score understated real divergence. A row where EITHER side
-            // moved still counts (that disagreement is the signal).
-            if !user_used && !ai_used {
-                continue;
-            }
-            // …with ONE exception, and it is a different question (R28 Batch-5
-            // 5b): a toning wheel's hue is only a value while the wheel has
-            // saturation. "Either side moved it" is the right rule for a slider
-            // whose every position renders something; it is the wrong rule for
-            // an angle that renders nothing at zero saturation, and it is what
-            // produced the 141° `shadow_hue` artifact. See `hue_carries_colour`
-            // for the threshold, what it costs, and why that row's history is
-            // not comparable with what this run prints.
-            if row.circular && !hue_carries_colour(row, scope, &ai) {
-                continue;
-            }
-            let e = stats.acc.entry(row.metric.clone()).or_default();
-            match ai_val {
-                Some(a) => {
-                    let d = row.diff(a, u) as f64;
-                    e.sum_abs += d.abs();
-                    e.sum_signed += d;
-                    e.n += 1;
-                    // You moved it; the AI parked it at neutral → a miss.
-                    if user_used && !ai_used {
-                        e.omit += 1;
+            let mut stats = PhotoStats::default();
+            // The Description's OWN scope, like every other whole-document reader
+            // (`xmp::crs_own_scope`): a nested creative Look's baked parameters are
+            // the PROFILE's, not the photographer's, and scoring the AI against
+            // them charged it for matching a look no slider in the sidecar states.
+            let scope = crate::xmp::crs_own_scope(&xmp_text);
+            let scope = Scope::new(scope.as_ref());
+            // Any value OTHER than "As Shot" is a user WB decision; an absent
+            // attribute (non-LR / hand-trimmed sidecar) keeps the Kelvin as
+            // intentional.
+            let user_wb = scope.crs_str("WhiteBalance").as_deref() != Some("As Shot");
+            let has_crop = scope.crs_str("HasCrop").as_deref() == Some("True");
+            // style_strength = 0 AND judge = false: eval measures the RAW AI
+            // proposal vs your edits, so it must NOT pull toward your historical
+            // style and must NOT let the visual closed loop revise the proposal
+            // (either would bias the gap — and the judge is a paid vision call
+            // per photo, unasked-for in a measurement run).
+            let (ai, _verdict, notes) =
+                match pipeline::produce_recipe(
+                    raw,
+                    &cfg,
+                    false,
+                    None,
+                    None,
+                    // The CALIBRATION point, named: eval is the measurement
+                    // baseline R23-5's wider ruler is calibrated against, so it must
+                    // not drift when the product default moves (R23-3).
+                    //
+                    // What this pins is the NUMBER axis — the prompt's ±50/±35 pair
+                    // and temper's knees are bit-for-bit pre-R23 here. It does NOT
+                    // freeze the request: R23-1 rewrote the proposer prose at every
+                    // strength (and the verbatim old wording now lives in the ≤ 0.4
+                    // band, where soft_cap_factor is 0.93 and the numbers would drift
+                    // instead). So scores from this harness are not comparable across
+                    // R23 whatever value stands here — the same break the module doc
+                    // already records for the widened ruler — and the 147-photo set
+                    // has to be re-measured to give the new baseline a number.
+                    pipeline::GradeRequest {
+                        strength: crate::recipe::GradeStrength::calibrated(),
+                        ..Default::default()
+                    },
+                    false,
+                ) {
+                Ok(v) => v,
+                Err(e) => {
+                    emit(live, block, &format!("FAILED: {e}\n"));
+                    return PhotoOutcome::Failed;
+                }
+            };
+            for row in ruler.iter() {
+                let eps = row.eps();
+                let n0 = neutral(row, &ai);
+                let user_val = user_value(row, scope, user_wb, has_crop);
+                // "Used" is measured against the control's NEUTRAL, not against
+                // zero: `color_grade.blending` sits at 50 untouched, so a
+                // zero-based test called every neutral wheel a ±50 disagreement.
+                let user_used = user_val.is_some_and(|u| (u - n0).abs() > eps);
+                let ai_used = match row.metric.as_str() {
+                    // Stating an absolute Kelvin AT ALL is a WB decision, even one
+                    // that lands on the as-shot value.
+                    "temperature_k" => ai.temperature_k.is_some(),
+                    _ => ai_value(row, &ai).is_some_and(|a| (a - n0).abs() > eps),
+                };
+                // An absent slider means the photographer left it at its neutral,
+                // an absent white balance means they kept as-shot — so a one-sided
+                // disagreement still compares two real numbers instead of being
+                // dropped from the aggregate (which understated the gap score).
+                let u = user_val.unwrap_or(n0);
+                let ai_val = ai_value(row, &ai);
+                // A both-neutral row is not a comparison: Lightroom writes EVERY
+                // slider explicitly (Contrast2012="0"), so counting 0↔0 rows
+                // inflated n and diluted each control's MAE toward zero — the gap
+                // score understated real divergence. A row where EITHER side
+                // moved still counts (that disagreement is the signal).
+                if !user_used && !ai_used {
+                    continue;
+                }
+                // …with ONE exception, and it is a different question (R28 Batch-5
+                // 5b): a toning wheel's hue is only a value while the wheel has
+                // saturation. "Either side moved it" is the right rule for a slider
+                // whose every position renders something; it is the wrong rule for
+                // an angle that renders nothing at zero saturation, and it is what
+                // produced the 141° `shadow_hue` artifact. See `hue_carries_colour`
+                // for the threshold, what it costs, and why that row's history is
+                // not comparable with what this run prints.
+                if row.circular && !hue_carries_colour(row, scope, &ai) {
+                    continue;
+                }
+                let e = stats.acc.entry(row.metric.clone()).or_default();
+                match ai_val {
+                    Some(a) => {
+                        let d = row.diff(a, u) as f64;
+                        e.sum_abs += d.abs();
+                        e.sum_signed += d;
+                        e.n += 1;
+                        // You moved it; the AI parked it at neutral → a miss.
+                        if user_used && !ai_used {
+                            e.omit += 1;
+                        }
+                    }
+                    // Unreachable while every row has a reader (pinned by the
+                    // catalogue tests); kept so a future row without one still
+                    // shows up as a miss instead of vanishing.
+                    None => {
+                        if (u - n0).abs() > eps {
+                            e.omit += 1;
+                        }
                     }
                 }
-                // Unreachable while every row has a reader (pinned by the
-                // catalogue tests); kept so a future row without one still
-                // shows up as a miss instead of vanishing.
-                None => {
-                    if (u - n0).abs() > eps {
-                        e.omit += 1;
+            }
+
+            // --- master tone curve: did the AI commit to a curve like you did? ---
+            // Entered when EITHER side has a real curve: gating on the user's
+            // alone made an AI-only curve invisible to the metric (an identity
+            // user curve is a valid comparison baseline — curve_lut of no points
+            // is the identity LUT). ANY point counts: even a one-point curve
+            // renders (pinned endpoints), so `>= 2` still hid real curves.
+            // Scoped like `user_curve_shape` and `parse_user_xmp` — the SAME rule
+            // at every read of a whole sidecar, or the report scores the AI
+            // against a curve the profile baked, not the one the user drew.
+            let user_curve =
+                parse_tone_curve(&crate::xmp::crs_own_scope(&xmp_text), "ToneCurvePV2012");
+            let ai_curve = ai_tone_curve_points(&ai);
+            if !user_curve.is_empty() || !ai_curve.is_empty() {
+                let ulut = curve_lut(&user_curve);
+                let alut = curve_lut(&ai_curve);
+                stats.curve = Some((
+                    curve_rmse(&ulut, &alut),
+                    curve_black_lift(&ulut) as f64,
+                    curve_black_lift(&alut) as f64,
+                    curve_s_strength(&ulut) as f64,
+                    curve_s_strength(&alut) as f64,
+                ));
+            }
+
+            // --- the three per-channel RGB curves (R23-1) ---------------------
+            // The colour-shaping companion to the master curve, and the other half
+            // of the "did the AI use the look controls at all?" question. Same
+            // either-side rule and same RMSE metric; the SHAPE metrics (black lift
+            // / S-strength) are master-curve vocabulary and are not repeated here.
+            for (ch, (_, tag)) in rgb_curves.iter().enumerate() {
+                let user_curve = parse_tone_curve(scope.text(), tag);
+                let ai_curve: Vec<(f32, f32)> = match catalogue::global_value(&ai, &format!("{}_curve", rgb_curves[ch].0)) {
+                    Some(catalogue::GlobalValue::Curve(pts)) => {
+                        pts.iter().map(|p| (p.input as f32, p.output as f32)).collect()
                     }
+                    _ => Vec::new(),
+                };
+                if user_curve.is_empty() && ai_curve.is_empty() {
+                    continue;
+                }
+                stats.rgb[ch] =
+                    Some(curve_rmse(&curve_lut(&user_curve), &curve_lut(&ai_curve)));
+            }
+
+            // --- local masks: counts, not divergence --------------------------
+            // The user's side comes from the same importer the app uses, plus the
+            // corrections it REFUSES (foreign brush/AI masks): reporting only the
+            // importable ones would understate how much local work the photograph
+            // actually had.
+            let imported = crate::xmp::xmp_to_recipe(&xmp_text).masks.len();
+            let refused = crate::xmp::unsupported_corrections(&xmp_text);
+            if imported + refused + ai.masks.len() > 0 {
+                stats.masks = Some((imported, refused, ai.masks.len()));
+            }
+
+            emit(live, block, "done\n");
+            // Above one job the per-photo ⚠ lines the pipeline raises on stderr
+            // (the GPT-proposer fallback warn in `pipeline::produce_recipe`) arrive in COMPLETION
+            // order and can no longer be read as belonging to the line above them.
+            // The same disclosures ride the typed note channel by construction, so
+            // attach them to THIS photo's block — the attribution the reordering
+            // costs, bought back on the channel that already carries it. At one job
+            // the transcript stays exactly what it was.
+            if !live && !notes.is_empty() {
+                let text = crate::rationale::render_en(&notes);
+                let text = text.trim();
+                if !text.is_empty() {
+                    block.push_str("       ");
+                    block.push_str(text);
+                    block.push('\n');
                 }
             }
-        }
-
-        // --- master tone curve: did the AI commit to a curve like you did? ---
-        // Entered when EITHER side has a real curve: gating on the user's
-        // alone made an AI-only curve invisible to the metric (an identity
-        // user curve is a valid comparison baseline — curve_lut of no points
-        // is the identity LUT). ANY point counts: even a one-point curve
-        // renders (pinned endpoints), so `>= 2` still hid real curves.
-        // Scoped like `user_curve_shape` and `parse_user_xmp` — the SAME rule
-        // at every read of a whole sidecar, or the report scores the AI
-        // against a curve the profile baked, not the one the user drew.
-        let user_curve =
-            parse_tone_curve(&crate::xmp::crs_own_scope(&xmp_text), "ToneCurvePV2012");
-        let ai_curve = ai_tone_curve_points(&ai);
-        if !user_curve.is_empty() || !ai_curve.is_empty() {
-            let ulut = curve_lut(&user_curve);
-            let alut = curve_lut(&ai_curve);
-            stats.curve = Some((
-                curve_rmse(&ulut, &alut),
-                curve_black_lift(&ulut) as f64,
-                curve_black_lift(&alut) as f64,
-                curve_s_strength(&ulut) as f64,
-                curve_s_strength(&alut) as f64,
-            ));
-        }
-
-        // --- the three per-channel RGB curves (R23-1) ---------------------
-        // The colour-shaping companion to the master curve, and the other half
-        // of the "did the AI use the look controls at all?" question. Same
-        // either-side rule and same RMSE metric; the SHAPE metrics (black lift
-        // / S-strength) are master-curve vocabulary and are not repeated here.
-        for (ch, (_, tag)) in rgb_curves.iter().enumerate() {
-            let user_curve = parse_tone_curve(scope.text(), tag);
-            let ai_curve: Vec<(f32, f32)> = match catalogue::global_value(&ai, &format!("{}_curve", rgb_curves[ch].0)) {
-                Some(catalogue::GlobalValue::Curve(pts)) => {
-                    pts.iter().map(|p| (p.input as f32, p.output as f32)).collect()
-                }
-                _ => Vec::new(),
+            // The measurement is complete: save it, so the NEXT upstream stream
+            // error costs this photograph nothing. A photograph the proposer
+            // fell back on completes the run exactly as it does today — it is
+            // in the table below — but it is not saved, and the disclosure says
+            // so on the photo's own block rather than only in the summary.
+            let row = StateRow {
+                stem: pipeline::stem(raw).to_string(),
+                rel: photo_rel(dir, raw),
+                xmp_sha256: sha256_hex(xmp_text.as_bytes()),
+                stats,
             };
-            if user_curve.is_empty() && ai_curve.is_empty() {
-                continue;
+            if !record_measured(&log, &notes, &row) {
+                fallbacks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                emit(
+                    live,
+                    block,
+                    "       (the proposer fell back to the deterministic baseline — NOT saved as \
+                     progress; a rerun measures this photograph again)\n",
+                );
             }
-            stats.rgb[ch] =
-                Some(curve_rmse(&curve_lut(&user_curve), &curve_lut(&ai_curve)));
-        }
-
-        // --- local masks: counts, not divergence --------------------------
-        // The user's side comes from the same importer the app uses, plus the
-        // corrections it REFUSES (foreign brush/AI masks): reporting only the
-        // importable ones would understate how much local work the photograph
-        // actually had.
-        let imported = crate::xmp::xmp_to_recipe(&xmp_text).masks.len();
-        let refused = crate::xmp::unsupported_corrections(&xmp_text);
-        if imported + refused + ai.masks.len() > 0 {
-            stats.masks = Some((imported, refused, ai.masks.len()));
-        }
-
-        emit(live, block, "done\n");
-        // Above one job the per-photo ⚠ lines the pipeline raises on stderr
-        // (the GPT-proposer fallback warn in `pipeline::produce_recipe`) arrive in COMPLETION
-        // order and can no longer be read as belonging to the line above them.
-        // The same disclosures ride the typed note channel by construction, so
-        // attach them to THIS photo's block — the attribution the reordering
-        // costs, bought back on the channel that already carries it. At one job
-        // the transcript stays exactly what it was.
-        if !live && !notes.is_empty() {
-            let text = crate::rationale::render_en(&notes);
-            let text = text.trim();
-            if !text.is_empty() {
-                block.push_str("       ");
-                block.push_str(text);
-                block.push('\n');
-            }
-        }
-        PhotoOutcome::Stats(Box::new(stats))
+            PhotoOutcome::Stats(Box::new(row.stats))
+        })
     });
 
     // ── FOLD, strictly in photo order ────────────────────────────────────────
@@ -847,44 +1287,57 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
     // finished first. Folding the positional results reproduces the serial
     // arithmetic exactly, at any `--jobs`.
     let mut abort: Option<String> = None;
-    for outcome in outcomes.into_iter().flatten() {
-        match outcome {
-            PhotoOutcome::Stats(s) => {
-                for (metric, one) in &s.acc {
-                    acc.entry(metric.clone()).or_default().merge(one);
-                }
-                if let Some((rmse, ul, al, us, as_)) = s.curve {
-                    curve_n += 1;
-                    sum_curve_rmse += rmse;
-                    sum_user_lift += ul;
-                    sum_ai_lift += al;
-                    sum_user_s += us;
-                    sum_ai_s += as_;
-                }
-                for (ch, r) in s.rgb.iter().enumerate() {
-                    if let Some(rmse) = r {
-                        rgb_acc[ch].0 += 1;
-                        rgb_acc[ch].1 += rmse;
-                    }
-                }
-                if let Some((imported, refused, ai_n)) = s.masks {
-                    mask_photos += 1;
-                    user_masks += imported;
-                    user_masks_unsupported += refused;
-                    ai_masks += ai_n;
-                }
-                evaluated += 1;
-            }
+    // Provenance of the table below, counted while it is folded.
+    let (mut loaded_rows, mut measured_now) = (0u32, 0u32);
+    for (i, outcome) in outcomes.into_iter().enumerate() {
+        let Some(outcome) = outcome else { continue };
+        // A restored photograph and a freshly measured one reach the fold the
+        // SAME way, at the SAME index — that is what makes a resumed run's
+        // arithmetic identical to an uninterrupted one's, whatever the split.
+        let stats = match outcome {
+            PhotoOutcome::Stats(s) => Some((s, false)),
+            PhotoOutcome::Restored => restored[i].take().map(|s| (s, true)),
             // Reported in its own block; the run continues (unchanged).
-            PhotoOutcome::Failed | PhotoOutcome::Skipped => {}
+            PhotoOutcome::Failed | PhotoOutcome::Skipped => None,
             // The FIRST hard error wins, so the message a `--jobs 1` run would
             // have raised is the message this run raises.
             PhotoOutcome::Aborted(why) => {
                 if abort.is_none() {
                     abort = Some(why);
                 }
+                None
+            }
+        };
+        let Some((s, from_state)) = stats else { continue };
+        if from_state {
+            loaded_rows += 1;
+        } else {
+            measured_now += 1;
+        }
+        for (metric, one) in &s.acc {
+            acc.entry(metric.clone()).or_default().merge(one);
+        }
+        if let Some((rmse, ul, al, us, as_)) = s.curve {
+            curve_n += 1;
+            sum_curve_rmse += rmse;
+            sum_user_lift += ul;
+            sum_ai_lift += al;
+            sum_user_s += us;
+            sum_ai_s += as_;
+        }
+        for (ch, r) in s.rgb.iter().enumerate() {
+            if let Some(rmse) = r {
+                rgb_acc[ch].0 += 1;
+                rgb_acc[ch].1 += rmse;
             }
         }
+        if let Some((imported, refused, ai_n)) = s.masks {
+            mask_photos += 1;
+            user_masks += imported;
+            user_masks_unsupported += refused;
+            ai_masks += ai_n;
+        }
+        evaluated += 1;
     }
     if let Some(why) = abort {
         anyhow::bail!("{why}");
@@ -901,6 +1354,16 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
     }
 
     println!("\n=== AI vs your edits ({evaluated} photo(s)) ===");
+    // WHERE the rows came from, before the numbers they produced: a table
+    // built partly out of saved progress must say so, and a fallback row —
+    // counted here, deliberately NOT saved — is the reason a rerun's photo
+    // count can move.
+    println!(
+        "{evaluated} row(s) total: {loaded_rows} loaded from saved progress, {measured_now} \
+         measured this run, {} fallback row(s) NOT persisted.",
+        fallbacks.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!("progress file: {}", state_path.display());
     println!("{:<22} {:>4} {:>10} {:>13} {:>8}", "field", "n", "mean|Δ|", "bias(AI−you)", "AI-omit");
     for row in &ruler {
         let Some(a) = acc.get(&row.metric) else { continue };
@@ -1562,6 +2025,332 @@ mod tests {
         assert_eq!(neutral(&row("tint"), &ai), 7.0);
         // The engine's tint is a DELTA from as-shot; ACR's is absolute.
         assert_eq!(ai_value(&row("tint"), &ai), Some(10.0));
+    }
+
+    // ── resumable progress ────────────────────────────────────────────────
+    //
+    // The arm-2 tests of "a single mid-run failure forfeits the whole run".
+    // None of them touch a network: the state file, its header guard, the
+    // resume decision and the fallback rule are all measurable without one,
+    // which is the point of keeping them out of the pool body.
+
+    /// A scratch folder of this test's own, removed on the way out.
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("autoshop-eval-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch dir");
+        d
+    }
+
+    /// The published FIPS 180-4 vectors, including one that crosses the
+    /// padding boundary into a SECOND block — a one-block implementation gets
+    /// the first two right by accident.
+    ///
+    /// MUTATION THIS CATCHES: any mistyped round constant, a wrong rotation
+    /// amount, dropping the second block, or padding the length in
+    /// little-endian. Every one of those still returns 64 plausible hex
+    /// characters, and a hash that is merely *stable* would pass a
+    /// self-comparison test while agreeing with nothing on earth.
+    #[test]
+    fn sha256_matches_the_published_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // A one-byte edit changes it — the property the stale-sidecar guard
+        // actually rests on.
+        assert_ne!(sha256_hex(b"abc"), sha256_hex(b"abd"));
+    }
+
+    /// R28 follow-up, item 5: the report must not be able to tell which side a
+    /// photograph came from. Aggregates are sums over per-photo stats, so this
+    /// is a statement about the ROUND TRIP being exact, and it is asserted bit
+    /// for bit rather than approximately — the whole reason the fold runs in
+    /// index order is that the last ulp is allowed to matter here.
+    ///
+    /// MUTATION THIS CATCHES: putting `#[serde(default)]` on `PhotoStats` (the
+    /// last two assertions go green-then-red — a truncated row would silently
+    /// deserialise into an all-zero contribution that claims the photograph was
+    /// measured), or serialising the sums through `f32`.
+    #[test]
+    fn a_saved_row_folds_exactly_like_the_measurement_it_replaces() {
+        let mut fresh = PhotoStats::default();
+        fresh.acc.insert(
+            "contrast".into(),
+            Acc { sum_abs: 12.5, sum_signed: -12.5, n: 1, omit: 0 },
+        );
+        // Deliberately a value with no short decimal form.
+        fresh.acc.insert(
+            "exposure_ev".into(),
+            Acc { sum_abs: 0.1 + 0.2, sum_signed: -(0.1 + 0.2), n: 1, omit: 1 },
+        );
+        fresh.curve = Some((3.5, 12.25, 0.0, 33.0, 1.0));
+        fresh.rgb = [Some(1.5), None, Some(2.5)];
+        fresh.masks = Some((2, 1, 0));
+
+        let row = StateRow {
+            stem: "DSC08724".into(),
+            rel: "shoot/DSC08724.ARW".into(),
+            xmp_sha256: sha256_hex(b"<x/>"),
+            stats: fresh.clone(),
+        };
+        let line = serde_json::to_string(&row).expect("a row serialises");
+        assert!(!line.contains('\n'), "one photograph is one line: {line}");
+        let loaded: StateRow = serde_json::from_str(&line).expect("a row round-trips");
+
+        let fold = |s: &PhotoStats| {
+            let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
+            for (m, one) in &s.acc {
+                acc.entry(m.clone()).or_default().merge(one);
+            }
+            acc
+        };
+        let (a, b) = (fold(&fresh), fold(&loaded.stats));
+        assert_eq!(a.len(), b.len(), "the same controls");
+        for ((ka, va), (kb, vb)) in a.iter().zip(b.iter()) {
+            assert_eq!(ka, kb);
+            assert_eq!(va.sum_abs.to_bits(), vb.sum_abs.to_bits(), "{ka} mean|Δ|");
+            assert_eq!(va.sum_signed.to_bits(), vb.sum_signed.to_bits(), "{ka} bias");
+            assert_eq!((va.n, va.omit), (vb.n, vb.omit), "{ka} counts");
+        }
+        assert_eq!(fresh.curve, loaded.stats.curve);
+        assert_eq!(fresh.rgb, loaded.stats.rgb);
+        assert_eq!(fresh.masks, loaded.stats.masks);
+
+        // The crash this whole mechanism exists for leaves exactly ONE
+        // half-written line. It must not parse.
+        assert!(serde_json::from_str::<StateRow>(&line[..line.len() / 2]).is_err());
+        assert!(serde_json::from_str::<StateRow>("{}").is_err());
+    }
+
+    /// A photograph a valid row answers for is not measured — and "not
+    /// measured" is asserted by COUNTING, not by reading the code.
+    ///
+    /// MUTATION THIS CATCHES: make `resume_plan` always return `None` (or
+    /// `restore_or_measure` always call `measure`) and the run re-buys every
+    /// photograph a previous run already paid for — exactly the loss this
+    /// change exists to stop. Both go red here.
+    #[test]
+    fn a_photograph_a_saved_row_answers_for_is_not_measured_again() {
+        let dir = scratch("resume-skip");
+        for stem in ["a", "b"] {
+            std::fs::write(
+                dir.join(format!("{stem}.xmp")),
+                format!("<rdf:Description crs:Contrast2012=\"+{}\">", stem.len()),
+            )
+            .unwrap();
+        }
+        let raws = [dir.join("a.arw"), dir.join("b.arw")];
+        let work: Vec<&Path> = raws.iter().map(|p| p.as_path()).collect();
+        let mut stats = PhotoStats::default();
+        stats.acc.insert("contrast".into(), Acc { sum_abs: 7.0, sum_signed: 7.0, n: 1, omit: 0 });
+        let saved = StateRow {
+            stem: "a".into(),
+            rel: "a.arw".into(),
+            xmp_sha256: sha256_hex(&std::fs::read(dir.join("a.xmp")).unwrap()),
+            stats,
+        };
+
+        let (restored, stale) = resume_plan(&dir, &work, vec![saved]);
+        assert!(stale.is_empty(), "an untouched sidecar is not stale: {stale:?}");
+        assert!(restored[0].is_some(), "a's saved row must answer for a");
+        assert!(restored[1].is_none(), "b was never measured");
+
+        let calls = std::cell::Cell::new(0u32);
+        let mut block = String::new();
+        let out = restore_or_measure(false, &mut block, restored[0].is_some(), |_| {
+            calls.set(calls.get() + 1);
+            PhotoOutcome::Failed
+        });
+        assert!(matches!(out, PhotoOutcome::Restored), "a is restored, not measured");
+        assert_eq!(calls.get(), 0, "a restored photograph must cost NOTHING");
+        assert!(block.contains("from saved progress"), "and the transcript says so: {block}");
+
+        let out = restore_or_measure(false, &mut block, restored[1].is_some(), |_| {
+            calls.set(calls.get() + 1);
+            PhotoOutcome::Failed
+        });
+        assert!(matches!(out, PhotoOutcome::Failed), "b takes the measurement path");
+        assert_eq!(calls.get(), 1, "an unanswered photograph must be measured");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The photographer re-editing a photo invalidates the measurement OF that
+    /// photo: the saved row scored the AI against an edit that no longer
+    /// exists, so it is thrown away and the photograph is measured again — out
+    /// loud, by stem.
+    #[test]
+    fn an_edited_sidecar_invalidates_its_saved_row() {
+        let dir = scratch("resume-stale");
+        let xmp = dir.join("a.xmp");
+        std::fs::write(&xmp, "<rdf:Description crs:Contrast2012=\"+10\">").unwrap();
+        let raws = [dir.join("a.arw")];
+        let work: Vec<&Path> = raws.iter().map(|p| p.as_path()).collect();
+        let row = StateRow {
+            stem: "a".into(),
+            rel: "a.arw".into(),
+            xmp_sha256: sha256_hex(&std::fs::read(&xmp).unwrap()),
+            stats: PhotoStats::default(),
+        };
+
+        let (restored, stale) = resume_plan(&dir, &work, vec![row.clone()]);
+        assert!(restored[0].is_some() && stale.is_empty(), "untouched: honoured");
+
+        std::fs::write(&xmp, "<rdf:Description crs:Contrast2012=\"+40\">").unwrap();
+        let (restored, stale) = resume_plan(&dir, &work, vec![row.clone()]);
+        assert!(restored[0].is_none(), "a re-edited photograph must be measured again");
+        assert_eq!(stale, vec!["a".to_string()], "and the run must name which");
+
+        // A sidecar that is gone is equally not a match (the run then fails on
+        // it the way it always has — it must not be silently "restored").
+        std::fs::remove_file(&xmp).unwrap();
+        let (restored, _) = resume_plan(&dir, &work, vec![row]);
+        assert!(restored[0].is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A header describing a different build or a different model is a
+    /// REFUSAL, printed with both sides — one table measured by two different
+    /// things is not a measurement, and silently mixing them would be the
+    /// quietest possible way to publish a wrong baseline.
+    #[test]
+    fn saved_progress_from_another_build_or_model_is_refused() {
+        let dir = scratch("resume-header");
+        let path = dir.join("state.jsonl");
+        let want = StateHeader {
+            autoshop_version: "0.34.0".into(),
+            proposer_model: "gpt-image-2".into(),
+            analysis_model: "opus".into(),
+            limit: 147,
+            dir: "library".into(),
+            started: 0,
+        };
+        let write = |h: &StateHeader| {
+            let row = StateRow {
+                stem: "a".into(),
+                rel: "a.arw".into(),
+                xmp_sha256: sha256_hex(b"<x/>"),
+                stats: PhotoStats::default(),
+            };
+            let text = format!(
+                "{}\n{}\n",
+                serde_json::to_string(h).unwrap(),
+                serde_json::to_string(&row).unwrap()
+            );
+            std::fs::write(&path, text).unwrap();
+        };
+
+        write(&want);
+        assert_eq!(load_state(&path, &want).expect("same build loads").len(), 1);
+
+        let refusal = |other: &StateHeader, saved_value: &str| {
+            write(other);
+            let e = load_state(&path, &want).unwrap_err().to_string();
+            assert!(e.contains(saved_value), "the refusal must name the SAVED value: {e}");
+            assert!(e.contains("--fresh"), "…and how to get past it: {e}");
+            e
+        };
+        let mut other = want.clone();
+        other.autoshop_version = "0.33.0".into();
+        let e = refusal(&other, "0.33.0");
+        assert!(e.contains("0.34.0"), "…and this run's value beside it: {e}");
+        let mut other = want.clone();
+        other.proposer_model = "gpt-4o".into();
+        let e = refusal(&other, "gpt-4o");
+        assert!(e.contains("gpt-image-2"), "…and this run's proposer beside it: {e}");
+        let mut other = want.clone();
+        other.analysis_model = "sonnet".into();
+        let e = refusal(&other, "sonnet");
+        assert!(e.contains("opus"), "…and this run's verifier beside it: {e}");
+
+        // Not a header at all → still a refusal, never a silent empty resume.
+        std::fs::write(&path, "not json\n").unwrap();
+        assert!(load_state(&path, &want).is_err());
+        // No file → simply "nothing measured yet".
+        std::fs::remove_file(&path).unwrap();
+        assert!(load_state(&path, &want).expect("absent = empty").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE poisoned row. A photograph whose recipe came from the deterministic
+    /// baseline instead of the vision proposer completes the run — it is in the
+    /// table, visibly — but it is never saved, so a rerun measures it again
+    /// rather than folding the fallback into a baseline that claims to be the
+    /// model's.
+    ///
+    /// MUTATION THIS CATCHES: drop either key from `proposer_answered` (a
+    /// stream-error fallback, or a whole key-less run, becomes permanently
+    /// baked into the saved progress), or record the row before the check.
+    #[test]
+    fn a_fallback_photograph_is_never_saved_as_progress() {
+        use crate::rationale::{keys, Note};
+        let dir = scratch("resume-fallback");
+        let path = dir.join("state.jsonl");
+        let header = StateHeader {
+            autoshop_version: "0.34.0".into(),
+            proposer_model: "gpt-image-2".into(),
+            analysis_model: "opus".into(),
+            limit: 3,
+            dir: "library".into(),
+            started: 0,
+        };
+        let log = StateLog::open(&path, &header, false);
+        let row = |stem: &str| StateRow {
+            stem: stem.to_string(),
+            rel: format!("{stem}.arw"),
+            xmp_sha256: sha256_hex(stem.as_bytes()),
+            stats: PhotoStats::default(),
+        };
+
+        assert!(record_measured(&log, &[], &row("proposer_answered")));
+        // The field failure: the proposer WAS tried and the stream broke.
+        assert!(!record_measured(
+            &log,
+            &[Note::plain(keys::HEURISTIC_UNAVAILABLE)],
+            &row("stream_error")
+        ));
+        // …and a run with no proposer configured is not a measurement of one.
+        assert!(!record_measured(&log, &[Note::plain(keys::HEURISTIC_NO_KEY)], &row("no_key")));
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2, "header + exactly one row:\n{text}");
+        assert!(text.contains("proposer_answered"), "{text}");
+        assert!(!text.contains("stream_error"), "a fallback row leaked in:\n{text}");
+        assert!(!text.contains("no_key"), "a key-less row leaked in:\n{text}");
+
+        let rows = load_state(&path, &header).expect("reload");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stem, "proposer_answered");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The progress file lands in the per-user store and nowhere near the
+    /// photographs — the library is READ-ONLY by settled project law — and it
+    /// is keyed by the two things that decide the work list.
+    #[test]
+    fn the_default_progress_file_is_in_the_store_and_keyed_by_the_run() {
+        let lib = if cfg!(windows) { "D:/pics" } else { "/pics" };
+        let a = default_state_path(Path::new(lib), 147);
+        assert_ne!(a, default_state_path(Path::new(lib), 10), "--limit picks the work list");
+        let other = if cfg!(windows) { "D:/other" } else { "/other" };
+        assert_ne!(a, default_state_path(Path::new(other), 147), "another folder, another run");
+        assert!(a.starts_with(crate::store::store_root()), "{}", a.display());
+        assert!(!a.starts_with(lib), "never inside the library: {}", a.display());
+        assert_eq!(a.extension().and_then(|e| e.to_str()), Some("jsonl"));
+        if cfg!(windows) {
+            // The store's own case-fold rule: one folder is one run however it
+            // was typed.
+            assert_eq!(a, default_state_path(Path::new("d:/PICS"), 147));
+        }
     }
 
     #[test]

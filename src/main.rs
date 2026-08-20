@@ -187,6 +187,16 @@ enum Command {
         /// says so when it does.
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// Discard any saved progress for this folder and measure every photo
+        /// again. Without it, a rerun folds in the photographs an interrupted
+        /// run already measured and spends nothing on them.
+        #[arg(long)]
+        fresh: bool,
+        /// Where to keep this run's resumable progress. Default: a file named
+        /// from the folder + --limit under the app's per-user data directory
+        /// (never inside your photo library, which stays read-only).
+        #[arg(long)]
+        state: Option<PathBuf>,
     },
     /// Build the style index from your edited library (RAW+.xmp pairs) → the
     /// advisor then references your edits on similar shots. Run once / on update.
@@ -348,7 +358,9 @@ fn main() -> Result<()> {
         Command::Batch { dir, render, limit, include_baked, jobs } => {
             batch_cmd(&dir, render, limit, include_baked, jobs)
         }
-        Command::Eval { dir, limit, jobs } => eval::run(&dir, limit, jobs),
+        Command::Eval { dir, limit, jobs, fresh, state } => {
+            eval::run(&dir, limit, jobs, fresh, state.as_deref())
+        }
         Command::StyleIndex { dir } => style_index_cmd(&dir),
         Command::Reimagine { raw, prompt, fidelity, quality, out } => {
             let cfg = Config::load();

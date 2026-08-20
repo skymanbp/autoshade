@@ -423,6 +423,36 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R29 Batch-1a 已落地（2026-08-20，未发版）：「单点故障废整跑」类根因两臂合修** ——
+  用户令（先修传输重试→升级为断点续传必做）。①**传输重试**：唯一咽喉点
+  `advisor::post_ai_json_with`（六个 OpenAI 兼容调用面全经它；claude/generative
+  是别的传输不在内），仅对上游自报「响应死了」的 `response.failed|incomplete`
+  重发**一次**（2s 退避；`TRANSIENT_STREAM_EVENTS` 单源常量＝报告臂与分类器
+  共读防漂移）；4xx/参数拒/流 error 事件/传输中断/无终局流一律不重（前两类
+  逐字节重发只会原价复现，后两类计费不明触「2xx 后不重发」铁律）；重试必
+  披露且写明**第二次计费**。②**eval 断点续传**：状态文件默认开
+  （`<store>/eval-state/<sha256(dir|limit)[..16]>.jsonl`，绝不进照片库；
+  `--fresh`/`--state` 两旗），逐照落 `PhotoStats` 行（同一 `Acc::merge` 同序
+  折叠＝续跑算术与不间断跑逐位相同，bit 级测试钉死）；行键=**rel 路径**
+  （find_raws 递归、双影集同名 stem 会顶错行）+ **sidecar SHA-256**（改过的
+  xmp 自动重测具名播报）；表头钉 版本+双模型，任一不符**大声拒绝**双侧打印；
+  **回退照（HEURISTIC_UNAVAILABLE/NO_KEY 注记）完成但不落行**——两个
+  `det_notes.clear()` 位点（pipeline.rs:503 修订采纳臂/:782 视觉评审采纳臂）
+  在 eval+回退路径不可达已亲核；报告头两行披露来源构成+状态文件路径；
+  SHA-256 树内 55 行（不为漂移检查引 crypto crate 的供应链决定）FIPS 三向量
+  钉死；截断行无 `serde(default)` 必拒析。门（主审亲跑）：clippy0×2、
+  **738 lib（9i）/11 CLI/131 GUI/2+2** 双配置（727→738＝臂1+4、臂2+7 集合
+  对账）；变异主审亲手：`proposer_answered` 恒真→毒行测试红（eval.rs:2316）
+  →字节还原→绿。**登记两项**：(a) `assemble_sse` 的 error 键预检先于类型
+  匹配（advisor/mod.rs:1221-1226）——带顶层 error 键的 `response.failed`
+  会绕过重试；实测两次废稿消息均以类型名开头＝中转真实事件不带顶层 error
+  键，潜伏非现行；(b) CI test 作业首跑双 OS 红＝四测把 Windows 平台语义当
+  宇宙不变量（NTFS 折叠/卷大小写/本机位哈希 golden/夹具路径），同根一批修
+  排在本批后，README CI 宣称句在其转绿前保持「仅编译」不动。M-C attempt-1/2
+  废稿转录：`~/.claude/plans/r28-materials/mc-eval-147-v0340-attempt{1,2}-aborted.txt`；
+  attempt-3 用本批 dev build（渲染路径零文件改动＝与发布 exe 渲染同义，
+  diff 可证）跑。README 的 eval `--fresh`/`--state` 两旗文档随 v0.35.0 发版补。
+
 - **R29 已锁定（2026-08-20，用户三拍板）** —— 计划书
   `~/.claude/plans/r29-plan-proposal.md`（12 条载荷引用经独立 verifier 全 intact）。
   ①范围＝**全池（选项 C）**：B1 R28 遗留收口（诊断 sink + XMP Scope 非 crs 余项）→
