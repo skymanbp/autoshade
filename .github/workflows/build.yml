@@ -1,8 +1,11 @@
-# Cross-platform build verification (R28 Batch-1, user-ruled 2026-08-20).
-# Scope is honest and narrow: proves `cargo build` compiles on Linux/macOS in
-# both feature configurations. It does NOT run tests (several create files and
-# expect local fixtures) and does NOT claim runtime behaviour — README quotes
-# exactly what this verifies, nothing more.
+# Cross-platform build + test verification (R28 Batch-1, user-ruled
+# 2026-08-20; test job added by user ruling 2026-08-20 in place of renting
+# cloud compute). `build` proves both feature configurations compile on
+# Linux/macOS; `test` runs the default-gated suite there — fixture-dependent
+# suites are env-gated and skip themselves off this machine, which is what
+# made this job possible (the earlier "does NOT run tests" scope note
+# predates that gating). README's CI paragraph is updated only after a run
+# of each job has actually been observed green — never ahead of evidence.
 name: build
 
 on:
@@ -28,3 +31,16 @@ jobs:
         run: cargo build --release --locked
       - name: cargo build (gui feature)
         run: cargo build --release --locked --bins --features gui
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test (default features)
+        run: cargo test --locked
+      - name: cargo test (gui feature)
+        run: cargo test --locked --features gui
