@@ -423,6 +423,31 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R29 Batch-2 已落地（2026-08-20，未发版，`318ddfc`）：export-at-size＝CLI 旗
+  `--long-edge`（用户拍板：旗非 recipe 字段，零 schema）** —— 引擎的
+  `ExportOpts.long_edge` 数轮以来只有桌面导出面板在用、CLI 四渲染点全传
+  None（README 两处自陈）。面形状：`apply`/`auto`/`batch` 落旗（batch 带
+  `requires="render"`＝无渲染时尺寸是笔误、解析器层拒收）；batch 逐照生效
+  （同一 ExportOpts 按各帧自身长边封顶）；`0`/缺省＝全分辨率，在 CLI 层单
+  助手 `export_opts` 折成 None 与 GUI 同义（gui/export.rs:445 对齐）；
+  `denoise` 具名排除双理由（输出是母版会被后续显影读回+烘焙臂不走
+  render_to_file）；auto 横幅不再无条件宣称 full-resolution。滤镜=Lanczos3
+  ＝沿用既有导出路径（render.rs:1564），serve Triangle vs decode Lanczos3
+  的先在分裂具名不加第三种；永不放大（:1561）端到端验证。验收测试三件：
+  export-at-size 精确等于全渲染的降采样（缩放是最后像素级）＋显影半径是
+  帧的分数非像素数（R25 B2 归一化承诺首次钉死）＋**执行级 wire 测试**
+  （真跑 apply_cmd 读盘上尺寸——先用变异证明纯 parse 测试整套电池拦不住
+  掉线后补）。README：展示脚注带实测表（--long-edge 2048→q95 均差
+  1.82/255 vs 旧「全渲染再重编码」路 3.11/255＝代价恰是多一次 JPEG 编码，
+  非中间件块噪声——重采样把它平均到 0.22/255；无损中间件下两路逐位相同）
+  +命令速查+新段落+Honest scope 改写（JPEG 质量/输出锐化/8-bit/P3/AdobeRGB
+  仍 GUI-only 逐项列明）。门（主审亲跑）：clippy0×2、**749(9i)/14/131/2+2
+  双配置**（747/11→+2 渲染验收+3 CLI 集差）、check_docs 0 FAIL；变异=代理
+  5 组+主审亲手（删 requires="render"→拒收断言红）全字节还原。**登记（代理
+  如实自报）**：auto/batch --render 的接线无测试执行（计费门挡，parse+共用
+  助手+读码证明；apply 端到端已证）；auto 横幅改句无测；展示 JPEG 未用新旗
+  重出（脚注已改为量化差距而非宣称出处）。
+
 - **R29 Batch-1 已落地（2026-08-20，未发版，`ff64f9d`）：诊断 sink（F6 最深根）
   + XMP 帧作用域类型化 —— R28 Batch-5 两条自留余项一批清（5c 留 sink、5d 留
   非 crs 命名空间＝锁定计划 B1「同一次决策的同类欠账」）**。①**R29-1 诊断 sink**：
