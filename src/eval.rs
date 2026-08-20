@@ -1116,6 +1116,15 @@ pub fn run(
                         ..Default::default()
                     },
                     false,
+                    // The DEFAULT channel, deliberately (R29-1). `batch`
+                    // collects its workers' diagnostics and renders them into
+                    // the photo's block; eval does not, because the same
+                    // disclosures already ride the typed `rationale::Note`
+                    // channel it renders below by construction, and routing
+                    // both would print each fallback twice in the measurement
+                    // transcript. What eval loses is the ORDER of the stderr
+                    // copy, which is where it was before this batch.
+                    crate::diag::stderr(),
                 ) {
                 Ok(v) => v,
                 Err(e) => {

@@ -640,7 +640,7 @@ fn analyze_cmd(
     // (batch passes false — spend never multiplies silently).
     let req = analyze_request(style, strength, deep, &cfg);
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true)?;
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshop::diag::stderr())?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
@@ -676,7 +676,7 @@ fn analyze_cmd(
     {
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
-    let recipe_path = write_recipe(raw, &recipe, out)?;
+    let recipe_path = write_recipe(raw, &recipe, out, autoshop::diag::stderr())?;
     println!("\nrecipe -> {}", recipe_path.display());
     // XMP only for a RAW; a baked source (PNG/TIFF) gets the recipe JSON only.
     if decode::is_raw(raw) {
@@ -700,10 +700,10 @@ fn analyze_cmd(
                     recipe_path.display()
                 ))
             } else {
-                pipeline::write_xmp_at(side, &recipe, Some(raw))
+                pipeline::write_xmp_at(side, &recipe, &autoshop::diag::photo(raw))
             }
         } else {
-            write_xmp(raw, &recipe)
+            write_xmp(raw, &recipe, autoshop::diag::stderr())
         };
         match projected {
             // The merge note AND the mask-projection loss line (if any)
@@ -831,7 +831,7 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path) -> Result<()> {
         println!("ai mask : {line}");
     }
     println!("rendering {} with {} ...", raw.display(), recipe_path.display());
-    let (w, h) = render::render_to_file(&src, &recipe, out, None, None)?;
+    let (w, h) = render::render_to_file(&src, &recipe, out, None, None, autoshop::diag::stderr())?;
     println!("render -> {} ({} x {})", out.display(), w, h);
     Ok(())
 }
@@ -867,7 +867,7 @@ fn auto_cmd(
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true)?;
+        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshop::diag::stderr())?;
     let accepted = verdict.decision == autoshop::advisor::Decision::Accept;
     // Opt-in AI denoise runs inside the render, before tone/sharpen.
     let dn = denoise
@@ -921,11 +921,12 @@ fn auto_cmd(
                         "refusing to overwrite the saved develop: backing it up failed ({e})"
                     );
                 }
-                write_recipe(raw, &recipe, None)?;
+                write_recipe(raw, &recipe, None, autoshop::diag::stderr())?;
             }
             let (src, relook) = autoshop::store::render_source_checked(raw, &mut render_recipe)
                 .map_err(|m| anyhow::anyhow!(m))?;
-            let xmp_result = (accepted && decode::is_raw(raw)).then(|| write_xmp(raw, &recipe));
+            let xmp_result =
+                (accepted && decode::is_raw(raw)).then(|| write_xmp(raw, &recipe, autoshop::diag::stderr()));
             Ok((src, relook, xmp_result))
         },
     )?;
@@ -947,7 +948,7 @@ fn auto_cmd(
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }
-    let (w, h) = render::render_to_file(&src, &render_recipe, &out, dn.as_ref(), None)?;
+    let (w, h) = render::render_to_file(&src, &render_recipe, &out, dn.as_ref(), None, autoshop::diag::stderr())?;
     println!("render -> {} ({} x {})", out.display(), w, h);
     // XMP only for a RAW (Lightroom reads it beside the RAW); a baked source
     // (PNG/TIFF) gets the recipe JSON only. A projection failure is a WARNING:
@@ -990,7 +991,8 @@ fn denoise_cmd(
     let opts = denoise::DenoiseOpts::from_config(&cfg, model, strength.unwrap_or(1.0));
     if decode::is_raw(input) {
         println!("denoising RAW {} (neutral develop) ...", input.display());
-        let (w, h) = render::render_to_file(input, &EditRecipe::default(), &out, Some(&opts), None)?;
+        let (w, h) =
+            render::render_to_file(input, &EditRecipe::default(), &out, Some(&opts), None, autoshop::diag::stderr())?;
         println!("denoised -> {} ({} x {})", out.display(), w, h);
     } else {
         println!("denoising image {} ...", input.display());
@@ -1247,7 +1249,7 @@ fn match_cmd(
         autoshop::store::commit_develop(
             raw,
             autoshop::store::DevelopCommit {
-                recipe: Some(pipeline::recipe_store_bytes(raw, &rep.recipe)?),
+                recipe: Some(pipeline::recipe_store_bytes(raw, &rep.recipe, autoshop::diag::stderr())?),
                 pixels: autoshop::store::CommitMember::Clear,
                 // R24-4: `match` publishes a REVERSE-FIT into the active
                 // slot, so a strip record left saying 「original」 would
@@ -1270,7 +1272,7 @@ fn match_cmd(
         commit_canonical()?;
         canonical.clone()
     } else {
-        write_recipe(raw, &rep.recipe, Some(out))?
+        write_recipe(raw, &rep.recipe, Some(out), autoshop::diag::stderr())?
     };
     println!("recipe -> {}", recipe_path.display());
     // ALSO write the canonical sidecar. The store's recipe.json is the ONLY
@@ -1298,7 +1300,7 @@ fn match_cmd(
     }
     if decode::is_raw(raw) {
         // Warning, not failure: the recipe above already committed.
-        match write_xmp(raw, &rep.recipe) {
+        match write_xmp(raw, &rep.recipe, autoshop::diag::stderr()) {
             // Notes + mask-loss line: stderr, from write_xmp_doc (as above).
             Ok((xmp_path, _, _)) => {
                 let s = stem(raw);
@@ -1318,7 +1320,7 @@ fn match_cmd(
         pipeline::guard_readonly(&img_out, raw)?;
         ensure_parent(&img_out)?;
         println!("rendering the fitted recipe at full resolution …");
-        let (w, h) = render::render_to_file(raw, &rep.recipe, &img_out, None, None)?;
+        let (w, h) = render::render_to_file(raw, &rep.recipe, &img_out, None, None, autoshop::diag::stderr())?;
         println!("render -> {} ({w} x {h})", img_out.display());
     }
     if style_prompt {
@@ -1463,22 +1465,28 @@ fn batch_cmd(
     // sequencer make the parallel transcript byte-identical in order to a
     // serial one.
     //
-    // STDERR is NOT covered, and this comment claimed it was until R28 2e
+    // STDERR was NOT covered, and this comment claimed it was until R28 2e
     // (adjudication F6). `verbose` gates the progress chatter, not the
     // warnings: the proposer fallback, the clamp disclosure, the XMP merge and
     // mask-loss notes, the "XMP failed" line in `process_one` below and the
-    // render's own ICC / inert-raster warnings are all ungated `eprintln!`s
-    // that land in COMPLETION order.
+    // render's own ICC / inert-raster warnings were all ungated `eprintln!`s
+    // landing in COMPLETION order.
     //
-    // R28 Batch-5 5c stamped every one of them that has a photograph in scope
-    // with its stem (`pipeline::attribution`), so a reordered line can still be
-    // attributed, and made this closure render `produce_recipe`'s typed note
-    // channel into the photo's own block the way `eval` always did. What is
-    // NOT fixed, and stays registered: there is still no caller-supplied
-    // diagnostics sink (adjudication F6's deepest root), so these lines cannot
-    // be routed, suppressed or ordered by the caller — and the pure-pixel
-    // preview arm (`render::best_effort_mask_raster_snapshot`) has no photo to
-    // stamp with at all.
+    // R28 Batch-5 5c stamped every one of them that had a photograph in scope
+    // with its stem, so a reordered line could at least be attributed, and made
+    // this closure render `produce_recipe`'s typed note channel into the photo's
+    // own block the way `eval` always did. It registered what a prefix could
+    // not do — route, suppress or ORDER — as still open.
+    //
+    // R29-1 closes it. Each worker below hands `process_one` a
+    // `diag::Collector` of its own and drains it into THIS photo's block, so
+    // the develop chain's disclosures are released by the sequencer in INDEX
+    // order with the rest of the photo's transcript. Two consequences worth
+    // stating plainly: those lines now appear on STDOUT inside the block rather
+    // than on stderr, and a photo's warnings wait for the block that carries
+    // them (a slow photo 1 holds 2..k, exactly as its `[i/n]` line already
+    // did). The pure-pixel preview arm is typed rather than un-stamped —
+    // `diag::Subject::PixelOnly` — and `batch` never reaches it anyway.
     let work: Vec<&Path> = pending.iter().take(n).map(|p| p.as_path()).collect();
     // Deliverables are stem-keyed and one library can hold two DSC00001.ARW
     // (counter rollover — four review units reported the silent overwrite).
@@ -1531,7 +1539,12 @@ fn batch_cmd(
     let results = autoshop::jobs::for_each_indexed(plan.jobs, n, |i, block| {
         use std::fmt::Write;
         let raw = work[i];
-        let res = process_one(raw, &cfg, outs[i].as_deref());
+        // THIS photo's diagnostics channel (R29-1). One collector per worker is
+        // what makes the lines separable at all: a shared sink would hand back
+        // three photos' warnings in completion order again, only inside a
+        // Vec instead of on a stream.
+        let diags = autoshop::diag::Collector::new();
+        let res = process_one(raw, &cfg, outs[i].as_deref(), &diags);
         let outcome = match &res {
             Ok((v, _)) if v.decision == autoshop::advisor::Decision::Accept => {
                 let _ = writeln!(block, "[{}/{n}] {} ... {:?}", i + 1, stem(raw), v.decision);
@@ -1569,6 +1582,12 @@ fn batch_cmd(
                 let _ = writeln!(block, "       {text}");
             }
         }
+        // …and the DIAGNOSTICS channel, drained into the same block. Both
+        // arms are rendered — they are different statements of the same
+        // events: a note is the rationale fragment the recipe carries, a
+        // diagnostic is the raw failure that produced it, and dropping either
+        // would leave a surface with less than it has today.
+        autoshop::diag::write_into_block(block, "       ", &diags.take());
         outcome
     });
     let ok = results.iter().filter(|r| **r == Some(Outcome::Saved)).count();
@@ -1621,17 +1640,31 @@ fn batch_cmd(
 /// where a proposer fallback is most likely to happen (an unattended
 /// library-sized run) was also the one that threw away the attributed copy of
 /// the fact, leaving only the reordered stderr line.
+///
+/// `sink` is the caller's diagnostics channel for everything this photo's pass
+/// raises (R29-1) — the develop chain's, the render's, and the one line this
+/// function owns. `batch` passes a per-worker collector; the SUBJECT is bound
+/// inside each entry point from `raw`, so nothing here can mis-attribute.
 fn process_one(
     raw: &Path,
     cfg: &Config,
     render_to: Option<&Path>,
+    sink: &dyn autoshop::diag::Sink,
 ) -> Result<(Verdict, Vec<autoshop::rationale::Note>)> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
     // judge = false: a library-sized batch must never silently multiply the
     // paid vision calls — the closed loop is for the interactive surfaces
     // (review R20-M2).
-    let (recipe, verdict, notes) =
-        produce_recipe(raw, cfg, false, None, None, GradeRequest::with_style(cfg.style_strength), false)?;
+    let (recipe, verdict, notes) = produce_recipe(
+        raw,
+        cfg,
+        false,
+        None,
+        None,
+        GradeRequest::with_style(cfg.style_strength),
+        false,
+        sink,
+    )?;
     // A non-Accept verdict may not auto-save (user decision). In a headless
     // batch that means NO sidecars and NO deliverable: the photo stays
     // pending, the caller's summary names it, and a re-run re-attempts it —
@@ -1661,19 +1694,22 @@ fn process_one(
         if let Err(e) = autoshop::store::backup_saved_develop(raw, Some(recipe)) {
             anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
         }
-        write_recipe(raw, recipe, None)?;
+        write_recipe(raw, recipe, None, sink)?;
         // The recipe write ALONE decides the saved state (cross-surface rule):
         // failing the photo here made the batch report it failed while the
         // resume filter — which sees recipe.json — permanently skipped it.
-        if let Err(e) = write_xmp(raw, recipe) {
-            // The one ungated stderr line in the batch worker itself, and the
+        if let Err(e) = write_xmp(raw, recipe, sink) {
+            // The one disclosure the batch worker itself owns, and the
             // "main.rs:1586" the `jobs` disclosure and the comment above name
-            // (both re-located at R28 HEAD). Stamped: this fires INSIDE the
-            // pool, after the develop lock, so at `--jobs 3` it lands between
-            // two other photos' output with nothing to tie it to its own.
-            eprintln!(
-                "  ⚠ {}recipe saved, but the Lightroom XMP failed: {e}",
-                pipeline::attribution(Some(raw))
+            // (both re-located at R28 HEAD). It fires INSIDE the pool, after
+            // the develop lock, so at `--jobs 3` it used to land between two
+            // other photos' output with nothing to tie it to its own; it now
+            // goes to the caller's channel, which puts it in this photo's
+            // block. `WarnNested` keeps the "  ⚠ " the CLI's XMP-failure
+            // family has always worn.
+            autoshop::diag::Diag::about(sink, raw).emit(
+                autoshop::diag::Mark::WarnNested,
+                format!("recipe saved, but the Lightroom XMP failed: {e}"),
             );
         }
         Ok(())
@@ -1685,7 +1721,7 @@ fn process_one(
         // caller so same-stem photos in one batch each keep a deliverable
         // and worker scheduling cannot reorder the names.
         ensure_parent(out)?;
-        if let Err(e) = render::render_to_file(raw, &recipe, out, None, None) {
+        if let Err(e) = render::render_to_file(raw, &recipe, out, None, None, sink) {
             // A render failure must not discard the PAID, verified analysis:
             // with sidecars-last ordering the photo stayed pending and a
             // re-run RE-BILLED it. Persist the develop first — it is

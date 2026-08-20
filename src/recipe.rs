@@ -1726,18 +1726,30 @@ impl ValidatedRecipe {
         ValidatedRecipe { recipe, dropped }
     }
 
-    /// Say what sanitisation cost, on stderr — entry points call this once;
-    /// silence is reserved for the recipe that lost nothing.
-    pub fn disclose(&self) {
+    /// Say what sanitisation cost, on the caller's channel — entry points call
+    /// this once; silence is reserved for the recipe that lost nothing.
+    ///
+    /// **R29-1 found this one.** It is raised by all four render entry points,
+    /// so a `batch --jobs 3` worker reaches it per photo — and the R28 Batch-5
+    /// 5c attribution sweep missed it entirely, because that sweep re-walked
+    /// `pipeline.rs`, `render.rs` and `main.rs` and this line lives here. It
+    /// therefore printed with no photograph on it at all while its twin in
+    /// `pipeline::recipe_bytes_for` carried a stem. Taking the channel fixes
+    /// both halves at once: the subject rides with it, and the caller decides
+    /// where it lands.
+    pub fn disclose(&self, diag: &crate::diag::Diag<'_>) {
         let d = self.dropped;
         if !d.is_empty() {
-            eprintln!(
-                "warning: recipe limits discarded {} mask(s) and {} mask component(s), \
-                 truncated {} curve point(s) and {} string byte(s) before rendering",
-                d.dropped_masks,
-                d.dropped_components,
-                d.truncated_curve_points,
-                d.truncated_string_bytes
+            diag.emit(
+                crate::diag::Mark::WarningWord,
+                format!(
+                    "recipe limits discarded {} mask(s) and {} mask component(s), \
+                     truncated {} curve point(s) and {} string byte(s) before rendering",
+                    d.dropped_masks,
+                    d.dropped_components,
+                    d.truncated_curve_points,
+                    d.truncated_string_bytes
+                ),
             );
         }
     }

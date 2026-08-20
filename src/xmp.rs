@@ -256,7 +256,7 @@ impl FrameAspect {
     /// The frame a document DECLARES, from `tiff:ImageWidth` /
     /// `tiff:ImageLength` / `tiff:Orientation`.
     ///
-    /// Read off the whole document, not the crs scope: these are `tiff:`
+    /// Read off a scope of their OWN, not the crs one: these are `tiff:`
     /// properties, and while they sit on the same `rdf:Description` as the crs
     /// settings in every Lightroom sidecar seen here, nothing makes that
     /// structural — an XMP packet may carry one Description per namespace.
@@ -266,12 +266,14 @@ impl FrameAspect {
     /// searches over the whole document, so a width from one element could be
     /// paired with a length from another and an orientation from a third — a
     /// frame no element in the file actually declares, handed to the mask and
-    /// crop decoders as the coordinate system to fold pixel geometry with. The
-    /// scan below finds the first `rdf:Description` that declares BOTH
-    /// dimensions and takes all three from it; a document with no
-    /// `rdf:Description` at all (a bare fragment) falls back to the whole text,
-    /// where "one element" is vacuously true and the old reading is the only
-    /// possible one.
+    /// crop decoders as the coordinate system to fold pixel geometry with.
+    /// [`FrameScope::resolve`] picks the first `rdf:Description` that declares
+    /// BOTH dimensions and all three are read from THAT scope — a scope that is
+    /// a TYPE since R29-2, so a caller cannot skip the narrowing by forgetting
+    /// it instead of by meaning to. Its two whole-document fallbacks (a
+    /// document with no `rdf:Description` at all; one whose Descriptions never
+    /// carry both dimensions together) are intended behaviour and are spelled
+    /// out there.
     ///
     /// The declared pair is taken VERBATIM as the source frame, including for
     /// the transposing orientations — `F3-REPORT.md`'s public census is 72/72
@@ -286,11 +288,11 @@ impl FrameAspect {
     /// A missing `tiff:Orientation` reads as `Normal`, which is the same thing
     /// EXIF itself means by an absent tag.
     fn from_xmp(doc: &str) -> Option<Self> {
-        let span = frame_description(doc);
+        let span = FrameScope::resolve(doc);
         FrameAspect::from_size_turned(
-            declared_number(span, "tiff:ImageWidth")?,
-            declared_number(span, "tiff:ImageLength")?,
-            declared_number(span, "tiff:Orientation")
+            span.declared_number("tiff:ImageWidth")?,
+            span.declared_number("tiff:ImageLength")?,
+            span.declared_number("tiff:Orientation")
                 .filter(|v| (1.0..=8.0).contains(v))
                 .map_or(rawler::Orientation::Normal, |v| {
                     rawler::Orientation::from_u16(v as u16)
@@ -299,72 +301,113 @@ impl FrameAspect {
     }
 }
 
-/// The ONE `rdf:Description` a document's `tiff:` frame is read from — the
-/// first one that declares both `tiff:ImageWidth` and `tiff:ImageLength`
-/// (R28 Batch-5 5d, F4 symptom D).
+/// **The scope a `tiff:` frame read is allowed to see — as a TYPE** (R29-2,
+/// finishing R28 Batch-5 5d on the namespaces 5d did not reach).
 ///
-/// The span returned is that element from its `<` through its close tag, so
-/// BOTH XMP spellings still work: the attribute form Lightroom writes lives on
-/// the start tag, and the property-element form lives in the body.
+/// 5d put the `crs:` side's scope in the signature ([`Tag`] / [`Scope`]) and
+/// left the `tiff:` frame family on the old shape: a free
+/// `declared_number(doc: &str, name: &str)` whose `doc` meant "the ONE
+/// Description this frame is read from" at one call site and "the whole
+/// document" at the next, kept straight only by the CONVENTION that every
+/// caller ran the narrowing scan (then `frame_description`) first. That is
+/// exactly the per-call-site convention 5d removed next door — and the property
+/// it guards is the coordinate system every mask and crop decode folds pixel
+/// geometry with ([`lr_to_engine`]).
 ///
-/// Falls back to the whole document when there is no `rdf:Description` in it at
-/// all — a fragment cannot mix two elements' declarations, so the narrowing has
-/// nothing to protect there and refusing would break every reader that hands
-/// this function a snippet. A document that HAS Descriptions but no single one
-/// carrying both dimensions gets the whole document too: that is the shape the
-/// old code read, the aspect is disclosed as degraded downstream either way,
-/// and inventing a refusal here would drop the frame for files nobody has
-/// measured.
-fn frame_description(doc: &str) -> &str {
-    let mut from = 0;
-    while let Some((start, gt, self_closing)) = next_xml_tag(doc, from) {
-        from = gt + 1;
-        let tag = &doc[start..=gt];
-        if tag.starts_with("</") || tag_name(tag) != "rdf:Description" {
-            continue;
-        }
-        let end = if self_closing {
-            gt + 1
-        } else {
-            match find_matching_close(doc, gt + 1) {
-                // `find_matching_close` returns the `<` of the close tag; the
-                // close itself carries no attributes, so the body is enough.
-                Some(close) => close,
-                None => continue,
-            }
-        };
-        let span = &doc[start..end];
-        if declared_number(span, "tiff:ImageWidth").is_some()
-            && declared_number(span, "tiff:ImageLength").is_some()
-        {
-            return span;
-        }
-    }
-    doc
-}
+/// So the scope is a type here too. A `FrameScope` is produced by
+/// [`resolve`](Self::resolve) and nothing else, so "which span is this?" is
+/// answered once, by the resolver, instead of separately in each caller's head.
+///
+/// A dedicated newtype rather than a second meaning bolted onto 5d's [`Scope`]:
+/// `Scope`'s reads are `crs:`-anchored ([`CrsSource`]) and its `new` takes any
+/// text, so teaching it `tiff:` would hand all 107 existing `crs:` call sites
+/// the power to ask a frame question of an unresolved document — the same
+/// convention back again, one type wider.
+#[derive(Clone, Copy)]
+struct FrameScope<'a>(&'a str);
 
-/// The number a document declares for `name`, in either XMP spelling —
-/// `name="9504"` (the attribute form Lightroom writes) or
-/// `<name>9504</name>` (the element form the same property is legal in).
-///
-/// Scanned with [`find_outside_constructs`], so a comment quoting the property
-/// cannot answer for the document — the rule this module already enforces for
-/// the merge splice. A hit whose next non-space character is neither `=` nor
-/// `>` (i.e. the needle was the prefix of a LONGER name) gives up rather than
-/// searching on: giving up costs the caller its frame, which is a disclosed,
-/// degraded path, where searching on could answer from an unrelated property.
-fn declared_number(doc: &str, name: &str) -> Option<f64> {
-    let at = find_outside_constructs(doc, name)?;
-    let rest = doc[at + name.len()..].trim_start();
-    let text = match rest.strip_prefix('=') {
-        Some(v) => {
-            let v = v.trim_start();
-            let quote = v.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-            v[quote.len_utf8()..].split(quote).next()?
+impl<'a> FrameScope<'a> {
+    /// The ONE `rdf:Description` a document's `tiff:` frame is read from — the
+    /// first one that declares both `tiff:ImageWidth` and `tiff:ImageLength`
+    /// (R28 Batch-5 5d, F4 symptom D).
+    ///
+    /// The span runs from that element's `<` to the end of its BODY (the close
+    /// tag carries no attributes, so it is not needed), which is what keeps
+    /// BOTH XMP spellings working: the attribute form Lightroom writes lives on
+    /// the start tag, and the property-element form lives in the body.
+    ///
+    /// **Two fallbacks to the WHOLE document, both intended, both pinned by the
+    /// R29-2 fixtures at the bottom of this file:**
+    ///
+    /// * there is no `rdf:Description` in the text at all. A bare fragment
+    ///   cannot mix two elements' declarations, so the narrowing has nothing to
+    ///   protect there, and refusing would break every reader that hands this a
+    ///   snippet — fixtures in this module do exactly that.
+    /// * Descriptions are present, but no single one carries both dimensions.
+    ///   That is the shape the pre-5d code read; the aspect is disclosed as
+    ///   degraded downstream either way, and inventing a refusal here would drop
+    ///   the frame for files nobody has measured. The residue is real and named:
+    ///   in THAT document the width and the length may still come from different
+    ///   elements — symptom D is removed only for documents where some element
+    ///   declares both.
+    fn resolve(doc: &'a str) -> Self {
+        let mut from = 0;
+        while let Some((start, gt, self_closing)) = next_xml_tag(doc, from) {
+            from = gt + 1;
+            let tag = &doc[start..=gt];
+            if tag.starts_with("</") || tag_name(tag) != "rdf:Description" {
+                continue;
+            }
+            let end = if self_closing {
+                gt + 1
+            } else {
+                match find_matching_close(doc, gt + 1) {
+                    // `find_matching_close` returns the `<` of the close tag; the
+                    // close itself carries no attributes, so the body is enough.
+                    Some(close) => close,
+                    None => continue,
+                }
+            };
+            let span = FrameScope(&doc[start..end]);
+            if span.declared_number("tiff:ImageWidth").is_some()
+                && span.declared_number("tiff:ImageLength").is_some()
+            {
+                return span;
+            }
         }
-        None => rest.strip_prefix('>')?.split('<').next()?,
-    };
-    xml_unescape(text).trim().trim_start_matches('+').parse::<f64>().ok().filter(|v| v.is_finite())
+        FrameScope(doc)
+    }
+
+    /// The number THIS scope declares for `name`, in either XMP spelling —
+    /// `name="9504"` (the attribute form Lightroom writes) or
+    /// `<name>9504</name>` (the element form the same property is legal in).
+    ///
+    /// Scanned with [`find_outside_constructs`], so a comment quoting the
+    /// property cannot answer for the scope — the rule this module already
+    /// enforces for the merge splice. A hit whose next non-space character is
+    /// neither `=` nor `>` (i.e. the needle was the prefix of a LONGER name)
+    /// gives up rather than searching on: giving up costs the caller its frame,
+    /// which is a disclosed, degraded path, where searching on could answer
+    /// from an unrelated property.
+    fn declared_number(self, name: &str) -> Option<f64> {
+        let doc = self.0;
+        let at = find_outside_constructs(doc, name)?;
+        let rest = doc[at + name.len()..].trim_start();
+        let text = match rest.strip_prefix('=') {
+            Some(v) => {
+                let v = v.trim_start();
+                let quote = v.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+                v[quote.len_utf8()..].split(quote).next()?
+            }
+            None => rest.strip_prefix('>')?.split('<').next()?,
+        };
+        xml_unescape(text)
+            .trim()
+            .trim_start_matches('+')
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+    }
 }
 
 /// The five numbers Lightroom stores for one `Mask/CircularGradient`, in its
@@ -9985,9 +10028,12 @@ mod tests {
             }
             // …and the frame this writer declares is the frame the file
             // declared (A8), which is what makes the round trip re-readable.
+            // Both sides are read through the RESOLVED frame scope (R29-2), so
+            // this compares what the reader will actually see, not a
+            // first-occurrence sweep of two whole documents.
             for key in ["tiff:ImageWidth", "tiff:ImageLength", "tiff:Orientation"] {
-                let want = declared_number(&text, key);
-                let got = declared_number(&out, key);
+                let want = FrameScope::resolve(&text).declared_number(key);
+                let got = FrameScope::resolve(&out).declared_number(key);
                 assert_eq!(want, got, "{}: {key} {got:?} vs {want:?}", path.display());
             }
             checked += 1;
@@ -14174,8 +14220,9 @@ mod tests {
     /// a frame no element declares — and that frame is the coordinate system
     /// every mask and crop decode folds pixel geometry with (`lr_to_engine`).
     ///
-    /// MUTATION: point the three reads back at `doc` and the frame becomes
-    /// 6000 × 6336, which this file never states.
+    /// MUTATION: make [`FrameScope::resolve`] return `FrameScope(doc)`
+    /// unconditionally — i.e. point the three reads back at the whole document
+    /// — and the frame becomes 6000 × 6336, which this file never states.
     #[test]
     fn the_declared_frame_comes_from_one_description() {
         let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
@@ -14197,5 +14244,154 @@ mod tests {
         let bare = "tiff:ImageWidth=\"800\" tiff:ImageLength=\"600\"";
         let frame = FrameAspect::from_xmp(bare).expect("a bare fragment still declares a frame");
         assert_eq!((frame.w, frame.h), (800.0, 600.0));
+    }
+
+    // ================================================================
+    // R29-2 — THE FOUR ADVERSARIAL FRAME-SCOPE FIXTURES
+    //
+    // R28 Batch-5 5d typed the `crs:` reader's scope and left the `tiff:` frame
+    // family on a bare-`&str` `declared_number` whose scope was a per-call-site
+    // CONVENTION. `declared_number` is a method on [`FrameScope`] now, so the
+    // question can only be asked of a span [`FrameScope::resolve`] produced.
+    //
+    // Two of the four pin FALLBACKS, not guarantees. `resolve` deliberately
+    // widens to the whole document in the two cases its own doc comment names,
+    // and both are behaviour a photographer's file can reach; they are fixtures
+    // so that a later narrowing has to face them instead of changing the frame
+    // — the coordinate system every mask and crop decode folds pixel geometry
+    // with — by accident. None of these four documents is one Lightroom writes.
+    // ================================================================
+
+    /// **A** — HALF a frame in each of two `rdf:Description`s.
+    ///
+    /// One element declares only `tiff:ImageWidth`, the next only
+    /// `tiff:ImageLength`. No element declares both, so `resolve` falls back to
+    /// the whole document and the pair IS assembled across two elements — the
+    /// pairing F4 symptom D removes when some element declares both, and which
+    /// this document gives the reader no way to avoid. PINNED, not endorsed:
+    /// the alternative is dropping the frame for files nobody has measured.
+    ///
+    /// MUTATION: drop the fallback (`resolve` returning the last candidate span
+    /// instead of `doc`) and `from_xmp` returns `None` — the half-declaration
+    /// the narrowed span sees is not a frame, which the control below states
+    /// directly.
+    #[test]
+    fn half_a_frame_in_each_description_falls_back_to_the_whole_document() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             <rdf:Description rdf:about=\"\" xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n\
+             \x20 tiff:ImageWidth=\"9504\"/>\n\
+             <rdf:Description rdf:about=\"\" xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n\
+             \x20 tiff:ImageLength=\"6336\" tiff:Orientation=\"1\"/>\n\
+             </rdf:RDF></x:xmpmeta>";
+        let frame = FrameAspect::from_xmp(doc).expect("the whole-document fallback still reads");
+        assert_eq!(
+            (frame.w, frame.h),
+            (9504.0, 6336.0),
+            "the documented fallback assembles the pair across the two elements"
+        );
+        // CONTROL: half a declaration is not a frame. Neither element on its
+        // own answers, which is what makes the assertion above a statement
+        // about the FALLBACK rather than about either span.
+        let half = "<rdf:Description rdf:about=\"\" tiff:ImageWidth=\"9504\"/>";
+        assert!(
+            FrameAspect::from_xmp(half).is_none(),
+            "a width with no length declares no rectangle"
+        );
+    }
+
+    /// **B** — the two XMP spellings MIXED inside one `rdf:Description`.
+    ///
+    /// `tiff:ImageWidth` is an attribute on the start tag (what Lightroom
+    /// writes); `tiff:ImageLength` and `tiff:Orientation` are property elements
+    /// in the body (the same properties' other legal spelling). The scope runs
+    /// from the element's `<` to the end of its body precisely so that one
+    /// element declaring both — in either spelling, or one of each — counts as
+    /// declaring both.
+    ///
+    /// The first Description is a DECOY carrying a lone `tiff:ImageWidth="6000"`:
+    /// if the narrowing stopped working the whole-document fallback would read
+    /// its 6000 first and the frame would be 6000 × 6336.
+    ///
+    /// MUTATION: make `resolve` end the span at the start tag's `>` (a `Tag`,
+    /// not a scope) and the mixed element stops declaring a length, so the
+    /// decoy's 6000 wins.
+    #[test]
+    fn the_frame_scope_sees_both_xmp_spellings_of_one_element() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             <rdf:Description rdf:about=\"\" xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n\
+             \x20 tiff:ImageWidth=\"6000\"/>\n\
+             <rdf:Description rdf:about=\"\" xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n\
+             \x20 tiff:ImageWidth=\"9504\">\n\
+             \x20<tiff:ImageLength>6336</tiff:ImageLength>\n\
+             \x20<tiff:Orientation>8</tiff:Orientation>\n\
+             </rdf:Description>\n\
+             </rdf:RDF></x:xmpmeta>";
+        let frame = FrameAspect::from_xmp(doc).expect("the mixed-spelling element declares both");
+        assert_eq!(
+            frame,
+            FrameAspect::from_size_turned(9504.0, 6336.0, rawler::Orientation::from_u16(8))
+                .expect("a positive rectangle"),
+            "all three come from the ONE element that declares the pair, either spelling"
+        );
+    }
+
+    /// **C** — a bare fragment with no `rdf:Description` at all.
+    ///
+    /// Both shapes fall back to the whole text, and that is load-bearing: this
+    /// module's own fixtures hand `from_xmp` snippets, and a reader given a
+    /// fragment cannot be mixing two elements' declarations because there are
+    /// no elements to mix. The element-form fragment is the sharper of the two
+    /// — it HAS markup, so it pins that the fallback keys on the absence of an
+    /// `rdf:Description`, not on the absence of tags.
+    ///
+    /// MUTATION: make `resolve` return an empty span when no Description
+    /// matched and both halves of this test lose their frame.
+    #[test]
+    fn the_frame_scope_falls_back_to_a_bare_fragment() {
+        let attrs = "tiff:ImageWidth=\"800\" tiff:ImageLength=\"600\" tiff:Orientation=\"1\"";
+        let frame = FrameAspect::from_xmp(attrs).expect("an attribute fragment declares a frame");
+        assert_eq!((frame.w, frame.h), (800.0, 600.0));
+        let elems = "<tiff:ImageWidth>800</tiff:ImageWidth>\n\
+             <tiff:ImageLength>600</tiff:ImageLength>";
+        let frame = FrameAspect::from_xmp(elems).expect("an element fragment declares a frame");
+        assert_eq!(
+            (frame.w, frame.h),
+            (800.0, 600.0),
+            "markup without an rdf:Description is still a fragment"
+        );
+    }
+
+    /// **D** — `rdf:Description`s present, none of them carrying both
+    /// dimensions.
+    ///
+    /// Three elements, three separate properties: an orientation, a width, a
+    /// length. `resolve` finds no complete pair, falls back to the whole
+    /// document, and the frame is assembled from all THREE — the exact reading
+    /// F4 symptom D indicted, kept because refusing would drop the frame for a
+    /// document class nobody has measured (the aspect is disclosed as degraded
+    /// downstream either way). This is the residue R29-2 names rather than
+    /// closes.
+    ///
+    /// MUTATION: return the FIRST `rdf:Description` seen instead of the
+    /// whole-document fallback and the frame disappears — that element declares
+    /// only an orientation.
+    #[test]
+    fn descriptions_without_a_complete_pair_read_as_the_whole_document() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             <rdf:Description rdf:about=\"\" xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n\
+             \x20 tiff:Orientation=\"8\"/>\n\
+             <rdf:Description rdf:about=\"\" tiff:ImageWidth=\"9504\"/>\n\
+             <rdf:Description rdf:about=\"\" tiff:ImageLength=\"6336\"/>\n\
+             </rdf:RDF></x:xmpmeta>";
+        let frame = FrameAspect::from_xmp(doc).expect("the whole-document fallback still reads");
+        assert_eq!(
+            frame,
+            FrameAspect::from_size_turned(9504.0, 6336.0, rawler::Orientation::from_u16(8))
+                .expect("a positive rectangle"),
+            "no element declares the pair, so all three properties come from the document"
+        );
     }
 }

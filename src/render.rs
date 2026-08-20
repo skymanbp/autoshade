@@ -98,13 +98,28 @@ pub fn source_pixels(path: &Path, cap: Option<u32>) -> Result<DynamicImage> {
 /// so a preview-resolution caller (retouch base, web preview, base-look
 /// estimation) stops paying a 61 MP develop + 16-bit pack + geometry chain
 /// only to thumbnail the result at the end. `None` = full resolution (export).
+///
+/// **The un-injected door.** This wrapper sends its disclosures (the clamp
+/// summary, the mask-raster loader's refusals) to [`crate::diag::stderr`],
+/// attributed to `raw_path` — exactly what they did before [`crate::diag`]
+/// existed. It stays that way because the surfaces on it (the decoder's
+/// self-checks, `generative`, the GUI's full-res fetch) have nowhere else to
+/// put a line and no ordering to defend. A caller that DOES want the lines
+/// routed calls [`render_to_image_in`], which takes the sink.
 pub fn render_to_image(
     raw_path: &Path,
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
     max_edge: Option<u32>,
 ) -> Result<DynamicImage> {
-    render_to_image_in(raw_path, recipe, denoise, max_edge, ExportColorSpace::Srgb)
+    render_to_image_in(
+        raw_path,
+        recipe,
+        denoise,
+        max_edge,
+        ExportColorSpace::Srgb,
+        crate::diag::stderr(),
+    )
 }
 
 /// [`render_to_image`] with a chosen WORKING space. `Srgb` is the exact
@@ -123,20 +138,26 @@ pub fn render_to_image(
 /// shared transfer → the neutral axis renders identically to sRGB), and
 /// colours outside the DELIVERY gamut clip only at the final 16-bit pack —
 /// the honest boundary of the chosen deliverable.
+///
+/// `sink` is where this develop's disclosures go (R29-1). The SUBJECT is bound
+/// here from `raw_path`, so a caller cannot attribute one photo's warnings to
+/// another; what it CAN do is decide where they land and in what order.
 pub fn render_to_image_in(
     raw_path: &Path,
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
     max_edge: Option<u32>,
     working: ExportColorSpace,
+    sink: &dyn crate::diag::Sink,
 ) -> Result<DynamicImage> {
+    let diag = crate::diag::Diag::about(sink, raw_path);
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
     // clone+clamp+eprintln triplets that had already drifted apart.
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
-    validated.disclose();
+    validated.disclose(&diag);
     let recipe = &*validated;
-    let rasters = load_mask_raster_snapshot(recipe, Some(raw_path))?;
+    let rasters = load_mask_raster_snapshot(recipe, &diag)?;
     // Decode scope: the RawSource holds the entire RAW file in memory
     // (~60–120 MB for a 61 MP lossless ARW), and neither it nor the decoder
     // outlives the sensor read — so the file bytes drop HERE instead of
@@ -781,10 +802,11 @@ fn rgb16_source(img: &DynamicImage) -> Cow<'_, ImageBuffer<Rgb<u16>, Vec<u16>>> 
 /// capped result meaningful rather than merely smaller; they are the same
 /// shared functions the RAW path calls, so the two arms cap identically.
 ///
-/// `photo` is the file these pixels were decoded FROM, and it is used for
-/// nothing but stamping the mask loader's stderr warnings with the photograph
-/// (R28 Batch-5 5c). `None` is legitimate for a caller that really is holding
-/// anonymous pixels; `render_to_file`'s baked arm has the path and passes it,
+/// `diag` is the caller's diagnostics channel, and it carries WHOSE pixels
+/// these are (R28 Batch-5 5c threaded the path for the stamp; R29-1 threads the
+/// channel). A caller really holding anonymous pixels says so with
+/// [`crate::diag::Subject::PixelOnly`] rather than a `None` whose meaning lived
+/// in this comment; `render_to_file`'s baked arm has the path and binds it,
 /// which is what puts the baked half of a parallel `batch` on the same footing
 /// as the RAW half.
 pub fn render_baked_to_image(
@@ -792,15 +814,15 @@ pub fn render_baked_to_image(
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
     max_edge: Option<u32>,
-    photo: Option<&Path>,
+    diag: &crate::diag::Diag<'_>,
 ) -> Result<DynamicImage> {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
     // clone+clamp+eprintln triplets that had already drifted apart.
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
-    validated.disclose();
+    validated.disclose(diag);
     let recipe = &*validated;
-    let rasters = load_mask_raster_snapshot(recipe, photo)?;
+    let rasters = load_mask_raster_snapshot(recipe, diag)?;
     // The photographer's quarter turns FIRST — before the cap and before every
     // develop stage, exactly where `orient_f32` sits on the RAW path, and for
     // the same reason: masks / crop / straighten are defined against what the
@@ -1454,22 +1476,23 @@ pub fn stage_and_publish(
 /// version regresses, the pixels are still correctly encoded, just untagged —
 /// so warn instead of failing the whole export.
 ///
-/// `photo` is the source this export came from, and it exists for ONE reason:
-/// the warning below is ungated and lands on a shared stderr that a parallel
-/// `batch` interleaves in completion order (R28 Batch-5 5c). Threaded as a
-/// parameter rather than read from anywhere, because nothing here knows a
-/// photo — that is the honest shape of a leaf.
-fn tag_icc<E: ImageEncoder>(enc: &mut E, space: ExportColorSpace, photo: Option<&Path>) {
+/// `diag` is the export's diagnostics channel, and it exists for ONE reason:
+/// the warning below is ungated and used to land on a shared stderr that a
+/// parallel `batch` interleaved in completion order (R28 Batch-5 5c stamped it;
+/// R29-1 routes it). Threaded as a parameter rather than read from anywhere,
+/// because nothing here knows a photo — that is the honest shape of a leaf.
+fn tag_icc<E: ImageEncoder>(
+    enc: &mut E,
+    space: ExportColorSpace,
+    diag: &crate::diag::Diag<'_>,
+) {
     let profile = match space {
         ExportColorSpace::Srgb => SRGB_ICC,
         ExportColorSpace::DisplayP3 => DISPLAY_P3_ICC,
         ExportColorSpace::AdobeRgb => ADOBE_RGB_ICC,
     };
     if let Err(e) = enc.set_icc_profile(profile.to_vec()) {
-        eprintln!(
-            "⚠ {}could not embed the {space:?} ICC profile: {e:?}",
-            crate::pipeline::attribution(photo)
-        );
+        diag.warn(format!("could not embed the {space:?} ICC profile: {e:?}"));
     }
 }
 
@@ -1481,18 +1504,26 @@ fn tag_icc<E: ImageEncoder>(enc: &mut E, space: ExportColorSpace, photo: Option<
 /// image (the PNG-source engine) automatically. `export` adds the delivery
 /// pipeline (resize / output sharpen / JPEG quality / color space); `None` =
 /// full-res q95 sRGB as always. Returns the SAVED dimensions (post-resize).
+///
+/// `sink` is where this export's disclosures go (R29-1) — the clamp summary,
+/// the ICC tagging failure, the mask-raster budget refusals. Bound to
+/// `src_path` here, so the identity cannot disagree with the file being
+/// rendered; `batch` passes a [`crate::diag::Collector`] and prints the result
+/// in its own order.
 pub fn render_to_file(
     src_path: &Path,
     recipe: &EditRecipe,
     out: &Path,
     denoise: Option<&crate::denoise::DenoiseOpts>,
     export: Option<&ExportOpts>,
+    sink: &dyn crate::diag::Sink,
 ) -> Result<(u32, u32)> {
+    let diag = crate::diag::Diag::about(sink, src_path);
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
     // clone+clamp+eprintln triplets that had already drifted apart.
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
-    validated.disclose();
+    validated.disclose(&diag);
     let recipe = &*validated;
     let opts = export.copied().unwrap_or_default();
 
@@ -1515,7 +1546,7 @@ pub fn render_to_file(
     let native_wide = is_raw_src && space != ExportColorSpace::Srgb;
     let mut img = if is_raw_src {
         let working = if native_wide { space } else { ExportColorSpace::Srgb };
-        render_to_image_in(src_path, recipe, denoise, None, working)?
+        render_to_image_in(src_path, recipe, denoise, None, working, sink)?
     } else {
         // baked-by-construction: the !is_raw_src arm (decided just above).
         let src = crate::decode::load_image_for_develop(src_path)?;
@@ -1523,7 +1554,7 @@ pub fn render_to_file(
         // the finished pixels, which is not the same thing as developing at a
         // bounded working resolution and must not be quietly swapped for it —
         // the RAW arm above passes `None` for exactly the same reason.
-        render_baked_to_image(&src, recipe, denoise, None, Some(src_path))?
+        render_baked_to_image(&src, recipe, denoise, None, &diag)?
     };
     if let Some(le) = opts.long_edge
         && le > 0
@@ -1602,7 +1633,7 @@ pub fn render_to_file(
             let mut wr = create(&staged)?;
             let mut enc =
                 image::codecs::jpeg::JpegEncoder::new_with_quality(&mut wr, opts.jpeg_quality.clamp(1, 100));
-            tag_icc(&mut enc, space, Some(src_path));
+            tag_icc(&mut enc, space, &diag);
             enc.write_image(rgb8.as_raw(), rgb8.width(), rgb8.height(), image::ExtendedColorType::Rgb8)
                 .with_context(|| format!("encode jpeg {}", out.display()))?;
             wr.flush().with_context(|| format!("flush {}", out.display()))?;
@@ -1610,7 +1641,7 @@ pub fn render_to_file(
         "tif" | "tiff" => {
             let mut wr = create(&staged)?;
             let mut enc = image::codecs::tiff::TiffEncoder::new(&mut wr);
-            tag_icc(&mut enc, space, Some(src_path));
+            tag_icc(&mut enc, space, &diag);
             // 8-bit on request (阶段4): the depth is an EXPORT SETTING, not
             // an extension property — a .tif says nothing about bits.
             if opts.eight_bit {
@@ -1626,7 +1657,7 @@ pub fn render_to_file(
         "png" => {
             let mut wr = create(&staged)?;
             let mut enc = image::codecs::png::PngEncoder::new(&mut wr);
-            tag_icc(&mut enc, space, Some(src_path));
+            tag_icc(&mut enc, space, &diag);
             if opts.eight_bit {
                 DynamicImage::ImageRgb8(img.to_rgb8())
                     .write_with_encoder(enc)
@@ -1663,12 +1694,32 @@ pub fn render_to_file(
 /// so the Temp/Tint sliders and the WB eyedropper are live in the preview.
 /// Crop is intentionally NOT applied here so sliders give immediate full-frame
 /// feedback; the full-res `render_to_image` path applies crop on export.
+///
+/// **The pure-pixel arm, typed.** This entry is handed a buffer, a width and a
+/// height: there is no photograph behind them, and since R29-1 that is a state
+/// in the type ([`crate::diag::Subject::PixelOnly`]) rather than a `None` whose
+/// meaning lived in a comment beside the call. Its disclosures go to
+/// [`crate::diag::stderr`] with no stem — which is exactly what they printed
+/// before. A caller that DOES know which photograph these pixels came from, or
+/// that wants the lines routed somewhere other than the console, calls
+/// [`develop_preview_with`] and says so.
 pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicImage {
+    develop_preview_with(preview, recipe, &crate::diag::pixels())
+}
+
+/// [`develop_preview`] with the caller's own diagnostics channel — the injected
+/// form of the preview arm. `diag` states whose pixels these are (or that
+/// nobody's are), and where the mask loader's refusals go.
+pub fn develop_preview_with(
+    preview: &DynamicImage,
+    recipe: &EditRecipe,
+    diag: &crate::diag::Diag<'_>,
+) -> DynamicImage {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
     // clone+clamp+eprintln triplets that had already drifted apart.
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
-    validated.disclose();
+    validated.disclose(diag);
     let recipe = &*validated;
     let rgb = preview.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -1678,7 +1729,7 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
         .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
         .collect();
     apply_recipe_wb(&mut data, recipe);
-    apply_develop(&mut data, w as usize, h as usize, recipe);
+    apply_develop(&mut data, w as usize, h as usize, recipe, diag);
     let mut buf = vec![0u8; (w * h * 3) as usize];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
         o[0] = to_u8(px[0]);
@@ -1692,9 +1743,27 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
 /// orientation), shared by full-res render and the UI preview. Order follows
 /// ACR: tone → clarity → saturation/vibrance → noise reduction → sharpening.
 /// Operates in place on sRGB-gamma RGB in [0,1].
-fn apply_develop(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
-    let rasters = best_effort_mask_raster_snapshot(r);
+///
+/// `diag` is the caller's channel for the mask-raster loader's refusals — the
+/// only thing in here that can say anything.
+fn apply_develop(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    r: &EditRecipe,
+    diag: &crate::diag::Diag<'_>,
+) {
+    let rasters = best_effort_mask_raster_snapshot(r, diag);
     apply_develop_with_rasters(data, w, h, r, &rasters);
+}
+
+/// [`apply_develop`] on pixels with no owner and no caller to route to — the
+/// pixel-math tests, which construct a `[[f32; 3]]` by hand and have neither.
+/// `Subject::PixelOnly` on the default sink: the same thing production's
+/// un-injected preview arm does, said once here instead of at ~40 call sites.
+#[cfg(test)]
+fn apply_develop_anon(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe) {
+    apply_develop(data, w, h, r, &crate::diag::pixels());
 }
 
 fn apply_develop_with_rasters(
@@ -2808,27 +2877,38 @@ pub(crate) fn is_raster_backed(g: &MaskGeometry) -> bool {
     matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::AiMask { .. })
 }
 
-/// `photo` rides along ONLY to stamp the loader's stderr warnings with the
-/// photograph they belong to (R28 Batch-5 5c) — a `batch --jobs 3` interleaves
-/// three photos' warnings on one stderr in completion order, and "mask raster
-/// '…/mask-1.png' is inert" names a file inside a hashed store directory, not a
-/// picture the photographer can find. It changes nothing about what loads.
+/// `diag` rides along ONLY to carry the loader's warnings to the caller,
+/// attributed to the photograph they belong to (R28 Batch-5 5c stamped them;
+/// R29-1 routes them) — a `batch --jobs 3` interleaves three photos' warnings
+/// on one stderr in completion order, and "mask raster '…/mask-1.png' is inert"
+/// names a file inside a hashed store directory, not a picture the
+/// photographer can find. It changes nothing about what loads.
 fn load_mask_raster_snapshot(
     recipe: &EditRecipe,
-    photo: Option<&Path>,
+    diag: &crate::diag::Diag<'_>,
 ) -> Result<MaskRasterSnapshot> {
-    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, true, photo)
+    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, true, diag)
 }
 
-/// The PREVIEW arm, and the one place that genuinely has no photo to name:
-/// `apply_develop` is handed pixels, a width and a height. Passing `None` here
-/// is the registered residue of 5c — closing it means a caller-supplied
-/// diagnostics sink (adjudication F6's deepest root), which this batch
-/// deliberately did NOT build. The interactive surfaces this arm serves have a
-/// window and a mask list to say it in ([`dead_bitmap_rasters`]), so the
-/// unattributed stderr line is not the user's only channel there.
-fn best_effort_mask_raster_snapshot(recipe: &EditRecipe) -> MaskRasterSnapshot {
-    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, false, None)
+/// The PREVIEW arm — the one place that genuinely has no photograph, and since
+/// R29-1 the one place that SAYS SO in the type.
+///
+/// `apply_develop` is handed pixels, a width and a height. Under 5c this arm
+/// passed a bare `None` and the registration admitted what that cost: `None`
+/// meant "I have no photo" here and "the caller did not bother" three call
+/// sites away, and neither the destination nor the order of the resulting
+/// stderr line could be chosen by anyone but the process (adjudication F6). It
+/// now takes the caller's `Diag`, whose subject is
+/// [`crate::diag::Subject::PixelOnly`] when the pixels really are anonymous —
+/// a state a sink can match on rather than a missing value it has to guess at.
+/// The interactive surfaces this arm serves still have a window and a mask list
+/// to say it in ([`dead_bitmap_rasters`]); that remains the better channel
+/// there, and a GUI is now free to select it.
+fn best_effort_mask_raster_snapshot(
+    recipe: &EditRecipe,
+    diag: &crate::diag::Diag<'_>,
+) -> MaskRasterSnapshot {
+    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, false, diag)
         .unwrap_or_default()
 }
 
@@ -2853,8 +2933,12 @@ pub fn dead_bitmap_rasters(m: &crate::recipe::LocalAdjustment) -> Vec<String> {
                 .map(str::to_string)
                 .unwrap_or_else(|| "AI mask (not yet recomputed)".to_string());
             // GUI mask list, no photograph in scope and none needed: this is
-            // a UI probe, and the row it feeds IS the disclosure.
-            load_mask_bitmap(g, None).is_none().then_some(name)
+            // a UI probe, and the row it feeds IS the disclosure. So the
+            // channel is DROPPED, deliberately and in the type (R29-1) — the
+            // loader's stderr copy would fire once per frame per mask and say
+            // nothing the row does not already say. Under 5c this was a `None`
+            // that only suppressed the STEM; the line still printed.
+            load_mask_bitmap(g, &crate::diag::dropped()).is_none().then_some(name)
         })
         .collect()
 }
@@ -2984,14 +3068,18 @@ fn load_mask_raster_snapshot_with_budget(
     recipe: &EditRecipe,
     budget_bytes: usize,
     strict: bool,
-    photo: Option<&Path>,
+    diag: &crate::diag::Diag<'_>,
 ) -> Result<MaskRasterSnapshot> {
     let mut snapshot = MaskRasterSnapshot::default();
     let mut held_bytes = 0usize;
-    // Every `eprintln!` below is ungated and worker-reachable, so each carries
-    // the photograph (R28 Batch-5 5c). The `bail!`s do not: an error message
-    // travels up a `Result` to a caller that names the photo itself.
-    let who = crate::pipeline::attribution(photo);
+    // Every disclosure below is ungated and worker-reachable, so each travels
+    // the caller's channel carrying its subject (R28 Batch-5 5c stamped them;
+    // R29-1 routes them). The `bail!`s do not: an error message travels up a
+    // `Result` to a caller that names the photo itself.
+    //
+    // `Mark::Bare`: these three have never worn the ⚠ glyph, and the default
+    // sink reproduces that. The mark is data precisely so a sink rendering
+    // into a per-photo block can drop it.
 
     // The active set and its per-file projection come from
     // `active_bitmap_rasters` / `raster_projected_bytes` — the same two the
@@ -3016,14 +3104,17 @@ fn load_mask_raster_snapshot_with_budget(
                          loading '{path}' for mask '{label}' — no pixels were rendered"
                     );
                 }
-                eprintln!(
-                    "{who}mask raster '{path}' skipped: the active raster set exceeds the \
-                     {budget_bytes}-byte aggregate budget"
+                diag.emit(
+                    crate::diag::Mark::Bare,
+                    format!(
+                        "mask raster '{path}' skipped: the active raster set exceeds the \
+                         {budget_bytes}-byte aggregate budget"
+                    ),
                 );
                 continue;
             }
         }
-        let Some(bitmap) = load_mask_bitmap(geometry, photo) else {
+        let Some(bitmap) = load_mask_bitmap(geometry, diag) else {
             if strict {
                 bail!(
                     "mask raster '{path}' for mask '{label}' is unreadable — no pixels were rendered"
@@ -3039,9 +3130,12 @@ fn load_mask_raster_snapshot_with_budget(
                      loading '{path}' for mask '{label}' — no pixels were rendered"
                 );
             }
-            eprintln!(
-                "{who}mask raster '{path}' skipped: the active raster set exceeds the \
-                 {budget_bytes}-byte aggregate budget"
+            diag.emit(
+                crate::diag::Mark::Bare,
+                format!(
+                    "mask raster '{path}' skipped: the active raster set exceeds the \
+                     {budget_bytes}-byte aggregate budget"
+                ),
             );
             continue;
         };
@@ -3052,9 +3146,12 @@ fn load_mask_raster_snapshot_with_budget(
                      loading '{path}' for mask '{label}' — no pixels were rendered"
                 );
             }
-            eprintln!(
-                "{who}mask raster '{path}' skipped: the active raster set exceeds the \
-                 {budget_bytes}-byte aggregate budget"
+            diag.emit(
+                crate::diag::Mark::Bare,
+                format!(
+                    "mask raster '{path}' skipped: the active raster set exceeds the \
+                     {budget_bytes}-byte aggregate budget"
+                ),
             );
             continue;
         }
@@ -3097,17 +3194,24 @@ fn combined_mask_weight(
 /// the stale mask forever. Failure warns and returns None (the mask renders
 /// inert instead of killing the develop).
 ///
-/// `photo` stamps those two warnings with the photograph (R28 Batch-5 5c), and
-/// carries ONE caveat worth stating: the negative result is CACHED, so the
-/// warning fires once per (path, mtime) and names the photo that hit it FIRST.
-/// A mask raster lives in its own photo's develop directory, so in practice
-/// that is the only photo it can belong to; two recipes pointing at one raster
-/// would see the first name stick. Naming a photo that owns the file beats
-/// naming none, and the alternative (warn per call) is the per-tick flood this
-/// cache exists to stop.
+/// `diag` carries those two warnings to the caller with the photograph they
+/// belong to (R28 Batch-5 5c stamped them; R29-1 routes them), and carries ONE
+/// caveat worth stating: the negative result is CACHED, so the warning fires
+/// once per (path, mtime) — on the channel, and with the subject, of whoever
+/// hit it FIRST. A mask raster lives in its own photo's develop directory, so
+/// in practice that is the only photo it can belong to; two recipes pointing at
+/// one raster would see the first name stick.
+///
+/// R29-1 sharpened that caveat rather than removing it: the GUI mask list's
+/// `dead_bitmap_rasters` probe now passes a SILENT channel (its row is the
+/// disclosure), so if the probe reaches a dead raster first, the console line
+/// for that (path, mtime) is the one that does not print. That is the intended
+/// trade — the alternative (warn per call) is the per-tick flood this cache
+/// exists to stop, and the surface that suppressed it is the surface that
+/// already shows the fact.
 fn load_mask_bitmap(
     g: &MaskGeometry,
-    photo: Option<&Path>,
+    diag: &crate::diag::Diag<'_>,
 ) -> Option<std::sync::Arc<image::GrayImage>> {
     use std::sync::{Arc, Mutex, OnceLock};
     // Keyed by Option<(mtime, size)>: mtime alone misses a same-length-of-
@@ -3152,17 +3256,18 @@ fn load_mask_bitmap(
         .is_some_and(|(w, h)| {
             (w as usize).saturating_mul(h as usize).saturating_mul(4) > MASK_RASTER_BUDGET_BYTES
         });
-    let who = crate::pipeline::attribution(photo);
     let decoded = if over_budget {
-        eprintln!(
-            "⚠ {who}bitmap mask '{path}' exceeds the {MASK_RASTER_BUDGET_BYTES}-byte mask budget — mask is inert"
-        );
+        diag.warn(format!(
+            "bitmap mask '{path}' exceeds the {MASK_RASTER_BUDGET_BYTES}-byte mask budget — mask is inert"
+        ));
         None
     } else {
         match image::open(path) {
             Ok(img) => Some(Arc::new(img.to_luma8())),
             Err(e) => {
-                eprintln!("⚠ {who}bitmap mask '{path}' could not be loaded ({e}) — mask is inert");
+                diag.warn(format!(
+                    "bitmap mask '{path}' could not be loaded ({e}) — mask is inert"
+                ));
                 None
             }
         }
@@ -3235,9 +3340,15 @@ pub fn mask_coverage(
     if !m.enabled {
         return image::GrayImage::new(w, h);
     }
-    let bmp = load_mask_bitmap(&m.mask, None);
+    // DROPPED channel, for the same reason as `dead_bitmap_rasters` (R29-1):
+    // this is the overlay probe, it runs per frame, and a dead raster's
+    // disclosure is the empty coverage it returns plus the ⚠ on the mask row —
+    // not a console line the windowed surface cannot show anyway. Under 5c
+    // this was a `None` that suppressed only the STEM.
+    let probe = crate::diag::dropped();
+    let bmp = load_mask_bitmap(&m.mask, &probe);
     let comp_bmps: Vec<Option<std::sync::Arc<image::GrayImage>>> =
-        m.components.iter().map(|c| load_mask_bitmap(&c.geometry, None)).collect();
+        m.components.iter().map(|c| load_mask_bitmap(&c.geometry, &probe)).collect();
     // Same load-failure contract as `apply_masks` (inert, inversion included,
     // components included), so the overlay never advertises coverage the
     // render will not apply.
@@ -5923,18 +6034,18 @@ mod tests {
 
         // Uncapped = the source's own resolution (what the export path asks).
         assert_eq!(
-            render_baked_to_image(&big, &r, None, None, None).unwrap().dimensions(),
+            render_baked_to_image(&big, &r, None, None, &crate::diag::pixels()).unwrap().dimensions(),
             (400, 200)
         );
         // Capped on the LONG edge, aspect kept.
         assert_eq!(
-            render_baked_to_image(&big, &r, None, Some(100), None).unwrap().dimensions(),
+            render_baked_to_image(&big, &r, None, Some(100), &crate::diag::pixels()).unwrap().dimensions(),
             (100, 50)
         );
         // Never upsampled.
         let small = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 48, image::Rgb([3, 4, 5])));
         assert_eq!(
-            render_baked_to_image(&small, &r, None, Some(2048), None).unwrap().dimensions(),
+            render_baked_to_image(&small, &r, None, Some(2048), &crate::diag::pixels()).unwrap().dimensions(),
             (64, 48)
         );
 
@@ -5951,7 +6062,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_baked_to_image(&big, &cropped, None, Some(100), None).unwrap().dimensions(),
+            render_baked_to_image(&big, &cropped, None, Some(100), &crate::diag::pixels()).unwrap().dimensions(),
             (50, 50),
             "the crop must be taken from the CAPPED frame — i.e. the cap ran first"
         );
@@ -6308,7 +6419,7 @@ mod tests {
         img.save(&src).unwrap();
         let out_p = dir.join("cropped.png");
         let r = EditRecipe { crop: Some(c), ..Default::default() };
-        let (w, h) = render_to_file(&src, &r, &out_p, None, None).unwrap();
+        let (w, h) = render_to_file(&src, &r, &out_p, None, None, crate::diag::stderr()).unwrap();
         assert_eq!((w, h), (60, 30), "the baked export applies the SAME rectangle");
         assert_eq!(image::image_dimensions(&out_p).unwrap(), (60, 30));
         let _ = std::fs::remove_dir_all(&dir);
@@ -6323,7 +6434,7 @@ mod tests {
         DynamicImage::ImageRgb8(image::RgbImage::new(4, 3)).save(&src).unwrap();
         let out = dir.join("shot.developed.png");
         let r = EditRecipe::default();
-        render_to_file(&src, &r, &out, None, None).unwrap();
+        render_to_file(&src, &r, &out, None, None, crate::diag::stderr()).unwrap();
         assert!(out.exists(), "the deliverable must be published");
         // The staged copy is consumed on EVERY path — a leftover would mean a
         // partial file could survive beside a delivery.
@@ -6335,7 +6446,7 @@ mod tests {
             .collect();
         assert!(residue.is_empty(), "staging residue left behind: {residue:?}");
         // A re-export replaces it in place, still with no residue.
-        render_to_file(&src, &r, &out, None, None).unwrap();
+        render_to_file(&src, &r, &out, None, None, crate::diag::stderr()).unwrap();
         assert!(out.exists());
 
         // A PRE-STAGING failure: an unknown extension is rejected at format
@@ -6345,7 +6456,7 @@ mod tests {
         // follows below, R12.)
         let keeper = dir.join("keeper.unknownext");
         std::fs::write(&keeper, b"a previous deliverable").unwrap();
-        let err = render_to_file(&src, &r, &keeper, None, None);
+        let err = render_to_file(&src, &r, &keeper, None, None, crate::diag::stderr());
         assert!(err.is_err(), "an unknown extension must fail the export");
         assert_eq!(
             std::fs::read(&keeper).unwrap(),
@@ -6373,7 +6484,7 @@ mod tests {
             let mut perm = std::fs::metadata(&ro).unwrap().permissions();
             perm.set_readonly(true);
             std::fs::set_permissions(&ro, perm.clone()).unwrap();
-            let err = render_to_file(&src, &r, &ro, None, None);
+            let err = render_to_file(&src, &r, &ro, None, None, crate::diag::stderr());
             assert!(err.is_err(), "publishing over a read-only file must fail");
             assert_eq!(
                 std::fs::read(&ro).unwrap(),
@@ -6539,7 +6650,7 @@ mod tests {
         }
         // A neutral recipe must leave bright near-white foam bright.
         let mut foam = vec![[0.90_f32, 0.93, 0.96]];
-        apply_develop(&mut foam, 1, 1, &EditRecipe::default());
+        apply_develop_anon(&mut foam, 1, 1, &EditRecipe::default());
         let lum = 0.299 * foam[0][0] + 0.587 * foam[0][1] + 0.114 * foam[0][2];
         assert!(lum > 0.90, "neutral recipe dimmed bright foam: {lum}");
     }
@@ -6565,10 +6676,10 @@ mod tests {
         r.temper(crate::recipe::GradeStrength::calibrated());
         let lum = |p: [f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
         let mut foam = vec![[0.90_f32, 0.93, 0.96]];
-        apply_develop(&mut foam, 1, 1, &r);
+        apply_develop_anon(&mut foam, 1, 1, &r);
         assert!(lum(foam[0]) > 0.80, "foam crushed (should stay light): luma {}", lum(foam[0]));
         let mut water = vec![[0.35_f32, 0.62, 0.66]];
-        apply_develop(&mut water, 1, 1, &r);
+        apply_develop_anon(&mut water, 1, 1, &r);
         let [rr, gg, bb] = water[0];
         assert!(gg > rr + 0.10 && bb > rr + 0.10, "water lost its turquoise: [{rr}, {gg}, {bb}]");
     }
@@ -6842,7 +6953,7 @@ mod tests {
         };
         let cyan = [0.35_f32, 0.62, 0.66]; // mid-bright sunlit turquoise
         let mut data = vec![cyan];
-        apply_develop(&mut data, 1, 1, &r);
+        apply_develop_anon(&mut data, 1, 1, &r);
         let [rr, gg, bb] = data[0];
         // green & blue stay clearly above red → still cyan, not neutral grey.
         assert!(gg > rr + 0.08 && bb > rr + 0.08, "water greyed out: [{rr}, {gg}, {bb}]");
@@ -6865,7 +6976,7 @@ mod tests {
         };
         let (w, h) = (1usize, 4usize);
         let mut data = vec![[0.6_f32, 0.6, 0.6]; w * h];
-        apply_develop(&mut data, w, h, &r);
+        apply_develop_anon(&mut data, w, h, &r);
         assert!((data[0][0] - 0.6).abs() < 0.03, "top should be ~unchanged: {}", data[0][0]);
         assert!(data[3][0] < 0.5, "bottom should darken: {}", data[3][0]);
         // The interior rows carry the actual gradient — the endpoint checks
@@ -6906,9 +7017,9 @@ mod tests {
         // is blind to a constant offset (translation-invariant) and to
         // green/blue-only leaks (it never read those channels) (U14).
         let mut control = data.clone();
-        apply_develop(&mut control, w, h, &EditRecipe::default());
+        apply_develop_anon(&mut control, w, h, &EditRecipe::default());
         let right0 = var(&data, 4..8);
-        apply_develop(&mut data, w, h, &r);
+        apply_develop_anon(&mut data, w, h, &r);
         assert!(var(&data, 4..8) < right0 * 0.8, "right half should smooth");
         assert_eq!(&data[0..4], &control[0..4], "left half untouched, bit for bit");
     }
@@ -6938,9 +7049,9 @@ mod tests {
         // noise), so "untouched by the mask" means equal to the CONTROL, not to
         // the raw input.
         let mut control = vec![dark, mid, bright];
-        apply_develop(&mut control, 3, 1, &EditRecipe::default());
+        apply_develop_anon(&mut control, 3, 1, &EditRecipe::default());
         let mut data = vec![dark, mid, bright];
-        apply_develop(&mut data, 3, 1, &r);
+        apply_develop_anon(&mut data, 3, 1, &r);
         assert_eq!(data[0], control[0], "below the range: the mask must skip it");
         assert!(data[2][0] < 0.6, "bright pixel must darken: {}", data[2][0]);
         // The ramp midpoint moves, but less than the fully-selected pixel.
@@ -6971,9 +7082,9 @@ mod tests {
         // Same control-render comparison as the luminance test: out-of-range
         // pixels must match a mask-less render exactly (the mask pass skips them).
         let mut control = vec![orange, dark_orange, blue, grey];
-        apply_develop(&mut control, 4, 1, &EditRecipe::default());
+        apply_develop_anon(&mut control, 4, 1, &EditRecipe::default());
         let mut data = vec![orange, dark_orange, blue, grey];
-        apply_develop(&mut data, 4, 1, &r);
+        apply_develop_anon(&mut data, 4, 1, &r);
         let spread = |p: [f32; 3]| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
         assert!(spread(data[0]) < 0.05, "orange must desaturate: {:?}", data[0]);
         assert!(spread(data[1]) < 0.05, "dark orange (same hue) must desaturate: {:?}", data[1]);
@@ -7018,9 +7129,9 @@ mod tests {
         let grey = [0.5_f32; 3];
         let (w, h) = (1usize, 4usize);
         let mut control = vec![grey; w * h];
-        apply_develop(&mut control, w, h, &EditRecipe::default());
+        apply_develop_anon(&mut control, w, h, &EditRecipe::default());
         let mut data = vec![grey; w * h];
-        apply_develop(&mut data, w, h, &r);
+        apply_develop_anon(&mut data, w, h, &r);
         assert_eq!(data[0], control[0], "zero end of the gradient: the mask must skip it");
         let px = data[3];
         assert!(
@@ -7072,9 +7183,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        apply_develop(&mut global, 3, 1, &EditRecipe::default());
+        apply_develop_anon(&mut global, 3, 1, &EditRecipe::default());
         let mut local = src.to_vec();
-        apply_develop(
+        apply_develop_anon(
             &mut local,
             3,
             1,
@@ -7115,7 +7226,7 @@ mod tests {
             ("out/_icc.png", &b"iCCP"[..]),
             ("out/_icc.tif", &b"acsp"[..]),
         ] {
-            render_to_file(src_p, &neutral, std::path::Path::new(name), None, None).unwrap();
+            render_to_file(src_p, &neutral, std::path::Path::new(name), None, None, crate::diag::stderr()).unwrap();
             let bytes = std::fs::read(name).unwrap();
             assert!(
                 bytes.windows(needle.len()).any(|win| win == needle),
@@ -7337,7 +7448,7 @@ mod tests {
         ] {
             let opts = ExportOpts { color_space: space, ..Default::default() };
             for name in ["out/_gamut.jpg", "out/_gamut.tif"] {
-                render_to_file(src_p, &neutral, std::path::Path::new(name), None, Some(&opts)).unwrap();
+                render_to_file(src_p, &neutral, std::path::Path::new(name), None, Some(&opts), crate::diag::stderr()).unwrap();
                 let bytes = std::fs::read(name).unwrap();
                 assert!(
                     bytes.windows(profile.len()).any(|win| win == profile),
@@ -7346,7 +7457,7 @@ mod tests {
                 );
             }
             let png_name = "out/_gamut.png";
-            render_to_file(src_p, &neutral, std::path::Path::new(png_name), None, Some(&opts)).unwrap();
+            render_to_file(src_p, &neutral, std::path::Path::new(png_name), None, Some(&opts), crate::diag::stderr()).unwrap();
             let mut d = image::codecs::png::PngDecoder::new(std::io::BufReader::new(
                 std::fs::File::open(png_name).unwrap(),
             ))
@@ -7420,7 +7531,7 @@ mod tests {
 
         let small = ExportOpts { long_edge: Some(50), sharpen: 25.0, ..Default::default() };
         let (w, h) =
-            render_to_file(src_p, &neutral, std::path::Path::new("out/_export_le50.png"), None, Some(&small))
+            render_to_file(src_p, &neutral, std::path::Path::new("out/_export_le50.png"), None, Some(&small), crate::diag::stderr())
                 .unwrap();
         assert_eq!((w, h), (50, 25), "long edge 50 must fit 200×100 to 50×25");
         let saved = image::image_dimensions("out/_export_le50.png").unwrap();
@@ -7428,13 +7539,13 @@ mod tests {
 
         let big = ExportOpts { long_edge: Some(400), ..Default::default() };
         let (w, h) =
-            render_to_file(src_p, &neutral, std::path::Path::new("out/_export_le400.png"), None, Some(&big))
+            render_to_file(src_p, &neutral, std::path::Path::new("out/_export_le400.png"), None, Some(&big), crate::diag::stderr())
                 .unwrap();
         assert_eq!((w, h), (200, 100), "long edge beyond source must NOT upscale");
 
         for (q, name) in [(30u8, "out/_export_q30.jpg"), (95u8, "out/_export_q95.jpg")] {
             let opts = ExportOpts { jpeg_quality: q, ..Default::default() };
-            render_to_file(src_p, &neutral, std::path::Path::new(name), None, Some(&opts)).unwrap();
+            render_to_file(src_p, &neutral, std::path::Path::new(name), None, Some(&opts), crate::diag::stderr()).unwrap();
         }
         let (s30, s95) = (
             std::fs::metadata("out/_export_q30.jpg").unwrap().len(),
@@ -7452,7 +7563,7 @@ mod tests {
             .unwrap();
         let export = |sharpen: f32, name: &str| {
             let opts = ExportOpts { long_edge: Some(100), sharpen, ..Default::default() };
-            render_to_file(edge_p, &neutral, std::path::Path::new(name), None, Some(&opts)).unwrap();
+            render_to_file(edge_p, &neutral, std::path::Path::new(name), None, Some(&opts), crate::diag::stderr()).unwrap();
             let px = image::open(name).unwrap().to_rgb8();
             let (w, h) = px.dimensions();
             // Per channel: a red-only sharpen raised the summed energy too,
@@ -7638,14 +7749,14 @@ mod tests {
         };
         let r = EditRecipe { masks: vec![broken.clone()], ..Default::default() };
         let out = dir.join("out.png");
-        let err = render_to_file(&src, &r, &out, None, None).unwrap_err().to_string();
+        let err = render_to_file(&src, &r, &out, None, None, crate::diag::stderr()).unwrap_err().to_string();
         assert!(err.contains("sky"), "the refusal names the mask: {err}");
         assert!(!out.exists(), "a refused export writes nothing");
         // amount = 0 is inert BY the recipe — nothing is being dropped.
         let mut disabled = broken;
         disabled.amount = 0.0;
         let r = EditRecipe { masks: vec![disabled], ..Default::default() };
-        render_to_file(&src, &r, &out, None, None).expect("disabled mask exports fine");
+        render_to_file(&src, &r, &out, None, None, crate::diag::stderr()).expect("disabled mask exports fine");
         // A PARKED mask (default amount 1, every adjustment neutral) renders
         // nothing even with a healthy raster — its lost raster must not
         // block the export either.
@@ -7655,7 +7766,7 @@ mod tests {
             ..Default::default()
         };
         let r = EditRecipe { masks: vec![parked], ..Default::default() };
-        render_to_file(&src, &r, &out, None, None).expect("engine-inert mask exports fine");
+        render_to_file(&src, &r, &out, None, None, crate::diag::stderr()).expect("engine-inert mask exports fine");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7945,6 +8056,58 @@ mod tests {
         let inert = develop_preview(&base, &missing).to_rgb8();
         assert_eq!(inert.get_pixel(5, 10)[0], ctrl_w, "missing raster ⇒ mask inert");
         assert_eq!(inert.get_pixel(35, 10)[0], ctrl_b);
+    }
+
+    /// R29-1 acceptance ②: the PURE-PIXEL preview arm carries typed identity —
+    /// or, here, typed ABSENCE of it.
+    ///
+    /// `develop_preview` is handed a buffer, a width and a height. Under R28
+    /// Batch-5 5c its mask-raster loader was passed a bare `None` and the
+    /// resulting stderr line named nothing, with the reason living only in a
+    /// comment; the registration called it "the residue of 5c". The disclosure
+    /// now arrives as a `diag::Line` whose subject IS `Subject::PixelOnly` —
+    /// a state a sink can match on — and the injected form lets a caller that
+    /// DOES know the photograph say so instead.
+    #[test]
+    fn the_pure_pixel_preview_arm_states_that_it_has_no_photograph() {
+        use crate::diag::{Collector, Diag, Subject};
+        use crate::recipe::MaskGeometry;
+        let base =
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([120, 120, 120])));
+        // A path nothing else in the suite touches: `load_mask_bitmap` caches
+        // its negative result per (path, mtime), so a shared fixture would let
+        // a neighbouring test's first hit swallow the line under test.
+        let dead = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap {
+                    path: "out/_r29_pixel_only_probe_no_such_mask.png".into(),
+                },
+                exposure_ev: 1.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let sink = Collector::new();
+        let _ = develop_preview_with(&base, &dead, &Diag::pixels_only(&sink));
+        let lines = sink.take();
+        assert_eq!(lines.len(), 1, "the dead raster must disclose exactly once: {lines:?}");
+        assert_eq!(
+            lines[0].subject,
+            Subject::PixelOnly,
+            "the preview arm must state that it has no photograph, not pass a bare None"
+        );
+        assert!(
+            lines[0].text.contains("could not be loaded"),
+            "unexpected line: {}",
+            lines[0].text
+        );
+        // …and the shipped rendering of a PixelOnly line carries no stem, which
+        // is what this arm has always printed.
+        assert!(
+            lines[0].shipped().starts_with("⚠ bitmap mask '"),
+            "PixelOnly must render without an attribution: {}",
+            lines[0].shipped()
+        );
     }
 
     #[test]
@@ -8328,7 +8491,7 @@ mod tests {
             ..Default::default()
         };
         let r = EditRecipe { masks: vec![m], ..Default::default() };
-        let err = load_mask_raster_snapshot(&r, None)
+        let err = load_mask_raster_snapshot(&r, &crate::diag::pixels())
             .expect_err("a component raster counts for the deliverable refusal");
         assert!(
             err.to_string().contains("carved"),
@@ -9203,7 +9366,7 @@ d 0.113862 0.987261"
         // only by aggressive recipe values? Run with `--nocapture` to read numbers.
         fn run(px: [f32; 3], r: &EditRecipe) -> [f32; 3] {
             let mut d = vec![px];
-            apply_develop(&mut d, 1, 1, r);
+            apply_develop_anon(&mut d, 1, 1, r);
             d[0]
         }
         let white = [1.0_f32, 1.0, 1.0];
@@ -9254,7 +9417,7 @@ d 0.113862 0.987261"
         // All-zero recipe ⇒ no clarity/sat/NR/sharpen, near-identity tone LUT.
         let mut data = vec![[0.2_f32, 0.5, 0.8], [0.9, 0.1, 0.4]];
         let orig = data.clone();
-        apply_develop(&mut data, 2, 1, &EditRecipe::default());
+        apply_develop_anon(&mut data, 2, 1, &EditRecipe::default());
         for (a, b) in data.iter().zip(orig.iter()) {
             for c in 0..3 {
                 assert!((a[c] - b[c]).abs() < 0.02, "channel drift {} vs {}", a[c], b[c]);
@@ -9318,7 +9481,7 @@ d 0.113862 0.987261"
             .collect();
         let before = data[6][0] - data[5][0];
         let r = EditRecipe { sharpening: 120.0, ..Default::default() };
-        apply_develop(&mut data, w, h, &r);
+        apply_develop_anon(&mut data, w, h, &r);
         let after = data[6][0] - data[5][0];
         assert!(after > before, "edge step {after} should exceed {before}");
         // The unsharp is a LUMA op scaling all channels by one ratio — a
@@ -9659,9 +9822,9 @@ d 0.113862 0.987261"
         // Before R22 the local path rendered NOTHING at all.
         let (data, w, h) = detail_frame();
         let mut global = data.clone();
-        apply_develop(&mut global, w, h, &EditRecipe { clarity: 50.0, ..Default::default() });
+        apply_develop_anon(&mut global, w, h, &EditRecipe { clarity: 50.0, ..Default::default() });
         let mut local = data.clone();
-        apply_develop(
+        apply_develop_anon(
             &mut local,
             w,
             h,
@@ -9706,7 +9869,7 @@ d 0.113862 0.987261"
         let mut reference = data.clone();
         unsharp_luma(&mut reference, w, h, radius, 0.5, false);
         let mut local = data.clone();
-        apply_develop(
+        apply_develop_anon(
             &mut local,
             w,
             h,
@@ -9750,9 +9913,9 @@ d 0.113862 0.987261"
     fn global_texture_at_full_coverage_equals_the_masked_operator() {
         let (data, w, h) = detail_frame();
         let mut global = data.clone();
-        apply_develop(&mut global, w, h, &EditRecipe { texture: 50.0, ..Default::default() });
+        apply_develop_anon(&mut global, w, h, &EditRecipe { texture: 50.0, ..Default::default() });
         let mut local = data.clone();
-        apply_develop(
+        apply_develop_anon(
             &mut local,
             w,
             h,
@@ -9856,7 +10019,7 @@ d 0.113862 0.987261"
             let src = stripe_frame(w, h, period);
             let before = stripe_contrast(&src, w, h);
             let mut new = src.clone();
-            apply_develop(&mut new, w, h, &recipe);
+            apply_develop_anon(&mut new, w, h, &recipe);
             // The PRE-R28 branch, called rather than paraphrased.
             let mut old = src.clone();
             let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
@@ -9902,9 +10065,9 @@ d 0.113862 0.987261"
         //    already pinned to two tests above.
         let src = stripe_frame(w, h, 16);
         let mut global = src.clone();
-        apply_develop(&mut global, w, h, &recipe);
+        apply_develop_anon(&mut global, w, h, &recipe);
         let mut local = src.clone();
-        apply_develop(
+        apply_develop_anon(
             &mut local,
             w,
             h,
@@ -9967,7 +10130,7 @@ d 0.113862 0.987261"
             })
             .collect();
         let mut global = data.clone();
-        apply_develop(
+        apply_develop_anon(
             &mut global,
             w,
             h,
@@ -9980,7 +10143,7 @@ d 0.113862 0.987261"
             },
         );
         let mut local = data.clone();
-        apply_develop(
+        apply_develop_anon(
             &mut local,
             w,
             h,
@@ -10052,7 +10215,7 @@ d 0.113862 0.987261"
             .collect();
         let halo_of = |r: EditRecipe| -> usize {
             let mut out = edge.clone();
-            apply_develop(&mut out, w, h, &r);
+            apply_develop_anon(&mut out, w, h, &r);
             let row = (h / 2) * w;
             (0..w)
                 .filter(|x| (out[row + x][0] - edge[row + x][0]).abs() > 1e-3)
@@ -10087,7 +10250,7 @@ d 0.113862 0.987261"
             .collect();
         let halo_of = |m: LocalAdjustment| -> usize {
             let mut out = edge.clone();
-            apply_develop(&mut out, w, h, &EditRecipe { masks: vec![m], ..Default::default() });
+            apply_develop_anon(&mut out, w, h, &EditRecipe { masks: vec![m], ..Default::default() });
             let row = (h / 2) * w;
             (0..w)
                 .filter(|x| (out[row + x][0] - edge[row + x][0]).abs() > 1e-3)
@@ -10131,7 +10294,7 @@ d 0.113862 0.987261"
             })
             .collect();
         let mut out = base.clone();
-        apply_develop(
+        apply_develop_anon(
             &mut out,
             w,
             h,
@@ -10557,7 +10720,7 @@ d 0.113862 0.987261"
         ];
         for (name, r, ch) in cases {
             let mut data = vec![[0.0_f32, 0.0, 0.0]];
-            apply_develop(&mut data, 1, 1, &r);
+            apply_develop_anon(&mut data, 1, 1, &r);
             let p = data[0];
             assert!(p[ch] > 0.15, "{name} channel lifted: {p:?}");
             for c in (0..3).filter(|c| *c != ch) {
@@ -10722,8 +10885,8 @@ d 0.113862 0.987261"
         clamped.clamp();
         let wild_out = dir.join("wild.png");
         let clamped_out = dir.join("clamped.png");
-        render_to_file(&src, &wild, &wild_out, None, None).unwrap();
-        render_to_file(&src, &clamped, &clamped_out, None, None).unwrap();
+        render_to_file(&src, &wild, &wild_out, None, None, crate::diag::stderr()).unwrap();
+        render_to_file(&src, &clamped, &clamped_out, None, None, crate::diag::stderr()).unwrap();
 
         let got = image::open(&wild_out).unwrap().to_rgb16();
         let expected = image::open(&clamped_out).unwrap().to_rgb16();
@@ -10896,7 +11059,7 @@ d 0.113862 0.987261"
             ],
             ..Default::default()
         };
-        let Err(error) = load_mask_raster_snapshot_with_budget(&recipe, 1, true, None) else {
+        let Err(error) = load_mask_raster_snapshot_with_budget(&recipe, 1, true, &crate::diag::pixels()) else {
             panic!("two decoded bytes must exceed a one-byte snapshot budget");
         };
         assert!(
@@ -10926,7 +11089,7 @@ d 0.113862 0.987261"
             }],
             ..Default::default()
         };
-        let snapshot = load_mask_raster_snapshot(&recipe, None).unwrap();
+        let snapshot = load_mask_raster_snapshot(&recipe, &crate::diag::pixels()).unwrap();
         let untouched = vec![[0.25, 0.25, 0.25]; 4];
         let mut before_delete = untouched.clone();
         apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot);
@@ -11522,7 +11685,7 @@ d 0.113862 0.987261"
         ] {
             let out = out_dir.join(name);
             let opts = ExportOpts { eight_bit: eight, ..Default::default() };
-            render_to_file(&src, &recipe, &out, None, Some(&opts)).unwrap();
+            render_to_file(&src, &recipe, &out, None, Some(&opts), crate::diag::stderr()).unwrap();
             let img = image::open(&out).unwrap();
             let got8 = matches!(img.color(), image::ColorType::Rgb8 | image::ColorType::Rgba8);
             assert_eq!(
@@ -11614,7 +11777,7 @@ d 0.113862 0.987261"
             Some(p.to_string_lossy().as_ref()),
             "the resolved alpha is the geometry's raster"
         );
-        let bmp = load_mask_bitmap(&resolved.mask, None).expect("the alpha must load");
+        let bmp = load_mask_bitmap(&resolved.mask, &crate::diag::pixels()).expect("the alpha must load");
         assert_eq!(mask_weight(&resolved.mask, 0.5, 0.5, Some(&bmp)), 1.0);
         let _ = std::fs::remove_dir_all(&dir);
     }

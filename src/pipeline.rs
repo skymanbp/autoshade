@@ -115,6 +115,21 @@ fn reference_preview(path: &Path) -> Result<Vec<u8>> {
 /// Run the advise chain for one RAW. `guidance` is an optional user direction
 /// (a prompt steering the edit, e.g. "warmer and moodier") woven into the GPT
 /// prompt.
+///
+/// `sink` is where this call's DISCLOSURES go (R29-1). The chain raises two
+/// ungated lines — the proposer fallback and the style-embedding degrade — and
+/// until this parameter existed they were hard-coded `eprintln!`s a caller
+/// could neither route nor order (see [`crate::diag`]). Pass
+/// [`crate::diag::stderr`] for the shipped behaviour; a pooled caller passes a
+/// [`crate::diag::Collector`] and renders the lines into the photo's own block.
+/// The SUBJECT is bound here from `raw`, so no caller can attribute this
+/// photo's warnings to another.
+// One advise chain's own inputs — every one of them is a decision a caller
+// makes per call (which photo, whose config, how loud, what direction, what
+// base, which grade, judge or not, where the disclosures go). Bundling them
+// into a struct would move the arity, not remove it, and `GradeRequest`
+// already carries the half that groups.
+#[allow(clippy::too_many_arguments)]
 pub fn produce_recipe(
     raw: &Path,
     cfg: &Config,
@@ -123,6 +138,7 @@ pub fn produce_recipe(
     base: Option<&EditRecipe>,
     req: GradeRequest,
     judge: bool,
+    sink: &dyn crate::diag::Sink,
 ) -> Result<(EditRecipe, Verdict, Vec<crate::rationale::Note>)> {
     // The third element (L12#2B): every DETERMINISTIC rationale fragment this
     // call appended, as typed notes rendering the rationale string's SUFFIX
@@ -140,6 +156,8 @@ pub fn produce_recipe(
              AUTOSHOP_ANALYSIS_API_KEY), or switch the analysis provider to oauth"
         );
     }
+    // This call's diagnostics channel, bound to the photograph it is about.
+    let diag = crate::diag::Diag::about(sink, raw);
     // decode_any: a camera RAW, or an already-baked PNG/TIFF/JPEG (PNG-source mode).
     let decoded = decode::decode_any(raw)?;
 
@@ -209,12 +227,12 @@ pub fn produce_recipe(
                     // found by re-walking `eprintln!` in this file at R28 HEAD
                     // (Batch-2 did the same re-enumeration for the render's
                     // two): per-photo, ungated, worker-reachable, and it named
-                    // no photograph either. Stamped for the same reason.
-                    eprintln!(
-                        "⚠ {}style embedding unavailable ({e:#}) — retrieving on the 14-dim \
-                         feature alone",
-                        attribution(Some(raw))
-                    );
+                    // no photograph either. It travels the caller's channel for
+                    // the same reason.
+                    diag.warn(format!(
+                        "style embedding unavailable ({e:#}) — retrieving on the 14-dim \
+                         feature alone"
+                    ));
                     None
                 }
             }
@@ -241,19 +259,24 @@ pub fn produce_recipe(
             // console, so the same fact also rides the rationale below (L08
             // disclosure threading).
             //
-            // NOT stamped with a photograph, deliberately (R28 Batch-5 5c): the
-            // `Once` makes this a statement about the RUN — the index is stale
-            // for every photo in it — and prefixing whichever worker happened
-            // to reach it first would read as "this photo's index is stale".
-            // The per-photo half of the same fact is `style_err`, which the
-            // rationale carries on every photo.
+            // NOT attributed to a photograph, and now the TYPE says so
+            // (R29-1): the `Once` makes this a statement about the RUN — the
+            // index is stale for every photo in it — and naming whichever
+            // worker happened to reach it first would read as "this photo's
+            // index is stale". R28 Batch-5 5c could only leave it un-stamped
+            // and explain the gap in a comment; `Subject::Run` states it, on
+            // the caller's own channel, so a sink can file it once for the run
+            // instead of under an arbitrary photo. The per-photo half of the
+            // same fact is `style_err`, which the rationale carries on every
+            // photo.
             static ONCE: std::sync::Once = std::sync::Once::new();
             let once_msg = err.clone();
+            let run = diag.rebound(crate::diag::Subject::Run);
             ONCE.call_once(move || {
-                eprintln!(
-                    "⚠ style reference unavailable ({once_msg}) — the Style slider has \
+                run.warn(format!(
+                    "style reference unavailable ({once_msg}) — the Style slider has \
                      no effect until the index is rebuilt"
-                );
+                ));
             });
             style_err = Some(err);
             None
@@ -400,16 +423,15 @@ pub fn produce_recipe(
                     .context("the AI refine failed — your current edit is unchanged"));
             }
             Err(e) => {
-                // STAMPED with the photograph (R28 Batch-5 5c): this is the
-                // line `jobs`' module doc names by file:line as the one a
-                // parallel batch reorders, and until now it named no photo, so
-                // three workers' fallbacks were indistinguishable. The same
-                // fact also rides the typed note channel below — which `batch`
-                // used to discard and now renders into the photo's block.
-                eprintln!(
-                    "⚠ {}GPT proposer failed ({e})\n  → falling back to the heuristic baseline.",
-                    attribution(Some(raw))
-                );
+                // THE line `jobs`' module doc names by file:line as the one a
+                // parallel batch reorders. R28 Batch-5 5c stamped it with the
+                // photograph; R29-1 puts it on the caller's channel, so a
+                // pooled caller can also decide WHEN it appears. The same fact
+                // rides the typed note channel below — which `batch` used to
+                // discard and now renders into the photo's block.
+                diag.warn(format!(
+                    "GPT proposer failed ({e})\n  → falling back to the heuristic baseline."
+                ));
                 // Hand the REAL cause to the heuristic: this stderr line is
                 // invisible in the windowed GUI, so the recipe's rationale is
                 // the only place the user can learn why the AI didn't run.
@@ -2223,7 +2245,14 @@ pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
     }
 }
 
-pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Result<PathBuf> {
+/// Publish the recipe for `raw`. `sink` receives the clamp disclosure, if the
+/// write costs anything (R29-1: it used to be a bare `eprintln!`).
+pub fn write_recipe(
+    raw: &Path,
+    recipe: &EditRecipe,
+    out: Option<PathBuf>,
+    sink: &dyn crate::diag::Sink,
+) -> Result<PathBuf> {
     let out = out.unwrap_or_else(|| crate::store::recipe_target(raw));
     // `-o some_dir` names an existing DIRECTORY: refuse instead of renaming
     // the whole directory to .bak below and publishing a recipe FILE in its
@@ -2236,7 +2265,7 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
         );
     }
     ensure_parent(&out)?;
-    let bytes = recipe_bytes_for(recipe, out.parent(), Some(raw))?;
+    let bytes = recipe_bytes_for(recipe, out.parent(), &crate::diag::Diag::about(sink, raw))?;
     // Publish via tmp+rename rather than truncating the AUTHORITATIVE file in
     // place: a crash mid-write used to leave a half-written recipe.json (loud
     // Unreadable, but the develop was gone). The old file is retired to .bak
@@ -2283,24 +2312,24 @@ pub fn write_recipe(raw: &Path, recipe: &EditRecipe, out: Option<PathBuf>) -> Re
 /// routes that already clamp see a no-op — a floor no future route can
 /// forget to stand on.
 ///
-/// `photo` is the photograph this recipe belongs to, threaded for the clamp
-/// disclosure below and nothing else (R28 Batch-5 5c). `anchor` cannot stand in
-/// for it: it is a DIRECTORY (the develop dir, or wherever `-o` pointed), so it
-/// names the store's hash, not the picture.
+/// `diag` is the caller's channel for the clamp disclosure below, carrying the
+/// photograph this recipe belongs to (R28 Batch-5 5c threaded the path;
+/// R29-1 threads the whole channel). `anchor` cannot stand in for the
+/// photograph: it is a DIRECTORY (the develop dir, or wherever `-o` pointed),
+/// so it names the store's hash, not the picture.
 fn recipe_bytes_for(
     recipe: &EditRecipe,
     anchor: Option<&std::path::Path>,
-    photo: Option<&Path>,
+    diag: &crate::diag::Diag<'_>,
 ) -> Result<Vec<u8>> {
     let mut on_disk = recipe.clone();
     let dropped = on_disk.clamp();
     if !dropped.is_empty() {
         // describe(): only the non-zero losses — curve/string truncation was
         // invisible behind a "0 mask(s)" line (16-lane scan L16).
-        eprintln!(
-            "warning: {}recipe limits discarded {}",
-            attribution(photo),
-            dropped.describe()
+        diag.emit(
+            crate::diag::Mark::WarningWord,
+            format!("recipe limits discarded {}", dropped.describe()),
         );
     }
     if let Some(parent) = anchor {
@@ -2312,9 +2341,13 @@ fn recipe_bytes_for(
 /// The CENTRAL-STORE recipe bytes for `raw` — identical to what a plain
 /// [`write_recipe`] publishes — for staging into a
 /// [`crate::store::commit_develop`] single-generation save.
-pub fn recipe_store_bytes(raw: &Path, recipe: &EditRecipe) -> Result<Vec<u8>> {
+pub fn recipe_store_bytes(
+    raw: &Path,
+    recipe: &EditRecipe,
+    sink: &dyn crate::diag::Sink,
+) -> Result<Vec<u8>> {
     let target = crate::store::recipe_target(raw);
-    recipe_bytes_for(recipe, target.parent(), Some(raw))
+    recipe_bytes_for(recipe, target.parent(), &crate::diag::Diag::about(sink, raw))
 }
 
 /// First FREE ./out artifact path for `tag` (`tag`, `tag-2`, … `tag-999`),
@@ -2354,9 +2387,14 @@ pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
 /// silent, so the values ride the RETURN TYPE where a surface has to look at
 /// them. stderr already hears both via `write_xmp_doc`; UI surfaces route
 /// what they are handed here.
+///
+/// `sink` receives the two ungated lines this path raises (the merge note and
+/// the mask-loss list) — R29-1: the caller decides where they go, and the
+/// SUBJECT is bound from `raw` here rather than taken on trust.
 pub fn write_xmp(
     raw: &Path,
     recipe: &EditRecipe,
+    sink: &dyn crate::diag::Sink,
 ) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
     use crate::store::SidecarRead;
     let target = xmp_target(raw);
@@ -2412,16 +2450,20 @@ pub fn write_xmp(
             )),
         }
     }
-    write_xmp_doc(target, recipe, base, Some(raw), notes)
+    write_xmp_doc(target, recipe, base, &crate::diag::Diag::about(sink, raw), notes)
 }
 
 /// Write the XMP to an EXPLICIT path. Used when the recipe was redirected with
 /// `-o`: the two halves of one develop must stay in the same folder, or the
 /// GUI/web would keep restoring an older `out/<stem>.xmp` instead.
+///
+/// `diag` carries BOTH halves the old `photo: Option<&Path>` parameter was
+/// standing in for (R29-1): the photograph — read back out for the frame
+/// aspect — and the channel its disclosures travel on.
 pub fn write_xmp_at(
     out: PathBuf,
     recipe: &EditRecipe,
-    photo: Option<&Path>,
+    diag: &crate::diag::Diag<'_>,
 ) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
     use crate::store::SidecarRead;
     let mut notes: Vec<String> = Vec::new();
@@ -2437,7 +2479,7 @@ pub fn write_xmp_at(
             None
         }
     };
-    write_xmp_doc(out, recipe, base, photo, notes)
+    write_xmp_doc(out, recipe, base, diag, notes)
 }
 
 /// Returns the published path and, when the merge could not run, a note naming
@@ -2456,9 +2498,14 @@ fn write_xmp_doc(
     out: PathBuf,
     recipe: &EditRecipe,
     merge_base: Option<(PathBuf, String)>,
-    photo: Option<&Path>,
+    diag: &crate::diag::Diag<'_>,
     mut notes: Vec<String>,
 ) -> Result<(PathBuf, Option<String>, Vec<xmp::MaskLoss>)> {
+    // ONE source for the photograph: the channel this write discloses on. A
+    // separate `photo` parameter beside a separate attribution could disagree,
+    // and the frame aspect below is decided by the same identity the warnings
+    // are attributed to.
+    let photo = diag.photo();
     ensure_parent(&out)?;
     // The same floor `write_recipe` stands on, for the same reason: this is a
     // persistence boundary, the string caps exist because `rationale` is
@@ -2533,14 +2580,14 @@ fn write_xmp_doc(
             )
         });
     }
-    // Both stderr lines in this function carry the photograph when the caller
-    // knows one (R28 Batch-5 5c). `photo` is already this function's parameter
-    // — the merge/export path had the identity all along and simply did not
-    // print it, which is what made a `--jobs 3` transcript unreadable.
-    let who = attribution(photo);
+    // Both disclosure lines in this function travel the caller's channel and
+    // carry the photograph when the caller knows one (R28 Batch-5 5c stamped
+    // them; R29-1 routes them). The merge/export path had the identity all
+    // along and simply did not print it, which is what made a `--jobs 3`
+    // transcript unreadable.
     let note = (!notes.is_empty()).then(|| {
         let msg = notes.join("; ");
-        eprintln!("⚠ {who}{msg}");
+        diag.warn(msg.clone());
         // The RETURNED note is unprefixed: it travels the structured channel to
         // a caller that already knows which photo it asked about (and the GUI
         // localises it), so stamping it there would print the stem twice.
@@ -2550,9 +2597,9 @@ fn write_xmp_doc(
     // shapes flattened, rotation + recolour dropped) — judged by the WRITER on
     // the CLAMPED recipe, i.e. exactly the masks the document carries. The
     // import direction had four disclosure sites and the export direction had
-    // none; this is that half. stderr covers every CLI path from here — one
-    // line, one place — the same deal the merge note above has; UI/web surfaces
-    // localise the structured list they get back.
+    // none; this is that half. The caller's channel covers every CLI path from
+    // here — one line, one place — the same deal the merge note above has;
+    // UI/web surfaces localise the structured list they get back.
     //
     // The document and the verdicts arrive TOGETHER (R22 NIT-1): both arms
     // produce the list while emitting the mask block, so this no longer calls
@@ -2562,7 +2609,7 @@ fn write_xmp_doc(
         None => xmp::recipe_to_xmp_in_frame(recipe, frame),
     };
     if let Some(m) = xmp::describe_mask_losses(&mask_losses) {
-        eprintln!("⚠ {who}{m}");
+        diag.warn(m);
     }
     // Stage + rename, never truncate in place: `fs::write` opens the LIVE
     // sidecar with O_TRUNC, so a full disk, an interruption or a competing
@@ -3467,7 +3514,7 @@ mod guard_tests {
         )
         .unwrap();
         let r = EditRecipe { exposure_ev: 0.75, ..Default::default() };
-        let (out, _, _) = write_xmp(&raw, &r).unwrap();
+        let (out, _, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("crs:PointColor=\"0\""), "LR-only property survives the save");
         assert_eq!(text.matches("crs:Exposure2012=").count(), 1, "ours replaces, never duplicates");
@@ -3526,7 +3573,7 @@ mod guard_tests {
             exposure_ev: 0.4,
             ..Default::default()
         });
-        let (out, note, _) = write_xmp(&raw, &r).unwrap();
+        let (out, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("Mask/CircularGradient"), "the develop's mask is published");
         assert!(!text.contains("Mask/Brush"), "the foreign block is not resurrected");
@@ -3566,7 +3613,7 @@ mod guard_tests {
             ],
             ..Default::default()
         };
-        let (out, _, losses) = write_xmp(&raw, &r).unwrap();
+        let (out, _, losses) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
         assert_eq!(
             losses,
             vec![xmp::MaskLoss { name: "sky".into(), reason: xmp::MaskLossReason::Bitmap }],
@@ -3582,7 +3629,7 @@ mod guard_tests {
         // surfaces stay silent on that, and an always-non-empty list would make
         // every clean save shout.
         let clean = EditRecipe { masks: vec![r.masks[1].clone()], ..Default::default() };
-        let (_, _, none) = write_xmp(&raw, &clean).unwrap();
+        let (_, _, none) = write_xmp(&raw, &clean, crate::diag::stderr()).unwrap();
         assert!(none.is_empty(), "an exportable develop loses nothing: {none:?}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
@@ -3625,7 +3672,7 @@ mod guard_tests {
                 .collect(),
             ..Default::default()
         };
-        let out = write_recipe(&raw, &hostile, None).unwrap();
+        let out = write_recipe(&raw, &hostile, None, crate::diag::stderr()).unwrap();
         let on_disk: EditRecipe =
             serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!(on_disk.masks.len(), 64, "the file on disk is within the caps");
@@ -3660,7 +3707,7 @@ mod guard_tests {
              crs:PointColor=\"0\"></rdf:Description>\n",
         )
         .unwrap();
-        let (out, note, _) = write_xmp(&raw, &r).unwrap();
+        let (out, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
         assert!(note.is_none(), "a merge that worked has nothing to disclose: {note:?}");
         assert!(std::fs::read_to_string(&out).unwrap().contains("crs:PointColor=\"0\""));
 
@@ -3674,7 +3721,7 @@ mod guard_tests {
              crs:PointColor=\"0\">\n",
         )
         .unwrap();
-        let (out, note, _) = write_xmp(&raw, &r).unwrap();
+        let (out, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.contains("crs:Exposure2012=\"0.75\""), "the save still happened");
         assert!(!text.contains("crs:PointColor"), "…by regenerating, so the LR property is gone");
@@ -3713,11 +3760,11 @@ mod guard_tests {
         let dev = crate::store::develop_dir(&raw);
         let _ = std::fs::remove_dir_all(&dev);
         std::fs::write(dir.join("_pipe_note_blank.xmp"), b"").unwrap();
-        let (_, note, _) = write_xmp(&raw, &r).unwrap();
+        let (_, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
         assert!(note.is_none(), "an empty sidecar carries nothing to disclose: {note:?}");
         // Whitespace-only is the same emptiness.
         std::fs::write(dir.join("_pipe_note_blank.xmp"), b"  \n\t\n").unwrap();
-        let (_, note, _) = write_xmp(&raw, &r).unwrap();
+        let (_, note, _) = write_xmp(&raw, &r, crate::diag::stderr()).unwrap();
         assert!(note.is_none(), "whitespace is not a merge base: {note:?}");
         let _ = std::fs::remove_dir_all(&dev);
 
@@ -3732,7 +3779,7 @@ mod guard_tests {
             "<rdf:Description rdf:about=\"\" xmlns:crs=\"c\" crs:PointColor=\"0\">\n",
         )
         .unwrap();
-        let (_, note, _) = write_xmp(&png, &r).unwrap();
+        let (_, note, _) = write_xmp(&png, &r, crate::diag::stderr()).unwrap();
         assert!(note.is_none(), "a baked photo's neighbour .xmp is not read: {note:?}");
         let _ = std::fs::remove_dir_all(&dev_png);
 
@@ -3754,7 +3801,7 @@ mod guard_tests {
              xmp:Rating=\"5\" xmp:Label=\"Green\"></rdf:Description>\n \
              </rdf:RDF>\n</x:xmpmeta>\n";
         std::fs::write(&lr2, ratings).unwrap();
-        let (out2, note, _) = write_xmp(&raw2, &r).unwrap();
+        let (out2, note, _) = write_xmp(&raw2, &r, crate::diag::stderr()).unwrap();
         assert!(note.is_none(), "a foreign sidecar we CAN merge has no loss to report: {note:?}");
         let merged = std::fs::read_to_string(&out2).unwrap();
         assert!(merged.contains("xmp:Rating=\"5\""), "the user's rating survives: {merged}");
@@ -3767,7 +3814,7 @@ mod guard_tests {
         );
         // Saving AGAIN must not stack a second Description: the merged store
         // copy now carries crs, so the ordinary merge path takes over.
-        let (out2b, note, _) = write_xmp(&raw2, &r).unwrap();
+        let (out2b, note, _) = write_xmp(&raw2, &r, crate::diag::stderr()).unwrap();
         let again = std::fs::read_to_string(&out2b).unwrap();
         assert!(note.is_none(), "the second save has nothing to disclose either: {note:?}");
         assert_eq!(again.matches("crs:Exposure2012=").count(), 1, "one settings block, not two");
@@ -3799,7 +3846,7 @@ mod guard_tests {
                 ),
             )
             .unwrap();
-            let (out4, _, _) = write_xmp(&raw4, &r).unwrap();
+            let (out4, _, _) = write_xmp(&raw4, &r, crate::diag::stderr()).unwrap();
             let t = std::fs::read_to_string(&out4).unwrap();
             let settings = t.find("crs:Exposure2012").expect("our settings landed somewhere");
             let real_root = t.rfind("<rdf:RDF").expect("the real root survives");
@@ -3825,7 +3872,7 @@ mod guard_tests {
              crs:PointColor=\"0\">\n",
         )
         .unwrap();
-        let (_, note, _) = write_xmp(&raw3, &r).unwrap();
+        let (_, note, _) = write_xmp(&raw3, &r, crate::diag::stderr()).unwrap();
         let note = note.expect("an unaccountable base is a real loss");
         assert!(
             note.contains(&lr3.display().to_string()),
@@ -3864,7 +3911,7 @@ mod guard_tests {
         )
         .unwrap();
         let r1 = EditRecipe { exposure_ev: 0.5, ..Default::default() };
-        let (_, note, _) = write_xmp(&raw, &r1).unwrap();
+        let (_, note, _) = write_xmp(&raw, &r1, crate::diag::stderr()).unwrap();
         assert!(note.is_none(), "the mergeable base has nothing to disclose: {note:?}");
 
         // The sidecar balloons past the cap (Lightroom AI masks, or hostile).
@@ -3876,7 +3923,7 @@ mod guard_tests {
         std::fs::write(&lr, &big).unwrap();
 
         let r2 = EditRecipe { exposure_ev: 0.75, ..Default::default() };
-        let (out, note, _) = write_xmp(&raw, &r2).unwrap();
+        let (out, note, _) = write_xmp(&raw, &r2, crate::diag::stderr()).unwrap();
         // The fallback itself is CORRECT — the previous projection carries
         // forward what the first merge preserved, and the save must succeed.
         let text = std::fs::read_to_string(&out).unwrap();
@@ -4090,29 +4137,33 @@ pub fn stem(p: &Path) -> &str {
     p.file_stem().and_then(|s| s.to_str()).unwrap_or("out")
 }
 
-/// The `"<stem>: "` prefix a worker-reachable stderr line wears, or `""` when
-/// the caller genuinely has no photograph (R28 Batch-5 5c).
+/// The `"<stem>: "` the DEFAULT diagnostics sink puts in front of a
+/// photograph's message ([`crate::diag::Subject::stamp`]) — a FORMATTING
+/// helper, and the only thing left of what used to be the whole mechanism.
 ///
-/// **Why this exists.** `batch` defaults to `--jobs 3` and the pool's ordering
-/// guarantee covers STDOUT only: workers write into their own block and the
-/// sequencer releases blocks in index order, so the transcript is
-/// byte-identical to a serial one. STDERR has no such thing — `verbose` gates
-/// the progress chatter, not the warnings, so every ungated `eprintln!` in the
-/// develop chain lands on a shared stream in COMPLETION order and used to name
-/// no photograph at all. Three photos in flight, three warnings, and nothing
-/// says which is which. `jobs`' module doc has always disclosed the block
-/// channel; this is the identity the reordering costs, bought back.
+/// **Why the attribution exists at all.** `batch` defaults to `--jobs 3` and
+/// the pool's ordering guarantee covers STDOUT only: workers write into their
+/// own block and the sequencer releases blocks in index order, so the
+/// transcript is byte-identical to a serial one. STDERR had no such thing —
+/// `verbose` gates the progress chatter, not the warnings, so every ungated
+/// `eprintln!` in the develop chain landed on a shared stream in COMPLETION
+/// order and named no photograph at all. Three photos in flight, three
+/// warnings, and nothing said which was which. `jobs`' module doc has always
+/// disclosed the block channel; this is the identity the reordering costs,
+/// bought back.
 ///
-/// It is a PREFIX, not a sink. The deepest root the R27 adjudication names
-/// (F6) is that this pipeline has no caller-supplied diagnostics channel at
-/// all — the disclosure lines are hard-coded `eprintln!`s and the only way to
-/// route or suppress them is to be the process. That redesign stays OPEN and
-/// registered; stamping the lines that already have a photo in scope, plus
-/// rendering `produce_recipe`'s typed note channel into the caller's block
-/// (which `eval` already did and `batch` threw away), is the minimum that makes
-/// a parallel transcript attributable without inventing an abstraction.
-pub fn attribution(photo: Option<&Path>) -> String {
-    photo.map(|p| format!("{}: ", stem(p))).unwrap_or_default()
+/// **What changed at R29-1.** R28 Batch-5 5c bought that identity back as a
+/// PREFIX and registered the gap a prefix leaves: the deepest root the R27
+/// adjudication names (F6) is that the pipeline had no caller-supplied
+/// diagnostics channel at all, so the disclosure lines could not be routed,
+/// suppressed or ORDERED by anyone who was not the process. [`crate::diag`] is
+/// that channel, and it is no longer open: the develop chain's disclosures
+/// travel as `diag::Line`s carrying their subject as DATA, and `batch` now
+/// renders its workers' lines into the photo's own transcript block, so their
+/// order is the sequencer's (index) rather than the scheduler's (completion).
+/// Nothing but the default sink calls this function.
+pub fn attribution(photo: &Path) -> String {
+    format!("{}: ", stem(photo))
 }
 
 /// Whether a directory entry is a directory, WITHOUT an extra stat per file:
@@ -4274,42 +4325,101 @@ pub fn find_sources_counted(dir: &Path) -> Result<(Vec<PathBuf>, usize)> {
 mod tests {
     use super::*;
 
-    /// R28 Batch-5 5c — THE ATTRIBUTION GATE.
+    /// The PRODUCTION text of `rel`, with every `#[cfg(test)]` item removed.
+    ///
+    /// The cut is deliberately dumb, and reliable here for one stated reason:
+    /// every `#[cfg(test)]` in the scanned files sits at column 0, and every
+    /// top-level item in this codebase closes with a `}` at column 0 — so
+    /// "from the attribute to the next line that is exactly `}`" is the item.
+    /// A parser would be more general and would also have to know raw strings,
+    /// nested block comments and lifetimes apart from char literals; the pinned
+    /// counts below are what actually proves this cut landed where intended (a
+    /// mis-cut moves them).
+    ///
+    /// It is also what lets this gate live inside one of the files it scans:
+    /// its own registry table is `#[cfg(test)]`, so the scan cannot find it.
+    fn production_text(rel: &str) -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // LF-normalised: this repo has MIXED line endings by design.
+        let text = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel}: source readable ({e})"))
+            .replace("\r\n", "\n");
+        let mut out = String::new();
+        let (mut cursor, mut search) = (0usize, 0usize);
+        while let Some(rel_at) = text[search..].find("\n#[cfg(test)]\n") {
+            let at = search + rel_at + 1;
+            let end = text[at..].find("\n}\n").map(|r| at + r + 3).unwrap_or(text.len());
+            out.push_str(&text[cursor..at]);
+            cursor = end;
+            search = end;
+        }
+        out.push_str(&text[cursor..]);
+        out
+    }
+
+    /// Every `<call>…;` statement in `text` opened by one of `openers`.
+    ///
+    /// Statement space, not raw offsets: the question is always "what does the
+    /// call around this message look like", and a fragment can sit many lines
+    /// below the call that raises it.
+    fn statements(text: &str, openers: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        for opener in openers {
+            let mut from = 0usize;
+            while let Some(rel) = text[from..].find(opener) {
+                let start = from + rel;
+                let end = start + text[start..].find(';').unwrap_or(text[start..].len() - 1);
+                out.push(text[start..=end.min(text.len() - 1)].to_string());
+                from = start + opener.len();
+            }
+        }
+        out
+    }
+
+    /// R29-1 — THE DIAGNOSTICS-SINK GATE (successor of R28 Batch-5 5c's
+    /// attribution gate, `every_worker_reachable_warning_names_its_photo`).
     ///
     /// `batch` defaults to `--jobs 3` and the pool orders STDOUT only, so every
-    /// ungated `eprintln!` a worker can reach lands on a shared stderr in
-    /// completion order. Each of those lines must name its photograph, or a
-    /// three-photo run prints warnings nobody can attribute — the mechanism the
-    /// R27 adjudication filed as F6.
+    /// ungated `eprintln!` a worker could reach landed on a shared stderr in
+    /// completion order. 5c made each of those lines NAME its photograph; that
+    /// left the deeper half of adjudication F6 open — the caller could not
+    /// route, suppress or order them, because they were hard-coded writes to
+    /// the process's own stderr. R29-1 moved them onto [`crate::diag`], and
+    /// this gate states the property that replaces "each line names a photo":
+    ///
+    /// 1. Each registered disclosure is raised through the SINK (`.warn(` /
+    ///    `.emit(`), carrying its subject as data.
+    /// 2. NONE of them is an `eprintln!` any more — the same fragment scanned
+    ///    in `eprintln!` statement space must come back empty.
+    /// 3. The develop chain's files hold no OTHER bare `eprintln!` than the
+    ///    ones this table names and explains, so a new one cannot be added
+    ///    without meeting the gate.
     ///
     /// A source scan, in the idiom this repo already uses for the store's
     /// capped-reader rule and the GUI font gate: the property is "no site
-    /// forgot", which no behavioural test over one code path can state. Each
-    /// row is a fragment of the warning's own format string; the gate finds it,
-    /// checks it appears exactly as often as it should, and asserts the
-    /// `eprintln!` statement around it carries the stamp
-    /// (`attribution(` directly, or the `{who}` prefix a loop hoists out).
+    /// forgot", which no behavioural test over one code path can state. The
+    /// behavioural half lives beside it — `crate::diag`'s pool test proves the
+    /// ORDER is the caller's, and `render`'s preview test proves the pure-pixel
+    /// arm carries `Subject::PixelOnly`.
     ///
-    /// Rows whose fragment IS `{who}…` are messages made of nothing but
-    /// interpolation ("⚠ {who}{msg}"): there the COUNT is the assertion —
-    /// dropping the stem changes the spelling and the row goes missing.
-    ///
-    /// **Deliberately absent, and why.** `pipeline.rs`'s style-index `Once`
-    /// line is a statement about the RUN, not a photo (see its comment).
-    /// `main.rs`'s three `apply`/`auto` XMP-failure lines are SERIAL commands
-    /// that print their own photo header. `render::best_effort_mask_raster_
-    /// snapshot` has no photograph to pass — that one is the registered residue
-    /// of 5c, and closing it needs the diagnostics sink this batch did not
-    /// build.
+    /// Rows whose fragment is the CALL rather than a message ("warn(m)") are
+    /// disclosures made of nothing but an interpolated value: there the count is
+    /// the assertion, exactly as under 5c.
     #[test]
-    fn every_worker_reachable_warning_names_its_photo() {
-        // (file, fragment, how many times it must appear)
-        const SITES: [(&str, &str, usize); 10] = [
+    fn every_worker_reachable_warning_flows_through_the_sink() {
+        // (file, fragment, how many times it must be raised through the sink)
+        const SITES: [(&str, &str, usize); 12] = [
             ("src/pipeline.rs", "GPT proposer failed", 1),
             ("src/pipeline.rs", "style embedding unavailable", 1),
-            ("src/pipeline.rs", "recipe limits discarded", 1),
-            ("src/pipeline.rs", "\"⚠ {who}{msg}\"", 1),
-            ("src/pipeline.rs", "\"⚠ {who}{m}\"", 1),
+            // The run-scoped `Once` line — 5c had to leave this one
+            // un-stamped and say so in a comment; `Subject::Run` states it.
+            ("src/pipeline.rs", "style reference unavailable", 1),
+            ("src/pipeline.rs", "recipe limits discarded {}", 1),
+            ("src/pipeline.rs", "warn(msg.clone())", 1),
+            ("src/pipeline.rs", "warn(m)", 1),
+            // The clamp disclosure 5c's sweep MISSED, because it re-walked
+            // three files and this one lives in a fourth.
+            ("src/recipe.rs", "truncated {} curve point(s)", 1),
             ("src/main.rs", "XMP failed: {e}\"", 1),
             ("src/render.rs", "could not embed the {space:?} ICC profile", 1),
             ("src/render.rs", "bitmap mask '{path}' could not be loaded", 1),
@@ -4317,53 +4427,75 @@ mod tests {
             // Three arms of the same aggregate-budget refusal, one loop.
             ("src/render.rs", "mask raster '{path}' skipped", 3),
         ];
-        // Matching is over `eprintln!` STATEMENTS, not raw file offsets, for a
-        // concrete reason: this gate lives in one of the files it scans, so a
-        // plain text search would find its own table above and report every
-        // pipeline row twice. A registry entry is not an eprintln, so working
-        // in statement space excludes it by construction rather than by
-        // spelling the fragments in pieces to hide them from the scanner.
-        let statements = |text: &str| -> Vec<String> {
-            let mut out = Vec::new();
-            let mut from = 0usize;
-            while let Some(rel) = text[from..].find("eprintln!(") {
-                let start = from + rel;
-                let end = start + text[start..].find(';').unwrap_or(text[start..].len() - 1);
-                out.push(text[start..=end.min(text.len() - 1)].to_string());
-                from = start + "eprintln!(".len();
-            }
-            out
-        };
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut checked = 0usize;
         let mut scanned = 0usize;
         for (rel, fragment, want) in SITES {
-            // LF-normalised: this repo has MIXED line endings by design.
-            let text = std::fs::read_to_string(root.join(rel))
-                .unwrap_or_else(|e| panic!("{rel}: source readable ({e})"))
-                .replace("\r\n", "\n");
-            let all = statements(&text);
-            scanned += all.len();
-            let hits: Vec<&String> = all.iter().filter(|s| s.contains(fragment)).collect();
+            let text = production_text(rel);
+            let sunk = statements(&text, &[".warn(", ".emit("]);
+            scanned += sunk.len();
+            let hits: Vec<&String> = sunk.iter().filter(|s| s.contains(fragment)).collect();
             assert_eq!(
                 hits.len(),
                 want,
-                "{rel}: expected {want} eprintln!(s) carrying {fragment:?}, found {} — this \
-                 gate has gone stale, or a stamp was dropped and the message re-spelled",
+                "{rel}: expected {want} sink call(s) carrying {fragment:?}, found {} — this \
+                 gate has gone stale, or a disclosure left the channel and was re-spelled",
                 hits.len()
             );
-            for stmt in hits {
-                assert!(
-                    stmt.contains("attribution(") || stmt.contains("{who}"),
-                    "{rel}: this worker-reachable warning names no photograph:\n{stmt}"
-                );
-                checked += 1;
-            }
+            // …and it must not ALSO still be an eprintln (a half-migrated site
+            // would otherwise satisfy the row above and keep printing twice).
+            let bare = statements(&text, &["eprintln!("]);
+            let leaks: Vec<&String> = bare.iter().filter(|s| s.contains(fragment)).collect();
+            assert!(
+                leaks.is_empty(),
+                "{rel}: {fragment:?} is still raised by a bare eprintln!:\n{}",
+                leaks[0]
+            );
+            checked += hits.len();
         }
-        // PREMISE: a scanner that matched nothing, or that failed to find any
-        // `eprintln!` at all, would pass vacuously.
-        assert_eq!(checked, 12, "every registered site must have been inspected");
-        assert!(scanned > 100, "the statement scanner found almost nothing: {scanned}");
+        // PREMISE: a scanner that matched nothing would pass vacuously.
+        assert_eq!(checked, 14, "every registered site must have been inspected");
+        assert!(scanned > 40, "the statement scanner found almost nothing: {scanned}");
+
+        // THE CENSUS. What is left of `eprintln!` in the develop chain's own
+        // files, why each survivor is not a sink case, and a pinned count so a
+        // new one cannot slip in silently.
+        //
+        // * `src/diag.rs` = 1: the DEFAULT SINK itself. Every routed line ends
+        //   here unless the caller says otherwise, and it is the only write to
+        //   the process stderr the develop chain performs.
+        // * `src/pipeline.rs` = 8: five belong to the RESTORE/base-look
+        //   helpers (`saved_recipe_snapshot`, `photo_base_knots_checked`) —
+        //   library-wide functions with ~30 GUI/web/store call sites, each of
+        //   which already names its photograph by stem or by path; threading a
+        //   sink through them is its own sweep and is registered as such in
+        //   `crate::diag`'s module doc. Three are the folder SCAN's, which run
+        //   before any pool, in the caller's own thread, and are about a
+        //   directory rather than a photograph.
+        // * `src/render.rs` = 1: `disclose_approximate_demosaic`, which names
+        //   its file by full path and belongs to the decoder rather than to
+        //   this chain (same registered sweep).
+        // * `src/main.rs` = 9: the SERIAL single-photo commands (`analyze`,
+        //   `apply`, `auto`, `fit`) and their import-note siblings. One photo,
+        //   one thread, a printed header directly above — nothing to order and
+        //   nobody to route to. The pooled `batch` worker has none.
+        // * `src/recipe.rs` = 0: `ValidatedRecipe::disclose` was the last one.
+        const CENSUS: [(&str, usize); 5] = [
+            ("src/diag.rs", 1),
+            ("src/pipeline.rs", 8),
+            ("src/render.rs", 1),
+            ("src/main.rs", 9),
+            ("src/recipe.rs", 0),
+        ];
+        for (rel, want) in CENSUS {
+            let found = statements(&production_text(rel), &["eprintln!("]).len();
+            assert_eq!(
+                found,
+                want,
+                "{rel}: {found} bare eprintln!(s) in production code, registered {want} — a new \
+                 one needs a row in this census explaining why it is not a sink case (or it \
+                 needs to become one)"
+            );
+        }
     }
 
     /// L13#4: calibration comes from the NEWEST intent. A Lightroom sidecar
@@ -5927,6 +6059,7 @@ mod tests {
             None,
             GradeRequest::default(),
             false,
+            crate::diag::stderr(),
         )
         .expect_err("no analysis key + api provider must refuse up front")
         .to_string();

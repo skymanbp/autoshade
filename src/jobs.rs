@@ -738,7 +738,8 @@ mod tests {
             };
             let out = out_dir.join("autoshop-peak-probe.tif");
             let dims =
-                crate::render::render_to_file(&raw, &recipe, &out, None, None).expect("render");
+                crate::render::render_to_file(&raw, &recipe, &out, None, None, crate::diag::stderr())
+                    .expect("render");
             let _ = std::fs::remove_file(&out);
             println!("  render  peak commit {:>6} MB (saved {dims:?})", peak_commit_mb());
         }

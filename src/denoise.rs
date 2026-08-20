@@ -416,6 +416,10 @@ pub fn denoise_active(
             out,
             Some(opts),
             None,
+            // The shipped channel (R29-1): this is the GUI's interactive
+            // "denoise now", one photo at a time on a worker thread of its
+            // own — there is no pooled transcript for it to be ordered into.
+            crate::diag::stderr(),
         )?;
         return Ok(());
     }

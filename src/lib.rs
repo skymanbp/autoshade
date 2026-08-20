@@ -12,6 +12,7 @@ pub mod advisor;
 pub mod config;
 pub mod decode;
 pub mod denoise;
+pub mod diag;
 pub mod embed;
 pub mod eval;
 pub mod fit;

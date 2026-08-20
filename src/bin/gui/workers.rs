@@ -1670,7 +1670,7 @@ impl AutoshopApp {
                                     let strip_rec = self.current_strip_record();
                                     let commit_res: anyhow::Result<()> = (|| {
                                         let recipe_bytes =
-                                            autoshop::pipeline::recipe_store_bytes(&p, &stamped)?;
+                                            autoshop::pipeline::recipe_store_bytes(&p, &stamped, autoshop::diag::stderr())?;
                                         let pixels = match &origin {
                                             Some(o) => autoshop::store::CommitMember::Write(
                                                 autoshop::store::pixel_source_record_bytes(
@@ -1728,7 +1728,7 @@ impl AutoshopApp {
                                                 None => tr(lang, "AI develop applied · saved to recipe.json").to_string(),
                                             };
                                             if autoshop::decode::is_raw(&p) {
-                                                match autoshop::pipeline::write_xmp(&p, &stamped) {
+                                                match autoshop::pipeline::write_xmp(&p, &stamped, autoshop::diag::stderr()) {
                                                     // Regenerated-not-merged AND
                                                     // the M6a projection losses:
                                                     // the same disclosure as

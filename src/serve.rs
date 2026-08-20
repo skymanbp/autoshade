@@ -1813,6 +1813,11 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             think: req.deep.unwrap_or(false),
         },
         true,
+        // The shipped channel (R29-1). The web surface is one request, one
+        // photo, on its own thread: there is no pooled transcript to order
+        // these into, and the browser's own disclosure is the `warning` field
+        // this handler already builds below.
+        crate::diag::stderr(),
     )?;
     // A non-Accept verdict may not auto-save (user decision): the verifier
     // itself judged the result not ready, so the develop on disk stays
@@ -1841,7 +1846,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         crate::store::DevelopLockMode::Wait,
         || match crate::store::backup_saved_develop(&raw, Some(&recipe)) {
         Ok(backed_up) => {
-            pipeline::write_recipe(&raw, &recipe, None)?;
+            pipeline::write_recipe(&raw, &recipe, None, crate::diag::stderr())?;
             // The recipe write ALONE decides the saved state (the GUI/CLI
             // rule): a failed XMP projection degrades to a warning — the old
             // `?` answered 500 and hid the committed save from the browser.
@@ -1857,7 +1862,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // than the snapshot already does.
             body["revision"] = json!(crate::store::develop_revision(&raw));
             if decode::is_raw(&raw) {
-                match pipeline::write_xmp(&raw, &recipe) {
+                match pipeline::write_xmp(&raw, &recipe, crate::diag::stderr()) {
                     // Two independent disclosures share the one `warning`
                     // field (the existing shape — no new API): the merge note
                     // and, since M6a, what the mask PROJECTION itself could
@@ -2224,8 +2229,15 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         std::process::id(),
         DL_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    if let Err(e) = render::render_to_file(&src, &req.recipe, &tmp, denoise_opts(&req, &cfg).as_ref(), None)
-    {
+    if let Err(e) = render::render_to_file(
+        &src,
+        &req.recipe,
+        &tmp,
+        denoise_opts(&req, &cfg).as_ref(),
+        None,
+        // The shipped channel (R29-1): one request, one photo, one thread.
+        crate::diag::stderr(),
+    ) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -2271,7 +2283,15 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     // A failed render must not leave a multi-hundred-MB partial file to sit
     // in %TEMP% until the next server start's sweep.
     if let Err(e) =
-        render::render_to_file(&src, &req.recipe, &tmp, denoise_opts(&req, &cfg).as_ref(), None)
+        render::render_to_file(
+            &src,
+            &req.recipe,
+            &tmp,
+            denoise_opts(&req, &cfg).as_ref(),
+            None,
+            // The shipped channel (R29-1): one request, one photo, one thread.
+            crate::diag::stderr(),
+        )
     {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -2524,7 +2544,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     crate::store::commit_develop(
         &raw,
         crate::store::DevelopCommit {
-            recipe: Some(pipeline::recipe_store_bytes(&raw, &req.recipe)?),
+            recipe: Some(pipeline::recipe_store_bytes(&raw, &req.recipe, crate::diag::stderr())?),
             pixels,
             variants,
         },
@@ -2561,7 +2581,7 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // the projection write in each arm: the develop tag folds in a sidecar
     // that out-ranks the store, and the tag the tab adopts must describe
     // the state its next If-Match is compared against.
-    match pipeline::write_xmp(&raw, &req.recipe) {
+    match pipeline::write_xmp(&raw, &req.recipe, crate::diag::stderr()) {
         // A regenerated (rather than merged) sidecar is a LOSS of the user's
         // Lightroom-only properties, so it rides the same reply as the path —
         // reporting a bare success here is what made the loss silent.

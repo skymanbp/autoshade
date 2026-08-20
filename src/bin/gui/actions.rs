@@ -1435,7 +1435,7 @@ impl AutoshopApp {
             self.toast(ToastKind::Error, t);
             return Ok(());
         }
-        let res = autoshop::pipeline::write_recipe(&src, &snap, Some(vpath.clone()));
+        let res = autoshop::pipeline::write_recipe(&src, &snap, Some(vpath.clone()), autoshop::diag::stderr());
         if res.is_err() {
             // Release the claimed slot AND this call's frozen rasters — an
             // empty version must not pollute the list after a failed write.
@@ -2404,7 +2404,7 @@ impl AutoshopApp {
                 // or not at all — the background variants this dialog just
                 // listed cannot outlive a save that tore between members.
                 let res: anyhow::Result<()> = (|| {
-                    let recipe_bytes = autoshop::pipeline::recipe_store_bytes(p, &disk)?;
+                    let recipe_bytes = autoshop::pipeline::recipe_store_bytes(p, &disk, autoshop::diag::stderr())?;
                     let pixels = match pix {
                         Some((o, g)) => autoshop::store::CommitMember::Write(
                             autoshop::store::pixel_source_record_bytes(p, o, *g)?,
@@ -2467,7 +2467,7 @@ impl AutoshopApp {
                     // one fixed "projection(s) failed" sentence, which a
                     // lossy-but-successful projection is not. stderr carries
                     // the per-photo line from write_xmp_doc.
-                    match autoshop::pipeline::write_xmp(p, &disk) {
+                    match autoshop::pipeline::write_xmp(p, &disk, autoshop::diag::stderr()) {
                         Ok((_, None, _)) => {}
                         // A regenerated (unmerged) sidecar loses LR-only
                         // properties — Save-all's warning list is exactly
@@ -2818,6 +2818,7 @@ impl AutoshopApp {
                     // loop IS the R20 strengthening (cost disclosed in the
                     // button's hover text; batch surfaces pass false).
                     true,
+                    autoshop::diag::stderr(),
                 );
                 Msg::Analyzed(epoch, Box::new(res))
             },
@@ -3194,6 +3195,7 @@ impl AutoshopApp {
                                           recipe: Some(autoshop::pipeline::recipe_store_bytes(
                                               p,
                                               &rep.recipe,
+                                              autoshop::diag::stderr(),
                                           )?),
                                           pixels: autoshop::store::CommitMember::Clear,
                                           // R24-4: this worker publishes a
@@ -3239,7 +3241,7 @@ impl AutoshopApp {
                                     // Lightroom sidecar cannot carry (the
                                     // ZONE_ATTACHED note), so a second copy
                                     // would say it twice for the same masks.
-                                    match autoshop::pipeline::write_xmp(p, &rep.recipe) {
+                                    match autoshop::pipeline::write_xmp(p, &rep.recipe, autoshop::diag::stderr()) {
                                         Ok((x, merge_note, _)) => {
                                             status.push(FitNote::XmpWritten(x));
                                             // Regenerated-not-merged: same

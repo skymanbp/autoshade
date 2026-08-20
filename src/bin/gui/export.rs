@@ -422,7 +422,7 @@ impl AutoshopApp {
                     let opts = denoise.then(|| {
                         autoshop::denoise::DenoiseOpts::from_config(&autoshop::config::Config::load(), None, 1.0)
                     });
-                    autoshop::render::render_to_file(&path, &recipe, &out, opts.as_ref(), Some(&export))?;
+                    autoshop::render::render_to_file(&path, &recipe, &out, opts.as_ref(), Some(&export), autoshop::diag::stderr())?;
                     // FACTS (L12#4): the landing renders the relook note in
                     // the landing-time language.
                     Ok::<ExportOutcome, anyhow::Error>(ExportOutcome::Single {
@@ -683,7 +683,7 @@ impl AutoshopApp {
                             )
                             .is_some();
                             let src = pix.map(|(m, _)| m).unwrap_or_else(|| p.clone());
-                            autoshop::render::render_to_file(&src, &recipe, &out, None, Some(&export))?;
+                            autoshop::render::render_to_file(&src, &recipe, &out, None, Some(&export), autoshop::diag::stderr())?;
                             if repaired {
                                 relooked += 1;
                             }
@@ -1022,7 +1022,7 @@ impl AutoshopApp {
         let strip_rec = self.current_strip_record();
         let generated = self.active_is_generated();
         let committed: anyhow::Result<()> = (|| {
-            let recipe_bytes = autoshop::pipeline::recipe_store_bytes(&path, &self.recipe)?;
+            let recipe_bytes = autoshop::pipeline::recipe_store_bytes(&path, &self.recipe, autoshop::diag::stderr())?;
             let pixels = match &origin {
                 // An in-place heal/clone/fill bakes pixels into the variant's
                 // origin raster; parametric recipe/XMP cannot carry them, so
@@ -1070,7 +1070,7 @@ impl AutoshopApp {
                 self.nav_stash.remove(&path);
                 self.pixels_on_disk = origin;
                 let mut s = if raw {
-                    match autoshop::pipeline::write_xmp(&path, &self.recipe) {
+                    match autoshop::pipeline::write_xmp(&path, &self.recipe, autoshop::diag::stderr()) {
                         Ok((p, merge_note, losses)) => {
                             // A sidecar we could not MERGE was regenerated, and
                             // that drops the user's Lightroom-only properties.
@@ -1335,6 +1335,7 @@ impl AutoshopApp {
                                 autoshop::store::DevelopCommit {
                                     recipe: Some(autoshop::pipeline::recipe_store_bytes(
                                         path, &r,
+                                        autoshop::diag::stderr(),
                                     )?),
                                     pixels: autoshop::store::CommitMember::Keep,
                                     variants: autoshop::store::variants_member(
@@ -1359,7 +1360,7 @@ impl AutoshopApp {
                                 // per-target UI list of them needs its own
                                 // PasteOutcome member — R23 work, not a
                                 // mislabelled fold into this one.
-                                match autoshop::pipeline::write_xmp(path, &r) {
+                                match autoshop::pipeline::write_xmp(path, &r, autoshop::diag::stderr()) {
                                     Ok((_, None, _)) => {}
                                     // Regenerated-not-merged loses LR-only
                                     // properties — collected for the paste
