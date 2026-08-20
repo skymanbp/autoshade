@@ -22,6 +22,13 @@
 autoshop.local.toml
 autoshop.local.json
 
+# Development ledgers (user ruling 2026-08-20): working process records, kept
+# ON DISK at their long-standing paths (code comments cite them) but off the
+# GitHub remote. ROADMAP.md stays tracked; these two are snapshotted to the
+# private plans archive at every release ledger-stamp instead of git.
+/docs/M1_PLAN.md
+/docs/V2_PLAN.md
+
 # OS / editor cruft
 Thumbs.db
 .DS_Store

@@ -371,7 +371,9 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 - **发版链 + 环境门套件（R27 L-29 补入，2026-08-19）**：
   `bump → 文档门 → feat → push → tag → gh release → assets 回下载逐位 cmp →
   台账章`（文档门=`python scripts/check_docs.py --gates <电池转录>`，2026-08-20
-  起，11 行注册表，FAIL 即停）。
+  起，11 行注册表，FAIL 即停；台账章同时把 gitignored 的 M1_PLAN/V2_PLAN 快照到
+  `~/.claude/plans/autoshop-ledger-snapshots/<日期>/`——它们 2026-08-20 起不进远端，
+  git 不再为其留版本）。
   **每次发版必须另跑 env 门控的真实夹具套件并把张数记在门数字旁边**：
   `AUTOSHOP_LR_PROBE_FIXTURES`（真实 LR sidecar 往返，v0.32.0 实跑 16/16）、
   `AUTOSHOP_MB_FIXTURES`（M-B 采样族）与 `AUTOSHOP_RAW_ZOO`（CC0 多机 RAW，
@@ -415,6 +417,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **发布批 P3 仓库瘦身（2026-08-20，用户令「清理脚手架/过程/过时/测试代码，M1_PLAN 之类撤出远端」）** —— 普查 92 个跟踪文件：**无**脚手架/草稿/一次性调试物（src 51 全产品码、scripts 3 全发版门、tests 2 全合约回归）；「过程」类=三份台账。用户三拍板：**只撤 M1_PLAN+V2_PLAN**（ROADMAP 留远端）、**原地留盘+gitignore**（路径不变、代码注释与台账纪律照旧；git 历史仍含旧版，未洗史——洗史需重写+强推会断已发布 tag，且两档无秘密）、**测试全保留**（695 单测内嵌 src、发布构建本不含）。机制=`git rm --cached`+.gitignore 两行；ARCHITECTURE:1197 加「私档」注记；src 约 30 处注释引用两档=既有私档引用类（PROBE3-ADDENDUM 先例）不动；README 的一处引用随 P2 重写落地时处理。**台账章新增步骤（见发版链）**：把两份 gitignored 台账快照到`~/.claude/plans/autoshop-ledger-snapshots/<日期>/`（首份快照 2026-08-20 已存）。
 - **v0.33.0 已发布（2026-08-19，R27 全轮收口）** —— 内容=R27 十个批次：
   Batch-1a 台账清账六转换 / Batch-1b 多格式（RAW 24 扩展+烘焙 8；CC0 九机 zoo）/
   Batch-2 90° 旋转骨架（quarter_turns）/ Batch-3 像素战役几何根修消费 /

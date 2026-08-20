@@ -1192,7 +1192,9 @@ experiment:
   across both costs rms 0.012–0.018). The code is unchanged on purpose: the
   falloff sits on the same reviewer-owned geometry surface as the frame
   constant above, and a two-branch replacement law needs its own adjudication
-  (`batch10-report.md` §8; the item lives in V2_PLAN §7 item 1).
+  (`batch10-report.md` §8; the item lives in V2_PLAN §7 item 1 — M1_PLAN and
+  V2_PLAN are development ledgers kept outside the public tree since
+  2026-08-20, the same standing as the probe reports these sections cite).
 * **`crs:LocalHue`'s scale is 180, not 100.** A controlled export with the mask
   Hue slider at +50 wrote `crs:LocalHue="0.277778"`; 0.277778 × 180 = 50.00004.
 
