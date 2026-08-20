@@ -410,6 +410,24 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **v0.33.0 已发布（2026-08-19，R27 全轮收口）** —— 内容=R27 十个批次：
+  Batch-1a 台账清账六转换 / Batch-1b 多格式（RAW 24 扩展+烘焙 8；CC0 九机 zoo）/
+  Batch-2 90° 旋转骨架（quarter_turns）/ Batch-3 像素战役几何根修消费 /
+  Batch-4 笔刷蒙版一等携带+解析器加固+许可证根修 / Batch-5 SigLIP2 风格嵌入+
+  AI 蒙版本机重算 / Batch-6 估计器验证（M1 #12 关、gray-world 证伪）/
+  Batch-7 `--jobs` 内存预算并行+embed 撞名根修 / Batch-8/9/10 笔刷径向终局
+  实验（合成 sidecar 路线）+ `LR_MASK_FRAME_SCALE 1.032→1.0`（用户拍板）。
+  **⚠ 前向断裂（发版说明置顶）**：v0.32 exe **硬拒**带 quarter_turns/笔刷蒙版/
+  AiMask 的 v0.33 recipe（deny_unknown_fields 响亮拒收）；不带这三者的 recipe
+  字节不变双向可读。**行为变更**：径向蒙版按 sidecar 实存几何渲染（旧值整体
+  放大 3.2%=单帧镜头畸变误当常数）；batch 转录按 index 序。
+  **门（发版电池实录）**：clippy 0×2；**695 lib（8 ignored）/ 10 CLI / 131 GUI /
+  2+2 合约** 双配置；**LR 探针 16/16** 径向 sidecar 字节往返（canonical 集）+
+  实验 5 份另过；**M-B 7 份 42/42 蒙版导入 0 拒收**；**RAW zoo 9/9**（X-Trans/
+  ORF 披露按设计触发）；字体 cmap 803/803；audit_i18n 0/0。exe：cli 30,668,634 B
+  / gui 40,290,588 B（tag 后回下载逐位 cmp，哈希入记忆台账）。
+  发版说明全文：`~/.claude/plans/r27-materials/v0330-release-notes.md`。
+
 - **第二轮实验消费：流量律关闭、两定律再反转、L-05 机制定案（2026-08-19，
   R27 Batch-9+10，零码变更）** —— 用户「操作想吐」后改**合成 sidecar** 路线：
   Batch-9 把 17 个实验状态写成 ARW 副本+外科手术 xmp（五道验证门 17/17；
