@@ -1,0 +1,30 @@
+# Cross-platform build verification (R28 Batch-1, user-ruled 2026-08-20).
+# Scope is honest and narrow: proves `cargo build` compiles on Linux/macOS in
+# both feature configurations. It does NOT run tests (several create files and
+# expect local fixtures) and does NOT claim runtime behaviour — README quotes
+# exactly what this verifies, nothing more.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build (default features)
+        run: cargo build --release --locked
+      - name: cargo build (gui feature)
+        run: cargo build --release --locked --bins --features gui

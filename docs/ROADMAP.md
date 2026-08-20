@@ -417,6 +417,25 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R28 修复轮已锁定 → v0.34.0 全五批（🔒2026-08-20 用户六拍板）** —— 拍板：
+  ①范围=**全五批**；②RAW 单文件内存=**与 baked 同款 4GiB 峰值闸**（超限拒收+具名
+  披露）；③XMP 作用域=**连 Scope newtype 类型化大改**（tag/subtree 语义上类型，
+  非只换 crs_attributes 读器）；④跨平台编译验证载体=**GitHub Actions**（ubuntu+
+  macos cargo build，结果链接入 README；workflow 本日落库随本条同批提交）；
+  ⑤（宣传联动）取证博文标题=**标题二**（four numbers not a bounding box）；
+  ⑥README 加 **clean-room 政策声明**（落 Batch-1，博文引用它）。批次划分：
+  B1 宣传解锁（X-Trans 通道映射根查+修/两假披露句/CI/clean-room 句）→B2 防御收口
+  （无界读类 store.rs:1219+865/920+源扫描门/笔刷帽 token 界+ClampSummary 披露/
+  check_docs 加固/jobs.rs:137 saturating/三注释谎言）→B3 帧身份（AI 蒙版 staging=
+  decode_any_turned(recipe.quarter_turns)+缓存键加帧项+身份归 raw+staging 序号/
+  rotate phase1 跳 AiMask+错误路径清理）→B4 资源预算（单文件峰值进准入+RAW 4GiB 闸
+  +延长 Batch-7 探针复测 render 尾巴/GPU sidecar --fp16+模型单飞或 manifest+GUI 退化
+  披露+DecodePermit 不扣穿）→B5 语义口径（texture−100 设计项/shadow_hue 口径/诊断行
+  盖 stem+batch 不弃 _notes/XMP 类型化）。计划全文（已盖拍板）=
+  `~/.claude/plans/r28-plan-proposal.md`；Codex 九根因证据=同目录 codex-r27-review-
+  adjudication.md。预计零 recipe schema 变更；3a 缓存键一次性失效（重算披露）；
+  1a 为渲染行为变更入发版说明。
+
 - **Codex gpt-5.6-sol 只读审阅 + 十发现全裁决（2026-08-20）** —— 审阅基线
   012cb60（代码域 src/scripts/python/Cargo.* 与 HEAD 字节同；rollout 文件证实
   gpt-5.6-sol/xhigh/只读沙箱，33m49s，porcelain 双证零写）。回传 2H/5M/2L/1N、
