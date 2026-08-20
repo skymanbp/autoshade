@@ -423,6 +423,36 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R29 Batch-1 已落地（2026-08-20，未发版，`ff64f9d`）：诊断 sink（F6 最深根）
+  + XMP 帧作用域类型化 —— R28 Batch-5 两条自留余项一批清（5c 留 sink、5d 留
+  非 crs 命名空间＝锁定计划 B1「同一次决策的同类欠账」）**。①**R29-1 诊断 sink**：
+  新模块 `src/diag.rs`——`Subject`（Photo/PixelOnly/Run）作数据随行、`Mark`
+  四种开头字节逐字节钉住出厂拼写、`Sink` trait（Stderr/Silent/Collector）、
+  `Diag` 绑定 sink+主体；带照入口（produce_recipe/write_recipe/write_xmp/
+  render_to_file…）自绑主体防错归属，深助手收 `&Diag`；**batch 每 worker 一个
+  Collector 排进本照片 stdout 块＝告警按索引序发布**（验收①，`--jobs 3` 顺序
+  归排序器）；style 索引 `Once` 行类型化为 `Subject::Run`、纯像素预览臂
+  `Subject::PixelOnly`（类型化缺席+专测＝验收②）；GUI 两探针改类型化
+  `dropped()`（行=UI 行自身，5c 的 None 只压 stem 行照打）；**5c 三文件扫描
+  漏网的 `ValidatedRecipe::disclose`（在第四文件 recipe.rs）补上照片主体**；
+  `pipeline::attribution` 缩为缺省 sink 格式助手（单调用者 grep 实证）；源扫描
+  门改写＝12 登记披露过 sink+eprintln 清零+五文件裸 eprintln 普查钉数各带书面
+  理由（验收③）。CLI 可见变化三条皆设计意图：batch 告警入照片块（stderr→
+  stdout，即验收①）、clamp 披露补 stem、GUI 探针不再向控制台重复行披露。
+  ②**R29-2 帧作用域**：`declared_number` 改 `FrameScope<'a>` 方法、仅
+  `FrameScope::resolve` 可产——裸 `&str` 形态**删除**清零（约定→类型，同 5d
+  在 crs: 侧的手法）；扫描逻辑逐字节未动；两条全文档回落（裸片段/无完整对的
+  Description）钉为**登记非背书**（四对抗夹具 A–D）；LR 探针 16/16 字节往返
+  改经 resolve 双侧读保绿；tiff: 是本模块唯一读值的非 crs 命名空间＝类闭合。
+  门（主审亲跑）：clippy0×2、**747 lib（9i）/11/131/2+2 双配置**（738→747
+  ＝9 条具名新测集差：diag×4+xmp 夹具×4+render 纯像素×1）；变异＝代理 5+4 组
+  全红还原+主审亲手两组（Warn 开头字节 flip→3 diag 红；resolve 恒全文档→
+  收窄测试红而回落夹具留绿＝判别力精确），还原皆 cmp 字节相等。**登记**：
+  census 存活的 18 条裸 eprintln（restore/base-look 助手~30 调用点+目录扫描+
+  串行命令）＝另一次 sweep 已在 diag 模块文档具名；store 测试
+  `clearing_one_same_stem…` 单跑不幂等（遗留 tombstone 于中央库）＝先在缺陷，
+  R29 候选；eval 刻意留缺省通道（note 通道已渲同披露，收集会双打）。
+
 - **CI test 作业收口（2026-08-20，未发版）：双 OS 全绿、README 宣称句改真** ——
   B1a 登记 (b) 的同根一批修 `dd95a35`：四测一类根＝「测试把宿主 Windows
   平台语义钉成普适」，全部测试层、产品码经复审零缺陷（①stem_fold 折叠缝
@@ -550,7 +580,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   **具名不改**：style 索引 `Once` 行（是一次运行的事实、非单照）、apply/auto 三条
   串行行（命令自带照片抬头，盖章会重复）。**登记未闭**＝调用方注入的 diagnostics
   sink（F6 最深根）仍未建，纯像素预览臂 `best_effort_mask_raster_snapshot` 根本
-  没有照片可盖——两处都在码内注明。5d **XMP 作用域类型化大改**（用户 D3 拍板全量
+  没有照片可盖——两处都在码内注明（✅ 两处均已于 R29 Batch-1 `ff64f9d` 关闭，
+  见上方条目）。5d **XMP 作用域类型化大改**（用户 D3 拍板全量
   版）：新 `Tag<'a>` / `Scope<'a>` 两 newtype + `CrsSource` trait（`crs_str`/
   `crs_f32` 成方法），裸 `&str` 读器全部删除——**107 个非测试调用点逐一声明作用域**
   （xmp.rs 99 / eval.rs 6 / style.rs 2；另测试模块 20 处同步改写；`optional_scaled_number_in`/
@@ -564,7 +595,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   `crs_attributes` 改走 `next_xml_attribute`（引号完备、遇 `/`或`>` 即止）——单引号
   文档的 11 个来源/digest 键不再于回写时静默丢失，闭词表拒绝环真的跑起来；
   **D** `tiff:ImageWidth/ImageLength/Orientation` 必须来自**同一个 rdf:Description**
-  （新 `frame_description`；无 Description 的裸片段回落全文＝旧读法唯一可能）。
+  （新 `frame_description`——R29 Batch-1 起改名为 `FrameScope::resolve` 并类型化，
+  见上方条目；无 Description 的裸片段回落全文＝旧读法唯一可能）。
   四条各配对抗夹具，**零 schema 变更**。门（主审复跑）＝clippy 0×2 +
   **727**(+7 通过 / 忽略 9)/**11**/**131**/2+2 + zoo 全名 9/9（106.01s）+
   **LR 探针 16/16 字节往返**（真 LR 边车对类型化改动零位移＝本批最强证据）+
