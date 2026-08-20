@@ -417,7 +417,29 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
-- **R28 Batch-5：语义/口径批（2026-08-20，未发版）** —— 5a **texture=−100 端点**
+- **R28 v0.34.0 已发布（2026-08-20，全五批+发版链；托管夜间轮）** —— 批次范围
+  `307211b..5059df0`（B1 X-Trans 根修 / B2 防御收口 / B3 帧身份 / B4 资源预算 /
+  B5 语义+XMP 类型化——各批细账见下方五条）。**行为变更（发版说明全文）**：
+  ①X-Trans 颜色修复——**发布 exe 在 X-S10 RAF 上实测全帧 G/R 0.9473**（修前
+  1.5503；相机预览 0.95），README 格式条 raf.jpg 用本渲染重制、题注改真；
+  ②一切负 texture 渲染改变（负半支带限，−100 不再整幅高斯糊）；③≥138,547,333 px
+  的 RAW 具名拒收（与 baked 同一 4GiB 峰值闸）；④AI 蒙版缓存换键一次性重算；
+  ⑤烘焙母版上的 AI 蒙版从「披露不渲」变正常渲染；⑥eval 四 hue 行口径改两侧
+  过阈（报告自报跨版不可比）；⑦嵌入 sidecar 默认 --fp16+模型单飞
+  （`AUTOSHOP_EMBED_FP32` 逃生阀）。**零 recipe schema 变更＝v0.33↔v0.34 双向
+  互读**（自 v0.30 以来首个无前向断裂的功能版）。门（发版电池实录
+  `~/.claude/plans/r28-materials/v0340-gates.txt`）：clippy0×2、**727 lib
+  （9 ignored）/ 11 CLI / 131 GUI / 2+2** 双配置、RAW zoo 全名 9/9、LR 探针
+  16/16 字节往返、M-B 7 份 42/42、audit_i18n 0、check_docs --gates 11/11。
+  exe：cli 30,752,116 B `1697fe87f4eefe28b002fdede65254eeffe47de15ee872c0d0e4d262f4c07231`
+  / gui 40,373,202 B `53cba5b1188012e91ac20b42a0dde36a94cd29e05b1d338acb79d8d2bebb14d2`
+  （tag 后回下载逐位 cmp，结果入记忆台账）。台账快照（P3 纪律）：M1/V2_PLAN →
+  `~/.claude/plans/autoshop-ledger-snapshots/2026-08-20-v0340/`。发版说明全文：
+  `~/.claude/plans/r28-materials/v0340-release-notes.md`。**R29 候选池未动**
+  （.lcp/羽化调和/Feather→CenterWeight/κ 普适性/export-at-size/BiRefNet/竖幅
+  >45°/诊断 sink/XMP Scope 全域化余项/texture 负半支 LR 地面真值）。
+
+- **R28 Batch-5：语义/口径批（2026-08-20，~~未发版~~ →已随 v0.34.0 发布）** —— 5a **texture=−100 端点**
   （设计项，用户 D1 范围内）：旧负半支＝同一 unsharp 取负幅度，传递函数
   `1−|a|(1−G)` 在端点恰为 `G` ——**整幅高斯糊**（目检包 D-texture-m100 实测
   σ−92%），边缘与细节一并抹平；LR 的 Texture 是中频控件。改为**带限**：
@@ -473,7 +495,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   旧作用域）全部主审亲手红→还原后与备份 **byte-identical**。ARCHITECTURE 三处
   texture 叙述 + §4.6 新增口径段随批改真；README 未触碰（无既述行为改变）。
 
-- **R28 Batch-4：资源预算批（2026-08-20，未发版）** —— 4a（F2 两根一批）：
+- **R28 Batch-4：资源预算批（2026-08-20，~~未发版~~ →已随 v0.34.0 发布）** —— 4a（F2 两根一批）：
   ①**探针实测收口 F2 的 UNVERIFIABLE 项**——R27 那支探针从未入库故不可复现，
   本批把它做成在库 `#[ignore]` 测试 `jobs::tests::probe_per_photo_peak_commit`
   （`PeakPagefileUsage`，release，`AUTOSHOP_PEAK_PROBE_STAGE` 单阶段单进程跑，
@@ -522,7 +544,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   更高就会吃掉余量（常数文档已写明「格式表长出形状不同的解码器时重跑探针」）；
   单飞与 permit 重构无端到端实跑（无 1.5GB 权重/GPU），靠单元变异+代码论证。
 
-- **R28 Batch-3：AI 蒙版帧身份 + rotate 文件系统原子性（2026-08-20，未发版）** ——
+- **R28 Batch-3：AI 蒙版帧身份 + rotate 文件系统原子性（2026-08-20，~~未发版~~ →已随 v0.34.0 发布）** ——
   3a（F1 两根一修）：resolve_ai_masks 改双参 `(raw=身份, src=像素)`（F1-C：两调用点
   曾把烘焙母版当唯一参，键与缓存家落在不属于任何照片的 develop 目录）；
   stage_source_frame 改 `decode_any_turned(src, recipe.quarter_turns)`（F1-B：帧
@@ -545,7 +567,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   **代理过程自纠**：中途 git checkout 误废自家 segment.rs 编辑，重施并复验（diffstat
   前后一致）——后续变异改用 scratchpad 备份。ARCHITECTURE AI 蒙版键描述同批补帧项。
 
-- **R28 Batch-2：防御性收口五项（2026-08-20，未发版）** —— 2a **无界 store 读类**：
+- **R28 Batch-2：防御性收口五项（2026-08-20，~~未发版~~ →已随 v0.34.0 发布）** —— 2a **无界 store 读类**：
   saved_quarter_turns 改 read_text_capped+单字段 SavedTurn（无 deny_unknown_fields
   =前向兼容保留、%4 与 clamp 对齐）；兄弟 adopting-from.txt 两处改 64KiB 专帽
   （Windows 路径上限论证）；**扫描门顺手抓出第四处旁路** export_xmp_beside 一并收口；
@@ -570,7 +592,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   11 留（全非 token 域）；read 普查=4 改 2 惯用法留 14 read_dir 留。
   README CI 句精确化（every push→push to main+PR，Show HN 材料代理发现）同批。
 
-- **R28 Batch-1 1a+1b：X-Trans 色偏根修 + 两披露句改真（2026-08-20，未发版）** ——
+- **R28 Batch-1 1a+1b：X-Trans 色偏根修 + 两披露句改真（2026-08-20，~~未发版~~ →已随 v0.34.0 发布）** ——
   确诊=rawler PPG 色度插值按 Bayer 公理从「右+下」邻取 R/B（ppg.rs:185-203），
   X-Trans 每 36 像素的四个 2×2 全绿块使其失败 16 次：8 相位 R 从未被写（=0）、
   另 8 相位 B=0（实测 99.8% 像素；余 0.2%=上游 3px 边环规则）；WB 对角阵与

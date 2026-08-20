@@ -1,6 +1,10 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.33.0 — R27, ten batches: the input path stopped
+> Status: **implemented** (v0.34.0 — R28, five batches: the X-Trans colour cast
+> root-fixed by an in-tree CFA-geometry demosaic, every store read capped
+> classwide, AI-mask frame identity in the cache key, per-file 4 GiB memory
+> ceilings on BOTH develop doors, and typed XMP read scopes — atop R27's ten
+> batches: the input path stopped
 > being one camera. **24 RAW extensions + 8 baked formats**
 > (`decode::RAW_EXTS` / `pipeline::BAKED_EXTS`, one predicate app-wide), with
 > nine cameras — one per format — run end to end from CC0 sample files.
@@ -67,17 +71,16 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 695 library + 10 CLI + 131 GUI + 2+2 contract tests pass in both build
-> configurations, with 8 further library tests `#[ignore]`d as forensic probes
-> (counts refreshed 2026-08-19 from the v0.33.0 release battery; the line had
-> been left at v0.26.x's 449 + 7 + 73). THREE suites are ADDITIONAL and
+> 727 library + 11 CLI + 131 GUI + 2+2 contract tests pass in both build
+> configurations, with 9 further library tests `#[ignore]`d as forensic probes
+> (counts refreshed 2026-08-20 from the v0.34.0 release battery). THREE suites are ADDITIONAL and
 > env-gated, so a bare `cargo test` does not include them:
 > `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
 > round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
 > 42 corrections imported, 0 refused) and, since R27, `AUTOSHOP_RAW_ZOO` (the
 > CC0 nine-camera zoo, one RAW per format —
 > `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself` in
-> [`src/decode.rs`](../src/decode.rs), 9/9 at v0.33.0). Every release runs all
+> [`src/decode.rs`](../src/decode.rs), 9/9 at v0.34.0). Every release runs all
 > three and records their counts — see ROADMAP「发版链 + 环境门套件」.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
@@ -1048,9 +1051,9 @@ needs that no sidecar contains is the alpha kernel (the falloff versus hardness
 and the per-dab accumulation law — the file stores the STROKE, never the alpha),
 so `render::mask_weight` answers 0 and both disclosure channels carry a named
 reason, `MaskImportReason::BrushCarried` / `MaskLossReason::BrushCarried`
-(「brush mask carried, not yet rendered — kernel measurement in flight」 — the
-wording v0.33.0 ships, because Batches 8-10 measured the model and changed no
-code). It is a gate on RENDERING, not on carrying. Measured on the specimen
+(「brush mask(s) carried, not yet rendered - the measured kernel has no closed
+form and the mask lives in a pre-lens-correction frame」 — the wording since
+v0.34.0; R27's said the measurement was in flight, and it landed). It is a gate on RENDERING, not on carrying. Measured on the specimen
 folder that has brush work in it: `_DSC9583` went from 8 of 11 corrections
 imported to 10 of 11, and the one still refused is refused for
 `CorrectionAmount="1.1"`, not for its brush.

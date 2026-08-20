@@ -8,7 +8,7 @@
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **The AI never touches a pixel.**
 
-[Download v0.33.0](https://github.com/skymanbp/autoshop/releases/tag/v0.33.0) ·
+[Download v0.34.0](https://github.com/skymanbp/autoshop/releases/tag/v0.34.0) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Roadmap](docs/ROADMAP.md) ·
 [MIT](LICENSE)
@@ -172,12 +172,12 @@ global/local composition, and it is written down rather than curated away.
 ### Download
 
 Each tagged release ships **both** front-ends prebuilt for Windows. For
-v0.33.0:
+v0.34.0:
 
 | file | size | sha256 |
 |---|---|---|
-| `autoshop.exe` (CLI) | 30,668,634 B | `e670f91e6480db6f639ced36af802d0c8cf899a8e9e34c022bd4e1e4e2f11db2` |
-| `autoshop-gui.exe` (desktop app) | 40,290,588 B | `6c69ee3f71a2bb31e14da108b55f76a523577ea533c084362527ba9b452e00b8` |
+| `autoshop.exe` (CLI) | 30,752,116 B | `1697fe87f4eefe28b002fdede65254eeffe47de15ee872c0d0e4d262f4c07231` |
+| `autoshop-gui.exe` (desktop app) | 40,373,202 B | `53cba5b1188012e91ac20b42a0dde36a94cd29e05b1d338acb79d8d2bebb14d2` |
 
 Both digests were verified by re-downloading the published assets and comparing
 them byte-for-byte against the local build.
@@ -401,13 +401,14 @@ through OpenAI Images and are labelled experimental everywhere. `heal` is the
 
 <sub>Nine cameras, one per format, each a **full neutral develop** by
 `autoshop apply` from a CC0 sample file — not the camera's embedded preview.
-The `.raf` tile still shows the **pre-fix v0.33.0** render: X-Trans then went
-through a Bayer demosaic whose chroma pass left R and B unwritten at 16 of every
-36 photosites, which is why it is visibly green and dark (measured channel means
-53.6/82.9/39.9 versus the camera preview's 110.2/104.9/99.8, where the other
-eight formats land within G/R 0.81–1.08). Unreleased v0.34.0 demosaics over the
-array's own geometry instead — whole-frame G/R now measures 0.9476 against the
-preview's 0.95 — and this tile will be re-rendered at the next release.
+The `.raf` tile shows the **v0.34.0** render — the X-Trans colour fix, on the
+sample that exposed the defect. Through v0.33.0 this tile was visibly green and
+dark (measured channel means 53.6/82.9/39.9 against the camera preview's
+110.2/104.9/99.8): the Bayer demosaic's chroma pass left R and B unwritten at
+16 of every 36 photosites. v0.34.0 demosaics over the array's own geometry;
+this very render measures whole-frame **G/R 0.9473** against the preview's
+0.95, inside the 0.81–1.08 band the other eight formats occupy. Fine detail is
+still softer than a dedicated X-Trans converter, and the render says so.
 See [X-Trans, restated](#x-trans-restated).</sub>
 
 **Camera RAW — 24 extensions**, one predicate app-wide (`decode::is_raw`):
@@ -425,7 +426,7 @@ Decoding is `rawler` 0.7.2, which carries **725 camera models**. An extension
 being on that list means the file reaches the RAW engine — not that your
 particular body is in the database. **Nine cameras, one per format, are verified
 end to end** on CC0 sample files, and that zoo is a release gate
-(`AUTOSHOP_RAW_ZOO`, 9/9 at v0.33.0).
+(`AUTOSHOP_RAW_ZOO`, 9/9 at v0.34.0).
 
 **If your camera is not recognised**, or its format is not listed: run the file
 through the free **Adobe DNG Converter** and open the `.dng`. That is not a
@@ -467,8 +468,8 @@ The remaining bias is real and unresolved: the AI still sets `whites` about 16
 points higher and `blacks` about 11 points lower than this photographer does.
 That is a taste gap, stated as a number instead of a claim.
 
-**Release gates at v0.33.0** (both build configurations): clippy clean ×2;
-695 library (8 `#[ignore]`d forensic probes) / 10 CLI / 131 GUI / 2+2 contract
+**Release gates at v0.34.0** (both build configurations): clippy clean ×2;
+727 library (9 `#[ignore]`d forensic probes) / 11 CLI / 131 GUI / 2+2 contract
 tests; 16/16 real Lightroom radial sidecars byte-round-tripped; 42/42 mask
 imports on the forensic corpus with 0 refusals; RAW zoo 9/9; font subset
 803/803 glyphs; i18n audit 0 findings. A doc-drift gate
@@ -530,7 +531,7 @@ a different 8.** Correct white balance cannot repair that — a per-channel gain
 and a per-channel hole are both diagonal, so they commute — which is why the
 cast survived metadata that read perfectly.
 
-**Fixed in v0.34.0 (unreleased):** a non-2×2 RGB array is now demosaiced
+**Fixed in v0.34.0:** a non-2×2 RGB array is now demosaiced
 in-tree over the array's own geometry — every channel is interpolated only
 from photosites that actually measured it, with per-phase plane-fit weights.
 On the same sample the whole-frame G/R moved **1.55 → 0.9476** and G/B
@@ -750,6 +751,10 @@ per-user `autoshop.local.json` overrides the environment. The two sidecar knobs
   a v0.33.0 recipe carrying a 90° rotation, a brush mask or an AI mask — a loud
   schema refusal by design, never a silent drop. Recipes using none of those
   serialise byte-identically and stay readable both ways.
+- **v0.34.0 changes no recipe schema at all.** A v0.33.0 binary reads a v0.34.0
+  recipe and vice versa; what changed is renders (X-Trans colour, negative
+  texture, the ≥138.5 MP RAW refusal) and the AI-mask cache key, which simply
+  re-derives each alpha once on the first develop.
 - **AI denoise runs on the demosaiced RGB**, not the raw Bayer mosaic like Adobe
   Denoise, and takes ~3 min for a 60 MP frame on an RTX 4060 Ti. Excellent, not
   identical to Adobe.
