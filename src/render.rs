@@ -2118,12 +2118,22 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             // and fits `d_in = k(1−f)`, `d_out = k(1+f/2)` with coefficients
             // 0.99 and 0.45 against the law's exactly 1 and ½ (chi2/dof 1.52 at
             // zero free parameters against 1.37 at two; `PROBE3-ADDENDUM.md`
-            // §3.1). The `k = 1.032` of that law is a COORDINATE-FRAME constant
-            // and lives on the XMP boundary (`xmp::LR_MASK_FRAME_SCALE`), where
-            // it is folded into the semi-axes — so the engine's own `d` is the
-            // measured `d` divided by `k`, and the endpoints here carry no `k`.
-            // Engine-native radials and imported ones therefore share ONE
-            // falloff law, which is what the user ruled.
+            // §3.1). The law was written with a coordinate-frame `k = 1.032`
+            // folded into the semi-axes at the XMP boundary; since 2026-08-19
+            // `xmp::LR_MASK_FRAME_SCALE` is 1.0 by user ruling (the 1.032 was
+            // one frame's lens-profile warp — that constant's own comment
+            // carries the evidence), so nothing is folded any more and
+            // engine-native and imported radials share ONE falloff law
+            // outright rather than by cancellation.
+            //
+            // R27 Batch-10 then measured the WHOLE feather range on two
+            // geometries and REFUTED both endpoints as written: d_in reads
+            // ≈ 0.79 − 0.94·f (negative at f = 1) against this law's 1 − f,
+            // and d_out SATURATES near 1.41 instead of reaching 1.5. The
+            // outer branch is a clean smoothstep; the inner is not the same
+            // one. Deliberately left standing — a two-branch replacement law
+            // needs its own adjudication (`batch10-report.md` §8;
+            // docs/V2_PLAN.md §7 item 1).
             //
             // What this replaces: `d_out = 1`, i.e. the effect reaching zero
             // exactly on the ellipse. Measured at f = 0.5 it reaches 1.25 —
@@ -7583,8 +7593,10 @@ mod tests {
         // The half-strength point of a cubic smoothstep is its midpoint, so the
         // law predicts w = 0.5 at d = (d_in + d_out)/2 = 0.875 — against the
         // pooled five-frame measurement of 0.889 ± 0.067 in RAW decoded units,
-        // i.e. 0.861 ± 0.065 once the frame scale k = 1.032 is folded into the
-        // axes (PROBE3 §3). Well inside.
+        // i.e. 0.861 ± 0.065 under PROBE3 §3's own k = 1.032 normalisation
+        // (historical: that fold was the pre-ruling import path — k is 1.0
+        // since 2026-08-19 — and either reading sits well inside, both 0.014
+        // from the prediction).
         assert!((at(0.5, 0.875) - 0.5).abs() < 1e-6, "{}", at(0.5, 0.875));
         // f = 1: `d_in` collapses to 0 — Feather 100 leaves no full-strength
         // core at all. UNMEASURED and named as such (PROBE3 §5, PROBE4 §5

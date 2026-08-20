@@ -630,9 +630,11 @@ fn inscribed_norm(s: f64, straighten_deg: f64) -> (f64, f64) {
 /// across two signs of `CropAngle`, two `tiff:Orientation` states and two
 /// source aspect ratios; seven rival models miss by 165–987 px, including the
 /// naive AABB this build used until R27 (485 px, 0/7). There is **no `k`
-/// magnification on the crop** — global best-fit scale 1.000006 — where the
-/// mask frame carries `k = 1.032`: same namespace, same corner encoding,
-/// different affine, and that asymmetry is measured rather than assumed.
+/// magnification on the crop** — global best-fit scale 1.000006. (R27
+/// Batch-10 dissolved the crop-vs-mask asymmetry this once stated: the mask
+/// frame carries no `k` either — its 1.032 was one frame's lens-profile warp,
+/// and `LR_MASK_FRAME_SCALE` is 1.0 by the 2026-08-19 ruling — so crop and
+/// mask coordinates alike are plain fractions of the un-rotated source frame.)
 ///
 /// **The sign** (`P3-cropangle-model.md` §4, HIGH, 34× margin on the weakest of
 /// six photographs, 7257× on the best). `rot(source → export) = −CropAngle`:

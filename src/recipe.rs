@@ -1313,9 +1313,11 @@ pub struct BrushStroke {
     /// **zero steps exceed 1.0 r — there are no pen-lifts inside a Paint**), so
     /// a renderer interpolates nothing: it stamps the dabs it is given. The
     /// coordinate frame is the PLAIN image frame, `k = 1.00001 ± 2×10⁻⁵` —
-    /// **not** the 1.032 concentric frame `xmp::LR_MASK_FRAME_SCALE` folds
-    /// radial corners through. Both facts are calibrated against Lightroom's
-    /// own `crs:pm_*` pixel boxes on 79 spots, sub-pixel.
+    /// measured HERE first, and since the 2026-08-19 ruling also what
+    /// `xmp::LR_MASK_FRAME_SCALE` says of radial corners (1.0: the old 1.032
+    /// was one frame's lens-profile warp, not a frame constant — the
+    /// constant's own comment carries the evidence). Both facts are calibrated
+    /// against Lightroom's own `crs:pm_*` pixel boxes on 79 spots, sub-pixel.
     ///
     /// **Why this is a STRING and not a parsed `Vec<Dab>`.** The one thing the
     /// sidecar does not carry is the alpha KERNEL — the falloff as a function
@@ -1323,11 +1325,16 @@ pub struct BrushStroke {
     /// stroke, never the alpha, so no amount of parsing recovers it, and the
     /// only published model for it is a third-party decompile reconstruction
     /// whose `Density` field does not exist in any of the 382 real components.
-    /// Structuring the stream before that measurement exists would freeze a
+    /// Structuring the stream before that measurement existed would freeze a
     /// shape around a renderer nobody has written; carrying it verbatim
-    /// guarantees the round trip is exact meanwhile. The measurement is one
-    /// controlled Lightroom export away (docs/V2_PLAN.md) and it is a GATE on
-    /// rendering, not on carrying.
+    /// guarantees the round trip is exact meanwhile. R27 Batches 8-10 then
+    /// MADE the measurement (screen accumulation; density scales each dab
+    /// BEFORE the screen; a one-parameter flow odds law, κ = 0.1219 ± 0.0027;
+    /// an 11-rung hardness kernel TABLE with no closed form) — what still
+    /// gates RENDERING, never carrying, is the kernel's missing closed form
+    /// plus Lightroom rasterising the mask in its PRE-lens-correction frame
+    /// (docs/V2_PLAN.md §7 item 13; implementation sketch in
+    /// `batch10-report.md` §7.4).
     pub dabs: String,
 }
 

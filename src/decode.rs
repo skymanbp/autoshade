@@ -3359,7 +3359,8 @@ mod tests {
     ///
     /// Rows 2-9 are MEASURED, not guessed: they are the `(sensor, active,
     /// crop)` triples the `AUTOSHOP_RAW_ZOO` probe printed for nine real CC0
-    /// files, one per make, on 2026-08-19. That is why this test can exist in
+    /// files — one per FORMAT, eight makes, Canon covering both CR2 and CR3 —
+    /// on 2026-08-19. That is why this test can exist in
     /// a public repository without the photographs — the numbers are the
     /// fixture. Row 1 (A7R IV) is the geometry the v0.32.0 defect was
     /// originally measured on and has no zoo file.

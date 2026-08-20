@@ -369,13 +369,18 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   成品字体子集（口径见下方 v0.31.0 条的更正）、禁启 GUI、禁 cargo fmt、五文档
   +记忆同步、Opus 5 对抗复审后发版。
 - **发版链 + 环境门套件（R27 L-29 补入，2026-08-19）**：
-  `bump → feat → push → tag → gh release → assets 回下载逐位 cmp → 台账章`。
+  `bump → 文档门 → feat → push → tag → gh release → assets 回下载逐位 cmp →
+  台账章`（文档门=`python scripts/check_docs.py --gates <电池转录>`，2026-08-20
+  起，11 行注册表，FAIL 即停）。
   **每次发版必须另跑 env 门控的真实夹具套件并把张数记在门数字旁边**：
-  `AUTOSHOP_LR_PROBE_FIXTURES`（真实 LR sidecar 往返，v0.32.0 实跑 16/16）与
-  `AUTOSHOP_MB_FIXTURES`（M-B 采样族）。**未设变量则静默跳过**，所以裸 `cargo
+  `AUTOSHOP_LR_PROBE_FIXTURES`（真实 LR sidecar 往返，v0.32.0 实跑 16/16）、
+  `AUTOSHOP_MB_FIXTURES`（M-B 采样族）与 `AUTOSHOP_RAW_ZOO`（CC0 多机 RAW，
+  R27 Batch-1b 起，`decode.rs`；过滤串必须用测试全名
+  `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself`——v0.33.0 电池用
+  `raw_zoo` 简称 0 命中的教训）。**未设变量则静默跳过**，所以裸 `cargo
   test` 的门数字（620/8/129/2+2 这一族）**不含**它们——真实边车往返出回归也能
   绿着发出去，这正是 L-29 登记的风险。记法照门数字：「620 lib / 8 CLI / 129 GUI
-  / 2+2 合约 + LR 探针 16/16 + M-B n/n」。同族同样静默的还有需要真 RAW 的
+  / 2+2 合约 + LR 探针 16/16 + M-B n/n + zoo n/n」。同族同样静默的还有需要真 RAW 的
   `AUTOSHOP_PROBE_RAW`（`render.rs` / `lensmeta.rs`）与 `AUTOSHOP_ORIENT_PROBE_RAW`
   （`decode.rs`）——有真机时一并跑并记数。`AUTOSHOP_THINK_PROBE_KEY`（付费）
   不进硬门，按轮决定。
@@ -396,7 +401,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 | **B2** | 全局 `crs:Texture` + 效果面板：Texture **读写必须同一次落地**（只读不写＝键不进 `owned_attr_keys`，merge 不剥离，我方值与文档原值并存；只写不读＝导入的 LR 值不生效）；裁剪后暗角六键 + Grain 三键先走 CarriedOnly；「暗角」标签同名冲突改名 | ✅ R25 v0.31.0（`1ddf53e`） |
 | **B3** | Detail 子控件（锐化 3 + 亮度降噪 2 + 彩色降噪 3）、手动色差 `ca_r`/`ca_b`（渲染）+ `AutoLateralCA`（携带）、Defringe 六键 | ✅ R25 v0.31.0（`98b4c65`；Defringe 走甲案＝CarriedOnly 终态） |
 | **B4** | Transform/Upright 八键 + Camera Calibration 八键走 `Tier::PassThrough`（**具名键集**，不是「一切未知」——merge 的剥离宇宙是静态清单，自由 map 会与实际写出的键失配）+ 渲染分叉披露 `global_render_gaps` | ✅ R25 v0.31.0（`3ae7df7`；PassThrough 首个真载荷） |
-| **B5** | 蒙版几何互通，三臂：**A＝导入**（LR 蒙版解锁，与 `INERT_LOCAL` 硬拒同根因一次修完）✅ R25 `4eb54aa`；**B1＝写回** `crs:Midpoint`/`crs:Version` + 旋转损失点名角度 ✅ R25 `a98a82f`；**B2＝`crs:Angle` 双向映射** ⏸ E1-verdict2 扩样（冻结预注册、来源门控 10 照）**未复现** 5 照佐证：4/10 顺时针、Stouffer Z=−1.431、3 逆向照 \|z\|>1 ⇒ 冻结判级 **evidence WEAKENED**（主分析 n=2 单独仍 SUPPORTED Z=+1.695，分歧照预注册并报）；引擎自身旋向（引擎渲染实测）与三家独立重实现不受影响，码内本就未映射零回滚；**唯一收口路径=用户 LR 已知角度实验** —— **该实验 2026-08-18/19 已做，三臂全合于 R26 v0.32.0 ✅**：12 张受控导出+ 像素测量定下角点解码 / `k=1.032` 坐标仿射 / 落笔两端点 / 极性真值表（证据档案 ~/.claude/plans/r25-materials/lr-experiment/） |
+| **B5** | 蒙版几何互通，三臂：**A＝导入**（LR 蒙版解锁，与 `INERT_LOCAL` 硬拒同根因一次修完）✅ R25 `4eb54aa`；**B1＝写回** `crs:Midpoint`/`crs:Version` + 旋转损失点名角度 ✅ R25 `a98a82f`；**B2＝`crs:Angle` 双向映射** ⏸ E1-verdict2 扩样（冻结预注册、来源门控 10 照）**未复现** 5 照佐证：4/10 顺时针、Stouffer Z=−1.431、3 逆向照 \|z\|>1 ⇒ 冻结判级 **evidence WEAKENED**（主分析 n=2 单独仍 SUPPORTED Z=+1.695，分歧照预注册并报）；引擎自身旋向（引擎渲染实测）与三家独立重实现不受影响，码内本就未映射零回滚；**唯一收口路径=用户 LR 已知角度实验** —— **该实验 2026-08-18/19 已做，三臂全合于 R26 v0.32.0 ✅**：12 张受控导出+ 像素测量定下角点解码 / `k=1.032` 坐标仿射 / 落笔两端点 / 极性真值表（证据档案 ~/.claude/plans/r25-materials/lr-experiment/）。**← 2026-08-19 勘误（R27 Batch-8/10）**：这四项里 `k=1.032` 与落笔两端点已被后续实验推翻——k 实为**每帧**镜头档案畸变而非常数，用户拍板 `LR_MASK_FRAME_SCALE 1.032→1.0`（`xmp.rs:161`）；`ramp(1−f, 1+f/2)` 两端皆被直测证伪（d_out 在 f≥50 饱和 ≈1.41），码内登记不动。角点解码与极性真值表不受影响，详见「当前状态」v0.33.0 条 |
 | **SF4** | 「是否接受 `CarriedOnly` 这个中间态」（字段可读可写可编辑、本机预览不渲染、进了 Lightroom 才生效＝公开承认预览与 LR 不一致）三选一：**A** 全盘接受，B2-B4 全部可落码；**B** 不接受，那批全退回 PassThrough + 披露，App 只做自己渲染得了的；**C** 接受但**限白名单**——只对 Adobe 独有、我方短期实现不了的算子开口。**用户 2026-08-18 拍板 = C（默认档）**，24 个全局成员逐条带理由钉在 `CARRIED_ONLY_GLOBAL` | ✅ R25 定稿 |
 
 ### 素材请求（用户侧动作，非代码项）
@@ -427,6 +432,21 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   ORF 披露按设计触发）；字体 cmap 803/803；audit_i18n 0/0。exe：cli 30,668,634 B
   / gui 40,290,588 B（tag 后回下载逐位 cmp，哈希入记忆台账）。
   发版说明全文：`~/.claude/plans/r27-materials/v0330-release-notes.md`。
+  feat/tag=`000444c`；assets sha256：cli
+  `e670f91e6480db6f639ced36af802d0c8cf899a8e9e34c022bd4e1e4e2f11db2` / gui
+  `6c69ee3f71a2bb31e14da108b55f76a523577ea533c084362527ba9b452e00b8`
+  （回下载逐位 cmp 通过）。**电池勘误（2026-08-20）**：转录 `v0330-gates.txt` 的
+  「=== RAW zoo ===」块存的是过滤串失配的那次调用（`raw_zoo` 简称 0 命中、703
+  filtered out）；全名 `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself`
+  当日另跑 9/9，发版后独立复跑再证 9/9——照抄该块会把「没跑」读成「过了」，
+  下轮电池必须用全名（发版链一节已钉）。**待办**：发布四件套（eCO 定稿 /
+  ~~文档门~~ ✅ `scripts/check_docs.py` 2026-08-20 落地 / README 展示重写 /
+  GitHub 完备化）+ 目检包。**R28 候选**：`.lcp` 解析（笔刷渲染帧 + 径向逐帧
+  保真的唯一根修）、羽化两支替换法待判（含 L-06 `d_out`=1.64 与 Batch-10 饱和
+  ≈1.41 两测未调和，见 V2_PLAN §7-1，勿自行脑补和解）、Feather→CenterWeight
+  映射（仅 3 点）、κ 跨镜头/半径/硬度普适性、`BrushCarried` 披露文案更新
+  （「kernel measurement in flight」已过时——测量已落地，堵渲染的是核无闭式+
+  镜前帧）。
 
 - **第二轮实验消费：流量律关闭、两定律再反转、L-05 机制定案（2026-08-19，
   R27 Batch-9+10，零码变更）** —— 用户「操作想吐」后改**合成 sidecar** 路线：
@@ -503,7 +523,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   是渲染臂唯一阻塞、item 4 定 L-05 机制）。落账：xmp.rs 常数注释更新 +
   V2_PLAN §7 items 1/13 + 本条；未验证清单见报告 §8。
 
-- **并行图片处理 `--jobs N` + 内存根因定案（2026-08-19，R27 Batch-7，未发版）**
+- **并行图片处理 `--jobs N` + 内存根因定案（2026-08-19，R27 Batch-7，~~未发版~~ →已随 v0.33.0 发布）**
   —— 用户令「尝试并行图片处理加速」。**先取证，后动手**：R27 Batch-6 的 147 张
   HEAD 重基线死在 83/147（~80 分钟，机器撞 commit 内存墙），本批把那次死亡溯到
   最上游并**证伪了「泄漏」假设**。
@@ -574,7 +594,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   门：clippy 双配置 0；测试 **695 lib（8 ignored）+ 10 CLI + 131 GUI + 2 + 2 合约**
   （lib +6 = `jobs` 的 sequencer/内存闸/pool/串行四组；CLI +1 = `--jobs` 默认值）。
 
-- **AI 蒙版重算 + SigLIP 2 风格嵌入（2026-08-19，R27 Batch-5，未发版）** ——
+- **AI 蒙版重算 + SigLIP 2 风格嵌入（2026-08-19，R27 Batch-5，~~未发版~~ →已随 v0.33.0 发布）** ——
   两件事，共用一条「本机 ML sidecar」纪律（设计稿：`~/.claude/plans/r27-materials/
   D1-ml-sidecar-design.md`，用户已批）。
 
@@ -699,7 +719,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   SAM 2.1 的端到端墙钟，没有单独测显存峰值。⑥ GUI 里没有「现在重算这条 AI
   蒙版」的按钮——重算跟着 develop 走。
 
-- **画笔蒙版结构落地 + 分割许可证根修（2026-08-19，R27 Batch-4，未发版）** ——
+- **画笔蒙版结构落地 + 分割许可证根修（2026-08-19，R27 Batch-4，~~未发版~~ →已随 v0.33.0 发布）** ——
   L-08 由「登记不修」转正为**根实现**（用户裁决：最高质量、笔刷必须无损往返、
   不许位图降级）。**一句话**：`Mask/Aggregate` + `Mask/Paint` 从此是一等几何，
   **读进来、存进 recipe.json、原样写回 sidecar**；唯独**不渲染**——因为
@@ -794,7 +814,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   `Mask/Image` 需自有分割器；brush 的 dab 坐标不参与 `coord_era` 迁移（与位图同列，
   `recipe_has_raster_masks` 一起报「转不了」）；`crs:MaskSyncID` 单次存活已接受。
 
-- **台账勘误 + 登记转正（2026-08-19，R27 Batch-1a，未发版）** —— 不是一次发布，
+- **台账勘误 + 登记转正（2026-08-19，R27 Batch-1a，~~未发版~~ →已随 v0.33.0 发布）** —— 不是一次发布，
   是一次**审计留痕**：R27 立案时对全部文档做了穷尽扫描（`A-leftover-ledger.md`
   33 项），查出台账多处滞后于事实，以及若干「登记不修」在本轮被用户裁决为「修」。
   逐条列在这里，便于日后追溯**是谁、在哪一天、依据什么改的**。下面被更正的原句
@@ -882,12 +902,14 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   `catalogue.rs` 注释同步更正。M1_PLAN §8 #3（结构化输出 schema 上限文档锚）
   仍开，等下次带真机付费会话顺跑。
 
-- **通用输入格式（2026-08-19，R27 Batch-1b，未发版）** —— 项目自立项起**只
+- **通用输入格式（2026-08-19，R27 Batch-1b，~~未发版~~ →已随 v0.33.0 发布）** —— 项目自立项起**只
   跑过 Sony ARW**（`ARCHITECTURE.md` 旧行「resolved: Sony `.ARW`」为证）。本批
   把 RAW 从 9 扩展名扩到 **24**，把 baked 从 5 扩到 **8**，并**第一次**用 9 份
   CC0 真机样张（raw.pixls.us，sha256 逐份核对，存仓库外
   `~/autoshop-fixtures/raw-zoo/`）跑通 Canon CR2+CR3 / Nikon NEF / Fuji RAF /
-  Olympus ORF / Panasonic RW2 / Pentax PEF / Ricoh DNG / Sony ARW 九个厂牌。
+  Olympus ORF / Panasonic RW2 / Pentax PEF / Ricoh DNG / Sony ARW ~~九个厂牌~~
+  （←2026-08-20 勘误：实为**八厂牌九机**，Canon 占 CR2+CR3 两台；`decode.rs`
+  zoo 注释同日同改）。
   **① 一份清单，处处派生**：`decode::RAW_EXTS` 与 `pipeline::BAKED_EXTS` 是全
   仓库仅有的两份扩展名表。原先有**四份手抄副本**且 web 那份已漂移（`.orf`
   `.rw2` `.raw` 四个版本里一直进不了网页选择框）；现 GUI 对话框 / serve 上传门
@@ -940,7 +962,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   （与既有 `ValidatedRecipe::disclose`、embedded-XMP 警告同一现状，扩大到 GUI
   toast 通道是带 i18n 面的独立改动，**登记不做**）。
 
-- **90° 手动旋转骨架（2026-08-19，R27 Batch-2，未发版）** —— v0.33 首项落地。
+- **90° 手动旋转骨架（2026-08-19，R27 Batch-2，~~未发版~~ →已随 v0.33.0 发布）** —— v0.33 首项落地。
   骨架表（本文件下方 v0.31.0 段）已就地补「落地状态」栏并按删除线纪律更正三处
   滞后断言（消费点**五个**不是三个、缓存盐**两个**不是一个、`↶/↷` 字形**撞门**）。
   **① 根因洞见成立**：EXIF 八态就是正方形的二面体群、对复合封闭，所以用户的
@@ -967,7 +989,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   `Orientation=8` 竖幅成片 + 四张横幅对照就把画幅判死了，7/7）；
   带烘焙像素的照片不可旋转（按钮禁用并说明理由）；web UI 缩略图不跟随转数。
 
-- **裁剪几何 + 画幅根修（2026-08-19，R27 Batch-3，未发版）** —— 把 R27 的三份
+- **裁剪几何 + 画幅根修（2026-08-19，R27 Batch-3，~~未发版~~ →已随 v0.33.0 发布）** —— 把 R27 的三份
   测量（P3 裁剪角度模型、P5 裁剪帧下的蒙版帧、P1 竖幅蒙版帧）一次性消费进代码。
   **一句话**：`crs:Crop{L,T,R,B}` 与 `Mask/CircularGradient` 的
   `Top/Left/Bottom/Right` 是**同一种编码**——旋转后的两个对角，写成**未旋转源
@@ -5021,8 +5043,10 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   双分区 → 每区 zone_err 矩裁判（帧全局 look_err 只作 ±0.02 漂移保险——
   帧级指标会否决正确分区重绘，实测记录在 ZONE_ACCEPT_RATIO 注释）＋区内
   luma-CDF 色调求解（源区 IQR<0.05 退化守卫）。任何失败优雅回退全局 fit。
-- 照片库 `D:/Photography` 只读；输出一律 `./out`（`pipeline::guard_readonly`，
-  项目自身 `./out` 永远可写）。
+- 源照片库只读（`pipeline::guard_readonly`）；输出走 `config::delivery_root()`
+  （R24 M8 起为一等设置：settings `out_dir` > `AUTOSHOP_OUT_DIR` > 默认
+  `./out`；guard 把配置根与字面 `./out` 都算输出区——见 ARCHITECTURE §4.10。
+  原文「输出一律 ./out」滞后于 R24，2026-08-20 修正）。
 
 ## ① 色调曲线交互编辑器（✅ 已完成）
 

@@ -1,6 +1,25 @@
 # Autoshop — Architecture
 
-> Status: **implemented** (v0.27.0 — R21: deleted version snapshots STAY
+> Status: **implemented** (v0.33.0 — R27, ten batches: the input path stopped
+> being one camera. **24 RAW extensions + 8 baked formats**
+> (`decode::RAW_EXTS` / `pipeline::BAKED_EXTS`, one predicate app-wide), with
+> nine cameras — one per format — run end to end from CC0 sample files.
+> `batch` and `eval` gained **memory-budgeted `--jobs N` parallelism**
+> ([`src/jobs.rs`](../src/jobs.rs)): one 61 MP photo's pipeline pass peaks at
+> ~1.77 GB of commit charge, so the worker count is capped by free memory and
+> DISCLOSES when the cap overrules the flag — the 147-photo eval went from
+> ~2.3 h serial to a measured 38 min at `--jobs 3`. Lightroom **brush and AI
+> masks are carried first-class** (dab streams and mask intent round-trip
+> byte-exact), and an AI mask's alpha is **recomputed locally** by our own
+> segmenter, disclosed as a recomputation in both directions and never passed
+> off as Adobe's raster. The style index can additionally rank by a **SigLIP 2
+> embedding**. The photographer's own **90° quarter turns** compose into the
+> EXIF orientation rather than adding a second rotation stage (§4.4). And the
+> radial frame constant `xmp::LR_MASK_FRAME_SCALE` fell from 1.032 to **1.0**:
+> the measured 1.032 turned out to be ONE frame's Adobe lens-profile warp
+> mistaken for a universal affine, so an imported radial now renders at the
+> geometry the sidecar actually stores instead of 3.2 % dilated (§「The radial
+> ellipse, measured」). v0.27.0 — R21: deleted version snapshots STAY
 > deleted. One root cause, three resurrection arms: the backup gate's only
 > "already preserved" dedup witness was the deletable snapshot itself,
 > `claim_version` re-issued a freed number (max+1) so the reborn snapshot
@@ -48,13 +67,18 @@
 > experimental generative edits, an optional pixel-**heal** retouch mode (§4.7)
 > the deterministic look **reverse-fit** (§4.8) and the local server's refusal
 > model (§4.9).
-> 624 library + 9 CLI + 130 GUI + 2+2 contract tests pass in both build
-> configurations (count refreshed 2026-08-19; the line had been left at
-> v0.26.x's 449 + 7 + 73). Two suites are ADDITIONAL and env-gated, so a bare
-> `cargo test` does not include them: `AUTOSHOP_LR_PROBE_FIXTURES` (16 real
-> Lightroom radial sidecars, byte round-trip) and `AUTOSHOP_MB_FIXTURES` (the
-> 7-file M-B forensic set). Every release runs both and records their counts —
-> see ROADMAP「发版链 + 环境门套件」.
+> 695 library + 10 CLI + 131 GUI + 2+2 contract tests pass in both build
+> configurations, with 8 further library tests `#[ignore]`d as forensic probes
+> (counts refreshed 2026-08-19 from the v0.33.0 release battery; the line had
+> been left at v0.26.x's 449 + 7 + 73). THREE suites are ADDITIONAL and
+> env-gated, so a bare `cargo test` does not include them:
+> `AUTOSHOP_LR_PROBE_FIXTURES` (16 real Lightroom radial sidecars, byte
+> round-trip), `AUTOSHOP_MB_FIXTURES` (the 7-file M-B forensic set — 42 of its
+> 42 corrections imported, 0 refused) and, since R27, `AUTOSHOP_RAW_ZOO` (the
+> CC0 nine-camera zoo, one RAW per format —
+> `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself` in
+> [`src/decode.rs`](../src/decode.rs), 9/9 at v0.33.0). Every release runs all
+> three and records their counts — see ROADMAP「发版链 + 环境门套件」.
 > v0.23.3 (round 13): the XMP xmlns conflict gate resolves namespace bindings
 > through an element SCOPE STACK and refuses only where a binding would
 > actually corrupt this document's reading (a nested rebound island nobody
@@ -242,15 +266,16 @@
 > **Widened in R27 (2026-08-19).** The RAW scope is no longer one make: 24
 > extensions, every rawler 0.7.2 decoder with a filename (see
 > `decode::RAW_EXTS` — `.x3f` is permanently excluded because rawler's
-> metadata reader for it is a `todo!()`). Nine makes have now actually been
-> run end to end from CC0 sample files — Canon CR2 + CR3, Nikon NEF, Fuji RAF,
-> Olympus ORF, Panasonic RW2, Pentax PEF, Ricoh DNG, Sony ARW — which until
-> that batch no non-Sony file ever had been. **The DNG on-ramp is the stated
-> answer for anything else**: rawler builds a DNG's whole camera profile from
-> the file's own tags (`decoders/dng.rs:270-289`), so an Adobe DNG Converter
-> output works for any body without a camera-database entry. That sentence
-> lives in exactly one place in the code, `decode::DNG_ONRAMP`, so the CLI,
-> the GUI toast and the web error body cannot offer three different remedies.
+> metadata reader for it is a `todo!()`). Nine cameras — one per format — have
+> now actually been run end to end from CC0 sample files: Canon CR2 + CR3,
+> Nikon NEF, Fuji RAF, Olympus ORF, Panasonic RW2, Pentax PEF, Ricoh DNG and
+> Sony ARW, where until that batch no non-Sony file ever had been. **The DNG
+> on-ramp is the stated answer for anything else**: rawler builds a DNG's whole
+> camera profile from the file's own tags (`decoders/dng.rs:270-289`), so an
+> Adobe DNG Converter output works for any body without a camera-database
+> entry. That sentence lives in exactly one place in the code,
+> `decode::DNG_ONRAMP`, so the CLI, the GUI toast and the web error body cannot
+> offer three different remedies.
 >
 > Since shipped, two *opt-in* pixel-level features were added alongside the
 > parametric core: **AI denoise** (a Python/SCUNet GPU sidecar, run before
@@ -546,8 +571,8 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | M1 | Unified provider framework + GPT advisor + Claude verifier | `ureq` (HTTP) + `claude` CLI | **done** |
 | M2 | Deterministic render engine | `image`, custom tone/colour/WB/clarity/NR/sharpen ops | **done** |
 | M2 | XMP sidecar writer (ACR `crs:`, global + local masks) | hand-rolled XML | **done** |
-| M3 | `auto` end-to-end + batch | batch fixes its work list up front, then runs it through a bounded pool (≤3 worker threads); "pending" = no develop in the store (recipe.json or `<stem>.xmp`, central or legacy) | **done** |
-| M4 | Style retrieval + eval harness (your edits as ground truth) | k-NN over EXIF+histogram; per-field MAE/bias | **done** |
+| M3 | `auto` end-to-end + batch | batch fixes its work list up front, then runs it through a bounded pool — `--jobs N` since R27, default 3 for `batch` and 1 for `eval` (their pre-R27 concurrency), capped by the memory budget in [`src/jobs.rs`](../src/jobs.rs) and index-ordered on output; "pending" = no develop in the store (recipe.json or `<stem>.xmp`, central or legacy) | **done** |
+| M4 | Style retrieval + eval harness (your edits as ground truth) | k-NN over EXIF+histogram, plus an optional SigLIP 2 cosine term (`AUTOSHOP_STYLE_EMBED`, off by default); per-field MAE/bias | **done** |
 | M5 | Local web UI | `tiny_http` + vanilla JS (gallery, live before/after) | **done** |
 | V2 | AI denoise (high-ISO/astro) | Python sidecar → **SCUNet** on GPU, called from Rust | **done** |
 | V2 | Baked-source mode (edit exported PNG/TIFF) | extension dispatch; develop runs on loaded pixels | **done** |
@@ -628,12 +653,19 @@ really turned (`image::rotate90` is lossless and these are our own PNGs — the
 `coord_era` migration could only disclose them because those files predated a
 frame nobody could re-derive) into freshly claimed names with the originals left
 in place, and the turn count last; a raster that cannot be turned refuses the
-whole operation rather than leaving a half-turned develop. Not yet turned: the
-XMP sidecar, which has no place for a quarter turn until `tiff:Orientation` is
-written (R27 A8, gated on one portrait Lightroom export), and a photo carrying
-BAKED pixels — a retouch/AI master is a raster on disk in the frame it was baked
-in, so the GUI refuses the turn with that reason on the button rather than
-turning the canvas out from under it.
+whole operation rather than leaving a half-turned develop. The XMP sidecar
+turns with it since R27 Batch-3 (A8): a document THIS build writes declares its
+frame — `tiff:ImageWidth/ImageLength` in the SOURCE frame plus a
+`tiff:Orientation` carrying the COMPOSED state (`xmp::frame_declaration`, fed
+by `pipeline::photo_frame_aspect`) — which closed the 「the sidecar describes
+the unturned frame」 gap Batch-2 registered. The declaration is added only where
+the merge target mentions no `tiff:` at all, so the 16 real Lightroom sidecars
+still round-trip byte for byte; and the turn is still not RECOVERABLE from a
+classic ACR sidecar on the way back, so `recipe.json` remains the authoritative
+restore path. Not turned: a photo carrying BAKED pixels — a retouch/AI master
+is a raster on disk in the frame it was baked in, so the GUI refuses the turn
+with that reason on the button rather than turning the canvas out from under
+it.
 
 **And WHERE the frame starts comes from the DefaultCrop rectangle, not from the
 sensor corner (v0.32.0).** Block registration of eight Autoshop renders against
@@ -838,7 +870,7 @@ The recipe written as an ACR/Lightroom `.xmp` sidecar (`crs:` keys like
 edit appears as fully-adjustable sliders in Lightroom — the "AI does 90%, I
 nudge the last 10%" workflow.
 
-Since v0.13.0 Autoshop does **not** write it next to the `.ARW`: the source
+Since v0.13.0 Autoshop does **not** write it next to the photo: the source
 library is read-only, so the projection lands in the per-user develop store
 (`<AUTOSHOP_DATA_DIR | %LOCALAPPDATA%/autoshop | $XDG_DATA_HOME/autoshop |
 $HOME/.local/share/autoshop>/develops/<stem>-<hash of the absolute
@@ -945,20 +977,24 @@ file we did not author (all 1048 mask components in the 160-sidecar reference
 library carry one). Both were the same root as five more 「don't recognise it →
 discard the correction, keep an integer count」 gates, while the EXPORT side had
 had a named `MaskLoss{name, reason}` since R22 — the asymmetry WAS the defect.
-The import side now mirrors it: `MaskImportReason` names nine LOSSY-but-
+The import side now mirrors it: `MaskImportReason` names eleven LOSSY-but-
 imported cases (rotation / blend mode / inert local slider / unknown local key /
-extra shapes / brush carried-not-rendered / foreign range mask / unreadable
-local curve / curve-refine saturation) — the geometry still arrives — and two
+extra shapes / brush carried-not-rendered / AI mask recomputed / AI mask
+unresolved / foreign range mask / unreadable local curve / curve-refine
+saturation) — the geometry still arrives — and two
 DROPS kept deliberately distinct from them, `Unrepresentable` (no parametric geometry to stand on) and
 `OutOfModel` (values that read fine but land outside the model), so a sentence
 saying 「imported with N features unmodelled」 cannot be told about a correction
 that was not imported at all. The banner names what it could not model instead
 of counting it. Measured on the reference library: 0 masks imported before, 31 of
 its 42 corrections after, with `imported + refused == corrections` holding file
-by file. (Re-measured at HEAD on 2026-08-19 through the `AUTOSHOP_MB_FIXTURES`
-probe: **33 of 42**, the two extra being v0.31.2's multi-component base-geometry
-fix, which stopped a Correction whose base shape sat behind a Subtract component
-from being read as the subtracted shape.)
+by file. (Re-measured through the `AUTOSHOP_MB_FIXTURES` probe as the round went
+on: **33 of 42** once v0.31.2's multi-component base-geometry fix stopped a
+Correction whose base shape sat behind a Subtract component from being read as
+the subtracted shape, then **42 of 42 with 0 refused** at the v0.33.0 release
+battery — the nine that were still refused were all `Mask/Image`, which R27
+Batch-5's recomputation arm took. The per-photo refusal rate over the 147-pair
+eval corpus fell the same way, 2.35 → 0.05 masks per photo.)
 
 **R27 Batch-4 (L-08) took the brush half of the remaining refusal.** A
 `Mask/Aggregate` and its `Mask/Paint` children are now a first-class geometry,
@@ -971,11 +1007,45 @@ needs that no sidecar contains is the alpha kernel (the falloff versus hardness
 and the per-dab accumulation law — the file stores the STROKE, never the alpha),
 so `render::mask_weight` answers 0 and both disclosure channels carry a named
 reason, `MaskImportReason::BrushCarried` / `MaskLossReason::BrushCarried`
-(「brush mask carried, not yet rendered — kernel measurement in flight」). The
-measurement is one controlled Lightroom export away and it is a gate on
-RENDERING, not on carrying. Measured on the specimen folder that has brush work
-in it: `_DSC9583` went from 8 of 11 corrections imported to 10 of 11, and the
-one still refused is refused for `CorrectionAmount="1.1"`, not for its brush.
+(「brush mask carried, not yet rendered — kernel measurement in flight」 — the
+wording v0.33.0 ships, because Batches 8-10 measured the model and changed no
+code). It is a gate on RENDERING, not on carrying. Measured on the specimen
+folder that has brush work in it: `_DSC9583` went from 8 of 11 corrections
+imported to 10 of 11, and the one still refused is refused for
+`CorrectionAmount="1.1"`, not for its brush.
+
+**The measurement then LANDED, and the arm still does not render (R27
+Batches 8-10).** Two controlled Lightroom experiments — 16 hand-made exports,
+then 17 states written as SYNTHESIZED sidecars that Lightroom imported and
+rendered without complaint — close the alpha model except at one axis:
+accumulation is **screen**, within a stroke and across components (a held-out
+51-dab stroke predicts at rms 0.0045); **density (`MaskValue`) scales each dab
+BEFORE the screen** rather than capping it (the cap reading is refuted 13×);
+and **flow** obeys a one-parameter odds law, `D/(1−D) = κ·f/(1−f)` with
+**κ = 0.1219 ± 0.0027** (fit rms 0.0070 over 11 rungs, held-out 0.0097, and
+`D(1) = 1` exactly with no free parameter — which killed the earlier
+「flow 1.0 takes a different code path」 hypothesis). Two identities fell out:
+Lightroom's brush **Size is the α = 0.5 diameter** (266.1 ± 5.0 px, invariant
+across the feather ladder) while `crs:Radius` is the OUTER support, and
+`CenterWeight ≠ 1 − Feather/100` (Feather 50 → 0.1621).
+
+Two named reasons keep the renderer at weight 0. **(1) The kernel has no closed
+form.** `k(ρ;h)` is measured at 11 hardness rungs; six families were tried and
+the only one spanning h = 0 → 1 has parameters DISCONTINUOUS in h, so what
+exists is a measured TABLE whose h-interpolation predicts a held-out rung at
+rms 0.0115 and max **0.0344** — 4× the 0.0085 quantisation floor. **(2) The
+mask does not live in the frame this engine renders in**: Lightroom rasterises
+it BEFORE its lens correction (the same artefact the `k = 1.032` bullet below
+closes), displacing exported dabs by up to 57 px and stretching them 7.4 %
+anisotropically at the frame corners — and this engine has no `.lcp` parser,
+never reads `crs:LensProfileEnable`, and runs Sony EXIF knots in its own
+geometry stage, a DIFFERENT polynomial. Baking a mask into pixels at a position
+known to be wrong is worse than the honest `BrushCarried` disclosure, so the
+implementation waits: the sketch is on file (`batch10-report.md` §7.4 —
+pre-rasterise the dab group and sample it exactly like `Bitmap`/`AiMask`, no
+schema change, with κ and the 11-rung table as the pinned test values), and the
+frame half of the blocker is what an `.lcp` reader would answer (the named R28
+candidate).
 
 Reading a Paint required three parser fixes in the same batch, all of them
 latent-until-now: `classify_correction` walked the component list FLAT (so a
@@ -986,12 +1056,16 @@ read its geometry keys from a slice running to the END of the correction (so a
 later component's `MaskValue` could answer for a base that omitted its own).
 All three are nesting-aware now, through one shared `components_in` walk.
 
-What still refuses is `Mask/Image` — the AI subject/sky/object masks. Those
-carry no raster and no geometry payload at all: only the INTENT (`MaskSubType`,
-`MaskName`, `ReferencePoint`), the provenance digests, and the proxy geometry
-the model ran in. Reproducing one needs a segmenter of our own producing our own
-alpha, which is a different feature (approximate re-derivation, disclosed as
-such) rather than anything a parser can reach.
+`Mask/Image` — the AI subject/sky/object masks — was the other half, and R27
+Batch-5 took it. Those files carry no raster and no geometry payload at all:
+only the INTENT (`MaskSubType`, `MaskName`, `ReferencePoint`), the provenance
+digests, and the proxy geometry the model ran in. So reproducing one was never
+a parser question: it needs a segmenter of our own producing our own alpha,
+which is a DIFFERENT feature — `MaskGeometry::AiMask` carries the intent and
+the 11 whitelisted provenance attributes verbatim, `segment::resolve_ai_masks`
+recomputes the alpha at develop time and caches it, and every surface calls it
+a re-derivation (see 「AI masks are a RECOMPUTATION」 above). With that arm the
+7-file M-B set imports 42 of 42 corrections and refuses none.
 
 **Every front-end hears it, the CLI included (R27).** `xmp::import_losses` →
 `xmp::describe_import_losses` is the one producer; the GUI localises it into the
@@ -1064,19 +1138,61 @@ it at the pixel (`_DSC9689` 8.3 : 1 at +24.35°; `_DSC9685` decoded tilt
 Three more constants ride with it, each measured on the same twelve-export
 experiment:
 
-* **the frame affine `k = 1.032`.** Lightroom draws the mask in a frame 1.032×
-  the export, concentric with it: `x_px = W·(k·n − (k−1)/2)`. The CENTRE moves,
-  not only the axes — settled on a hard-edged mask whose centre sits 2799 px
-  from the frame centre, where the affine lands to **3 px** and "the centre
-  stays put" misses by 88.
-* **the falloff endpoints.** Recovering the true mask WEIGHT from an 11-rung
-  exposure ladder across five frames (aspect 1.03 … 7.46, one rotated, one
-  corner-placed) fits a cubic smoothstep — the family the engine already used
-  — from `d_in = k(1−f)` to `d_out = k(1+f/2)`. The engine's outer edge had been
-  at `d = 1`; the measured one at `Feather = 50` is 1.25, i.e. **the mask was
-  29 % under-sized** and no amount of correct geometry upstream could recover
-  it. Since `k` is folded into the semi-axes at the XMP boundary, the engine's
-  own endpoints carry no `k` and engine-native radials share the law.
+* ~~**the frame affine `k = 1.032`**~~ — real as a MEASUREMENT, wrong as a
+  CONSTANT; `xmp::LR_MASK_FRAME_SCALE` is **`1.0`** since 2026-08-19 (R27
+  Batches 8+10, user ruling). The measurement stands as history: on the probe
+  frames Lightroom's mask does sit in a frame 1.032× the export and concentric
+  with it, `x_px = W·(k·n − (k−1)/2)`, and on a hard-edged mask whose centre
+  sits 2799 px from the frame centre that affine lands to **3 px** where "the
+  centre stays put" misses by 88 — the CENTRE moves, not only the axes. What
+  it is not is universal: three further controlled frames measure the same
+  scale at 0.984 (24 mm), 0.9996 (105 mm) and 1.004 (34 mm), i.e. it is a
+  PER-FRAME quantity. The mechanism is **Adobe's lens-profile distortion**.
+  Toggling `LensProfileEnable` 1 → 0 on the identical capture and radial moves
+  the implied scale 0.98396 → 0.99826, and independently 11 disjoint brush dabs
+  are displaced PURELY RADIALLY by `dr = −0.02487·r + 2.285e−9·r³` (rms
+  2.94 px; a pure scale refuted at 11×, this constant at 30×). Over one mask's
+  narrow annulus a distortion polynomial is locally indistinguishable from a
+  scale, which is exactly why single frames read 0.984 … 1.032 at all. So the
+  sidecar's geometry lives in the PLAIN frame (0.998 measured with the profile
+  off) and **Lightroom rasterises its masks BEFORE the lens correction**, a
+  frame this engine cannot reproduce today — no `.lcp` parser,
+  `crs:LensProfileEnable` never read, and its own geometry stage runs Sony EXIF
+  knots, a different polynomial. Rendering the geometry the sidecar actually
+  stores and leaving Adobe's warp UNMODELLED is what the user ruled; an `.lcp`
+  reader is the named R28 candidate. The `k` plumbing stays (it is the shape a
+  warp model slots into) and is now the identity everywhere. **What this
+  costs and what it does not:** the byte round-trips were `k`-invariant by
+  construction, so the real-sidecar suites pass unchanged; what moves is the
+  RENDER — an imported radial is no longer dilated 3.2 %, and the residual on
+  any frame is that frame's own Adobe warp (0–3.4 % observed).
+* **the falloff endpoints** — measured in v0.32.0, REFUTED at both ends a round
+  later, and deliberately still in the code. What v0.32.0 landed, and what the
+  engine runs today, is `ramp(1 − f, 1 + f/2, d)`
+  ([`src/render.rs`](../src/render.rs), the `MaskGeometry::Radial` arm of
+  `mask_weight`): a cubic smoothstep — the family the engine already used —
+  from `d_in = 1−f` to `d_out = 1+f/2`, fitted on an 11-rung exposure ladder
+  across five frames (aspect 1.03 … 7.46, one rotated, one corner-placed). The
+  engine's outer edge had been at `d = 1`; the measured one at `Feather = 50`
+  is 1.25, i.e. **the mask was 29 % under-sized** and no amount of correct
+  geometry upstream could recover it. The law was written with a `k` on both
+  endpoints, folded into the semi-axes at the XMP boundary; at
+  `LR_MASK_FRAME_SCALE = 1.0` that factor is the identity and folds out, so
+  imported and engine-native radials share one law outright instead of by
+  cancellation. **R27 Batch-10 then measured the WHOLE feather range on two
+  geometries and refuted both endpoints.** An untouched reference export
+  unlocked the inner branch for the first time: `d_in` reads 0.558 / 0.348 /
+  0.041 / **−0.144** at `Feather` 25/50/75/100 against the law's
+  0.75/0.50/0.25/0.00 (measured `d_in ≈ 0.79 − 0.94 f`, negative at the end
+  stop). `d_out` SATURATES at ≈ 1.41 instead of climbing to 1.5 — 1.220 /
+  1.409 / 1.419 / 1.433 on a 4.35-aspect off-centre ellipse, reproducing the
+  first geometry's 1.223 / 1.402 / 1.406 / 1.414 to ≤ 0.019. The outer branch
+  IS a clean smoothstep (rms 0.0006–0.0072, at or below the quantisation
+  floor); the inner branch is not the same one (forcing a single smoothstep
+  across both costs rms 0.012–0.018). The code is unchanged on purpose: the
+  falloff sits on the same reviewer-owned geometry surface as the frame
+  constant above, and a two-branch replacement law needs its own adjudication
+  (`batch10-report.md` §8; the item lives in V2_PLAN §7 item 1).
 * **`crs:LocalHue`'s scale is 180, not 100.** A controlled export with the mask
   Hue slider at +50 wrote `crs:LocalHue="0.277778"`; 0.277778 × 180 = 50.00004.
 
@@ -1105,7 +1221,9 @@ radial moves: the falloff's outer edge is wider, so a recipe saved before
 v0.32.0 draws a slightly larger, softer radial than it did. That is a
 deliberate, disclosed change (version snapshots keep the earlier render), and
 re-importing the original Lightroom sidecar is what recovers the intent for a
-mask that came from one.
+mask that came from one. (v0.33.0 moves a stored radial a SECOND time, in the
+other direction and for the frame constant rather than the falloff — the first
+bullet above.)
 
 #### The five-tier control registry (v0.30.0; populated in v0.31.0)
 
@@ -1124,9 +1242,10 @@ silently drops what you are looking at」 were both unrepresentable claims.
 | `DerivedWriteOnly` | (yes) | no — only a derived value | `as_shot_k`/`as_shot_tint`, which reach the sidecar as `crs:Temperature`/`Tint` | — |
 
 `Control.tier` is `Option<Tier>`; `None` is not "unclassified" but "not a
-develop control" (the two era stamps, the AI's own `rationale`/`confidence`,
-the solver's mask `role`), and such a row may never own a `crs:` property. The
-registry is enforced from three sides: adding a field to `EditRecipe` /
+develop control" (the base curve's `version` stamp, the two era stamps, the
+AI's own `rationale`/`confidence`, the solver's mask `role`, and since v0.33.0
+the photographer's `quarter_turns` — seven rows), and such a row may never own
+a `crs:` property. The registry is enforced from three sides: adding a field to `EditRecipe` /
 `LocalAdjustment` already fails the build until it has a row (the `global_value`
 / `local_value` destructures, R23-1), the row cannot be written without a tier
 (a struct literal has no optional fields), and the tests re-derive both halves
@@ -1486,18 +1605,102 @@ setting cannot retroactively change). `guard_readonly` keeps the literal `./out`
 as an output area alongside the configured root, so repointing the root does not
 make a `match` on an older export suddenly refused.
 
-## 5. Why Rust
+## 5. Why Rust — and the whole stack, named
 
 Cross-platform, no GC pauses on large-image pipelines, first-class image crates,
 single-binary distribution, trivial `std::process` shell-out to `claude`.
-Toolchain in use: rustc/cargo **1.94.1** (verified locally).
+Toolchain in use: rustc/cargo **1.94.1** (verified locally), **edition 2024**.
+
+The rest of this section is the complete list of what this project actually
+depends on, with each entry's REASON — because "first-class image crates" is a
+slogan, and a public repository that is being copyright registered should be
+able to answer "what is in it" without anyone reading `Cargo.lock`. Every crate
+below is a DIRECT dependency in [`Cargo.toml`](../Cargo.toml), whose own
+comments are the source of these one-liners.
+
+**Runtime (both binaries).**
+
+| crate | why |
+|---|---|
+| `anyhow` 1.0.103 | the application error type everything fallible returns |
+| `base64` 0.22 | the preview image goes to the vision API as a base64 `input_image` data URL, and images come back the same way |
+| `bytemuck` 1 | zero-copy `Vec<[f32;3]>` ↔ `Vec<f32>` casts in the orientation stage — a 61 MP portrait RAW otherwise pays three ~732 MB full-frame copies (`render::orient_f32`) |
+| `clap` 4.6.1 (`derive`) | the CLI surface: subcommands, `--jobs`, `--strength`, the rest |
+| `dotenvy` 0.15 | reads `.env` — under the trust table of §3, which is why a `.env` may carry a `Secret` and not a `Destination` |
+| `getrandom` 0.3.4 | CSPRNG bytes for the `serve` session token gating image URLs; anything seeded from the clock is guessable, which is the whole attack. Already transitive, so no new dependency |
+| `image` 0.25 | baked-source decode + every export encode. `default-features = false` and the codec set is opt-in one at a time — `jpeg`, `png`, `tiff`, `webp`, `bmp`, `gif`. avif/heic stay OUT because they mean a C toolchain (dav1d) this tree does not have; R27 added the last three only after checking each one's dependency closure (all pure Rust, no `build.rs`, no bundled C) |
+| `qcms` 0.3 | ICC → sRGB for baked imports; LR's "Edit in…" exports ProPhoto 16-bit TIFFs, and treating those pixels as sRGB fed every tone decision wrong numbers. Pure Rust |
+| `rawler` 0.7.2 | RAW decode — 24 formats, 725 camera models, embedded preview, full EXIF, as-shot WB (§4.1) |
+| `rayon` 1 | row-parallel per-pixel stages; it was already in the tree (rawler's demosaic uses it), so our serial tail joins the same pool. Every conversion is per-pixel independent, so outputs stay bit-identical |
+| `serde` 1.0.228 (`derive`) + `serde_json` 1.0.150 | `EditRecipe`, `recipe.json`, `variants.json`, the style index, and every AI request/response body |
+| `thiserror` 2.0.18 | the typed error enums whose arms callers branch on — `advisor::AdvisorError` is the one that matters (a CLI envelope failure and a bad verdict are different recoveries) |
+| `tiny_http` 0.12.0 | the local web server behind `serve` (§4.9) |
+| `ureq` 2 (`json`) | the blocking HTTP client for every AI endpoint, including the SSE streaming arm |
+
+**Native GUI**, behind the `gui` feature so a plain `cargo build` / `cargo test`
+never pulls in winit and the GL stack: `eframe` + `egui` **0.29** (the desktop
+app, with `eframe/persistence` remembering window geometry and our own prefs),
+`rfd` 0.15 (native file/folder dialogs), and `ab_glyph` 0.2 — the same version
+egui pulls — used to pre-validate a CJK font before handing it to egui, which
+panics on an unparseable one, so font loading degrades safely.
+
+**Platform.** `windows-sys` 0.59 with four feature gates:
+`Win32_Foundation` + `Win32_System_JobObjects` for the sidecar kill-groups (a
+timeout must reap the sidecar's WHOLE process tree), `Win32_Security` +
+`Win32_System_Threading` for `CreateJobObjectW`'s security-attributes parameter
+and the extended limit struct's `IO_COUNTERS`, and
+`Win32_System_SystemInformation` for `GlobalMemoryStatusEx` — the free-memory
+reading R27's `--jobs` cap divides by its measured per-photo peak. On unix,
+`libc` 0.2 does the two same jobs (`killpg` for the kill-group, `sysconf`
+`_SC_AVPHYS_PAGES` for free memory). Both crates were already in `Cargo.lock`
+transitively, so promoting them added no download and no new supply-chain
+surface. Build-time: `winresource` 0.1 embeds the Windows app icon
+([`build.rs`](../build.rs)), best-effort — no resource compiler still builds.
+
+**Dev-only.** `tiff` 0.11 — the same version `image` already locks. `image`'s
+own TIFF *encoder* cannot round-trip an `IccProfile` tag (probed: the written
+tag reads back `None`), so the ICC regression tests write their fixture through
+the `tiff` crate directly, the way Lightroom-style writers produce real profiled
+TIFFs.
+
+**The Python sidecar stack** is deliberately NOT in `Cargo.toml`: three scripts
+under `python/`, shelled out to with `-E`, each doing one job and each failing
+loudly rather than degrading silently (`lib.rs::sidecar_wrote`). They need
+Python 3 + PyTorch (CUDA where the box has it), plus `transformers` on the sky
+and object paths and `rembg` on the subject path. The five models they load,
+their licences and their pinned byte counts are the 「ML sidecar family」 table
+at the top of this document — not repeated here, so there is one place to
+correct. Weights are never in this repository: they are fetched on first use
+and pinned in the two tiers that table describes — sha256 plus an exact byte
+count where the sidecar fetches every file itself, an HF revision only on the
+two older segmenter paths, which say so in their own comments.
+
+**The AI services** are two HTTP contracts and one subprocess: an
+OpenAI-compatible **Responses** API for the vision advisor and the visual judge
+(strict `json_schema`, `store: false`), the **Images** API (`/v1/images/edits`,
+`gpt-image-*`) for the experimental generative edits, and the **`claude` CLI**
+for the analyst/verifier role — reusing Claude Code OAuth, so that role needs no
+API key at all (§3, §4.3).
+
+**The web front-end** is one file: `src/web/index.html`, `include_str!`'d into
+the binary and served by `tiny_http`. Vanilla JS, one inline `<script>`, zero
+build step, zero CDN — which is also what makes §4.9's origin rules the whole
+of the client's trust story.
+
+**The XMP layer is hand-rolled** — [`src/xmp.rs`](../src/xmp.rs) reads and
+writes the document itself, and this project takes no XML crate as a
+dependency. That is a choice, not an omission: a Lightroom sidecar must be
+*merged into*, preserving byte-for-byte everything this engine does not model
+(`xmp::insert_crs_description`, the namespace SCOPE STACK of v0.23.3, the
+pass-through key set), and a serialise-from-a-DOM round trip cannot promise
+that.
 
 ## 6. Open questions
 
 | # | Question | Status |
 |---|----------|--------|
 | 1 | **Image library path** (originals + finished edits) | resolved: passed per invocation (`batch <dir>`, `serve --dir`, `style-index <dir>`, the GUI folder picker) — no configured library root; develop state is keyed by each photo's absolute path in the per-user store. One exception since R23-2: the STYLE library's source folder is remembered in the GUI prefs (`style_src_dir`) so a rebuild need not re-find it — a convenience, not a library root; the index records the folder it was built from as well |
-| 2 | Camera / RAW format | ~~resolved: Sony `.ARW`~~ **← R27 (2026-08-19) widened**: 24 RAW extensions (`decode::RAW_EXTS`) + 8 baked (`pipeline::BAKED_EXTS`), one predicate app-wide; 9 makes verified end to end on CC0 samples; Adobe DNG Converter is the documented on-ramp for the rest. Refusals are named per cause (unknown make / unknown model / no decoder); monochrome and 4-colour sensors are refused before the develop; X-Trans develops approximately and says so |
+| 2 | Camera / RAW format | ~~resolved: Sony `.ARW`~~ **← R27 (2026-08-19) widened**: 24 RAW extensions (`decode::RAW_EXTS`) + 8 baked (`pipeline::BAKED_EXTS`), one predicate app-wide; 9 cameras (one per format) verified end to end on CC0 samples, and the zoo is a release gate (`AUTOSHOP_RAW_ZOO`, 9/9 at v0.33.0); Adobe DNG Converter is the documented on-ramp for the rest. Refusals are named per cause (unknown make / unknown model / no decoder); monochrome and 4-colour sensors are refused before the develop; X-Trans develops approximately and says so |
 | 3 | Output target | resolved: XMP sidecar **+** rendered, XMP-first |
 | 4 | AI roles | resolved: GPT=image, Claude=non-image+verify, unified framework |
 | 5 | Exact meaning of Claude's "收货验证" (data-level vs pixel-level) | resolved: **data-level**. The verifier is never sent pixels — it judges the recipe against EXIF/histogram/clipping stats and the advisor's rationale (§3, §4.3, [`src/advisor/claude.rs`](../src/advisor/claude.rs)) |
