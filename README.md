@@ -195,6 +195,15 @@ never pulls in eframe + winit + the GL stack. Both binaries link the same engine
 library — the desktop app is not a wrapper around the CLI, it links the crate
 in-process.
 
+Cross-platform **compilation** is CI-verified: the
+[`build` workflow](.github/workflows/build.yml) compiles both feature
+configurations on `ubuntu-latest` and `macos-latest` on every push (first
+verified run:
+[32346678287](https://github.com/skymanbp/autoshop/actions/runs/32346678287),
+2026-08-20, 7m27s). That proves the source *builds* there and exactly that —
+runtime behaviour on those platforms has not been verified, and prebuilt
+binaries remain Windows-only.
+
 ### Three front-ends, one engine
 
 | | how | when |
@@ -263,6 +272,13 @@ own box, in pixel space. Reading it naively — which this app, and every other
 implementation we could find, did — gets the axis ratio wrong by a median factor
 of **1.84** and leaves 8 % of real masks unreadable. Sixteen real sidecars now
 round-trip their corners byte for byte.
+
+The method policy, stated once so it can be cited: every piece of format
+knowledge here comes from **behavioural measurement** — sidecars and exports of
+the author's own photographs from the author's own Lightroom, compared at the
+XMP and pixel level. Nothing was decompiled or disassembled. The one published
+decompile-derived model in this space (of the brush alpha kernel) is precisely
+what this project **refuses** to build on.
 
 The follow-up round then **refuted one of its own constants**, which is the part
 worth reading. The `1.032` frame scale measured in v0.32.0 turned out to be one
