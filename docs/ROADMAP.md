@@ -1,7 +1,8 @@
 # ROADMAP — “一定程度直接取代 Photoshop” 路线（v0.5.0 之后 · UX 阶段）
 
 > 交接文档：每项都附实现要点与 `file:line` 锚点，供新会话不重读全库即可
-> 开工。更新于 2026-07-24（**v0.12.0 已发布**：全量 debug + 协同性审计
+> 开工。更新于 2026-08-20（**v0.34.0 已发布**——现状见「当前状态」首条；以下横幅为
+> 历史存档，最早起自 v0.12.0：全量 debug + 协同性审计
 > 批次——77 项对抗验证 findings 全修/有据取舍，蒙版行点击=选择恢复、
 > recipe.json 统一持久化契约、未保存保护、指针状态机清残留、引擎位图/
 > feather/roundness 语义钉死、web/CLI 协同；详见下方「当前状态」首条。
@@ -371,7 +372,11 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 - **发版链 + 环境门套件（R27 L-29 补入，2026-08-19）**：
   `bump → 文档门 → feat → push → tag → gh release → assets 回下载逐位 cmp →
   台账章`（文档门=`python scripts/check_docs.py --gates <电池转录>`，2026-08-20
-  起，11 行注册表，FAIL 即停；台账章同时把 gitignored 的 M1_PLAN/V2_PLAN 快照到
+  起注册表化，FAIL 即停；**电池转录必须是全形两跑**——`cargo test` 与
+  `cargo test --features gui`（不加 `--bins`/`--lib`/过滤串）各成
+  `=== test default ===` / `=== test gui ===` 块，GUI 数＝两配置总和之差，
+  `--bins` 形只有两个 bin 套件表达不了这个差——v0.34.0 电池第一份正是这样
+  录废重录的；台账章同时把 gitignored 的 M1_PLAN/V2_PLAN 快照到
   `~/.claude/plans/autoshop-ledger-snapshots/<日期>/`——它们 2026-08-20 起不进远端，
   git 不再为其留版本）。
   **每次发版必须另跑 env 门控的真实夹具套件并把张数记在门数字旁边**：
@@ -380,9 +385,10 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   R27 Batch-1b 起，`decode.rs`；过滤串必须用测试全名
   `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself`——v0.33.0 电池用
   `raw_zoo` 简称 0 命中的教训）。**未设变量则静默跳过**，所以裸 `cargo
-  test` 的门数字（620/8/129/2+2 这一族）**不含**它们——真实边车往返出回归也能
-  绿着发出去，这正是 L-29 登记的风险。记法照门数字：「620 lib / 8 CLI / 129 GUI
-  / 2+2 合约 + LR 探针 16/16 + M-B n/n + zoo n/n」。同族同样静默的还有需要真 RAW 的
+  test` 的门数字（随版本走，v0.34.0＝727/11/131/2+2）**不含**它们——真实边车
+  往返出回归也能绿着发出去，这正是 L-29 登记的风险。记法照门数字：
+  「<lib> lib / <cli> CLI / <gui> GUI / 2+2 合约 + LR 探针 n/n + M-B n/n +
+  zoo n/n」（数字每版实录，勿抄上一版）。同族同样静默的还有需要真 RAW 的
   `AUTOSHOP_PROBE_RAW`（`render.rs` / `lensmeta.rs`）与 `AUTOSHOP_ORIENT_PROBE_RAW`
   （`decode.rs`）——有真机时一并跑并记数。`AUTOSHOP_THINK_PROBE_KEY`（付费）
   不进硬门，按轮决定。
@@ -427,7 +433,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   ⑤烘焙母版上的 AI 蒙版从「披露不渲」变正常渲染；⑥eval 四 hue 行口径改两侧
   过阈（报告自报跨版不可比）；⑦嵌入 sidecar 默认 --fp16+模型单飞
   （`AUTOSHOP_EMBED_FP32` 逃生阀）。**零 recipe schema 变更＝v0.33↔v0.34 双向
-  互读**（自 v0.30 以来首个无前向断裂的功能版）。门（发版电池实录
+  互读**（自 v0.30 以来**第二个**零 schema 功能版——前一个是 v0.32.0，见其条目
+  「recipe schema 零新字段」；2026-08-20 深检勘误，原写「首个」）。门（发版电池实录
   `~/.claude/plans/r28-materials/v0340-gates.txt`）：clippy0×2、**727 lib
   （9 ignored）/ 11 CLI / 131 GUI / 2+2** 双配置、RAW zoo 全名 9/9、LR 探针
   16/16 字节往返、M-B 7 份 42/42、audit_i18n 0、check_docs --gates 11/11。
@@ -436,8 +443,10 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   （tag 后回下载逐位 cmp，结果入记忆台账）。台账快照（P3 纪律）：M1/V2_PLAN →
   `~/.claude/plans/autoshop-ledger-snapshots/2026-08-20-v0340/`。发版说明全文：
   `~/.claude/plans/r28-materials/v0340-release-notes.md`。**R29 候选池未动**
-  （.lcp/羽化调和/Feather→CenterWeight/κ 普适性/export-at-size/BiRefNet/竖幅
-  >45°/诊断 sink/XMP Scope 全域化余项/texture 负半支 LR 地面真值）。
+  （.lcp/羽化调和/Feather→CenterWeight/κ 普适性/export-at-size/BiRefNet/
+  `|Angle|>45°` 径向角度折叠未验证（xmp.rs `canonical_lr_angle`；竖幅/裁剪帧
+  本身 R27 Batch-3 已关，2026-08-20 深检勘误）/诊断 sink/XMP Scope 全域化余项/
+  texture 负半支 LR 地面真值）。
 
 - **R28 Batch-5：语义/口径批（2026-08-20，~~未发版~~ →已随 v0.34.0 发布）** —— 5a **texture=−100 端点**
   （设计项，用户 D1 范围内）：旧负半支＝同一 unsharp 取负幅度，传递函数
@@ -462,7 +471,8 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   可比**已落两处：eval 报告尾行自报 + ARCHITECTURE §4.6；成本如实＝单侧上色的
   照片不再进 hue 行（其遗漏记在 `*_sat` 行，那才是承载决定的控件）。
   5c **诊断行身份**（F6 最小形）：新 `pipeline::attribution(Option<&Path>)` 一个
-  前缀函数，盖章全部 worker 可达 eprintln —— pipeline 提案回退（:390）/ style
+  前缀函数，盖章全部 worker 可达 eprintln —— pipeline 提案回退（GPT-proposer fallback，
+  发版后 :409）/ style
   嵌入不可用（同类兄弟，按 HEAD 重枚举出）/ clamp 披露 / merge 注记 / 蒙版损失，
   main batch 的「XMP failed」，render 的 ICC 嵌入 + 位图蒙版三条预算跳过 + 两条
   加载失败；**batch 不再弃 `_notes`**——`process_one` 改返 `(Verdict, Vec<Note>)`，
@@ -551,7 +561,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   从配方取非从盘取，与 render 两臂同门同折，烘焙母版从「解码失败披露不渲染」变
   「正常解码渲染」）；**ai_cache_key 加帧项** `…|t{turns%4}|…`（F1-A：(0.5,0.5) 不动
   点修死；%4 与 render 折叠对齐防手改 5 铸双键）；staging 名加 AtomicU64 序号
-  （F1-D 潜在碰撞，对齐 style.rs:400 形制）。**行为披露=v0.33 及以前的全部 AI 蒙版
+  （F1-D 潜在碰撞，对齐 style.rs 的 TMP_SEQ 形制，发版后 :422）。**行为披露=v0.33 及以前的全部 AI 蒙版
   缓存换键一次性重算**（秒级 GPU/蒙版，经 describe 通道如实报告；旧 PNG 留盘=既
   接受的 superseded 残留）。3b（F8）：**根修=集合错配**——新 turnable_raster_paths_mut
   （只含 Bitmap）与 bitmap_paths_mut（存储集）成为共享 geometries_mut 走查上的两条
@@ -580,7 +590,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   dab token 加 256B 长度界。2c **check_docs 加固**：块注释跳过+_PROBE 加案例+
   [&str;N] 交叉核对（含失败向自检 _raises_lookup）+括号计数前遮引号段（_TOML_PROBE
   合成自检）。2d jobs.rs saturating_mul+u64::MAX 邻域测试。2e **三注释谎言改真**：
-  style.rs:559/575（citing git -S bae6d99、真修指 B4-4b）+main.rs:1431 限定到
+  style.rs:559/575（citing git -S bae6d99、真修指 B4-4b）+main.rs 批处理注释（B2 时 :1431、发版后 :1547 起）限定到
   stdout（stderr 站点按 HEAD 重枚举、指 B5-5c）+store.rs 文档随 2a。
   **裁决档案勘误（代理实测）**：F5 加重项示例「30 万整数位」错——溢出成 inf 早被
   有限性检查拒收，可达形是小数形 0.111…（fixture 与注释已按实况记录）；F6 引行
@@ -609,7 +619,7 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   6×6 上的 Color2DPtr 并行竞争顺带按构造消除）。1b=X-Trans 披露句改真（旧
   「Colour…unaffected」src/ 清零）+BrushCarried 两处「measurement in flight」
   →「measured kernel has no closed form + pre-lens-correction frame」
-  （xmp.rs:1433/1664；钉测试只查 not yet rendered 保绿）+gui/util.rs 注释同步。
+  （B1 时 xmp.rs:1433/1664、发版后 :1491/:1723——B5 大改移位；钉测试只查 not yet rendered 保绿）+gui/util.rs 注释同步。
   门（主审复跑）=clippy0×2+**702**(+7)/10/131/2+2+zoo 全名 9/9（91.35s）；
   变异主审亲手复现（去 ROI 相位移位→flat 测试红 0.405≠0.2→还原绿）。
   **未验证登记**：细节质量无参考转换器对照（合成量尺+披露句代偿，待人工目验）；
@@ -5232,8 +5242,10 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   → **方向值的唯一来源 = `decode::raw_orientation_of`（EXIF IFD0 tag 0x0112）**：
   rawler 0.7.2 在 `rawimage.rs:389/478` 把 `RawImage.orientation` **硬写死为
   `Normal`**（`//cam.orientation, // TODO fixme`），DNG/QTK 之外全部解码器如此——
-  所以 v0.29.x 以前竖拍 ARW 在显示/显影/导出全链都是横的。三个消费点
-  （render.rs 渲染钩、decode.rs 的 Meta 尺寸 + 预览转正、`camera_rendition`）
+  所以 v0.29.x 以前竖拍 ARW 在显示/显影/导出全链都是横的。**五个**消费点
+  （render.rs 渲染钩、decode.rs 的 Meta 尺寸 + 预览转正、`camera_rendition`、
+  `frame_size`（v0.32.0 起）、`pipeline::migrate_recipe_coord_frame` 按路径
+  孪生——2026-08-20 深检由三勘正为五，ARCHITECTURE 同句早已改）
   均改读该访问器；缺 tag 回 `Normal`，rawler 自己的 `from_tiff` 回 `Unknown`，
   二者在像素/坐标/尺寸三条链上均为 no-op（断言在
   `unknown_and_normal_are_the_same_no_op`）。GUI 缩略图磁盘缓存盐 v2→v3
@@ -5271,13 +5283,15 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   （GUI 已如实分组：Temp/Tint 移入实时区）。**（R22 起已上引擎**——此句
   记录的是 #2-B 当时状态；现行通道链见下条 R22-4）
 - **R22-4（#15a/#10B）蒙版 clarity/dehaze/texture 上引擎**：`apply_masks`
-  现行通道顺序 = **dehaze → 融合 WB+tone+sat → clarity → texture → NR**，
-  每条各自 `!= 0.0` 门控（此前「只调这三项」的蒙版三重落空：不渲染、
+  现行通道顺序 = **dehaze → 融合 WB+tone+sat(+hue) → clarity → texture →
+  sharpness（R23-1b 起，±100 有符号）→ NR**（2026-08-20 深检补 sharpness/hue
+  两级），每条各自 `!= 0.0` 门控（此前「只调这三项」的蒙版三重落空：不渲染、
   `engine_active` 判不活、栅格预算加载器连位图都不载）。dehaze 复用全局
   同一模型（`apply_dehaze` 拆出 `dehaze_airlight` + `dehaze_px`，拆分前后
   golden 位级一致），airlight 每帧只估一次且取自全局显影后的画面 ⇒ 蒙版
-  叠放顺序不改变雾模型；clarity/texture = `unsharp_luma_weighted`（把权重
-  乘到亮度差上，与「整幅滤波再按权混合」严格等价，故只需两个 f32 平面而
+  叠放顺序不改变雾模型；clarity = `unsharp_luma_weighted`、texture 自 R28 起 = `render::texture_pass`
+  （正半支即 unsharp、负半支带限 fine−coarse——2026-08-20 深检补注；把权重
+  乘到亮度差上，与「整幅滤波再按权混合」严格等价，故仍只需两个 f32 平面而
   非 RGB 副本，61MP 省 ~732MB），clarity 半径同全局（0.02·短边，地板 8px、
   midtone 加权），texture = 0.005·短边地板 2px、无 midtone 加权且**是我们
   自己的标定**（引擎无全局 Texture 可对齐、Adobe 模型未公开，同

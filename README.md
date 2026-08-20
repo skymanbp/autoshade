@@ -27,6 +27,7 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 [Measured results](#measured-results) ·
 [The honesty model](#the-honesty-model-is-a-feature) ·
 [Privacy & trust](#privacy--trust) ·
+[AI setup](#ai-setup) ·
 [Commands](#command-reference) ·
 [Configuration](#configuration-env-vars) ·
 [Honest scope](#honest-scope) ·
@@ -160,8 +161,8 @@ global/local composition, and it is written down rather than curated away.
 > The retry went through cleanly.
 >
 > **Reproducibility footnote:** the JPEGs above are downscaled from full-sensor
-> renders (9504×6336 / 6336×9504). The CLI has no export-at-size flag — `apply`
-> renders at native resolution only — so the resize was done outside Autoshop.
+> renders (9504×6336 / 6336×9504). The resize was done outside Autoshop —
+> there is no export-at-size command (see [Honest scope](#honest-scope)).
 > The faint `© skymanbp` watermark protects the author's photographs and sits
 > identically on both halves of every pair — it is not part of the develop.
 
@@ -353,7 +354,7 @@ Runs entirely on your machine.
 
 `batch` processes a folder; `eval` runs the AI against RAWs that have your own
 `.xmp` beside them and reports per-control error and bias. Both take `--jobs N`,
-**capped by a memory budget**: one 61 MP photo's pipeline pass peaks at ~1.8 GB
+**capped by a memory budget**: one 61 MP photo's pipeline pass peaks at ~1.77 GB
 of commit charge (measured, not guessed — 1,771 MB, re-measured at v0.34.0 with
 the full-resolution render included), so the worker count is bounded by free
 memory — and the run *discloses* when the cap overrules your flag. Where a
@@ -419,8 +420,11 @@ mef mos erf kdc dcr dcs crw nrw mrw ari
 ```
 
 **Baked rasters — 8 extensions:** `png tif tiff jpg jpeg webp bmp gif`. All
-decoders are pure Rust. AVIF and HEIC are **deliberately excluded** — they need
-a C toolchain, and this tree has no C build dependency and keeps none.
+decoders are pure Rust. AVIF and HEIC are **deliberately excluded** — they would need a C image
+codec (dav1d), and every image decoder in this tree is pure Rust. (Full
+honesty on the wider graph: the TLS stack's `ring` compiles C via `cc` —
+the one transitive C build dependency in the tree, and it is not ours to
+swap without changing TLS stacks.)
 
 Decoding is `rawler` 0.7.2, which carries **725 camera models**. An extension
 being on that list means the file reaches the RAW engine — not that your
@@ -472,9 +476,12 @@ That is a taste gap, stated as a number instead of a claim.
 727 library (9 `#[ignore]`d forensic probes) / 11 CLI / 131 GUI / 2+2 contract
 tests; 16/16 real Lightroom radial sidecars byte-round-tripped; 42/42 mask
 imports on the forensic corpus with 0 refusals; RAW zoo 9/9; font subset
-803/803 glyphs; i18n audit 0 findings. A doc-drift gate
-([`scripts/check_docs.py`](scripts/check_docs.py)) re-derives every hard number
-in these docs from the tree before each release.
+check 803/803 needed codepoints embedded (68 symbols + 735 CJK); i18n audit
+0 findings; doc gate 11/11 with the battery transcript. That doc-drift gate
+([`scripts/check_docs.py`](scripts/check_docs.py)) re-derives the shipped
+version, the battery's test counts, the format counts, the dependency
+inventory and the toolchain from the tree — and pins this README's own
+copies of the version, battery line and format counts — before each release.
 
 ---
 
@@ -534,8 +541,8 @@ cast survived metadata that read perfectly.
 **Fixed in v0.34.0:** a non-2×2 RGB array is now demosaiced
 in-tree over the array's own geometry — every channel is interpolated only
 from photosites that actually measured it, with per-phase plane-fit weights.
-On the same sample the whole-frame G/R moved **1.55 → 0.9476** and G/B
-2.08 → 1.03, inside the 0.81–1.08 band the other eight formats occupy;
+On the same sample the whole-frame G/R moved **1.5503 → 0.9473** (measured
+on the release binary) and G/B 2.08 → 1.03, inside the 0.81–1.08 band the other eight formats occupy;
 per-phase channel spread fell from 158 % to 0.34 % of the channel mean. The
 render still disclaims what remains true: fine detail is reconstructed by a
 general rule rather than by an algorithm built for this array (Markesteijn),
@@ -624,7 +631,7 @@ Two roles, each configurable in the in-app **Settings (⚙)** panel or via env:
 | Role | What it does | Default | Other option |
 |------|------|---------|--------------|
 | **分析 / Analysis** (verifier) | data-only acceptance check of each recipe | **OAuth** — the `claude` CLI on PATH, signed in (reuses Claude Code OAuth, **no API key**), model `opus` | **API** — any OpenAI-compatible chat endpoint (base URL + key + model) |
-| **图像 / Image** (vision advisor) | looks at the photo → `EditRecipe` | **API** — `OPENAI_API_KEY`, model `gpt-5.5` | any OpenAI-compatible **vision** endpoint. Without a key, a histogram heuristic is used |
+| **图像 / Image** (vision advisor) | looks at the photo → `EditRecipe` | **API** — `OPENAI_API_KEY`; model = `AUTOSHOP_OPENAI_MODEL` (default in the [env table](#configuration-env-vars)) | any OpenAI-compatible **vision** endpoint. Without a key, a histogram heuristic is used |
 
 The `claude` CLI has no image input in print mode, so the image role always
 speaks the OpenAI-compatible HTTP protocol. The Settings panel's "OAuth" choice

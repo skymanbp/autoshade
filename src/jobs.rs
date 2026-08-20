@@ -19,7 +19,7 @@
 //! The 1.77 GB lives in the demosaic: `render::render_to_image` produces the
 //! full-frame oriented f32 buffer (61 MP x 3 x 4 B ~ 732 MB, plus rawler's own
 //! sensor buffers and the orientation transient) BEFORE it applies `max_edge`
-//! (render.rs:266-272), so `photo_base_knots`' "capped at 2048" bounds the
+//! (the `match max_edge` in `render::render_to_image_in`), so `photo_base_knots`' "capped at 2048" bounds the
 //! develop stages but NOT the peak.
 //!
 //! ## The render tail, measured (R28 Batch-4)
@@ -95,8 +95,8 @@
 //! chose. If a run starts collecting 429s, lower `--jobs`.
 //!
 //! Not covered, and disclosed rather than pretended away: `eprintln!` lines
-//! raised deep inside the pipeline (e.g. the GPT-proposer fallback at
-//! pipeline.rs:390) go straight to the process stderr and therefore appear in
+//! raised deep inside the pipeline (e.g. the GPT-proposer fallback warn in
+//! `pipeline::produce_recipe`) go straight to the process stderr and therefore appear in
 //! COMPLETION order, not index order. They cannot interleave mid-line — Rust
 //! holds the stderr lock across the whole `write_fmt` — but they are not
 //! attributable to a photo by position. Callers that need the attribution read

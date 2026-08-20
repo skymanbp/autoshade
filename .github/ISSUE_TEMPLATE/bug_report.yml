@@ -36,7 +36,7 @@ body:
       label: Version
       description: "`autoshop --version`, or the title bar of the desktop app."
       options:
-        - v0.33.0 (latest release)
+        - v0.34.0 (latest release)
         - older — please say which, in the next field
     validations:
       required: true
@@ -47,10 +47,11 @@ body:
       label: If older — which one?
       description: >-
         A tag (`v0.32.0`), or the commit you built. Render behaviour changed at
-        real, documented boundaries — imported radial geometry at v0.33.0, the
-        Sony ARW develop window moving by (32, 20) px at v0.32.0, and the
-        white-balance gains when the blackbody curve was repaired. Knowing which
-        side of those you are on matters; they are all listed under
+        real, documented boundaries — X-Trans colour and every negative Texture
+        render at v0.34.0, imported radial geometry at v0.33.0, the Sony ARW
+        develop window moving by (32, 20) px at v0.32.0, and the white-balance
+        gains when the blackbody curve was repaired. Knowing which side of those
+        you are on matters; they are all listed under
         [Honest scope](https://github.com/skymanbp/autoshop#honest-scope).
       placeholder: "v0.31.2 — or: built from main at abc1234"
 
@@ -133,18 +134,19 @@ body:
         - **Local web UI** — the same sentence in the reply text.
         - **The save side** — what the written `.xmp` could not carry, and why.
 
-        Lines such as `brush mask(s) carried, not yet rendered - kernel
-        measurement in flight`, `AI mask(s) re-derived by the local segmenter -
-        not Adobe's own raster`, `radial rotation(s) read as 0`, `local point
-        curve(s) unreadable`, `unmodelled local slider(s)` or the X-Trans note
-        are **expected behaviour, disclosed on purpose** — and they very often
+        Lines such as `brush mask(s) carried, not yet rendered - the measured
+        kernel has no closed form and the mask lives in a pre-lens-correction
+        frame`, `AI mask(s) re-derived by the local segmenter - not Adobe's own
+        raster`, `radial rotation(s) read as 0`, `local point curve(s)
+        unreadable`, `unmodelled local slider(s)` or the X-Trans note are
+        **expected behaviour, disclosed on purpose** — and they very often
         explain the difference you are looking at.
 
         Paste them verbatim. **If there were none, write "none"** — that is a
         real data point: it means the engine believes it rendered your edit
         whole, which narrows the bug considerably.
       placeholder: |
-        ⚠ imported 12 Lightroom mask(s); 2 brush mask(s) carried, not yet rendered - kernel measurement in flight (Sky brush, Skin brush); 1 radial rotation(s) read as 0 (Lift porch) — the sidecar itself is not modified
+        ⚠ imported 12 Lightroom mask(s); 2 brush mask(s) carried, not yet rendered - the measured kernel has no closed form and the mask lives in a pre-lens-correction frame (Sky brush, Skin brush); 1 radial rotation(s) read as 0 (Lift porch) — the sidecar itself is not modified
     validations:
       required: true
 

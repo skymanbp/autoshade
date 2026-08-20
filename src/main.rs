@@ -1544,7 +1544,7 @@ fn batch_cmd(
         // thing `eval` does with the same notes (eval.rs, its own worker
         // closure), and what `jobs`' module doc asks every pooled caller to do.
         // Above one job the ⚠ lines these notes mirror (the proposer fallback
-        // at pipeline.rs:390 and its siblings) arrive on stderr in COMPLETION
+        // warn in `pipeline::produce_recipe` and its siblings) arrive on stderr in COMPLETION
         // order; the block is the channel that keeps them attached to the
         // photograph. At `--jobs 1` the transcript gains the same line in the
         // same place, so nothing about a serial run's ordering changes.

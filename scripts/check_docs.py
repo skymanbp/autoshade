@@ -454,6 +454,21 @@ def major_minor(v: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(".".join(x.split(".")[:2]) for x in v)
 
 
+def camera_model_count(_args: argparse.Namespace) -> Truth:
+    """rawler's camera-model count, from the source-of-record comment in
+    decode.rs (a rawler property this tree asserts once in code and quotes in
+    five doc places — R28 doc audit added this row so a rawler bump cannot
+    leave the doc copies behind)."""
+    src = text("src/decode.rs")
+    m = re.search(r"carries (?P<models>\d+) camera models", src)
+    if not m:
+        raise LookupError(
+            "src/decode.rs: no 'carries N camera models' comment — the "
+            "source-of-record moved; re-anchor this extractor"
+        )
+    return Truth((m.group("models"),), f"src/decode.rs:{line_of(src, m.start())}")
+
+
 # ── The CLAIMS registry ─────────────────────────────────────────────────────
 
 
@@ -543,6 +558,77 @@ CLAIMS: list[Claim | SetClaim] = [
         r"rustc/cargo \*\*(?P<toolchain>\d+(?:\.\d+)+)\*\*",
         toolchain_truth,
         major_minor,
+    ),
+    # ── R28 doc-audit additions (2026-08-20): pin the maintained COPIES the
+    # original 11 rows could not see — the audit found the bug template's
+    # version dropdown had already drifted a whole release behind, which is
+    # exactly the failure mode these rows exist to end. ────────────────────
+    Claim(
+        README,
+        "shipped version — download link text",
+        r"\[Download v(?P<version>\d+\.\d+\.\d+)\]",
+        cargo_version,
+    ),
+    Claim(
+        README,
+        "shipped version — download link URL + release-table + gates + zoo",
+        r"(?:releases/tag/v|Release gates at v|9/9 at v)(?P<version>\d+\.\d+\.\d+)",
+        cargo_version,
+    ),
+    Claim(
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+        "shipped version — bug template dropdown",
+        r"- v(?P<version>\d+\.\d+\.\d+) \(latest release\)",
+        cargo_version,
+    ),
+    Claim(
+        README,
+        "test counts — Release gates list",
+        r"(?P<lib>\d+) library \(\d+ `#\[ignore\]`d forensic probes\) / "
+        r"(?P<cli>\d+) CLI / (?P<gui>\d+) GUI / (?P<c1>\d+)\+(?P<c2>\d+) contract",
+        battery_test_counts,
+    ),
+    Claim(
+        ARCH,
+        "camera models — §4 + §5 (all mentions must agree)",
+        r"(?P<models>\d+) camera models",
+        camera_model_count,
+    ),
+    Claim(
+        README,
+        "camera models — Decoding line",
+        r"carries \*\*(?P<models>\d+) camera models\*\*",
+        camera_model_count,
+    ),
+    Claim(
+        README,
+        "camera models — Tech line (bodies)",
+        r"(?P<models>\d+) bodies",
+        camera_model_count,
+    ),
+    Claim(
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+        "camera models — bug template",
+        r"rawler carries (?P<models>\d+) camera models",
+        camera_model_count,
+    ),
+    Claim(
+        README,
+        "RAW ext count — formats header",
+        r"Camera RAW — (?P<formats>\d+) extensions",
+        ext_count("src/decode.rs", "const RAW_EXTS"),
+    ),
+    Claim(
+        README,
+        "RAW ext count — no-preview sentence",
+        r"of the (?P<formats>\d+) formats store none",
+        ext_count("src/decode.rs", "const RAW_EXTS"),
+    ),
+    Claim(
+        README,
+        "baked ext count — formats header",
+        r"Baked rasters — (?P<baked>\d+) extensions",
+        ext_count("src/pipeline.rs", "const BAKED_EXTS"),
     ),
 ]
 

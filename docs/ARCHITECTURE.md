@@ -620,7 +620,7 @@ APP1 / TIFF IFD block, so the same extraction serves both arms.
 `pipeline::BAKED_EXTS` (8) are the only extension lists in the tree. Every gate
 derives from them — `is_raw`, `is_source`, `is_baked`, the CLI scanners, the
 web server's upload gate, the GUI file dialog. The one copy that cannot be
-derived, the static `<input accept>` in `web/index.html`, is pinned by a test
+derived, the static `<input accept>` in `src/web/index.html`, is pinned by a test
 that prints the exact replacement string when it drifts. Before this there were
 four hand-typed copies and the web one had already lost `.orf`, `.rw2` and
 `.raw`.
@@ -635,7 +635,7 @@ line is whether the NUMBERS are wrong or only the fine detail:
 | A camera RAW named `.tif` | **Refuse**, naming the marker that gave it away | The `image` crate would decode a DNG's first IFD — the *thumbnail* — so the photo would open, look right, and develop at a few hundred pixels. Opening wrong is worse than not opening |
 | Third-party parser panics | **Named error**, process survives (`decode::guard_parser_panic`) | The GUI has wrapped workers in `catch_unwind` since v0.22; the CLI had nothing, so one malformed file killed a whole `batch` run |
 | No embedded preview (ORF class) | **Degrade** to a neutral develop + say so | rawler overrides no rendition method for 12 of the 24 formats; that is a fact about the format, not a broken file. `embedded_preview` keeps the strict "camera pixels or nothing" contract, because the base-look estimator's method depends on it |
-| Non-Bayer CFA (X-Trans) | **Demosaic in-tree over the array's own geometry** (v0.34.0, `render::demosaic_over_cfa_geometry`) + disclose per render | rawler's `PPGDemosaic` is Bayer-only and its guard (`CFA::is_rgb`) checks the pattern's NAME, not its geometry; through v0.33.0 its chroma pass left R and B unwritten at 16 of 36 X-Trans photosites — the measured green-dark cast. Now every channel interpolates only from photosites that measured it: colour/tone/framing correct, fine detail approximate and disclosed |
+| Non-Bayer CFA (X-Trans) | **Demosaic in-tree over the array's own geometry** (v0.34.0, `render::demosaic_over_cfa_geometry`) + disclose per render | rawler's `PPGDemosaic` is Bayer-only and its guard (`CFA::is_rgb`) checks the pattern's NAME, not its geometry; through v0.33.0 its chroma pass left R unwritten at 8 of the 36 photosites per tile and B at a different 8 — the measured green-dark cast. Now every channel interpolates only from photosites that measured it: colour/tone/framing correct, fine detail approximate and disclosed |
 | A RAW whose develop would peak over **4 GiB** — 138,547,333 px and up, at the measured 31 B/px (a 150 MP back; a 102 MP GFX is well clear) | **Refuse**, naming the estimate and its per-pixel basis (v0.34.0, `decode::refuse_raw_develop_over_ceiling`, charged in `render::render_to_image_in` before the sensor is decompressed) | The baked door has refused an over-ceiling file since L02 while the RAW door had NO per-file limit at all, so a ~150 MP back on the default `batch --jobs 3` was the worse instance of the same defect with nothing opt-in about it. The ceiling is the SAME 4 GiB, and the message says outright that `--jobs 1` is not the answer — a single file's peak is not a concurrency budget. This IS a behaviour change: such a file used to be attempted, and would page |
 | DefaultCrop rectangle off the sensor | **Disclose** and develop un-aligned | Was a silent `None` until R27 — any diagnosis of a misplaced mask started with zero telemetry |
 | Untagged **16-bit** baked input | **Disclose** | It is read as sRGB. Right for 8-bit JPEG (web convention); often wrong for 16-bit, which is what an editor produces — LR's "Edit in…" exports ProPhoto. Warning on every untagged JPEG would be a warning nobody reads |
@@ -880,8 +880,9 @@ LUT, not a new operator; every geometry consumer reads the one
 never disagree about whether the frame moved.
 
 Each mask runs its own sub-chain, in this order: **dehaze** → the fused
-**WB + tone + curves + saturation** blend → **clarity** → **texture** → **noise
-reduction**. The mask's own **point curves** (R25) live inside that fused pass
+**WB + tone + curves + saturation (+ local hue)** blend → **clarity** →
+**texture** → **sharpness** (signed ±100, the global sharpening stage's own
+radius model — R23-1b) → **noise reduction**. The mask's own **point curves** (R25) live inside that fused pass
 and cost no extra one: `main_curve` is handed to the same `build_tone_lut` that
 already composes the mask's synthesized tone recipe, and the three RGB curves
 are compiled once per mask and applied right after it — the global chain's
@@ -1704,7 +1705,7 @@ app, with `eframe/persistence` remembering window geometry and our own prefs),
 egui pulls — used to pre-validate a CJK font before handing it to egui, which
 panics on an unparseable one, so font loading degrades safely.
 
-**Platform.** `windows-sys` 0.59 with four feature gates:
+**Platform.** `windows-sys` 0.59 with five feature gates:
 `Win32_Foundation` + `Win32_System_JobObjects` for the sidecar kill-groups (a
 timeout must reap the sidecar's WHOLE process tree), `Win32_Security` +
 `Win32_System_Threading` for `CreateJobObjectW`'s security-attributes parameter
@@ -1717,7 +1718,11 @@ transitively, so promoting them added no download and no new supply-chain
 surface. Build-time: `winresource` 0.1 embeds the Windows app icon
 ([`build.rs`](../build.rs)), best-effort — no resource compiler still builds.
 
-**Dev-only.** `tiff` 0.11 — the same version `image` already locks. `image`'s
+**Dev-only.** `tiff` 0.11 — the same version `image` already locks — and, on
+Windows, `windows-sys` 0.59 a second time with `Win32_System_ProcessStatus`
+(`GetProcessMemoryInfo`): the `#[ignore]`d `jobs::probe_per_photo_peak_commit`
+harness that re-derives `PER_PHOTO_PEAK_COMMIT_MB`; resolver 3 keeps
+dev-dependency features out of the shipped binaries. `image`'s
 own TIFF *encoder* cannot round-trip an `IccProfile` tag (probed: the written
 tag reads back `None`), so the ICC regression tests write their fixture through
 the `tiff` crate directly, the way Lightroom-style writers produce real profiled

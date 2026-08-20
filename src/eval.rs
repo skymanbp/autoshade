@@ -823,7 +823,7 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
 
         emit(live, block, "done\n");
         // Above one job the per-photo ⚠ lines the pipeline raises on stderr
-        // (the GPT-proposer fallback at pipeline.rs:390) arrive in COMPLETION
+        // (the GPT-proposer fallback warn in `pipeline::produce_recipe`) arrive in COMPLETION
         // order and can no longer be read as belonging to the line above them.
         // The same disclosures ride the typed note channel by construction, so
         // attach them to THIS photo's block — the attribution the reordering

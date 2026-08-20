@@ -1,7 +1,8 @@
 <!--
-Thanks for the patch. The checklist below is not ceremony — it is the same
-battery every release runs, and each line exists because skipping it has broken
-something here before.
+Thanks for the patch. The checklist below is not ceremony — it is the core of
+the battery every release runs (releases additionally run three env-gated
+fixture suites; see the last Gates row), and each line exists because skipping
+it has broken something here before.
 -->
 
 ## What this changes
@@ -24,7 +25,14 @@ configuration and broken on the other.
 - [ ] `cargo clippy --all-targets` — clean
 - [ ] `cargo clippy --all-targets --features gui` — clean
 - [ ] `cargo test` — green
-- [ ] `cargo test --bins --features gui` — green
+- [ ] `cargo test --features gui` — green (the FULL form, not `--bins`: the
+      library and the two contract suites must also pass under the `gui`
+      feature, and the `--bins` form cannot even express that)
+- [ ] **Touched decode / XMP / masks?** Run whichever env-gated fixture suites
+      you have — `AUTOSHOP_RAW_ZOO` (full test name
+      `every_make_in_the_raw_zoo_decodes_and_agrees_with_itself`),
+      `AUTOSHOP_LR_PROBE_FIXTURES`, `AUTOSHOP_MB_FIXTURES` — and say in the PR
+      which ones you could not run. Unset, they skip silently.
 - [ ] **Docs changed?** `python scripts/check_docs.py` prints **PASS** on every
       row it can derive. That gate re-derives the hard numbers in the docs from
       the tree, and a claim site it can no longer find is a **FAIL**, not a
