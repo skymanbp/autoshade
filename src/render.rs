@@ -3,10 +3,13 @@
 //!
 //! Pipeline: `rawler` demosaics + colour-calibrates the sensor data to a
 //! full-res sRGB-gamma float image (`RawDevelop::develop_intermediate`), then we
-//! apply the recipe. The tonal ops (exposure, contrast, whites/blacks,
-//! highlights/shadows, tone curve) are all 1-D functions of a channel value, so
-//! they collapse into a single per-channel lookup table; saturation/vibrance run
-//! per pixel; then orientation + crop.
+//! apply the recipe. A non-2×2 RGB colour filter array (X-Trans) is the one
+//! exception: rawler's demosaic is Bayer-only, so this module demosaics and
+//! calibrates that class itself — see [`demosaic_over_cfa_geometry`]. The tonal
+//! ops (exposure, contrast, whites/blacks, highlights/shadows, tone curve) are
+//! all 1-D functions of a channel value, so they collapse into a single
+//! per-channel lookup table; saturation/vibrance run per pixel; then
+//! orientation + crop.
 //!
 //! HONEST SCOPE: these ops are tasteful **approximations**, not bit-exact
 //! Lightroom — clarity/sharpening are luma unsharp masks, noise reduction is a
@@ -105,7 +108,11 @@ pub fn render_to_image(
 }
 
 /// [`render_to_image`] with a chosen WORKING space. `Srgb` is the exact
-/// historical pipeline (rawler's own calibrated develop, byte-identical). A
+/// historical pipeline (rawler's own calibrated develop, byte-identical) for
+/// every 2×2 Bayer CFA — since v0.34.0 a non-2×2 RGB CFA takes the
+/// [`demosaic_over_cfa_geometry`] path in BOTH working spaces and is
+/// deliberately not byte-identical to v0.33.0, which rendered it through a
+/// Bayer demosaic that left two of three channels partly unwritten. A
 /// wide space develops DIRECTLY in the delivery primaries: rawler's own
 /// calibrate gamut-clips at the sRGB boundary (its `map_3ch_to_rgb` ends in
 /// a negative clip, where every colour outside sRGB dies — verified in the
@@ -168,7 +175,7 @@ pub fn render_to_image_in(
         // verdict the metadata already contained.
         refuse_unsupported_sensor(&raw, raw_path)?;
         // …and for the sensors we DO render, say when the demosaic is only an
-        // approximation of this CFA (R6 — X-Trans through a Bayer algorithm).
+        // approximation of this CFA (R6 — a non-2×2 RGB array, X-Trans today).
         disclose_approximate_demosaic(&raw, raw_path);
         // …developed from the frame the camera and Lightroom call the picture,
         // not from the sensor's top-left corner. v0.32.0 — see
@@ -181,8 +188,18 @@ pub fn render_to_image_in(
     };
 
     let wide = working != ExportColorSpace::Srgb;
+    // R28 — a non-2×2 RGB CFA is demosaiced HERE, not by rawler, so its
+    // develop keeps only the black/white-level rescale: rawler's `Demosaic`
+    // step is Bayer-only (`imgop/develop.rs:145-147` hands every `is_rgb`
+    // pattern to `PPGDemosaic`), and it owns the active-area ROI and the
+    // default crop along with it (`develop.rs:140-144`, `:204-224`), so taking
+    // the demosaic means taking both crops too. Cloned because the frame it
+    // describes outlives `rawimage`, which is dropped right after the develop.
+    let geometry_cfa = non_bayer_rgb_cfa(&rawimage).cloned();
     let mut dev = RawDevelop::default();
-    if wide {
+    if geometry_cfa.is_some() {
+        dev.steps = vec![ProcessingStep::Rescale];
+    } else if wide {
         dev.steps.retain(|s| {
             !matches!(
                 s,
@@ -204,23 +221,47 @@ pub fn render_to_image_in(
         let xyz2cam = camera_matrix(&rawimage)?;
         validate_calibration(&xyz2cam, rawimage.wb_coeffs, working, raw_path)?;
         Some((xyz2cam, normalise_wb(rawimage.wb_coeffs)))
+    } else if rawimage.color_matrix.iter().next().is_some() {
+        let xyz2cam = camera_matrix(&rawimage)?;
+        // rawler's own develop targets sRGB — validate the matrix it
+        // effectively inverts.
+        validate_calibration(
+            &xyz2cam,
+            rawimage.wb_coeffs,
+            ExportColorSpace::Srgb,
+            raw_path,
+        )?;
+        // The CFA-geometry path stripped rawler's WhiteBalance/Calibrate/SRgb
+        // together with its demosaic, so it performs them here; the Bayer sRGB
+        // path leaves all three to rawler and stays byte-identical.
+        geometry_cfa.is_some().then_some((xyz2cam, normalise_wb(rawimage.wb_coeffs)))
     } else {
-        if rawimage.color_matrix.iter().next().is_some() {
-            let xyz2cam = camera_matrix(&rawimage)?;
-            // rawler's own develop targets sRGB — validate the matrix it
-            // effectively inverts.
-            validate_calibration(
-                &xyz2cam,
-                rawimage.wb_coeffs,
-                ExportColorSpace::Srgb,
-                raw_path,
-            )?;
-        }
         None
     };
     let inter = dev
         .develop_intermediate(&rawimage)
         .map_err(|e| anyhow!("develop: {e}"))?;
+    let inter = match (&geometry_cfa, inter) {
+        (Some(cfa), Intermediate::Monochrome(plane)) => {
+            let roi = rawimage.active_area.unwrap_or_else(|| plane.rect());
+            let rgb = demosaic_over_cfa_geometry(&plane.data, plane.dim(), cfa, roi);
+            let mut out =
+                rawler::pixarray::Color2D::<f32, 3>::new_with(rgb, roi.width(), roi.height());
+            // rawler's `CropDefault` measures the default crop against the
+            // window the demosaic actually read (`develop.rs:204-216`); the
+            // master here is that ROI rather than `active_area`, which is the
+            // same rectangle whenever the file declares one and the correct
+            // one when it does not.
+            if let Some(crop) = rawimage.crop_area.or(rawimage.active_area) {
+                let crop = crop.adapt(&roi);
+                if crop.d != out.dim() {
+                    out = out.crop(crop);
+                }
+            }
+            Intermediate::ThreeColor(out)
+        }
+        (_, other) => other,
+    };
     // The demosaiced float frame owns everything the pipeline needs from here
     // on; the ~120 MB u16 sensor mosaic would otherwise survive to the end of
     // the function, under denoise/tone/pack/geometry (A7).
@@ -241,6 +282,14 @@ pub fn render_to_image_in(
     let mut data: Vec<[f32; 3]> = rgb.data;
     if let Some((xyz2cam, wb)) = calibration {
         calibrate_camera_buffer(&mut data, &xyz2cam, wb, working);
+    } else if geometry_cfa.is_some() {
+        // A camera with no colour matrix at all: rawler skips its `Calibrate`
+        // step there but still applies `SRgb` (`imgop/develop.rs:199-233`).
+        // This path stripped both, so the working encoding is applied here or
+        // the frame would publish as linear light.
+        data.par_iter_mut().for_each(|px| {
+            *px = [linear_to_srgb(px[0]), linear_to_srgb(px[1]), linear_to_srgb(px[2])];
+        });
     }
     let data = data;
 
@@ -336,6 +385,11 @@ pub fn render_to_image_in(
 /// and "rawler itself would panic", which is why it is checked before the
 /// develop rather than after: the second class never reached the old
 /// post-develop `bail!` at all — it aborted.
+///
+/// Since v0.34.0 the `is_rgb` arm has TWO producers, not one: a non-2×2 repeat
+/// drops rawler's `Demosaic` step for [`demosaic_over_cfa_geometry`], which
+/// yields a three-channel frame by the same declaration. The verdict is
+/// unchanged either way, so this stays a single predicate.
 fn refuse_unsupported_sensor(raw: &rawler::RawImage, path: &Path) -> Result<()> {
     use rawler::rawimage::RawPhotometricInterpretation as Photo;
     let kind = match (raw.cpp, &raw.photometric) {
@@ -361,51 +415,294 @@ fn refuse_unsupported_sensor(raw: &rawler::RawImage, path: &Path) -> Result<()> 
     )
 }
 
-/// Say so when the demosaic about to run is the WRONG ALGORITHM for this
-/// sensor's colour filter array — R27's answer to the format map's R6, which
-/// asked whether rawler 0.7.2 handles Fuji X-Trans properly and could not tell
-/// offline. It does not, and the reason is worth writing down because it is
-/// invisible from the outside: the file decodes, the dimensions are right, the
-/// colour matrix is right, and only fine detail is wrong.
+/// The colour filter array this build must demosaic ITSELF — an RGB pattern
+/// whose repeat is anything other than 2×2. The test is geometric, not
+/// nominal: `CFA::is_rgb` (`cfa.rs:193-195`) only checks that the pattern NAME
+/// is spelled out of R, G and B, so X-Trans's 36-char 6×6 string satisfies it
+/// as readily as `"RGGB"` does, and `CFA::new` admits 2×8 and 12×12 repeats on
+/// the same terms (`cfa.rs:116-123`).
 ///
-/// `PPGDemosaic` is a **Bayer** algorithm — its own doc says "PPG can only
-/// applied to pure RGGB or variants" — and `interpolate_green`
-/// (`imgop/sensor/bayer/ppg.rs:126-136`) reads the four immediate neighbours
-/// of every non-green pixel as GREEN and `(row ± 2, col)` / `(row, col ± 2)`
-/// as the SAME colour as the centre. Both are properties of a 2×2 quincunx.
-/// But the guard that is supposed to keep non-Bayer patterns away from it,
-/// `CFA::is_rgb` (`cfa.rs:193-195`), only checks that the pattern NAME is
-/// spelled out of R, G and B — so X-Trans's 6×6 pattern (20 green / 8 red /
-/// 8 blue, verified from the zoo's X-S10 file's own `0x0131` record) sails
-/// straight through and is demosaiced as if it were Bayer.
-///
-/// So the test here is geometric, not nominal: an RGB pattern whose repeat is
-/// anything other than 2×2 is not a Bayer mosaic, whatever it is called.
-///
-/// This is a DISCLOSURE and not a refusal on purpose. The pixels are not
-/// wrong the way a bad colour matrix is wrong — tone, colour and geometry are
-/// all correct, and the image is perfectly usable; what suffers is
-/// fine-detail reconstruction (maze/worm artifacts at 100 %). Refusing would
-/// take a working develop away from every Fuji owner to avoid an artifact
-/// most of them will never enlarge far enough to see. Saying nothing, though,
-/// would leave someone comparing against Fuji's own converter with no
-/// explanation for the difference.
-fn disclose_approximate_demosaic(raw: &rawler::RawImage, path: &Path) {
+/// ONE predicate for the dispatch and for the disclosure, so the sentence a
+/// photographer reads cannot describe a path the pixels did not take.
+fn cfa_needs_geometry_demosaic(cfa: &rawler::cfa::CFA) -> bool {
+    cfa.is_rgb() && (cfa.width, cfa.height) != (2, 2)
+}
+
+fn non_bayer_rgb_cfa(raw: &rawler::RawImage) -> Option<&rawler::cfa::CFA> {
     use rawler::rawimage::RawPhotometricInterpretation as Photo;
-    let Photo::Cfa(c) = &raw.photometric else { return };
-    if !c.cfa.is_rgb() || (c.cfa.width == 2 && c.cfa.height == 2) {
-        return;
-    }
+    let Photo::Cfa(c) = &raw.photometric else { return None };
+    cfa_needs_geometry_demosaic(&c.cfa).then_some(&c.cfa)
+}
+
+/// Say so when the demosaic that ran is not one written for this sensor's
+/// colour filter array — R27's answer to the format map's R6, which asked
+/// whether rawler 0.7.2 handles Fuji X-Trans properly and could not tell
+/// offline. It does not (see [`demosaic_over_cfa_geometry`] for the defect and
+/// the measurement), so since v0.34.0 this build does not use rawler's
+/// demosaic on such a file at all — it reconstructs the frame over the array's
+/// real geometry instead.
+///
+/// The disclosure survives the fix because what it discloses has changed, not
+/// gone away: colour, tone and framing are now correct — that clause was
+/// measurably FALSE before the fix and is true only because of it — while fine
+/// detail is still reconstructed by a general rule rather than by an algorithm
+/// built for this array (Markesteijn for X-Trans), and is correspondingly
+/// softer. Saying nothing would leave someone comparing against Fujifilm's own
+/// converter with no explanation for the difference.
+fn disclose_approximate_demosaic(raw: &rawler::RawImage, path: &Path) {
+    let Some(cfa) = non_bayer_rgb_cfa(raw) else { return };
     eprintln!(
-        "⚠ {} comes from a {}×{} non-Bayer colour filter array ({}), and the decoder in this \
-         build demosaics it with a Bayer algorithm. Colour, tone and framing are unaffected; \
-         very fine detail is reconstructed approximately and may show maze-like artifacts at \
-         100 % zoom",
+        "⚠ {} comes from a {}×{} non-Bayer colour filter array ({}), which this build demosaics \
+         over the array's own geometry instead of with an algorithm written for this sensor \
+         family. Every channel is interpolated from the photosites that actually measured it, so \
+         colour, tone and framing are correct; fine detail is softer than a dedicated converter \
+         would resolve",
         path.display(),
-        c.cfa.width,
-        c.cfa.height,
-        c.cfa
+        cfa.width,
+        cfa.height,
+        cfa
     );
+}
+
+/// Half-width, in photosites, of the window the two missing channels are
+/// interpolated from. 2 (a 5×5 window) is the smallest that pins a PLANE
+/// through every one of the X-S10 tile's 108 (phase, channel) sample sets:
+/// enumerated at radius 1, **56 of the 108 hold fewer than three samples** and
+/// fall back to a plain mean, whose per-phase chroma error on a gradient is
+/// the thing the plane fit exists to remove
+/// (see [`demosaic_over_cfa_geometry`]). At radius 2 none do — the sets run
+/// 4-6 samples for R and B, 13-17 for G.
+const CFA_TAP_RADIUS: usize = 2;
+
+/// Per-(phase, channel) interpolation weights for one CFA, built once per
+/// render — the pattern repeats, so the tap set does too, and the per-pixel
+/// cost collapses to a dot product.
+struct CfaTaps {
+    /// Window half-width the offsets below are BIASED by, so both index
+    /// straight into [`wrap_table`]'s tables with no signed arithmetic in the
+    /// inner loop. Wide enough for the whole-tile fallback, not just
+    /// [`CFA_TAP_RADIUS`].
+    radius: usize,
+    /// `[(phase_row * cfa.width + phase_col) * 3 + channel]` → that channel's
+    /// taps as `(biased_row_offset, biased_col_offset, weight)`.
+    per_phase: Vec<Vec<(usize, usize, f32)>>,
+}
+
+/// Offsets of every photosite of colour `ch` within `radius` of CFA phase
+/// `(pr, pc)`. `color_at` wraps its argument at 48 (`cfa.rs:165-167`) and 48
+/// is a multiple of every repeat `CFA::new` accepts (2, 6, 8, 12), so biasing
+/// a negative offset by 48 preserves its colour exactly.
+fn cfa_samples(
+    cfa: &rawler::cfa::CFA,
+    pr: usize,
+    pc: usize,
+    ch: usize,
+    radius: usize,
+) -> Vec<(isize, isize)> {
+    let r = radius as isize;
+    let mut pts = Vec::new();
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let row = (pr as isize + dy + 48) as usize;
+            let col = (pc as isize + dx + 48) as usize;
+            if cfa.color_at(row, col) == ch {
+                pts.push((dy, dx));
+            }
+        }
+    }
+    pts
+}
+
+/// Weights that reproduce a locally PLANAR signal exactly: the constant-term
+/// row of the least-squares pseudo-inverse of the design matrix `[1, dx, dy]`.
+/// `None` when the samples cannot pin a plane (fewer than three, or collinear)
+/// — the caller falls back to a plain mean, which is exact on flat colour but
+/// not on a gradient.
+fn plane_fit_weights(pts: &[(isize, isize)]) -> Option<Vec<(isize, isize, f32)>> {
+    if pts.len() < 3 {
+        return None;
+    }
+    let (mut sx, mut sy, mut sxx, mut sxy, mut syy) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for &(dy, dx) in pts {
+        let (x, y) = (dx as f32, dy as f32);
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+        syy += y * y;
+    }
+    let a = [[pts.len() as f32, sx, sy], [sx, sxx, sxy], [sy, sxy, syy]];
+    let det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+        - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+        + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    // Scale-free rank test: for a Gram matrix the product of the diagonal
+    // bounds |det| from above (Hadamard), so the ratio IS the conditioning and
+    // needs no absolute threshold in photosite units.
+    if det.abs() <= 1e-6 * a[0][0] * a[1][1] * a[2][2] {
+        return None;
+    }
+    let m = inv3(&a);
+    Some(
+        pts.iter()
+            .map(|&(dy, dx)| (dy, dx, m[0][0] + m[0][1] * dx as f32 + m[0][2] * dy as f32))
+            .collect(),
+    )
+}
+
+fn cfa_taps(cfa: &rawler::cfa::CFA) -> CfaTaps {
+    // A window of half-width max(width, height) spans strictly more than one
+    // full repeat on both axes, so it contains every colour the pattern has —
+    // the guarantee [`CFA_TAP_RADIUS`] cannot make for an arbitrary geometry.
+    let full = cfa.width.max(cfa.height);
+    let radius = CFA_TAP_RADIUS.max(full);
+    let mut per_phase = Vec::with_capacity(cfa.height * cfa.width * 3);
+    for pr in 0..cfa.height {
+        for pc in 0..cfa.width {
+            for ch in 0..3 {
+                let weights = plane_fit_weights(&cfa_samples(cfa, pr, pc, ch, CFA_TAP_RADIUS))
+                    .unwrap_or_else(|| {
+                        let pts = cfa_samples(cfa, pr, pc, ch, full);
+                        // Unreachable through `non_bayer_rgb_cfa`, whose
+                        // `is_rgb` requires R, G and B all to appear in the
+                        // pattern name — and a full-repeat window sees every
+                        // cell of the tile. Loud rather than silent: an empty
+                        // tap list would leave the channel at 0.0, which is
+                        // the exact defect this function exists to remove.
+                        assert!(
+                            !pts.is_empty(),
+                            "CFA {cfa} has no colour-{ch} photosite in a full repeat, but \
+                             is_rgb() promised one"
+                        );
+                        let w = 1.0 / pts.len() as f32;
+                        pts.into_iter().map(|(dy, dx)| (dy, dx, w)).collect()
+                    });
+                let bias = radius as isize;
+                per_phase.push(
+                    weights
+                        .into_iter()
+                        .map(|(dy, dx, w)| ((dy + bias) as usize, (dx + bias) as usize, w))
+                        .collect(),
+                );
+            }
+        }
+    }
+    CfaTaps { radius, per_phase }
+}
+
+/// Source index for every logical index in `-radius .. n + radius`.
+///
+/// Out-of-frame taps come back INTO the frame by whole CFA repeats, never by
+/// mirroring or clamping: a mirror puts a different colour under the offset
+/// and would reintroduce the very channel error this demosaic exists to
+/// remove. Folding by the largest whole number of repeats that fits inside
+/// the frame preserves each index's residue — i.e. its colour — exactly.
+fn wrap_table(n: usize, period: usize, radius: usize) -> Vec<usize> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let p = period.max(1);
+    let span = ((n / p) * p) as isize;
+    (0..n + 2 * radius)
+        .map(|i| {
+            let v = i as isize - radius as isize;
+            // A frame narrower than one repeat has no whole span to fold by;
+            // colour-correct interpolation is impossible there in any case, so
+            // clamp rather than loop.
+            if span == 0 { v.clamp(0, n as isize - 1) as usize } else { v.rem_euclid(span) as usize }
+        })
+        .collect()
+}
+
+/// Demosaic a rescaled sensor plane over the CFA's REAL geometry, returning
+/// the `roi`-sized camera-native linear frame. R28 Batch-1 1a.
+///
+/// **The defect this replaces.** rawler 0.7.2 routes every `is_rgb` pattern
+/// into `PPGDemosaic`, whose chroma pass fills a green photosite's two missing
+/// channels from *exactly* the neighbour to its right and the neighbour below
+/// (`imgop/sensor/bayer/ppg.rs:185-203`), on the Bayer axiom that those two
+/// carry the two different chroma colours. Inside X-Trans's four 2×2
+/// all-green blocks per tile the axiom is false: the write lands back on the
+/// GREEN channel, and no later pass revisits a green site
+/// (`ppg.rs:220-252` is gated on `color_at != G`), so the chroma channel keeps
+/// the `Color2D::new` zero fill (`pixarray.rs:376-378`). Measured on the zoo's
+/// X-S10 RAF (`GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG`, 6252×4176 demosaic ROI,
+/// binned by `(row mod 6, col mod 6)`): **8 of the 36 phases carry R = 0.0 at
+/// 99.8 % of their pixels and a different 8 carry B = 0.0; green has no hole**
+/// — the remaining 0.2 % is the 3-px border ring, which upstream fills with a
+/// CFA-correct rule it never applies to the interior (`ppg.rs:74-110`).
+/// Camera-native whole-frame means came out R 0.03434 / G 0.08810 / B 0.02051,
+/// i.e. G/R = 2.57 before white balance and the 1.55 the README reported after
+/// it. White balance cannot repair this: a per-channel gain and a per-channel
+/// deficiency are both diagonal, so they commute — and the loss is not even a
+/// scalar, it is a 6×6-periodic pattern of exact zeros.
+///
+/// **The rule here.** Every output pixel keeps its OWN photosite's channel
+/// exactly; each missing channel is a fixed linear combination of the real
+/// photosites of that colour inside a `(2·CFA_TAP_RADIUS + 1)²` window, with
+/// the weights taken per (phase, channel) from [`plane_fit_weights`]. Two
+/// consequences, both measured on a synthetic 60×60 mosaic of the X-S10 tile
+/// (interior pixels, versus the ground truth the mosaic was sampled from):
+///
+///   * **flat colour — exact.** Max abs error 1.1e-16, and the spread of the
+///     per-phase R/G ratio across all 36 phases is 3.9e-16. The zero holes and
+///     the fixed-pattern chroma are gone, not attenuated.
+///   * **linear gradient — exact.** Max abs error 2.2e-16, per-phase R/G
+///     spread 3.3e-16. A plain distance-weighted mean is exact only on the
+///     flat case; on the gradient its per-phase R/G spread is 7.2e-3, a 1.8 %
+///     chroma modulation at the tile period — visible fixed-pattern chroma on
+///     a sky, and a milder form of the defect above. That is why the weights
+///     fit a plane and not a mean.
+///
+/// Detail stays APPROXIMATE and the render says so
+/// ([`disclose_approximate_demosaic`]): chroma is reconstructed over a 5×5
+/// window with no directional decision, so a hard edge smears across it
+/// (measured max abs error 0.304 on a 0.5-amplitude step). It does not RING:
+/// for this tile all 108 (phase, channel) tap sets came out non-negative
+/// (worst tap +0.056), so each estimate is a convex combination of real
+/// samples of that colour and cannot leave their range — measured overshoot
+/// on the step is exactly 0.0000, and interpolated noise sits at or below a
+/// distance-weighted mean's (σ 0.0117/0.0152/0.0119 versus 0.0122/0.0153/
+/// 0.0122 for an input σ of 0.0200).
+///
+/// **Bayer files never reach this function** — [`non_bayer_rgb_cfa`] gates it,
+/// and a 2×2 CFA keeps rawler's own develop untouched, byte for byte.
+fn demosaic_over_cfa_geometry(
+    plane: &[f32],
+    dim: rawler::imgop::Dim2,
+    cfa: &rawler::cfa::CFA,
+    roi: rawler::imgop::Rect,
+) -> Vec<[f32; 3]> {
+    // The ROI moves the pattern under the frame exactly as rawler's own
+    // expansion does (`imgop/sensor/bayer/mod.rs:26`), so a develop window
+    // that does not start on a tile boundary — the X-S10's active area starts
+    // at y = 5 — keeps its true phase.
+    let cfa = cfa.shift(roi.x(), roi.y());
+    let taps = cfa_taps(&cfa);
+    let (rw, rh) = (roi.width(), roi.height());
+    let ymap = wrap_table(rh, cfa.height, taps.radius);
+    let xmap = wrap_table(rw, cfa.width, taps.radius);
+    let mut out = vec![[0.0f32; 3]; rw * rh];
+    out.par_chunks_exact_mut(rw).enumerate().for_each(|(row, line)| {
+        let phase = (row % cfa.height) * cfa.width;
+        for (col, px) in line.iter_mut().enumerate() {
+            let own = cfa.color_at(row, col);
+            let base = (phase + col % cfa.width) * 3;
+            for (ch, out) in px.iter_mut().enumerate() {
+                if ch == own {
+                    // This photosite MEASURED this channel; nothing is
+                    // interpolated over a real sample.
+                    *out = plane[(roi.y() + row) * dim.w + roi.x() + col];
+                    continue;
+                }
+                let mut acc = 0.0f32;
+                for &(dy, dx, w) in &taps.per_phase[base + ch] {
+                    acc += w * plane[(roi.y() + ymap[row + dy]) * dim.w + roi.x() + xmap[col + dx]];
+                }
+                *out = acc;
+            }
+        }
+    });
+    out
 }
 
 /// The user crop — normalised [0,1] on the DISPLAYED frame, i.e. after
@@ -11013,5 +11310,251 @@ d 0.113862 0.987261"
         };
         assert_ne!((*ref_x, *ref_y), (0.25, 0.10), "the click moved with the frame");
         assert!(raster.is_none(), "the alpha from the OLD frame must not be reused");
+    }
+
+    // ---- R28 Batch-1 1a: the CFA-geometry demosaic ------------------------
+
+    /// The X-S10's 6×6 X-Trans tile, read back from the zoo RAF's OWN
+    /// `XTransLayout` (0x0131) record rather than from rawler's camera DB —
+    /// the RAF decoder prefers the file's copy (`decoders/raf.rs:257-263`),
+    /// and for this body the two turned out identical (measured 2026-08-20,
+    /// `AUTOSHOP_RAW_ZOO` probe, alongside `active_area = 6252×4176 @ (0,5)`
+    /// and `crop_area = 6240×4160 @ (6,13)`).
+    const XTRANS_XS10: &str = "GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG";
+
+    /// 20 green / 8 red / 8 blue in four 2×2 all-green blocks plus four
+    /// isolated greens — the structure every claim below rests on.
+    #[test]
+    fn the_x_trans_tile_is_four_green_blocks_and_four_isolated_greens() {
+        use rawler::cfa::{CFA, CFA_COLOR_B, CFA_COLOR_G, CFA_COLOR_R};
+        let cfa = CFA::new(XTRANS_XS10);
+        assert_eq!((cfa.width, cfa.height), (6, 6));
+        let count = |ch: usize| (0..36).filter(|i| cfa.color_at(i / 6, i % 6) == ch).count();
+        assert_eq!((count(CFA_COLOR_R), count(CFA_COLOR_G), count(CFA_COLOR_B)), (8, 20, 8));
+        // A green whose right AND down neighbours are both green is the
+        // top-left corner of a 2×2 block; there are four of them.
+        let blocks = (0..36)
+            .filter(|i| {
+                let (r, c) = (i / 6, i % 6);
+                cfa.color_at(r, c) == CFA_COLOR_G
+                    && cfa.color_at(r, c + 1) == CFA_COLOR_G
+                    && cfa.color_at(r + 1, c) == CFA_COLOR_G
+            })
+            .count();
+        assert_eq!(blocks, 4, "X-Trans is defined by its four 2×2 green blocks per tile");
+    }
+
+    /// WHY this file has its own demosaic, pinned from the pattern alone.
+    ///
+    /// rawler's `interpolate_rb_at_green` (`imgop/sensor/bayer/ppg.rs:185-203`)
+    /// fills a green photosite's two missing channels from exactly
+    /// `(row, col+1)` and `(row+1, col)`, on the Bayer axiom that those two
+    /// carry the two DIFFERENT chroma colours. Every time a neighbour is green
+    /// instead, the write lands back on the green channel and that chroma
+    /// value is never written by any pass — `interpolate_rb_at_non_green`
+    /// (`ppg.rs:220-252`) is gated on `color_at != G` and never revisits a
+    /// green site.
+    ///
+    /// The four 2×2 blocks contribute 2 + 1 + 1 failures each (top-left corner
+    /// both ways, top-right down, bottom-left right), so **16 chroma values
+    /// per 36-pixel tile are lost**, split 8 R / 8 B by the tile's R↔B duality.
+    /// Confirmed on the real X-S10 RAF before the fix: binning the 6252×4176
+    /// camera-native demosaic by `(row mod 6, col mod 6)` gave R = 0.0 at
+    /// 99.8 % of the pixels in 8 of the 36 phases and B = 0.0 in a different 8,
+    /// green in none — the residual 0.2 % being the 3-px ring that upstream's
+    /// CFA-correct border pass (`ppg.rs:74-110`) does reach.
+    ///
+    /// Kept as a PATTERN assertion rather than a call into `PPGDemosaic`
+    /// deliberately: on a 6×6 CFA those passes read the buffer they are
+    /// concurrently writing through `Color2DPtr` (`pixarray.rs:500-529`), so
+    /// running them here would put a genuine data race in the suite to assert
+    /// on its output.
+    ///
+    /// MUTATION THIS CATCHES: a future rawler that fixes X-Trans does not make
+    /// this red — it makes [`demosaic_over_cfa_geometry`] redundant, which is
+    /// a decision, not a regression. What it pins is the arithmetic behind the
+    /// 16, so nobody re-derives it from memory.
+    #[test]
+    fn the_bayer_chroma_axiom_fails_sixteen_times_per_x_trans_tile() {
+        use rawler::cfa::{CFA, CFA_COLOR_G};
+        let cfa = CFA::new(XTRANS_XS10);
+        let lost: usize = (0..36)
+            .map(|i| {
+                let (r, c) = (i / 6, i % 6);
+                if cfa.color_at(r, c) != CFA_COLOR_G {
+                    return 0;
+                }
+                usize::from(cfa.color_at(r, c + 1) == CFA_COLOR_G)
+                    + usize::from(cfa.color_at(r + 1, c) == CFA_COLOR_G)
+            })
+            .sum();
+        assert_eq!(lost, 16, "the Bayer chroma axiom must fail 16 times per X-Trans tile");
+    }
+
+    /// The fix, on the case the defect destroyed: a flat colour must survive
+    /// EVERY CFA phase exactly. On the pre-fix path 16 of every 36 pixels came
+    /// out with a channel at 0.0 or half its value.
+    ///
+    /// The ROI deliberately starts at neither the frame origin nor a tile
+    /// boundary — the X-S10's active area starts at `y = 5` (measured) — so a
+    /// demosaic that forgot to shift the pattern by the ROI origin writes the
+    /// measured photosite into the wrong channel and this goes red at the
+    /// first pixel.
+    ///
+    /// MUTATION THIS CATCHES: drop `cfa.shift(roi.x(), roi.y())`; swap the R
+    /// and B tap sets; index the source plane from the frame origin instead of
+    /// the ROI's; mirror instead of fold at the border (the outer ring then
+    /// samples the wrong colour).
+    #[test]
+    fn the_cfa_geometry_demosaic_is_exact_on_flat_colour_at_every_phase() {
+        use rawler::cfa::CFA;
+        use rawler::imgop::{Dim2, Point, Rect};
+        let cfa = CFA::new(XTRANS_XS10);
+        let truth = [0.2f32, 0.5, 0.3];
+        let (pw, ph) = (72usize, 72usize);
+        let roi = Rect::new(Point::new(3, 5), Dim2::new(60, 60));
+        let plane: Vec<f32> =
+            (0..pw * ph).map(|i| truth[cfa.color_at(i / pw, i % pw)]).collect();
+        let out = demosaic_over_cfa_geometry(&plane, Dim2::new(pw, ph), &cfa, roi);
+        assert_eq!(out.len(), roi.width() * roi.height());
+        let mut sums = [[0.0f64; 3]; 36];
+        for (i, px) in out.iter().enumerate() {
+            let (row, col) = (i / roi.width(), i % roi.width());
+            for ch in 0..3 {
+                assert!(
+                    (px[ch] - truth[ch]).abs() < 1e-5,
+                    "phase ({}, {}) channel {ch} came out {} instead of {}",
+                    row % 6,
+                    col % 6,
+                    px[ch],
+                    truth[ch]
+                );
+                sums[(row % 6) * 6 + col % 6][ch] += px[ch] as f64;
+            }
+        }
+        // The whole-frame statement of the same thing, and the shape the
+        // defect was originally measured in: 36 phase means per channel, which
+        // must not spread at all on a flat field.
+        let n = (out.len() / 36) as f64;
+        for ch in 0..3 {
+            let means: Vec<f64> = sums.iter().map(|s| s[ch] / n).collect();
+            let spread = means.iter().cloned().fold(f64::MIN, f64::max)
+                - means.iter().cloned().fold(f64::MAX, f64::min);
+            assert!(spread < 1e-5, "channel {ch} spreads {spread} across the 36 CFA phases");
+        }
+    }
+
+    /// …and on a LINEAR gradient, which is what makes the taps a plane fit
+    /// rather than a distance-weighted mean. Measured on this same synthetic
+    /// (60×60, interior): a mean's per-phase R/G ratio spreads by 7.2e-3 — a
+    /// 1.8 % chroma modulation at the tile period, i.e. visible fixed-pattern
+    /// chroma on a sky — where the plane fit spreads by 3.3e-16.
+    ///
+    /// Interior only: outside `CfaTaps::radius` of the ROI edge the window
+    /// folds back into the frame by whole CFA repeats, which is colour-correct
+    /// but not linear.
+    #[test]
+    fn the_cfa_geometry_demosaic_is_exact_on_a_linear_gradient() {
+        use rawler::cfa::CFA;
+        use rawler::imgop::{Dim2, Point, Rect};
+        let cfa = CFA::new(XTRANS_XS10);
+        let (pw, ph) = (72usize, 72usize);
+        let roi = Rect::new(Point::new(3, 5), Dim2::new(60, 60));
+        let truth = |row: usize, col: usize| {
+            let t = 0.1 + 0.6 * col as f32 / 71.0 + 0.2 * row as f32 / 71.0;
+            [0.4 * t, t, 0.6 * t]
+        };
+        let plane: Vec<f32> = (0..pw * ph)
+            .map(|i| truth(i / pw, i % pw)[cfa.color_at(i / pw, i % pw)])
+            .collect();
+        let out = demosaic_over_cfa_geometry(&plane, Dim2::new(pw, ph), &cfa, roi);
+        let guard = cfa.width.max(cfa.height);
+        for (i, px) in out.iter().enumerate() {
+            let (row, col) = (i / roi.width(), i % roi.width());
+            if row < guard || col < guard || row + guard >= roi.height() || col + guard >= roi.width()
+            {
+                continue;
+            }
+            let want = truth(roi.y() + row, roi.x() + col);
+            for ch in 0..3 {
+                assert!(
+                    (px[ch] - want[ch]).abs() < 2e-5,
+                    "({row}, {col}) channel {ch}: {} vs {}",
+                    px[ch],
+                    want[ch]
+                );
+            }
+        }
+    }
+
+    /// Every tap set is a normalised, NON-NEGATIVE combination — the two
+    /// properties the doc comment's quality claims rest on. Sum = 1 is what
+    /// makes flat colour exact; non-negativity makes each estimate a convex
+    /// combination of real samples of that colour, so it cannot leave their
+    /// range and cannot ring. The second is a MEASURED property of this tile
+    /// at radius 2 (worst tap +0.056 over all 108 sets), not a theorem about
+    /// least squares — a different geometry may well need the guarantee
+    /// dropped, and this is where that would be noticed.
+    #[test]
+    fn every_cfa_tap_set_is_a_normalised_convex_combination() {
+        use rawler::cfa::CFA;
+        let cfa = CFA::new(XTRANS_XS10);
+        let taps = cfa_taps(&cfa);
+        assert_eq!(taps.per_phase.len(), 6 * 6 * 3);
+        assert!(taps.radius >= 6, "the fallback window must span a whole repeat");
+        for (i, set) in taps.per_phase.iter().enumerate() {
+            let (phase, ch) = (i / 3, i % 3);
+            assert!(!set.is_empty(), "phase {phase} channel {ch} has no sample at all");
+            let sum: f32 = set.iter().map(|t| t.2).sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-5,
+                "phase {phase} channel {ch} weights sum to {sum}"
+            );
+            let worst = set.iter().map(|t| t.2).fold(f32::MAX, f32::min);
+            assert!(worst >= 0.0, "phase {phase} channel {ch} has a negative tap {worst}");
+        }
+    }
+
+    /// Out-of-frame taps fold by whole CFA repeats, so an offset keeps its
+    /// COLOUR. A mirror or a clamp puts a different colour under it and
+    /// reintroduces the channel error the whole path exists to remove.
+    #[test]
+    fn out_of_frame_taps_fold_by_whole_cfa_repeats() {
+        let t = wrap_table(60, 6, 6);
+        assert_eq!(t.len(), 60 + 12);
+        for (i, &src) in t.iter().enumerate() {
+            let logical = i as isize - 6;
+            assert!(src < 60, "index {logical} folded to {src}, outside the frame");
+            assert_eq!(
+                src % 6,
+                logical.rem_euclid(6) as usize,
+                "index {logical} folded to {src} and changed colour"
+            );
+        }
+        // A frame that is not a whole number of repeats folds by the largest
+        // whole span inside it (54 of 57 rows here), never by the frame size.
+        let t = wrap_table(57, 6, 6);
+        for (i, &src) in t.iter().enumerate() {
+            let logical = i as isize - 6;
+            assert!(src < 57);
+            assert_eq!(src % 6, logical.rem_euclid(6) as usize, "{logical} -> {src}");
+        }
+    }
+
+    /// The dispatch is GEOMETRIC. Every Bayer spelling stays on rawler's own
+    /// develop (byte-identical: all eight non-Fuji zoo renders hashed the same
+    /// before and after this change), a 4-colour array is not ours to touch,
+    /// and only a non-2×2 RGB repeat takes the new path.
+    #[test]
+    fn only_a_non_two_by_two_rgb_cfa_takes_the_geometry_path() {
+        use rawler::cfa::CFA;
+        for bayer in ["RGGB", "BGGR", "GRBG", "GBRG"] {
+            assert!(
+                !cfa_needs_geometry_demosaic(&CFA::new(bayer)),
+                "{bayer} is a 2×2 quincunx and must keep rawler's PPG"
+            );
+        }
+        assert!(!cfa_needs_geometry_demosaic(&CFA::new("RGBE")), "4-colour is refused earlier");
+        assert!(cfa_needs_geometry_demosaic(&CFA::new(XTRANS_XS10)));
     }
 }

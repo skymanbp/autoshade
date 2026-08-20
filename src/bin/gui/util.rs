@@ -640,8 +640,9 @@ pub(crate) fn xmp_import_line(
             R::BlendMode => tr(lang, "Blend mode").into(),
             R::MultiComponent => tr(lang, "Extra shapes").into(),
             // NOT a loss of the mask: the strokes arrived and they round-trip.
-            // What did not arrive is the DRAWING of them, which waits on the
-            // alpha-kernel measurement — so the label says both halves.
+            // What did not arrive is the DRAWING of them, which waits on a
+            // kernel closed form + the pre-lens-correction frame (the R27
+            // measurement itself landed) — so the label says both halves.
             R::BrushCarried => tr(lang, "Brush mask (carried, not rendered)").into(),
             // NOT a loss either — the correction arrived, and so did every
             // shape standing beside it (the 78-correction gain). What the

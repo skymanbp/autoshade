@@ -1430,7 +1430,8 @@ impl MaskLossReason {
             MaskLossReason::Disabled => "muted mask(s) skipped",
             MaskLossReason::ComponentsFlattened => "extra shape component(s) flattened",
             MaskLossReason::BrushCarried => {
-                "brush mask(s) carried, not yet rendered - kernel measurement in flight"
+                "brush mask(s) carried, not yet rendered - the measured kernel has no closed \
+                 form and the mask lives in a pre-lens-correction frame"
             }
             MaskLossReason::AiMaskRecomputed => {
                 "AI mask(s) re-derived by the local segmenter - not Adobe's own raster"
@@ -1661,7 +1662,8 @@ impl MaskImportReason {
             MaskImportReason::BlendMode => "non-default blend mode(s) ignored",
             MaskImportReason::MultiComponent => "extra shape component(s) dropped",
             MaskImportReason::BrushCarried => {
-                "brush mask(s) carried, not yet rendered - kernel measurement in flight"
+                "brush mask(s) carried, not yet rendered - the measured kernel has no closed \
+                 form and the mask lives in a pre-lens-correction frame"
             }
             MaskImportReason::AiMaskRecomputed => {
                 "AI mask(s) re-derived by the local segmenter - not Adobe's own raster"

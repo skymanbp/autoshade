@@ -397,12 +397,14 @@ through OpenAI Images and are labelled experimental everywhere. `heal` is the
 
 <sub>Nine cameras, one per format, each a **full neutral develop** by
 `autoshop apply` from a CC0 sample file — not the camera's embedded preview.
-The `.raf` tile is the honest one: X-Trans is demosaiced through the Bayer path,
-and on this sample the develop also comes out visibly green and dark against the
-camera's own preview of the same bytes (measured channel means 53.6/82.9/39.9
-versus 110.2/104.9/99.8, where the other eight formats all land within
-G/R 0.81–1.08). The as-shot white balance reads correctly, so the suspect is the
-Bayer-on-X-Trans channel mapping. See [X-Trans, restated](#x-trans-restated).</sub>
+The `.raf` tile still shows the **pre-fix v0.33.0** render: X-Trans then went
+through a Bayer demosaic whose chroma pass left R and B unwritten at 16 of every
+36 photosites, which is why it is visibly green and dark (measured channel means
+53.6/82.9/39.9 versus the camera preview's 110.2/104.9/99.8, where the other
+eight formats land within G/R 0.81–1.08). Unreleased v0.34.0 demosaics over the
+array's own geometry instead — whole-frame G/R now measures 0.9476 against the
+preview's 0.95 — and this tile will be re-rendered at the next release.
+See [X-Trans, restated](#x-trans-restated).</sub>
 
 **Camera RAW — 24 extensions**, one predicate app-wide (`decode::is_raw`):
 
@@ -510,18 +512,27 @@ Each control is exactly one of three kinds, and the registry states it once:
 
 ### X-Trans, restated
 
-Non-Bayer colour filter arrays develop through the Bayer path, because rawler
-0.7.2's demosaic guard checks the pattern's *name* rather than its geometry, so a
-6×6 X-Trans mosaic is reconstructed as if it were a 2×2 quincunx. Autoshop
-discloses this on every such render.
+Through v0.33.0, non-Bayer colour filter arrays developed through rawler's
+Bayer demosaic, whose guard checks the pattern's *name* rather than its
+geometry. The measured consequence on the X-S10 zoo sample was a strong
+green-and-dark cast — and the mechanism turned out to be starker than a
+detail approximation: the Bayer chroma pass fills a green photosite's missing
+channels from exactly the neighbour to its right and the neighbour below, and
+inside X-Trans's four 2×2 all-green blocks per tile that assumption is false.
+**R was simply never written (left at zero) at 8 of every 36 photosites, B at
+a different 8.** Correct white balance cannot repair that — a per-channel gain
+and a per-channel hole are both diagonal, so they commute — which is why the
+cast survived metadata that read perfectly.
 
-The disclosure's current wording asserts that «colour, tone and framing are
-unaffected» and only fine detail is approximate. **On the Fujifilm X-S10 zoo
-sample that clause does not hold** — the measurement is in the format-strip
-caption above. The as-shot white balance is read correctly, which points at the
-channel mapping rather than the metadata. This is an open defect, the sample is
-shipped in the strip rather than quietly swapped for a prettier one, and the
-disclosure string should stop promising unaffected colour until it is fixed.
+**Fixed in v0.34.0 (unreleased):** a non-2×2 RGB array is now demosaiced
+in-tree over the array's own geometry — every channel is interpolated only
+from photosites that actually measured it, with per-phase plane-fit weights.
+On the same sample the whole-frame G/R moved **1.55 → 0.9476** and G/B
+2.08 → 1.03, inside the 0.81–1.08 band the other eight formats occupy;
+per-phase channel spread fell from 158 % to 0.34 % of the channel mean. The
+render still disclaims what remains true: fine detail is reconstructed by a
+general rule rather than by an algorithm built for this array (Markesteijn),
+and is softer than a dedicated converter would resolve.
 
 ---
 

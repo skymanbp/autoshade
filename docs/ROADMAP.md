@@ -417,6 +417,31 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R28 Batch-1 1a+1b：X-Trans 色偏根修 + 两披露句改真（2026-08-20，未发版）** ——
+  确诊=rawler PPG 色度插值按 Bayer 公理从「右+下」邻取 R/B（ppg.rs:185-203），
+  X-Trans 每 36 像素的四个 2×2 全绿块使其失败 16 次：8 相位 R 从未被写（=0）、
+  另 8 相位 B=0（实测 99.8% 像素；余 0.2%=上游 3px 边环规则）；WB 对角阵与
+  对角缺失可交换故不可修复（诊断代理+主审亲读 ppg.rs:185-203/render.rs:396/
+  0 字节 xtrans_markenstein.rs 三证）。修（用户拍板选项 b）=render.rs 内
+  CFA 几何感知去马赛克（+600/−57 单文件）：自家光位通道原值保留；缺失通道按
+  (相位,通道) 预算 5×5 **平面拟合**权重回填（半径 1 时 108 组中 56 组样本<3、
+  均值回退在线性梯度上留 7.2e-3 每相位色差→平面拟合 3.3e-16；全 108 组权重
+  非负=凸组合不振铃，阶跃过冲实测 0.0000）；出帧 tap 按整 CFA 周期回折非镜像；
+  分派与披露共用一个几何谓词（cfa_needs_geometry_demosaic）。**实测收敛：
+  X-S10 全帧 G/R 1.5503→0.9476、G/B 2.0839→1.0313（八格式带 0.81-1.08 内、
+  相机预览 0.95）；每相位散布 R 157.80%→0.34%**；八个 Bayer zoo 渲染 FNV
+  哈希前后逐一相同（2×2 分派字节不变佐证）、RAF 两次渲染哈希相同（PPG 在
+  6×6 上的 Color2DPtr 并行竞争顺带按构造消除）。1b=X-Trans 披露句改真（旧
+  「Colour…unaffected」src/ 清零）+BrushCarried 两处「measurement in flight」
+  →「measured kernel has no closed form + pre-lens-correction frame」
+  （xmp.rs:1433/1664；钉测试只查 not yet rendered 保绿）+gui/util.rs 注释同步。
+  门（主审复跑）=clippy0×2+**702**(+7)/10/131/2+2+zoo 全名 9/9（91.35s）；
+  变异主审亲手复现（去 ROI 相位移位→flat 测试红 0.405≠0.2→还原绿）。
+  **未验证登记**：细节质量无参考转换器对照（合成量尺+披露句代偿，待人工目验）；
+  2×8/12×12 几何仅构造性证明；README 格式条 raf.jpg 仍为 v0.33.0 修前渲染=
+  发版批重渲。README 展示节/§X-Trans restated/ARCHITECTURE 拒收表同批改真。
+  诊断档案=~/.claude/plans/r28-materials/xtrans-diagnosis.md。
+
 - **R28 修复轮已锁定 → v0.34.0 全五批（🔒2026-08-20 用户六拍板）** —— 拍板：
   ①范围=**全五批**；②RAW 单文件内存=**与 baked 同款 4GiB 峰值闸**（超限拒收+具名
   披露）；③XMP 作用域=**连 Scope newtype 类型化大改**（tag/subtree 语义上类型，
