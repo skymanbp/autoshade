@@ -417,6 +417,62 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R28 Batch-5：语义/口径批（2026-08-20，未发版）** —— 5a **texture=−100 端点**
+  （设计项，用户 D1 范围内）：旧负半支＝同一 unsharp 取负幅度，传递函数
+  `1−|a|(1−G)` 在端点恰为 `G` ——**整幅高斯糊**（目检包 D-texture-m100 实测
+  σ−92%），边缘与细节一并抹平；LR 的 Texture 是中频控件。改为**带限**：
+  `band = blur(r/4) − blur(blur(r/4), r)`、`new_l = l − |a|·band`，高频端与低频端
+  传递皆回到 1、只在中频凹陷（coarse 是 fine 再模糊所得，故带为
+  `G_f·(1−G_r)`、受 fine 自身响应限制；box³ 的 ≈1% 旁瓣使端点响应在一个
+  极窄频带上可达 ≈−0.01，已在码内如实写明而非四舍五入成「永不反相」）；两臂合并进新函数
+  `render::texture_pass`（`apply_develop` 3b 与 `apply_masks` 同一实现，负半支也
+  钉了位级孪生）。**行为变更＝一切负 texture（全局＋蒙版）渲染改变**；
+  **未测量登记**：本仓无 LR 负 texture 地面真值（没有 −100 受控导出可拟合），
+  `r/4` 与凹陷深度是**我们的选择、非拟合 Adobe**（同 `manual_vignette_lut` 立场；
+  XMP 仍写原始滑杆值，LR 用自己的模型重渲）。端点测钉的是**形状**：800px 帧、
+  radius 4、fine 1，−100 下 4px 正弦保留 **0.963**（旧 **0.001**）、16px 保留
+  **0.294**（旧 0.174）——细节活下来、中频仍掉 71%；coarse 由 fine **级联**求得
+  （σ² 相加）故仍只两个 f32 平面、峰值不抬（Batch-4 的 1800MB 常数不受影响）。
+  5b **eval shadow_hue 口径**：四个 `color_grade.*_hue` 行改为**两侧同轮饱和度
+  都过阈才计入**（阈＝ruler 自己的动度死区 `eps_for`＝0.5，不是新常数；`eps` 抽成
+  自由函数供两处共用），141° 假象消除（真相＝两个 sat=0 的色轮停在圆周两端，
+  角度不渲染任何东西）；真事实 `shadow_sat` 偏置 **+9.02** 原样保留。**跨版不
+  可比**已落两处：eval 报告尾行自报 + ARCHITECTURE §4.6；成本如实＝单侧上色的
+  照片不再进 hue 行（其遗漏记在 `*_sat` 行，那才是承载决定的控件）。
+  5c **诊断行身份**（F6 最小形）：新 `pipeline::attribution(Option<&Path>)` 一个
+  前缀函数，盖章全部 worker 可达 eprintln —— pipeline 提案回退（:390）/ style
+  嵌入不可用（同类兄弟，按 HEAD 重枚举出）/ clamp 披露 / merge 注记 / 蒙版损失，
+  main batch 的「XMP failed」，render 的 ICC 嵌入 + 位图蒙版三条预算跳过 + 两条
+  加载失败；**batch 不再弃 `_notes`**——`process_one` 改返 `(Verdict, Vec<Note>)`，
+  池闭包按 **eval 的样式**把 note 渲进本照片的块（`--jobs 1` 转录顺序不变）。
+  新源扫描门 `every_worker_reachable_warning_names_its_photo`（按 **eprintln 语句**
+  而非文本偏移匹配——门自己就在被扫文件里，纯文本搜会命中自己的登记表）。
+  **具名不改**：style 索引 `Once` 行（是一次运行的事实、非单照）、apply/auto 三条
+  串行行（命令自带照片抬头，盖章会重复）。**登记未闭**＝调用方注入的 diagnostics
+  sink（F6 最深根）仍未建，纯像素预览臂 `best_effort_mask_raster_snapshot` 根本
+  没有照片可盖——两处都在码内注明。5d **XMP 作用域类型化大改**（用户 D3 拍板全量
+  版）：新 `Tag<'a>` / `Scope<'a>` 两 newtype + `CrsSource` trait（`crs_str`/
+  `crs_f32` 成方法），裸 `&str` 读器全部删除——**107 个非测试调用点逐一声明作用域**
+  （xmp.rs 99 / eval.rs 6 / style.rs 2；另测试模块 20 处同步改写；`optional_scaled_number_in`/
+  `optional_number_is` 改泛型以免两份拷贝各长各的作用域习惯）。四症状按构造关闭：
+  **A** 嵌套组件的滑杆名不再答代 correction——新 `correction_own_scope`，实现＝把
+  `crs_scope_inner` 抽成共享 `element_own_scope` + **两条成员规则**（顶层「嵌
+  rdf:Description 即外人」／correction 层「`crs:CorrectionMasks` 按名就是组件表」），
+  同 Batch-3「一次走查两条成员规则」的形制；**B** RangeMask 只从本 correction 的
+  **顶层组件表**取、且只读该组件自身元素（旧＝全段首中 + 读到段尾，且因
+  `range_count` 为 0 连 `ForeignRangeMask` 披露都不会响＝全静默）；**C**
+  `crs_attributes` 改走 `next_xml_attribute`（引号完备、遇 `/`或`>` 即止）——单引号
+  文档的 11 个来源/digest 键不再于回写时静默丢失，闭词表拒绝环真的跑起来；
+  **D** `tiff:ImageWidth/ImageLength/Orientation` 必须来自**同一个 rdf:Description**
+  （新 `frame_description`；无 Description 的裸片段回落全文＝旧读法唯一可能）。
+  四条各配对抗夹具，**零 schema 变更**。门（主审复跑）＝clippy 0×2 +
+  **727**(+7 通过 / 忽略 9)/**11**/**131**/2+2 + zoo 全名 9/9（106.01s）+
+  **LR 探针 16/16 字节往返**（真 LR 边车对类型化改动零位移＝本批最强证据）+
+  M-B 7 份 42 蒙版全绿 + audit_i18n 0 + check_docs 10PASS/1SKIP；变异证据 **7 组**
+  （5a 端点回旧参数化 / 5b 去阈值 / 5c 掉一个 stem / 5d 的 A-D 四夹具各自还原
+  旧作用域）全部主审亲手红→还原后与备份 **byte-identical**。ARCHITECTURE 三处
+  texture 叙述 + §4.6 新增口径段随批改真；README 未触碰（无既述行为改变）。
+
 - **R28 Batch-4：资源预算批（2026-08-20，未发版）** —— 4a（F2 两根一批）：
   ①**探针实测收口 F2 的 UNVERIFIABLE 项**——R27 那支探针从未入库故不可复现，
   本批把它做成在库 `#[ignore]` 测试 `jobs::tests::probe_per_photo_peak_commit`

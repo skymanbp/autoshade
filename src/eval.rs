@@ -35,10 +35,12 @@ use crate::config::Config;
 use crate::pipeline;
 use crate::recipe::EditRecipe;
 
-// The `crs:` attribute scanner lives beside the XMP writer it inverts (xmp.rs,
-// where the sidecar READER also uses it); re-exported so this module's tests
-// and `style.rs` keep their `eval::crs_f32` path.
-pub(crate) use crate::xmp::crs_f32;
+// The `crs:` readers live beside the XMP writer they invert (xmp.rs, where the
+// sidecar READER also uses them). Since R28 Batch-5 5d the scope is a TYPE:
+// every read in this harness is against a `Scope` — a whole sidecar, narrowed
+// to the crs Description's own span — which is what it always meant and now
+// states. `style.rs` imports the same two names from `xmp` directly.
+pub(crate) use crate::xmp::{CrsSource, Scope};
 
 /// The provenance rule a row's USER value follows.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -108,7 +110,7 @@ impl Row {
 
     /// Deadband for "did anyone actually move this?" — exposure is in stops.
     fn eps(&self) -> f32 {
-        if self.metric == "exposure_ev" { 0.05 } else { 0.5 }
+        eps_for(&self.metric)
     }
 
     /// AI − user, wrapped into ±180 for the circular hue wheels.
@@ -121,6 +123,68 @@ impl Row {
             d
         }
     }
+}
+
+/// The ruler's "did anyone actually move this?" deadband, by metric name —
+/// lifted out of [`Row::eps`] so a row that has to ask about ANOTHER control's
+/// movement ([`hue_carries_colour`]) asks the same question with the same
+/// number instead of restating it.
+fn eps_for(metric: &str) -> f32 {
+    if metric == "exposure_ev" { 0.05 } else { 0.5 }
+}
+
+/// Does a colour-grade HUE row describe colour that BOTH sides actually
+/// applied? (R28 Batch-5 5b.)
+///
+/// A toning wheel's hue is an ANGLE, and the wheel paints nothing until its
+/// SATURATION leaves zero — `render::apply_color_grade` multiplies the tint by
+/// `sat/100`, so at zero saturation every hue from 0° to 359° renders the
+/// identical (untinted) pixel. The old row counted a photo whenever EITHER side
+/// moved the hue, saturation unasked: on the 147-photo baseline that made
+/// `color_grade.shadow_hue` read `mean|Δ| = 141`, a number with no colour
+/// anywhere behind it — two colourless wheels parked at opposite ends of a
+/// circle. The real finding the artifact was burying is one row down and stands
+/// unchanged: `shadow_sat` bias **+9.02**, i.e. the AI tints shadows the
+/// photographer leaves neutral.
+///
+/// So a hue delta is measured only where both sides put colour on the wheel.
+/// The threshold is not a new constant: it is the ruler's OWN movement deadband
+/// ([`eps_for`], 0.5 on the wheels' 0..100 saturation axis) applied to the
+/// companion `*_sat` control — "counted when both sides moved the saturation",
+/// in exactly the sense this harness already means by "moved".
+///
+/// **What this costs, stated:** a photo where the photographer toned and the AI
+/// did not no longer reaches the hue row at all, so that row's `AI-omit` count
+/// falls. The omission is not lost — it is recorded where it is measurable, on
+/// the `*_sat` row, which is the control that carries the decision. And the
+/// four `*_hue` rows are NOT comparable across v0.34.0: the pre-R28 M-C
+/// baseline's `shadow_hue` numbers count a different population.
+///
+/// Non-hue rows (every HSL cell included — those are ±100 shift sliders, not
+/// wheel angles, and `Row::circular` is false for them) return `true` and are
+/// untouched.
+fn hue_carries_colour(row: &Row, scope: Scope<'_>, ai: &EditRecipe) -> bool {
+    let Some(stem) = row
+        .metric
+        .strip_prefix("color_grade.")
+        .and_then(|f| f.strip_suffix("_hue"))
+    else {
+        return true;
+    };
+    let sat_field = format!("{stem}_sat");
+    // Derived from the registry, like every other reader here: a new wheel
+    // inherits this gate instead of needing a second edit.
+    let Some((_, sat_attr)) = COLOR_GRADE_CRS.iter().find(|(f, _)| *f == sat_field) else {
+        return true;
+    };
+    let neutral = catalogue::color_grade_value(&Default::default(), &sat_field).unwrap_or(0.0);
+    let eps = eps_for(&format!("color_grade.{sat_field}"));
+    let moved = |v: Option<f32>| v.is_some_and(|v| (v - neutral).abs() > eps);
+    // The user's side is read the same way `user_value` reads a `Rule::Plain`
+    // row (an absent attribute = the neutral = not moved), and the AI's the
+    // same way `ai_value` reads a `Source::Grade` row.
+    moved(scope.crs_f32(sat_attr))
+        && moved(catalogue::color_grade_value(&ai.color_grade, &sat_field))
 }
 
 /// The comparison table, derived from the control registry: every AI-visible
@@ -212,11 +276,11 @@ fn neutral(row: &Row, r: &EditRecipe) -> f32 {
 /// The user's value for one row, or `None` when this sidecar does not state it.
 /// Read STRAIGHT: every `crs:` attribute on the ruler carries the same number
 /// the recipe field does (see [`Row`] for the one exception that used to exist).
-fn user_value(row: &Row, scope: &str, user_wb: bool, has_crop: bool) -> Option<f32> {
+fn user_value(row: &Row, scope: Scope<'_>, user_wb: bool, has_crop: bool) -> Option<f32> {
     match row.rule {
         Rule::Wb if !user_wb => None,
         Rule::CropGated if !has_crop => None,
-        _ => crs_f32(scope, &row.crs),
+        _ => scope.crs_f32(&row.crs),
     }
 }
 
@@ -403,17 +467,17 @@ pub(crate) fn user_family_summary(xmp: &str) -> Option<FamilySummary> {
     // Same scope rule as every other whole-document read: a creative Look's
     // baked mixer belongs to the PROFILE, not the photographer.
     let scope = crate::xmp::crs_own_scope(xmp);
-    let scope = scope.as_ref();
+    let scope = Scope::new(scope.as_ref());
     let mut sums = [0.0f32; 3];
     for f in catalogue::hsl_expansion() {
-        sums[f.axis] += crs_f32(scope, &f.crs).unwrap_or(0.0).abs();
+        sums[f.axis] += scope.crs_f32(&f.crs).unwrap_or(0.0).abs();
     }
     let hsl = sums.map(|s| s / crate::recipe::HSL_BANDS.len() as f32);
     let wheel = |suffix: &str| -> Vec<f32> {
         COLOR_GRADE_CRS
             .iter()
             .filter(|(field, _)| field.ends_with(suffix))
-            .map(|(_, key)| crs_f32(scope, key).unwrap_or(0.0))
+            .map(|(_, key)| scope.crs_f32(key).unwrap_or(0.0))
             .collect()
     };
     let max_sat = wheel("_sat").into_iter().fold(0.0f32, |a, v| a.max(v.abs()));
@@ -425,7 +489,7 @@ pub(crate) fn user_family_summary(xmp: &str) -> Option<FamilySummary> {
     };
     let rgb_curves = ["ToneCurvePV2012Red", "ToneCurvePV2012Green", "ToneCurvePV2012Blue"]
         .iter()
-        .filter(|tag| !parse_tone_curve(scope, tag).is_empty())
+        .filter(|tag| !parse_tone_curve(scope.text(), tag).is_empty())
         .count() as u8;
     let mut out = FamilySummary { hsl, grade: [max_sat, mean_lum], rgb_curves };
     out.clamp();
@@ -597,12 +661,12 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
         // the PROFILE's, not the photographer's, and scoring the AI against
         // them charged it for matching a look no slider in the sidecar states.
         let scope = crate::xmp::crs_own_scope(&xmp_text);
-        let scope = scope.as_ref();
+        let scope = Scope::new(scope.as_ref());
         // Any value OTHER than "As Shot" is a user WB decision; an absent
         // attribute (non-LR / hand-trimmed sidecar) keeps the Kelvin as
         // intentional.
-        let user_wb = crate::xmp::crs_str(scope, "WhiteBalance").as_deref() != Some("As Shot");
-        let has_crop = crate::xmp::crs_str(scope, "HasCrop").as_deref() == Some("True");
+        let user_wb = scope.crs_str("WhiteBalance").as_deref() != Some("As Shot");
+        let has_crop = scope.crs_str("HasCrop").as_deref() == Some("True");
         // style_strength = 0 AND judge = false: eval measures the RAW AI
         // proposal vs your edits, so it must NOT pull toward your historical
         // style and must NOT let the visual closed loop revise the proposal
@@ -668,6 +732,17 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
             if !user_used && !ai_used {
                 continue;
             }
+            // …with ONE exception, and it is a different question (R28 Batch-5
+            // 5b): a toning wheel's hue is only a value while the wheel has
+            // saturation. "Either side moved it" is the right rule for a slider
+            // whose every position renders something; it is the wrong rule for
+            // an angle that renders nothing at zero saturation, and it is what
+            // produced the 141° `shadow_hue` artifact. See `hue_carries_colour`
+            // for the threshold, what it costs, and why that row's history is
+            // not comparable with what this run prints.
+            if row.circular && !hue_carries_colour(row, scope, &ai) {
+                continue;
+            }
             let e = stats.acc.entry(row.metric.clone()).or_default();
             match ai_val {
                 Some(a) => {
@@ -721,7 +796,7 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
         // either-side rule and same RMSE metric; the SHAPE metrics (black lift
         // / S-strength) are master-curve vocabulary and are not repeated here.
         for (ch, (_, tag)) in rgb_curves.iter().enumerate() {
-            let user_curve = parse_tone_curve(scope, tag);
+            let user_curve = parse_tone_curve(scope.text(), tag);
             let ai_curve: Vec<(f32, f32)> = match catalogue::global_value(&ai, &format!("{}_curve", rgb_curves[ch].0)) {
                 Some(catalogue::GlobalValue::Curve(pts)) => {
                     pts.iter().map(|p| (p.input as f32, p.output as f32)).collect()
@@ -926,6 +1001,15 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
         "Interpretation: positive bias = AI sets this higher than you do; large mean|Δ| = you \
          disagree a lot on that control; AI-omit = times you used a control the AI ignored. Use \
          these to calibrate the advisor prompt."
+    );
+    // The one row whose MEANING changed, disclosed in the report itself rather
+    // than only in the ledger — a reader comparing this transcript against the
+    // R27 147-photo baseline has to know the population moved (R28 Batch-5 5b,
+    // `hue_carries_colour`).
+    println!(
+        "Note: the four color_grade.*_hue rows count a photo only when BOTH sides put saturation \
+         on that wheel (a hue at zero saturation renders nothing). Their n / mean|Δ| / AI-omit are \
+         NOT comparable with a pre-v0.34.0 run; every other row is unchanged."
     );
 
     Ok(())
@@ -1135,8 +1219,8 @@ mod tests {
             // The Description's OWN scope — the same rule `run` applies, and
             // for the same reason: a creative Look bakes its own crs values.
             let scope = crate::xmp::crs_own_scope(&xmp_text);
-            let scope = scope.as_ref();
-            let user_wb = crate::xmp::crs_str(scope, "WhiteBalance").as_deref() != Some("As Shot");
+            let scope = Scope::new(scope.as_ref());
+            let user_wb = scope.crs_str("WhiteBalance").as_deref() != Some("As Shot");
             let decoded = crate::decode::decode_any(raw)
                 .unwrap_or_else(|e| panic!("decode {stem}: {e:#}"));
             let hist = &decoded.histogram;
@@ -1145,7 +1229,7 @@ mod tests {
             // An absent Exposure2012 means they left it at 0, the same
             // neutral rule the ruler above uses.
             let est_ev = crate::advisor::HeuristicProposer::ev_offset_estimate(hist);
-            ev.push(stem, est_ev as f64, crs_f32(scope, "Exposure2012").unwrap_or(0.0) as f64);
+            ev.push(stem, est_ev as f64, scope.crs_f32("Exposure2012").unwrap_or(0.0) as f64);
 
             // --- E2: as-shot WB vs Adobe's own as-shot reading -------------
             let as_shot = crate::render::as_shot_wb(raw);
@@ -1157,10 +1241,10 @@ mod tests {
                     // meaningful while the photographer left WB as-shot;
                     // once they drag Temp, crs:Temperature is their taste.
                     as_shot_photos += 1;
-                    if let Some(t) = crs_f32(scope, "Temperature") {
+                    if let Some(t) = scope.crs_f32("Temperature") {
                         wb_k.push(stem, k as f64, t as f64);
                     }
-                    if let Some(t) = crs_f32(scope, "Tint") {
+                    if let Some(t) = scope.crs_f32("Tint") {
                         wb_t.push(stem, tint as f64, t as f64);
                     }
                 }
@@ -1181,7 +1265,7 @@ mod tests {
                 channel_mean_01(&hist.b),
             ];
             let (gk, gt) = crate::render::solve_wb_from_neutral(px, anchor);
-            let (uk, ut) = (crs_f32(scope, "Temperature"), crs_f32(scope, "Tint"));
+            let (uk, ut) = (scope.crs_f32("Temperature"), scope.crs_f32("Tint"));
             if let Some(t) = uk {
                 gw_k_all.push(stem, gk as f64, t as f64);
                 if user_wb {
@@ -1266,8 +1350,9 @@ mod tests {
             .iter()
             .find(|r| r.metric == metric)
             .unwrap_or_else(|| panic!("{metric} is not a ruler row"));
-        let user_wb = crate::xmp::crs_str(xmp, "WhiteBalance").as_deref() != Some("As Shot");
-        let has_crop = crate::xmp::crs_str(xmp, "HasCrop").as_deref() == Some("True");
+        let xmp = Scope::new(xmp);
+        let user_wb = xmp.crs_str("WhiteBalance").as_deref() != Some("As Shot");
+        let has_crop = xmp.crs_str("HasCrop").as_deref() == Some("True");
         user_value(row, xmp, user_wb, has_crop)
     }
 
@@ -1283,7 +1368,7 @@ mod tests {
         // recipe units. Every earlier `sharpening` row in an eval report —
         // the R25 M-C 147-photo baseline included — read the user 1.5× high.
         assert_eq!(get(SAMPLE, "sharpening"), Some(40.0));
-        assert_eq!(crs_f32(SAMPLE, "Nonexistent"), None);
+        assert_eq!(Scope::new(SAMPLE).crs_f32("Nonexistent"), None);
     }
 
     /// R23-1: the ruler is DERIVED from the control registry, so the two
@@ -1344,6 +1429,68 @@ mod tests {
         // zero-based "used" test called every neutral wheel a ±50 divergence.
         assert_eq!(neutral(&row("color_grade.blending"), &EditRecipe::default()), 50.0);
         assert_eq!(neutral(&row("contrast"), &EditRecipe::default()), 0.0);
+    }
+
+    /// R28 Batch-5 5b — THE 141° ARTIFACT, reproduced and closed.
+    ///
+    /// The inspection pack's reading of the R27 147-photo baseline:
+    /// `color_grade.shadow_hue  mean|Δ| = 141`. This is that number's
+    /// mechanism, in the smallest form that produces it — a photographer's
+    /// sidecar and an AI recipe that BOTH leave the shadow wheel colourless and
+    /// merely park its angle at opposite ends of the circle. 210° against 351°
+    /// is 141° of "disagreement" about a hue neither side rendered.
+    ///
+    /// Revert `hue_carries_colour` to `true` (or drop the `row.circular` gate in
+    /// `run`) and the first assertion fails: that is the mutation proof.
+    #[test]
+    fn a_hue_on_a_colourless_wheel_is_not_a_measurement() {
+        let ruler = rows();
+        let row = |m: &str| ruler.iter().find(|r| r.metric == m).unwrap().clone();
+        let hue = row("color_grade.shadow_hue");
+
+        // The artifact itself: the delta the old row counted, in full. The
+        // circular wrap is doing its job here — this is not a 141° bug in
+        // `diff`, it is a real angular distance between two angles that mean
+        // nothing, which is exactly why the fix is upstream of the subtraction.
+        assert_eq!(hue.diff(351.0, 210.0).abs(), 141.0, "the ledger'd 141° is this subtraction");
+
+        // Both wheels colourless — the sidecar states a hue, the AI states
+        // another, and NOTHING is painted by either.
+        let colourless = Scope::new(r#"<rdf:Description crs:SplitToningShadowHue="210" crs:SplitToningShadowSaturation="0">"#);
+        let mut ai = EditRecipe::default();
+        ai.color_grade.shadow_hue = 351.0;
+        assert!(
+            !hue_carries_colour(&hue, colourless, &ai),
+            "a hue delta between two zero-saturation wheels is not a comparison"
+        );
+
+        // ONE side toning is still not a hue comparison — the omission belongs
+        // to (and is counted on) the saturation row, which is where the
+        // photographer's decision actually lives.
+        let user_tones = Scope::new(r#"<rdf:Description crs:SplitToningShadowHue="210" crs:SplitToningShadowSaturation="35">"#);
+        assert!(!hue_carries_colour(&hue, user_tones, &ai), "user-only toning: no hue to compare");
+        ai.color_grade.shadow_sat = 22.0;
+        assert!(
+            !hue_carries_colour(&hue, colourless, &ai),
+            "AI-only toning: still no hue to compare"
+        );
+
+        // BOTH sides painting → the row measures a real disagreement again.
+        assert!(
+            hue_carries_colour(&hue, user_tones, &ai),
+            "two saturated wheels DO disagree about hue, and that must still count"
+        );
+
+        // The deadband is the ruler's own, not a second number: a wheel moved
+        // by less than `eps_for` has not been moved.
+        let dust = Scope::new(r#"<rdf:Description crs:SplitToningShadowHue="210" crs:SplitToningShadowSaturation="0.4">"#);
+        assert!(!hue_carries_colour(&hue, dust, &ai), "0.4 is inside the ruler's own deadband");
+
+        // Every non-hue row is untouched — including the HSL "hue" cells, which
+        // are ±100 shift sliders and not wheel angles.
+        assert!(hue_carries_colour(&row("hsl.hue.blue"), colourless, &ai));
+        assert!(hue_carries_colour(&row("contrast"), colourless, &ai));
+        assert!(hue_carries_colour(&row("color_grade.shadow_sat"), colourless, &ai));
     }
 
     // A user S-curve: black lifted to 12, quarter-shadow pulled down (64→50),

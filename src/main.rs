@@ -1453,12 +1453,20 @@ fn batch_cmd(
     //
     // STDERR is NOT covered, and this comment claimed it was until R28 2e
     // (adjudication F6). `verbose` gates the progress chatter, not the
-    // warnings: pipeline.rs:390 (proposer fallback), :2220 (clamp
-    // disclosure), :2454 and :2473, main.rs:1586 below, and the render's own
-    // warnings (render.rs:1430 ICC embed, :3083 inert bitmap mask) are
-    // ungated `eprintln!`s that land in COMPLETION order and mostly name no
-    // photo. `jobs`' module docs disclose the channel; stamping those lines
-    // with a stem is registered as R28 Batch-5 5c.
+    // warnings: the proposer fallback, the clamp disclosure, the XMP merge and
+    // mask-loss notes, the "XMP failed" line in `process_one` below and the
+    // render's own ICC / inert-raster warnings are all ungated `eprintln!`s
+    // that land in COMPLETION order.
+    //
+    // R28 Batch-5 5c stamped every one of them that has a photograph in scope
+    // with its stem (`pipeline::attribution`), so a reordered line can still be
+    // attributed, and made this closure render `produce_recipe`'s typed note
+    // channel into the photo's own block the way `eval` always did. What is
+    // NOT fixed, and stays registered: there is still no caller-supplied
+    // diagnostics sink (adjudication F6's deepest root), so these lines cannot
+    // be routed, suppressed or ordered by the caller — and the pure-pixel
+    // preview arm (`render::best_effort_mask_raster_snapshot`) has no photo to
+    // stamp with at all.
     let work: Vec<&Path> = pending.iter().take(n).map(|p| p.as_path()).collect();
     // Deliverables are stem-keyed and one library can hold two DSC00001.ARW
     // (counter rollover — four review units reported the silent overwrite).
@@ -1512,12 +1520,12 @@ fn batch_cmd(
         use std::fmt::Write;
         let raw = work[i];
         let res = process_one(raw, &cfg, outs[i].as_deref());
-        match &res {
-            Ok(v) if v.decision == autoshop::advisor::Decision::Accept => {
+        let outcome = match &res {
+            Ok((v, _)) if v.decision == autoshop::advisor::Decision::Accept => {
                 let _ = writeln!(block, "[{}/{n}] {} ... {:?}", i + 1, stem(raw), v.decision);
                 Outcome::Saved
             }
-            Ok(v) => {
+            Ok((v, _)) => {
                 let _ = writeln!(
                     block,
                     "[{}/{n}] {} ... {:?} — NOT saved (a non-Accept verdict never auto-saves)",
@@ -1531,7 +1539,25 @@ fn batch_cmd(
                 let _ = writeln!(block, "[{}/{n}] {} ... FAILED: {e}", i + 1, stem(raw));
                 Outcome::Failed
             }
+        };
+        // The typed note channel, rendered into THIS photo's block — the same
+        // thing `eval` does with the same notes (eval.rs, its own worker
+        // closure), and what `jobs`' module doc asks every pooled caller to do.
+        // Above one job the ⚠ lines these notes mirror (the proposer fallback
+        // at pipeline.rs:390 and its siblings) arrive on stderr in COMPLETION
+        // order; the block is the channel that keeps them attached to the
+        // photograph. At `--jobs 1` the transcript gains the same line in the
+        // same place, so nothing about a serial run's ordering changes.
+        if let Ok((_, notes)) = &res
+            && !notes.is_empty()
+        {
+            let text = autoshop::rationale::render_en(notes);
+            let text = text.trim();
+            if !text.is_empty() {
+                let _ = writeln!(block, "       {text}");
+            }
         }
+        outcome
     });
     let ok = results.iter().filter(|r| **r == Some(Outcome::Saved)).count();
     let skipped = results.iter().filter(|r| **r == Some(Outcome::NotAccepted)).count();
@@ -1574,19 +1600,32 @@ fn batch_cmd(
     Ok(())
 }
 
-fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Verdict> {
+/// One batch photo. Returns the verdict AND the deterministic notes
+/// `produce_recipe` raised for it (R28 Batch-5 5c).
+///
+/// The notes used to be dropped on the floor here (`let (.., _notes)`) while
+/// `jobs`' module doc told callers to render them into the photo's block, and
+/// `eval` — the other pooled caller — did exactly that. So the one surface
+/// where a proposer fallback is most likely to happen (an unattended
+/// library-sized run) was also the one that threw away the attributed copy of
+/// the fact, leaving only the reordered stderr line.
+fn process_one(
+    raw: &Path,
+    cfg: &Config,
+    render_to: Option<&Path>,
+) -> Result<(Verdict, Vec<autoshop::rationale::Note>)> {
     // Batch uses the configured style strength (AUTOSHOP_STYLE_STRENGTH).
     // judge = false: a library-sized batch must never silently multiply the
     // paid vision calls — the closed loop is for the interactive surfaces
     // (review R20-M2).
-    let (recipe, verdict, _notes) =
+    let (recipe, verdict, notes) =
         produce_recipe(raw, cfg, false, None, None, GradeRequest::with_style(cfg.style_strength), false)?;
     // A non-Accept verdict may not auto-save (user decision). In a headless
     // batch that means NO sidecars and NO deliverable: the photo stays
     // pending, the caller's summary names it, and a re-run re-attempts it —
     // the same consequence a failed photo already has.
     if verdict.decision != autoshop::advisor::Decision::Accept {
-        return Ok(verdict);
+        return Ok((verdict, notes));
     }
     // Every fallible product BEFORE the completion markers: `has_develop`
     // (the batch resume filter) keys on the sidecars, so any failure after
@@ -1615,7 +1654,15 @@ fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Ver
         // failing the photo here made the batch report it failed while the
         // resume filter — which sees recipe.json — permanently skipped it.
         if let Err(e) = write_xmp(raw, recipe) {
-            eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e}");
+            // The one ungated stderr line in the batch worker itself, and the
+            // "main.rs:1586" the `jobs` disclosure and the comment above name
+            // (both re-located at R28 HEAD). Stamped: this fires INSIDE the
+            // pool, after the develop lock, so at `--jobs 3` it lands between
+            // two other photos' output with nothing to tie it to its own.
+            eprintln!(
+                "  ⚠ {}recipe saved, but the Lightroom XMP failed: {e}",
+                pipeline::attribution(Some(raw))
+            );
         }
         Ok(())
             },
@@ -1646,7 +1693,11 @@ fn process_one(raw: &Path, cfg: &Config, render_to: Option<&Path>) -> Result<Ver
         }
     }
     persist(&recipe)?;
-    Ok(verdict)
+    // The notes travel with the SUCCESS arm only. A failed photo returns an
+    // `Err` whose message the block already prints, and the render-failure arm
+    // above says what happened to the analysis — attaching a proposer-fallback
+    // note under a FAILED line would read as a second, unrelated failure.
+    Ok((verdict, notes))
 }
 
 /// Render a 256-bin histogram as a compact Unicode block sparkline.

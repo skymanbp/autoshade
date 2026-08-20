@@ -14,7 +14,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::decode::{self, Histogram, Meta};
-use crate::eval::crs_f32;
+// The typed `crs:` readers (R28 Batch-5 5d): the trait carries the methods,
+// `Scope` declares that a whole-sidecar read is a subtree read.
+use crate::xmp::CrsSource;
 use crate::pipeline;
 use crate::recipe::EditRecipe;
 
@@ -266,12 +268,14 @@ fn read_settings(xmp: &str) -> BTreeMap<String, f32> {
     // provenance error the as-shot rule above guards against, one container
     // deeper.
     let xmp = crate::xmp::crs_own_scope(xmp);
-    let xmp = xmp.as_ref();
-    let user_wb = crate::xmp::crs_str(xmp, "WhiteBalance").as_deref() != Some("As Shot");
+    // A `Scope`, spelled out (R28 Batch-5 5d): subtree-wide first-match is what
+    // a whole-sidecar read means, and the type is what says so now.
+    let xmp = crate::xmp::Scope::new(xmp.as_ref());
+    let user_wb = xmp.crs_str("WhiteBalance").as_deref() != Some("As Shot");
     REF_KEYS
         .iter()
         .filter(|(k, _)| user_wb || !matches!(*k, "Temperature" | "Tint"))
-        .filter_map(|(k, label)| crs_f32(xmp, k).map(|v| (label.to_string(), v)))
+        .filter_map(|(k, label)| xmp.crs_f32(k).map(|v| (label.to_string(), v)))
         .collect()
 }
 

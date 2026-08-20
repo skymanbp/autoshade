@@ -257,8 +257,21 @@ impl FrameAspect {
     /// `tiff:ImageLength` / `tiff:Orientation`.
     ///
     /// Read off the whole document, not the crs scope: these are `tiff:`
-    /// properties and they sit on the same `rdf:Description` in every Lightroom
-    /// sidecar seen here, but nothing makes that structural.
+    /// properties, and while they sit on the same `rdf:Description` as the crs
+    /// settings in every Lightroom sidecar seen here, nothing makes that
+    /// structural — an XMP packet may carry one Description per namespace.
+    ///
+    /// **They must come from ONE Description, though** (R28 Batch-5 5d, F4
+    /// symptom D). The three used to be three independent first-occurrence
+    /// searches over the whole document, so a width from one element could be
+    /// paired with a length from another and an orientation from a third — a
+    /// frame no element in the file actually declares, handed to the mask and
+    /// crop decoders as the coordinate system to fold pixel geometry with. The
+    /// scan below finds the first `rdf:Description` that declares BOTH
+    /// dimensions and takes all three from it; a document with no
+    /// `rdf:Description` at all (a bare fragment) falls back to the whole text,
+    /// where "one element" is vacuously true and the old reading is the only
+    /// possible one.
     ///
     /// The declared pair is taken VERBATIM as the source frame, including for
     /// the transposing orientations — `F3-REPORT.md`'s public census is 72/72
@@ -273,16 +286,61 @@ impl FrameAspect {
     /// A missing `tiff:Orientation` reads as `Normal`, which is the same thing
     /// EXIF itself means by an absent tag.
     fn from_xmp(doc: &str) -> Option<Self> {
+        let span = frame_description(doc);
         FrameAspect::from_size_turned(
-            declared_number(doc, "tiff:ImageWidth")?,
-            declared_number(doc, "tiff:ImageLength")?,
-            declared_number(doc, "tiff:Orientation")
+            declared_number(span, "tiff:ImageWidth")?,
+            declared_number(span, "tiff:ImageLength")?,
+            declared_number(span, "tiff:Orientation")
                 .filter(|v| (1.0..=8.0).contains(v))
                 .map_or(rawler::Orientation::Normal, |v| {
                     rawler::Orientation::from_u16(v as u16)
                 }),
         )
     }
+}
+
+/// The ONE `rdf:Description` a document's `tiff:` frame is read from — the
+/// first one that declares both `tiff:ImageWidth` and `tiff:ImageLength`
+/// (R28 Batch-5 5d, F4 symptom D).
+///
+/// The span returned is that element from its `<` through its close tag, so
+/// BOTH XMP spellings still work: the attribute form Lightroom writes lives on
+/// the start tag, and the property-element form lives in the body.
+///
+/// Falls back to the whole document when there is no `rdf:Description` in it at
+/// all — a fragment cannot mix two elements' declarations, so the narrowing has
+/// nothing to protect there and refusing would break every reader that hands
+/// this function a snippet. A document that HAS Descriptions but no single one
+/// carrying both dimensions gets the whole document too: that is the shape the
+/// old code read, the aspect is disclosed as degraded downstream either way,
+/// and inventing a refusal here would drop the frame for files nobody has
+/// measured.
+fn frame_description(doc: &str) -> &str {
+    let mut from = 0;
+    while let Some((start, gt, self_closing)) = next_xml_tag(doc, from) {
+        from = gt + 1;
+        let tag = &doc[start..=gt];
+        if tag.starts_with("</") || tag_name(tag) != "rdf:Description" {
+            continue;
+        }
+        let end = if self_closing {
+            gt + 1
+        } else {
+            match find_matching_close(doc, gt + 1) {
+                // `find_matching_close` returns the `<` of the close tag; the
+                // close itself carries no attributes, so the body is enough.
+                Some(close) => close,
+                None => continue,
+            }
+        };
+        let span = &doc[start..end];
+        if declared_number(span, "tiff:ImageWidth").is_some()
+            && declared_number(span, "tiff:ImageLength").is_some()
+        {
+            return span;
+        }
+    }
+    doc
 }
 
 /// The number a document declares for `name`, in either XMP spelling —
@@ -823,12 +881,12 @@ fn engine_to_lr_crop(
 /// `crs:CropAngle` only under `crs:HasCrop="True"`, so anything else is no crop
 /// AND no tilt — importing a stale angle from a disabled crop activated a
 /// straighten Adobe itself does not render.
-fn read_crop(scope: &str, frame: Option<FrameAspect>, ours: bool) -> CropDecode {
-    let angle = crs_f32(scope, "CropAngle").unwrap_or(0.0) as f64;
-    if crs_str(scope, "HasCrop").as_deref() != Some("True") {
+fn read_crop(scope: Scope<'_>, frame: Option<FrameAspect>, ours: bool) -> CropDecode {
+    let angle = scope.crs_f32("CropAngle").unwrap_or(0.0) as f64;
+    if scope.crs_str("HasCrop").as_deref() != Some("True") {
         return CropDecode::Read { crop: None, straighten_deg: 0.0, overshoot_frac: 0.0 };
     }
-    let n = |k: &str| crs_f32(scope, k).map(f64::from);
+    let n = |k: &str| scope.crs_f32(k).map(f64::from);
     let (Some(left), Some(top), Some(right), Some(bottom)) =
         (n("CropLeft"), n("CropTop"), n("CropRight"), n("CropBottom"))
     else {
@@ -852,7 +910,7 @@ pub fn crop_import_note(xmp: &str) -> Option<String> {
     }
     let scope = crs_own_scope(xmp);
     let frame = FrameAspect::from_xmp(xmp);
-    match read_crop(scope.as_ref(), frame, is_autoshop_sidecar(xmp)) {
+    match read_crop(Scope::new(scope.as_ref()), frame, is_autoshop_sidecar(xmp)) {
         CropDecode::Read { overshoot_frac, .. } if overshoot_frac > 0.0 => {
             // In pixels of the frame the document declares, when it declares
             // one — a fraction means nothing to a photographer.
@@ -3812,6 +3870,66 @@ fn crs_scope_inner(doc: &str) -> Option<String> {
     /// Owned containers that legitimately nest `rdf:Description`.
     const KEEP_NESTED: [&str; 1] = ["crs:MaskGroupBasedCorrections"];
     let start = find_crs_description(doc)?;
+    element_own_scope(doc, start, |name, nests_description| {
+        !nests_description || KEEP_NESTED.contains(&name)
+    })
+}
+
+/// One CORRECTION's own property scope — the same law, one level down (R28
+/// Batch-5 5d).
+///
+/// A `crs:What="Correction"` element carries its sliders as attributes on its
+/// own tag and its four point curves as child elements, and it carries its
+/// COMPONENTS inside `crs:CorrectionMasks`. Every slider read used to scan the
+/// whole correction segment, so an attribute named `crs:LocalExposure2012` on a
+/// nested `Mask/Paint` — or on anything else inside that component list —
+/// answered for the correction whenever the correction itself omitted the key.
+///
+/// Zero real Lightroom files do that (LR writes the Local* family on the
+/// Correction tag and nothing else carries those names), which is why the
+/// adjudication rated it LOW and adversarial-input-only. But the nearest real
+/// threat is already in the corpus: Lightroom really does put `crs:Local*`
+/// NAMES on nested `Mask/Image` components (`LocalInputDigest` and friends, 218
+/// measured instances), and today's reader survives that only because those
+/// values are strings nobody parses as a number — a coincidence, not a guard.
+///
+/// The member rule is the difference from [`crs_scope_inner`]: at the top level
+/// a child is foreign when it NESTS a settings block; inside a correction the
+/// component list is foreign BY NAME, because its members are `rdf:li`s that may
+/// carry no `rdf:Description` at all (Lightroom's attribute form for parametric
+/// shapes) and would otherwise stay in scope.
+fn correction_own_scope(seg: &str) -> std::borrow::Cow<'_, str> {
+    let start = match next_xml_tag(seg, 0) {
+        Some((s, _, _)) => s,
+        None => return std::borrow::Cow::Borrowed(seg),
+    };
+    match element_own_scope(seg, start, |name, nests_description| {
+        !nests_description && name != "crs:CorrectionMasks"
+    }) {
+        Some(s) => std::borrow::Cow::Owned(s),
+        // Markup this scanner cannot account for: fall back to the whole
+        // segment, which is the pre-5d behaviour and the same direction
+        // `crs_own_scope` degrades in. A correction this malformed is already
+        // heading for a refusal in `classify_correction`.
+        None => std::borrow::Cow::Borrowed(seg),
+    }
+}
+
+/// The shared walk behind [`crs_scope_inner`] and [`correction_own_scope`]: an
+/// element's opening tag plus the top-level children `keep` accepts, with
+/// everything else dropped. `keep(child element name, does it nest an
+/// `rdf:Description`)`.
+///
+/// TWO membership rules on ONE walk, deliberately — the same shape R28 Batch-3
+/// gave the rotate/storage raster sets. The alternative was a second copy of
+/// this scanner with one predicate changed, which is how the reader's scope law
+/// came to hold at the document level and not at the correction level in the
+/// first place.
+fn element_own_scope(
+    doc: &str,
+    start: usize,
+    keep: impl Fn(&str, bool) -> bool,
+) -> Option<String> {
     let (gt, self_closing) = scan_tag_end(doc, start)?;
     let mut out = doc[start..=gt].to_string();
     if self_closing {
@@ -3863,7 +3981,7 @@ fn crs_scope_inner(doc: &str) -> Option<String> {
                 // Dropping is the safe direction for a READ scope: the worst
                 // it can do is leave a property unread, and it can never let a
                 // nested settings block answer for the top level.
-                if name == open_name && (!nested || KEEP_NESTED.contains(&open_name.as_str())) {
+                if name == open_name && keep(&open_name, nested) {
                     out.push('\n');
                     out.push_str(&body[s..=gt2]);
                 }
@@ -3873,9 +3991,13 @@ fn crs_scope_inner(doc: &str) -> Option<String> {
         }
         if depth == 0 {
             if self_closing {
-                // No children to inspect — a bare property element is ours.
-                out.push('\n');
-                out.push_str(&body[p..=gt2]);
+                // No children to inspect — a bare property element is ours,
+                // unless the member rule refuses it by NAME (an empty
+                // `<crs:CorrectionMasks/>` is still the component list).
+                if keep(&name, false) {
+                    out.push('\n');
+                    out.push_str(&body[p..=gt2]);
+                }
             } else {
                 open = Some((p, name.clone(), false));
             }
@@ -4371,72 +4493,172 @@ fn upgrade_era_marker(doc: String) -> String {
         .replacen(r#"x:xmptk='Autoshop'"#, r#"x:xmptk='Autoshop 2'"#, 1)
 }
 
-/// Raw string value of a `crs:<key>="…"` attribute (first occurrence). The
-/// `crs:` anchor makes prefixed cousins unambiguous (`crs:Tint` can never match
-/// inside `crs:LocalTint`). pub(crate): the style index shares the
-/// WhiteBalance="Custom" provenance rule (as-shot Temperature/Tint are camera
-/// values, not user edits) — see `style::read_settings`.
-pub(crate) fn crs_str<'a>(
-    xmp: &'a str,
-    key: &str,
-) -> Option<std::borrow::Cow<'a, str>> {
-    if xmp.len() > MAX_XMP_BYTES {
-        return None;
-    }
-    let name = format!("crs:{key}");
-    if !xmp.trim_start().starts_with('<')
-        && let Some((_, raw)) = xml_attribute_raw(xmp, &name)
-    {
-        return Some(xml_unescape(raw));
-    }
+/// **The scope a `crs:` read is allowed to see — as a TYPE** (R28 Batch-5 5d,
+/// adjudication F4 root 1).
+///
+/// Every reader below used to take a bare `&str`, and that string carried TWO
+/// incompatible meanings depending on which call site produced it: "one
+/// element's start tag" (read its attributes) or "a subtree" (first match
+/// anywhere inside, children included). The distinction was a per-call-site
+/// CONVENTION — nothing in a signature said which was meant, nothing checked,
+/// and the difference is exactly the class of defect R27 Batch-4 hardened three
+/// sites against by hand (`components_in`, `correction_mask_components`,
+/// `base_element`) while `xmp.rs`'s own comment admitted "the older reads stay
+/// on `g`" was a survey, not an invariant.
+///
+/// So the scope is a type now. [`Tag`] can only ever answer from ONE element's
+/// attributes; [`Scope`] is the subtree search, and a call site that wants one
+/// cannot silently get the other — it has to name it.
+pub(crate) trait CrsSource<'a>: Copy {
+    /// Raw string value of `crs:<key>` within this source's scope. The `crs:`
+    /// anchor makes prefixed cousins unambiguous (`crs:Tint` can never match
+    /// inside `crs:LocalTint`).
+    fn crs_str(self, key: &str) -> Option<std::borrow::Cow<'a, str>>;
 
-    let mut from = 0;
-    while let Some((start, end, self_closing)) = next_xml_tag(xmp, from) {
-        let tag = &xmp[start..=end];
-        if !tag.starts_with("</") {
-            if let Some((_, raw)) = xml_attribute_raw(tag, &name) {
-                return Some(xml_unescape(raw));
-            }
-            if tag_name(tag) == name {
-                if self_closing {
-                    return Some(std::borrow::Cow::Borrowed(""));
-                }
-                // By NAME, not the literal `</crs:Key>`: `</crs:Key >` is the
-                // same close in XML, and the literal ran past it into the next
-                // occurrence (or off the document).
-                let close_at = element_close_start(xmp, &name, end)?;
-                return Some(xml_unescape(xmp[end + 1..close_at].trim()));
-            }
-        }
-        from = end + 1;
+    /// Numeric `crs:` value, tolerating ACR's explicit `+` (`"+22"`). `None`
+    /// if the key is absent, unparsable, or NON-FINITE: Rust's f32 parser
+    /// accepts "NaN"/"inf", no real sidecar writer emits them, and letting one
+    /// through imported a value the recipe clamp then silently neutralised
+    /// WITHOUT the unparsable-number disclosure ever firing.
+    fn crs_f32(self, key: &str) -> Option<f32> {
+        self.crs_str(key)?
+            .trim()
+            .trim_start_matches('+')
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite())
     }
-    None
 }
 
-fn find_crs_value_at(xmp: &str, key: &str, wanted: &str) -> Option<usize> {
-    if xmp.len() > MAX_XMP_BYTES {
-        return None;
-    }
-    let name = format!("crs:{key}");
-    if !xmp.trim_start().starts_with('<')
-        && let Some((_, raw)) = xml_attribute_raw(xmp, &name)
-        && xml_unescape(raw).as_ref() == wanted
-    {
-        return Some(0);
+/// ONE element's own start tag, `<` to `>` inclusive (or a bare attribute list).
+///
+/// A read against a `Tag` sees that element's ATTRIBUTES and nothing else: no
+/// body, no children, no siblings. It is the right scope for every per-component
+/// question — "what does THIS `<rdf:li crs:What="Mask/…">` say" — and it is not
+/// expressible as a subtree read, which is the point.
+#[derive(Clone, Copy)]
+pub(crate) struct Tag<'a>(&'a str);
+
+/// A SUBTREE: an element and everything nested inside it, or a whole document.
+///
+/// A read against a `Scope` takes the FIRST match anywhere inside, children
+/// included — which is what a whole-document read of `crs:Exposure2012` needs
+/// (the property may be an attribute on the Description or a child element of
+/// it) and what a per-element read must never get. When the enclosing element
+/// has nested settings that are somebody ELSE's, the scope is narrowed BEFORE
+/// it is built: [`crs_own_scope`] does that for the top-level Description and
+/// [`correction_own_scope`] for one correction.
+#[derive(Clone, Copy)]
+pub(crate) struct Scope<'a>(&'a str);
+
+impl<'a> Tag<'a> {
+    pub(crate) fn new(tag: &'a str) -> Self {
+        Tag(tag)
     }
 
-    let mut from = 0;
-    while let Some((start, end, _)) = next_xml_tag(xmp, from) {
-        let tag = &xmp[start..=end];
-        if !tag.starts_with("</")
-            && let Some((_, raw)) = xml_attribute_raw(tag, &name)
+    /// The underlying text, for the structural helpers (`tag_name`,
+    /// `next_xml_attribute`) that work on markup rather than on one property.
+    fn text(self) -> &'a str {
+        self.0
+    }
+}
+
+impl<'a> Scope<'a> {
+    pub(crate) fn new(text: &'a str) -> Self {
+        Scope(text)
+    }
+
+    /// The underlying text, for the structural helpers (`owned_element_body`,
+    /// `parse_curve_checked`, `next_xml_tag`) that walk markup rather than read
+    /// one property. `pub(crate)`: `eval`'s tone-curve reader is one of those
+    /// helpers and lives in another module.
+    pub(crate) fn text(self) -> &'a str {
+        self.0
+    }
+
+    /// Byte offset of the first tag inside this scope carrying
+    /// `crs:<key>="<wanted>"`. Subtree-wide BY DEFINITION — the callers are
+    /// "does this block hold a correction" and "where is the component list's
+    /// range mask", both of which are questions about a region.
+    fn find_value_at(self, key: &str, wanted: &str) -> Option<usize> {
+        let xmp = self.0;
+        if xmp.len() > MAX_XMP_BYTES {
+            return None;
+        }
+        let name = format!("crs:{key}");
+        if !xmp.trim_start().starts_with('<')
+            && let Some((_, raw)) = xml_attribute_raw(xmp, &name)
             && xml_unescape(raw).as_ref() == wanted
         {
-            return Some(start);
+            return Some(0);
         }
-        from = end + 1;
+
+        let mut from = 0;
+        while let Some((start, end, _)) = next_xml_tag(xmp, from) {
+            let tag = &xmp[start..=end];
+            if !tag.starts_with("</")
+                && let Some((_, raw)) = xml_attribute_raw(tag, &name)
+                && xml_unescape(raw).as_ref() == wanted
+            {
+                return Some(start);
+            }
+            from = end + 1;
+        }
+        None
     }
-    None
+}
+
+impl<'a> CrsSource<'a> for Tag<'a> {
+    /// Attributes only. No tag walk, no element-body form — a start tag HAS no
+    /// body, and a `Tag` built from something larger still cannot read past the
+    /// first element's attributes, because that is all `xml_attribute_raw`
+    /// looks at (`next_xml_attribute` stops at the tag's own `/` or `>`).
+    fn crs_str(self, key: &str) -> Option<std::borrow::Cow<'a, str>> {
+        if self.0.len() > MAX_XMP_BYTES {
+            return None;
+        }
+        let name = format!("crs:{key}");
+        xml_attribute_raw(self.0, &name).map(|(_, raw)| xml_unescape(raw))
+    }
+}
+
+impl<'a> CrsSource<'a> for Scope<'a> {
+    /// First occurrence anywhere in the subtree, in either XMP spelling: an
+    /// attribute on any tag, or a `<crs:Key>…</crs:Key>` property element.
+    fn crs_str(self, key: &str) -> Option<std::borrow::Cow<'a, str>> {
+        let xmp = self.0;
+        if xmp.len() > MAX_XMP_BYTES {
+            return None;
+        }
+        let name = format!("crs:{key}");
+        if !xmp.trim_start().starts_with('<')
+            && let Some((_, raw)) = xml_attribute_raw(xmp, &name)
+        {
+            return Some(xml_unescape(raw));
+        }
+
+        let mut from = 0;
+        while let Some((start, end, self_closing)) = next_xml_tag(xmp, from) {
+            let tag = &xmp[start..=end];
+            if !tag.starts_with("</") {
+                if let Some((_, raw)) = xml_attribute_raw(tag, &name) {
+                    return Some(xml_unescape(raw));
+                }
+                if tag_name(tag) == name {
+                    if self_closing {
+                        return Some(std::borrow::Cow::Borrowed(""));
+                    }
+                    // By NAME, not the literal `</crs:Key>`: `</crs:Key >` is
+                    // the same close in XML, and the literal ran past it into
+                    // the next occurrence (or off the document).
+                    let close_at = element_close_start(xmp, &name, end)?;
+                    return Some(xml_unescape(xmp[end + 1..close_at].trim()));
+                }
+            }
+            from = end + 1;
+        }
+        None
+    }
 }
 
 
@@ -4473,6 +4695,10 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
     }
 
     let scope = crs_own_scope(xmp);
+    // ONE `Scope` for every read below: the Description's OWN span, which is
+    // what this whole-document scan has always meant (R28 Batch-5 5d makes it
+    // say so in the type instead of by convention).
+    let scope = Scope::new(scope.as_ref());
     let mut bad: Vec<String> = owned_attr_keys()
         .into_iter()
         .filter(|k| !STRINGY.contains(&k.as_str()))
@@ -4489,8 +4715,9 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         // this scan falls back to and is a perfectly ordinary Upright result.
         .filter(|k| !PASSTHROUGH_CRS.contains(&k.as_str()))
         .filter(|k| {
-            crs_str(&scope, k).is_some()
-                && crs_f32(&scope, k)
+            scope.crs_str(k).is_some()
+                && scope
+                    .crs_f32(k)
                     .is_none_or(|v| !crs_number_is_in_recipe_range(k, v))
         })
         .collect();
@@ -4500,7 +4727,7 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         "ToneCurvePV2012Green",
         "ToneCurvePV2012Blue",
     ] {
-        if parse_curve_checked(&scope, tag).is_err() {
+        if parse_curve_checked(scope.text(), tag).is_err() {
             bad.push(tag.to_string());
         }
     }
@@ -4510,8 +4737,8 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
     // nobody asked for. Individually unparsable coordinates are named by the
     // generic scan above; absence and ordering are only visible to a check
     // of the structure as a whole (the curve rule, applied to the crop).
-    if crs_str(&scope, "HasCrop").as_deref() == Some("True") {
-        let coord = |k: &str| crs_f32(&scope, k).filter(|v| (0.0..=1.0).contains(v));
+    if scope.crs_str("HasCrop").as_deref() == Some("True") {
+        let coord = |k: &str| scope.crs_f32(k).filter(|v| (0.0..=1.0).contains(v));
         let consistent = match (
             coord("CropLeft"),
             coord("CropTop"),
@@ -4574,20 +4801,9 @@ fn crs_number_is_in_recipe_range(key: &str, value: f32) -> bool {
 
 
 
-/// Numeric `crs:` attribute, tolerating ACR's explicit `+` (`"+22"`). `None`
-/// if the key is absent, unparsable, or NON-FINITE: Rust's f32 parser accepts
-/// "NaN"/"inf", no real sidecar writer emits them, and letting one through
-/// imported a value the recipe clamp then silently neutralised WITHOUT the
-/// unparsable-number disclosure ever firing. Shared with the eval harness +
-/// style index (re-exported through `eval`).
-pub(crate) fn crs_f32(xmp: &str, key: &str) -> Option<f32> {
-    crs_str(xmp, key)?
-        .trim()
-        .trim_start_matches('+')
-        .parse::<f32>()
-        .ok()
-        .filter(|v| v.is_finite())
-}
+// `crs_f32` moved onto `CrsSource` in R28 Batch-5 5d — it is the same parse
+// applied to whatever `crs_str` answered, and leaving it as a free function
+// taking `&str` would have kept the untyped door open beside the typed one.
 
 /// Decode XML character references in one pass. Decoding `&amp;lt;` yields
 /// `&lt;`, not `<`, because the logical value must be unescaped exactly once.
@@ -4853,8 +5069,12 @@ fn mask_summary(
 /// The label this correction wears in every disclosure: its own
 /// `crs:CorrectionName`, else its position in the block. Blank names fall to
 /// the positional form — an empty slot in a comma list reads as a bug.
-fn correction_name(seg: &str, position: usize) -> String {
-    crs_str(seg, "CorrectionName")
+///
+/// `own` is the correction's OWN scope ([`correction_own_scope`]), not the
+/// whole segment: a nested component carrying a `crs:CorrectionName` would
+/// otherwise be able to name the correction it sits inside.
+fn correction_name(own: Scope<'_>, position: usize) -> String {
+    own.crs_str("CorrectionName")
         .map(|v| v.into_owned())
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| format!("Correction {position}"))
@@ -4895,8 +5115,13 @@ fn mask_summary_from_block(
         };
         let end = close + DESCRIPTION_CLOSE.len();
         let seg = &block[start..end];
-        let name = correction_name(seg, seen);
-        match classify_correction(seg, authored_by_autoshop, frame) {
+        // Built ONCE per correction and handed to both readers below, so the
+        // label a disclosure prints and the values the import takes cannot come
+        // from two different scopes (R28 Batch-5 5d).
+        let own = correction_own_scope(seg);
+        let own = Scope::new(own.as_ref());
+        let name = correction_name(own, seen);
+        match classify_correction(seg, own, authored_by_autoshop, frame) {
             MaskCorrectionParse::Supported(mask, reasons)
                 if summary.supported.len() < MAX_MASKS_FROM_XMP =>
             {
@@ -4914,7 +5139,7 @@ fn mask_summary_from_block(
         }
         at = end;
     }
-    if seen == 0 && find_crs_value_at(block, "What", "Correction").is_some() {
+    if seen == 0 && Scope::new(block).find_value_at("What", "Correction").is_some() {
         summary.record("Correction 1", MaskImportReason::OutOfModel);
         // An attribute-form group is a group: the scanner above walked past
         // it, but the document really does carry corrections and the merge's
@@ -4927,25 +5152,31 @@ fn mask_summary_from_block(
     summary
 }
 
-fn optional_scaled_number_in(
-    seg: &str,
+/// Generic over the SOURCE (R28 Batch-5 5d): the correction-wide gates ask a
+/// [`Scope`] and the per-component gates ask a [`Tag`], and both spellings of
+/// "absent is fine, present must be in band" are the same three lines. Being
+/// generic is also what stops the two from drifting into two copies with two
+/// different scope habits — the shape the untyped `&str` version had.
+fn optional_scaled_number_in<'a>(
+    src: impl CrsSource<'a>,
     key: &str,
     scale: f32,
     lo: f32,
     hi: f32,
 ) -> bool {
-    match crs_str(seg, key) {
+    match src.crs_str(key) {
         None => true,
-        Some(_) => crs_f32(seg, key)
+        Some(_) => src
+            .crs_f32(key)
             .map(|v| v * scale)
             .is_some_and(|v| (lo..=hi).contains(&v)),
     }
 }
 
-fn optional_number_is(seg: &str, key: &str, expected: f32) -> bool {
-    match crs_str(seg, key) {
+fn optional_number_is<'a>(src: impl CrsSource<'a>, key: &str, expected: f32) -> bool {
+    match src.crs_str(key) {
         None => true,
-        Some(_) => crs_f32(seg, key).is_some_and(|v| (v - expected).abs() <= 1e-6),
+        Some(_) => src.crs_f32(key).is_some_and(|v| (v - expected).abs() <= 1e-6),
     }
 }
 
@@ -4957,7 +5188,18 @@ fn optional_number_is(seg: &str, key: &str, expected: f32) -> bool {
 /// file does not say. A knob we simply have no model FOR is not: dropping the
 /// user's whole mask because it also carries a Moiré slider loses far more
 /// than it protects, and the note says exactly what did not come through.
-fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImportReason> {
+///
+/// `own` is the correction's OWN scope (R28 Batch-5 5d, adjudication F4
+/// symptom A) — the correction tag plus its property children, with the
+/// component list cut out. It used to be the whole segment, so a nested
+/// component carrying any of the names below answered for the correction
+/// whenever the correction itself omitted the key: an unknown
+/// `crs:LocalExposure2012` on a `Mask/Paint` was read as the correction's
+/// exposure, and the very same scan then reported the correction CLEAN, because
+/// the unknown-key walk below (correctly) looks only at the correction's own
+/// tag. Gate and reader now share one scope, which is the invariant that was
+/// missing.
+fn correction_value_reasons(own: Scope<'_>) -> Result<Vec<MaskImportReason>, MaskImportReason> {
     const KNOWN_LOCAL: [&str; 28] = [
         "LocalExposure",
         "LocalHue",
@@ -5024,11 +5266,11 @@ fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImpo
     ];
 
     if !matches!(
-        crs_str(seg, "CorrectionActive").as_deref(),
+        own.crs_str("CorrectionActive").as_deref(),
         None | Some("true")
-    ) || !optional_scaled_number_in(seg, "CorrectionAmount", 1.0, 0.0, 1.0)
-        || !optional_scaled_number_in(seg, "LocalExposure2012", 4.0, -5.0, 5.0)
-        || !optional_scaled_number_in(seg, "LocalLuminanceNoise", 100.0, 0.0, 100.0)
+    ) || !optional_scaled_number_in(own, "CorrectionAmount", 1.0, 0.0, 1.0)
+        || !optional_scaled_number_in(own, "LocalExposure2012", 4.0, -5.0, 5.0)
+        || !optional_scaled_number_in(own, "LocalLuminanceNoise", 100.0, 0.0, 100.0)
     {
         return Err(MaskImportReason::OutOfModel);
     }
@@ -5047,7 +5289,7 @@ fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImpo
         "LocalTemperature",
         "LocalTint",
     ] {
-        if !optional_scaled_number_in(seg, key, 100.0, -100.0, 100.0) {
+        if !optional_scaled_number_in(own, key, 100.0, -100.0, 100.0) {
             return Err(MaskImportReason::OutOfModel);
         }
     }
@@ -5063,17 +5305,17 @@ fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImpo
     // slider's own end stop ±100 is `±0.555556` there, which reads back as
     // ±100.00008. Gating at exactly 100 would refuse a mask for the wire
     // format's rounding — the band is one wire step wide and nothing else.
-    if !optional_scaled_number_in(seg, "LocalHue", 180.0, -100.001, 100.001) {
+    if !optional_scaled_number_in(own, "LocalHue", 180.0, -100.001, 100.001) {
         return Err(MaskImportReason::OutOfModel);
     }
     // Everything below this line is a NOTE, not a refusal.
     let mut reasons: Vec<MaskImportReason> = Vec::new();
     for key in INERT_LOCAL {
-        if !optional_number_is(seg, key, 0.0) {
+        if !optional_number_is(own, key, 0.0) {
             reasons.push(MaskImportReason::InertLocal(key));
         }
     }
-    if !optional_number_is(seg, "LocalCurveRefineSaturation", 100.0) {
+    if !optional_number_is(own, "LocalCurveRefineSaturation", 100.0) {
         reasons.push(MaskImportReason::CurveRefineSaturation);
     }
     // The four per-channel local curves are child ELEMENTS, so the attribute
@@ -5092,16 +5334,19 @@ fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImpo
     // draws, the same verdict `ForeignRangeMask` gets.
     if ["MainCurve", "RedCurve", "GreenCurve", "BlueCurve"]
         .iter()
-        .any(|k| parse_curve_checked(seg, k).is_err())
+        .any(|k| parse_curve_checked(own.text(), k).is_err())
     {
         reasons.push(MaskImportReason::LocalCurve);
     }
 
-    let Some((_, gt, _)) = next_xml_tag(seg, 0) else {
+    // The own scope BEGINS with the correction's start tag by construction
+    // (`element_own_scope` copies it first), so this walk sees exactly the
+    // attributes it always did.
+    let Some((_, gt, _)) = next_xml_tag(own.text(), 0) else {
         return Err(MaskImportReason::OutOfModel);
     };
     let mut cursor = 0;
-    while let Some(a) = next_xml_attribute(&seg[..=gt], &mut cursor) {
+    while let Some(a) = next_xml_attribute(&own.text()[..=gt], &mut cursor) {
         if let Some(local) = a.name.strip_prefix("crs:")
             && local.starts_with("Local")
             && !KNOWN_LOCAL.contains(&local)
@@ -5117,7 +5362,7 @@ fn correction_value_reasons(seg: &str) -> Result<Vec<MaskImportReason>, MaskImpo
 /// UNUSABLE, and the caller decides what that costs: a geometry takes the
 /// whole correction with it, a range component only takes itself.
 fn component_import_reasons(
-    tag: &str,
+    tag: Tag<'_>,
     what: &str,
     authored_by_autoshop: bool,
     frame: Option<FrameAspect>,
@@ -5128,7 +5373,7 @@ fn component_import_reasons(
     // A muted component changes what the mask covers — a value we can read but
     // have no model for, so it still refuses. (Compare the knobs below, which
     // are composition, not coverage.)
-    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true")) {
+    if !matches!(tag.crs_str("MaskActive").as_deref(), None | Some("true")) {
         return Err(());
     }
     // Lightroom's SUBTRACT is encoded as a PAIR, and `MaskValue="0"` is HALF of
@@ -5159,8 +5404,8 @@ fn component_import_reasons(
     // (`MaskBlendMode="1"` + `MaskValue="0"`, which IS this app's intersect
     // spelling) out of the branch — it is already the expected pair there.
     let subtracted = expected_value != 0.0
-        && crs_str(tag, "MaskBlendMode").is_some_and(|mode| mode.as_ref() != expected_mode)
-        && crs_f32(tag, "MaskValue").is_some_and(|v| v.abs() <= 1e-6);
+        && tag.crs_str("MaskBlendMode").is_some_and(|mode| mode.as_ref() != expected_mode)
+        && tag.crs_f32("MaskValue").is_some_and(|v| v.abs() <= 1e-6);
     if !subtracted && !optional_number_is(tag, "MaskValue", expected_value) {
         return Err(());
     }
@@ -5181,12 +5426,12 @@ fn component_import_reasons(
     // and this says so. Asked of the DECODER rather than re-derived here, so
     // the sentence the user reads and the geometry the render draws cannot
     // disagree.
-    if crs_str(tag, "Angle").is_some() && crs_f32(tag, "Angle").is_none_or(|v| v != 0.0) {
+    if tag.crs_str("Angle").is_some() && tag.crs_f32("Angle").is_none_or(|v| v != 0.0) {
         // The angle rides along so the disclosure can NAME it; an unreadable
         // one is a rotation we cannot measure, and `0` is this payload's word
         // for that (see the variant's doc). `as i32` saturates rather than
         // wrapping.
-        let readable = crs_f32(tag, "Angle");
+        let readable = tag.crs_f32("Angle");
         // Two ways the tilt fails to arrive, and the frame narrows only ONE of
         // them: a value we cannot PARSE is a rotation nobody can apply however
         // well the frame is known, and `parse_one_correction` reads it as 0.
@@ -5201,18 +5446,18 @@ fn component_import_reasons(
     // is deliberately NOT part of this test any more: the value says what it
     // says whoever wrote it, and requiring our own provenance is what refused
     // every Lightroom mask in the first place.
-    if crs_str(tag, "MaskBlendMode").is_some_and(|mode| mode.as_ref() != expected_mode) {
+    if tag.crs_str("MaskBlendMode").is_some_and(|mode| mode.as_ref() != expected_mode) {
         reasons.push(MaskImportReason::BlendMode);
     }
 
     match what {
         "Mask/Gradient" => {
             if matches!(
-                crs_str(tag, "MaskInverted").as_deref(),
+                tag.crs_str("MaskInverted").as_deref(),
                 None | Some("true") | Some("false")
             ) && ["ZeroX", "ZeroY", "FullX", "FullY"]
                 .iter()
-                .all(|key| crs_f32(tag, key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
+                .all(|key| tag.crs_f32(key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
             {
                 Ok(reasons)
             } else {
@@ -5245,19 +5490,19 @@ fn component_import_reasons(
             // exactly as it arrived. Whichever scale either meant, the file
             // gets its own number back.
             if !matches!(
-                crs_str(tag, "MaskInverted").as_deref(),
+                tag.crs_str("MaskInverted").as_deref(),
                 None | Some("true") | Some("false")
             ) || !matches!(
-                crs_str(tag, "Flipped").as_deref(),
+                tag.crs_str("Flipped").as_deref(),
                 None | Some("true") | Some("false")
             ) || !["Top", "Left", "Bottom", "Right"]
                 .iter()
-                .all(|key| crs_f32(tag, key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
-                || !crs_f32(tag, "Roundness").is_some_and(|v| (-100.0..=100.0).contains(&v))
+                .all(|key| tag.crs_f32(key).is_some_and(|v| (-8.0..=8.0).contains(&v)))
+                || !tag.crs_f32("Roundness").is_some_and(|v| (-100.0..=100.0).contains(&v))
             {
                 return Err(());
             }
-            let Some(raw) = crs_f32(tag, "Feather") else {
+            let Some(raw) = tag.crs_f32("Feather") else {
                 return Err(());
             };
             let feather = if raw > 1.0 || raw == raw.trunc() { raw / 100.0 } else { raw };
@@ -5276,11 +5521,11 @@ fn component_import_reasons(
             if matches!(
                 lr_to_engine(
                     LrRadial {
-                        top: crs_f32(tag, "Top").unwrap_or(0.0) as f64,
-                        left: crs_f32(tag, "Left").unwrap_or(0.0) as f64,
-                        bottom: crs_f32(tag, "Bottom").unwrap_or(0.0) as f64,
-                        right: crs_f32(tag, "Right").unwrap_or(0.0) as f64,
-                        angle_deg: crs_f32(tag, "Angle").unwrap_or(0.0) as f64,
+                        top: tag.crs_f32("Top").unwrap_or(0.0) as f64,
+                        left: tag.crs_f32("Left").unwrap_or(0.0) as f64,
+                        bottom: tag.crs_f32("Bottom").unwrap_or(0.0) as f64,
+                        right: tag.crs_f32("Right").unwrap_or(0.0) as f64,
+                        angle_deg: tag.crs_f32("Angle").unwrap_or(0.0) as f64,
                     },
                     frame,
                 ),
@@ -5295,7 +5540,7 @@ fn component_import_reasons(
         // caller turns this `Err` into a `ForeignRangeMask` note.
         "Mask/RangeMask" => {
             if authored_by_autoshop
-                && matches!(crs_str(tag, "MaskInverted").as_deref(), None | Some("true"))
+                && matches!(tag.crs_str("MaskInverted").as_deref(), None | Some("true"))
             {
                 Ok(reasons)
             } else {
@@ -5327,29 +5572,29 @@ fn component_import_reasons(
 ///    Lightroom never writes;
 ///  * the per-stroke gates in [`parse_paint_stroke`].
 fn parse_brush_group(scope: &str, agg: &XmlComponent<'_>) -> Result<MaskGeometry, ()> {
-    let tag = agg.tag;
+    let tag = Tag::new(agg.tag);
     // A muted component changes what the mask covers — refused for exactly the
     // reason `component_import_reasons` refuses a muted parametric shape.
-    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true")) {
+    if !matches!(tag.crs_str("MaskActive").as_deref(), None | Some("true")) {
         return Err(());
     }
     // The group's three composition attributes, carried VERBATIM. Absent reads
     // as Lightroom's default in each case (it writes all three on 39/39 real
     // Aggregates, so absence is a foreign writer's terseness, not a value).
-    let blend_mode = match crs_str(tag, "MaskBlendMode") {
+    let blend_mode = match tag.crs_str("MaskBlendMode") {
         None => 0u32,
         Some(v) => v.trim().parse::<u32>().map_err(|_| ())?,
     };
-    let value = match crs_str(tag, "MaskValue") {
+    let value = match tag.crs_str("MaskValue") {
         None => 1.0f32,
-        Some(_) => crs_f32(tag, "MaskValue").filter(|v| v.is_finite()).ok_or(())?,
+        Some(_) => tag.crs_f32("MaskValue").filter(|v| v.is_finite()).ok_or(())?,
     };
-    let inverted = match crs_str(tag, "MaskInverted").as_deref() {
+    let inverted = match tag.crs_str("MaskInverted").as_deref() {
         None | Some("false") => false,
         Some("true") => true,
         Some(_) => return Err(()),
     };
-    let name = crs_str(tag, "MaskName").map(|v| v.into_owned()).unwrap_or_default();
+    let name = tag.crs_str("MaskName").map(|v| v.into_owned()).unwrap_or_default();
 
     let Some(body) = component_body(scope, agg)? else {
         // Self-closing: an Aggregate with no `crs:Masks` child is a group with
@@ -5393,46 +5638,46 @@ fn parse_brush_group(scope: &str, agg: &XmlComponent<'_>) -> Result<MaskGeometry
 ///  * a child element other than `crs:Gesture`, or a Gesture holding anything
 ///    but `Mask/Paint` (83 Gestures, one Paint each).
 fn parse_ai_mask(scope: &str, img: &XmlComponent<'_>) -> Result<MaskGeometry, ()> {
-    let tag = img.tag;
-    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true")) {
+    let tag = Tag::new(img.tag);
+    if !matches!(tag.crs_str("MaskActive").as_deref(), None | Some("true")) {
         return Err(());
     }
     // The three composition attributes, read exactly as a brush group's are.
-    let blend_mode = match crs_str(tag, "MaskBlendMode") {
+    let blend_mode = match tag.crs_str("MaskBlendMode") {
         None => 0u32,
         Some(v) => v.trim().parse::<u32>().map_err(|_| ())?,
     };
-    let value = match crs_str(tag, "MaskValue") {
+    let value = match tag.crs_str("MaskValue") {
         None => 1.0f32,
-        Some(_) => crs_f32(tag, "MaskValue").filter(|v| v.is_finite()).ok_or(())?,
+        Some(_) => tag.crs_f32("MaskValue").filter(|v| v.is_finite()).ok_or(())?,
     };
-    let inverted = match crs_str(tag, "MaskInverted").as_deref() {
+    let inverted = match tag.crs_str("MaskInverted").as_deref() {
         None | Some("false") => false,
         Some("true") => true,
         Some(_) => return Err(()),
     };
-    let name = crs_str(tag, "MaskName").map(|v| v.into_owned()).unwrap_or_default();
+    let name = tag.crs_str("MaskName").map(|v| v.into_owned()).unwrap_or_default();
     // REQUIRED, not defaulted: an absent subtype is not "object", it is a
     // component this reader has never seen.
-    let subtype = crs_str(tag, "MaskSubType")
+    let subtype = tag.crs_str("MaskSubType")
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|v| (0..=2).contains(v))
         .ok_or(())?;
     // `"0.517578 0.260997"` — space separated, normalised. STRICT: a malformed
     // token used to be the kind of thing a `filter_map` would drop, leaving the
     // remaining value to shift into the wrong field.
-    let pt: Option<Vec<f32>> = crs_str(tag, "ReferencePoint")
+    let pt: Option<Vec<f32>> = tag.crs_str("ReferencePoint")
         .map(|s| s.split_whitespace().map(|x| x.parse::<f32>().ok()).collect::<Option<Vec<_>>>())
         .ok_or(())?;
     let pt = pt.filter(|v| v.len() == 2 && v.iter().all(|x| x.is_finite())).ok_or(())?;
-    let mask_version = crs_str(tag, "MaskVersion")
+    let mask_version = tag.crs_str("MaskVersion")
         .and_then(|v| v.trim().parse::<u32>().ok())
         .unwrap_or(1);
 
     // Every attribute on the element, in document order, split into "modelled
     // above", "carried as provenance", and "refused".
     let mut provenance: Vec<(String, String)> = Vec::new();
-    for (key, raw) in crs_attributes(tag) {
+    for (key, raw) in crs_attributes(tag.text()) {
         match key.as_str() {
             // Modelled, or an invariant this writer re-emits as a literal.
             "What" | "MaskActive" | "MaskName" | "MaskBlendMode" | "MaskInverted"
@@ -5494,30 +5739,31 @@ fn parse_ai_mask(scope: &str, img: &XmlComponent<'_>) -> Result<MaskGeometry, ()
 /// us which of the names we already knew were present — never that the document
 /// carried a name we have not measured, which is the case that means "not
 /// Lightroom's writer".
+///
+/// **R28 Batch-5 5d (F4 root 2 / symptom C): built on [`next_xml_attribute`]
+/// instead of a second hand-rolled lexer.** The old one searched for `crs:`,
+/// then for `=`, then for a DOUBLE QUOTE — so on a document written with
+/// single-quoted attributes (`crs:MaskSubType='0'`, legal XML that every parser
+/// but this one accepts) the first `find('"')` ran past the end of the tag or
+/// into an unrelated value. What that cost was not academic: the closed-
+/// vocabulary loop above saw an empty (or wrongly paired) attribute list, so it
+/// could neither refuse an unmeasured name nor CARRY the eleven provenance /
+/// digest keys — they were dropped on the way back out, silently, from a file
+/// this reader had just accepted.
+///
+/// `next_xml_attribute` is quote-complete (it takes whichever quote opens the
+/// value as the one that closes it), stops at the tag's own `/` or `>` rather
+/// than running into a body, and is the SAME reader
+/// `correction_value_reasons`' unknown-key walk already used — so the two scans
+/// of "what attributes does this element carry" are now one implementation
+/// rather than two with different ideas about XML.
 fn crs_attributes(tag: &str) -> Vec<(String, &str)> {
     let mut out = Vec::new();
-    let bytes = tag.as_bytes();
-    let mut i = 0;
-    while let Some(rel) = tag[i..].find("crs:") {
-        let start = i + rel;
-        // Must follow whitespace to be an attribute NAME rather than part of a
-        // value (a `crs:` inside a quoted string is data, not markup).
-        if start == 0 || !bytes[start - 1].is_ascii_whitespace() {
-            i = start + 4;
-            continue;
+    let mut cursor = 0;
+    while let Some(a) = next_xml_attribute(tag, &mut cursor) {
+        if let Some(local) = a.name.strip_prefix("crs:") {
+            out.push((local.to_string(), a.value));
         }
-        let after = start + 4;
-        let Some(eq_rel) = tag[after..].find('=') else { break };
-        let name = &tag[after..after + eq_rel];
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            i = after;
-            continue;
-        }
-        let rest = &tag[after + eq_rel + 1..];
-        let Some(q0) = rest.find('"') else { break };
-        let Some(q1_rel) = rest[q0 + 1..].find('"') else { break };
-        out.push((name.to_string(), &rest[q0 + 1..q0 + 1 + q1_rel]));
-        i = after + eq_rel + 1 + q0 + 1 + q1_rel + 1;
     }
     out
 }
@@ -5532,20 +5778,20 @@ fn crs_attributes(tag: &str) -> Vec<(String, &str)> {
 /// 300/300 in-correction instances, with no optional fields and no variation,
 /// so a missing one means this is not the encoding we measured.
 fn parse_paint_stroke(scope: &str, p: &XmlComponent<'_>) -> Result<BrushStroke, ()> {
-    let tag = p.tag;
-    if !matches!(crs_str(tag, "MaskActive").as_deref(), None | Some("true"))
-        || !matches!(crs_str(tag, "MaskBlendMode").as_deref(), None | Some("0"))
-        || !matches!(crs_str(tag, "MaskInverted").as_deref(), None | Some("false"))
+    let tag = Tag::new(p.tag);
+    if !matches!(tag.crs_str("MaskActive").as_deref(), None | Some("true"))
+        || !matches!(tag.crs_str("MaskBlendMode").as_deref(), None | Some("0"))
+        || !matches!(tag.crs_str("MaskInverted").as_deref(), None | Some("false"))
     {
         return Err(());
     }
-    let num = |k: &str| crs_f32(tag, k).filter(|v| v.is_finite()).ok_or(());
+    let num = |k: &str| tag.crs_f32(k).filter(|v| v.is_finite()).ok_or(());
     Ok(BrushStroke {
         value: num("MaskValue")?,
         radius: num("Radius")?,
         flow: num("Flow")?,
         center_weight: num("CenterWeight")?,
-        sync_id: crs_str(tag, "MaskSyncID").map(|v| v.into_owned()).unwrap_or_default(),
+        sync_id: tag.crs_str("MaskSyncID").map(|v| v.into_owned()).unwrap_or_default(),
         dabs: parse_dabs(scope, p)?,
     })
 }
@@ -5685,6 +5931,7 @@ fn range_values_are_supported(range: &RangeMask) -> bool {
 
 fn classify_correction(
     seg: &str,
+    own: Scope<'_>,
     authored_by_autoshop: bool,
     frame: Option<FrameAspect>,
 ) -> MaskCorrectionParse {
@@ -5727,7 +5974,8 @@ fn classify_correction(
     for component in components.iter().filter(|c| c.depth == 0) {
         {
             let (tag, what) = (component.tag, &component.what);
-            let verdict = component_import_reasons(tag, what.as_ref(), authored_by_autoshop, frame);
+            let verdict =
+                component_import_reasons(Tag::new(tag), what.as_ref(), authored_by_autoshop, frame);
             match what.as_ref() {
                 "Mask/Gradient" | "Mask/CircularGradient" => {
                     geometry_count += 1;
@@ -5877,12 +6125,12 @@ fn classify_correction(
     if ai_count > 0 {
         reasons.push(MaskImportReason::AiMaskRecomputed);
     }
-    match correction_value_reasons(seg) {
+    match correction_value_reasons(own) {
         Ok(rs) => reasons.extend(rs),
         Err(reason) => return MaskCorrectionParse::Unsupported(reason),
     }
 
-    let Some(mut parsed) = parse_one_correction(seg, frame) else {
+    let Some(mut parsed) = parse_one_correction(seg, own, frame) else {
         return MaskCorrectionParse::Unsupported(MaskImportReason::OutOfModel);
     };
     // A range we cannot honour costs the RANGE, not the mask: the geometry is
@@ -5960,7 +6208,7 @@ fn base_geometry_at(seg: &str) -> Option<usize> {
         // Absent counts as default: Lightroom writes the attribute on every
         // component it emits, and a component without one is not asserting a
         // composition (the same reading `component_import_reasons` takes).
-        if crs_str(c.tag, "MaskBlendMode").is_none_or(|m| m.as_ref() == "0") {
+        if Tag::new(c.tag).crs_str("MaskBlendMode").is_none_or(|m| m.as_ref() == "0") {
             first_base = first_base.or(Some(at));
         }
     }
@@ -6014,9 +6262,19 @@ fn base_element(seg: &str, p: usize) -> &str {
 /// invert the writer's: exposure ×4 (a power-of-two rescale, exact in binary
 /// FP), every other slider ×100 snapped to 4 decimals so `"0.3" → 30.0` lands
 /// back on the UI grid instead of 30.000002.
-fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAdjustment> {
+///
+/// `own` is the correction's OWN scope — every SLIDER below is read from it,
+/// never from the whole segment (R28 Batch-5 5d, F4 symptom A). The segment
+/// itself is still what the GEOMETRY reads walk, because the components live
+/// inside it and each of those reads is separately bounded to the component it
+/// belongs to.
+fn parse_one_correction(
+    seg: &str,
+    own: Scope<'_>,
+    frame: Option<FrameAspect>,
+) -> Option<LocalAdjustment> {
     let scaled = |k: &str, scale: f32| {
-        crs_f32(seg, k).map_or(0.0, |v| (v * scale * 10_000.0).round() / 10_000.0)
+        own.crs_f32(k).map_or(0.0, |v| (v * scale * 10_000.0).round() / 10_000.0)
     };
     let q100 = |k: &str| scaled(k, 100.0);
     let q180 = |k: &str| scaled(k, 180.0);
@@ -6061,7 +6319,7 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
                 // twice — and on a mask whose alpha has not resolved yet, the
                 // second spelling would turn zero coverage into a WHOLE-FRAME
                 // adjustment.
-                (ai_masks.remove(0), "")
+                (ai_masks.remove(0), Scope::new(""))
             } else if brushes.is_empty() {
                 return None;
             } else {
@@ -6073,24 +6331,28 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
             // render's weight loop reads, which on an inert brush would flip a
             // zero-coverage mask into a WHOLE-FRAME adjustment. The same
             // one-bit-one-home rule `lr_net_inverted` enforces for radials.
-            (brushes.remove(0), "")
+            (brushes.remove(0), Scope::new(""))
             }
         }
         Some(p) => {
-    let base_tag = next_xml_tag(seg, p).map_or(&seg[p..], |(s, e, _)| &seg[s..=e]);
-    let base_is_linear = xml_attribute_raw(base_tag, "crs:What")
+    let base_tag = Tag::new(next_xml_tag(seg, p).map_or(&seg[p..], |(s, e, _)| &seg[s..=e]));
+    let base_is_linear = xml_attribute_raw(base_tag.text(), "crs:What")
         .is_some_and(|(_, raw)| xml_unescape(raw).as_ref() == "Mask/Gradient");
     // HAZARD 3 (R27 Batch-4): every geometry read below is bounded to the base
     // component's OWN element instead of running to the end of the correction.
-    // See `base_element` for the bleed this closes.
-    let g = base_element(seg, p);
+    // See `base_element` for the bleed this closes. It stays a SCOPE and not a
+    // `Tag` deliberately (R28 Batch-5 5d): the element-form spelling of a
+    // component puts these values in a body, and narrowing a working read on no
+    // evidence is how a batch grows a regression — the same judgement the
+    // `geom_tag` note below records for the two reads that DO need the tag.
+    let g = Scope::new(base_element(seg, p));
     if base_is_linear {
         (
             MaskGeometry::Linear {
-                zero_x: crs_f32(g, "ZeroX")?,
-                zero_y: crs_f32(g, "ZeroY")?,
-                full_x: crs_f32(g, "FullX")?,
-                full_y: crs_f32(g, "FullY")?,
+                zero_x: g.crs_f32("ZeroX")?,
+                zero_y: g.crs_f32("ZeroY")?,
+                full_x: g.crs_f32("FullX")?,
+                full_y: g.crs_f32("FullY")?,
             },
             g,
         )
@@ -6116,7 +6378,7 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
         // Tested on the parsed VALUE (fractional ⇒ legacy 0..1), not the
         // text: "5e-1" carries no '.' yet is 0.5 — a text-shape test sent
         // it through /100.
-        let feather_raw = crs_f32(g, "Feather")?;
+        let feather_raw = g.crs_f32("Feather")?;
         let feather = if feather_raw > 1.0 || feather_raw == feather_raw.trunc() {
             feather_raw / 100.0
         } else {
@@ -6132,14 +6394,14 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
         // the file says.
         let decoded = lr_to_engine(
             LrRadial {
-                top: crs_f32(g, "Top")? as f64,
-                left: crs_f32(g, "Left")? as f64,
-                bottom: crs_f32(g, "Bottom")? as f64,
-                right: crs_f32(g, "Right")? as f64,
+                top: g.crs_f32("Top")? as f64,
+                left: g.crs_f32("Left")? as f64,
+                bottom: g.crs_f32("Bottom")? as f64,
+                right: g.crs_f32("Right")? as f64,
                 // Absent = unrotated. Lightroom writes the attribute on every
                 // radial, but an Autoshop sidecar written before v0.32.0 does
                 // not, and its box IS the axis-aligned ellipse.
-                angle_deg: crs_f32(geom_tag, "Angle").unwrap_or(0.0) as f64,
+                angle_deg: geom_tag.crs_f32("Angle").unwrap_or(0.0) as f64,
             },
             frame,
         );
@@ -6154,7 +6416,7 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
                 bottom: e.bottom as f32,
                 right: e.right as f32,
                 feather,
-                roundness: crs_f32(g, "Roundness")?,
+                roundness: g.crs_f32("Roundness")?,
                 // NOT `crs:Flipped` (R25 P9 — the defect this batch closed).
                 //
                 // This engine composes `Radial::flipped` and
@@ -6215,8 +6477,8 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
                 // The older reads above stay on `g`: no attribute they ask for
                 // appears twice inside a correction, and re-scoping a working
                 // read on no evidence is how a batch grows a regression.
-                midpoint: crs_f32(geom_tag, "Midpoint").filter(|v| v.is_finite()).unwrap_or(50.0),
-                mask_version: crs_str(geom_tag, "Version")
+                midpoint: geom_tag.crs_f32("Midpoint").filter(|v| v.is_finite()).unwrap_or(50.0),
+                mask_version: geom_tag.crs_str("Version")
                     .and_then(|v| v.trim().parse::<u32>().ok())
                     .unwrap_or(2),
             },
@@ -6250,35 +6512,51 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
     // Optional range component. Its head repeats `MaskInverted="true"` as part
     // of the intersect ENCODING (see `range_mask_xml`), so user intent is read
     // from the geometry component only — hence the `base_el`-anchored scan.
-    let range = find_crs_value_at(seg, "What", "Mask/RangeMask").and_then(|p| {
-
-
-        let r = &seg[p..];
-        // STRICT token parse (`collect::<Option<…>>`), not filter_map: a
-        // malformed token used to vanish, letting the remaining values shift
-        // one field left and still pass the length check.
-        if let Some(lum) = crs_str(r, "LumRange") {
-            let v: Option<Vec<f32>> =
-                lum.split_whitespace().map(|x| x.parse().ok()).collect();
-            let v = v?;
-            (v.len() == 4).then(|| RangeMask::Luminance {
-                lo_outer: v[0],
-                lo: v[1],
-                hi: v[2],
-                hi_outer: v[3],
-            })
-        } else if let Some(amount) = crs_f32(r, "ColorAmount") {
-            // PointModels entry: "r g b px py 0" (writer + LR convention).
-            let li = owned_element_body(r, "rdf:li").ok().flatten()?;
-            let v: Option<Vec<f32>> =
-                li.split_whitespace().map(|x| x.parse().ok()).collect();
-            let v = v?;
-            (v.len() >= 5)
-                .then(|| RangeMask::Color { r: v[0], g: v[1], b: v[2], amount, px: v[3], py: v[4] })
-        } else {
-            None
-        }
-    });
+    //
+    // R28 Batch-5 5d (F4 symptom B) — TWO scope defects, one fix. The search
+    // used to run over the WHOLE correction segment for the first tag saying
+    // `crs:What="Mask/RangeMask"`, so a Mask/RangeMask sitting anywhere —
+    // nested inside a brush group's `crs:Masks`, inside an AI mask's
+    // `crs:Gesture`, or even outside `crs:CorrectionMasks` entirely — was
+    // attached to this correction as its range. And once found, the reader ran
+    // from that offset to the END of the segment, so the `rdf:li` the colour
+    // arm parses could come from a later component altogether.
+    //
+    // Both close by asking the ONE component list this correction owns
+    // (`correction_mask_components`, the same answer `base_geometry_at` and the
+    // parser above use) for a TOP-LEVEL range component, and reading it from
+    // its own element. Real Lightroom is unaffected: it writes range masks as
+    // members of `crs:CorrectionMasks` and nowhere else.
+    let range = comps
+        .iter()
+        .find(|c| c.depth == 0 && c.what.as_ref() == "Mask/RangeMask")
+        .and_then(|c| {
+            let r = Scope::new(base_element(block, c.start));
+            // STRICT token parse (`collect::<Option<…>>`), not filter_map: a
+            // malformed token used to vanish, letting the remaining values shift
+            // one field left and still pass the length check.
+            if let Some(lum) = r.crs_str("LumRange") {
+                let v: Option<Vec<f32>> =
+                    lum.split_whitespace().map(|x| x.parse().ok()).collect();
+                let v = v?;
+                (v.len() == 4).then(|| RangeMask::Luminance {
+                    lo_outer: v[0],
+                    lo: v[1],
+                    hi: v[2],
+                    hi_outer: v[3],
+                })
+            } else if let Some(amount) = r.crs_f32("ColorAmount") {
+                // PointModels entry: "r g b px py 0" (writer + LR convention).
+                let li = owned_element_body(r.text(), "rdf:li").ok().flatten()?;
+                let v: Option<Vec<f32>> =
+                    li.split_whitespace().map(|x| x.parse().ok()).collect();
+                let v = v?;
+                (v.len() >= 5)
+                    .then(|| RangeMask::Color { r: v[0], g: v[1], b: v[2], amount, px: v[3], py: v[4] })
+            } else {
+                None
+            }
+        });
     Some(LocalAdjustment {
         mask,
         range,
@@ -6286,18 +6564,17 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
         // block above needs SOME CorrectionName) — importing that back as a
         // user-given name froze the placeholder and hid the localised
         // role/label. Round-trip it back to "unnamed".
-        name: crs_str(seg, "CorrectionName")
+        name: own
+            .crs_str("CorrectionName")
             .map(|v| v.into_owned())
-
-
             .filter(|n| {
                 n.strip_prefix("Autoshop ").is_none_or(|rest| rest.parse::<u32>().is_err())
             })
             .unwrap_or_default(),
-        amount: crs_f32(seg, "CorrectionAmount").unwrap_or(1.0),
+        amount: own.crs_f32("CorrectionAmount").unwrap_or(1.0),
         components,
-        inverted: crs_str(base_el, "MaskInverted").as_deref() == Some("true"),
-        exposure_ev: crs_f32(seg, "LocalExposure2012").unwrap_or(0.0) * 4.0,
+        inverted: base_el.crs_str("MaskInverted").as_deref() == Some("true"),
+        exposure_ev: own.crs_f32("LocalExposure2012").unwrap_or(0.0) * 4.0,
         contrast: q100("LocalContrast2012"),
         highlights: q100("LocalHighlights2012"),
         shadows: q100("LocalShadows2012"),
@@ -6352,10 +6629,17 @@ fn parse_one_correction(seg: &str, frame: Option<FrameAspect>) -> Option<LocalAd
         // form over the same four keys and raises `LocalCurve` for exactly the
         // curves this line drops. The two must stay in step; the pair is
         // pinned by `an_unreadable_local_curve_is_named_not_swallowed`.
-        main_curve: parse_curve(seg, "MainCurve"),
-        red_curve: parse_curve(seg, "RedCurve"),
-        green_curve: parse_curve(seg, "GreenCurve"),
-        blue_curve: parse_curve(seg, "BlueCurve"),
+        // The four local point curves are child ELEMENTS of the correction, and
+        // they read from its OWN scope for the same reason its sliders do (R28
+        // Batch-5 5d): `correction_value_reasons` gates them there through
+        // `parse_curve_checked`, and a gate and its reader that disagree about
+        // scope are exactly the defect this batch closed one line up. A
+        // `<crs:MainCurve>` nested inside a component is that component's, not
+        // this correction's.
+        main_curve: parse_curve(own.text(), "MainCurve"),
+        red_curve: parse_curve(own.text(), "RedCurve"),
+        green_curve: parse_curve(own.text(), "GreenCurve"),
+        blue_curve: parse_curve(own.text(), "BlueCurve"),
         // color_gains / role are engine-only and never reach a sidecar.
         ..Default::default()
     })
@@ -6415,15 +6699,18 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
     // (`is_autoshop_sidecar` above, the rationale comment below) deliberately
     // stay on the whole document — they live OUTSIDE the Description.
     let scope = crs_own_scope(xmp);
-    let scope = scope.as_ref();
+    // …and that scope is a TYPE now (R28 Batch-5 5d): `Scope` says "subtree,
+    // first match wins", which is what a whole-document read means and what a
+    // per-element read must never be handed.
+    let scope = Scope::new(scope.as_ref());
     // Any EXPLICIT white balance is a user decision, not the camera's: ACR
     // writes Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash — each
     // with its own Temperature+Tint — and accepting only "Custom" imported all
     // of them as as-shot, dropping a WB the photographer had chosen. (Absent
     // is treated as explicit for the same reason `eval`/`style` do: a sidecar
     // carrying Temperature without the mode is still a stated value.)
-    let custom_wb = crs_str(scope, "WhiteBalance").as_deref() != Some("As Shot");
-    let f = |k: &str| crs_f32(scope, k).unwrap_or(0.0);
+    let custom_wb = scope.crs_str("WhiteBalance").as_deref() != Some("As Shot");
+    let f = |k: &str| scope.crs_f32(k).unwrap_or(0.0);
     // The engine's own neutrals, for the ONE block whose neutral is not zero
     // (de-fringe, R25 B3) — `f`'s zero fallback would invent a hue window.
     let dflt = EditRecipe::default();
@@ -6450,7 +6737,7 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
     // (16-lane scan L05). The hue itself is already named by
     // `unparsable_crs_numbers`; zeroing the sat makes the wheel colourless.
     let wheel_sat = |hue_key: &str, sat_key: &str| -> f32 {
-        if crs_str(scope, hue_key).is_some() && crs_f32(scope, hue_key).is_none() {
+        if scope.crs_str(hue_key).is_some() && scope.crs_f32(hue_key).is_none() {
             0.0
         } else {
             f(sat_key)
@@ -6469,7 +6756,7 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
         global_hue: f("ColorGradeGlobalHue"),
         global_sat: wheel_sat("ColorGradeGlobalHue", "ColorGradeGlobalSat"),
         global_lum: f("ColorGradeGlobalLum"),
-        blending: crs_f32(scope, "ColorGradeBlending").unwrap_or(ColorGrade::default().blending),
+        blending: scope.crs_f32("ColorGradeBlending").unwrap_or(ColorGrade::default().blending),
         balance: f("SplitToningBalance"),
     };
     // Our own comment header carries the AI provenance back (best-effort; the
@@ -6484,7 +6771,7 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
         .unwrap_or_default();
 
     let mut r = EditRecipe {
-        temperature_k: custom_wb.then(|| crs_f32(scope, "Temperature")).flatten(),
+        temperature_k: custom_wb.then(|| scope.crs_f32("Temperature")).flatten(),
         tint: if custom_wb || ours { f("Tint") } else { 0.0 },
         exposure_ev: f("Exposure2012"),
         contrast: f("Contrast2012"),
@@ -6536,7 +6823,7 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
         color_nr_detail: f("ColorNoiseReductionDetail"),
         color_nr_smooth: f("ColorNoiseReductionSmoothness"),
         lens_vignette: f("VignetteAmount"),
-        lens_vignette_mid: crs_f32(scope, "VignetteMidpoint").unwrap_or(50.0),
+        lens_vignette_mid: scope.crs_f32("VignetteMidpoint").unwrap_or(50.0),
         lens_distortion: f("LensManualDistortionAmount"),
         ca_r: f("ChromaticAberrationR"),
         ca_b: f("ChromaticAberrationB"),
@@ -6544,7 +6831,7 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
         // the wild for a crs boolean — both are accepted, anything else (and
         // absence) is off.
         auto_lateral_ca: matches!(
-            crs_str(scope, "AutoLateralCA").as_deref().map(str::trim),
+            scope.crs_str("AutoLateralCA").as_deref().map(str::trim),
             Some("1") | Some("true") | Some("True")
         ),
         // De-fringe, the ONE block that falls back to ADOBE'S DEFAULT rather
@@ -6554,12 +6841,12 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
         // save would write that invented window into the sidecar beside the
         // RAW. `EditRecipe::default()` holds Adobe's 30/70 and 40/60, so a
         // document with no de-fringe block comes back exactly neutral.
-        defringe_purple: crs_f32(scope, "DefringePurpleAmount").unwrap_or(dflt.defringe_purple),
-        defringe_purple_lo: crs_f32(scope, "DefringePurpleHueLo").unwrap_or(dflt.defringe_purple_lo),
-        defringe_purple_hi: crs_f32(scope, "DefringePurpleHueHi").unwrap_or(dflt.defringe_purple_hi),
-        defringe_green: crs_f32(scope, "DefringeGreenAmount").unwrap_or(dflt.defringe_green),
-        defringe_green_lo: crs_f32(scope, "DefringeGreenHueLo").unwrap_or(dflt.defringe_green_lo),
-        defringe_green_hi: crs_f32(scope, "DefringeGreenHueHi").unwrap_or(dflt.defringe_green_hi),
+        defringe_purple: scope.crs_f32("DefringePurpleAmount").unwrap_or(dflt.defringe_purple),
+        defringe_purple_lo: scope.crs_f32("DefringePurpleHueLo").unwrap_or(dflt.defringe_purple_lo),
+        defringe_purple_hi: scope.crs_f32("DefringePurpleHueHi").unwrap_or(dflt.defringe_purple_hi),
+        defringe_green: scope.crs_f32("DefringeGreenAmount").unwrap_or(dflt.defringe_green),
+        defringe_green_lo: scope.crs_f32("DefringeGreenHueLo").unwrap_or(dflt.defringe_green_lo),
+        defringe_green_hi: scope.crs_f32("DefringeGreenHueHi").unwrap_or(dflt.defringe_green_hi),
         // Both halves come out of ONE decode (R27, `lr_to_engine_crop`): the
         // rectangle and the tilt are two faces of one rotated-corner encoding,
         // and reading either without the other is what made every straightened
@@ -6568,11 +6855,11 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
         crop: crop_read.crop(),
 
 
-        tone_curve: parse_curve(scope, "ToneCurvePV2012"),
-        red_curve: parse_curve(scope, "ToneCurvePV2012Red"),
-        green_curve: parse_curve(scope, "ToneCurvePV2012Green"),
-        blue_curve: parse_curve(scope, "ToneCurvePV2012Blue"),
-        masks: parse_masks(scope, ours, frame),
+        tone_curve: parse_curve(scope.text(), "ToneCurvePV2012"),
+        red_curve: parse_curve(scope.text(), "ToneCurvePV2012Red"),
+        green_curve: parse_curve(scope.text(), "ToneCurvePV2012Green"),
+        blue_curve: parse_curve(scope.text(), "ToneCurvePV2012Blue"),
+        masks: parse_masks(scope.text(), ours, frame),
 
         // The PASS-THROUGH blocks (R25 B4), read as STRINGS and stored
         // verbatim. `crs_str` already reads BOTH spellings — the
@@ -6587,7 +6874,7 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
         // imported the PROFILE's name whenever the top level omitted one.
         passthrough: PASSTHROUGH_CRS
             .iter()
-            .filter_map(|k| crs_str(scope, k).map(|v| ((*k).to_string(), v.into_owned())))
+            .filter_map(|k| scope.crs_str(k).map(|v| ((*k).to_string(), v.into_owned())))
             .collect(),
 
         rationale,
@@ -7393,12 +7680,16 @@ mod tests {
         // correction's components live, and the fixture wears the wrapper its
         // production caller always supplies.
         let li = r#"<crs:CorrectionMasks><rdf:Seq><rdf:li crs:What="Mask/CircularGradient" crs:Top="0.2" crs:Left="0.2" crs:Bottom="0.8" crs:Right="0.8" crs:Feather="72" crs:Roundness="0" crs:Flipped="false"/></rdf:Seq></crs:CorrectionMasks>"#;
-        let m = parse_one_correction(li, None).expect("radial parses");
+        // The correction's own scope is empty here BY CONSTRUCTION: this
+        // fixture is a bare component list with no correction tag around it,
+        // so there are no sliders to read and the geometry is the whole claim.
+        let m = parse_one_correction(li, Scope::new(""), None).expect("radial parses");
         let MaskGeometry::Radial { feather, .. } = m.mask else { panic!("radial") };
         assert!((feather - 0.72).abs() < 1e-6, "LR 72 → 0.72, got {feather}");
         // …while a legacy own-writer value (≤ 1.0) passes through verbatim.
         let legacy = li.replace(r#"crs:Feather="72""#, r#"crs:Feather="0.4""#);
-        let m = parse_one_correction(&legacy, None).expect("legacy radial parses");
+        let m =
+            parse_one_correction(&legacy, Scope::new(""), None).expect("legacy radial parses");
         let MaskGeometry::Radial { feather, .. } = m.mask else { panic!("radial") };
         assert!((feather - 0.4).abs() < 1e-6, "legacy 0.4 stays 0.4, got {feather}");
     }
@@ -8605,7 +8896,7 @@ mod tests {
     /// catalog therefore arrived as nothing, and the only thing said about it
     /// was an integer count.
     ///
-    /// MUTATION THIS CATCHES: put `crs_str(tag, "Angle").is_some()` back into
+    /// MUTATION THIS CATCHES: put `tag.crs_str("Angle").is_some()` back into
     /// the refusal and this test goes to zero masks — which is exactly the
     /// state the round opened in.
     #[test]
@@ -9876,17 +10167,18 @@ mod tests {
             // Both attributes read off the SAME component tag — the pair is
             // the claim, and two whole-document `contains` could each be
             // satisfied by a different component.
-            let p = find_crs_value_at(&xmp, "What", "Mask/CircularGradient")
+            let p = Scope::new(xmp.as_str())
+                .find_value_at("What", "Mask/CircularGradient")
                 .expect("the radial must be emitted");
             let (s, e, _) = next_xml_tag(&xmp, p).expect("its component tag");
-            let tag = &xmp[s..=e];
+            let tag = Tag::new(&xmp[s..=e]);
             assert_eq!(
-                crs_str(tag, "MaskInverted").as_deref(),
+                tag.crs_str("MaskInverted").as_deref(),
                 Some(if net { "true" } else { "false" }),
                 "flipped={flipped} inverted={inverted}: the net must reach crs:MaskInverted"
             );
             assert_eq!(
-                crs_str(tag, "Flipped").as_deref(),
+                tag.crs_str("Flipped").as_deref(),
                 Some(if net { "false" } else { "true" }),
                 "flipped={flipped} inverted={inverted}: and its complement crs:Flipped — a \
                  matching pair is one Lightroom never writes, and it is what makes this \
@@ -11729,8 +12021,9 @@ mod tests {
                 {
                     continue;
                 }
-                let f = crs_str(tag, "Flipped").map(|v| v.as_ref() == "true");
-                let i = crs_str(tag, "MaskInverted").map(|v| v.as_ref() == "true");
+                let tag = Tag::new(tag);
+                let f = tag.crs_str("Flipped").map(|v| v.as_ref() == "true");
+                let i = tag.crs_str("MaskInverted").map(|v| v.as_ref() == "true");
                 let (Some(f), Some(i)) = (f, i) else {
                     panic!("{name}: a radial without both flags — {f:?} / {i:?}");
                 };
@@ -12333,8 +12626,9 @@ mod tests {
   </rdf:Description>
  </rdf:RDF>
 </x:xmpmeta>"#;
-        assert_eq!(crs_f32(lr, "Temperature"), None, "NaN is not a Kelvin");
-        assert_eq!(crs_f32(lr, "Contrast2012"), None, "inf is not a slider");
+        let lr_scope = Scope::new(lr);
+        assert_eq!(lr_scope.crs_f32("Temperature"), None, "NaN is not a Kelvin");
+        assert_eq!(lr_scope.crs_f32("Contrast2012"), None, "inf is not a slider");
         let r = xmp_to_recipe(lr);
         assert_eq!(r.temperature_k, None);
         assert_eq!(r.contrast, 0.0);
@@ -12980,7 +13274,7 @@ mod tests {
 
         let foreign = r#"<rdf:Description crs:CorrectionName = "Bob&apos;s &#x3C;sky&#62; &#38; &quot;sea&quot;"/>"#;
         assert_eq!(
-            crs_str(foreign, "CorrectionName").as_deref(),
+            Tag::new(foreign).crs_str("CorrectionName").as_deref(),
             Some(r#"Bob's <sky> & "sea""#)
         );
     }
@@ -13242,7 +13536,7 @@ mod tests {
         xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
        <crs:Exposure2012>+0.65</crs:Exposure2012 >
       </rdf:Description>"#;
-        assert_eq!(crs_f32(doc, "Exposure2012"), Some(0.65));
+        assert_eq!(Scope::new(doc).crs_f32("Exposure2012"), Some(0.65));
     }
 
     /// Present-but-unreadable is a DISCLOSED loss, not "no curve": the
@@ -13696,5 +13990,212 @@ mod tests {
         // The pair is CARRIED verbatim for the writer even though the render
         // reads the projected `MaskCombine` — two spellings of one fact.
         assert_eq!((*blend_mode, *value), (1, 0.0));
+    }
+
+    // ================================================================
+    // R28 Batch-5 5d — THE FOUR ADVERSARIAL SCOPE FIXTURES (F4 A–D)
+    //
+    // All four are documents no Lightroom writes; the adjudication rated the
+    // whole finding "mechanism real, zero sites reachable from real LR". They
+    // are here because the DEFENCE used to be a coincidence — real Lightroom
+    // happens not to put these names in these places — and a coincidence is not
+    // a guard. The typed scope (`Tag` / `Scope`) plus the two narrowed searches
+    // make them refusals by construction, and these four fixtures say so.
+    // ================================================================
+
+    /// A correction with NO `crs:LocalExposure2012` of its own, one gradient
+    /// component, and whatever `extra` / `stray` the caller plants.
+    ///
+    /// `extra` goes on the COMPONENT (inside `crs:CorrectionMasks`); `stray` is
+    /// spliced in as a child of the correction itself, before the component
+    /// list. Hand-written rather than built from `lr_correction` deliberately:
+    /// the point of A is a correction that OMITS a slider, and the Lightroom
+    /// fixture writes every one of them.
+    ///
+    /// Authored by US (`x:xmptk="Autoshop 2"`), which matters for exactly one
+    /// thing: `component_import_reasons` accepts a `Mask/RangeMask` only on our
+    /// own documents (someone else's range encoding is not ours to interpret).
+    /// A Lightroom-authored fixture would drop the range for THAT reason and
+    /// the B control below could not tell the two refusals apart.
+    fn scope_bleed_doc(extra: &str, stray: &str) -> String {
+        format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Autoshop 2\">\n\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             <rdf:Description rdf:about=\"\"\n\
+             \x20 xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n\
+             \x20 crs:HasSettings=\"True\">\n\
+             \x20<crs:MaskGroupBasedCorrections><rdf:Seq>\n\
+             \x20 <rdf:li><rdf:Description crs:What=\"Correction\"\n\
+             \x20  crs:CorrectionAmount=\"1\" crs:CorrectionActive=\"true\"\n\
+             \x20  crs:CorrectionName=\"Mask 1\" crs:LocalContrast2012=\"0.2\">\n\
+             {stray}\
+             \x20  <crs:CorrectionMasks><rdf:Seq>\n\
+             \x20   <rdf:li crs:What=\"Mask/Gradient\" crs:MaskActive=\"true\"\n\
+             \x20    crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\" crs:MaskValue=\"1\"\n\
+             \x20    crs:ZeroX=\"0.5\" crs:ZeroY=\"0.8\" crs:FullX=\"0.5\" crs:FullY=\"0.2\"{extra}/>\n\
+             \x20  </rdf:Seq></crs:CorrectionMasks>\n\
+             \x20 </rdf:Description></rdf:li>\n\
+             \x20</rdf:Seq></crs:MaskGroupBasedCorrections>\n\
+             </rdf:Description></rdf:RDF></x:xmpmeta>\n"
+        )
+    }
+
+    /// **F4 SYMPTOM A** — a slider name on a NESTED component must not answer
+    /// for the correction.
+    ///
+    /// The correction states no `crs:LocalExposure2012`; its gradient component
+    /// carries one, at a value (`9`, i.e. +36 EV on the ×4 file scale) far
+    /// outside Lightroom's own slider. The pre-5d reader scanned the whole
+    /// correction segment for every slider, so it found the component's number
+    /// and REFUSED the entire correction as out-of-model — the photographer
+    /// lost a mask because of an attribute on a shape.
+    ///
+    /// The nearest real threat this closes: Lightroom really does write
+    /// `crs:Local*` NAMES on nested components (`LocalInputDigest` and friends,
+    /// 218 measured instances). They are strings nobody parses as numbers
+    /// today, which is why nothing has caught fire — a coincidence, now a
+    /// guard.
+    ///
+    /// MUTATION: hand `correction_value_reasons` / `parse_one_correction` the
+    /// whole `seg` again instead of `own`, and the first assertion goes red.
+    #[test]
+    fn a_nested_components_slider_name_cannot_answer_for_the_correction() {
+        let doc = scope_bleed_doc(" crs:LocalExposure2012=\"9\"", "");
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the correction must still import: {:?}", r.masks);
+        assert_eq!(
+            r.masks[0].exposure_ev, 0.0,
+            "the correction states no exposure; the component's number is not its value"
+        );
+        // The correction's OWN sliders still arrive — this is a narrowing, not
+        // a blindfold.
+        assert_eq!(r.masks[0].contrast, 20.0, "crs:LocalContrast2012=0.2 → +20");
+        assert_eq!(unsupported_corrections(&doc), 0, "and nothing was dropped");
+    }
+
+    /// **F4 SYMPTOM B** — a `Mask/RangeMask` outside `crs:CorrectionMasks` is
+    /// not this correction's range.
+    ///
+    /// The stray element below sits inside the correction but outside its
+    /// component list, so no component walk ever counts it — which is exactly
+    /// why attaching it was SILENT: `range_count` stayed 0, so the
+    /// `ForeignRangeMask` disclosure could not fire either. The old search was
+    /// a first-occurrence scan over the whole segment, and the reader then ran
+    /// from that offset to the END of the segment, so even the colour arm's
+    /// `rdf:li` could come from an unrelated component.
+    ///
+    /// MUTATION: restore `Scope::new(seg).find_value_at("What",
+    /// "Mask/RangeMask")` + `&seg[p..]` and the range comes back.
+    #[test]
+    fn a_range_mask_outside_the_component_list_is_not_attached() {
+        let stray = "\x20 <rdf:li crs:What=\"Mask/RangeMask\" crs:MaskActive=\"true\"\n\
+                     \x20  crs:MaskBlendMode=\"1\" crs:MaskValue=\"0\" crs:MaskInverted=\"true\"\n\
+                     \x20  crs:LumRange=\"0 0.2 0.8 1\"/>\n";
+        let doc = scope_bleed_doc("", stray);
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "the correction still imports: {:?}", r.masks);
+        assert!(
+            r.masks[0].range.is_none(),
+            "a range mask outside the component list is not this correction's: {:?}",
+            r.masks[0].range
+        );
+        // …and the control: the SAME range component, INSIDE the list, is.
+        let inside = scope_bleed_doc("", "").replace(
+            "</rdf:Seq></crs:CorrectionMasks>",
+            "<rdf:li crs:What=\"Mask/RangeMask\" crs:MaskActive=\"true\" \
+             crs:MaskBlendMode=\"1\" crs:MaskValue=\"0\" crs:MaskInverted=\"true\" \
+             crs:LumRange=\"0 0.2 0.8 1\"/></rdf:Seq></crs:CorrectionMasks>",
+        );
+        let r = xmp_to_recipe(&inside);
+        assert!(
+            matches!(r.masks[0].range, Some(RangeMask::Luminance { .. })),
+            "an in-list range component must still be read, or this test proves nothing: {:?}",
+            r.masks[0].range
+        );
+    }
+
+    /// **F4 SYMPTOM C** — single-quoted attributes are legal XML, and the AI
+    /// mask's closed-vocabulary gate has to run on them.
+    ///
+    /// `crs_attributes` hand-rolled its own lexer and looked for a DOUBLE
+    /// quote, so on this document it found none and returned an empty list.
+    /// Two consequences, both silent: the eleven provenance / digest keys were
+    /// dropped on write-back (Lightroom's own recompute ledger, gone from a
+    /// file we had just accepted), and the refusal loop that is supposed to
+    /// reject an unmeasured attribute name never looked at anything.
+    ///
+    /// MUTATION: restore the `find('"')` lexer — the first half loses the
+    /// digests, the second half stops refusing.
+    #[test]
+    fn single_quoted_attributes_carry_provenance_and_still_refuse_the_unknown() {
+        let ai = |extra: &str| {
+            format!(
+                "       <rdf:li><rdf:Description crs:What='Mask/Image' crs:MaskActive='true'\n\
+                 \x20        crs:MaskName='Sky 1' crs:MaskBlendMode='0' crs:MaskInverted='false'\n\
+                 \x20        crs:MaskSyncID='440777CD3CB8E24BB8E16028893B45DC' crs:MaskValue='1'\n\
+                 \x20        crs:MaskVersion='1' crs:MaskSubType='2'\n\
+                 \x20        crs:ReferencePoint='0.605469 0.281525'\n\
+                 \x20        crs:InputDigest='D0DAC04EB58F013F49D93EF47D22794E'\n\
+                 \x20        crs:ModelVersion='234881976'{extra}/></rdf:li>\n"
+            )
+        };
+        let doc = lr_doc(&lr_correction("Mask 1", "", &ai("")));
+        let r = xmp_to_recipe(&doc);
+        assert_eq!(r.masks.len(), 1, "a single-quoted AI mask imports: {:?}", r.masks);
+        let MaskGeometry::AiMask { provenance, .. } = &r.masks[0].mask else {
+            panic!("expected an AI mask, got {:?}", r.masks[0].mask);
+        };
+        assert_eq!(
+            provenance.len(),
+            2,
+            "both provenance keys must be CARRIED, not silently dropped: {provenance:?}"
+        );
+        // …and they come back out, which is the loss the photographer feels.
+        let out = recipe_to_xmp(&r);
+        assert!(
+            out.contains("crs:InputDigest=\"D0DAC04EB58F013F49D93EF47D22794E\"")
+                && out.contains("crs:ModelVersion=\"234881976\""),
+            "the digests must survive the round trip:\n{out}"
+        );
+        // The refusal loop runs on legal XML now: an unmeasured name costs the
+        // correction, exactly as it does with double quotes.
+        let bogus = lr_doc(&lr_correction("Mask 1", "", &ai(" crs:Bogus='1'")));
+        assert!(
+            xmp_to_recipe(&bogus).masks.is_empty(),
+            "an attribute outside the measured vocabulary must still refuse"
+        );
+    }
+
+    /// **F4 SYMPTOM D** — the declared frame comes from ONE `rdf:Description`.
+    ///
+    /// Width, length and orientation used to be three independent
+    /// first-occurrence searches over the whole document, so a packet carrying
+    /// a `tiff:ImageWidth` in one element and the real pair in another produced
+    /// a frame no element declares — and that frame is the coordinate system
+    /// every mask and crop decode folds pixel geometry with (`lr_to_engine`).
+    ///
+    /// MUTATION: point the three reads back at `doc` and the frame becomes
+    /// 6000 × 6336, which this file never states.
+    #[test]
+    fn the_declared_frame_comes_from_one_description() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+             <rdf:Description rdf:about=\"\" xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n\
+             \x20 tiff:ImageWidth=\"6000\"/>\n\
+             <rdf:Description rdf:about=\"\" xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n\
+             \x20 tiff:ImageWidth=\"9504\" tiff:ImageLength=\"6336\" tiff:Orientation=\"1\"/>\n\
+             </rdf:RDF></x:xmpmeta>";
+        let frame = FrameAspect::from_xmp(doc).expect("the second Description declares a frame");
+        assert_eq!(
+            (frame.w, frame.h),
+            (9504.0, 6336.0),
+            "both dimensions must come from the element that declares both"
+        );
+        // A document with no `rdf:Description` at all still reads: the
+        // narrowing has nothing to protect in a bare fragment, and fixtures in
+        // this module that hand `from_xmp` a snippet rely on it.
+        let bare = "tiff:ImageWidth=\"800\" tiff:ImageLength=\"600\"";
+        let frame = FrameAspect::from_xmp(bare).expect("a bare fragment still declares a frame");
+        assert_eq!((frame.w, frame.h), (800.0, 600.0));
     }
 }

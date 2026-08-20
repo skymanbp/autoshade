@@ -423,8 +423,9 @@ exist only per mask: a SIGNED `sharpness` (positive sharpens, negative softens
 — ACR's local band, R23-1b) and `hue`, a rotation of every colour under the
 mask (R23-1b; the global mixer moves one band across the whole frame instead).
 `texture` was a third until R25 gave it a global twin — the two now share one
-operator and one radius model, which is what lets the engine assert that a
-full-coverage masked Texture is bit-identical to the global one. Since R25 a
+operator and one radius model (`render::texture_pass`, one function since
+v0.34.0), which is what lets the engine assert that a full-coverage masked
+Texture is bit-identical to the global one at BOTH signs. Since R25 a
 mask also carries **four point curves** of its own (`main_curve` /
 `red_curve` / `green_curve` / `blue_curve`, LR's bare `crs:MainCurve` … with
 no `PV2012` suffix and no space after the comma — deliberately NOT the global
@@ -845,12 +846,29 @@ curves → 8-band HSL → colour grading → clarity → **texture** →
 saturation/vibrance → noise reduction → sharpening → local adjustments
 (linear/radial/bitmap masks).
 
-Two R25 additions ride existing stages rather than adding one. **Texture** is
-the same `unsharp_luma` operator as clarity at a small radius with no midtone
-mask (0.005·min(w,h), floor 2), placed between clarity and saturation for ACR's
-Basic-panel order and sharing the mask path's radius model verbatim — so
-「Texture +30」 means the same structure globally and inside a mask, on a
-1280 px preview and at 61 MP. **Manual CA** (`ca_r`/`ca_b`) folds into the
+Two R25 additions ride existing stages rather than adding one. **Texture**
+(`render::texture_pass`) is a small-radius detail operator (0.005·min(w,h),
+floor 2), placed between clarity and saturation for ACR's Basic-panel order and
+called by the global stage and the mask arm alike — so 「Texture +30」 means the
+same structure globally and inside a mask, on a 1280 px preview and at 61 MP.
+**Its two halves are not the same operator, since v0.34.0.** Positive is the
+plain `unsharp_luma` of clarity at that radius, measured against Lightroom in
+R27. Negative is **band-limited**: it subtracts `blur(r/4) − blur(blur(r/4), r)`
+rather than the full high-pass, so the transfer returns to 1 at both ends of the
+spectrum and dips only in the middle (the coarse plane is the fine one blurred
+further, so the band is bounded by the fine blur's own response). The old negative half ran the same
+unsharp with a negative amount, whose endpoint is exactly the blur — 「Texture
+−100」 was a full Gaussian blur that erased edges and fine detail, which the
+visual-inspection package measured (σ −92 %) and Lightroom's mid-band control
+does not do. **This IS a rendering change for every negative texture value,
+global and per mask.** There is no Lightroom ground truth in this repository for
+the negative transfer curve, so the fine-radius fraction and the notch depth are
+OURS, chosen to keep the endpoint band-limited, not fitted to Adobe — the same
+stance `manual_vignette_lut` takes, and the XMP still carries the raw slider so
+Lightroom re-renders it with its own model. What is pinned by test is the SHAPE
+(`texture_at_minus_100_is_band_limited_not_a_full_blur`: at −100 a 4 px tone
+keeps 96 % of its contrast, where the old branch left 0.1 %, while a 16 px tone
+still loses 71 %). **Manual CA** (`ca_r`/`ca_b`) folds into the
 per-channel radial factor the lens-profile CA correction already builds
 (`MANUAL_CA_PER_UNIT = 2e-5` per slider unit, i.e. ±0.2 % of the half-diagonal
 at the ends — derived beside the constant), so it is a scaling of an existing
@@ -872,9 +890,9 @@ Clarity/dehaze/texture became engine-rendered in R22 (feedback
 Lightroom, so a mask that moved only those three did nothing in-app; recipes
 saved before R22 re-render with the local effect, which the user signed off on).
 Local dehaze shares the global haze model, with the airlight estimated once per
-frame so mask order cannot change it; clarity and texture are the same
-mask-weighted unsharp operator at a large midtone-masked radius and a small
-plain one. Two deliberate residues vs the global order are documented at
+frame so mask order cannot change it; clarity is a mask-weighted unsharp at a
+large midtone-masked radius, and texture is `texture_pass` at a small one —
+the same function the global stage calls, negative branch included. Two deliberate residues vs the global order are documented at
 `render::apply_masks`: local Temp/Tint lands after local dehaze, and local
 saturation before local clarity/texture — splitting the fused WB/tone/saturation
 blend to fix either would change the output of every existing partial-weight
@@ -1323,6 +1341,20 @@ The user's **finished edits** are ground truth. If they're Lightroom XMP/develop
 settings, diff the AI recipe against them; if they're exported JPEGs, compare the
 AI render perceptually. Lets us measure "does the AI match *how the user*
 develops a shot?" and tune the advisor prompt accordingly.
+
+**One row changed meaning in v0.34.0** (`eval::hue_carries_colour`). The four
+`color_grade.*_hue` rows now count a photo only when BOTH sides put saturation
+on that wheel, above the ruler's own movement deadband. A toning wheel's hue is
+an angle, and the wheel paints nothing at zero saturation, so a hue delta
+between two colourless wheels was arithmetic on noise: the R27 147-photo
+baseline read `shadow_hue mean|Δ| = 141`, an artifact of two neutral wheels
+parked at opposite ends of a circle. The real finding it was burying is one row
+down and unchanged — `shadow_sat` bias **+9.02**, the AI tinting shadows the
+photographer leaves neutral. Consequences, stated: those four rows' `n` /
+`mean|Δ|` / `AI-omit` are **not comparable** with any pre-v0.34.0 run (the eval
+report prints that line itself), and a photo where only one side toned no
+longer reaches the hue row at all — its omission is recorded on the `*_sat` row,
+which is the control that carries the decision. Every other row is untouched.
 
 **Three surfaces, one loader (R23-2).** The library
 ([`src/style.rs`](../src/style.rs)) is built from RAW+`.xmp` pairs by

@@ -136,7 +136,7 @@ pub fn render_to_image_in(
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
     validated.disclose();
     let recipe = &*validated;
-    let rasters = load_mask_raster_snapshot(recipe)?;
+    let rasters = load_mask_raster_snapshot(recipe, Some(raw_path))?;
     // Decode scope: the RawSource holds the entire RAW file in memory
     // (~60–120 MB for a 61 MP lossless ARW), and neither it nor the decoder
     // outlives the sensor read — so the file bytes drop HERE instead of
@@ -780,11 +780,19 @@ fn rgb16_source(img: &DynamicImage) -> Cow<'_, ImageBuffer<Rgb<u16>, Vec<u16>>> 
 /// resolution-normalised stages (masks, sharpen, geometry) are what make the
 /// capped result meaningful rather than merely smaller; they are the same
 /// shared functions the RAW path calls, so the two arms cap identically.
+///
+/// `photo` is the file these pixels were decoded FROM, and it is used for
+/// nothing but stamping the mask loader's stderr warnings with the photograph
+/// (R28 Batch-5 5c). `None` is legitimate for a caller that really is holding
+/// anonymous pixels; `render_to_file`'s baked arm has the path and passes it,
+/// which is what puts the baked half of a parallel `batch` on the same footing
+/// as the RAW half.
 pub fn render_baked_to_image(
     img: &DynamicImage,
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
     max_edge: Option<u32>,
+    photo: Option<&Path>,
 ) -> Result<DynamicImage> {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
@@ -792,7 +800,7 @@ pub fn render_baked_to_image(
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
     validated.disclose();
     let recipe = &*validated;
-    let rasters = load_mask_raster_snapshot(recipe)?;
+    let rasters = load_mask_raster_snapshot(recipe, photo)?;
     // The photographer's quarter turns FIRST — before the cap and before every
     // develop stage, exactly where `orient_f32` sits on the RAW path, and for
     // the same reason: masks / crop / straighten are defined against what the
@@ -1445,14 +1453,23 @@ pub fn stage_and_publish(
 /// profile unconditionally — verified in the crate source); if a future
 /// version regresses, the pixels are still correctly encoded, just untagged —
 /// so warn instead of failing the whole export.
-fn tag_icc<E: ImageEncoder>(enc: &mut E, space: ExportColorSpace) {
+///
+/// `photo` is the source this export came from, and it exists for ONE reason:
+/// the warning below is ungated and lands on a shared stderr that a parallel
+/// `batch` interleaves in completion order (R28 Batch-5 5c). Threaded as a
+/// parameter rather than read from anywhere, because nothing here knows a
+/// photo — that is the honest shape of a leaf.
+fn tag_icc<E: ImageEncoder>(enc: &mut E, space: ExportColorSpace, photo: Option<&Path>) {
     let profile = match space {
         ExportColorSpace::Srgb => SRGB_ICC,
         ExportColorSpace::DisplayP3 => DISPLAY_P3_ICC,
         ExportColorSpace::AdobeRgb => ADOBE_RGB_ICC,
     };
     if let Err(e) = enc.set_icc_profile(profile.to_vec()) {
-        eprintln!("⚠ could not embed the {space:?} ICC profile: {e:?}");
+        eprintln!(
+            "⚠ {}could not embed the {space:?} ICC profile: {e:?}",
+            crate::pipeline::attribution(photo)
+        );
     }
 }
 
@@ -1506,7 +1523,7 @@ pub fn render_to_file(
         // the finished pixels, which is not the same thing as developing at a
         // bounded working resolution and must not be quietly swapped for it —
         // the RAW arm above passes `None` for exactly the same reason.
-        render_baked_to_image(&src, recipe, denoise, None)?
+        render_baked_to_image(&src, recipe, denoise, None, Some(src_path))?
     };
     if let Some(le) = opts.long_edge
         && le > 0
@@ -1585,7 +1602,7 @@ pub fn render_to_file(
             let mut wr = create(&staged)?;
             let mut enc =
                 image::codecs::jpeg::JpegEncoder::new_with_quality(&mut wr, opts.jpeg_quality.clamp(1, 100));
-            tag_icc(&mut enc, space);
+            tag_icc(&mut enc, space, Some(src_path));
             enc.write_image(rgb8.as_raw(), rgb8.width(), rgb8.height(), image::ExtendedColorType::Rgb8)
                 .with_context(|| format!("encode jpeg {}", out.display()))?;
             wr.flush().with_context(|| format!("flush {}", out.display()))?;
@@ -1593,7 +1610,7 @@ pub fn render_to_file(
         "tif" | "tiff" => {
             let mut wr = create(&staged)?;
             let mut enc = image::codecs::tiff::TiffEncoder::new(&mut wr);
-            tag_icc(&mut enc, space);
+            tag_icc(&mut enc, space, Some(src_path));
             // 8-bit on request (阶段4): the depth is an EXPORT SETTING, not
             // an extension property — a .tif says nothing about bits.
             if opts.eight_bit {
@@ -1609,7 +1626,7 @@ pub fn render_to_file(
         "png" => {
             let mut wr = create(&staged)?;
             let mut enc = image::codecs::png::PngEncoder::new(&mut wr);
-            tag_icc(&mut enc, space);
+            tag_icc(&mut enc, space, Some(src_path));
             if opts.eight_bit {
                 DynamicImage::ImageRgb8(img.to_rgb8())
                     .write_with_encoder(enc)
@@ -1747,19 +1764,22 @@ fn apply_develop_with_rasters(
         let radius = ((0.02 * w.min(h) as f32).round() as usize).max(8);
         unsharp_luma(data, w, h, radius, r.clarity / 100.0, true);
     }
-    // 3b) texture — the SAME unsharp operator at a small radius and with no
-    //     midtone mask, so it works fine detail across the whole tonal range
-    //     where clarity works midtone volume (R25 B2). Placed between clarity
-    //     and saturation for ACR's Basic-panel order, and sharing the mask
-    //     path's radius model verbatim (`apply_masks`, the `m.texture` arm) —
-    //     one calibration, so "Texture +30" means the same structure globally
-    //     and inside a mask, at a 1280 px preview and at 61 MP.
-    //     `unsharp_luma` is `unsharp_luma_weighted` at weight 1, so this adds
-    //     no new mechanism, and it runs and DROPS its planes before the next
+    // 3b) texture — a small-radius detail operator with no midtone mask, so it
+    //     works fine detail across the whole tonal range where clarity works
+    //     midtone volume (R25 B2). Placed between clarity and saturation for
+    //     ACR's Basic-panel order, and sharing the mask path's operator
+    //     VERBATIM (`apply_masks`, the `m.texture` arm) — one calibration, so
+    //     "Texture +30" means the same structure globally and inside a mask, at
+    //     a 1280 px preview and at 61 MP.
+    //     The radius model, the positive branch and the negative one all live
+    //     in `texture_pass` now (R28 Batch-5 5a): the two arms used to hold two
+    //     copies of the same three lines, which is how a one-sided fix to the
+    //     −100 endpoint would have split the calibration in half. At weight 1
+    //     the positive branch is still exactly `unsharp_luma`, so this adds no
+    //     new mechanism there, and it runs and DROPS its planes before the next
     //     stage like the other two spatial passes.
     if r.texture != 0.0 {
-        let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
-        unsharp_luma(data, w, h, radius, r.texture / 100.0, false);
+        texture_pass(data, w, h, r.texture / 100.0, |_, _, _| 1.0);
     }
     // 3) saturation / vibrance.
     let (sat, vib) = (r.saturation / 100.0, r.vibrance / 100.0);
@@ -2316,16 +2336,16 @@ fn apply_masks(
             unsharp_luma_weighted(data, w, h, radius, m.clarity / 100.0, true, spatial_weight);
         }
         if m.texture != 0.0 {
-            // Texture = the same unsharp operator at a SMALL radius and with no
-            // midtone mask, so it works fine detail across the whole tonal
-            // range where clarity works midtone volume. The GLOBAL texture
-            // stage (R25 B2, `apply_develop` stage 3b) uses this very formula,
-            // so the two are one calibration — 0.5% of the short edge, floored
-            // at 2 px, still OURS because Adobe's model is proprietary. Same
-            // honesty stance as `manual_vignette_lut`: the XMP carries the raw
-            // slider value, so Lightroom re-renders it with its own model.
-            let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
-            unsharp_luma_weighted(data, w, h, radius, m.texture / 100.0, false, spatial_weight);
+            // Texture = a SMALL-radius detail operator with no midtone mask, so
+            // it works fine detail across the whole tonal range where clarity
+            // works midtone volume. The GLOBAL texture stage (R25 B2,
+            // `apply_develop` stage 3b) calls the SAME function, so the two are
+            // one calibration — 0.5% of the short edge floored at 2 px, and
+            // since R28 Batch-5 a band-limited negative half, both still OURS
+            // because Adobe's model is proprietary. Same honesty stance as
+            // `manual_vignette_lut`: the XMP carries the raw slider value, so
+            // Lightroom re-renders it with its own model.
+            texture_pass(data, w, h, m.texture / 100.0, spatial_weight);
         }
         if m.sharpness != 0.0 {
             // The GLOBAL sharpening stage's own radius model (stage 5,
@@ -2786,12 +2806,27 @@ pub(crate) fn is_raster_backed(g: &MaskGeometry) -> bool {
     matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::AiMask { .. })
 }
 
-fn load_mask_raster_snapshot(recipe: &EditRecipe) -> Result<MaskRasterSnapshot> {
-    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, true)
+/// `photo` rides along ONLY to stamp the loader's stderr warnings with the
+/// photograph they belong to (R28 Batch-5 5c) — a `batch --jobs 3` interleaves
+/// three photos' warnings on one stderr in completion order, and "mask raster
+/// '…/mask-1.png' is inert" names a file inside a hashed store directory, not a
+/// picture the photographer can find. It changes nothing about what loads.
+fn load_mask_raster_snapshot(
+    recipe: &EditRecipe,
+    photo: Option<&Path>,
+) -> Result<MaskRasterSnapshot> {
+    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, true, photo)
 }
 
+/// The PREVIEW arm, and the one place that genuinely has no photo to name:
+/// `apply_develop` is handed pixels, a width and a height. Passing `None` here
+/// is the registered residue of 5c — closing it means a caller-supplied
+/// diagnostics sink (adjudication F6's deepest root), which this batch
+/// deliberately did NOT build. The interactive surfaces this arm serves have a
+/// window and a mask list to say it in ([`dead_bitmap_rasters`]), so the
+/// unattributed stderr line is not the user's only channel there.
 fn best_effort_mask_raster_snapshot(recipe: &EditRecipe) -> MaskRasterSnapshot {
-    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, false)
+    load_mask_raster_snapshot_with_budget(recipe, MASK_RASTER_BUDGET_BYTES, false, None)
         .unwrap_or_default()
 }
 
@@ -2815,7 +2850,9 @@ pub fn dead_bitmap_rasters(m: &crate::recipe::LocalAdjustment) -> Vec<String> {
             let name = geometry_raster_path(g)
                 .map(str::to_string)
                 .unwrap_or_else(|| "AI mask (not yet recomputed)".to_string());
-            load_mask_bitmap(g).is_none().then_some(name)
+            // GUI mask list, no photograph in scope and none needed: this is
+            // a UI probe, and the row it feeds IS the disclosure.
+            load_mask_bitmap(g, None).is_none().then_some(name)
         })
         .collect()
 }
@@ -2945,9 +2982,14 @@ fn load_mask_raster_snapshot_with_budget(
     recipe: &EditRecipe,
     budget_bytes: usize,
     strict: bool,
+    photo: Option<&Path>,
 ) -> Result<MaskRasterSnapshot> {
     let mut snapshot = MaskRasterSnapshot::default();
     let mut held_bytes = 0usize;
+    // Every `eprintln!` below is ungated and worker-reachable, so each carries
+    // the photograph (R28 Batch-5 5c). The `bail!`s do not: an error message
+    // travels up a `Result` to a caller that names the photo itself.
+    let who = crate::pipeline::attribution(photo);
 
     // The active set and its per-file projection come from
     // `active_bitmap_rasters` / `raster_projected_bytes` — the same two the
@@ -2973,13 +3015,13 @@ fn load_mask_raster_snapshot_with_budget(
                     );
                 }
                 eprintln!(
-                    "mask raster '{path}' skipped: the active raster set exceeds the \
+                    "{who}mask raster '{path}' skipped: the active raster set exceeds the \
                      {budget_bytes}-byte aggregate budget"
                 );
                 continue;
             }
         }
-        let Some(bitmap) = load_mask_bitmap(geometry) else {
+        let Some(bitmap) = load_mask_bitmap(geometry, photo) else {
             if strict {
                 bail!(
                     "mask raster '{path}' for mask '{label}' is unreadable — no pixels were rendered"
@@ -2996,7 +3038,7 @@ fn load_mask_raster_snapshot_with_budget(
                 );
             }
             eprintln!(
-                "mask raster '{path}' skipped: the active raster set exceeds the \
+                "{who}mask raster '{path}' skipped: the active raster set exceeds the \
                  {budget_bytes}-byte aggregate budget"
             );
             continue;
@@ -3009,7 +3051,7 @@ fn load_mask_raster_snapshot_with_budget(
                 );
             }
             eprintln!(
-                "mask raster '{path}' skipped: the active raster set exceeds the \
+                "{who}mask raster '{path}' skipped: the active raster set exceeds the \
                  {budget_bytes}-byte aggregate budget"
             );
             continue;
@@ -3052,7 +3094,19 @@ fn combined_mask_weight(
 /// photo+target, see the GUI's start_segment) — a path-only key would serve
 /// the stale mask forever. Failure warns and returns None (the mask renders
 /// inert instead of killing the develop).
-fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>> {
+///
+/// `photo` stamps those two warnings with the photograph (R28 Batch-5 5c), and
+/// carries ONE caveat worth stating: the negative result is CACHED, so the
+/// warning fires once per (path, mtime) and names the photo that hit it FIRST.
+/// A mask raster lives in its own photo's develop directory, so in practice
+/// that is the only photo it can belong to; two recipes pointing at one raster
+/// would see the first name stick. Naming a photo that owns the file beats
+/// naming none, and the alternative (warn per call) is the per-tick flood this
+/// cache exists to stop.
+fn load_mask_bitmap(
+    g: &MaskGeometry,
+    photo: Option<&Path>,
+) -> Option<std::sync::Arc<image::GrayImage>> {
     use std::sync::{Arc, Mutex, OnceLock};
     // Keyed by Option<(mtime, size)>: mtime alone misses a same-length-of-
     // time overwrite on coarse-timestamp filesystems (the thumb cache already
@@ -3096,16 +3150,17 @@ fn load_mask_bitmap(g: &MaskGeometry) -> Option<std::sync::Arc<image::GrayImage>
         .is_some_and(|(w, h)| {
             (w as usize).saturating_mul(h as usize).saturating_mul(4) > MASK_RASTER_BUDGET_BYTES
         });
+    let who = crate::pipeline::attribution(photo);
     let decoded = if over_budget {
         eprintln!(
-            "⚠ bitmap mask '{path}' exceeds the {MASK_RASTER_BUDGET_BYTES}-byte mask budget — mask is inert"
+            "⚠ {who}bitmap mask '{path}' exceeds the {MASK_RASTER_BUDGET_BYTES}-byte mask budget — mask is inert"
         );
         None
     } else {
         match image::open(path) {
             Ok(img) => Some(Arc::new(img.to_luma8())),
             Err(e) => {
-                eprintln!("⚠ bitmap mask '{path}' could not be loaded ({e}) — mask is inert");
+                eprintln!("⚠ {who}bitmap mask '{path}' could not be loaded ({e}) — mask is inert");
                 None
             }
         }
@@ -3178,9 +3233,9 @@ pub fn mask_coverage(
     if !m.enabled {
         return image::GrayImage::new(w, h);
     }
-    let bmp = load_mask_bitmap(&m.mask);
+    let bmp = load_mask_bitmap(&m.mask, None);
     let comp_bmps: Vec<Option<std::sync::Arc<image::GrayImage>>> =
-        m.components.iter().map(|c| load_mask_bitmap(&c.geometry)).collect();
+        m.components.iter().map(|c| load_mask_bitmap(&c.geometry, None)).collect();
     // Same load-failure contract as `apply_masks` (inert, inversion included,
     // components included), so the overlay never advertises coverage the
     // render will not apply.
@@ -3336,6 +3391,100 @@ fn unsharp_luma_weighted(
             let detail = l - blurred[i];
             let m = if midtone { 1.0 - (2.0 * l - 1.0).powi(2) } else { 1.0 };
             let new_l = (l + amount * detail * m * wgt).clamp(0.0, 1.0);
+            scale_chroma(px, l, new_l);
+        }
+    });
+}
+
+/// **The texture operator** — the ONE calibration the global stage
+/// ([`apply_develop`] 3b) and the mask arm ([`apply_masks`]) both call, so
+/// "Texture −40" cannot come to mean two different things depending on whether
+/// a mask is in the way. `amount` is the slider ÷ 100 (−1..=1) and the radius is
+/// the resolution-normalised one both arms have shared since R25 B2: 0.5 % of
+/// the short edge, floored at 2 px.
+///
+/// **POSITIVE — unchanged, and measured.** A plain unsharp mask at that radius
+/// with no midtone weighting: `l + amount·(l − blur)`. R27 P2 measured this half
+/// against Lightroom and it is not touched here.
+///
+/// **NEGATIVE — band-limited since R28 Batch-5 (5a), and NOT measured.** The old
+/// negative half ran the same formula with a negative amount, which makes the
+/// transfer `1 − |amount|·(1 − G)`: at the endpoint that is exactly `G`, i.e.
+/// the frame REPLACED by its own blur. The visual-inspection pack measured it
+/// (`crops/D-texture-m100__branches.jpg`, σ −92 %) and it is a full Gaussian
+/// blur — every scale finer than the radius gone, edges included. Lightroom's
+/// Texture is a mid-frequency control: at −100 it smooths the mid band and
+/// leaves fine detail and edges standing.
+///
+/// So the negative half extracts a BAND instead of everything above a cutoff:
+///
+/// ```text
+///   band  = blur(luma, r_fine) − blur(blur(luma, r_fine), radius)
+///   new_l = l − |amount|·band
+/// ```
+///
+/// with `r_fine = max(1, radius/4)`. The transfer is then `1 − |amount|·(G_f −
+/// G_c)`, which tends to 1 at BOTH ends of the spectrum — fine detail survives
+/// (`G_f → 0`) and large structure survives (`G_f − G_c → 0`) — and dips in the
+/// middle, where the smoothing is meant to happen. The coarse plane is the fine
+/// one blurred FURTHER, so the band is `G_f·(1 − G_r)` — bounded by the fine
+/// blur's own response rather than free to run away. (Exactly: three box passes
+/// are a sinc³, whose first side-lobe reaches ≈ −1 %, so the band can exceed 1
+/// by about that much in one razor-thin frequency; the endpoint response there
+/// is ≈ −0.01 instead of 0. That is a hundredth of a code, not an inversion a
+/// photograph can show — stated rather than rounded to "never".)
+///
+/// `r_fine` is a FRACTION of the radius, not a fixed pixel count, because the
+/// whole texture calibration is resolution-normalised: a fixed floor would make
+/// "Texture −60" preserve a different band on a 1280 px preview than on the
+/// 61 MP export, which is the exact promise R25 B2 made.
+///
+/// **What is NOT measured, stated plainly.** There is no Lightroom ground truth
+/// in this tree for the negative-texture transfer curve — no controlled export
+/// of a −100 frame to fit against — so `r_fine = radius/4` and the notch depth
+/// are OURS, chosen to keep the endpoint band-limited, not fitted to Adobe. What
+/// the endpoint test pins is the SHAPE (fine detail survives, the mid band
+/// drops), which is the property the old parameterisation could not have; the
+/// exact curve is an approximation and the sidecar carries the raw slider value
+/// so Lightroom re-renders it with its own model — the same stance
+/// [`manual_vignette_lut`] takes.
+///
+/// The cascade is also why this needs no third plane: `coarse` is blurred FROM
+/// `fine` (σ² adds), so the pass holds two f32 planes exactly like the positive
+/// one, and `l` is recomputed from the pixel — which is the same number the
+/// dropped luma plane held, since each pixel is read before it is written.
+fn texture_pass(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    amount: f32,
+    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
+) {
+    let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
+    if amount >= 0.0 {
+        unsharp_luma_weighted(data, w, h, radius, amount, false, weight);
+        return;
+    }
+    if w == 0 || h == 0 {
+        return; // par_chunks_mut(0) asserts; a 0-dim frame has no pixels anyway
+    }
+    let fine_radius = (radius / 4).max(1);
+    let fine = {
+        let luma: Vec<f32> = data.par_iter().map(luma601).collect();
+        blur_plane(&luma, w, h, fine_radius)
+    };
+    let coarse = blur_plane(&fine, w, h, radius);
+    let strength = -amount;
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let wgt = weight(x, y, px);
+            if wgt <= 0.001 {
+                continue;
+            }
+            let i = y * w + x;
+            let l = luma601(px);
+            let band = fine[i] - coarse[i];
+            let new_l = (l - strength * band * wgt).clamp(0.0, 1.0);
             scale_chroma(px, l, new_l);
         }
     });
@@ -5772,18 +5921,18 @@ mod tests {
 
         // Uncapped = the source's own resolution (what the export path asks).
         assert_eq!(
-            render_baked_to_image(&big, &r, None, None).unwrap().dimensions(),
+            render_baked_to_image(&big, &r, None, None, None).unwrap().dimensions(),
             (400, 200)
         );
         // Capped on the LONG edge, aspect kept.
         assert_eq!(
-            render_baked_to_image(&big, &r, None, Some(100)).unwrap().dimensions(),
+            render_baked_to_image(&big, &r, None, Some(100), None).unwrap().dimensions(),
             (100, 50)
         );
         // Never upsampled.
         let small = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 48, image::Rgb([3, 4, 5])));
         assert_eq!(
-            render_baked_to_image(&small, &r, None, Some(2048)).unwrap().dimensions(),
+            render_baked_to_image(&small, &r, None, Some(2048), None).unwrap().dimensions(),
             (64, 48)
         );
 
@@ -5800,7 +5949,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_baked_to_image(&big, &cropped, None, Some(100)).unwrap().dimensions(),
+            render_baked_to_image(&big, &cropped, None, Some(100), None).unwrap().dimensions(),
             (50, 50),
             "the crop must be taken from the CAPPED frame — i.e. the cap ran first"
         );
@@ -8177,7 +8326,7 @@ mod tests {
             ..Default::default()
         };
         let r = EditRecipe { masks: vec![m], ..Default::default() };
-        let err = load_mask_raster_snapshot(&r)
+        let err = load_mask_raster_snapshot(&r, None)
             .expect_err("a component raster counts for the deliverable refusal");
         assert!(
             err.to_string().contains("carved"),
@@ -9596,6 +9745,146 @@ d 0.113862 0.987261"
         );
     }
 
+    /// A frame of vertical SINUSOIDAL stripes at `period` px, ±0.06 around mid
+    /// grey. Sinusoidal and not square: a square wave's edges are broadband, so
+    /// its peak-to-peak measures every frequency at once and cannot say which
+    /// BAND a filter took — which is the whole question below. One tone per
+    /// probe, and the peak-to-peak reads that tone's transfer directly.
+    fn stripe_frame(w: usize, h: usize, period: usize) -> Vec<[f32; 3]> {
+        let mut data = Vec::with_capacity(w * h);
+        for _ in 0..h {
+            for x in 0..w {
+                let phase = std::f32::consts::TAU * x as f32 / period as f32;
+                let v = 0.5 + 0.06 * phase.sin();
+                data.push([v, v, v]);
+            }
+        }
+        data
+    }
+
+    /// Peak-to-peak luma of the middle row, sampled away from the borders so
+    /// the box blur's clamped edge seeding cannot answer for the interior.
+    fn stripe_contrast(data: &[[f32; 3]], w: usize, h: usize) -> f32 {
+        let row = (h / 2) * w;
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for x in (w / 4)..(3 * w / 4) {
+            let l = luma601(&data[row + x]);
+            lo = lo.min(l);
+            hi = hi.max(l);
+        }
+        hi - lo
+    }
+
+    /// R28 Batch-5 5a — THE −100 ENDPOINT, pinned.
+    ///
+    /// Measured defect (visual-inspection pack `D-texture-m100__branches.jpg`,
+    /// ledgered 2026-08-20): `texture = −100` was a FULL Gaussian blur — the
+    /// old negative branch's transfer is `1 − |amount|·(1 − G)`, which at the
+    /// endpoint is `G` exactly, so every scale finer than the radius went to
+    /// zero. Lightroom's Texture is a mid-band control that keeps fine detail
+    /// and edges at its negative end.
+    ///
+    /// This test states the SHAPE, which is all that is claimable without a
+    /// Lightroom ground truth for the negative transfer curve (there is none in
+    /// this tree — see `texture_pass`): at the endpoint a fine pattern keeps
+    /// most of its contrast while a mid-band pattern loses most of its. The old
+    /// operator is not described here, it is CALLED — `unsharp_luma` at
+    /// `amount = −1` and the same radius IS the pre-R28 branch — so the
+    /// comparison is against the real thing and reverting `texture_pass` makes
+    /// the two identical, which fails the first assertion.
+    ///
+    /// Measured on this frame (800 px, radius 4, fine radius 1), contrast kept
+    /// at `texture = −100`:
+    ///
+    /// ```text
+    ///            4 px tone     16 px tone
+    ///   now       0.963          0.294
+    ///   pre-R28   0.001          0.174
+    /// ```
+    ///
+    /// i.e. the endpoint went from "erases the 4 px tone" to "keeps 96 % of it",
+    /// while still taking 71 % out of the mid band. The thresholds below are set
+    /// well inside those numbers so box-blur arithmetic drift cannot flip the
+    /// test without the SHAPE having actually changed.
+    #[test]
+    fn texture_at_minus_100_is_band_limited_not_a_full_blur() {
+        // 800 px short edge → radius 4, fine radius 1: the band this endpoint
+        // removes sits between them, and 4 px / 16 px straddle it.
+        let (w, h) = (800usize, 800usize);
+        let recipe = EditRecipe { texture: -100.0, ..Default::default() };
+        let survives = |period: usize| -> (f32, f32) {
+            let src = stripe_frame(w, h, period);
+            let before = stripe_contrast(&src, w, h);
+            let mut new = src.clone();
+            apply_develop(&mut new, w, h, &recipe);
+            // The PRE-R28 branch, called rather than paraphrased.
+            let mut old = src.clone();
+            let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
+            unsharp_luma(&mut old, w, h, radius, -1.0, false);
+            (
+                stripe_contrast(&new, w, h) / before,
+                stripe_contrast(&old, w, h) / before,
+            )
+        };
+        let (fine_new, fine_old) = survives(4);
+        let (mid_new, mid_old) = survives(16);
+        eprintln!(
+            "texture −100: fine 4px {fine_new:.3} (was {fine_old:.3}), mid 16px {mid_new:.3} (was {mid_old:.3})"
+        );
+
+        // 1) FINE DETAIL SURVIVES. This is the assertion the old branch fails:
+        //    a full blur at radius 4 leaves a 4 px pattern nothing at all.
+        assert!(
+            fine_new > 0.70,
+            "a 4 px pattern must keep most of its contrast at texture −100, kept {fine_new:.3}"
+        );
+        assert!(
+            fine_old < 0.05,
+            "the pre-R28 branch really did erase it ({fine_old:.3}) — if this fails the \
+             comparison is not measuring what the ledger says it measures"
+        );
+
+        // 2) …and the MID BAND still drops, or this is not a smoothing control
+        //    at all, merely a weaker one.
+        assert!(
+            mid_new < 0.55,
+            "a 16 px pattern must lose most of its contrast at texture −100, kept {mid_new:.3}"
+        );
+        assert!(
+            mid_new < fine_new * 0.75,
+            "mid must drop FURTHER than fine — that ordering is the whole difference \
+             between a band control and an amount cap (fine {fine_new:.3}, mid {mid_new:.3})"
+        );
+        assert!(mid_old < mid_new, "the old branch smoothed the mid band at least as hard");
+
+        // 3) ONE calibration: the negative half is the same operator inside a
+        //    mask as outside it, bit for bit — the law the positive half is
+        //    already pinned to two tests above.
+        let src = stripe_frame(w, h, 16);
+        let mut global = src.clone();
+        apply_develop(&mut global, w, h, &recipe);
+        let mut local = src.clone();
+        apply_develop(
+            &mut local,
+            w,
+            h,
+            &EditRecipe {
+                masks: vec![LocalAdjustment {
+                    mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
+                    amount: 1.0,
+                    texture: -100.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            frame_bits_fnv64(&global),
+            frame_bits_fnv64(&local),
+            "full-coverage local texture −100 must equal global texture −100 bit-for-bit"
+        );
+    }
+
     /// R25 P8: the honest version of the claim beside the fused curve stage.
     ///
     /// `render.rs`'s "a full-coverage mask carrying a curve lands where the
@@ -10567,7 +10856,7 @@ d 0.113862 0.987261"
             ],
             ..Default::default()
         };
-        let Err(error) = load_mask_raster_snapshot_with_budget(&recipe, 1, true) else {
+        let Err(error) = load_mask_raster_snapshot_with_budget(&recipe, 1, true, None) else {
             panic!("two decoded bytes must exceed a one-byte snapshot budget");
         };
         assert!(
@@ -10597,7 +10886,7 @@ d 0.113862 0.987261"
             }],
             ..Default::default()
         };
-        let snapshot = load_mask_raster_snapshot(&recipe).unwrap();
+        let snapshot = load_mask_raster_snapshot(&recipe, None).unwrap();
         let untouched = vec![[0.25, 0.25, 0.25]; 4];
         let mut before_delete = untouched.clone();
         apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot);
@@ -11285,7 +11574,7 @@ d 0.113862 0.987261"
             Some(p.to_string_lossy().as_ref()),
             "the resolved alpha is the geometry's raster"
         );
-        let bmp = load_mask_bitmap(&resolved.mask).expect("the alpha must load");
+        let bmp = load_mask_bitmap(&resolved.mask, None).expect("the alpha must load");
         assert_eq!(mask_weight(&resolved.mask, 0.5, 0.5, Some(&bmp)), 1.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
