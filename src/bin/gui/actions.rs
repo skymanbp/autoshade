@@ -2701,12 +2701,30 @@ impl AutoshopApp {
                     }
                 };
                 let total = index.exemplars.len();
+                // The embedding degradation count (R28 Batch-4 4b). Asked here
+                // rather than carried on `StyleIndex`, which is the SERIALISED
+                // index: adding a field to it would be a file-format change for
+                // a fact that is about this RUN, not about the library.
+                //
+                // Gated on `embedding_enabled`, because "no exemplar has a
+                // vector" means two opposite things — the user never asked for
+                // the sidecar (nothing to report), or they did and it failed
+                // for every photo (the whole point of reporting).
+                let without_embedding = if autoshop::style::embedding_enabled() {
+                    index.exemplars.iter().filter(|e| e.embed.is_none()).count()
+                } else {
+                    0
+                };
                 // The empty-index refusal is NOT re-implemented here: `save`
                 // owns it for every caller (an empty write truncates a good
                 // index in place). The count only decides WHICH sentence the
                 // landing shows for the refusal it hands back.
                 match index.save(&autoshop::store::style_index_path()) {
-                    Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved { total, dir })),
+                    Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
+                        total,
+                        dir,
+                        without_embedding,
+                    })),
                     Err(_) if total == 0 => {
                         Msg::StyleBuilt(Box::new(StyleBuildOutcome::NothingIndexed { dir }))
                     }

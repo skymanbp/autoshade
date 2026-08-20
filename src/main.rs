@@ -1486,7 +1486,11 @@ fn batch_cmd(
         }
         outs
     };
-    let plan = autoshop::jobs::plan(jobs, work.len());
+    // `plan_for`, not `plan`: `--include-baked` puts Lightroom "Edit in…"
+    // exports on this list, and a native-resolution 16-bit TIFF can peak far
+    // past the corpus constant on its own (R28 Batch-4 4a). Their headers are
+    // free to read, so the budget asks them.
+    let plan = autoshop::jobs::plan_for(jobs, &work);
     if let Some(note) = &plan.note {
         println!("{note}");
     }

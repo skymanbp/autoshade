@@ -7,6 +7,14 @@
 //! weights auto-download to `python/weights` on first run (~1.50 GB, digest
 //! pinned) — nothing is stored in this repo.
 //!
+//! **Budgeted, since R28 Batch-4.** The model is the largest thing this tree
+//! loads and it does not live in host RAM, so neither of the two budgets that
+//! bound everything else (`decode::MAX_CONCURRENT_DECODES`, `jobs`' free-memory
+//! division) ever saw it. Two rules close that: the sidecar is asked for
+//! [`fp16_wanted`] half precision, and calls are SINGLE-FLIGHTED
+//! ([`with_model_slot`]) so at most one model is resident whatever the caller's
+//! concurrency. Together, 4 concurrent × 1.50 GB becomes 1 × 0.75 GB.
+//!
 //! **The embedding is additive, in both directions.** An index built without
 //! this sidecar loads and retrieves exactly as it did before (the field is
 //! `None` and the cosine block contributes nothing), and a build whose sidecar
@@ -49,12 +57,97 @@ impl EmbedOpts {
     }
 }
 
+/// Load the model in HALF precision unless the user asked otherwise.
+///
+/// ON by default (R28 Batch-4 4b, adjudication F3): `python/embed.py` has
+/// implemented `--fp16` since R27 Batch-5 and nothing ever passed it, so every
+/// sidecar call has been loading 375.5 M parameters at 4 B each — 1.50 GB per
+/// process — when 0.75 GB would do. It is a no-op on CPU by the sidecar's own
+/// construction (`embed.py`: `if fp16 and device.startswith("cuda")`), so a
+/// machine without CUDA is unaffected in every direction.
+///
+/// **Why the consumers tolerate it.** The sidecar casts the pooled output back
+/// to fp32 and normalises THERE (`v = v.float()` before the norm), so the
+/// record it writes is still float32 text declaring `"norm":"l2"` — no
+/// invariant `parse_vector` checks moves, including the ±1e-3 norm gate. The
+/// only consumer of the elements themselves is `style::embed_distance`, which
+/// is a ranking: a dot product of two unit vectors, clamped to [-1, 1] and
+/// multiplied by `W_EMB_DEFAULT = 2.0` against a 14-dim block whose weights
+/// sum to 14.5. fp16 carries ~4.9e-4 of relative precision per element
+/// (10 explicit mantissa bits), and the quantity built from them is an order
+/// COMPARISON, not a measurement.
+///
+/// **Registered as unverified**: the resulting cosine drift is argued, not
+/// measured — this batch ran no GPU sidecar. The escape hatch is therefore
+/// real rather than decorative: `AUTOSHOP_EMBED_FP32` forces the old load, so
+/// an index built before this change can be queried in exactly the arithmetic
+/// it was built with.
+fn fp16_wanted() -> bool {
+    !std::env::var("AUTOSHOP_EMBED_FP32")
+        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off"))
+        .unwrap_or(false)
+}
+
+/// The sidecar's argv, as a pure function of the four things that decide it —
+/// so the flags this build passes can be pinned by a test instead of being
+/// visible only to a running Python.
+fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool) -> Vec<std::ffi::OsString> {
+    let mut v: Vec<std::ffi::OsString> = vec![
+        // `-E`: the second layer against a PYTHON* import hijack (the env
+        // allowlist in `dotenv_child_env` is the first).
+        "-E".into(),
+        script.into(),
+        "--input".into(),
+        input.into(),
+        "--output".into(),
+        output.into(),
+    ];
+    if fp16 {
+        v.push("--fp16".into());
+    }
+    v
+}
+
+/// SINGLE-FLIGHT over the sidecar PROCESS: at most one model is resident at a
+/// time, whatever the caller's concurrency.
+///
+/// The fan-out this closes (adjudication F3): `StyleIndex::build` runs up to
+/// `decode::MAX_CONCURRENT_DECODES` = 4 workers and each one used to spawn its
+/// own sidecar, so four SigLIP loads could be live at once — 6.0 GB of fp32
+/// weights, 3.0 GB even with `--fp16`, against a consumer GPU that commonly
+/// has 4. Nothing in the tree serialised them, because every budget in this
+/// codebase is shaped like host RAM (`MAX_CONCURRENT_DECODES` counts 181 MB
+/// decodes, `jobs` divides `GlobalMemoryStatusEx`) and the model does not live
+/// in host RAM at all.
+///
+/// A GATE, not a batcher, chosen over wiring `embed.py --manifest`: the
+/// manifest path helps only the index build, while this covers the develop-time
+/// query too (`pipeline::produce_recipe` under `batch --jobs 3` is three
+/// concurrent single-image calls that no manifest can merge), and it needs no
+/// new record format, no per-line failure mapping and no second staging
+/// lifetime. The cost is honest and bounded: the embedding arm of a build runs
+/// serially, while the decode that dominates it still runs four-wide.
+///
+/// Poison is recovered rather than re-panicked, like every other lock in this
+/// tree: one worker panicking inside the sidecar must not turn every other
+/// worker's embed into a second panic.
+fn with_model_slot<T>(body: impl FnOnce() -> T) -> T {
+    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SLOT.lock().unwrap_or_else(|p| p.into_inner());
+    body()
+}
+
 /// Run the sidecar on ONE image and return its L2-normalised vector.
 ///
 /// `scratch` is the JSON file the sidecar writes; the caller owns its lifetime
 /// (the style build hands over a per-photo temp name so parallel workers never
 /// share one). The file-based contract is the same one `denoise.py` and
 /// `segment.py` use — stdout stays a diagnostic channel, never the payload.
+///
+/// SERIALISED against every other call in this process — see
+/// [`with_model_slot`]. The staging the caller did (writing the PNG) is
+/// deliberately OUTSIDE that gate: it is disk work, it costs no model, and
+/// holding the slot across it would serialise the cheap half too.
 pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<f32>> {
     if !opts.script.exists() {
         bail!(
@@ -70,15 +163,9 @@ pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<
     let before = crate::artifact_state(scratch);
     let mut cmd = Command::new(&opts.python_bin);
     // ALLOWLIST, not "everything the capability table did not refuse" — see
-    // `config::dotenv_child_env`. `-E` is the second layer for PYTHON*
-    // specifically (import hijack).
+    // `config::dotenv_child_env`.
     cmd.envs(crate::config::dotenv_child_env());
-    cmd.arg("-E")
-        .arg(&opts.script)
-        .arg("--input")
-        .arg(input)
-        .arg("--output")
-        .arg(scratch)
+    cmd.args(sidecar_args(&opts.script, input, scratch, fp16_wanted()))
         // CAPTURE, never inherit: the release GUI is windows_subsystem="windows"
         // and has no console, so an inherited handle discards the reason a
         // missing dependency failed.
@@ -87,7 +174,12 @@ pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<
         .stderr(Stdio::piped());
     crate::hide_child_console(&mut cmd);
     crate::arm_kill_group(&mut cmd);
-    let run = (|| -> Result<std::process::Output> {
+    // THE SLOT covers the child's whole life, not just the spawn: what has to
+    // be exclusive is the model RESIDENT in the GPU, which exists from the
+    // load until the process exits. The sidecar's own timeout
+    // (`bounded_child_output`) therefore doubles as this gate's release —
+    // a hung sidecar cannot park the pool forever.
+    let run = with_model_slot(|| -> Result<std::process::Output> {
         let child = cmd.spawn().with_context(|| {
             format!(
                 "launch style-embedding sidecar ({} {}) — is Python on PATH / AUTOSHOP_PYTHON set?",
@@ -103,7 +195,7 @@ pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<
             "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
             group,
         )
-    })();
+    });
     let out = match run {
         Ok(out) => out,
         Err(error) => {
@@ -234,6 +326,71 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("cannot read image"), "{e}");
+    }
+
+    /// R28 Batch-4 4b: the half-precision flag the sidecar has implemented
+    /// since R27 Batch-5 is actually PASSED, and the escape hatch really
+    /// escapes.
+    ///
+    /// MUTATION THIS KILLS: dropping the `--fp16` push (the state this batch
+    /// found the tree in — every call loading 1.50 GB of fp32 weights when
+    /// 0.75 GB would do), or wiring the env var the wrong way round so
+    /// `AUTOSHOP_EMBED_FP32` turned fp16 ON.
+    #[test]
+    fn the_sidecar_argv_carries_the_half_precision_flag() {
+        let args = |fp16| {
+            sidecar_args(Path::new("embed.py"), Path::new("in.png"), Path::new("out.json"), fp16)
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let on = args(true);
+        assert!(on.contains(&"--fp16".to_string()), "{on:?}");
+        // The contract the sidecar reads: one `--input`, one `--output`, and
+        // `-E` first (import-hijack hardening, not decoration).
+        assert_eq!(on.first().map(String::as_str), Some("-E"));
+        assert_eq!(on.iter().filter(|a| *a == "--input").count(), 1);
+        assert_eq!(on.iter().filter(|a| *a == "--output").count(), 1);
+        // …and never `--manifest`: this door is the single-image one, and a
+        // sidecar handed both refuses (`give exactly one of --input or
+        // --manifest`).
+        assert!(!on.iter().any(|a| a == "--manifest"), "{on:?}");
+        assert!(!args(false).contains(&"--fp16".to_string()));
+    }
+
+    /// SINGLE-FLIGHT, pinned by observation rather than by reading the code:
+    /// however many threads call it, the gate never lets two bodies overlap.
+    ///
+    /// MUTATION THIS KILLS: delete the lock in `with_model_slot` (make it call
+    /// `body()` directly) and the four threads below all enter together — the
+    /// observed maximum becomes 4 and this fails. That is exactly the state
+    /// F3 measured: four workers, four resident SigLIP models, 6.0 GB.
+    #[test]
+    fn the_model_slot_admits_one_caller_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let live = AtomicUsize::new(0);
+        let most = AtomicUsize::new(0);
+        let entered = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                let (live, most, entered) = (&live, &most, &entered);
+                s.spawn(move || {
+                    with_model_slot(|| {
+                        let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        entered.fetch_add(1, Ordering::SeqCst);
+                        // Long enough that an ungated version really would
+                        // overlap: thread spawn is microseconds, this is
+                        // milliseconds.
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                        live.fetch_sub(1, Ordering::SeqCst);
+                    });
+                });
+            }
+        });
+        assert_eq!(entered.load(Ordering::SeqCst), 4, "every caller must get through");
+        assert_eq!(most.load(Ordering::SeqCst), 1, "two models were resident at once");
+        assert_eq!(live.load(Ordering::SeqCst), 0);
     }
 
     // --- SIDECAR SOURCE CONTRACTS (D1 section 8) -----------------------------
@@ -388,5 +545,26 @@ mod tests {
             EMBED_SRC.contains(&format!("\"dim\": {EMBED_DIM}")),
             "the sidecar's declared dim must match EMBED_DIM = {EMBED_DIM}"
         );
+    }
+
+    /// The OTHER half of the fp16 contract: this build passes `--fp16`
+    /// unconditionally, so the sidecar must still (a) accept the flag, (b)
+    /// apply it on CUDA only — a CPU-only machine must not be handed a half
+    /// model — and (c) keep the normalisation in fp32, which is what lets
+    /// `parse_vector`'s norm gate stay a ±1e-3 check.
+    ///
+    /// MUTATION THIS KILLS: removing `--fp16` from `embed.py`'s parser (the
+    /// Rust side would then pass an argument argparse rejects and EVERY embed
+    /// would fail), or moving `v.float()` after the norm.
+    #[test]
+    fn the_sidecar_still_accepts_the_flag_this_build_always_passes() {
+        assert!(EMBED_SRC.contains("\"--fp16\""), "embed.py must accept --fp16");
+        assert!(
+            EMBED_SRC.contains("if fp16 and device.startswith(\"cuda\")"),
+            "half precision must stay CUDA-only — a CPU box gets the fp32 model"
+        );
+        let float = EMBED_SRC.find("v = v.float()").expect("the fp32 re-cast must exist");
+        let norm = EMBED_SRC.find("v.norm(dim=-1").expect("the norm must exist");
+        assert!(float < norm, "the vector must be back in fp32 BEFORE it is normalised");
     }
 }

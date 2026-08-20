@@ -541,7 +541,11 @@ pub fn run(dir: &Path, limit: usize, jobs: usize) -> Result<()> {
     // replaces, line for line and sum for sum.
     let work: Vec<&Path> = pairs.iter().take(limit).map(|p| p.as_path()).collect();
     let n = work.len();
-    let plan = crate::jobs::plan(jobs, n);
+    // `plan_for` for the same reason `batch` uses it (R28 Batch-4 4a), even
+    // though `eval`'s work list is RAW+.xmp pairs by construction and the
+    // survey therefore finds nothing to raise: the door a caller takes should
+    // not depend on a filter two functions away staying RAW-only.
+    let plan = crate::jobs::plan_for(jobs, &work);
     if let Some(note) = &plan.note {
         println!("{note}");
     }

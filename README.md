@@ -354,8 +354,11 @@ Runs entirely on your machine.
 `batch` processes a folder; `eval` runs the AI against RAWs that have your own
 `.xmp` beside them and reports per-control error and bias. Both take `--jobs N`,
 **capped by a memory budget**: one 61 MP photo's pipeline pass peaks at ~1.8 GB
-of commit charge (measured, not guessed), so the worker count is bounded by free
-memory — and the run *discloses* when the cap overrules your flag. The 147-photo
+of commit charge (measured, not guessed — 1,771 MB, re-measured at v0.34.0 with
+the full-resolution render included), so the worker count is bounded by free
+memory — and the run *discloses* when the cap overrules your flag. Where a
+file's own header is free to read, the budget asks it instead of assuming the
+corpus average, and says which file raised the bill. The 147-photo
 eval went from ~2.3 h serial to a measured **38 min** at `--jobs 3`. Transcripts
 are index-ordered, so re-running the same folder gives the same record.
 
@@ -495,6 +498,8 @@ on stderr beside the `xmp ->` line.
 | **Parser panics** | A third-party decoder panic becomes a named error; the process survives, so one bad file cannot kill a `batch` run |
 | **Carried, not rendered** | Every control declares which of three things it is (below). No control moves a number without either moving a pixel or admitting that it doesn't |
 | **Memory cap** | When the `--jobs` budget overrules your flag, it prints a line. A silent downgrade reads as "the flag didn't work" |
+| **A file too big to develop** | A photo whose develop would peak over 4 GiB is **refused by name**, with the estimate and what it is based on — and told outright that `--jobs 1` will not help, because one file's peak is not a concurrency budget. RAW and baked share the one ceiling |
+| **Style embedding gaps** | If the optional embedding sidecar fails for some photos, the index is still built — and the count of photos without a vector is reported, so "all of them failed" no longer looks identical to "all of them worked" |
 | **AI fallback** | A failed vision call degrades to the histogram heuristic with `confidence 0.4` — and the verifier is allowed to refuse it, as it did in the showcase above |
 
 Each control is exactly one of three kinds, and the registry states it once:
@@ -715,6 +720,7 @@ per-user `autoshop.local.json` overrides the environment. The two sidecar knobs
 | `AUTOSHOP_EMBED_SCRIPT` | bundled `python/embed.py` | style-embedding sidecar (SigLIP 2) |
 | `AUTOSHOP_STYLE_EMBED` | off | opt in to SigLIP 2 style embeddings — the first run downloads **1.50 GB** of weights, so this is never taken without being asked |
 | `AUTOSHOP_STYLE_EMBED_WEIGHT` | `2.0` | weight of the embedding block in the retrieval distance; `0` reproduces the pre-embedding ranking exactly. **Not calibrated** — the value was chosen, not measured |
+| `AUTOSHOP_EMBED_FP32` | off (i.e. half precision is ON) | force the embedding sidecar to load in fp32. Half precision halves the model on the GPU (1.50 → 0.75 GB) and is a no-op on CPU; the vector is still normalised in fp32, so nothing the Rust side checks changes. Set this to reproduce an index built before v0.34.0 in exactly the arithmetic it was built with |
 
 ---
 

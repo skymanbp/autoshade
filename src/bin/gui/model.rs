@@ -572,8 +572,23 @@ pub(crate) enum Msg {
 /// runs for minutes, so its sentence is composed at LANDING in the language
 /// live then, never with the language captured at spawn.
 pub(crate) enum StyleBuildOutcome {
-    /// Indexed and published: how many of the user's edits, from where.
-    Saved { total: usize, dir: PathBuf },
+    /// Indexed and published: how many of the user's edits, from where — and
+    /// how many of them ended up WITHOUT a style embedding.
+    ///
+    /// `without_embedding` is 0 both when every photo got a vector and when the
+    /// embedding was never asked for (`AUTOSHOP_STYLE_EMBED` unset), which are
+    /// the two cases with nothing to disclose. Anything above 0 is a real
+    /// degradation: the sidecar was wanted and did not deliver for that many
+    /// photos, and the index is a legitimate but weaker mixed one.
+    ///
+    /// It is a COUNT rather than a sentence for the same reason the rest of
+    /// this enum is (L12#4) — the build runs for minutes and the language may
+    /// change while it does. Before R28 Batch-4 the outcome carried no such
+    /// fact at all, so a build where every single embedding failed landed the
+    /// identical success toast as one where none did: the release GUI is
+    /// `windows_subsystem = "windows"`, so the per-photo `eprintln!` the CLI
+    /// shows goes to a console that does not exist (adjudication F3).
+    Saved { total: usize, dir: PathBuf, without_embedding: usize },
     /// The folder held no RAW with its `.xmp` sidecar beside it, so
     /// `StyleIndex::save` REFUSED (the one empty-index guard, shared by the
     /// CLI, the web handler and this button — writing an empty index would

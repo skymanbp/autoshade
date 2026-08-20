@@ -6896,12 +6896,18 @@
             .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
                 total: 412,
                 dir: dir.clone(),
+                without_embedding: 0,
             })))
             .unwrap();
         app.poll_workers(&ctx);
         assert!(!app.style_build_inflight, "the button re-arms");
         assert_eq!(app.style_build_progress, None, "the counter belongs to ONE build");
         assert!(app.status.contains("412"), "{}", app.status);
+        assert!(
+            !app.status.contains("without a style embedding"),
+            "a build with nothing to disclose must not grow a clause: {}",
+            app.status
+        );
         assert_eq!(
             app.style_src_dir.as_deref(),
             Some(dir.as_path()),
@@ -6909,6 +6915,42 @@
         );
         assert!(app.style_info_loading, "a build invalidates the cached status");
         assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Success)));
+
+        // R28 Batch-4 4b: a build where the embedding sidecar failed must NOT
+        // land the same sentence as one where it worked. The release GUI is
+        // `windows_subsystem = "windows"` and has no console, so the per-photo
+        // stderr line the CLI shows is invisible there — this toast is the
+        // user's only account of it (adjudication F3).
+        //
+        // MUTATION THIS KILLS: revert `on_style_built` to the single
+        // unconditional sentence, or drop `without_embedding` from the outcome
+        // — the status then reads exactly like the all-embedded case above and
+        // this assertion fails. It is the same status in BOTH languages, so it
+        // is asserted in both.
+        for (lang, needle) in [(Lang::En, "without a style embedding"), (Lang::Zh, "没有嵌入向量")] {
+            let mut app = AutoshopApp {
+                style_build_inflight: true,
+                lang,
+                ..Default::default()
+            };
+            app.tx
+                .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
+                    total: 412,
+                    dir: dir.clone(),
+                    without_embedding: 400,
+                })))
+                .unwrap();
+            app.poll_workers(&ctx);
+            assert!(
+                app.status.contains("400") && app.status.contains(needle),
+                "a degraded build must say how many photos lost their vector ({lang:?}): {}",
+                app.status
+            );
+            // …and it is still a SUCCESS: the index published, the folder is
+            // remembered, the panel re-reads. A degradation is not a failure.
+            assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Success)));
+            assert_eq!(app.style_src_dir.as_deref(), Some(dir.as_path()));
+        }
 
         // Nothing indexed: the SHARED refusal wording (the CLI and the web say
         // the same), an ERROR toast, and NOTHING remembered — the folder was

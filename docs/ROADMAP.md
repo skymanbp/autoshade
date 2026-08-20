@@ -417,6 +417,55 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R28 Batch-4：资源预算批（2026-08-20，未发版）** —— 4a（F2 两根一批）：
+  ①**探针实测收口 F2 的 UNVERIFIABLE 项**——R27 那支探针从未入库故不可复现，
+  本批把它做成在库 `#[ignore]` 测试 `jobs::tests::probe_per_photo_peak_commit`
+  （`PeakPagefileUsage`，release，`AUTOSHOP_PEAK_PROBE_STAGE` 单阶段单进程跑，
+  因为该计数器单调不回落、同进程后阶段必然继承前阶段高水位）。61MP A7R V
+  （9504×6336）实测：**decode 151 / cal 1771 / render 1766 / all 1771 MB**——
+  **render 尾巴不抬高峰值，1800 常数成立**（结构性而非侥幸：两大阶段共用同一
+  全帧去马赛克+定向，`max_edge` 只决定其后；全分辨率多出的 16-bit pack 比工作
+  分辨率的定向瞬时还小）。余量薄=1800 只是 1771 的向上取整不是安全系数，已在
+  常数文档写明。新增 `[target.'cfg(windows)'.dev-dependencies] windows-sys`
+  （`Win32_System_ProcessStatus`，resolver 3 下不进发布构建）。
+  ②**RAW 单文件 4GiB 峰值闸**（用户 D2 拍板：与 baked 同款、超限拒收+具名披露）
+  ——`decode::RAW_DEVELOP_BYTES_PER_PIXEL = 31`（1771MB/60217344px=30.84 向上
+  取整；把峰值向下取整=放行本该拒的文件），闸设在**唯一漏斗**
+  `render::render_to_image_in`（`render_to_file` RAW 臂 / `source_pixels` RAW 臂 /
+  `render_to_image` 三条都经它，CLI+GUI+serve 全覆盖），用 `raw_image(dummy=true)`
+  头解析定帧、**在传感器解压之前**收费；拒收句含文件名+估算+每像素依据+
+  「`--jobs 1` 不解决单文件峰值」。**行为变更（用户 D2 已拍板）=138,547,333 px
+  （≈138.5MP）及以上的 RAW 由「照跑、可能分页」变「具名拒收」**；150MP 后背中招，
+  102MP GFX 远在界内。③**计划器去无量纲**：`jobs::survey_peak_mb`
+  对**头解析便宜的 baked 源**取每文件峰值最大值（非均值）当除数并披露是哪张，
+  RAW 一律 `None`（问一次要映射整个文件=jobs.rs 原理由对 RAW 为真、对 baked 为
+  假），`batch`/`eval` 改走 `plan_for`。构造的 4×大 TIFF 2.28× 超支场景由此
+  「要么被计入、要么开跑前如实披露」。附带：`decode::baked_reader` 抽出（头估算
+  与像素路径必须同一 raised limits，否则 512MB 默认 max_alloc 会让大 TIFF 估算
+  答「读不了」→按小文件排产）。4b（F3+三加重项）：①`--fp16` 接线（R27 就实现、
+  从未传；CUDA-only、sidecar 在归一化前回 fp32 故 `parse_vector` 不变式零位移；
+  逃生阀 `AUTOSHOP_EMBED_FP32`）；②**模型单飞**（`embed::with_model_slot` 进程级
+  互斥）——选它而非接 manifest 批处理：manifest 只救建库，单飞连显影期查询
+  （`batch --jobs 3` = 三个并发单图调用，manifest 合不了）一起救，且零新记录
+  格式/零逐行失败映射；代价如实=建库的嵌入臂串行、解码仍四路。③**DecodePermit
+  不再扣穿 sidecar**：新 `style::StagedFrame`（RAII 双临时文件）把
+  `embed_preview` 劈成「暂存」+「送闸」，暂存**留在 permit 内**（它读 preview，
+  提前放闸会让本 worker 端着 181MB 时别的 worker 开新解码=正是
+  `MAX_CONCURRENT_DECODES` 要挡的跨库 1.4GB 叠加），preview 与 permit 都在
+  sidecar **之前**释放——181MB 生命期从「整个模型加载」缩到「一次缩放+写 PNG」。
+  ④**GUI 退化披露**：`StyleBuildOutcome::Saved` 加 `without_embedding`
+  （`embedding_enabled()` 门控，因「无向量」有两种相反含义），全败不再与全成
+  同句；新串双语（zh 逐字过 cmap 子集=零新字形）。附带：`jobs::plan`（只数张数
+  那道门）**删除而非保留**——留一个更短、静默跳过每文件普查的名字正是本批要拔的
+  雷；`plan_with` 降格为纯函数测试缝并在文档写明。门（主审复跑）=clippy0×2+
+  **720**(+9 通过 / 忽略 8→9=探针)/11/131/2+2+zoo 全名 9/9（90.18s）+audit_i18n 0+
+  check_docs 10PASS/1SKIP；变异证据 7 组（RAW 闸/漏斗调用点/单飞锁/fp16 旗/
+  survey 取最大/GUI 披露/StagedFrame Drop）全部主审亲手红→还原绿。**未验证登记**：fp16 对余弦的实际
+  漂移是论证不是实测（本批没跑 GPU sidecar，逃生阀因此是真的不是装饰）；
+  `RAW_DEVELOP_BYTES_PER_PIXEL` 只测了一机一 CFA 一压缩模式，别的解码器每像素
+  更高就会吃掉余量（常数文档已写明「格式表长出形状不同的解码器时重跑探针」）；
+  单飞与 permit 重构无端到端实跑（无 1.5GB 权重/GPU），靠单元变异+代码论证。
+
 - **R28 Batch-3：AI 蒙版帧身份 + rotate 文件系统原子性（2026-08-20，未发版）** ——
   3a（F1 两根一修）：resolve_ai_masks 改双参 `(raw=身份, src=像素)`（F1-C：两调用点
   曾把烘焙母版当唯一参，键与缓存家落在不属于任何照片的 develop 目录）；

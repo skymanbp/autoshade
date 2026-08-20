@@ -691,6 +691,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "正在构建风格参考库… {done} / {total} 张"),
     ("Style library built: {n} of your own edits from {path}",
         "风格参考库已建成：来自 {path} 的 {n} 条你自己的编辑"),
+    ("Style library built: {n} of your own edits from {path} ({m} of them without a style embedding)",
+        "风格参考库已建成：来自 {path} 的 {n} 条你自己的编辑（其中 {m} 条没有嵌入向量）"),
     ("Nothing to index in {path} — no RAW there has its .xmp sidecar beside it (Autoshop keeps its own .xmp in the develop store, never beside the RAW, so point this at the folder you edit in Lightroom). Your existing style library was left untouched.",
         "{path} 里没有可入库的照片——那里没有一个 RAW 旁边带着它的 .xmp（Autoshop 自己的 .xmp 放在显影库里、从不放在 RAW 旁边，所以请指向你在 Lightroom 里编辑的文件夹）。你原有的风格参考库保持不动。"),
     ("Building the style library failed: {err}", "风格参考库构建失败：{err}"),

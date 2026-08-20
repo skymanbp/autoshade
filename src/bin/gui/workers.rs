@@ -1847,12 +1847,32 @@ impl AutoshopApp {
         self.style_build_inflight = false;
         self.style_build_progress = None;
         match outcome {
-            StyleBuildOutcome::Saved { total, dir } => {
-                let t = trf(
-                    lang,
-                    "Style library built: {n} of your own edits from {path}",
-                    &[("n", &total.to_string()), ("path", &abs_display(&dir))],
-                );
+            StyleBuildOutcome::Saved { total, dir, without_embedding } => {
+                // TWO sentences, not one with an "(0 without …)" tail: the
+                // degraded case is the exception and an always-on clause would
+                // read as noise on every ordinary build. The count is what
+                // makes the toast different at all — before R28 Batch-4 a
+                // build whose every embedding failed said exactly what a fully
+                // embedded one said, and the release GUI has no console for
+                // the per-photo stderr line that would have told the user
+                // otherwise (adjudication F3).
+                let t = if without_embedding > 0 {
+                    trf(
+                        lang,
+                        "Style library built: {n} of your own edits from {path} ({m} of them without a style embedding)",
+                        &[
+                            ("n", &total.to_string()),
+                            ("path", &abs_display(&dir)),
+                            ("m", &without_embedding.to_string()),
+                        ],
+                    )
+                } else {
+                    trf(
+                        lang,
+                        "Style library built: {n} of your own edits from {path}",
+                        &[("n", &total.to_string()), ("path", &abs_display(&dir))],
+                    )
+                };
                 self.status = t.clone();
                 self.toast(ToastKind::Success, t);
                 self.style_src_dir = Some(dir);

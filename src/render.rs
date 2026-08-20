@@ -163,6 +163,31 @@ pub fn render_to_image_in(
         // stage exists to disagree with this one.
         let orientation =
             compose_orientation(crate::decode::raw_orientation_of(&md), recipe.quarter_turns);
+        // THE PER-FILE MEMORY CEILING, charged BEFORE a single sensor row is
+        // decompressed (R28 Batch-4 4a; adjudication F2's deeper root). The
+        // baked door has refused an over-ceiling file since L02 while this one
+        // — the door every RAW's pixels come through — had no per-file limit
+        // at all. `dummy = true` is the same metadata-only read
+        // `decode::source_frame` takes: dimensions and levels, no
+        // decompression, so the refusal costs a header parse and the admission
+        // costs one too. Gating AFTER the real decode instead would already
+        // have committed the ~2 B/px sensor mosaic, and gating at the top of
+        // the function would have paid a SECOND `RawSource::new` (the whole
+        // file mapped) for dimensions the open decoder can already answer.
+        //
+        // The price is measured, not asserted: `decode::frame_size` on the
+        // same 61 MP ARW — which opens the file, maps it, builds a decoder AND
+        // takes this read — costs 110 ms against a 3.5 s full-resolution
+        // render (`jobs::tests::probe_per_photo_peak_commit`, release). That is
+        // an UPPER BOUND on what this line adds, since the first three of those
+        // four are already paid above.
+        let probe = crate::decode::guard_parser_panic(raw_path, "raw_image(dummy)", || {
+            decoder
+                .raw_image(&src, &params, true)
+                .map_err(|e| anyhow!("raw_image(dummy): {e}"))
+        })?;
+        crate::decode::refuse_raw_develop_over_ceiling_for(raw_path, &probe)?;
+        drop(probe);
         // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
         let mut raw = crate::decode::guard_parser_panic(raw_path, "raw_image", || {
             decoder.raw_image(&src, &params, false).map_err(|e| anyhow!("raw_image: {e}"))

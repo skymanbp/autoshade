@@ -113,6 +113,17 @@ libc = "0.2"
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
+# TEST-ONLY (`[dev-dependencies]`, so a release build never compiles it):
+# `GetProcessMemoryInfo` + `PROCESS_MEMORY_COUNTERS`, the process's own
+# PeakPagefileUsage. That reading is the METHOD behind
+# `jobs::PER_PHOTO_PEAK_COMMIT_MB`; R27 Batch-7 measured it from a scratch
+# probe that was never committed, which is why R28 could not re-derive the
+# number without rebuilding the harness. `jobs::probe_per_photo_peak_commit`
+# is that harness, in tree, `#[ignore]`d. Resolver 3 keeps dev-dependency
+# features out of the normal build, so the shipped binaries gain nothing.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus"] }
+
 [dev-dependencies]
 # Same version `image` already locks (0.11.3) — its own TIFF *encoder* cannot
 # round-trip an IccProfile tag (probed: written tag reads back None), so the

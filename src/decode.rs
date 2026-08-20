@@ -356,6 +356,145 @@ fn develop_peak_bytes(
         .saturating_add(pixels.saturating_mul(PIPELINE_BYTES_PER_PIXEL))
 }
 
+/// Bytes of COMMIT charge one SOURCE pixel of a camera RAW costs at the PEAK of
+/// `render::render_to_image_in` — the RAW twin of [`PIPELINE_BYTES_PER_PIXEL`],
+/// and what lets the same 4 GiB per-file ceiling be charged to a RAW at all.
+///
+/// **MEASURED, not derived.** 1,771 MB of peak process commit over a
+/// 9504x6336 (60.2 MP) A7R V ARW = 30.8 B/px, read as `PeakPagefileUsage` by
+/// `jobs::tests::probe_per_photo_peak_commit` (release profile, one stage per
+/// process — that probe's own docs carry the method, `jobs`' module docs the
+/// stage table). Rounded UP to 31: this number multiplies a pixel count into a
+/// REFUSAL, and rounding a peak DOWN is how a file that really does blow the
+/// ceiling gets admitted.
+///
+/// It is the WHOLE develop's peak, not one buffer's width. The demosaiced f32
+/// frame (`Vec<[f32; 3]>`, 12 B/px) is only its largest single term; rawler's
+/// own sensor buffers, the mapped file, the orientation transient and the
+/// 16-bit pack are all inside the measured figure. That is deliberate — the
+/// baked side can enumerate its overlapping stages because it OWNS them
+/// (`PIPELINE_BYTES_PER_PIXEL`'s doc does exactly that), while a RAW's peak is
+/// mostly inside rawler, where an enumeration would be a guess about somebody
+/// else's allocations. A measurement of the whole is the honest form.
+///
+/// **Corpus caveat, stated rather than hidden**: one body, one CFA, one
+/// compression mode. A format whose decoder holds more than rawler's ARW path
+/// does would peak higher per pixel, and this constant would then admit a file
+/// it should refuse. Re-run the probe when the RAW format list grows a decoder
+/// with a different shape (the same discipline `PIPELINE_BYTES_PER_PIXEL`'s
+/// R27 R7 note records for the baked side).
+pub const RAW_DEVELOP_BYTES_PER_PIXEL: u64 = 31;
+
+/// What developing a `pixels`-pixel camera RAW peaks at. Pure, so the boundary
+/// test can pin the accounting the way it pins the baked one.
+fn raw_develop_peak_bytes(pixels: u64) -> u64 {
+    pixels.saturating_mul(RAW_DEVELOP_BYTES_PER_PIXEL)
+}
+
+/// THE RAW DEVELOP CEILING — the twin of the baked gate inside
+/// [`load_image_gated`], and the closing of what the R28 adjudication (F2)
+/// called the deeper root: the baked path has refused an over-ceiling file
+/// since L02, while **the RAW path had no per-file limit at all**. A 150 MP
+/// IIQ on the default `batch --jobs 3` was therefore a worse instance of the
+/// same defect than the constructed TIFF scenario that raised it, with nothing
+/// opt-in about it.
+///
+/// ONE call site, `render::render_to_image_in` — the single funnel every RAW's
+/// pixels pass through (`render_to_file`'s RAW arm, `source_pixels`' RAW arm,
+/// `render_to_image`, and through those three the CLI, the GUI and `serve`).
+/// Patching the callers instead would have been the shape this file already
+/// refuses for `load_image` (see that gate's doc): a per-caller copy is a
+/// per-caller chance to forget.
+///
+/// REFUSE, never degrade (user ruling 2026-08-20, plan D2): the alternative —
+/// silently developing at a reduced resolution — would hand back a deliverable
+/// that is not the one asked for.
+fn refuse_raw_develop_over_ceiling(path: &Path, pixels: u64) -> Result<()> {
+    let need = raw_develop_peak_bytes(pixels);
+    if allocation_over_ceiling(need) {
+        // Everything a person can act on: the measured basis (so the estimate
+        // is auditable rather than an oracle), and — because the obvious guess
+        // is wrong — that the concurrency flag is not the answer.
+        anyhow::bail!(
+            "{} is a {pixels}-pixel camera RAW; developing it peaks at about {need} bytes \
+             ({pixels} px x {RAW_DEVELOP_BYTES_PER_PIXEL} B/px, measured) — at or over the \
+             {MAX_ALLOC}-byte ceiling this build will commit for ONE file. `--jobs 1` does not \
+             help: this is a single file's own peak, not a concurrency budget. This build cannot \
+             develop a photo this large without paging, so it refuses instead of stalling the \
+             machine or aborting on a failed allocation",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// [`refuse_raw_develop_over_ceiling`] against a decoder's DUMMY `RawImage` —
+/// the metadata-only probe `render::render_to_image_in` takes before it
+/// decompresses a single sensor row.
+///
+/// The frame rule ([`default_crop`]) stays on THIS side of the wall so the
+/// ceiling is charged against the same rectangle the develop will actually
+/// produce, decided in the one place that owns that rule — rather than the
+/// render re-deriving "which pixels are the picture" for the purpose of a
+/// budget and drifting from the answer it uses for pixels.
+pub(crate) fn refuse_raw_develop_over_ceiling_for(
+    path: &Path,
+    probe: &rawler::RawImage,
+) -> Result<()> {
+    let d = default_crop(probe).d;
+    refuse_raw_develop_over_ceiling(path, (d.w as u64).saturating_mul(d.h as u64))
+}
+
+/// The per-file develop peak in MB for a source whose HEADER is CHEAP to read,
+/// or `None` when it is not — the admission-time half of the same accounting
+/// the ceilings above enforce.
+///
+/// **Baked**: `image`'s reader parses a header and decodes no pixel, so the
+/// real per-file peak is available for the price of an `open` +
+/// `into_decoder`. `jobs.rs`' "reading each RAW's dimensions to size the
+/// budget would cost a decode per photo" is simply not true here, which is why
+/// the planner may consult this.
+///
+/// **Camera RAW**: `None`. Answering would cost `RawSource::new` — the WHOLE
+/// file mapped (~120 MB for a 61 MP ARW) — per photo before the pool even
+/// starts, which is exactly the cost that reasoning was about. The RAW side is
+/// bounded instead by [`refuse_raw_develop_over_ceiling`] at the develop door,
+/// plus the corpus constant in the planner.
+///
+/// Best-effort by construction: an unreadable header answers `None` rather than
+/// failing, because a PLAN must not be the thing that fails a run. The photo's
+/// own develop will surface the real error, loudly, where the diagnosis lives.
+pub fn cheap_develop_peak_mb(path: &Path) -> Option<u64> {
+    if is_raw(path) {
+        return None;
+    }
+    // baked-by-construction: the !is_raw arm, decided one line up.
+    Some(baked_header_peak_bytes(path).ok()?.div_ceil(1024 * 1024))
+}
+
+/// [`develop_peak_bytes`] from a HEADER alone — no pixel decoded.
+///
+/// Reads through [`baked_reader`], the same raised limits the pixel path uses:
+/// a probe running under the crate's 512 MB default `max_alloc` would refuse
+/// to build a decoder for exactly the big exports this estimate exists for,
+/// and answering "unreadable" for them would silently plan as if they were
+/// small.
+fn baked_header_peak_bytes(path: &Path) -> Result<u64> {
+    use image::ImageDecoder as _;
+    let mut decoder = baked_reader(path)?
+        .into_decoder()
+        .with_context(|| format!("read the header of {}", path.display()))?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let (dw, dh) = decoder.dimensions();
+    Ok(develop_peak_bytes(
+        decoder.total_bytes(),
+        orientation,
+        u64::from(dw).saturating_mul(u64::from(dh)),
+    ))
+}
+
 /// Load a baked raster (PNG/TIFF/JPEG) with a RAISED (not lifted) decoder
 /// memory limit — a 60 MP export trips the image crate's default cap, but
 /// `no_limits()` let a corrupt header with absurd declared dimensions drive an
@@ -389,6 +528,34 @@ pub fn load_image_for_develop(path: &Path) -> Result<DynamicImage> {
     load_image_gated(path, true) // not-a-consumer-call: dispatch inside the gate
 }
 
+/// A baked raster's reader, opened with the RAISED (not lifted) decoder limits
+/// and its format already probed.
+///
+/// ONE construction, because there are now TWO consumers and they must agree:
+/// the pixel path ([`load_image_gated`]) and the header-only peak estimate
+/// ([`baked_header_peak_bytes`]). Under the crate's own `Limits::default()`
+/// the TIFF codec's `set_limits` refuses to build a decoder whose frame is
+/// larger than the default 512 MB `max_alloc` — so an estimate that opened its
+/// own plain reader would answer "unreadable" for precisely the 60 MP-plus
+/// exports it exists to size, and the caller would plan as if they were small.
+/// The 65,536-px dimension bounds and the 4 GiB allocation bound below are the
+/// ones that gate's doc argues for; they live here so neither consumer can
+/// drift off them.
+fn baked_reader(
+    path: &Path,
+) -> Result<image::ImageReader<std::io::BufReader<std::fs::File>>> {
+    let mut reader = image::ImageReader::open(path)
+        .with_context(|| format!("open image {}", path.display()))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(65_536);
+    limits.max_image_height = Some(65_536);
+    limits.max_alloc = Some(MAX_ALLOC);
+    reader.limits(limits);
+    reader
+        .with_guessed_format()
+        .with_context(|| format!("probe image {}", path.display()))
+}
+
 /// THE ROUTING TABLE for the refusal below, kept in the doc rather than in the
 /// error text (R24 batch 2): a RAW that arrived here belongs in
 /// [`crate::render::render_to_image`] or [`crate::render::source_pixels`] (the
@@ -420,16 +587,7 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
             path.display()
         );
     }
-    let mut reader = image::ImageReader::open(path)
-        .with_context(|| format!("open image {}", path.display()))?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(65_536);
-    limits.max_image_height = Some(65_536);
-    limits.max_alloc = Some(4 * 1024 * 1024 * 1024);
-    reader.limits(limits);
-    let reader = reader
-        .with_guessed_format()
-        .with_context(|| format!("probe image {}", path.display()))?;
+    let reader = baked_reader(path)?;
     let format = reader.format();
     // R11: a camera RAW wearing a `.tif` extension reaches HERE, because
     // `is_raw` is extension-based and a DNG (or a CR2, or a NEF) really is a
@@ -2642,6 +2800,139 @@ mod tests {
             Orientation::Rotate90,
             target
         )));
+    }
+
+    /// R28 Batch-4 4a — the RAW twin of the two tests above: until this batch
+    /// the develop chain had a per-file ceiling on ONE side only, so a 150 MP
+    /// back that the baked door would have refused outright went through the
+    /// RAW door with nothing checked (adjudication F2's deeper root).
+    ///
+    /// MUTATION THIS KILLS: delete the `allocation_over_ceiling` branch in
+    /// `refuse_raw_develop_over_ceiling` (or turn its `>=` into `>`, which the
+    /// exact-ceiling row below catches) and the 200 MP frame is admitted —
+    /// the exact silence the gate exists to end.
+    #[test]
+    fn a_raw_over_the_ceiling_is_refused_by_name_and_offers_the_way_out() {
+        let p = std::path::Path::new("big.iiq");
+        // 60.2 MP, the measured corpus frame: admitted, with room to spare.
+        assert!(refuse_raw_develop_over_ceiling(p, 60_217_344).is_ok());
+        // The BOUNDARY, both sides of it. 4 GiB / 31 B/px = 138,547,332 px is
+        // the first pixel count at or over the ceiling.
+        let at = MAX_ALLOC.div_ceil(RAW_DEVELOP_BYTES_PER_PIXEL);
+        assert!(refuse_raw_develop_over_ceiling(p, at - 1).is_ok(), "just under must develop");
+        let e = refuse_raw_develop_over_ceiling(p, at).unwrap_err().to_string();
+        // The disclosure the user ruling asked for: WHICH file, the estimate
+        // and its basis, and the correction of the obvious wrong guess.
+        assert!(e.contains("big.iiq"), "must name the file: {e}");
+        assert!(e.contains(&at.to_string()), "must name the pixel count: {e}");
+        assert!(
+            e.contains(&RAW_DEVELOP_BYTES_PER_PIXEL.to_string()) && e.contains("measured"),
+            "must show the basis, not just a verdict: {e}"
+        );
+        assert!(e.contains("--jobs 1"), "must correct the concurrency guess: {e}");
+        // A 200 MP back — the class F2 named as the worse, zero-opt-in
+        // instance — is refused where the same count on the baked side is.
+        assert!(refuse_raw_develop_over_ceiling(p, 200_000_000).is_err());
+        // Absurd input saturates instead of wrapping into an accidental pass.
+        assert!(refuse_raw_develop_over_ceiling(p, u64::MAX).is_err());
+    }
+
+    /// The RAW and baked ceilings must be the SAME ceiling — the user ruling
+    /// (2026-08-20) was "the same 4 GiB per-file peak gate as baked", and two
+    /// numbers that merely happen to agree today would drift.
+    ///
+    /// Also pins the per-pixel constant against the measurement that produced
+    /// it: 1,771 MB over 60,217,344 px = 30.84 B/px, and the constant must be
+    /// the CEILING of that (rounding a peak down admits files it should
+    /// refuse). MUTATION THIS KILLS: lowering the constant to 30.
+    #[test]
+    fn the_raw_ceiling_is_the_baked_ceiling_and_its_constant_matches_the_probe() {
+        let measured_bytes: u64 = 1771 * 1024 * 1024;
+        let measured_px: u64 = 60_217_344;
+        let per_px = measured_bytes.div_ceil(measured_px);
+        assert_eq!(
+            RAW_DEVELOP_BYTES_PER_PIXEL, per_px,
+            "the constant is the ROUNDED-UP measurement (jobs.rs' stage table), not a guess"
+        );
+        // One ceiling, asserted rather than assumed: whatever `MAX_ALLOC` is,
+        // both doors refuse at it.
+        assert!(allocation_over_ceiling(raw_develop_peak_bytes(
+            MAX_ALLOC.div_ceil(RAW_DEVELOP_BYTES_PER_PIXEL)
+        )));
+        assert!(allocation_over_ceiling(MAX_ALLOC));
+    }
+
+    /// A ceiling is only a ceiling if the ONE funnel charges it, and the pure
+    /// tests above cannot see a call site. This is that half: a SOURCE SCAN,
+    /// the idiom this repo already uses where the property is about WHERE code
+    /// is called rather than what it computes (`store`'s capped-reader gate,
+    /// the GUI font gate).
+    ///
+    /// MUTATION THIS KILLS: deleting the call from `render::render_to_image_in`
+    /// — every RAW is admitted again and no unit test of the pure function
+    /// would notice — or moving it AFTER the non-dummy sensor read, which
+    /// would refuse only once the decompression it exists to prevent had
+    /// already happened.
+    #[test]
+    fn the_one_raw_develop_funnel_charges_the_ceiling_before_it_decompresses() {
+        // LF-normalised: this repo has MIXED line endings by design (per-file
+        // `.gitattributes` + `core.autocrlf`).
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/render.rs"),
+        )
+        .expect("render.rs readable")
+        .replace("\r\n", "\n");
+        assert_eq!(
+            text.matches("refuse_raw_develop_over_ceiling_for(").count(),
+            1,
+            "exactly ONE call site — a second would be the per-caller copy this design refuses"
+        );
+        let gate = text
+            .find("refuse_raw_develop_over_ceiling_for(")
+            .expect("the RAW develop funnel must charge the ceiling");
+        // Non-vacuity AND the ordering: the gate exists to run before the
+        // sensor is decompressed, which is the `dummy = false` read.
+        let sensor = text
+            .find("decoder.raw_image(&src, &params, false)")
+            .expect("extractor anchor: the non-dummy sensor read moved — re-anchor this gate");
+        assert!(
+            gate < sensor,
+            "the ceiling must be charged BEFORE the sensor decompression it bounds"
+        );
+    }
+
+    /// The planner's half (R28 Batch-4 4a): a baked source answers its own
+    /// peak from a HEADER, a RAW declines to answer at all, and the two
+    /// answers come from the same accounting the ceilings enforce.
+    ///
+    /// MUTATION THIS KILLS: make `cheap_develop_peak_mb` answer for RAWs too
+    /// (say by dropping the `is_raw` arm) — a 61 MP ARW would then pay
+    /// `RawSource::new`, the whole file mapped, once per photo before the pool
+    /// starts, which is the cost the corpus constant exists to avoid.
+    #[test]
+    fn the_cheap_peak_estimate_answers_for_baked_sources_and_declines_for_raw() {
+        assert_eq!(cheap_develop_peak_mb(std::path::Path::new("a.arw")), None);
+        assert_eq!(cheap_develop_peak_mb(std::path::Path::new("a.dng")), None);
+        // An absent/unreadable baked file is `None` too — a PLAN must never be
+        // the thing that fails a run.
+        assert_eq!(cheap_develop_peak_mb(std::path::Path::new("nope.png")), None);
+
+        let dir = std::env::temp_dir().join(format!("autoshop-peak-est-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let png = dir.join("small.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(400, 300))
+            .save(&png)
+            .expect("write fixture");
+        let mb = cheap_develop_peak_mb(&png).expect("a readable PNG answers");
+        // 400x300 RGB8: decode 360,000 B + 120,000 px x 24 B = 3,240,000 B.
+        let want = develop_peak_bytes(
+            400 * 300 * 3,
+            image::metadata::Orientation::NoTransforms,
+            400 * 300,
+        );
+        assert_eq!(mb, want.div_ceil(1024 * 1024), "the estimate IS develop_peak_bytes, in MB");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// THE INTERFACE that was broken: rawler 0.7.2 hard-codes

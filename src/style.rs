@@ -8,7 +8,7 @@
 //! not a target to copy.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -364,24 +364,42 @@ fn embed_distance(q: Option<&[f32]>, e: Option<&[f32]>, w: f64) -> f64 {
     w * (1.0 - dot.clamp(-1.0, 1.0))
 }
 
-/// One photo's SigLIP 2 vector, from the camera's embedded preview.
+/// One photo's embedding frame, staged on disk and OWNED: dropping it removes
+/// both temp files.
 ///
-/// The ONE entry point both the index build and the develop-time query use, so
-/// a photo's stored vector and its query vector are produced by the same
-/// pipeline: reduce to [`EMBED_FRAME_EDGE`] with a NAMED filter, write a PNG,
-/// hand it to the sidecar. `dir` is where the temp PNG and the sidecar's JSON
-/// live; both are removed before this returns.
+/// It exists so the ~181 MB preview and the multi-second sidecar call stop
+/// overlapping (R28 Batch-4 4b). `embed_preview` did both in one call, which
+/// meant the caller's decode-sized buffer — and, in `StyleIndex::build`, its
+/// `DecodePermit` — stayed alive for the whole model load. Staging is a
+/// 512x512 PNG; once it exists, the frame the sidecar needs is 200 KB on disk
+/// rather than 181 MB in RAM.
 ///
-/// Errors are the CALLER's to degrade: the build skips the vector for that
-/// photo and keeps the exemplar, the develop path retrieves on the 14 dims
-/// alone. Neither may fail the run — a style index is not worth an aborted
-/// develop, and a 1.5 GB download must never be able to break one.
-pub fn embed_preview(
-    opts: &crate::embed::EmbedOpts,
+/// RAII rather than the two `remove_file` calls it replaces: the staged files
+/// are intermediates, and every early return out of the embed path used to be
+/// a chance to leak one into the user's temp directory.
+pub struct StagedFrame {
+    img: PathBuf,
+    json: PathBuf,
+}
+
+impl Drop for StagedFrame {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.img);
+        let _ = std::fs::remove_file(&self.json);
+    }
+}
+
+/// Reduce a camera preview to THE embedding frame and write it out.
+///
+/// The reduction is the reason both the index build and the develop-time query
+/// go through one function: the sidecar squashes whatever it is given to
+/// 384x384, so the only way a photo's stored vector and its query vector could
+/// differ is if the two paths handed it different pixels.
+pub fn stage_embed_frame(
     preview: &image::DynamicImage,
     dir: &Path,
     tag: &str,
-) -> Result<Vec<f32>> {
+) -> Result<StagedFrame> {
     // `Triangle` is bilinear, NAMED rather than defaulted for the same reason
     // the sidecar names PIL's resample: a filter that changed under us would
     // move every vector without a line of this repo changing.
@@ -404,18 +422,55 @@ pub fn embed_preview(
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         tag
     );
-    let img_path = dir.join(format!("{stem}.png"));
-    let json_path = dir.join(format!("{stem}.json"));
-    let run = (|| -> Result<Vec<f32>> {
-        small
-            .to_rgb8()
-            .save(&img_path)
-            .with_context(|| format!("stage embedding input {}", img_path.display()))?;
-        crate::embed::embed_file(opts, &img_path, &json_path)
-    })();
-    let _ = std::fs::remove_file(&img_path);
-    let _ = std::fs::remove_file(&json_path);
-    run
+    // Constructed BEFORE the write, so a failed `save` still cleans up the
+    // partial file it may have created.
+    let staged =
+        StagedFrame { img: dir.join(format!("{stem}.png")), json: dir.join(format!("{stem}.json")) };
+    small
+        .to_rgb8()
+        .save(&staged.img)
+        .with_context(|| format!("stage embedding input {}", staged.img.display()))?;
+    Ok(staged)
+}
+
+/// Hand a [`StagedFrame`] to the sidecar. Serialised process-wide against
+/// every other embed (`embed::with_model_slot`) — one resident model, whatever
+/// the caller's concurrency.
+pub fn embed_staged(opts: &crate::embed::EmbedOpts, staged: &StagedFrame) -> Result<Vec<f32>> {
+    crate::embed::embed_file(opts, &staged.img, &staged.json)
+}
+
+/// One photo's SigLIP 2 vector, from the camera's embedded preview.
+///
+/// The ONE entry point for a caller that has nothing useful to do between the
+/// two halves — the develop-time query, which needs the vector before it can
+/// build the advisor request at all. `StyleIndex::build` splits them instead,
+/// so its decode buffer and its decode permit are released before the sidecar
+/// runs.
+///
+/// Errors are the CALLER's to degrade: the build skips the vector for that
+/// photo and keeps the exemplar, the develop path retrieves on the 14 dims
+/// alone. Neither may fail the run — a style index is not worth an aborted
+/// develop, and a 1.5 GB download must never be able to break one.
+pub fn embed_preview(
+    opts: &crate::embed::EmbedOpts,
+    preview: &image::DynamicImage,
+    dir: &Path,
+    tag: &str,
+) -> Result<Vec<f32>> {
+    let staged = stage_embed_frame(preview, dir, tag)?;
+    embed_staged(opts, &staged)
+}
+
+/// The ONE degradation line the index build prints when a photo ends up
+/// without a vector — shared by the staging arm and the sidecar arm so the two
+/// failures read identically to the user, who cannot tell them apart and does
+/// not need to.
+fn note_no_embedding(raw: &Path, e: &anyhow::Error) {
+    eprintln!(
+        "  {}: no style embedding ({e:#}) — indexed on the 14-dim feature alone",
+        pipeline::stem(raw)
+    );
 }
 
 /// Is this exemplar the QUERY photo itself? Path identity when the exemplar
@@ -555,15 +610,26 @@ impl StyleIndex {
                 s.spawn(move || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&raw) = pairs.get(i) else { break };
+                    // --- UNDER THE DECODE PERMIT: the decode itself, and the
+                    // staging of the embedding frame FROM the decoded buffer.
+                    // Nothing else. R28 Batch-4 4b (adjudication F3) shortened
+                    // this scope from what it used to be — it ran to the end of
+                    // the photo, so a non-decode process (the sidecar, seconds
+                    // of model load) sat inside the DECODE budget and the
+                    // ~181 MB preview stayed alive underneath it.
+                    //
+                    // The staging stays INSIDE, deliberately: it reads the
+                    // preview, so releasing first would let this worker hold
+                    // 181 MB while another started a fresh decode — and across
+                    // two concurrent builds (the web server's request threads)
+                    // that is exactly the ~1.4 GB stack `MAX_CONCURRENT_DECODES`
+                    // exists to bound. Inside, the invariant is unchanged: a
+                    // 61 MP preview is alive only while its permit is.
                     let permit = decode::DecodePermit::acquire();
                     // Destructured, not bound whole: bound as `d`, the entire
-                    // `Decoded` — rawler's sensor buffers included — stayed
-                    // alive across the sidecar read below, when all this loop
-                    // wants is `meta`, `histogram` and (~181 MB at 61 MP)
-                    // `preview`. R28 2e corrects the second half of what this
-                    // comment used to say: `preview` IS read here now, by the
-                    // embedding arm below (R27 Batch-5); "never read here"
-                    // described the loop as it stood before that landed.
+                    // `Decoded` — rawler's sensor buffers included — would stay
+                    // alive across the staging below, when all this loop wants
+                    // is `meta`, `histogram` and (~181 MB at 61 MP) `preview`.
                     // In the frame the photo's own saved develop asks for
                     // (R27): the aspect feature is a retrieval discriminator
                     // with weight 1.5, so indexing a hand-rotated shot as the
@@ -571,91 +637,27 @@ impl StyleIndex {
                     // answers. `saved_quarter_turns` is one small read beside
                     // a ~1 s decode, and answers 0 for the common case (a
                     // foreign Lightroom library this app has never developed).
-                    let ex = match decode::decode_raw_turned(
+                    let staged = match decode::decode_raw_turned(
                         raw,
                         crate::store::saved_quarter_turns(raw),
                     ) {
                         Ok(decode::Decoded { meta, histogram, preview, .. }) => {
                             let feat = feature_vector(&meta, &histogram);
-                            // The embedding, with `preview` STILL ALIVE:
-                            // `embed_preview` borrows it, so the ~181 MB
-                            // buffer is held for the whole call — the
-                            // sidecar's seconds-long model load included
-                            // (~1.5 GB of fp32 SigLIP weights per worker
-                            // process, up to `MAX_CONCURRENT_DECODES` of
-                            // them). This comment asserted the opposite from
-                            // the day it was written (git -S: bae6d99, R27
-                            // Batch-5); the `drop(preview)` below sits AFTER
-                            // the call, not before it, and moving it earlier
-                            // is impossible because the sidecar is fed FROM
-                            // the buffer. The real fix is on the sidecar side
-                            // — pass the already-implemented `--fp16` and
-                            // load the model once instead of per worker —
-                            // registered as R28 Batch-4 4b (adjudication F3).
-                            let embed = embedder.as_ref().and_then(|o| {
-                                let r = embed_preview(
-                                    o,
-                                    &preview,
-                                    embed_dir,
-                                    &format!("idx-{i}"),
-                                );
-                                match r {
-                                    Ok(v) => Some(v),
-                                    // DEGRADE, never fail: this photo keeps its
-                                    // 14-dim exemplar and the index becomes a
-                                    // legitimate mixed one (see
-                                    // `retrieve_with_embed`). A sidecar that
-                                    // could abort an hour-long build over one
-                                    // frame would be worse than no sidecar.
+                            // 181 MB in, 200 KB out: after this the sidecar
+                            // needs a PATH, not the buffer.
+                            let frame = embedder.as_ref().and_then(|_| {
+                                match stage_embed_frame(&preview, embed_dir, &format!("idx-{i}")) {
+                                    Ok(f) => Some(f),
+                                    // DEGRADE, never fail — see the sidecar arm
+                                    // below; the two failures are one outcome.
                                     Err(e) => {
-                                        eprintln!(
-                                            "  {}: no style embedding ({e:#}) — indexed on the \
-                                             14-dim feature alone",
-                                            pipeline::stem(raw)
-                                        );
+                                        note_no_embedding(raw, &e);
                                         None
                                     }
                                 }
                             });
                             drop(preview);
-                            // An unreadable sidecar must SKIP the photo, not
-                            // produce a settings-free exemplar that dilutes
-                            // retrieval (the pair scan guaranteed the .xmp
-                            // exists — a read failure here is a real error).
-                            match crate::store::read_sidecar(&raw.with_extension("xmp")) {
-                                Some(xmp) => {
-                                    let ex = StyleExemplar {
-                                        stem: pipeline::stem(raw).to_string(),
-                                        path: std::path::absolute(raw)
-                                            .ok()
-                                            .map(|p| p.display().to_string()),
-                                        tag: derive_tag(&feat),
-                                        feat: feat.to_vec(),
-                                        settings: read_settings(&xmp),
-                                        curve: crate::eval::user_curve_shape(&xmp)
-                                            .map(|(b, s)| [b, s]),
-                                        families: crate::eval::user_family_summary(&xmp),
-                                        embed,
-                                    };
-                                    if exemplar_is_finite(&ex) {
-                                        Some(ex)
-                                    } else {
-                                        eprintln!(
-                                            "  skip {}: non-finite or out-of-band metadata/settings \
-                                             (would corrupt the index)",
-                                            pipeline::stem(raw)
-                                        );
-                                        None
-                                    }
-                                }
-                                None => {
-                                    eprintln!(
-                                        "  skip {}: xmp unreadable or over the sidecar size cap",
-                                        pipeline::stem(raw)
-                                    );
-                                    None
-                                }
-                            }
+                            Some((feat, frame))
                         }
                         Err(e) => {
                             // println!/eprintln! are line-atomic, so per-photo
@@ -664,7 +666,68 @@ impl StyleIndex {
                             None
                         }
                     };
-                    drop(permit); // free the decode slot before the prints/send
+                    // --- OUT of the decode budget. Everything below is either
+                    // a small file read or the Python sidecar, which has its
+                    // own single-flight gate (`embed::with_model_slot`).
+                    drop(permit);
+                    let ex = staged.and_then(|(feat, frame)| {
+                        let embed = match (embedder.as_ref(), frame) {
+                            (Some(o), Some(f)) => match embed_staged(o, &f) {
+                                Ok(v) => Some(v),
+                                // DEGRADE, never fail: this photo keeps its
+                                // 14-dim exemplar and the index becomes a
+                                // legitimate mixed one (see
+                                // `retrieve_with_embed`). A sidecar that could
+                                // abort an hour-long build over one frame would
+                                // be worse than no sidecar. The GUI now COUNTS
+                                // these (R28 4b) — an all-failed build used to
+                                // land the same toast as an all-embedded one.
+                                Err(e) => {
+                                    note_no_embedding(raw, &e);
+                                    None
+                                }
+                            },
+                            _ => None,
+                        };
+                        // An unreadable sidecar must SKIP the photo, not
+                        // produce a settings-free exemplar that dilutes
+                        // retrieval (the pair scan guaranteed the .xmp
+                        // exists — a read failure here is a real error).
+                        match crate::store::read_sidecar(&raw.with_extension("xmp")) {
+                            Some(xmp) => {
+                                let ex = StyleExemplar {
+                                    stem: pipeline::stem(raw).to_string(),
+                                    path: std::path::absolute(raw)
+                                        .ok()
+                                        .map(|p| p.display().to_string()),
+                                    tag: derive_tag(&feat),
+                                    feat: feat.to_vec(),
+                                    settings: read_settings(&xmp),
+                                    curve: crate::eval::user_curve_shape(&xmp)
+                                        .map(|(b, s)| [b, s]),
+                                    families: crate::eval::user_family_summary(&xmp),
+                                    embed,
+                                };
+                                if exemplar_is_finite(&ex) {
+                                    Some(ex)
+                                } else {
+                                    eprintln!(
+                                        "  skip {}: non-finite or out-of-band metadata/settings \
+                                         (would corrupt the index)",
+                                        pipeline::stem(raw)
+                                    );
+                                    None
+                                }
+                            }
+                            None => {
+                                eprintln!(
+                                    "  skip {}: xmp unreadable or over the sidecar size cap",
+                                    pipeline::stem(raw)
+                                );
+                                None
+                            }
+                        }
+                    });
                     // Progress counts COMPLETED photos (completion order differs
                     // from index order under parallelism) so it stays monotonic.
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1302,6 +1365,39 @@ mod tests {
     fn parse_hour_reads_exif() {
         assert_eq!(parse_hour(Some("2023:06:01 14:30:00")), 14.0);
         assert_eq!(parse_hour(None), 12.0);
+    }
+
+    /// R28 Batch-4 4b: staging is the whole mechanism that lets the ~181 MB
+    /// preview and the seconds-long sidecar stop overlapping, so the frame must
+    /// really land on disk (the sidecar reads a PATH), must be the REDUCED
+    /// frame, and must take both temp names with it when it drops.
+    ///
+    /// MUTATION THIS KILLS: deleting the `Drop` impl — the PNG then survives in
+    /// the user's temp directory once per photo of every index build, which is
+    /// the leak the two hand-written `remove_file` calls used to prevent on the
+    /// happy path only.
+    #[test]
+    fn a_staged_embedding_frame_is_reduced_and_cleans_up_after_itself() {
+        let dir = std::env::temp_dir().join(format!("autoshop-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        // Deliberately larger than the embedding frame, and not square, so a
+        // "staged the source instead" mutant is visible in both dimensions.
+        let src = image::DynamicImage::ImageRgb8(image::RgbImage::new(2000, 1000));
+        let (img, json) = {
+            let staged = stage_embed_frame(&src, &dir, "probe").expect("staging writes the frame");
+            assert!(staged.img.exists(), "the sidecar is handed a path, so the file must exist");
+            let on_disk = image::open(&staged.img).expect("the staged frame is a readable PNG");
+            assert_eq!(
+                (on_disk.width(), on_disk.height()),
+                (EMBED_FRAME_EDGE, EMBED_FRAME_EDGE / 2),
+                "the frame is reduced to the long edge, aspect kept"
+            );
+            (staged.img.clone(), staged.json.clone())
+        };
+        assert!(!img.exists(), "the staged PNG must not outlive the frame that owns it");
+        assert!(!json.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

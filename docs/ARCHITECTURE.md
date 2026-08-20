@@ -327,6 +327,26 @@
 > comments. `trust_remote_code` is never used anywhere: it downloads and
 > executes upstream Python through HF's cache, which our gate never sees.
 >
+> **The sidecars' budget is not the host's budget (v0.34.0).** Every resource
+> bound in this tree is shaped like main memory — `decode::MAX_CONCURRENT_DECODES`
+> counts 181 MB previews, `jobs` divides `GlobalMemoryStatusEx` — and a model
+> loaded into a GPU is in none of them. So the embedder was fanning out
+> unchecked: up to four index workers each spawned their own sidecar, four
+> resident SigLIP copies at 1.50 GB of fp32 weights apiece, against consumer
+> cards that commonly have 4 GB total. Two rules, both in
+> [`src/embed.rs`](../src/embed.rs): the sidecar is asked for `--fp16` (which it
+> has implemented since R27 and nothing ever passed — CUDA-only by its own
+> construction, and it re-casts to fp32 before normalising, so no invariant the
+> Rust side checks moves), and calls are SINGLE-FLIGHTED behind a process-wide
+> gate, so at most one model is resident whatever the caller's concurrency.
+> 4 × 1.50 GB becomes 1 × 0.75 GB. The gate was chosen over wiring `embed.py`'s
+> (already implemented) manifest batching because it also covers the
+> develop-time query, which no manifest can merge: `batch --jobs 3` is three
+> concurrent single-image calls. What it costs is stated rather than hidden —
+> the embedding arm of an index build is now serial, while the decode that
+> dominates it still runs four-wide, and the decode PERMIT is released before
+> the sidecar rather than held across it.
+>
 > **What the sidecars are FOR** is the part that matters architecturally. The
 > segmenter picks *where* — its output is an 8-bit grey raster the deterministic
 > engine samples bilinearly — and the embedder picks *which past edits to show
@@ -573,7 +593,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | M1 | Unified provider framework + GPT advisor + Claude verifier | `ureq` (HTTP) + `claude` CLI | **done** |
 | M2 | Deterministic render engine | `image`, custom tone/colour/WB/clarity/NR/sharpen ops | **done** |
 | M2 | XMP sidecar writer (ACR `crs:`, global + local masks) | hand-rolled XML | **done** |
-| M3 | `auto` end-to-end + batch | batch fixes its work list up front, then runs it through a bounded pool — `--jobs N` since R27, default 3 for `batch` and 1 for `eval` (their pre-R27 concurrency), capped by the memory budget in [`src/jobs.rs`](../src/jobs.rs) and index-ordered on output; "pending" = no develop in the store (recipe.json or `<stem>.xmp`, central or legacy) | **done** |
+| M3 | `auto` end-to-end + batch | batch fixes its work list up front, then runs it through a bounded pool — `--jobs N` since R27, default 3 for `batch` and 1 for `eval` (their pre-R27 concurrency), capped by the memory budget in [`src/jobs.rs`](../src/jobs.rs) and index-ordered on output; since v0.34.0 that budget is per-FILE where the header is free to read (`jobs::survey_peak_mb` — a native-resolution 16-bit TIFF from LR's "Edit in…" can need more than the corpus constant on its own, and says so before the run starts); "pending" = no develop in the store (recipe.json or `<stem>.xmp`, central or legacy) | **done** |
 | M4 | Style retrieval + eval harness (your edits as ground truth) | k-NN over EXIF+histogram, plus an optional SigLIP 2 cosine term (`AUTOSHOP_STYLE_EMBED`, off by default); per-field MAE/bias | **done** |
 | M5 | Local web UI | `tiny_http` + vanilla JS (gallery, live before/after) | **done** |
 | V2 | AI denoise (high-ISO/astro) | Python sidecar → **SCUNet** on GPU, called from Rust | **done** |
@@ -612,6 +632,7 @@ line is whether the NUMBERS are wrong or only the fine detail:
 | Third-party parser panics | **Named error**, process survives (`decode::guard_parser_panic`) | The GUI has wrapped workers in `catch_unwind` since v0.22; the CLI had nothing, so one malformed file killed a whole `batch` run |
 | No embedded preview (ORF class) | **Degrade** to a neutral develop + say so | rawler overrides no rendition method for 12 of the 24 formats; that is a fact about the format, not a broken file. `embedded_preview` keeps the strict "camera pixels or nothing" contract, because the base-look estimator's method depends on it |
 | Non-Bayer CFA (X-Trans) | **Demosaic in-tree over the array's own geometry** (v0.34.0, `render::demosaic_over_cfa_geometry`) + disclose per render | rawler's `PPGDemosaic` is Bayer-only and its guard (`CFA::is_rgb`) checks the pattern's NAME, not its geometry; through v0.33.0 its chroma pass left R and B unwritten at 16 of 36 X-Trans photosites — the measured green-dark cast. Now every channel interpolates only from photosites that measured it: colour/tone/framing correct, fine detail approximate and disclosed |
+| A RAW whose develop would peak over **4 GiB** — 138,547,333 px and up, at the measured 31 B/px (a 150 MP back; a 102 MP GFX is well clear) | **Refuse**, naming the estimate and its per-pixel basis (v0.34.0, `decode::refuse_raw_develop_over_ceiling`, charged in `render::render_to_image_in` before the sensor is decompressed) | The baked door has refused an over-ceiling file since L02 while the RAW door had NO per-file limit at all, so a ~150 MP back on the default `batch --jobs 3` was the worse instance of the same defect with nothing opt-in about it. The ceiling is the SAME 4 GiB, and the message says outright that `--jobs 1` is not the answer — a single file's peak is not a concurrency budget. This IS a behaviour change: such a file used to be attempted, and would page |
 | DefaultCrop rectangle off the sensor | **Disclose** and develop un-aligned | Was a silent `None` until R27 — any diagnosis of a misplaced mask started with zero telemetry |
 | Untagged **16-bit** baked input | **Disclose** | It is read as sRGB. Right for 8-bit JPEG (web convention); often wrong for 16-bit, which is what an editor produces — LR's "Edit in…" exports ProPhoto. Warning on every untagged JPEG would be a warning nobody reads |
 
