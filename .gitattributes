@@ -8,3 +8,11 @@
 # fail on a tree that is byte-identical in git. Pinning eol here makes the working
 # copy match what the test expects, on any platform.
 *.py text eol=lf
+
+# The sidecar's data files are held to the same rule, and for a HARDER reason:
+# `python/ade20k_class_table.json` is gated on its own sha256 at run time
+# (`segment.py`'s `SKY_CLASS_TABLE_PIN`), so a checkout that rewrote its
+# newlines would not fail a text assertion — it would fail the digest, on a tree
+# git considers identical, and read as tampering. Autodetected `text` is not
+# enough: with no attribute at all `core.autocrlf=true` converts on checkout.
+python/*.json text eol=lf

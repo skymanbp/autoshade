@@ -15,8 +15,9 @@ consistent with .gitignore'ing python/weights):
              ... falling back to rembg / U^2-Net when BiRefNet cannot run
              (pip install rembg; ~/.u2net) — see SUBJECT below
   sky     -> OneFormer ADE20K Swin-L, sha256-pinned into python/weights
-             (pip install transformers torch; 881,196,376 B over seven files
-             plus the 7,084 B ADE20K class table — see the SKY section)
+             (pip install transformers torch; 881,196,376 B over seven files;
+             the 7,085 B ADE20K class table the processor needs is NOT
+             downloaded — it ships in python/ — see the SKY section)
   object  -> SAM 2.1 Hiera-Large, point-prompted (see the OBJECT section)
 
 LICENCES — this is a PUBLIC repository and the product is being copyright
@@ -61,9 +62,51 @@ be licensed for the use we are instructing. Both backends were re-checked
     with no field-of-use clause, no acceptable-use policy and no
     non-commercial carve-out — i.e. none of what disqualified SegFormer, SAM 3
     or CLIP. `cardData.license` is `mit` and `gated` is false on the HF API
-    (re-verified 2026-08-21, this session). What the review did NOT resolve:
-    the training sets the card names (DIS-TR / AM-2k / P3M-500-NP) carry their
-    own terms and were not audited.
+    (re-verified 2026-08-21, this session).
+
+    TRAINING-SET TERMS, AUDITED AND CLOSED (R29 C5, 2026-08-21). The card's one
+    training-set sentence ("trained on DIS-TR") is BOILERPLATE -- the identical
+    sentence sits in BiRefNet_HR and BiRefNet_lite, whose training sets are
+    provably different, while the dedicated DIS checkpoints live at
+    ZhengPeng7/BiRefNet-DIS5K. On the model zoo plus the -legacy card's
+    "(w/o portrait seg data)" qualifier, this checkpoint is the `general use`
+    swin_v1_large row: DIS5K-TR, DIS-TEs, DUTS-TR_TE, HRSOD-TR_TE, UHRSD-TR_TE,
+    HRS10K-TR_TE, TR-P3M-10k, TE-P3M-500-NP, TE-P3M-500-P, TR-humans, over an
+    ImageNet-22k swin backbone. AM-2k is NOT among them -- it belongs to the
+    matting and 2048 rows, which we do not run.
+
+    Of those, one carries a use restriction: DIS5K's Terms of Use say "The
+    Dataset is available for non-commercial use in research or educational
+    purpose ... commercial use of this dataset is prohibited even after copying,
+    editing, processing or any operations of this database"
+    (https://raw.githubusercontent.com/xuebinqin/DIS/main/DIS5K-Dataset-Terms-of-Use.pdf,
+    sha256 d509ad2249225d698921e1e4ce5497ca2d987cb7cc476b81c3b3094b26b9af96).
+    That does NOT reach us, and the difference from SegFormer is the whole point:
+    NVIDIA restricted THE WORK -- the weights we execute, with us as licensee --
+    so not redistributing cured nothing. DIS5K restricts A DATABASE WE NEVER
+    OBTAIN, under a signed registration agreement (it has Name/Affiliation/E-mail
+    fields and asks you to sign) to which we are not a party; its clause 1
+    reserves rights and grants none, so no condition runs with the weights, and
+    its clause 4 forbids distributing the database, which we do not do. The
+    reading that would condemn it also condemns DUTS (built from ImageNet DET),
+    the ImageNet-pretrained swin backbone, the torchvision vgg16/resnet50
+    imported below, and U^2-Net -- our own fallback tier, trained on DUTS-TR.
+    A rule with no reachable compliant state is not the rule.
+
+    Everything else is permissive: P3M-10k and AM-2k are MIT by clause 1 of their
+    release agreements; HRSOD is Flickr Creative Commons; UHRSD is Flickr/Pixabay
+    "free copyright"; HRS10K is Unsplash/Pixabay; TR-humans is Apache-2.0 and
+    synthetic. Recorded, not restrictive: P3M-500-NP is 500 identifiable
+    NON-face-blurred celebrity images (the P3M agreement's own preamble calls all
+    10,421 "face-blurred", which is wrong for that subset) -- no privacy clause
+    exists in the agreement, and a 1024x1024 binary-alpha discriminative model
+    cannot reproduce a training image. Upstream's own position, verbatim, when
+    asked about website use: "Sure. I set all models in MIT License."
+    (huggingface.co/ZhengPeng7/BiRefNet/discussions/15 -- also the only copyright
+    complaint ever filed against the repo; its entire body was "111", it was
+    never substantiated, and HF staff closed it.) Full audit with verbatim
+    clauses and provenance digests:
+    ~/.claude/plans/r29-materials/c5-dataset-terms-audit.md
 
     NOT `BiRefNet_HR-matting`, which the R27 design document picked
     (D1-ml-sidecar-design.md:134). Measured on the photographer's own library
@@ -491,36 +534,86 @@ def _u2net_subject_mask(img_path: str):
 # moving `main`, on every single sky mask. `SKY_REVISION` never reached it and
 # the local-files-only flag does not stop it (it is a separate call with its own
 # kwargs; proved by `HF_HUB_OFFLINE=1`, which turns the load into
-# `OfflineModeIsEnabled` on exactly that URL). The `metadata` key sitting in
-# the pinned `preprocessor_config.json` does NOT help: the constructor filters it
-# out and recomputes from the download. So the file is fetched HERE, pinned like
-# everything else, and handed back through `repo_path` — `load_metadata` prefers
+# `OfflineModeIsEnabled` on exactly that URL). The `metadata` key sitting in the
+# pinned `preprocessor_config.json` does NOT help AT LOAD TIME: the constructor
+# filters it out of the kwargs and recomputes from the file. (Its CONTENT is
+# another matter — it is one of the sources the file below was rebuilt from; see
+# the next block.) So the table is put in the verified directory HERE and handed
+# back through `repo_path` — `load_metadata` prefers
 # `os.path.join(repo_path, class_info_file)` when that is a real file, which is
 # what makes the offline load work.
 #
-# ⚠ REGISTERED, NOT CLEARED — the licence of that second repo.
-# `shi-labs/oneformer_demo` has NO declared licence: the HF API returns
-# `cardData: null` and `tags: ["region:us"]` (checked 2026-08-21), i.e. none of
-# the model repo's `mit`. The file is the 150-entry ADE20K class table
-# (`{"2": {"isthing": 0, "name": "sky"}, ...}`, 7,084 B) — factual label
-# metadata, not weights and not code — and this project has been fetching it on
-# every sky mask since R27 Batch-4 without noticing. Pinning it is strictly
-# better than the moving `main` it replaces, but it is NOT a licence clearance,
-# and R27 Batch-4's audit did not cover this repo. Two ways out if the user
-# wants it gone: synthesise the table from the model's own (MIT, pinned)
-# `config.json` `id2label` — but `isthing` is not in there and would have to be
-# invented, which only stays honest while nothing calls `post_process_*` — or
-# take the table from ADE20K/Detectron2 upstream directly. Neither is this
-# batch's to decide.
+# THE SECOND REPO IS GONE — the class table is now OURS (R29 收口, ruling 11).
+# What used to sit here was a registration, not a clearance:
+# `shi-labs/oneformer_demo` declares NO licence (the HF API returns
+# `cardData: null` and `tags: ["region:us"]`, checked 2026-08-21), so of every
+# asset this tree fetched it was the only one that had never been through the
+# criterion at the top of this file. Pinning its revision fixed WHICH bytes
+# arrived; it did not answer under what terms. The user's ruling was to stop
+# fetching it and rebuild the table from licence-clean facts instead — which is
+# what the file beside this script is.
+#
+# WHAT THE FILE HAS TO BE. `prepare_metadata` (transformers 5.2.0,
+# `models/oneformer/image_processing_oneformer.py:367`) is the whole consumer:
+#     for key, info in class_info.items():
+#         metadata[key] = info["name"]; class_names.append(info["name"])
+#         if info["isthing"]: thing_ids.append(int(key))
+# So the contract is exactly: string keys "0".."149" IN ASCENDING ORDER (the
+# order IS `class_names`), each mapping to an object with `name` and `isthing`.
+# Nothing else is read, and any EXTRA top-level key would be read as a 151st
+# class — which is why the file carries no comment field and its provenance
+# lives here instead.
+#
+# WHERE IT GOES, stated precisely because it is what makes the swap safe: the
+# `metadata` this builds is read by `encode_inputs` only under
+# `if annotations is not None` (i.e. when `segmentation_maps` is passed, which
+# is the annotation path) and by `post_process_instance_segmentation` /
+# `get_*_annotations`. `sky_mask` passes no segmentation maps and calls no
+# `post_process_*` — it contracts the query axis itself, below — so on THIS
+# path the table is consumed at construction and never read again. It still has
+# to be well formed: `prepare_metadata` indexes `info["name"]` and
+# `info["isthing"]` unguarded, so a missing field is a `KeyError` on every sky
+# mask, not a silent degradation.
+#
+# WHERE THE FACTS COME FROM — three sources, all MIT, all agreeing on all 150
+# rows before the file was written (the constructor asserted it row by row):
+#   * names + ids: `config.json` `id2label` from the MODEL repo itself, already
+#     pinned below. MIT, and the same file `sky_mask` resolves the sky class
+#     against, so the table cannot drift from the label map the mask uses.
+#   * thing/stuff split: `preprocessor_config.json` `metadata.thing_ids` from
+#     the same MIT model repo, also already pinned. This is the part the old
+#     note said "would have to be invented" — it does not: the checkpoint's own
+#     processor config ships the answer, and the constructor filtering it out at
+#     load time (see above) is a transformers quirk, not an absence.
+#   * both, independently: `ADE20K_150_CATEGORIES` in SHI-Labs/OneFormer's
+#     `oneformer/data/datasets/register_ade20k_panoptic.py` (MIT, LICENSE
+#     retrieved 2026-08-21, 1,065 B) — the upstream factual table, used as a
+#     third opinion rather than a source of bytes.
+# The third-party file was then used ONE way and one way only: as a check. The
+# reconstruction is dict-equal to it, key order included, and the
+# `prepare_metadata()` of the two are equal — the 152-key dicts, `class_names`
+# order and all 100 `thing_ids`. Verified at the PIXEL level besides, which is
+# the claim that does not depend on reading transformers correctly: two
+# photographs, a full sky run on each with the old table and with ours (both
+# under `HF_HUB_OFFLINE=1`), mask PNGs byte-identical — sha256
+# 3b6ad1f3b3557765761df38220258f4b64ebcfb252ea2b9b9239ed1805bf4d2f and
+# 43f531a782558195bc1842a2ca45e5c07538d47f9888fcb3f0628d68e5461507, and a
+# repeat run reproduced the first exactly. So `segment::AI_BACKEND_GENERATION`
+# does NOT move for this: no cached alpha changes. It is not a byte copy of the
+# file it replaces either: different key order inside each row, different
+# formatting, 7,085 B against 7,084.
 SKY_MODEL = "shi-labs/oneformer_ade20k_swin_large"
 SKY_REVISION = "4a5bac8e64f82681a12db2e151a4c2f4ce6092b2"
 
-# The class-info table's own repo and revision — a DATASET repo, hence the
-# `/datasets/` in the URL `_sky_cache` builds, and pinned separately because it
-# moves separately.
-SKY_CLASS_INFO_REPO = "shi-labs/oneformer_demo"
-SKY_CLASS_INFO_REVISION = "4d683bd5bf84e9c8b5537dce306230bde409fe89"
-SKY_CLASS_INFO_FILE = "ade20k_panoptic.json"
+# OUR class table, shipped in `python/` beside this script — no repo, no
+# revision, nothing to fetch. Still digest-gated, for the reason every other
+# asset here is: the pin is what turns "the file next to this script" into "the
+# bytes this project audited", and a half-written checkout or a local edit is
+# exactly as bad as a moving branch. `python/*.json` is pinned to LF in
+# `.gitattributes` — without that, `core.autocrlf` would rewrite the newlines on
+# a Windows checkout and this digest would read as tampering on a tree git
+# considers identical.
+SKY_CLASS_TABLE_FILE = "ade20k_class_table.json"
 
 # Every file `OneFormerProcessor.from_pretrained` + `OneFormerForUniversal-
 # Segmentation.from_pretrained` open, and nothing else: the repo's 949 MB
@@ -572,19 +665,60 @@ SKY = {
     },
 }
 
-SKY_CLASS_INFO_PIN = {
-    "sha256": "9d47d3bf5cedeefee0a41888b069bde254bf614f738ae43e4b423d1b2f321427",
-    "bytes": 7084,
+SKY_CLASS_TABLE_PIN = {
+    "sha256": "8b93934a55524e5a9320875336cb8bc6ba2a9e6307796e9f22e0cebbc89428d8",
+    "bytes": 7085,
 }
+
+
+def _install_class_table(d):
+    """Copy our own ADE20K class table into the verified directory `d`.
+
+    A COPY, not a download — the file ships in `python/` (see the block above).
+    The digest is still checked, and checked on the REPO file rather than the
+    installed one: refusing before the bytes are in the loader's directory is
+    the same order `_fetch_verified` uses, and it means a bad checkout cannot
+    leave a poisoned cache behind for the next run to find.
+    """
+    try:
+        from denoise import _sha256
+    except ImportError as e:
+        die(
+            f"sky segmentation needs the shared sidecar digest helper from denoise.py ({e}) "
+            "-> segment.py must sit beside denoise.py in python/"
+        )
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), SKY_CLASS_TABLE_FILE)
+    if not os.path.isfile(src):
+        die(
+            f"the ADE20K class table is missing -> {SKY_CLASS_TABLE_FILE} must sit beside "
+            "segment.py in python/ (it ships with the sidecar; it is not downloaded)"
+        )
+    got, size = _sha256(src), os.path.getsize(src)
+    if got != SKY_CLASS_TABLE_PIN["sha256"] or size != SKY_CLASS_TABLE_PIN["bytes"]:
+        # ASCII-only: this line can reach a legacy-codepage console.
+        die(
+            f"the ADE20K class table {SKY_CLASS_TABLE_FILE} does not match its pin "
+            f"(expected {SKY_CLASS_TABLE_PIN['sha256']} / {SKY_CLASS_TABLE_PIN['bytes']} B, "
+            f"got {got} / {size} B) -> restore it from the repository"
+        )
+    # Unique temp per process, then an atomic rename: `load_metadata` opens this
+    # path directly, so two sidecars racing must never expose a half-written one.
+    dest = os.path.join(d, SKY_CLASS_TABLE_FILE)
+    tmp = f"{dest}.{os.getpid()}.part"
+    with open(src, "rb") as f:
+        payload = f.read()
+    with open(tmp, "wb") as f:
+        f.write(payload)
+    os.replace(tmp, dest)
 
 
 def _sky_cache(cache_dir):
     """Fetch every pinned OneFormer file into one directory and return it.
 
     Same shape and the same shared downloader as `_sam_cache` /
-    `_birefnet_cache`. The class-info JSON lands in this directory too, under
-    its own name, so `repo_path=<this dir>` makes `load_metadata` read it off
-    disk instead of reaching for the dataset repo.
+    `_birefnet_cache`. Our class table is installed into this directory too,
+    under its own name, so `repo_path=<this dir>` makes `load_metadata` read it
+    off disk instead of reaching for a repository.
     """
     try:
         from denoise import _fetch_verified
@@ -604,14 +738,7 @@ def _sky_cache(cache_dir):
             pin["bytes"] + 4096,
             f"the OneFormer '{name}'",
         )
-    _fetch_verified(
-        f"https://huggingface.co/datasets/{SKY_CLASS_INFO_REPO}/resolve/"
-        f"{SKY_CLASS_INFO_REVISION}/{SKY_CLASS_INFO_FILE}",
-        os.path.join(d, SKY_CLASS_INFO_FILE),
-        SKY_CLASS_INFO_PIN["sha256"],
-        SKY_CLASS_INFO_PIN["bytes"] + 4096,
-        f"the ADE20K class table '{SKY_CLASS_INFO_FILE}'",
-    )
+    _install_class_table(d)
     return d
 
 
@@ -654,11 +781,12 @@ def sky_mask(img_path: str, cache_dir: str):
         d,
         local_files_only=True,
         use_fast=False,
-        # BOTH, or the constructor reaches for the dataset repo — see the block
+        # BOTH, or the constructor reaches for a remote repo — see the block
         # above. `repo_path` pointing at a real directory is what makes
-        # `load_metadata` take its local branch.
+        # `load_metadata` take its local branch, and the name is OURS, not the
+        # `ade20k_panoptic.json` the default `repo_path` would have served.
         repo_path=d,
-        class_info_file=SKY_CLASS_INFO_FILE,
+        class_info_file=SKY_CLASS_TABLE_FILE,
     )
     model = OneFormerForUniversalSegmentation.from_pretrained(d, local_files_only=True)
     model.eval()

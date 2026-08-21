@@ -457,6 +457,18 @@ def worker_bodies_hits(src: str) -> list[tuple[int, str]]:
 
 
 def main() -> int:
+    # The house pattern its two sibling scripts already carry (check_docs.py,
+    # subset_gui_fonts.py) and this one was missing: a redirected Windows stdout
+    # gets the ANSI codepage, and everything printed below is quoted back OUT OF
+    # UTF-8 SOURCE. A missing key holding one character CP936 has no mapping for
+    # (`²` is the one this was caught with) made `print` raise
+    # UnicodeEncodeError mid-report, so the gate died at the FIRST finding it
+    # had to quote — the report stopped there and the checks
+    # after it (dead keys, bypasses, placeholder mismatches) never ran. A crash
+    # is not a verdict. `errors="replace"` keeps that true even for a stream
+    # that genuinely cannot carry the character.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     keys, dynamic = tr_keys(GUI)
     pairs = zh_pairs(I18N)
     zh = [en for en, _ in pairs]

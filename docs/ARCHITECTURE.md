@@ -310,7 +310,7 @@
 > | `segment.py --target subject` | `segment.rs` | **BiRefNet** (general checkpoint), sha256-pinned | MIT | 444,473,596 B |
 > | `segment.py --target subject` (fallback) | `segment.rs` | U²-Net via a NAMED rembg session | Apache-2.0 | small |
 > | `segment.py --target sky` | `segment.rs` | **OneFormer ADE20K Swin-L**, sha256-pinned | MIT (weights) | 881,196,376 B |
-> | `segment.py --target sky` (class table) | `segment.rs` | ADE20K label table the processor requires | ⚠ **none declared** | 7,084 B |
+> | `segment.py --target sky` (class table) | `segment.rs` | ADE20K label table the processor requires — **ours, rebuilt from the model's own MIT metadata**, ships in `python/`, not downloaded | MIT (sources) | 7,085 B |
 > | `segment.py --target object` | `segment.rs` | **SAM 2.1 Hiera-Large**, point-prompted | Apache-2.0 | 897,897,416 B |
 > | `embed.py` | `embed.rs` | **SigLIP 2 base/16 @384**, 768-dim | Apache-2.0 | 1,501,968,264 B |
 >
@@ -349,17 +349,31 @@
 > separate call with its own kwargs), and the `metadata` key sitting in the
 > pinned `preprocessor_config.json` is filtered out and recomputed from the
 > download. Proved by running the load under `HF_HUB_OFFLINE=1`, which died on
-> exactly that URL. All seven weight/tokenizer files and that class table are
-> now fetched and digest-gated here, and `repo_path` points at the verified
-> directory so the metadata load takes its local branch; the same probe now
-> completes offline. **Registered, not cleared:** `shi-labs/oneformer_demo`
-> declares NO licence (`cardData: null`, tags `["region:us"]`), so unlike every
-> other row in the table above it has not been through the criterion below. It
-> is a 150-entry label table, not weights and not code, and this project has
-> been fetching it on every sky mask since R27 Batch-4 without noticing; pinning
-> it is strictly better than the moving `main` it replaces, but whether to keep
-> it, synthesise it from the model's own MIT `config.json`, or take it from
-> ADE20K upstream is a user decision that has not been made.
+> exactly that URL. All seven weight/tokenizer files are now fetched and
+> digest-gated here, and `repo_path` points at the verified directory so the
+> metadata load takes its local branch; the same probe now completes offline.
+>
+> **And then the class table stopped being fetched at all (R29 收口, ruling
+> 11).** `shi-labs/oneformer_demo` declares NO licence (`cardData: null`, tags
+> `["region:us"]`), so of every asset this tree pulled it was the only one that
+> had never been through the criterion above — pinning its revision fixed which
+> bytes arrived, not the terms they arrived under. The user's ruling was to
+> replace it with a table of our own, so `python/ade20k_class_table.json` is
+> **built from licence-clean facts and shipped in the repo**: class names and
+> ids from the MIT model repo's own `config.json` `id2label`, the thing/stuff
+> split from that same repo's `preprocessor_config.json` `metadata.thing_ids`
+> (the field transformers filters out of the kwargs and recomputes — its
+> *content* was never the problem), cross-checked row by row against SHI-Labs/
+> OneFormer's MIT `ADE20K_150_CATEGORIES`. All three sources agree on all 150
+> rows. It is not a byte copy of the file it replaces — different key order,
+> different formatting, 7,085 B against 7,084 — but it is **equivalent where it
+> counts, proved at the pixel level**: one frame, two full sky runs, old table
+> against ours, byte-identical mask PNGs. So `AI_BACKEND_GENERATION` does **not**
+> move and no cached alpha needs re-deriving. The digest gate stays — it now
+> pins a file in this repository rather than a download, because a half-written
+> checkout is exactly as bad as a moving branch, and `python/*.json` is pinned
+> to `eol=lf` in `.gitattributes` so a Windows checkout cannot fail that digest
+> on a tree git considers identical.
 >
 > **The sidecars' budget is not the host's budget (v0.34.0).** Every resource
 > bound in this tree is shaped like main memory — `decode::MAX_CONCURRENT_DECODES`

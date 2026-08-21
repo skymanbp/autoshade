@@ -1459,6 +1459,13 @@ mod tests {
     /// `OfflineModeIsEnabled` on
     /// `datasets/shi-labs/oneformer_demo/resolve/main/ade20k_panoptic.json` —
     /// a second, unpinned repository `SKY_REVISION` never covered.
+    ///
+    /// R29 收口 (ruling 11) then removed that repository rather than pinning
+    /// it: the class table is now `python/ade20k_class_table.json`, rebuilt from
+    /// the MIT model repo's own label map and thing/stuff split. **No
+    /// `AI_BACKEND_GENERATION` bump goes with it** — the two tables were run
+    /// against each other on two photographs and the mask PNGs came out
+    /// byte-identical, so no cached alpha changes and none needs re-deriving.
     #[test]
     fn seg_probe_sky_backend_produces_a_usable_soft_mask() {
         let Ok(input) = std::env::var("AUTOSHOP_SEG_PROBE") else { return };

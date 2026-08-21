@@ -431,6 +431,12 @@ mod tests {
     /// a 7-character hash is not accepted, and a BRANCH name resolves to
     /// whatever upstream has at download time — which is the whole thing the
     /// pinning exists to stop.
+    ///
+    /// R29 C3/C4 extracted a THIRD spelling here, `SKY_CLASS_INFO_REVISION` —
+    /// the class table's own dataset repo. R29 收口 deleted that repo rather
+    /// than pinning it (ruling 11): the table is ours and ships in `python/`,
+    /// so there is no revision left to hold to this standard, and its gate is
+    /// the digest in `the_sky_class_table_is_ours_and_matches_its_pin`.
     #[test]
     fn every_hugging_face_revision_pin_is_a_full_commit_hash() {
         let mut found = 0;
@@ -440,10 +446,6 @@ mod tests {
                 let Some(rest) = l
                     .strip_prefix("\"revision\": \"")
                     .or_else(|| l.strip_prefix("SKY_REVISION = \""))
-                    // R29 C3/C4: the class table lives in a DIFFERENT repo that
-                    // moves on its own, so it carries its own pin and has to be
-                    // held to the same standard as the weights' one.
-                    .or_else(|| l.strip_prefix("SKY_CLASS_INFO_REVISION = \""))
                 else {
                     continue;
                 };
@@ -652,8 +654,11 @@ mod tests {
              "968a6126200b3c8f68fe955d61da20f3537e641a1deb538dc39fdad142248d72"),
             ("special_tokens_map.json",
              "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac"),
-            ("ade20k_panoptic.json",
-             "9d47d3bf5cedeefee0a41888b069bde254bf614f738ae43e4b423d1b2f321427"),
+            // Ours since R29 收口 — the digest of a file in this repo, not of a
+            // download. `the_sky_class_table_is_ours_and_matches_its_pin`
+            // checks it against the shipped bytes.
+            ("ade20k_class_table.json",
+             "8b93934a55524e5a9320875336cb8bc6ba2a9e6307796e9f22e0cebbc89428d8"),
         ] {
             assert!(
                 SEGMENT_SRC.contains(digest),
@@ -667,11 +672,26 @@ mod tests {
             assert!(SEGMENT_SRC.contains(name), "the CLIP tokenizer tree must stay pinned: {name}");
         }
         // Fetched by US, loaded from disk, and the class table pointed at the
-        // verified directory rather than the dataset repo.
+        // verified directory rather than a remote repo.
         assert!(SEGMENT_SRC.contains("def _sky_cache("), "sky must fetch through its own gate");
         assert!(
-            SEGMENT_SRC.contains("SKY_CLASS_INFO_REVISION = \""),
-            "the dataset repo the processor reaches for must be pinned too"
+            SEGMENT_SRC.contains("def _install_class_table("),
+            "the class table must be INSTALLED from python/, not fetched (R29 收口, ruling 11)"
+        );
+        // The dataset repo R29 C3/C4 pinned is gone, not merely unused: the URL
+        // and the pin that built it must not survive anywhere in the source, or
+        // a later edit could quietly re-enable the unlicensed fetch.
+        for gone in ["oneformer_demo", "SKY_CLASS_INFO_REVISION", "SKY_CLASS_INFO_PIN"] {
+            for line in SEGMENT_SRC.lines() {
+                assert!(
+                    !line.contains(gone) || line.trim_start().starts_with('#'),
+                    "the unlicensed class-table repo must not come back as CODE: {line}"
+                );
+            }
+        }
+        assert!(
+            SEGMENT_SRC.contains("oneformer_demo"),
+            "…and the record of WHY it was removed must stay in the file"
         );
         // CODE lines only — the prose above these calls explains the flag, and
         // counting the explanation would make the count drift with the comment.
@@ -693,6 +713,110 @@ mod tests {
         assert!(
             SEGMENT_SRC.contains("use_fast=False"),
             "an unpinned processor class changes the mask bytes across transformers versions"
+        );
+    }
+
+    /// R29 收口 (ruling 11): the ADE20K class table is OURS, and this is the
+    /// contract `OneFormerImageProcessor` will hold it to.
+    ///
+    /// It replaced a file fetched from `shi-labs/oneformer_demo`, a DATASET repo
+    /// with no declared licence — the one asset in this tree that had never been
+    /// through the file's own licence criterion. The replacement was rebuilt from
+    /// the MIT model repo's own `config.json` `id2label` (names) and
+    /// `preprocessor_config.json` `metadata.thing_ids` (the thing/stuff split),
+    /// cross-checked against SHI-Labs/OneFormer's MIT `ADE20K_150_CATEGORIES`,
+    /// and proved equivalent at the PIXEL level — two sky runs on one frame, old
+    /// table against ours, byte-identical mask PNGs.
+    ///
+    /// The byte-exact gate is the sha256 in `_install_class_table`, which runs on
+    /// every sky mask. THIS test is the half that needs no weights: the shape
+    /// `prepare_metadata` requires (`image_processing_oneformer.py:367`), the
+    /// byte count the pin declares, and no CR — `python/*.json` is `eol=lf` in
+    /// `.gitattributes`, and a checkout that converted it would fail the runtime
+    /// digest on a tree git considers identical.
+    ///
+    /// MUTATIONS THIS CATCHES: reordering or renumbering the entries (the key
+    /// order IS `class_names`), dropping `isthing` (a `KeyError` inside
+    /// transformers on every sky mask), renaming class 2 (`sky_mask` resolves
+    /// its plane by exact label match, so the mask would silently become another
+    /// class), any insert/delete against the declared byte count, and a CRLF
+    /// checkout.
+    #[test]
+    fn the_sky_class_table_is_ours_and_matches_its_pin() {
+        const TABLE: &str =
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/ade20k_class_table.json"));
+
+        // The pin, read out of the sidecar so the two can never drift apart.
+        let pin = SEGMENT_SRC
+            .split_once("SKY_CLASS_TABLE_PIN = {")
+            .expect("segment.py must declare SKY_CLASS_TABLE_PIN")
+            .1;
+        let pin = pin.split_once('}').expect("SKY_CLASS_TABLE_PIN must be a dict").0;
+        let field = |k: &str| -> String {
+            let v = pin
+                .split_once(&format!("\"{k}\": "))
+                .unwrap_or_else(|| panic!("SKY_CLASS_TABLE_PIN has no {k}"))
+                .1;
+            v.trim_start_matches('"').split(['"', ',']).next().unwrap().trim().to_string()
+        };
+        let sha = field("sha256");
+        assert_eq!(sha.len(), 64, "the class-table digest {sha:?} is not a sha256");
+        assert!(
+            sha.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the class-table digest {sha:?} is not lowercase hex"
+        );
+        let want: usize = field("bytes").parse().expect("the byte count must be a number");
+        assert!(!TABLE.contains('\r'), "the class table must stay LF — see .gitattributes");
+        assert_eq!(
+            TABLE.len(),
+            want,
+            "the shipped class table is {} B but segment.py pins {want} B — the sidecar \
+             would refuse it at run time",
+            TABLE.len()
+        );
+
+        // The shape `prepare_metadata` reads, and NOTHING else: string keys
+        // "0".."149" in ascending order (the order IS `class_names`), each an
+        // object with `name` and `isthing`.
+        let v: serde_json::Value = serde_json::from_str(TABLE).expect("the class table must parse");
+        let obj = v.as_object().expect("the class table must be a JSON object");
+        assert_eq!(obj.len(), 150, "ADE20K has 150 classes, found {}", obj.len());
+        // serde_json's map sorts, so FILE order is read off the text itself.
+        let order: Vec<&str> = TABLE
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix('"'))
+            .filter_map(|l| l.split_once('"'))
+            .map(|(k, _)| k)
+            .collect();
+        let want_order: Vec<String> = (0..150).map(|i| i.to_string()).collect();
+        assert_eq!(order, want_order, "the entries must run 0..149 in order, one per line");
+
+        let mut things = 0;
+        for (k, e) in obj {
+            let e = e.as_object().unwrap_or_else(|| panic!("entry {k} is not an object"));
+            let mut keys: Vec<&str> = e.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["isthing", "name"], "entry {k} carries fields nobody reads");
+            assert!(
+                e["name"].as_str().is_some_and(|n| !n.is_empty()),
+                "entry {k} has no name — `class_names` would carry a hole"
+            );
+            match e["isthing"].as_u64() {
+                Some(0) => {}
+                Some(1) => things += 1,
+                other => panic!("entry {k} has isthing {other:?}, which is neither 0 nor 1"),
+            }
+        }
+        assert_eq!(things, 100, "ADE20K panoptic splits 150 into 100 things + 50 stuff");
+
+        // The one row this backend actually depends on: `sky_mask` resolves its
+        // plane by EXACT label match, and ADE20K also has `skyscraper`.
+        assert_eq!(obj["2"]["name"], "sky", "class 2 is the plane the sky mask reads");
+        assert_eq!(obj["2"]["isthing"], 0, "sky is stuff, not a thing");
+        assert_eq!(
+            obj.values().filter(|e| e["name"] == "sky").count(),
+            1,
+            "exactly one class may be named `sky`, or the exact match picks arbitrarily"
         );
     }
 
