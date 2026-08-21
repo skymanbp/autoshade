@@ -423,6 +423,104 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R29 收口批 C2 已落地（2026-08-21，未发版，`2ae1b11`）：全蒙版族改采样
+  像素中心 `(x+0.5)/w`——0.5px 系统偏差归零，第七项渲染硬变更**。用户拍板七
+  （逐字）：「G4 半像素 = 『改 (x+0.5)/w』——全蒙版族（径向/线性/笔刷/
+  位图）对齐 LR 像素中心约定，0.5px 系统偏差归零；第七项渲染硬变更入
+  v0.35.0 置顶清单；全量真 sidecar 往返门验收。第二帧复核依据=B7/B7-2
+  两底片椭圆心均偏 ~(−0.5,−0.5)。」**证据（两底片，B7 §8 + B7-2 §1.2/D6）**：
+  6240×4160 帧上 `Left=0.333333 Right=0.666667 Top=0.4 Bottom=0.6` 的
+  radial 标称心 = 连续坐标 (3120, 2080)；硬边椭圆拟合在**像素索引**空间
+  得 capture X (3119.46, 2079.50)（`b7_03`，边缘 rms 0.24px）与 capture Y
+  (3119.49, 2079.51)（`b7b_18`，D6 亲证是另一台机身/镜头/日期/
+  OriginalDocumentID 的**不同底片**）。索引空间拟合对真值连续坐标 p 返回
+  p−0.5，故两读数都说 p ≈ 3120 / 2080 ⇒ **LR 把分数 u 映到连续位置 u·W，
+  像素 i（中心在 i+0.5）拿的是 u=(i+0.5)/W 的值**；引擎旧式 `x/w` 给像素
+  x 的是它自己**左上角**的值，整族偏 +0.5px。
+  **实现＝一个共享常量五处**（`render::MASK_SAMPLE_CENTRE`，`pub(crate)`
+  只为让必须一致的五处**看得出**一致、且任一处的变异都是共享常量的变异）：
+  ①`apply_masks` 的 `weight_at` 帧生产端 `+0.5`；②`mask_coverage` 覆盖
+  叠层生产端同步（否则红色 wash 与真渲染差半像素）；③`sample_gray_norm`
+  消费端 `nx·w − 0.5`＝**texel 中心**查表（texel i 占 `[i/w,(i+1)/w]`，中心
+  是 `(i+0.5)/w`）；④`rasterise_brush_group` 生产端 `d.x·rw − 0.5` 落同一
+  网格；⑤`fit_zoned::mask_weights` 分析端跟随（zone 若在另一网格上解算，
+  gains 就解在与蒙版实际覆盖差半像素的总体上）。**两侧都动的判据是
+  「同一像素中心在两个域指同一物理点」，不是猜**：帧侧 `+0.5`、栅格两侧
+  各 `−0.5`，同尺寸栅格仍 `nx·w−0.5 = (x+0.5)−0.5 = x` ＝**零插值精确命中**
+  （旧注释声称的性质原样保住），异尺寸栅格按比例正确（ρ 的表达式与
+  `rw/W` 无关）。M8 变异亲证两半不互相抵消。
+  **一条独立佐证（本批查出，非本批产物）**：`apply_lens_geometry` 早就用
+  `cx=(w−1)/2` 量半径，而 `x−(w−1)/2` **恒等于** `x+0.5−w/2` ＝像素中心
+  偏移；`MaskUnwarp::at` 用 `(nx−0.5)·w`，只有在新约定下才等于同一偏移。
+  也就是说 B3 接的镜头蒙版逆映射此前一直比它**按定义要精确求逆的那个
+  重采样器**差半像素，本批之后两者**精确**一致而非仅仅接近。
+  **既有标定不需要补偿平移，逐条论证**：①径向 LUT 的 ρ 是对**实测拟合**
+  椭圆心与半轴归一的（B7-2 §2.1 逐位复现），约定中性，α(ρ) 表不动——
+  全 290×8 表零改动且 `texture_negative_hits_the_forty_five_lightroom_anchors`
+  与径向表复现测试全程未红；②B6 笔刷核 ρ 绕「帧中心」形成，实测 α 加权
+  质心在 x 上 0.47px 内，半像素心误差对 479.26px 半径的**径向**剖面是
+  O((δ/r)²)≈1e−6，远在 0.0102 pooled rms 之下；③质感 45 锚点是**空间**
+  滤波（σ 绑渲染栅格短边），与蒙版归一化坐标无交集。
+  **⚠渲染行为硬变更**：一切蒙版（径向/线性/笔刷/位图/AI）整体上移左移
+  各 0.5px，无论羽化、几何或画幅——**这是 v0.35.0 置顶清单第七项**
+  （编号从拍板七；六项前序＝①LensProfile schema 硬断裂 ②参数形蒙版帧
+  变更（B3）③笔刷实装（`fed4f80`）④质感换形（`b583e2e`）⑤径向 LUT
+  （`0ee386d`）⑥主体蒙版全部重算（B4，`AI_BACKEND_GENERATION 1→2`））。
+  **门（隔离 worktree 亲跑——共享树上另一代理正在改
+  `src/embed.rs`/`python/segment.py`/`scripts/audit_i18n.py`，`git worktree`
+  取 HEAD+仅本批两文件复测）**：clippy 0×2；**814(9i)/14/132/2+2** 双配置
+  （+2 净集差，无删除）；**`AUTOSHOP_LR_PROBE_FIXTURES` 16/16 字节往返**
+  （`the_probe_sidecars_decode_to_their_measured_ellipses`，stderr 亲印
+  「16 radial sidecar(s) round-tripped」）；check_docs 20P0F；fonts 803/803。
+  **新测试两条**：`every_mask_family_samples_at_pixel_centres`（四臂各
+  按「整个特征而非舍入」构造＝径向→居中 2×2 块 vs **单个偏心像素**
+  （旧约定下四个邻居恰落在 d=1 上、被严格 `d<1` 硬边排除，实测印证
+  `left: [(2, 2)]`）、线性→
+  0/⅓/⅔/1 vs 永不到 1、位图→0/¼/¾/1 对称 vs 0/½/1/1 早饱和、笔刷→
+  镜像对称 vs 落在 texel 8 上；并同时钉两个帧生产端）与
+  `zone_moments_sample_on_the_renders_own_grid`（**M7 变异先活后死**：
+  分析端单独回退无人发现＝真洞，补钉后红）。**期望值全部手推**：
+  `mask_coverage_reports_the_engine_weight` 的 0/128/242 三处改钉
+  6/134/249（`round((y+0.5)/20·255)`），`linear_mask_affects_only_the_full_end`
+  顶行由「~不变」改为**精确等于** amount=0.125 的全覆盖对照（该行现在
+  真带 1/8 覆盖），`local_temperature_warms_the_masked_region_only` 的
+  零权重跳过改用 `zero_y=0.125`（新约定下 0→1 梯度**没有**任何一行是
+  权重 0，旧夹具已停止在测那条不变量）并补钉「末行中心 IS 满端」；
+  `bitmap_mask_sampling_matches_the_producers_convention` 加钉
+  0.375+0.625=1 的对称性；`brush_raster_stamps_the_closed_form` 改直读
+  texel（旧注释「nx=i/rw 精确命中 texel i」已失真，且旧写法靠 0.005 容差
+  蒙混过关）。**变异 8 组全红→字节还原（sha256 校验）**：M1 常量 0.5→0.0
+  （6 红）/M2 仅回退 apply_masks 生产端（3 红）/M3 仅回退 `sample_gray_norm`
+  （2 红）/M4 仅回退笔刷冲压网格（2 红）/M5 仅回退叠层生产端（2 红）/
+  M6 帧生产端**符号反向**（5 红）/M7 仅回退 fit_zoned 分析端（**初活→
+  补测后 1 红**）/M8 栅格两半同时回退（4 红＝不抵消）。
+  **登记不做 / 未验**：①~~`AUTOSHOP_MB_FIXTURES` 的 7 份 M-B 取证集**本机
+  遍寻不获**（`DSC09568.xmp`/`DSC09034.xmp` 全盘无命中），故该门本批
+  **未跑**，非绿非红~~ **← 主审复核推翻**：取证集在
+  `~/.claude/plans/r25-materials/m-b/`（7 份 **`.xmp.txt`** 后缀，代理按
+  `.xmp` 搜故漏），合并树电池实跑绿＝「7 sidecar(s): 42 correction(s) and
+  120 R25 key(s) held through a v0.30-shaped save / 42 mask(s) imported」；
+  ②未启动任何 exe，预览↔导出的半像素一致性无实拍
+  复核；③`segment.py --reference-point` 的归一→像素换算未纳管（AI 点击点
+  不是蒙版求值，且该文件正被另一代理编辑）；④`retouch.rs:332` 的 spot
+  coverage 早已是 `(x+0.5)/w`（本批未动，已核）、但 `retouch.rs:494` 的
+  `cxp/w as f32` 质心归一未审；⑤GUI/浏览器授权侧送的是**连续** CSS 坐标
+  `(clientX−left)/rect.width`，本改动使其更准而非更差，未新增测试；
+  ⑥`recipe.rs:1102` 的 schema 注释只说「归一化到帧」、未加像素中心句——
+  不是假陈述，只是不完整，未改；⑦`LR_MASK_FRAME_SCALE = 1.0` 的 0.126%
+  （1.3px 半主轴）仍是登记的未建模 Adobe 每帧畸变，与本批无关也未动。
+
+- **R29 拍板十一批已落地（2026-08-21，未发版，`1e89102`）：自写同构
+  ADE20K 类表＋i18n 门 UTF-8＋训练集条款措辞**——三小项详情已就地注入
+  相关条目（类表=下方 C1+C3/C4 与 B4 条目的「已兑现/已裁决」块；GBK 根修
+  =C1+C3/C4 条目「仍开」区的推翻块；C5 §6 措辞=B4 条目末尾），此条目只
+  作提交锚点：**门（合并树主审亲跑）**=clippy 0×2+**815(9i)/14/132/2+2**
+  双配置+LR 探针 16/16+M-B 7 份+check_docs 20P0F+fonts 803/803+
+  audit_i18n exit 0；变异=代理 5 组+主审亲手 2 组（类 2 改名→精确标签
+  断言红；pin sha 翻字符→digest 表红）全字节还原。登记：Rust 侧类表门
+  非 byte-exact（同长度换字符可溜过——运行时 `_install_class_table`
+  sha256 每次 sky 跑必验＝真门；不为测试引 sha2 依赖=刻意取舍）。
+
 - **R29 收口批 C1+C3/C4 已落地（2026-08-21，未发版，`d03abaa`）：旋转
   数值重写笔刷 dab 流 + 分割侧五项收口——「不留遗留项」令的工程半场**。
   **C1（拍板六兑现）**：`render::CoordFrame` 类型化补上缺失输入（转前帧
@@ -448,7 +546,17 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   （transformers 5.2 换 Fast 处理器实测归一化张量 max|Δ|0.0175＝静默改
   蒙版字节），**掘出并钉住 SKY_REVISION 从未覆盖的第二仓洞**
   （oneformer_demo dataset 仓 moving main、`HF_HUB_OFFLINE=1` 亲证；
-  该仓无声明许可＝拍板十一裁「自写同构元数据」随文档 sweep 落）；store
+  该仓无声明许可＝拍板十一裁「自写同构元数据」随文档 sweep 落
+  **← 已兑现（同日收口小批，未发版）**：`python/ade20k_class_table.json`
+  自写入库＝名/ID 取模型自己 MIT 的 `config.json` `id2label`、thing/stuff
+  取同仓 `preprocessor_config.json` `metadata.thing_ids`、再以 SHI-Labs/
+  OneFormer MIT `ADE20K_150_CATEGORIES` 逐行第三方交叉核对，三源 150 行
+  全同；旧第三方文件只当**校验对象**不当来源（非字节拷贝：行内键序/
+  排版不同、7,085 B vs 7,084）。**像素级亲证**同帧两跑（旧表 vs 自写表）
+  mask PNG 字节相等 ⇒ `AI_BACKEND_GENERATION` **不动**、无缓存需重算；
+  digest 门保留但改钉本仓文件，`python/*.json` 同批钉 `.gitattributes`
+  `eol=lf`（否则 Windows checkout 换行改写＝在 git 眼中同一棵树上 digest
+  自爆）；store
   tombstone 夹具 Drop 守卫在首个可失败点前武装（panic 对偶测试；症状
   勘误=成功路本就幂等，真缺陷=夹具不抗 unwind 写真实中央库）；笔刷
   release 性能实测 416ms（~1.3×，替换「快好几倍」旧猜测）。**门（合并
@@ -456,8 +564,14 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   20P0F；fonts 803/803。变异=代理 7+7 组+主审亲手 2 组（换轴条件取反→
   Rotate90 行红；换代规则 None 当 yes→第 4 行红）全字节还原复绿。
   **仍开（具名）**：gesture 仍不渲染（合成未测）；store 测试仍写真实
-  中央库（残留已不存活）；`audit_i18n.py` GBK 控制台报缺键遇非 GBK 字
-  符崩（既存 wart）；sky/object 训练集条款未审。
+  中央库（残留已不存活）；~~`audit_i18n.py` GBK 控制台报缺键遇非 GBK 字
+  符崩（既存 wart）~~ **← 同日收口小批已根治**：根因不是编码而是**漏了
+  两个姊妹脚本已有的门规**（`check_docs.py` / `subset_gui_fonts.py` 入口
+  都有 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`，只有
+  它没有）；修前亲证＝造一条含 `²` 的缺键，`audit_i18n.py:505`
+  `UnicodeEncodeError` 崩在**第一条发现**上、其后四项检查（死键/绕过/
+  占位符/worker）全不执行＝门变成崩溃不是判决；修后同一探针全量出报告
+  且正确 exit 1，探针已还原；sky/object 训练集条款未审。
 
 - **R29 B4 已落地（2026-08-21，未发版，`790825e`）：主体分割换钉版通用
   BiRefNet——R29 全部批次至此收官**。对照包（b4-inspection/，九帧三臂）
@@ -496,9 +610,20 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   每次都去 `shi-labs/oneformer_demo`（另一个 **dataset** 仓库、moving
   `main`）取 `ade20k_panoptic.json`，`HF_HUB_OFFLINE=1` 亲证；已一并钉版，
   但**该仓库无任何声明许可证**（`cardData: null`，tags 仅 `region:us`）＝
-  R27 Batch-4 许可证审计从未覆盖它，**留给用户拍板**（保留钉版 / 用模型
-  自己 MIT 的 `config.json` 合成 / 取 ADE20K 上游）。仍开：训练集自身
-  条款未审计。**⚠v0.35.0 发版义务+1：v0.34 及
+  R27 Batch-4 许可证审计从未覆盖它，~~**留给用户拍板**（保留钉版 / 用模型
+  自己 MIT 的 `config.json` 合成 / 取 ADE20K 上游）~~ **← 已裁决并落地
+  ＝拍板十一「自写同构元数据」**（同日收口小批，未发版）：该仓从代码里
+  彻底移除（`SKY_CLASS_INFO_REPO/REVISION/PIN` 全删，测试反向钉「只准留
+  在注释里」），换成本仓自写的 `python/ade20k_class_table.json`；三个 MIT
+  事实源互证 + 像素级两跑字节相等，故不换代。~~仍开：训练集自身
+  条款未审计。~~ **← BiRefNet 链已由 R29 C5 审计关闭并按 §6 逐字落进
+  `segment.py` 文档段**（同日收口小批）：卡片那句「trained on DIS-TR」是
+  **样板**（同句原样出现在训练集可证不同的兄弟仓），真清单＝model zoo
+  `general use` swin_v1_large 行十集 + ImageNet-22k 骨干，**AM-2k 不在其中**
+  （旧文档三名单错）；唯一带使用限制的 DIS5K 是**我们从不获取的数据库**、
+  受限于我们从未签署的注册协议，与 SegFormer「限制的是我们执行的 Work」
+  分属两回事——该区分现已明文写进 LICENCES 段。sky/object（ADE20K、SA-1B）
+  训练集条款仍未审＝C5 §7.6 具名范围外项。**⚠v0.35.0 发版义务+1：v0.34 及
   更早缓存的主体蒙版全部重算一次。**
 
 - **R29 传输重试批已落地（2026-08-21，未发版，`74ffa25`）：524/529 纳入
