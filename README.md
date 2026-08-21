@@ -242,7 +242,7 @@ unverified, and prebuilt binaries remain Windows-only.
 | XMP read + write, mask import/export | `reimagine` / `retouch` (generative) |
 | crop, masks, curves, every slider in the GUI | AI auto-detect in `heal` (painting a mask works offline) |
 | **AI denoise** (local SCUNet on your GPU) | |
-| local AI mask re-derivation (SAM 2.1 / OneFormer / U²-Net) | |
+| local AI mask re-derivation (SAM 2.1 / OneFormer / BiRefNet) | |
 | style indexing and retrieval | |
 
 The **verifier** role needs no API key at all when it runs over OAuth: it shells
@@ -852,13 +852,14 @@ one `include_str!`'d HTML file, zero build step, zero CDN) · a hand-rolled XMP
 reader/writer with no XML crate, because a Lightroom sidecar must be *merged
 into*.
 
-Five ML models run locally through three Python sidecars, none of them shipped
+Six ML models run locally through three Python sidecars, none of them shipped
 in this repository — the weights are fetched on first use and pinned:
 
 | model | job | licence |
 |---|---|---|
 | **SCUNet** ×5 | AI denoise | Apache-2.0 (KAIR) |
-| **U²-Net** | subject segmentation | Apache-2.0 |
+| **BiRefNet** (general) | subject segmentation | MIT |
+| **U²-Net** | subject segmentation — fallback tier | Apache-2.0 |
 | **OneFormer** ADE20K Swin-L | sky segmentation | MIT |
 | **SAM 2.1** Hiera-Large | point-prompted object masks | Apache-2.0 |
 | **SigLIP 2** base/16 @384 | style embeddings (opt-in) | Apache-2.0 |

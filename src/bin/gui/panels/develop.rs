@@ -1482,8 +1482,13 @@ impl AutoshopApp {
                 // the missing sidecar.
                 if ui
                     .add_enabled(can_seg, egui::Button::new(tr(lang, "🤖 AI select subject")))
+                    // R29 B4: the model, its dependencies and its download size
+                    // all changed with the user's ruling of 2026-08-21, and the
+                    // FALLBACK is named because a machine without torchvision
+                    // gets a materially softer mask and would otherwise have no
+                    // way to know which model drew it.
                     .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
-                        "U²-Net salient-subject segmentation → bitmap mask (python sidecar: pip install rembg; first run auto-downloads the model to ~/.u2net)",
+                        "BiRefNet salient-subject segmentation → bitmap mask (python sidecar: pip install torchvision timm einops; first run auto-downloads a ~444MB model; without them it falls back to U²-Net / pip install rembg, whose edges are softer)",
                     )) } else { missing.to_string() })
                     .clicked()
                 {

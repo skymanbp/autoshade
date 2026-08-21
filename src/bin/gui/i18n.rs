@@ -459,8 +459,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Drag on the image to draw a radial (elliptical) area", "在图上拖拽画径向（椭圆）区域"),
     ("Drag to reorder", "拖动重新排序"),
     ("🤖 AI select subject", "🤖 AI 选主体"),
-    ("U²-Net salient-subject segmentation → bitmap mask (python sidecar: pip install rembg; first run auto-downloads the model to ~/.u2net)",
-        "U²-Net 显著主体分割 → 位图蒙版（python sidecar：pip install rembg；首次运行自动下载模型到 ~/.u2net）"),
+    // R29 B4: the subject backend became BiRefNet (user ruling, 2026-08-21).
+    // Three facts the photographer acts on BEFORE clicking, so all three ride
+    // in the tooltip: the new dependencies, the 444 MB first run, and the
+    // fallback — a machine without torchvision still gets a mask, just U²-Net's
+    // softer one, and 「it worked, but which model drew it」 is not a question
+    // the product may leave unanswered.
+    ("BiRefNet salient-subject segmentation → bitmap mask (python sidecar: pip install torchvision timm einops; first run auto-downloads a ~444MB model; without them it falls back to U²-Net / pip install rembg, whose edges are softer)",
+        "BiRefNet 显著主体分割 → 位图蒙版（python sidecar：pip install torchvision timm einops；首次运行自动下载约 444MB 模型；未安装这些依赖时回退到 U²-Net / pip install rembg，边缘更模糊）"),
     ("🤖 AI select sky", "🤖 AI 选天空"),
     // R27 Batch-4: the model NAME and its download size both changed with the
     // licence fix (SegFormer-B0's weights are "research or evaluation purposes

@@ -494,9 +494,12 @@ mod tests {
             SEGMENT_SRC.contains("nvidia/segformer"),
             "…and the record of WHY it was removed must stay in the file"
         );
-        // rembg is still used for `subject`, but ONLY with an explicitly named
-        // session — a bare `remove(` would resolve to whatever that install's
-        // default is.
+        // rembg is still used for `subject` — the FALLBACK tier since R29 B4 —
+        // but ONLY with an explicitly named session: a bare `remove(` would
+        // resolve to whatever that install's default is, and upstream's default
+        // is now a model that needs a paid agreement for commercial use. A
+        // fallback that fires on the machines least likely to be watched is the
+        // last place this may be left to chance.
         assert!(
             SEGMENT_SRC.contains("new_session(\"u2net\")"),
             "the rembg session must stay explicitly named"
@@ -511,6 +514,81 @@ mod tests {
                 "an unsessioned rembg call lets upstream pick the model: {l}"
             );
         }
+    }
+
+    /// R29 B4 — the subject backend is the PINNED BiRefNet, and the file this
+    /// sidecar EXECUTES is pinned by digest like the weights are.
+    ///
+    /// `birefnet.py` is not data: `segment.py` loads it through `importlib` and
+    /// `exec_module` runs it. That makes it the highest-stakes download in the
+    /// tree — a revision pin would fix which tree upstream serves, only the
+    /// sha256 proves the bytes that reach the interpreter. The general
+    /// checkpoint is named explicitly because R27's design document picked
+    /// `BiRefNet_HR-matting`, which R29 B4 measured returning an EMPTY alpha on
+    /// 4 of 9 of the user's own photographs; a silent drift back to it would
+    /// delete masks rather than approximate them.
+    ///
+    /// MUTATIONS THIS CATCHES: changing any pinned digit of the model or the
+    /// code digest, moving the revision, swapping the repo for HR-matting, or
+    /// deleting the fallback tier / its disclosure.
+    #[test]
+    fn the_subject_backend_is_the_pinned_general_birefnet_with_a_named_fallback() {
+        // The repo and revision the user ruled for, verbatim.
+        assert!(
+            SEGMENT_SRC.contains("\"repo\": \"ZhengPeng7/BiRefNet\""),
+            "the subject backend must be the GENERAL BiRefNet checkpoint"
+        );
+        assert!(
+            SEGMENT_SRC
+                .contains("\"revision\": \"e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4\""),
+            "the BiRefNet revision pin moved without this test moving with it"
+        );
+        // HR-matting is named in the docstring (the record of WHY it lost) and
+        // must never be the thing that is FETCHED — the same shape of
+        // assertion the SegFormer removal above uses.
+        assert!(
+            !SEGMENT_SRC.contains("\"repo\": \"ZhengPeng7/BiRefNet_HR-matting\""),
+            "HR-matting returns an empty alpha on 4/9 real photographs (R29 B4)"
+        );
+        assert!(
+            SEGMENT_SRC.contains("BiRefNet_HR-matting"),
+            "…and the record of why it lost must stay in the file"
+        );
+        // The weights AND the executed source, both by digest.
+        for (what, digest) in [
+            ("model.safetensors",
+             "9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154"),
+            ("birefnet.py",
+             "208771ae626f653d64128fbf2d6ac9f8e645c5cc5e286258a73ec3322bbfe5ef"),
+            ("BiRefNet_config.py",
+             "e7b8c2a74f6cea6a59553d517f71d47f2c1d90e670a13416af17c25fe2f3dc52"),
+        ] {
+            assert!(
+                SEGMENT_SRC.contains(digest),
+                "the pinned sha256 for {what} is not the one R29 B4 verified"
+            );
+        }
+        // `exec_module` on upstream Python is only acceptable BECAUSE of the
+        // digest above; the two must not drift apart.
+        assert!(
+            SEGMENT_SRC.contains("exec_module(") && SEGMENT_SRC.contains("_fetch_verified("),
+            "birefnet.py is executed, so it must arrive through the verified fetch"
+        );
+        // THE FALLBACK TIER, and the two states kept apart. The ruling keeps
+        // U²-Net for machines that cannot run BiRefNet; a degradation that did
+        // not announce itself would be the sidecar lying about provenance.
+        assert!(
+            SEGMENT_SRC.contains("U2NET_LABEL") && SEGMENT_SRC.contains("BIREFNET_LABEL"),
+            "the two subject backends must be separately LABELLED"
+        );
+        assert!(
+            SEGMENT_SRC.contains("FALLBACK - BiRefNet did not run"),
+            "a run that fell back must say so in the label it prints"
+        );
+        assert!(
+            SEGMENT_SRC.contains("WARNING - the BiRefNet subject backend did not run"),
+            "…and must warn on stderr, which segment.rs forwards on the success path"
+        );
     }
 
     /// L03 durability: every sidecar publishes through `tmp` + `fsync` +

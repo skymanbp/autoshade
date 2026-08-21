@@ -307,7 +307,8 @@
 > | sidecar | bridge | model(s) | licence | size |
 > |---|---|---|---|---|
 > | `denoise.py` | `denoise.rs` | SCUNet ×5 | Apache-2.0 (KAIR) | ~72 MB each |
-> | `segment.py --target subject` | `segment.rs` | U²-Net via a NAMED rembg session | Apache-2.0 | small |
+> | `segment.py --target subject` | `segment.rs` | **BiRefNet** (general checkpoint), sha256-pinned | MIT | 444,473,596 B |
+> | `segment.py --target subject` (fallback) | `segment.rs` | U²-Net via a NAMED rembg session | Apache-2.0 | small |
 > | `segment.py --target sky` | `segment.rs` | OneFormer ADE20K Swin-L | MIT | ~880 MB |
 > | `segment.py --target object` | `segment.rs` | **SAM 2.1 Hiera-Large**, point-prompted | Apache-2.0 | 897,897,416 B |
 > | `embed.py` | `embed.rs` | **SigLIP 2 base/16 @384**, 768-dim | Apache-2.0 | 1,501,968,264 B |
@@ -319,16 +320,25 @@
 > only」); CLIP and OpenCLIP were passed over in Batch-5 because their model
 > cards say deployment is out of scope and the OpenAI HF mirror carries no
 > licence tag at all. In both cases the licence-clean option was also the
-> stronger model.
+> stronger model. BiRefNet (R29 B4) is MIT, unmodified and ungated on both the
+> weight repo and the code repository it points at — and the checkpoint chosen
+> is the GENERAL one, not the `_HR-matting` variant the R27 design document
+> named: measured on the photographer's own library, HR-matting returns an
+> empty alpha on 4 of 9 real frames, so adopting it as designed would have
+> deleted masks rather than approximated them.
 >
 > **Pinning has two tiers, and the difference is stated rather than smoothed
-> over.** `denoise.py`, `embed.py` and `segment.py`'s SAM path fetch every file
-> themselves, gate it on sha256 + an exact byte count, and load from a local
-> directory with `local_files_only=True` — the digest is the only door.
-> `segment.py`'s subject/sky paths still pin only an HF *revision*, which fixes
-> WHICH tree is fetched but not the BYTES; that gap is registered in their own
-> comments. `trust_remote_code` is never used anywhere: it downloads and
-> executes upstream Python through HF's cache, which our gate never sees.
+> over.** `denoise.py`, `embed.py` and `segment.py`'s SAM **and BiRefNet** paths
+> fetch every file themselves, gate it on sha256 + an exact byte count, and load
+> from a local directory with `local_files_only=True` — the digest is the only
+> door. For BiRefNet that gate covers a file that is **executed**: `birefnet.py`
+> is the model's own source, loaded through `importlib`, so the digest is what
+> stands between upstream and `exec_module`. `segment.py`'s sky path is now the
+> only one that still pins an HF *revision* alone, which fixes WHICH tree is
+> fetched but not the BYTES; that gap is registered in its own comment (the
+> OneFormer processor drags a tokenizer tree along, so it is not the four-line
+> copy it looks like). `trust_remote_code` is never used anywhere: it downloads
+> and executes upstream Python through HF's cache, which our gate never sees.
 >
 > **The sidecars' budget is not the host's budget (v0.34.0).** Every resource
 > bound in this tree is shaped like main memory — `decode::MAX_CONCURRENT_DECODES`
