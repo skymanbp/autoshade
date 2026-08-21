@@ -423,6 +423,33 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
 
 ## 当前状态（已完成，勿重做）
 
+- **R29 B4 已落地（2026-08-21，未发版，`790825e`）：主体分割换钉版通用
+  BiRefNet——R29 全部批次至此收官**。对照包（b4-inspection/，九帧三臂）
+  先行+用户拍板五：**通用版 ZhengPeng7/BiRefNet@e2bf8e4460fc，非 R27
+  设计点名的 HR-matting**（后者实测 4/9 真实帧返回字面空 alpha=照设计
+  落地会静默删蒙版）；U²-Net 留作具名回退层。实现＝BIREFNET 钉表五文件
+  sha256+字节数全 digest 门（**含被执行的 birefnet.py**=importlib 合成包
+  装载、digest 是 exec_module 前唯一门）+config.json 断言
+  （bb_pretrained=false 堵未钉 torchvision 骨干下载）+kornia 会炸桩
+  （laplacian 本 revision 仅训练路径、forward 前断言）+预处理按钉版卡片
+  自写+fp16 1024²+确定性旋钮；**回退大声具名**（两态两句话不许合一）；
+  segment.rs `AI_BACKEND_GENERATION 1→2`（全部主体 alpha 一次性重算）+
+  代际项可测拆分+成功路 stderr 前缀过滤转发（降级与 444MB 首拉可见）+
+  subject 实弹探针。**torchvision+timm+einops 引入＝对 R27 婉拒的有据
+  反转**（该婉拒明言把决定停在目检闸上，闸已过）。许可证=未改动 MIT
+  逐字+HF API 双复核（agent 会话+落地会话各一次）。主审复核=五摘要亲算
+  全中+亲手变异 2 组（钉表异文件换位→合同红；生产键喂 generation 3→
+  键测试红）叠代理 6 组+**用户解释器实弹 `[BiRefNet e2bf8e4460fc]`**
+  （依赖落位时纠正 pip→miniforge 的指向分裂：误装三包全卸还原、
+  Python313 配对 torchvision 0.23.0+cu128+timm 1.0.28、torch 2.8.0
+  未动）+出局 HR-matting 死权重 445MB 删除。门=clippy0×2+
+  **797(9i)/14/131/2+2** 双配置（+3 集差）+check_docs 20P0F+fonts
+  803/803+i18n 0。登记=GUI 尚不能区分两层（tooltip 已带回退语义，
+  segment_file 回传后端标签=R30 候选）/回退机后装依赖不自动换代
+  （手册补救在常量文档）/sky 成唯一未 digest 门后端（tokenizer 树
+  原因具名）/训练集自身条款未审计。**⚠v0.35.0 发版义务+1：v0.34 及
+  更早缓存的主体蒙版全部重算一次。**
+
 - **R29 传输重试批已落地（2026-08-21，未发版，`74ffa25`）：524/529 纳入
   B1a 单重试漏斗——同根扩类非旁挂第二套**。用户拍板（2026-08-20
   AskUserQuestion，正式转录）：**①524+529 都重试一次带披露+计数**
