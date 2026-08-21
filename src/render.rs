@@ -2765,11 +2765,14 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // MEASURED fact, not a guess: a hand-authored Roundness="100" probe
         // renders geometry within 0.1 px of its Roundness=0 reference (edge
         // rms 0.31 px over 1440 angles — no circularisation, no superellipse)
-        // and is pixel-identical to it where the two masks overlap. Scope of
-        // that measurement, stated rather than generalised: +100 only,
-        // Feather=0 only (a falloff-shape meaning would be invisible on a
-        // hard edge — the registered residual is a Roundness×Feather cross
-        // probe), one geometry (docs/V2_PLAN.md §7 item 11).
+        // and is pixel-identical to it where the two masks overlap. R29 B7-2
+        // (2026-08-21) then closed the biggest hole with a Roundness=100 &
+        // Feather=50 cross probe: the no-op HOLDS with feather active
+        // (|Δα| ≤ 0.006 on both falloff branches, same support endpoint), so
+        // Roundness does not modulate the falloff shape either. Scope still
+        // stated rather than generalised: +100 only (negatives untested),
+        // one geometry, and the feathered inner-branch shape is only covered
+        // on the minor-axis sector (docs/V2_PLAN.md §7 item 11).
         // The sibling `feather` HAD the same guessing bug — Lightroom writes it
         // 0..100 and xmp.rs used to import the value raw, so Feather="72"
         // clamped to fully feathered; both XMP directions now convert on the
@@ -2837,19 +2840,29 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
             //
             // R29 B7 (2026-08-20) re-measured the ladder WITH the nomask
             // reference both earlier batches lacked, and the replacement is
-            // now specified rather than open: d_out = 1.4335, CONSTANT in
-            // feather — the 「saturation」 and the 0.79 − 0.94f d_in were
-            // both artefacts of forcing one smoothstep across the profile —
-            // and α(0) = 1 at EVERY feather (mask centres pixel-identical
-            // to the feather-0 frame), so there is no inner knee at all.
-            // No two-parameter closed form reaches the 0.003 measurement
+            // now specified rather than open: d_out is CONSTANT in feather
+            // — the 「saturation」 and the 0.79 − 0.94f d_in were both
+            // artefacts of forcing one smoothstep across the profile — and
+            // α(0) = 1 at EVERY feather (mask centres pixel-identical to
+            // the feather-0 frame), so there is no inner knee at all. No
+            // two-parameter closed form reaches the 0.003 measurement
             // floor; the adjudicated landing shape is the measured α(ρ)
             // LUT. This ramp scores rms(α) 0.093–0.156 against it and
             // renders the α ≥ 0.5 region up to 2.08× too large at f = 1.
-            // Still deliberately standing: the f ∈ (0, 25) support opening
-            // and d_out's aspect invariance are unsampled (b7-analysis.md
-            // §10), and a falloff swap is a render-behaviour change that
-            // rides its own batch with its own top notice.
+            //
+            // R29 B7-2 (2026-08-21, f = 1/5/10/90 supplement) then revised
+            // the numbers and filled the gaps: d_out = 1.43 ± 0.015 — B7's
+            // ±0.002 precision was JPEG 8×8 block spill, not mask support
+            // (twelve mod-8 alignment tests, p ≤ 1e−23), and √2 is back
+            // inside the error bar, UNRESOLVED. The f ∈ (0, 25) opening is
+            // CONTINUOUS (no jump), and this very ramp is actually CORRECT
+            // for f ≤ 5 (rms(α) 0.009–0.010) — the gap only opens from
+            // f = 10 — so the LUT replacement must degenerate EXACTLY to
+            // the hard edge as f → 0 or it would break the one segment
+            // that is right today. Still deliberately standing: d_out's
+            // aspect invariance is unsampled (b7-analysis-2.md §8), and a
+            // falloff swap is a render-behaviour change that rides its own
+            // batch with its own top notice.
             //
             // What this replaces: `d_out = 1`, i.e. the effect reaching zero
             // exactly on the ellipse. Measured at f = 0.5 it reaches 1.25 —
@@ -3893,24 +3906,34 @@ fn unsharp_luma_weighted(
 /// "Texture −60" preserve a different band on a 1280 px preview than on the
 /// 61 MP export, which is the exact promise R25 B2 made.
 ///
-/// **Measured 2026-08-20 (R29 B8), and REFUTED IN SHAPE.** A controlled
-/// three-step Lightroom ladder (Texture 0/−50/−100, single-key sidecar diff)
-/// read by block cross-spectrum shows LR's negative Texture is a monotone
-/// HIGH-SHELF, not a notch: low frequencies hold (H→1.02 below ν ≈ 0.006
-/// c/px), the half-depth corner sits at a 49 px period, and the attenuation
-/// PLATEAUS at H = 0.729 (−100) / 0.848 (−50) all the way through the fine
-/// end — a 4 px pattern keeps 0.72 in LR where this pass keeps 0.9992.
-/// Depth scales as |t|^0.74, not linearly. Against that ground truth this
-/// band form over-smooths the 40–130 px mid band by up to −13.0 dB and
-/// under-smooths everything finer than ~18 px by up to +2.9 dB; refitting
-/// the band form with every parameter free cannot beat 2.3× the residual of
-/// a two-lowpass mix — wrong function family, not mistuned constants. The
-/// operator is also amplitude-adaptive (not LTI), so any fixed kernel only
-/// matches the ensemble. The band form deliberately STANDS until the
-/// replacement lands (blocked on a Sharpness=0 ladder and a two-resolution
-/// export — b8-analysis.md §7); the sidecar carries the raw slider value so
-/// Lightroom re-renders it with its own model — the same stance
-/// [`manual_vignette_lut`] takes.
+/// **Measured (R29 B8 2026-08-20, re-measured on a clean base R29 B8-2
+/// 2026-08-21), and REFUTED IN SHAPE.** Controlled Lightroom ladders read by
+/// block cross-spectrum show LR's negative Texture is a monotone HIGH-SHELF,
+/// not a notch. B8's numbers carried a confound — its fixtures had capture
+/// sharpening at maximum (`Sharpness=150`), which rebuilds fine contrast
+/// AFTER Texture and inflated H at the fine end — so the clean-base (B8-2,
+/// Sharpness=0, five steps −10…−100) values are authoritative: low
+/// frequencies hold (H(ν→0)=0.9996, no lift — B8's +1.8 % LF lift was pure
+/// sharpening), the attenuation plateaus at H = 0.549 (−100) / 0.722 (−50),
+/// and a 4 px pattern keeps 0.57 in LR where this pass keeps 0.9992. Depth
+/// follows a one-parameter hyperbolic saturation w = t(1+d)/(1+dt),
+/// d = 0.5586 (a single power law is refuted by the five-step ladder; the
+/// engine's linear `strength = -amount` under-depths −50 by 17 % and −10 by
+/// 30 % even if the endpoint were matched). Against the clean ground truth
+/// this band form over-smooths the mid band by up to −12.97 dB at a 57 px
+/// period and under-smooths the fine end by up to +5.26 dB at 3 px;
+/// refitting the band form with every parameter free is 8.2× worse than a
+/// two-lowpass parallel mix — wrong function family, not mistuned constants.
+/// The operator is also amplitude-adaptive (not LTI; confirmed on the clean
+/// base, span 0.33→0.85 across detail amplitude), so any fixed kernel only
+/// matches the ensemble, and the fit only holds in the sRGB-gamma domain
+/// (linear-light diverges by 0.04 at 4 px — domain choice is load-bearing).
+/// The replacement is fully adjudicated (b8-analysis-2.md §6: parameters,
+/// σ short-edge normalisation pinned by a two-resolution export at 16×
+/// separation, 45 acceptance anchors) and rides its own render batch with
+/// its own top notice; until then this band form deliberately STANDS. The
+/// sidecar carries the raw slider value so Lightroom re-renders it with its
+/// own model — the same stance [`manual_vignette_lut`] takes.
 ///
 /// The cascade is also why this needs no third plane: `coarse` is blurred FROM
 /// `fine` (σ² adds), so the pass holds two f32 planes exactly like the positive
