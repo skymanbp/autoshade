@@ -8441,6 +8441,55 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+        /// Everything this test creates OUTSIDE its own temp dir, removed on
+        /// the way out — including the way out through a panic.
+        ///
+        /// **This is the fixture, not tidiness (R29 C3/C4).** The test drives
+        /// the REAL roots: `develop_dir` resolves through [`store_root`], which
+        /// is the user's own `%LOCALAPPDATA%\autoshop` (or `$XDG_DATA_HOME`),
+        /// and `legacy_file` resolves cwd-relative to `./out`. It cannot use a
+        /// temp root instead — `clear_develop` has no root-parameterized twin,
+        /// and `AUTOSHOP_DATA_DIR` is process-global environment that `set_var`
+        /// makes unsafe and racy under edition 2024 (the reason
+        /// [`develop_dir_in`] exists at all).
+        ///
+        /// So the cleanup has to survive a FAILURE, and as a tail of
+        /// `let _ = remove_*` statements it did not: the first assert to fire
+        /// skipped all of them, and the residue was
+        /// `<store>/develops/<key>/legacy.tombstone` — after which
+        /// `legacy_recipe(&a)` answers with the `.legacy-suppressed` path
+        /// forever and EVERY later run of this test fails at a different,
+        /// misleading assertion, on this machine and on any other, until a
+        /// human deletes a directory inside their own app data. Measured, not
+        /// argued: forcing a panic after the `legacy.exists()` assert left
+        /// `develops/dsc001-…/{legacy.tombstone,cleared.txt}` plus
+        /// `out/DSC001.recipe.json`, and the next run then failed at
+        /// `assert_eq!(legacy_recipe(&a), legacy)` with
+        /// `left: "…\.legacy-suppressed\DSC001.recipe.json"`.
+        ///
+        /// `Drop` runs during the unwind, so the guard cleans up on both paths.
+        /// It holds PATHS, not state: the test computes them once, before it
+        /// can fail, so a guard built from a half-run test still names the
+        /// right files.
+        struct LegacyTombstoneFixture {
+            base: PathBuf,
+            legacy: PathBuf,
+            develops: Vec<PathBuf>,
+        }
+
+        impl Drop for LegacyTombstoneFixture {
+            fn drop(&mut self) {
+                // Best-effort, exactly as before — a cleanup that PANICKED
+                // while unwinding would abort the whole test process and
+                // replace the real assertion message with a double-panic.
+                let _ = std::fs::remove_file(&self.legacy);
+                for d in &self.develops {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+                let _ = std::fs::remove_dir_all(&self.base);
+            }
+        }
+
         #[test]
         fn clearing_one_same_stem_photo_suppresses_but_never_unlinks_legacy_bytes() {
             let base = std::env::temp_dir().join("autoshop-store-test-legacy-tombstone");
@@ -8450,6 +8499,15 @@ mod tests {
             let a = base.join("trip-a").join("DSC001.ARW");
             let b = base.join("trip-b").join("DSC001.ARW");
             let legacy = legacy_file("DSC001.recipe.json");
+            // ARMED BEFORE THE FIRST THING THAT CAN FAIL, and before anything
+            // is written: `develop_dir` is resolved here, once, so the guard
+            // targets the same key the test does even if a later call would
+            // resolve differently.
+            let _fixture = LegacyTombstoneFixture {
+                base: base.clone(),
+                legacy: legacy.clone(),
+                develops: vec![develop_dir(&a), develop_dir(&b)],
+            };
             if let Some(parent) = legacy.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
@@ -8467,11 +8525,42 @@ mod tests {
                 b"{\"contrast\":22.0}",
                 "the legacy bytes are preserved verbatim"
             );
+        }
 
-            let _ = std::fs::remove_file(&legacy);
-            let _ = std::fs::remove_dir_all(develop_dir(&a));
-            let _ = std::fs::remove_dir_all(develop_dir(&b));
+        /// The fixture's own contract, because a cleanup that only runs when
+        /// nothing went wrong is the bug this pair was written for.
+        ///
+        /// Drives the guard directly over a stand-in tombstone and a stand-in
+        /// legacy file, from inside a closure that PANICS — the shape the real
+        /// test takes when an assert fires — and proves the files are gone on
+        /// the far side of the unwind. MUTATION-LINED: turning the `Drop` impl
+        /// back into an empty body, or moving the guard's construction below
+        /// the first `assert`, fails this.
+        #[test]
+        fn the_tombstone_fixture_cleans_up_through_a_panic() {
+            let base = std::env::temp_dir().join("autoshop-store-test-tombstone-fixture");
             let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let legacy = base.join("stand-in.recipe.json");
+            std::fs::write(&legacy, b"{}").unwrap();
+            let dev = base.join("develops").join("stand-in");
+            std::fs::create_dir_all(&dev).unwrap();
+            std::fs::write(dev.join("legacy.tombstone"), LEGACY_TOMBSTONE).unwrap();
+            assert!(dev.join("legacy.tombstone").exists(), "the probe residue starts present");
+
+            let (b2, l2, d2) = (base.clone(), legacy.clone(), dev.clone());
+            let died = std::panic::catch_unwind(move || {
+                let _fixture = LegacyTombstoneFixture {
+                    base: b2,
+                    legacy: l2,
+                    develops: vec![d2],
+                };
+                panic!("the assert that used to skip the cleanup");
+            });
+            assert!(died.is_err(), "the closure must actually unwind");
+            assert!(!dev.join("legacy.tombstone").exists(), "the tombstone is swept by Drop");
+            assert!(!legacy.exists(), "the legacy stand-in is swept by Drop");
+            assert!(!base.exists(), "and so is the whole fixture root");
         }
 
 

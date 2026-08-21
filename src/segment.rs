@@ -6,8 +6,8 @@
 //! attaches to the recipe as a [`crate::recipe::MaskGeometry::Bitmap`] local
 //! adjustment. The AI picks *where*; every actual edit stays a deterministic
 //! recipe slider. Models auto-download on first run — into `python/weights`
-//! (BiRefNet, SAM 2.1) or the user's home caches (`~/.cache/huggingface` for the
-//! sky model, `~/.u2net` for the subject fallback) — no weights in the repo.
+//! (BiRefNet, OneFormer, SAM 2.1, each behind a sha256 gate) or `~/.u2net` for
+//! the subject fallback tier, which gates its own — no weights in the repo.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -84,10 +84,101 @@ impl SegmentOpts {
     }
 }
 
+/// The word the sidecar puts inside [`SegmentReport::backend`] when the run
+/// took the fallback tier instead of the model the user ruled for.
+///
+/// It is `python/segment.py`'s own `U2NET_LABEL`
+/// (`"U^2-Net (FALLBACK - BiRefNet did not run)"`), and this matches the ONE
+/// word in it that states the condition rather than the model — so a future
+/// fallback under a different name still reads as a fallback here.
+/// `the_backend_label_survives_the_sidecar_line` pins the pairing from this
+/// side; the constant's comment in `segment.py` names this file from the other.
+const FALLBACK_MARK: &str = "FALLBACK";
+
+/// What the sidecar said about the run that produced the mask.
+///
+/// Returned instead of `()` because `--target subject` has TWO possible
+/// answers (R29 B4) and every surface downstream — the GUI's status line, the
+/// alpha cache's provenance marker — needs to know which one ran. Before this,
+/// the only carrier was a stderr line the Rust side forwarded to a console the
+/// windowed GUI does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentReport {
+    /// The backend named in the sidecar's own brackets, e.g.
+    /// `"BiRefNet e2bf8e4460fc"`. EMPTY when the line could not be found —
+    /// an older `segment.py` on disk, which this bridge tolerates elsewhere
+    /// too (see the `durable_adopt` belt at the end of [`segment_file`]).
+    pub backend: String,
+    /// Whether BiRefNet's imports resolved on this machine for this run.
+    /// `None` for the single-tier backends, which have no such question, and
+    /// for a sidecar too old to print the line.
+    pub birefnet_deps: Option<bool>,
+}
+
+/// Does this backend label name the fallback tier? See [`FALLBACK_MARK`].
+///
+/// Free-standing so the GUI can ask it of the bare label it carries in
+/// `Msg::Segmented` without reconstituting a [`SegmentReport`] — the one
+/// definition of "this is a degraded run", used on both sides.
+pub fn backend_is_fallback(backend: &str) -> bool {
+    backend.contains(FALLBACK_MARK)
+}
+
+impl SegmentReport {
+    /// Did this run take the fallback tier? See [`backend_is_fallback`].
+    pub fn is_fallback(&self) -> bool {
+        backend_is_fallback(&self.backend)
+    }
+
+    /// Parse the sidecar's stdout. Two lines matter and both are contracts
+    /// (`python/segment.py`'s `main`):
+    ///
+    /// ```text
+    /// segment.py: subject mask [BiRefNet e2bf8e4460fc] -> C:\…\mask.png
+    /// segment.py: subject backend deps [ok]
+    /// ```
+    ///
+    /// Split on `\r` as well as `\n` for the reason the stderr forwarder does:
+    /// a progress bar rewrites one physical line, so a newline-only split can
+    /// hand back a single enormous "line".
+    ///
+    /// A path with a `]` in it cannot confuse the first line — the label is
+    /// taken from the FIRST `[` to the FIRST `]` after it, and both sit left of
+    /// the ` -> ` the path follows.
+    fn parse(stdout: &str) -> SegmentReport {
+        let bracketed = |line: &str| -> Option<String> {
+            let open = line.find('[')?;
+            let rest = &line[open + 1..];
+            let close = rest.find(']')?;
+            Some(rest[..close].to_string())
+        };
+        let mut out = SegmentReport { backend: String::new(), birefnet_deps: None };
+        for line in stdout.split(['\n', '\r']) {
+            let line = line.trim();
+            let Some(body) = line.strip_prefix("segment.py:") else { continue };
+            let body = body.trim();
+            if body.contains(" mask [") {
+                if let Some(label) = bracketed(body) {
+                    out.backend = label;
+                }
+            } else if body.starts_with("subject backend deps") {
+                out.birefnet_deps = match bracketed(body).as_deref() {
+                    Some("ok") => Some(true),
+                    Some("missing") => Some(false),
+                    // A third word is a sidecar this build does not understand;
+                    // "unknown" is the honest answer, not a coin flip.
+                    _ => None,
+                };
+            }
+        }
+        out
+    }
+}
+
 /// Run the sidecar: `input` (any image file) → `output` (8-bit grayscale PNG).
 /// The mask is in the INPUT's frame — feed it the original-frame preview so it
 /// lands in the same space recipe masks live in.
-pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<()> {
+pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<SegmentReport> {
     if !opts.script.exists() {
         bail!(
             "segmentation sidecar not found at {} — run from the project dir or set \
@@ -170,10 +261,9 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
     }
     // Exit 0 alone is not success — THIS run must have produced a non-empty
     // mask (see `crate::sidecar_wrote` for the three refusals).
-    let wrote = crate::sidecar_wrote("segmentation sidecar", output, before);
-    if wrote.is_err() {
+    if let Err(e) = crate::sidecar_wrote("segmentation sidecar", output, before) {
         crate::denoise::discard_failed_output(output, before);
-        return wrote;
+        return Err(e);
     }
     // Byte-level acceptance is not MASK acceptance (L08-8): a sidecar that
     // wrote garbage (a truncated PNG, an HTML error body) used to be adopted
@@ -225,7 +315,201 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<(
     // sidecar fsyncs before its os.replace now — this adopt is the belt for
     // an older script on disk, at the cost of one flush.
     crate::store::durable_adopt(output)
-        .with_context(|| format!("sync segmentation output {}", output.display()))
+        .with_context(|| format!("sync segmentation output {}", output.display()))?;
+    // STDOUT, which until now was read only to pad a failure message. It
+    // carries the one fact the mask itself cannot: which of `--target
+    // subject`'s two backends actually answered.
+    Ok(SegmentReport::parse(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Can THIS machine run the BiRefNet subject backend right now?
+///
+/// `Some(true)` / `Some(false)` from the sidecar's `--probe-backend`, `None`
+/// when the question could not be asked at all (no sidecar, no Python, a
+/// sidecar too old to know the flag) — and `None` must never be read as "no",
+/// because acting on it would recompute alphas on evidence nobody has.
+///
+/// **Memoised for the process, and the memo is the point.** The probe costs one
+/// interpreter start plus three imports: measured 4.3 s where torchvision IS
+/// installed (it pulls torch in), ~0.1 s where it is not, against 0.06 s for a
+/// bare `python -c pass`. A recipe with four AI masks must pay that at most
+/// once, and [`resolve_ai_masks`] spends it at most once per develop — only
+/// when a CACHED alpha's marker says it came from the fallback tier on a
+/// machine that could not do better. On a machine that never fell back, or one
+/// that still cannot, this is never called or returns in ~0.1 s.
+///
+/// The memo is keyed on nothing: a dependency appearing mid-session is a case
+/// the NEXT session picks up, which is the same granularity `resolve_ai_masks`
+/// already gives the cache.
+fn birefnet_deps_available(opts: &SegmentOpts) -> Option<bool> {
+    use std::sync::OnceLock;
+    static PROBED: OnceLock<Option<bool>> = OnceLock::new();
+    *PROBED.get_or_init(|| {
+        if !opts.script.exists() {
+            return None;
+        }
+        let mut cmd = Command::new(&opts.python_bin);
+        // Same child-environment discipline as the segmentation spawn: an
+        // allowlisted `.env`, `-E` against PYTHON* import hijacking, no
+        // inherited console, and a kill group so a wedged probe cannot outlive
+        // the develop.
+        cmd.envs(crate::config::dotenv_child_env());
+        cmd.arg("-E")
+            .arg(&opts.script)
+            .arg("--target")
+            .arg("subject")
+            .arg("--probe-backend")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::hide_child_console(&mut cmd);
+        crate::arm_kill_group(&mut cmd);
+        let child = cmd.spawn().ok()?;
+        let group = crate::assign_kill_group(&child);
+        let out = crate::denoise::bounded_child_output(
+            child,
+            "segmentation backend probe",
+            crate::denoise::sidecar_timeout(),
+            "AUTOSHOP_SIDECAR_TIMEOUT_SECS",
+            group,
+        )
+        .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        SegmentReport::parse(&String::from_utf8_lossy(&out.stdout)).birefnet_deps
+    })
+}
+
+/// The provenance marker written beside one cached AI alpha.
+///
+/// **Why a sidecar FILE and not a term in the cache key.** The key is spelled
+/// by the Rust side BEFORE the sidecar chooses a backend, so it cannot contain
+/// the answer — that is exactly the limitation R29 B4 registered and this
+/// closes. The marker is written AFTER the run, by the side that has just been
+/// told which backend answered.
+///
+/// It lives at `<alpha>.backend`, i.e. `ai-mask-<hash>.backend` beside
+/// `ai-mask-<hash>.png` in the photo's own develop dir, so it is swept, cleared
+/// and snapshotted with the alpha it describes and never outlives it in a way
+/// that matters (a stray marker with no PNG is simply never read). It is NOT a
+/// recipe reference, so nothing relativizes it and no schema grows a field.
+///
+/// Three lines, `key=value`, version-stamped — the same shape every other
+/// small store record in this tree carries:
+///
+/// ```text
+/// autoshop-ai-mask-backend v1
+/// backend=U^2-Net (FALLBACK - BiRefNet did not run)
+/// birefnet-deps=missing
+/// ```
+struct BackendMarker {
+    backend: String,
+    /// The dependency verdict AT THE TIME the alpha was written — not now.
+    /// This is what makes the re-derivation rule terminate: see
+    /// [`should_renew_cached_alpha`].
+    birefnet_deps: Option<bool>,
+}
+
+const BACKEND_MARKER_HEADER: &str = "autoshop-ai-mask-backend v1";
+
+/// A marker is three short lines; anything larger is not one. Bounded for the
+/// reason every read in the store module is (R28 2a): the develop dir is not
+/// always written by this app.
+const MAX_BACKEND_MARKER: u64 = 4 * 1024;
+
+fn backend_marker_path(alpha: &Path) -> PathBuf {
+    alpha.with_extension("backend")
+}
+
+impl BackendMarker {
+    fn render(&self) -> String {
+        let deps = match self.birefnet_deps {
+            Some(true) => "ok",
+            Some(false) => "missing",
+            None => "unknown",
+        };
+        format!("{BACKEND_MARKER_HEADER}\nbackend={}\nbirefnet-deps={deps}\n", self.backend)
+    }
+
+    fn parse(text: &str) -> Option<BackendMarker> {
+        let mut lines = text.lines();
+        // The header is a GATE, not decoration: without it this would happily
+        // read provenance out of any file that happened to sit at the name.
+        if lines.next()?.trim() != BACKEND_MARKER_HEADER {
+            return None;
+        }
+        let mut m = BackendMarker { backend: String::new(), birefnet_deps: None };
+        for line in lines {
+            if let Some(v) = line.strip_prefix("backend=") {
+                m.backend = v.trim_end().to_string();
+            } else if let Some(v) = line.strip_prefix("birefnet-deps=") {
+                m.birefnet_deps = match v.trim() {
+                    "ok" => Some(true),
+                    "missing" => Some(false),
+                    _ => None,
+                };
+            }
+        }
+        Some(m)
+    }
+
+    fn read(alpha: &Path) -> Option<BackendMarker> {
+        let p = backend_marker_path(alpha);
+        let text = crate::store::read_text_capped(&p, MAX_BACKEND_MARKER).ok()?;
+        BackendMarker::parse(&text)
+    }
+
+    /// Best effort, and deliberately so: the ALPHA is the artifact, the marker
+    /// is provenance about it. A marker that could not be written costs one
+    /// missed re-derivation opportunity; refusing the mask over it would cost
+    /// the photographer their selection.
+    fn write(alpha: &Path, report: &SegmentReport) {
+        let m = BackendMarker {
+            backend: report.backend.clone(),
+            birefnet_deps: report.birefnet_deps,
+        };
+        let _ = crate::store::durable_write(&backend_marker_path(alpha), m.render().as_bytes());
+    }
+}
+
+/// Should a cache HIT be thrown away and re-segmented?
+///
+/// Exactly one case says yes, and it is the one R29 B4 registered as missing:
+/// **the alpha was produced by the fallback tier BECAUSE this machine could
+/// not run BiRefNet, and it now can.** The photographer installed torchvision
+/// since; serving them the softer U²-Net edges forever, under a cache key that
+/// records neither model, is the cache lying about provenance.
+///
+/// **Why the recorded verdict and not just "is it a fallback".** A machine that
+/// has the dependencies but fails for another reason — a digest mismatch, a
+/// card that will not hold the weights — falls back too, and re-running it on
+/// every develop would be an infinite retry loop that never improves. Comparing
+/// the verdict RECORDED WITH THE ALPHA against today's makes the rule fire only
+/// on an actual CHANGE in this machine's capability, so it fires once and then
+/// stops: the re-run rewrites the marker with today's verdict either way.
+///
+/// **Everything unknown means NO.** No marker (an alpha written before this
+/// build), an unparseable one, or a probe that could not run all leave the
+/// cache alone. That costs nothing real: `AI_BACKEND_GENERATION` 2 has not
+/// shipped, so every alpha that survives into v0.35.0 re-derives once anyway
+/// and is written by this build, with a marker.
+fn should_renew_cached_alpha(alpha: &Path, opts: &SegmentOpts) -> bool {
+    let Some(m) = BackendMarker::read(alpha) else { return false };
+    // The MARKER half first, so the 4.3 s probe is never spent on an alpha
+    // whose own record already says the answer cannot change.
+    if !backend_is_fallback(&m.backend) || m.birefnet_deps != Some(false) {
+        return false;
+    }
+    marker_is_stale(&m, birefnet_deps_available(opts))
+}
+
+/// The decision of [`should_renew_cached_alpha`] with today's verdict handed
+/// IN, so the rule can be exercised by a test instead of being reachable only
+/// through a real interpreter and a process-wide memo — the same split
+/// [`ai_cache_key_gen`] makes for the generation term.
+fn marker_is_stale(m: &BackendMarker, deps_now: Option<bool>) -> bool {
+    backend_is_fallback(&m.backend) && m.birefnet_deps == Some(false) && deps_now == Some(true)
 }
 
 /// What one [`resolve_ai_masks`] pass did, for the disclosure channels.
@@ -239,6 +523,13 @@ pub struct AiMaskResolution {
     pub resolved: usize,
     /// Masks reused from the cache without running the model.
     pub cached: usize,
+    /// Masks whose CACHED alpha was discarded and re-segmented because this
+    /// machine gained the primary backend since it was written
+    /// ([`should_renew_cached_alpha`]). Counted separately from `resolved`'s
+    /// plain re-derivations: "your machine can now do better, so this mask was
+    /// redone" is a different sentence from "this mask had no alpha yet", and
+    /// the photographer paying seconds of GPU is owed the first one.
+    pub renewed: usize,
     /// Masks with no alpha, each with the reason, in recipe order. These
     /// render INERT and raise [`crate::xmp::MaskImportReason::AiMaskUnresolved`].
     pub unresolved: Vec<(String, String)>,
@@ -264,6 +555,13 @@ impl AiMaskResolution {
             ));
             if self.cached > 0 {
                 s.push_str(&format!("; {} reused from the develop cache", self.cached));
+            }
+            if self.renewed > 0 {
+                s.push_str(&format!(
+                    "; {} re-segmented because this machine can now run the BiRefNet subject \
+                     backend it previously fell back from",
+                    self.renewed
+                ));
             }
         }
         for (name, why) in &self.unresolved {
@@ -322,16 +620,18 @@ impl AiMaskResolution {
 /// backend) buys three fields to save one re-run of a model whose alpha is
 /// cached beside the develop anyway.
 ///
-/// **Known limitation, registered rather than left to be found.** Generation 2
-/// means "BiRefNet, or U²-Net if this machine cannot run BiRefNet" — the Rust
-/// side chooses the key before the sidecar chooses the backend, so it cannot
-/// record which one answered. A machine that fell back and LATER installs
-/// torchvision keeps being served its U²-Net alphas under a generation-2 key.
-/// The disclosure stays true either way (「re-derived by the local segmenter」
-/// never claimed a model), and the sidecar's own stderr names the fallback on
-/// every run that takes it; what is missing is cache invalidation on the day
-/// the machine gains the dependency. Delete the develop's `ai-mask-*.png` to
-/// force it.
+/// **The limitation this constant CANNOT express, and where it is handled
+/// instead (R29 C3/C4).** Generation 2 means "BiRefNet, or U²-Net if this
+/// machine cannot run BiRefNet" — the Rust side spells the key before the
+/// sidecar chooses the backend, so no term of this string can record which one
+/// answered, and widening the generation would not help: it is one number for
+/// every machine, and the fact in question differs per machine. A machine that
+/// fell back and LATER installs torchvision used to keep being served its
+/// U²-Net alphas forever, with "delete the develop's `ai-mask-*.png`" as the
+/// only remedy — a manual step nobody could know they needed. That is now
+/// automatic and lives one layer out, in the per-alpha [`BackendMarker`] that
+/// [`should_renew_cached_alpha`] reads: provenance belongs beside the artifact,
+/// not in its name.
 const AI_BACKEND_GENERATION: u32 = 2;
 
 fn ai_cache_key(raw: &Path, subtype: u32, ref_x: f32, ref_y: f32, quarter_turns: u8) -> String {
@@ -391,6 +691,12 @@ fn ai_cache_key_gen(
 /// [`ai_cache_key`], so it is swept, snapshotted and relativized with every
 /// other mask raster (`LocalAdjustment::bitmap_paths_mut`).
 ///
+/// **A cache hit is not unconditional.** Each alpha carries a
+/// [`BackendMarker`] naming the backend that made it, and one written by the
+/// fallback tier on a machine that could not run BiRefNet is thrown away once
+/// that machine can — see [`should_renew_cached_alpha`] for why that rule
+/// terminates instead of retrying forever.
+///
 /// **TWO paths, and they are not interchangeable (R28 Batch-3, adjudication
 /// F1-C).** `raw` is the PHOTO — the identity every cache decision is made on:
 /// [`ai_cache_key`] hashes it and [`crate::store::raster_target`] homes the
@@ -444,16 +750,33 @@ pub fn resolve_ai_masks(
             // KEYED AND HOMED ON THE PHOTO, never on the pixel source (F1-C).
             let target =
                 crate::store::raster_target(raw, &ai_cache_key(raw, subtype, rx, ry, turns));
+            // Built BEFORE the cache probe now, because the probe needs it —
+            // `should_renew_cached_alpha` asks the sidecar whether this machine
+            // has gained the primary backend. Still cheap (two clones and a
+            // format), and a subtype with no backend keeps its old behaviour:
+            // the cache still answers for it, and only a MISS reports it.
+            let opts = SegmentOpts::for_ai_mask(cfg, subtype, rx, ry);
             // CACHE HIT, and it is checked by DECODING, not by `exists()`: a
             // half-written or truncated PNG on disk is exactly the file a
             // cheap existence test would serve forever.
+            let mut renewing = false;
             if target.exists() && crate::render::open_mask_bounded(&target).is_ok() {
-                *raster = Some(target.to_string_lossy().into_owned());
-                out.resolved += 1;
-                out.cached += 1;
-                continue;
+                renewing = opts.as_ref().is_some_and(|o| should_renew_cached_alpha(&target, o));
+                if !renewing {
+                    *raster = Some(target.to_string_lossy().into_owned());
+                    out.resolved += 1;
+                    out.cached += 1;
+                    continue;
+                }
+                // Cleared BEFORE the re-run, both files. `sidecar_wrote`
+                // refuses an output whose length AND mtime are unchanged, so a
+                // stale alpha left in place could turn a real re-run into a
+                // reported failure; and a marker left behind a re-run that
+                // fails would keep claiming a provenance nothing produced.
+                let _ = std::fs::remove_file(&target);
+                let _ = std::fs::remove_file(backend_marker_path(&target));
             }
-            let Some(opts) = SegmentOpts::for_ai_mask(cfg, subtype, rx, ry) else {
+            let Some(opts) = opts else {
                 out.unresolved.push((mask_name.clone(), format!("no backend for subtype {subtype}")));
                 continue;
             };
@@ -473,9 +796,21 @@ pub fn resolve_ai_masks(
                 continue;
             };
             match segment_file(&opts, input, &target) {
-                Ok(()) => {
+                Ok(report) => {
+                    // The marker lands with the alpha, not before it: a
+                    // provenance record for a mask that does not exist would be
+                    // read by the next develop and believed.
+                    BackendMarker::write(&target, &report);
                     *raster = Some(target.to_string_lossy().into_owned());
                     out.resolved += 1;
+                    // Counted on the SUCCESS arm, so `renewed` means "was
+                    // re-segmented", which is what the disclosure says. A
+                    // renewal whose re-run failed is an `unresolved`, and
+                    // claiming it as a re-derivation would be the counter
+                    // reporting an intention rather than an outcome.
+                    if renewing {
+                        out.renewed += 1;
+                    }
                 }
                 Err(e) => {
                     // `segment_file` already discarded whatever it wrote, so
@@ -595,6 +930,226 @@ mod tests {
 
         let err = segment_file(&opts, &input, &output).unwrap_err().to_string();
         assert!(err.contains("is empty"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R29 C3/C4 — the sidecar's stdout is a CONTRACT and this is its parser.
+    ///
+    /// `--target subject` has two possible backends and until this batch the
+    /// only thing that knew which one ran was a stderr line forwarded to a
+    /// console the windowed GUI does not have. The two lines parsed here are
+    /// written by `python/segment.py`'s `main`; changing either spelling
+    /// without changing this test is the drift it exists to catch.
+    ///
+    /// MUTATION-LINED: taking the label from the LAST `]` instead of the first
+    /// fails on the path case; dropping the `\r` from the split fails on the
+    /// progress-bar case; treating an unknown deps word as `false` fails the
+    /// last case and would silently re-derive every cached alpha.
+    #[test]
+    fn the_backend_label_survives_the_sidecar_line() {
+        let primary = SegmentReport::parse(
+            "segment.py: subject mask [BiRefNet e2bf8e4460fc] -> C:\\x\\mask.png\n\
+             segment.py: subject backend deps [ok]\n",
+        );
+        assert_eq!(primary.backend, "BiRefNet e2bf8e4460fc");
+        assert_eq!(primary.birefnet_deps, Some(true));
+        assert!(!primary.is_fallback(), "the pinned model is not a fallback");
+
+        let fell_back = SegmentReport::parse(
+            "segment.py: subject mask [U^2-Net (FALLBACK - BiRefNet did not run)] -> m.png\n\
+             segment.py: subject backend deps [missing]\n",
+        );
+        assert!(fell_back.is_fallback(), "the sidecar's own word for it must read as one here");
+        assert_eq!(fell_back.birefnet_deps, Some(false));
+
+        // A path containing a bracket must not eat the label — the label ends
+        // at the FIRST `]`, and the path is right of the ` -> `.
+        let bracketed = SegmentReport::parse(
+            "segment.py: sky mask [OneFormer ADE20K Swin-L 4a5bac8e64f8] -> D:\\a[1]\\m.png\n",
+        );
+        assert_eq!(bracketed.backend, "OneFormer ADE20K Swin-L 4a5bac8e64f8");
+        assert_eq!(bracketed.birefnet_deps, None, "sky has no fallback tier to report");
+
+        // A progress bar rewrites ONE physical line with `\r`, so a
+        // newline-only split can hand back a single enormous "line" with the
+        // contract line buried inside it.
+        let after_bar = SegmentReport::parse(
+            "loading 10%\rloading 90%\rsegment.py: object mask [SAM 2.1 Hiera-Large 665f8e2ad61c] -> m.png\r",
+        );
+        assert_eq!(after_bar.backend, "SAM 2.1 Hiera-Large 665f8e2ad61c");
+
+        // An older sidecar says nothing we understand: that is UNKNOWN, and
+        // every consumer must treat unknown as "leave it alone".
+        let silent = SegmentReport::parse("some library wrote this\n");
+        assert!(silent.backend.is_empty());
+        assert_eq!(silent.birefnet_deps, None);
+        let odd = SegmentReport::parse("segment.py: subject backend deps [perhaps]\n");
+        assert_eq!(odd.birefnet_deps, None, "a word this build does not know is not a verdict");
+    }
+
+    /// The label reaches the CALLER, not just the parser — the transport item 1
+    /// of R29 C3/C4 needed. A stand-in sidecar prints the contract line and
+    /// publishes a real PNG; `segment_file` must hand the bracketed text back.
+    ///
+    /// MUTATION-LINED: returning `Ok(SegmentReport::default())` instead of
+    /// parsing `out.stdout`, or reverting the signature to `Result<()>`, fails
+    /// here and in the GUI's `Msg::Segmented` arm.
+    #[test]
+    fn a_successful_run_hands_the_backend_label_back() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-seg-test-label-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A REAL 1×1 grey PNG, because `segment_file` decodes before adopting.
+        let png = dir.join("seed.png");
+        image::GrayImage::from_pixel(1, 1, image::Luma([128u8])).save(&png).unwrap();
+        let png_arg = png.to_string_lossy().replace('/', "\\");
+
+        // Copies the seed PNG over the --output argument, prints the two
+        // contract lines, exits 0. Argument 6 is `--output`'s value: the
+        // command line is `-E <script> --input <in> --output <out> --target <t>`.
+        #[cfg(windows)]
+        let bin = {
+            let p = dir.join("label.bat");
+            std::fs::write(
+                &p,
+                format!(
+                    "@copy /y \"{png_arg}\" \"%~6\" >nul\r\n\
+                     @echo segment.py: subject mask [U^^2-Net (FALLBACK - BiRefNet did not run)] -^> %~6\r\n\
+                     @echo segment.py: subject backend deps [missing]\r\n\
+                     @exit /b 0\r\n"
+                ),
+            )
+            .unwrap();
+            p
+        };
+        #[cfg(not(windows))]
+        let bin = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join("label.sh");
+            std::fs::write(
+                &p,
+                format!(
+                    "#!/bin/sh\ncp '{}' \"$6\"\n\
+                     echo 'segment.py: subject mask [U^2-Net (FALLBACK - BiRefNet did not run)] -> '\"$6\"\n\
+                     echo 'segment.py: subject backend deps [missing]'\nexit 0\n",
+                    png.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let script = dir.join("segment.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        let opts = SegmentOpts {
+            python_bin: bin.to_string_lossy().into_owned(),
+            script,
+            target: "subject".into(),
+            reference_point: None,
+        };
+        let input = dir.join("in.png");
+        std::fs::write(&input, b"src bytes").unwrap();
+        let output = dir.join("mask.png");
+
+        let report = segment_file(&opts, &input, &output).expect("the stand-in run succeeds");
+        assert_eq!(report.backend, "U^2-Net (FALLBACK - BiRefNet did not run)");
+        assert!(report.is_fallback(), "the GUI keys its warning on exactly this");
+        assert_eq!(report.birefnet_deps, Some(false));
+
+        // And the marker the cache writes from it round-trips.
+        BackendMarker::write(&output, &report);
+        let back = BackendMarker::read(&output).expect("the marker is readable");
+        assert_eq!(back.backend, report.backend);
+        assert_eq!(back.birefnet_deps, Some(false));
+        assert_eq!(
+            backend_marker_path(&output).file_name().unwrap(),
+            std::ffi::OsStr::new("mask.backend"),
+            "the marker sits beside the alpha, sharing its stem"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The marker's own gate: a file that is not one of ours is not read as
+    /// provenance. The develop dir is not always written by this app (R28 2a),
+    /// and "no marker" and "a marker saying nothing" must both mean UNKNOWN.
+    #[test]
+    fn a_foreign_file_at_the_marker_name_is_not_read_as_provenance() {
+        assert!(BackendMarker::parse("backend=BiRefNet\nbirefnet-deps=ok\n").is_none(),
+            "without the header line this is not a marker");
+        assert!(BackendMarker::parse("").is_none());
+        let m = BackendMarker::parse(&format!("{BACKEND_MARKER_HEADER}\n")).expect("header alone parses");
+        assert!(m.backend.is_empty());
+        assert_eq!(m.birefnet_deps, None);
+        let m = BackendMarker::parse(&format!(
+            "{BACKEND_MARKER_HEADER}\nbackend=BiRefNet e2bf8e4460fc\nbirefnet-deps=ok\n"
+        ))
+        .expect("a real marker parses");
+        assert_eq!(m.backend, "BiRefNet e2bf8e4460fc");
+        assert_eq!(m.birefnet_deps, Some(true));
+    }
+
+    /// R29 C3/C4 item 2 — the whole decision table for re-deriving a cached
+    /// alpha, and the two properties that matter are the ones that are easy to
+    /// get wrong: it FIRES on the machine that gained the dependency, and it
+    /// TERMINATES on the machine that has the dependency and still falls back.
+    ///
+    /// MUTATION-LINED: dropping the `birefnet_deps == Some(false)` term (i.e.
+    /// renewing on "is it a fallback" alone) turns row 3 true, which is an
+    /// infinite re-run loop — a model run per develop, forever, on a machine
+    /// where it can never improve. Treating `None` as `true` turns rows 4 and 5
+    /// true and re-derives every alpha on a machine that cannot answer.
+    #[test]
+    fn a_fallback_alpha_is_renewed_only_when_this_machine_gained_the_backend() {
+        let mk = |backend: &str, deps: Option<bool>| BackendMarker {
+            backend: backend.to_string(),
+            birefnet_deps: deps,
+        };
+        let fallback = "U^2-Net (FALLBACK - BiRefNet did not run)";
+        let primary = "BiRefNet e2bf8e4460fc";
+
+        // 1. Fell back for want of the dependency, and the dependency landed.
+        assert!(marker_is_stale(&mk(fallback, Some(false)), Some(true)));
+        // 2. Same alpha, machine still cannot run it — nothing to gain.
+        assert!(!marker_is_stale(&mk(fallback, Some(false)), Some(false)));
+        // 3. THE TERMINATION CASE: the deps were there and it fell back anyway
+        //    (a digest mismatch, a card that will not hold the weights). The
+        //    re-run rewrote the marker with today's verdict, so the next
+        //    develop must NOT try again.
+        assert!(!marker_is_stale(&mk(fallback, Some(true)), Some(true)));
+        // 4. The probe could not run at all: unknown is not "yes".
+        assert!(!marker_is_stale(&mk(fallback, Some(false)), None));
+        // 5. An older marker with no verdict recorded is likewise not "yes".
+        assert!(!marker_is_stale(&mk(fallback, None), Some(true)));
+        // 6. The pinned model's own alphas are never thrown away.
+        assert!(!marker_is_stale(&mk(primary, Some(true)), Some(true)));
+        assert!(!marker_is_stale(&mk(primary, Some(false)), Some(true)));
+    }
+
+    /// An alpha with NO marker beside it keeps its cache hit. The whole
+    /// population this could matter for is empty for released builds —
+    /// `AI_BACKEND_GENERATION` 2 has not shipped, so every alpha surviving into
+    /// v0.35.0 re-derives once and is written by this build, with a marker —
+    /// and guessing "it was probably a fallback" would spend a model run per
+    /// mask on evidence nobody has.
+    #[test]
+    fn an_unmarked_cached_alpha_is_left_alone() {
+        let dir = std::env::temp_dir()
+            .join(format!("autoshop-seg-test-unmarked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let alpha = dir.join("ai-mask-0123456789abcdef.png");
+        std::fs::write(&alpha, b"pretend png").unwrap();
+        let opts = SegmentOpts {
+            // A python_bin that cannot exist, so a probe that DID run would be
+            // visible as a hang or a panic rather than passing by accident.
+            python_bin: "autoshop-no-such-interpreter".into(),
+            script: dir.join("does-not-exist.py"),
+            target: "subject".into(),
+            reference_point: None,
+        };
+        assert!(!should_renew_cached_alpha(&alpha, &opts), "no marker ⇒ no re-derivation");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -887,6 +1442,62 @@ mod tests {
             "a point prompt at the frame centre must select SOMETHING and not everything \
              (coverage {coverage:.4})"
         );
+        assert!(img.width().max(img.height()) <= 4096, "the long-edge cap must hold");
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Tier-3 probe, R29 C3/C4: the REAL sky backend end to end, through the
+    /// digest gate this batch put in front of it. Same `AUTOSHOP_SEG_PROBE`
+    /// gate and the same silence when unset — a bare `cargo test` must not
+    /// fetch 881 MB.
+    ///
+    /// **This is the live fire that proves the gate rather than the model.**
+    /// Set `HF_HUB_OFFLINE=1` alongside the probe and it also proves the
+    /// negative: with `local_files_only=True` on both halves AND the class
+    /// table read from the verified directory, nothing on this path resolves a
+    /// remote name. Before this batch the same run died with
+    /// `OfflineModeIsEnabled` on
+    /// `datasets/shi-labs/oneformer_demo/resolve/main/ade20k_panoptic.json` —
+    /// a second, unpinned repository `SKY_REVISION` never covered.
+    #[test]
+    fn seg_probe_sky_backend_produces_a_usable_soft_mask() {
+        let Ok(input) = std::env::var("AUTOSHOP_SEG_PROBE") else { return };
+        let input = std::path::PathBuf::from(&input);
+        assert!(input.is_file(), "AUTOSHOP_SEG_PROBE is set but is not a file: {}", input.display());
+        let cfg = Config::load();
+        let opts = SegmentOpts::for_ai_mask(&cfg, 2, 0.5, 0.5)
+            .expect("subtype 2 must route to a backend");
+        assert_eq!(opts.target, "sky", "subtype 2 is Sky");
+        assert!(
+            opts.script.exists(),
+            "AUTOSHOP_SEG_PROBE is set but the sidecar is not at {} — set AUTOSHOP_SEGMENT_SCRIPT",
+            opts.script.display()
+        );
+        let out =
+            std::env::temp_dir().join(format!("autoshop-seg-probe-sky-{}.png", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let report = segment_file(&opts, &input, &out).expect("the sky backend must produce a mask");
+        assert!(
+            report.backend.starts_with("OneFormer ADE20K Swin-L "),
+            "the sky run must name the model it used, got {:?}",
+            report.backend
+        );
+        assert_eq!(report.birefnet_deps, None, "sky has no fallback tier to report");
+        let img = crate::render::open_mask_bounded(&out)
+            .expect("the mask must decode through the budget gate")
+            .to_luma8();
+        let n = (img.width() as u64) * (img.height() as u64);
+        let sum: u64 = img.pixels().map(|p| p.0[0] as u64).sum();
+        let coverage = sum as f64 / (n as f64 * 255.0);
+        let soft = img.pixels().any(|p| (1..=254).contains(&p.0[0]));
+        println!(
+            "AUTOSHOP_SEG_PROBE sky — {} -> {}x{} coverage={coverage:.4} soft={soft} [{}]",
+            input.display(),
+            img.width(),
+            img.height(),
+            report.backend
+        );
+        assert!(soft, "the class probability must stay SOFT — the render multiplies it in");
         assert!(img.width().max(img.height()) <= 4096, "the long-edge cap must hold");
         let _ = std::fs::remove_file(&out);
     }

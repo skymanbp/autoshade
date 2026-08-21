@@ -14,8 +14,9 @@ consistent with .gitignore'ing python/weights):
              (pip install torchvision timm einops; 444,473,596 B)
              ... falling back to rembg / U^2-Net when BiRefNet cannot run
              (pip install rembg; ~/.u2net) — see SUBJECT below
-  sky     -> OneFormer ADE20K Swin-L via transformers
-             (pip install transformers torch; ~/.cache/huggingface)
+  sky     -> OneFormer ADE20K Swin-L, sha256-pinned into python/weights
+             (pip install transformers torch; 881,196,376 B over seven files
+             plus the 7,084 B ADE20K class table — see the SKY section)
   object  -> SAM 2.1 Hiera-Large, point-prompted (see the OBJECT section)
 
 LICENCES — this is a PUBLIC repository and the product is being copyright
@@ -268,27 +269,41 @@ def _load_birefnet_module(weights_dir):
     return sys.modules[f"{pkg_name}.birefnet"]
 
 
-def _birefnet_subject_mask(img_path: str, cache_dir: str, edge: int):
-    """Salient-subject alpha from the pinned general BiRefNet checkpoint."""
-    # THE DEPENDENCY PROBE COMES FIRST, before the fetch. `birefnet.py` imports
-    # torchvision, timm and einops at ITS module scope, so a machine missing any
-    # of them cannot run this backend — and finding that out AFTER
-    # `_birefnet_cache` has hashed 444 MB costs ~20 s per mask on exactly the
-    # machines the fallback tier exists for. Measured, one whole fallback run:
-    # 22.3 s before this probe, 3.1 s after.
-    # A real import, not `find_spec`: a torchvision built against another torch
-    # resolves and then raises, and that is the failure worth catching here.
+def birefnet_deps_error():
+    """`None` when BiRefNet's imports all resolve, else the reason they do not.
+
+    ONE dependency list for the whole file: `_birefnet_subject_mask` gates its
+    own run on this, and `--probe-backend` answers the Rust cache with it, so
+    the two can never disagree about what "this machine can run BiRefNet" means.
+
+    A real import, not `find_spec`: a torchvision built against another torch
+    RESOLVES and then raises, and that is the failure worth catching here.
+    `birefnet.py` imports all three at ITS module scope, so any one of them
+    missing is fatal to the backend.
+    """
     import importlib
 
     for dep in ("torchvision", "timm", "einops"):
         try:
             importlib.import_module(dep)
         except ImportError as e:
-            raise RuntimeError(
+            return (
                 f"BiRefNet needs torchvision + timm + einops ({e}) -> "
                 "pip install torchvision timm einops, with a torchvision matching your "
                 "torch (they are version-coupled: torch 2.8.0 <-> torchvision 0.23.0)"
-            ) from e
+            )
+    return None
+
+
+def _birefnet_subject_mask(img_path: str, cache_dir: str, edge: int):
+    """Salient-subject alpha from the pinned general BiRefNet checkpoint."""
+    # THE DEPENDENCY PROBE COMES FIRST, before the fetch, and finding that out
+    # AFTER `_birefnet_cache` has hashed 444 MB costs ~20 s per mask on exactly
+    # the machines the fallback tier exists for. Measured, one whole fallback
+    # run: 22.3 s before this probe, 3.1 s after.
+    missing = birefnet_deps_error()
+    if missing:
+        raise RuntimeError(missing)
     import torch
     from safetensors.torch import load_file
 
@@ -455,26 +470,152 @@ def _u2net_subject_mask(img_path: str):
 # be the same file, and `id2label` deciding which plane is "sky" is part of what
 # could move. Verified against the HF API on 2026-08-19: sha
 # 4a5bac8e64f82681a12db2e151a4c2f4ce6092b2, cardData.license "mit", not gated,
-# config.json id2label["2"] == "sky" over 150 classes.
+# config.json id2label["2"] == "sky" over 150 classes (re-verified 2026-08-21,
+# this session, and the digests below were computed over the fetched bytes).
 #
-# This is WEAKER than denoise.py's discipline, which sha256-pins the network
-# file and every weight blob and refuses a mismatch loudly. A revision pin fixes
-# WHICH tree is fetched; only a digest gate proves the BYTES. Closing that gap
-# means fetching each file ourselves and loading from a local directory (see
-# D1 §3.3) — a larger change than a licence fix, and registered here rather than
-# left to be rediscovered.
+# DIGEST-GATED SINCE R29 C3/C4 — the registration that lived here is CLOSED.
+# It used to say: "a revision pin fixes WHICH tree is fetched; only a digest
+# gate proves the BYTES", with `sky` the last backend still short of denoise.py
+# / SAM / BiRefNet discipline, awkward because `OneFormerProcessor` pulls a CLIP
+# tokenizer tree alongside the weights. It does — six files, not one — and they
+# are all pinned below and loaded with `local_files_only=True`, so nothing on
+# this path resolves a remote name at run time.
 #
-# NARROWED, R29 B4: this registration used to cover `subject` as well. It no
-# longer does — the subject backend is now the digest-gated BiRefNet above and
-# its fallback tier is rembg, which gates its own download on its own checksum.
-# `sky` is the LAST holdout, and it is the awkward one: `OneFormerProcessor`
-# pulls a CLIP tokenizer tree alongside the weights, so the local-directory
-# treatment is not the four-line copy of `_birefnet_cache` it looks like.
+# CLOSING IT SURFACED A HOLE THE REVISION PIN NEVER COVERED, and it is the real
+# reason this was not a four-line copy of `_birefnet_cache`. `OneFormerImage-
+# Processor.__init__` (and the Fast one alike) ends in
+#     self.metadata = prepare_metadata(load_metadata(repo_path, class_info_file))
+# and `load_metadata` falls through to the hub downloader with
+# repo_id "shi-labs/oneformer_demo", "ade20k_panoptic.json" and
+# repo_type "dataset" — a SECOND repository, a DATASET repo, resolved at its
+# moving `main`, on every single sky mask. `SKY_REVISION` never reached it and
+# the local-files-only flag does not stop it (it is a separate call with its own
+# kwargs; proved by `HF_HUB_OFFLINE=1`, which turns the load into
+# `OfflineModeIsEnabled` on exactly that URL). The `metadata` key sitting in
+# the pinned `preprocessor_config.json` does NOT help: the constructor filters it
+# out and recomputes from the download. So the file is fetched HERE, pinned like
+# everything else, and handed back through `repo_path` — `load_metadata` prefers
+# `os.path.join(repo_path, class_info_file)` when that is a real file, which is
+# what makes the offline load work.
+#
+# ⚠ REGISTERED, NOT CLEARED — the licence of that second repo.
+# `shi-labs/oneformer_demo` has NO declared licence: the HF API returns
+# `cardData: null` and `tags: ["region:us"]` (checked 2026-08-21), i.e. none of
+# the model repo's `mit`. The file is the 150-entry ADE20K class table
+# (`{"2": {"isthing": 0, "name": "sky"}, ...}`, 7,084 B) — factual label
+# metadata, not weights and not code — and this project has been fetching it on
+# every sky mask since R27 Batch-4 without noticing. Pinning it is strictly
+# better than the moving `main` it replaces, but it is NOT a licence clearance,
+# and R27 Batch-4's audit did not cover this repo. Two ways out if the user
+# wants it gone: synthesise the table from the model's own (MIT, pinned)
+# `config.json` `id2label` — but `isthing` is not in there and would have to be
+# invented, which only stays honest while nothing calls `post_process_*` — or
+# take the table from ADE20K/Detectron2 upstream directly. Neither is this
+# batch's to decide.
 SKY_MODEL = "shi-labs/oneformer_ade20k_swin_large"
 SKY_REVISION = "4a5bac8e64f82681a12db2e151a4c2f4ce6092b2"
 
+# The class-info table's own repo and revision — a DATASET repo, hence the
+# `/datasets/` in the URL `_sky_cache` builds, and pinned separately because it
+# moves separately.
+SKY_CLASS_INFO_REPO = "shi-labs/oneformer_demo"
+SKY_CLASS_INFO_REVISION = "4d683bd5bf84e9c8b5537dce306230bde409fe89"
+SKY_CLASS_INFO_FILE = "ade20k_panoptic.json"
 
-def sky_mask(img_path: str):
+# Every file `OneFormerProcessor.from_pretrained` + `OneFormerForUniversal-
+# Segmentation.from_pretrained` open, and nothing else: the repo's 949 MB
+# `250_16_swin_l_oneformer_ade20k_160k.pth` is the ORIGINAL research checkpoint
+# and `from_pretrained` never touches it, so pinning it would mean downloading
+# it. Digests were computed over the bytes fetched this session; the one for
+# `pytorch_model.bin` also equals the HF tree API's LFS `oid` at this revision
+# (two independent derivations agreeing, the same double-check `_birefnet_cache`
+# documents). `merges.txt` / `vocab.json` / `tokenizer_config.json` /
+# `special_tokens_map.json` are the CLIP tokenizer tree — OneFormer is
+# task-conditioned, so the text side is load-bearing, not decoration.
+#
+# `pytorch_model.bin` is a PICKLE (this revision predates safetensors and
+# publishes no `.safetensors`), which is exactly why the digest matters more
+# here than for a `.safetensors` sibling: transformers hands it to `torch.load`,
+# and the gate below is what stands between those bytes and the interpreter.
+SKY = {
+    "repo": SKY_MODEL,
+    "revision": SKY_REVISION,
+    "files": {
+        "pytorch_model.bin": {
+            "sha256": "c0b2fe11dfecee6f2f1f315f466946e96f4e94813f3f6d660ff3747b83c28cc9",
+            "bytes": 879517517,
+        },
+        "config.json": {
+            "sha256": "27452b656a467dbdebdf879dc413d6f3facd2bfe3643824ae66c32c22884b4bd",
+            "bytes": 84289,
+        },
+        "preprocessor_config.json": {
+            "sha256": "49e2c8f207405d063cf7824f97c2814fa864f8f19ea9e02c9e20a9ff539c6d49",
+            "bytes": 8709,
+        },
+        "merges.txt": {
+            "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a",
+            "bytes": 524619,
+        },
+        "vocab.json": {
+            "sha256": "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349",
+            "bytes": 1059962,
+        },
+        "tokenizer_config.json": {
+            "sha256": "968a6126200b3c8f68fe955d61da20f3537e641a1deb538dc39fdad142248d72",
+            "bytes": 808,
+        },
+        "special_tokens_map.json": {
+            "sha256": "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac",
+            "bytes": 472,
+        },
+    },
+}
+
+SKY_CLASS_INFO_PIN = {
+    "sha256": "9d47d3bf5cedeefee0a41888b069bde254bf614f738ae43e4b423d1b2f321427",
+    "bytes": 7084,
+}
+
+
+def _sky_cache(cache_dir):
+    """Fetch every pinned OneFormer file into one directory and return it.
+
+    Same shape and the same shared downloader as `_sam_cache` /
+    `_birefnet_cache`. The class-info JSON lands in this directory too, under
+    its own name, so `repo_path=<this dir>` makes `load_metadata` read it off
+    disk instead of reaching for the dataset repo.
+    """
+    try:
+        from denoise import _fetch_verified
+    except ImportError as e:
+        die(
+            f"sky segmentation needs the shared sidecar downloader from denoise.py ({e}) "
+            "-> segment.py must sit beside denoise.py in python/"
+        )
+    d = os.path.join(cache_dir, "shi-labs--oneformer_ade20k_swin_large@" + SKY["revision"][:12])
+    os.makedirs(d, exist_ok=True)
+    for name, pin in SKY["files"].items():
+        url = f"https://huggingface.co/{SKY['repo']}/resolve/{SKY['revision']}/{name}"
+        _fetch_verified(
+            url,
+            os.path.join(d, name),
+            pin["sha256"],
+            pin["bytes"] + 4096,
+            f"the OneFormer '{name}'",
+        )
+    _fetch_verified(
+        f"https://huggingface.co/datasets/{SKY_CLASS_INFO_REPO}/resolve/"
+        f"{SKY_CLASS_INFO_REVISION}/{SKY_CLASS_INFO_FILE}",
+        os.path.join(d, SKY_CLASS_INFO_FILE),
+        SKY_CLASS_INFO_PIN["sha256"],
+        SKY_CLASS_INFO_PIN["bytes"] + 4096,
+        f"the ADE20K class table '{SKY_CLASS_INFO_FILE}'",
+    )
+    return d
+
+
+def sky_mask(img_path: str, cache_dir: str):
     """ADE20K semantic segmentation, sky-class probability as the mask."""
     try:
         import torch
@@ -486,14 +627,40 @@ def sky_mask(img_path: str):
         # ASCII-only: Windows consoles in legacy codepages mangle wide dashes.
         die(
             "sky segmentation needs transformers + torch -> pip install transformers "
-            "(OneFormer ADE20K Swin-L, ~880 MB, auto-downloads to ~/.cache/huggingface)"
+            "(OneFormer ADE20K Swin-L, ~880 MB, downloads to python/weights on first run)"
         )
     import numpy as np
     from PIL import Image
 
     name = SKY_MODEL
-    processor = OneFormerProcessor.from_pretrained(name, revision=SKY_REVISION)
-    model = OneFormerForUniversalSegmentation.from_pretrained(name, revision=SKY_REVISION)
+    d = _sky_cache(cache_dir)
+    # `local_files_only=True` on BOTH halves: the digest gate above is only a
+    # gate if nothing downstream can quietly resolve a name over the network.
+    #
+    # `use_fast=False` is a PIN, not a default. transformers 5.2.0 swapped the
+    # default to `OneFormerImageProcessorFast` and says so in a UserWarning that
+    # ends "This is a breaking change and may produce slightly different
+    # outputs" — and it does: measured on one 2000x1333 frame this session, the
+    # two produce the same (1, 3, 640, 960) tensor with max |delta| 0.0175 and
+    # mean |delta| 0.0023 in ImageNet-normalised units (~1/255 at the extreme).
+    # That is a silent, transformers-version-dependent change in the BYTES of a
+    # mask a saved recipe references and R21's fingerprinting compares. The slow
+    # processor is the one this checkpoint was saved with and the one every
+    # transformers before 5.x used, so pinning it keeps the mask stable rather
+    # than tracking whichever default the installed library happens to carry. It
+    # rides `segment::AI_BACKEND_GENERATION` 2, which has not shipped, so no
+    # released alpha changes under anyone.
+    processor = OneFormerProcessor.from_pretrained(
+        d,
+        local_files_only=True,
+        use_fast=False,
+        # BOTH, or the constructor reaches for the dataset repo — see the block
+        # above. `repo_path` pointing at a real directory is what makes
+        # `load_metadata` take its local branch.
+        repo_path=d,
+        class_info_file=SKY_CLASS_INFO_FILE,
+    )
+    model = OneFormerForUniversalSegmentation.from_pretrained(d, local_files_only=True)
     model.eval()
     # Determinism: this mask becomes a FILE that a saved recipe references, and
     # R21's version fingerprinting compares those bytes. cuDNN autotuning and
@@ -572,12 +739,11 @@ def sky_mask(img_path: str):
 # mechanism as well as licence: its repo is gated, so "download on first run"
 # cannot work without a token and a click-through.
 #
-# PINNING is stricter here than the sky backend. That one resolves a pinned
-# HF REVISION and lets `transformers` fetch; this one fetches every file itself
-# and gates each on its sha256 + byte count, then loads with
-# `local_files_only=True` — `denoise.py`'s discipline, reused verbatim through
-# its own `_fetch_verified`. R29 B4 put `subject` on the same footing; `sky` is
-# the remaining gap and is registered in its own comment above, not closed here.
+# PINNING: every file fetched by us, gated on its sha256 + byte count, then
+# loaded with `local_files_only=True` — `denoise.py`'s discipline, reused
+# verbatim through its own `_fetch_verified`. R29 B4 put `subject` on the same
+# footing and R29 C3/C4 put `sky` there too, so all four backends now share it
+# and there is no weaker tier left to name here.
 SAM = {
     "repo": "facebook/sam2.1-hiera-large",
     "revision": "665f8e2ad61cf5f53d65644ff27c8ee525124610",
@@ -768,9 +934,20 @@ def parse_point(text: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--input", required=True, help="source image (any PIL-readable format)")
-    ap.add_argument("--output", required=True, help="mask PNG to write (8-bit grayscale)")
+    # NOT `required=True` any more, and the loss is covered below: --probe-backend
+    # answers a question about THIS MACHINE, not about an image, so demanding a
+    # photo it will never open would be a lie about the contract. Every other
+    # invocation still gets the same "argument is required" refusal, just from an
+    # explicit check instead of argparse.
+    ap.add_argument("--input", help="source image (any PIL-readable format)")
+    ap.add_argument("--output", help="mask PNG to write (8-bit grayscale)")
     ap.add_argument("--target", required=True, choices=["subject", "sky", "object"])
+    ap.add_argument(
+        "--probe-backend",
+        action="store_true",
+        help="with --target subject: report whether the pinned BiRefNet can run on this "
+        "machine, then exit 0 without fetching weights or segmenting anything",
+    )
     ap.add_argument(
         "--reference-point",
         help="crs:ReferencePoint verbatim, e.g. \"0.517578 0.260997\" (required for --target object)",
@@ -796,6 +973,35 @@ def main() -> None:
     ap.add_argument("--cache", default=os.path.join(os.path.dirname(__file__), "weights"))
     a = ap.parse_args()
 
+    # THE CAPABILITY QUESTION, answered without touching an image or a weight
+    # file. Costs one interpreter start plus three imports: measured 4.3 s when
+    # torchvision IS installed (it pulls torch in), ~0.1 s when it is not,
+    # against 0.06 s for a bare `python -c pass`.
+    # `segment::birefnet_deps_available` spends that only when a CACHED alpha
+    # says it was written by the fallback tier on a machine that could not run
+    # BiRefNet — i.e. once, on the develop after the dependency lands.
+    if a.probe_backend:
+        # SUBJECT ONLY, and refusing the other two is the honest answer rather
+        # than a limitation: `sky` and `object` have ONE backend each, so
+        # "can the primary run here" is not a question their weights could
+        # answer without being fetched, and printing "ok" for them would be a
+        # verdict about nothing that a caller might later believe.
+        if a.target != "subject":
+            die(f"--probe-backend only applies to --target subject; {a.target} has one backend")
+        why = birefnet_deps_error()
+        print(f"segment.py: subject backend deps [{'missing' if why else 'ok'}]")
+        if why:
+            print(f"segment.py: {why}", file=sys.stderr)
+        return
+    for need in ("input", "output"):
+        if not getattr(a, need):
+            die(f"--{need} is required unless --probe-backend is given")
+
+    # Whether the PRIMARY backend's dependencies were present for THIS run, so
+    # the caller's cache can tell "U^2-Net because this machine cannot run
+    # BiRefNet" from "U^2-Net because the run failed for some other reason".
+    # Only the first of those should ever be retried when the machine changes.
+    deps_missing = None
     if a.target == "object":
         if not a.reference_point:
             die("--target object needs --reference-point (the sidecar's crs:ReferencePoint)")
@@ -804,9 +1010,13 @@ def main() -> None:
     elif a.target == "subject":
         if a.infer_size < 32:
             die(f"--infer-size {a.infer_size} is too small to segment anything")
+        # BEFORE the mask, not after: `subject_mask` imports torchvision itself
+        # on the way to BiRefNet, so asking afterwards would answer "ok" for a
+        # run that had already fallen back for a different reason.
+        deps_missing = birefnet_deps_error()
         mask, backend = subject_mask(a.input, a.cache, a.infer_size)
     else:
-        mask = sky_mask(a.input)
+        mask = sky_mask(a.input, a.cache)
         backend = "OneFormer ADE20K Swin-L " + SKY_REVISION[:12]
     mask = mask.convert("L")
     # LONG-EDGE CAP. The render engine charges every mask raster w*h*4 against a
@@ -850,7 +1060,16 @@ def main() -> None:
     # The BACKEND is named, not just the target. `--target subject` has two
     # possible answers now and they are not interchangeable, so a line that said
     # only "subject mask" would leave the one fact a reader needs out of it.
+    # `segment::segment_file` reads the label out of the brackets and hands it
+    # to the GUI and to the alpha cache — so the bracket is a CONTRACT, not
+    # decoration, and `tests::the_backend_label_survives_the_sidecar_line`
+    # pins this exact spelling from the Rust side.
     print(f"segment.py: {a.target} mask [{backend}] -> {a.output}")
+    # SECOND LINE, same shape as --probe-backend's, so one parser reads both.
+    # Only for the two-tier backend: printing "deps [ok]" for sky or object
+    # would invite a reader to think those have a fallback tier too.
+    if a.target == "subject":
+        print(f"segment.py: subject backend deps [{'missing' if deps_missing else 'ok'}]")
 
 
 if __name__ == "__main__":

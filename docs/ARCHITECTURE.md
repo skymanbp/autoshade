@@ -309,7 +309,8 @@
 > | `denoise.py` | `denoise.rs` | SCUNet ×5 | Apache-2.0 (KAIR) | ~72 MB each |
 > | `segment.py --target subject` | `segment.rs` | **BiRefNet** (general checkpoint), sha256-pinned | MIT | 444,473,596 B |
 > | `segment.py --target subject` (fallback) | `segment.rs` | U²-Net via a NAMED rembg session | Apache-2.0 | small |
-> | `segment.py --target sky` | `segment.rs` | OneFormer ADE20K Swin-L | MIT | ~880 MB |
+> | `segment.py --target sky` | `segment.rs` | **OneFormer ADE20K Swin-L**, sha256-pinned | MIT (weights) | 881,196,376 B |
+> | `segment.py --target sky` (class table) | `segment.rs` | ADE20K label table the processor requires | ⚠ **none declared** | 7,084 B |
 > | `segment.py --target object` | `segment.rs` | **SAM 2.1 Hiera-Large**, point-prompted | Apache-2.0 | 897,897,416 B |
 > | `embed.py` | `embed.rs` | **SigLIP 2 base/16 @384**, 768-dim | Apache-2.0 | 1,501,968,264 B |
 >
@@ -327,18 +328,38 @@
 > empty alpha on 4 of 9 real frames, so adopting it as designed would have
 > deleted masks rather than approximated them.
 >
-> **Pinning has two tiers, and the difference is stated rather than smoothed
-> over.** `denoise.py`, `embed.py` and `segment.py`'s SAM **and BiRefNet** paths
-> fetch every file themselves, gate it on sha256 + an exact byte count, and load
-> from a local directory with `local_files_only=True` — the digest is the only
-> door. For BiRefNet that gate covers a file that is **executed**: `birefnet.py`
-> is the model's own source, loaded through `importlib`, so the digest is what
-> stands between upstream and `exec_module`. `segment.py`'s sky path is now the
-> only one that still pins an HF *revision* alone, which fixes WHICH tree is
-> fetched but not the BYTES; that gap is registered in its own comment (the
-> OneFormer processor drags a tokenizer tree along, so it is not the four-line
-> copy it looks like). `trust_remote_code` is never used anywhere: it downloads
-> and executes upstream Python through HF's cache, which our gate never sees.
+> **Pinning is now ONE tier, and closing the last gap found a second one
+> (R29 C3/C4).** `denoise.py`, `embed.py` and every `segment.py` backend fetch
+> every file themselves, gate it on sha256 + an exact byte count, and load from
+> a local directory with `local_files_only=True` — the digest is the only door.
+> For BiRefNet that gate covers a file that is **executed**: `birefnet.py` is
+> the model's own source, loaded through `importlib`, so the digest is what
+> stands between upstream and `exec_module`. `trust_remote_code` is never used
+> anywhere: it downloads and executes upstream Python through HF's cache, which
+> our gate never sees.
+>
+> Sky was the last holdout — an HF *revision* pin alone, which fixes WHICH tree
+> is fetched but not the BYTES — and the reason it was not a four-line copy of
+> the BiRefNet gate turned out to be worse than the tokenizer tree it was
+> registered as. `OneFormerImageProcessor.__init__` (and the Fast variant alike)
+> ends in `load_metadata(repo_path, class_info_file)`, which falls through to
+> the hub downloader against **`shi-labs/oneformer_demo`, a different repository,
+> a DATASET repo, at its moving `main`** — on every single sky mask.
+> `SKY_REVISION` never reached it, `local_files_only` does not stop it (it is a
+> separate call with its own kwargs), and the `metadata` key sitting in the
+> pinned `preprocessor_config.json` is filtered out and recomputed from the
+> download. Proved by running the load under `HF_HUB_OFFLINE=1`, which died on
+> exactly that URL. All seven weight/tokenizer files and that class table are
+> now fetched and digest-gated here, and `repo_path` points at the verified
+> directory so the metadata load takes its local branch; the same probe now
+> completes offline. **Registered, not cleared:** `shi-labs/oneformer_demo`
+> declares NO licence (`cardData: null`, tags `["region:us"]`), so unlike every
+> other row in the table above it has not been through the criterion below. It
+> is a 150-entry label table, not weights and not code, and this project has
+> been fetching it on every sky mask since R27 Batch-4 without noticing; pinning
+> it is strictly better than the moving `main` it replaces, but whether to keep
+> it, synthesise it from the model's own MIT `config.json`, or take it from
+> ADE20K upstream is a user decision that has not been made.
 >
 > **The sidecars' budget is not the host's budget (v0.34.0).** Every resource
 > bound in this tree is shaped like main memory — `decode::MAX_CONCURRENT_DECODES`
@@ -740,13 +761,20 @@ era-2 stamp land on geometry that is already display-frame and get it turned a
 second time. The migration hooks only the paths that read a recipe FILE (GUI
 open, the variant strip, version snapshots, batch export, `api_recipe`, CLI
 `apply`); recipes arriving from the browser or from the model are stamped
-current-frame at their boundary instead. Raster (painted / AI-segmented) masks
-are image files, not coordinates: they are left alone and the user is told so.
-Imported BRUSH groups join them on that side of the line for a different reason
-— their dab coordinates are carried verbatim so the sidecar round-trips
-byte-faithfully, and rewriting every dab would forfeit exactly that in order to
-migrate a geometry nothing renders yet (`render::recipe_has_raster_masks` is the
-predicate for both).
+current-frame at their boundary instead. Raster (`MaskGeometry::Bitmap`) masks
+are image files, not coordinates: they are left alone and the user is told so
+(`render::recipe_has_raster_masks`, whose one member they now are). Imported
+BRUSH groups used to join them on that side of the line for a different reason —
+their dab coordinates were carried verbatim so the sidecar round-tripped
+byte-faithfully — and R29 C1 moved them off it: the brush RENDERS since R29
+Batch-6b, so a verbatim carry meant a mask drawn a quarter turn away from every
+parametric shape beside it. The migration now rewrites the stream numerically
+(`d` through `orient_point`, `r` and `crs:Radius` rescaled by W/H, because a dab
+is a circle in PIXELS while the radius is in width units — that aspect is
+`render::CoordFrame`, the input the function had to be given). The accepted cost
+is stated where it is paid: a rotated — or portrait — photo's republished dab
+stream is no longer byte-identical to Lightroom's, only numerically equal on
+Lightroom's own six-decimal grid. An unrotated landscape photo is untouched.
 v0.31.0 adds a second stamp built field-for-field on this precedent —
 `schema_era` (0 = written before the R25 control set existed) — for the same
 class of reason: see 「the merge treats ignorance as ignorance」 in §4.5.
@@ -1070,7 +1098,9 @@ eval corpus fell the same way, 2.35 → 0.05 masks per photo.)
 `Mask/Aggregate` and its `Mask/Paint` children are now a first-class geometry,
 `MaskGeometry::Brush` — the group's `(MaskBlendMode, MaskValue, MaskInverted)`
 and each stroke's `Radius`/`Flow`/`CenterWeight`/`MaskSyncID` plus its `crs:Dabs`
-token stream, the stream carried VERBATIM as a string. It is parsed, kept in
+token stream, the stream carried VERBATIM as a string (verbatim until a TURN
+touches it — R29 C1 rewrites the numbers so the mask renders in the right place;
+see §「the `coord_era` migration」). It is parsed, kept in
 `recipe.json`, and written back into the sidecar as the same `Mask/Aggregate`
 element it arrived as. **And it is RENDERED, since R29 Batch-6b** — from a
 measured model rather than from Adobe's code. The one input a rasterizer needs

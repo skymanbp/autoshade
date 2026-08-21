@@ -1904,9 +1904,9 @@ impl AutoshopApp {
 
     /// `Msg::Segmented` landing — body extracted verbatim from the
     /// poll_workers pump (round-12 decomposition; indentation kept).
-    fn on_segmented(&mut self, lang: Lang, res: anyhow::Result<(String, PathBuf)>) {
+    fn on_segmented(&mut self, lang: Lang, res: anyhow::Result<(String, PathBuf, String)>) {
                 match res {
-                    Ok((label, path)) => {
+                    Ok((label, path, backend)) => {
                         let path_s = path.to_string_lossy().into_owned();
                         // One raster per (photo, target): a re-run refreshed the
                         // SAME file, so re-select the mask that already
@@ -2005,6 +2005,32 @@ impl AutoshopApp {
                                 &[("what", &label)],
                             )
                         };
+                        // WHICH MODEL DREW IT, and the two tiers get two
+                        // different surfaces (R29 B4's own registration, closed
+                        // in R29 C3/C4). `--target subject` answers with either
+                        // the pinned BiRefNet or the U²-Net fallback, and until
+                        // now this landing showed one sentence for both — so a
+                        // machine that had quietly degraded looked exactly like
+                        // one that had not, while the mask's edges were
+                        // materially different. The backend NAME goes in the
+                        // status line for every run; a FALLBACK also raises an
+                        // error toast, because a status line the user is not
+                        // looking at is not a disclosure.
+                        if !backend.is_empty() {
+                            self.status.push_str(&trf(
+                                lang,
+                                " · drawn by {backend}",
+                                &[("backend", &backend)],
+                            ));
+                        }
+                        if autoshop::segment::backend_is_fallback(&backend) {
+                            let t = trf(
+                                lang,
+                                "「{what}」was drawn by the U^2-Net FALLBACK, not the pinned BiRefNet — its edges are materially softer and it can invent a subject where there is none. Install torchvision + timm + einops matching your torch to get the pinned model.",
+                                &[("what", &label)],
+                            );
+                            self.toast(ToastKind::Error, t);
+                        }
                     }
                     Err(e) => {
                         self.fail(tr(lang, "AI segmentation failed"), e);

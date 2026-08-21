@@ -807,7 +807,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Loaded version v{n} — Ctrl+Z returns to before the load", "已载入版本 v{n} — Ctrl+Z 可回到载入前"),
     ("camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark", "相机基调已重估——这张照片由预览采样偏亮的旧版本保存，存档基调渲染过暗"),
     ("this photo's saved crop and masks were rotated to match the RAW's EXIF orientation — earlier versions displayed rotated RAWs sideways, so their coordinates were stored against the sideways frame", "本照片存档的裁剪与蒙版已按 RAW 的 EXIF 方向转正——旧版本没有把旋转过的 RAW 转正显示，这些位置便是按未转正的画面记录的"),
-    ("its painted / AI raster masks are image files, not coordinates, and could NOT be rotated — check them and re-generate if they no longer fit", "其手绘 / AI 栅格蒙版是图片文件，不是可换算的位置，无法随之转正——请检查，若已对不上请重新生成"),
+    ("its raster masks are image files, not coordinates, and could NOT be rotated — check them and re-generate if they no longer fit", "其栅格蒙版是图片文件，不是可换算的位置，无法随之转正——请检查，若已对不上请重新生成"),
     ("busy — the preview-resolution switch was not applied; pick it again when the current task finishes", "忙碌中——预览分辨率切换未生效；当前任务结束后请再选一次"),
     ("preview resolution kept — this retouched canvas has no saved master to re-decode at the new size; save the photo, then switch", "预览分辨率保持不变——修饰后的画布尚无已保存母版可按新尺寸重解码；请先保存照片再切换"),
     ("preview resolution kept — this canvas's retouch master is no longer on disk, so it cannot be re-decoded at the new size", "预览分辨率保持不变——本画布的修饰母版已不在磁盘上，无法按新尺寸重解码"),
@@ -828,6 +828,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Sky", "天空"),
     ("AI「{what}」mask added — adjust its sliders (exposure / contrast / saturation…) to take effect",
         "AI「{what}」蒙版已加入 — 调它的滑杆（曝光/对比/饱和…）即刻生效"),
+    // WHICH backend drew it. `--target subject` has two tiers and they are not
+    // interchangeable, so the run names itself; the fallback also gets its own
+    // sentence below rather than sharing this one.
+    (" · drawn by {backend}", " · 由 {backend} 绘制"),
+    ("「{what}」was drawn by the U^2-Net FALLBACK, not the pinned BiRefNet — its edges are materially softer and it can invent a subject where there is none. Install torchvision + timm + einops matching your torch to get the pinned model.",
+        "「{what}」是 U^2-Net 回退层画的，不是固定版本的 BiRefNet —— 它的边缘明显更糊，也可能在没有主体的画面上编出一个。装上与你 torch 配套的 torchvision + timm + einops 才能用上 BiRefNet。"),
     ("AI segmentation failed", "AI 分割失败"),
 
     // ── Status bar · open / decode / scan / settings / esc ───────────────────

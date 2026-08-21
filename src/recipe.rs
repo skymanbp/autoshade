@@ -1403,6 +1403,12 @@ pub enum MaskGeometry {
         /// guessed, exactly as `roundness` was. Carrying it is still what makes
         /// the 7 corrections whose ONLY brush content is a gesture importable
         /// at all.
+        ///
+        /// Carried, and since R29 C1 also TURNED: these are `BrushStroke`s and
+        /// they ride `render::orient_recipe_coords`' rewrite with the rest.
+        /// They are written back into the sidecar, so leaving them in the old
+        /// frame would hand Lightroom a refinement stroke beside a
+        /// `ReferencePoint` that had moved.
         gesture: Vec<BrushStroke>,
         /// The RECOMPUTED alpha, once our segmenter has produced one — a path
         /// to an 8-bit grey PNG inside the photo's develop dir, keyed by
@@ -1491,11 +1497,25 @@ pub struct BrushStroke {
     /// only published model for it is a third-party decompile reconstruction
     /// whose `Density` field does not exist in any of the 382 real components.
     /// Structuring the stream before that measurement existed would freeze a
-    /// shape around a renderer nobody has written; carrying it verbatim
-    /// guarantees the round trip is exact meanwhile. R27 Batches 8-10 then
-    /// MADE the measurement (screen accumulation; density scales each dab
-    /// BEFORE the screen; a one-parameter flow odds law; an 11-rung hardness
-    /// kernel TABLE with no closed form).
+    /// shape around a renderer nobody has written; carrying it verbatim kept
+    /// the round trip exact meanwhile. R27 Batches 8-10 then MADE the
+    /// measurement (screen accumulation; density scales each dab BEFORE the
+    /// screen; a one-parameter flow odds law; an 11-rung hardness kernel TABLE
+    /// with no closed form).
+    ///
+    /// **Verbatim is no longer unconditional** (R29 C1, the 2026-08-21 ruling).
+    /// A TURN rewrites this stream numerically — every `d` coordinate through
+    /// `render::orient_point`, every `r` token and [`radius`](Self::radius)
+    /// rescaled by the frame aspect, because a dab is a circle in PIXELS while
+    /// the radius is in width units. The alternative was a mask that renders in
+    /// the wrong place beside every parametric shape that moved, and the render
+    /// is what the ruling protected. The re-emitted numbers keep Lightroom's
+    /// own six decimals (`render::LR_DAB_DECIMALS`), so the file stays legal
+    /// and reads back identically — but a ROTATED photo's republished stream is
+    /// no longer byte-identical to what Lightroom wrote, and neither is a
+    /// PORTRAIT capture's, whose sensor→display→sensor projection passes
+    /// through the same rewrite twice. An unrotated landscape photo is
+    /// untouched: the identity orientations return before the rewrite.
     ///
     /// ~~What still gates RENDERING, never carrying, is the kernel's missing
     /// closed form~~ — **CLOSED 2026-08-21 (R29 Batch-6), and the stream is

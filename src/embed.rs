@@ -440,6 +440,10 @@ mod tests {
                 let Some(rest) = l
                     .strip_prefix("\"revision\": \"")
                     .or_else(|| l.strip_prefix("SKY_REVISION = \""))
+                    // R29 C3/C4: the class table lives in a DIFFERENT repo that
+                    // moves on its own, so it carries its own pin and has to be
+                    // held to the same standard as the weights' one.
+                    .or_else(|| l.strip_prefix("SKY_CLASS_INFO_REVISION = \""))
                 else {
                     continue;
                 };
@@ -588,6 +592,107 @@ mod tests {
         assert!(
             SEGMENT_SRC.contains("WARNING - the BiRefNet subject backend did not run"),
             "…and must warn on stderr, which segment.rs forwards on the success path"
+        );
+        // R29 C3/C4 — and stdout is now a PARSED contract, not just prose.
+        // `segment::SegmentReport::parse` takes the label from the brackets and
+        // the dependency verdict from the second line; the GUI's status, the
+        // fallback warning and the alpha cache's re-derivation rule all hang
+        // off those two spellings, so the format lives here as well as there.
+        assert!(
+            SEGMENT_SRC.contains("{a.target} mask [{backend}] -> {a.output}"),
+            "the backend label must stay inside brackets — segment.rs parses it out"
+        );
+        assert!(
+            SEGMENT_SRC.contains("subject backend deps [{'missing' if deps_missing else 'ok'}]"),
+            "the dependency verdict line is what makes a stuck fallback re-derivable"
+        );
+        assert!(
+            SEGMENT_SRC.contains("--probe-backend"),
+            "the cache must be able to ask this machine's capability without segmenting"
+        );
+        assert!(
+            SEGMENT_SRC.contains("def birefnet_deps_error("),
+            "one dependency list for the run and the probe, or the two can disagree"
+        );
+    }
+
+    /// R29 C3/C4 — the sky backend joins the digest gate, and the SECOND
+    /// repository it was quietly fetching from is pinned with it.
+    ///
+    /// `sky` was the last backend on a revision pin alone: `from_pretrained`
+    /// resolved the name and `transformers` fetched. Worse, and invisible to
+    /// `SKY_REVISION`, `OneFormerImageProcessor.__init__` ends in
+    /// `load_metadata(repo_path, class_info_file)`, which falls through to
+    /// `hf_hub_download("shi-labs/oneformer_demo", …, repo_type="dataset")` —
+    /// a different repo, at its moving `main`, on every sky mask. Pointing
+    /// `repo_path` at the verified directory is what makes that call take its
+    /// local branch instead.
+    ///
+    /// MUTATIONS THIS CATCHES: dropping any of the seven pinned digests,
+    /// dropping the class-table pin, removing `local_files_only`, letting
+    /// `repo_path` fall back to the dataset repo, or unpinning `use_fast`
+    /// (transformers 5.2 defaults it to the Fast processor, whose own warning
+    /// says outputs may differ — measured max |Δ| 0.0175 on the normalised
+    /// tensor, i.e. a silent library-version-dependent change to the BYTES of a
+    /// mask a saved recipe references).
+    #[test]
+    fn the_sky_backend_is_digest_gated_and_loads_only_local_files() {
+        for (what, digest) in [
+            ("pytorch_model.bin",
+             "c0b2fe11dfecee6f2f1f315f466946e96f4e94813f3f6d660ff3747b83c28cc9"),
+            ("config.json",
+             "27452b656a467dbdebdf879dc413d6f3facd2bfe3643824ae66c32c22884b4bd"),
+            ("preprocessor_config.json",
+             "49e2c8f207405d063cf7824f97c2814fa864f8f19ea9e02c9e20a9ff539c6d49"),
+            ("merges.txt",
+             "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a"),
+            ("vocab.json",
+             "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349"),
+            ("tokenizer_config.json",
+             "968a6126200b3c8f68fe955d61da20f3537e641a1deb538dc39fdad142248d72"),
+            ("special_tokens_map.json",
+             "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac"),
+            ("ade20k_panoptic.json",
+             "9d47d3bf5cedeefee0a41888b069bde254bf614f738ae43e4b423d1b2f321427"),
+        ] {
+            assert!(
+                SEGMENT_SRC.contains(digest),
+                "the pinned sha256 for the OneFormer '{what}' is not the one R29 C3/C4 verified"
+            );
+        }
+        // The tokenizer tree is the reason this was never a four-line copy of
+        // `_birefnet_cache`; naming it here keeps a future trim from "tidying
+        // away" files the processor actually opens.
+        for name in ["merges.txt", "vocab.json", "tokenizer_config.json"] {
+            assert!(SEGMENT_SRC.contains(name), "the CLIP tokenizer tree must stay pinned: {name}");
+        }
+        // Fetched by US, loaded from disk, and the class table pointed at the
+        // verified directory rather than the dataset repo.
+        assert!(SEGMENT_SRC.contains("def _sky_cache("), "sky must fetch through its own gate");
+        assert!(
+            SEGMENT_SRC.contains("SKY_CLASS_INFO_REVISION = \""),
+            "the dataset repo the processor reaches for must be pinned too"
+        );
+        // CODE lines only — the prose above these calls explains the flag, and
+        // counting the explanation would make the count drift with the comment.
+        let code_lines = || SEGMENT_SRC.lines().map(str::trim).filter(|l| !l.starts_with('#'));
+        assert_eq!(
+            code_lines().filter(|l| l.contains("local_files_only=True")).count(),
+            3,
+            "both halves of the sky load and SAM's must refuse to resolve a remote name"
+        );
+        assert_eq!(
+            code_lines().filter(|l| l.contains("from_pretrained(")).count(),
+            3,
+            "a fourth from_pretrained would be a fourth chance to resolve a remote name"
+        );
+        assert!(
+            SEGMENT_SRC.contains("repo_path=d"),
+            "without repo_path the processor downloads its class table from a moving main"
+        );
+        assert!(
+            SEGMENT_SRC.contains("use_fast=False"),
+            "an unpinned processor class changes the mask bytes across transformers versions"
         );
     }
 

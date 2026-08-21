@@ -26,7 +26,7 @@ impl AutoshopApp {
         );
         self.spawn_worker(
             move || {
-                let res = (|| -> anyhow::Result<(String, PathBuf)> {
+                let res = (|| -> anyhow::Result<(String, PathBuf, String)> {
                     let cfg = autoshop::config::Config::load();
                     let opts = autoshop::segment::SegmentOpts::from_config(&cfg, target);
                     // The sidecar sees the ORIGINAL-frame preview — the space recipe
@@ -46,15 +46,24 @@ impl AutoshopApp {
                     let mask = autoshop::store::claim_raster(&src, &format!("mask-{target}"))?;
                     let run = autoshop::segment::segment_file(&opts, &tmp, &mask);
                     let _ = std::fs::remove_file(&tmp);
-                    if let Err(e) = run {
-                        // Release the claimed name: a failed run leaves its
-                        // create_new 0-byte slot (segment.py publishes
-                        // atomically, so an error means nothing real landed).
-                        let _ = std::fs::remove_file(&mask);
-                        return Err(e);
-                    }
+                    let report = match run {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // Release the claimed name: a failed run leaves its
+                            // create_new 0-byte slot (segment.py publishes
+                            // atomically, so an error means nothing real landed).
+                            let _ = std::fs::remove_file(&mask);
+                            return Err(e);
+                        }
+                    };
                     // English label into the recipe (stable data), not `disp`.
-                    Ok((label.to_string(), mask))
+                    // The BACKEND rides alongside: `--target subject` has two
+                    // possible answers and until now the GUI showed the same
+                    // sentence for both, so a photographer whose machine had
+                    // quietly degraded to U²-Net could not tell (R29 B4's own
+                    // registration). It is NOT persisted — it describes the run,
+                    // not the mask, and recipe.json is data.
+                    Ok((label.to_string(), mask, report.backend))
                 })();
                 Msg::Segmented(res)
             },

@@ -1680,22 +1680,46 @@ pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<Strin
 pub struct CoordMigration {
     /// The EXIF orientation the geometry was turned by.
     pub orientation: rawler::Orientation,
-    /// The recipe also carries RASTER (painted / AI-segmented) masks, which
-    /// are image files and cannot be turned by a coordinate rewrite — the one
-    /// honest gap in an otherwise lossless migration.
+    /// The recipe also carries RASTER masks — [`crate::recipe::MaskGeometry::
+    /// Bitmap`], whose pixels are an image file and cannot be turned by a
+    /// coordinate rewrite. The one honest gap in an otherwise lossless
+    /// migration, and since R29 C1 the ONLY one: the brush left this set when
+    /// its dab stream started turning numerically.
     pub rasters_left: bool,
 }
 
-/// Answers already computed this run, keyed like the curve memo: reading a
-/// RAW's orientation costs a full `RawSource::new` (rawler slurps the whole
-/// file, 60–120 MB for a 61 MP ARW), and the strip-card and batch-export
-/// paths ask per recipe, not per photo.
-fn orient_memo() -> &'static std::sync::Mutex<std::collections::HashMap<CurveMemoKey, rawler::Orientation>>
+/// The photo's SOURCE frame and its EXIF turn — [`crate::decode::source_frame`]
+/// with a memo, keyed like the curve memo.
+///
+/// Both halves, not just the orientation: reading either costs a full
+/// `RawSource::new` (rawler slurps the whole file, 60–120 MB for a 61 MP ARW),
+/// `source_frame` answers both from ONE header walk, and since R29 C1 the
+/// migration needs the SIZE as well as the turn — a brush's radii are in width
+/// units and a quarter turn rescales them by the frame aspect
+/// ([`crate::render::CoordFrame`]). The strip-card and batch-export paths ask
+/// per recipe, not per photo, which is what the memo is for.
+type SourceFrame = ((usize, usize), rawler::Orientation);
+
+fn orient_memo() -> &'static std::sync::Mutex<std::collections::HashMap<CurveMemoKey, SourceFrame>>
 {
     static MEMO: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, rawler::Orientation>>,
+        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, SourceFrame>>,
     > = std::sync::OnceLock::new();
     MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// [`orient_memo`]'s reader. Inabilities are NOT cached — a locked file must be
+/// retried, the same rule the curve memo follows.
+fn source_frame_memo(path: &Path) -> Option<SourceFrame> {
+    let key = (path.to_path_buf(), curve_ident(path));
+    if let Some(hit) = orient_memo().lock().ok().and_then(|m| m.get(&key).copied()) {
+        return Some(hit);
+    }
+    let answer = crate::decode::source_frame(path).ok()?;
+    Some(match orient_memo().lock() {
+        Ok(mut m) => *m.entry(key).or_insert(answer),
+        Err(_) => answer,
+    })
 }
 
 /// Bring a saved recipe's geometry into the DISPLAY frame — the load-time
@@ -1727,20 +1751,7 @@ pub fn migrate_recipe_coord_frame(raw: &Path, r: &mut EditRecipe) -> Option<Coor
         r.coord_era = crate::recipe::COORD_ERA;
         return None;
     }
-    let key = (raw.to_path_buf(), curve_ident(raw));
-    let cached = orient_memo().lock().ok().and_then(|m| m.get(&key).copied());
-    let orientation = match cached {
-        Some(o) => o,
-        None => {
-            // Inabilities are NOT cached — a locked file must be retried, the
-            // same rule the curve memo follows.
-            let o = crate::decode::raw_orientation(raw).ok()?;
-            match orient_memo().lock() {
-                Ok(mut m) => *m.entry(key).or_insert(o),
-                Err(_) => o,
-            }
-        }
-    };
+    let ((sw, sh), orientation) = source_frame_memo(raw)?;
     // The composed orientation, not the EXIF one (R27): era 0 means "these
     // numbers are in the SENSOR frame", and the frame they must reach is the
     // one this build DISPLAYS — EXIF plus the photographer's own turns. Today
@@ -1751,7 +1762,11 @@ pub fn migrate_recipe_coord_frame(raw: &Path, r: &mut EditRecipe) -> Option<Coor
     // era 0, or the day a future era forces a second migration.
     let orientation = crate::render::compose_orientation(orientation, r.quarter_turns);
     let rasters_left = crate::render::recipe_has_raster_masks(r);
-    let moved = crate::render::orient_recipe_coords(r, orientation);
+    // Era-0 numbers are SENSOR-frame by definition, so the frame the brush
+    // rewrite must rescale out of is the source rectangle `source_frame` just
+    // reported — not the display one (R29 C1, `render::CoordFrame`).
+    let frame = crate::render::CoordFrame::new(sw as f64, sh as f64);
+    let moved = crate::render::orient_recipe_coords(r, orientation, frame);
     // The stamp lands either way once the orientation is KNOWN: a Normal
     // photo's coordinates are already display-frame, and leaving it era-0
     // would pay the metadata read again on every future load.
@@ -1805,7 +1820,7 @@ pub fn coord_migration_note(c: CoordMigration) -> String {
         .to_string();
     if c.rasters_left {
         format!(
-            "{base}; its painted/AI raster mask(s) are image files and could NOT be turned — \
+            "{base}; its raster mask(s) are image files and could NOT be turned — \
              check and re-generate them"
         )
     } else {
@@ -1838,7 +1853,9 @@ pub struct RotateOutcome {
 ///
 ///  1. **The stored geometry**, through [`crate::render::orient_recipe_coords`]
 ///     — crop rectangle, every mask geometry, the Range-Mask sample point, the
-///     straighten sign. That function is the era-0 → era-1 migration's own
+///     straighten sign, and since R29 C1 every brush DAB (coordinates turned,
+///     radii rescaled by the frame aspect; see phase 0 below for where that
+///     aspect comes from). That function is the era-0 → era-1 migration's own
 ///     engine, proven exact for tilted radials by
 ///     `rotated_radial_mask_covers_the_rotated_pixels`.
 ///  2. **The raster masks** — really turned, unlike the `coord_era` migration,
@@ -1884,6 +1901,33 @@ pub fn rotate_recipe(
     }
     let o = crate::render::quarter_turn_orientation(delta);
 
+    // --- Phase 0: the frame shape, and ONLY when a brush needs it (R29 C1).
+    //
+    // A brush's radii are in WIDTH units while its dabs are circles in PIXELS,
+    // so turning one needs the aspect of the frame the strokes are currently in
+    // — the CURRENT display frame, i.e. the source rectangle carried through
+    // the EXIF turn AND the quarter turns already applied, which is exactly
+    // `frame_size_turned(src, r.quarter_turns)` before the count below moves.
+    //
+    // Lazily, because the read is a metadata walk of the photo (a `RawSource`
+    // slurp for a RAW) and every other geometry this function turns is
+    // aspect-free: a develop with no brush must not start paying for one. It
+    // runs BEFORE phase 1 so a failure still leaves nothing behind on disk, and
+    // it is an ERROR rather than a silent skip because a brush turned without
+    // its rescale is a mask drawn in the wrong shape, which is the outcome this
+    // batch exists to end.
+    let frame = if crate::render::recipe_has_brush_strokes(r) {
+        let (w, h) = crate::decode::frame_size_turned(src, r.quarter_turns).map_err(|e| {
+            std::io::Error::other(format!(
+                "read the frame of {} to turn its brush strokes: {e:#}",
+                src.display()
+            ))
+        })?;
+        crate::render::CoordFrame::new(w as f64, h as f64)
+    } else {
+        None
+    };
+
     // --- Phase 1: turn every raster into a fresh file. Nothing in `r` moves
     // until all of them are on disk.
     //
@@ -1927,7 +1971,7 @@ pub fn rotate_recipe(
 
     // --- Phase 2: commit. Geometry, then the raster references, then the
     // turn count.
-    crate::render::orient_recipe_coords(r, o);
+    crate::render::orient_recipe_coords(r, o, frame);
     for m in r.masks.iter_mut() {
         // The SAME walk phase 1 staged from, so a path can never be re-pointed
         // at a file that phase never made.
@@ -2559,6 +2603,13 @@ fn write_xmp_doc(
     // (`P1-portrait-mask-frame.md` §5). So the gate is now "does this recipe
     // carry frame coordinates at all", which is one memoised metadata read per
     // photo per process — and it is no longer "a cost for nothing".
+    //
+    // R29 C1 widened what that PREDICATE answers rather than the gate itself: a
+    // brush group is a frame coordinate now, so a brush-only recipe fetches the
+    // aspect where it used to skip it. That is not incidental — `in_source_
+    // frame` needs the frame to un-turn the dab stream, and without this the
+    // writer would have emitted a portrait capture's brush in the display
+    // frame while its `tiff:` block declared the sensor one.
     let frame = photo
         .filter(|_| {
             crate::render::recipe_has_frame_coords(recipe) || recipe.straighten_deg != 0.0
@@ -5083,6 +5134,111 @@ mod tests {
         for (got, want) in [(*zero_x, 0.25), (*zero_y, 0.10), (*full_x, 0.75), (*full_y, 0.60)] {
             assert!((got - want).abs() < 1e-6, "a full circle moved the mask: {got} != {want}");
         }
+    }
+
+    /// A scratch BAKED photo — a real PNG of `w × h`, whose header
+    /// `decode::frame_size_turned` can actually read. [`scratch_photo`]'s
+    /// `.arw` is three bytes of nonsense and no decoder will answer a frame out
+    /// of it, which is deliberate for every test that does not need one and
+    /// useless for the ones that do (R29 C1).
+    fn scratch_baked_photo(tag: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("autoshop-rotate-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(format!("{tag}.png"));
+        image::GrayImage::new(w, h).save(&p).unwrap();
+        let _ = std::fs::remove_dir_all(crate::store::develop_dir(&p));
+        p
+    }
+
+    /// One brush group with a single stroke, `radius` and one dab token.
+    fn brush_mask(radius: f32, dabs: &str) -> crate::recipe::MaskGeometry {
+        crate::recipe::MaskGeometry::Brush {
+            name: "Brush 1".into(),
+            blend_mode: 0,
+            value: 1.0,
+            inverted: false,
+            strokes: vec![crate::recipe::BrushStroke {
+                radius,
+                dabs: dabs.into(),
+                ..Default::default()
+            }],
+        }
+    }
+
+    /// R29 C1, the rotate half — and the half that needed a NEW input. A brush
+    /// dab is a circle in PIXELS while `crs:Radius` is in WIDTH units, so
+    /// turning a develop means reading the photo's frame and rescaling by its
+    /// aspect. `rotate_recipe` is the one caller that has to fetch that itself.
+    ///
+    /// 480 × 320 (aspect 1.5): one quarter turn takes the dab from (0.1, 0.8)
+    /// to (0.2, 0.1) and the radius from 0.1 to 0.15. A SECOND quarter turn is
+    /// what pins that the frame is re-read rather than cached — the photo is
+    /// 320 × 480 by then, so the radius must come back to 0.1 and not go to
+    /// 0.225.
+    ///
+    /// MUTATION THIS CATCHES: pass `r.quarter_turns + delta` (or a constant 0)
+    /// to `frame_size_turned` — the first turn still looks right and the second
+    /// rescales by 1.5 again.
+    #[test]
+    fn rotating_a_brush_develop_turns_its_dabs_with_the_frame() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let src = scratch_baked_photo("brushturn", 480, 320);
+        let mut r = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: brush_mask(0.1, "r 0.100000\nd 0.100000 0.800000"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        rotate_recipe(&mut r, &src, 1).unwrap();
+        let stream = |r: &EditRecipe| {
+            let MaskGeometry::Brush { strokes, .. } = &r.masks[0].mask else { panic!("a brush") };
+            (strokes[0].dabs.clone(), strokes[0].radius)
+        };
+        let (s, rad) = stream(&r);
+        assert_eq!(s, "r 0.150000\nd 0.200000 0.100000", "the dab turned and the radius rescaled");
+        assert!((rad - 0.15).abs() < 1e-6, "crs:Radius is {rad}, not 0.15");
+
+        rotate_recipe(&mut r, &src, 1).unwrap();
+        let (s, rad) = stream(&r);
+        assert_eq!(
+            s, "r 0.100000\nd 0.900000 0.200000",
+            "the second turn must use the 320 × 480 frame, not the 480 × 320 one"
+        );
+        assert!((rad - 0.1).abs() < 1e-6, "crs:Radius is {rad}, not 0.1");
+    }
+
+    /// …and when the frame CANNOT be read, a develop carrying a brush is
+    /// refused rather than half-turned. A brush turned without its rescale is a
+    /// mask drawn in the wrong SHAPE, which is the outcome R29 C1 exists to
+    /// end, so this joins `rotate_recipe`'s existing all-or-nothing rule.
+    ///
+    /// The same unreadable photo with NO brush still rotates, because nothing
+    /// in that recipe needs an aspect — which is what keeps the read lazy and
+    /// keeps every other test in this module on a three-byte `.arw`.
+    ///
+    /// MUTATION THIS CATCHES: drop the `recipe_has_brush_strokes` guard and
+    /// read the frame unconditionally — the second half goes red, and every
+    /// rotate in the app starts paying a `RawSource` slurp.
+    #[test]
+    fn a_brush_develop_whose_frame_cannot_be_read_is_refused_not_half_turned() {
+        use crate::recipe::{Crop, LocalAdjustment};
+        let raw = scratch_photo("brushnoframe");
+        let mut r = EditRecipe {
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            masks: vec![LocalAdjustment {
+                mask: brush_mask(0.1, "d 0.100000 0.800000"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let before = r.clone();
+        assert!(rotate_recipe(&mut r, &raw, 1).is_err(), "no frame, no turn");
+        assert_eq!(r, before, "and nothing moved at all");
+
+        let mut plain = EditRecipe { crop: before.crop, ..Default::default() };
+        rotate_recipe(&mut plain, &raw, 1).expect("a develop with no brush needs no frame");
+        assert_eq!(plain.quarter_turns, 1);
     }
 
     /// R27 A4 — raster masks are REALLY turned, unlike the `coord_era`

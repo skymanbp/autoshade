@@ -444,10 +444,25 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   Python313 配对 torchvision 0.23.0+cu128+timm 1.0.28、torch 2.8.0
   未动）+出局 HR-matting 死权重 445MB 删除。门=clippy0×2+
   **797(9i)/14/131/2+2** 双配置（+3 集差）+check_docs 20P0F+fonts
-  803/803+i18n 0。登记=GUI 尚不能区分两层（tooltip 已带回退语义，
+  803/803+i18n 0。登记=~~GUI 尚不能区分两层（tooltip 已带回退语义，
   segment_file 回传后端标签=R30 候选）/回退机后装依赖不自动换代
   （手册补救在常量文档）/sky 成唯一未 digest 门后端（tokenizer 树
-  原因具名）/训练集自身条款未审计。**⚠v0.35.0 发版义务+1：v0.34 及
+  原因具名）~~ **← 这三条已由 R29 C3/C4 收口批全部关闭（2026-08-21，
+  未发版）**：`segment_file` 回传 `SegmentReport{backend, birefnet_deps}`＝
+  GUI 状态行具名 + 回退再升一级 Error toast（两句话）；alpha 旁写
+  `ai-mask-*.backend` 三行标记＋`--probe-backend` 能力探针（4.3s 装了
+  torchvision / ~0.1s 没装，进程内 memo，只在标记=回退且当时缺依赖时
+  才花），换代规则比对「写入当时的能力 vs 今天的能力」故只触发一次、
+  digest 坏掉的机器不会无限重算；sky 七文件＋类表全 sha256+字节数钉版
+  ＋`local_files_only` ＋ `use_fast=False`（transformers 5.2 默认换成 Fast
+  处理器，实测归一化张量 max|Δ|0.0175＝静默改蒙版字节）。**⚠sky 收口
+  另掘出一个 SKY_REVISION 从未覆盖的洞**：`OneFormerImageProcessor.__init__`
+  每次都去 `shi-labs/oneformer_demo`（另一个 **dataset** 仓库、moving
+  `main`）取 `ade20k_panoptic.json`，`HF_HUB_OFFLINE=1` 亲证；已一并钉版，
+  但**该仓库无任何声明许可证**（`cardData: null`，tags 仅 `region:us`）＝
+  R27 Batch-4 许可证审计从未覆盖它，**留给用户拍板**（保留钉版 / 用模型
+  自己 MIT 的 `config.json` 合成 / 取 ADE20K 上游）。仍开：训练集自身
+  条款未审计。**⚠v0.35.0 发版义务+1：v0.34 及
   更早缓存的主体蒙版全部重算一次。**
 
 - **R29 传输重试批已落地（2026-08-21，未发版，`74ffa25`）：524/529 纳入
@@ -549,10 +564,18 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   空组惰性/组反相/端到端接线）+check_docs 20P0F+fonts 803/803+i18n 0；
   变异=代理 12 组+主审亲手 2 组（去纵横比因子→圆度断言红；破空 alpha
   反相守卫→整幅化断言红）全字节还原复绿。**登记不修（主审裁决）**：
-  ①`orient_recipe_coords` 仍不转 dab 流——笔刷渲染后该缺位从不可见
+  ~~①`orient_recipe_coords` 仍不转 dab 流——笔刷渲染后该缺位从不可见
   变可见（旋转照片上参数形动、笔刷不动），正确修法需给迁移函数补
   画幅纵横比输入+「逐字节往返 vs 转写」独立取舍＝自成一批（既有
-  raster-mask 披露照常触发）；②`AiMask::gesture` 仍不渲染、理由更新
+  raster-mask 披露照常触发）~~ →**已闭（R29 C1，2026-08-21 拍板六
+  「数值重写 dab 流」）**：迁移函数补 `render::CoordFrame`（当前帧
+  `W/H`）输入，四调用点全供帧；`d` 过 `orient_point`、`r` 与
+  `crs:Radius` 在四个换轴态按 `W/H` 缩放、`f`/`h` 不动；
+  `AiMask::gesture` 同款重写；`recipe_has_raster_masks` 收回只剩
+  `Bitmap`（名副其实），笔刷改由 `recipe_has_frame_coords` 计数。
+  接受成本＝**旋转过（含竖幅）照片 republish 的 dab 流不再逐字节等于
+  LR 原文**（仍 LR 六位小数、纯旋转下十进制格恰好闭合），未旋转
+  横幅照片零变化；②`AiMask::gesture` 仍不渲染、理由更新
   ＝核已测、未测的是「手势叠加到我方分割器 alpha」的合成；③栅格
   缓存身份=64 位哈希+双结构计数（弱于逐字节、已声明，与
   load_mask_bitmap 同款取舍）；④release 性能未测（debug 445ms 已注明）；
@@ -721,8 +744,22 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   收窄测试红而回落夹具留绿＝判别力精确），还原皆 cmp 字节相等。**登记**：
   census 存活的 18 条裸 eprintln（restore/base-look 助手~30 调用点+目录扫描+
   串行命令）＝另一次 sweep 已在 diag 模块文档具名；store 测试
-  `clearing_one_same_stem…` 单跑不幂等（遗留 tombstone 于中央库）＝先在缺陷，
-  R29 候选；eval 刻意留缺省通道（note 通道已渲同披露，收集会双打）。
+  ~~`clearing_one_same_stem…` 单跑不幂等（遗留 tombstone 于中央库）＝先在缺陷，
+  R29 候选~~ **← R29 C3/C4 已修（2026-08-21，未发版），且症状描述需勘误**：
+  成功路本来就幂等（HEAD 上单跑 ×2、全量 ×2 亲测零残留），真缺陷是
+  **夹具不抗 unwind 也不隔离**——它跑在用户真实中央库（`store_root()` →
+  `%LOCALAPPDATA%\autoshop`）和 cwd 相对的 `./out` 上，清理却只是尾部一串
+  `let _ = remove_*`，任何 assert 先炸就全跳过。亲证：在 `legacy.exists()`
+  断言后强制 panic → 残留 `develops/dsc001-…/{legacy.tombstone,cleared.txt}`
+  ＋`out/DSC001.recipe.json`；下一次跑就在 `assert_eq!(legacy_recipe(&a),
+  legacy)` 上以完全误导的信息**永久**失败（left 变成 `.legacy-suppressed\…`），
+  直到有人手动去 AppData 删目录。修＝`LegacyTombstoneFixture` 的 `Drop`
+  守卫（在第一处可能失败之前构造、只持路径），并加对偶测试
+  `the_tombstone_fixture_cleans_up_through_a_panic`（`catch_unwind` 里真炸一次）。
+  同一探针在修后重跑＝零残留、下一跑恢复绿。**仍开**：该测试仍写用户真实
+  中央库（`clear_develop` 没有 `*_in` 根参数化孪生，`AUTOSHOP_DATA_DIR` 又是
+  edition 2024 下 `set_var` 不安全的进程级环境）——只是残留不再存活。
+  eval 刻意留缺省通道（note 通道已渲同披露，收集会双打）。
 
 - **CI test 作业收口（2026-08-20，未发版）：双 OS 全绿、README 宣称句改真** ——
   B1a 登记 (b) 的同根一批修 `dd95a35`：四测一类根＝「测试把宿主 Windows
@@ -1460,8 +1497,9 @@ GUI 与导出路径——原生另存对话框本体不可自动化，验收=对
   超出 `LocalAdjustment::amount` 的 0..1，`OutOfModel`——从前它被含混地报成
   「AI / brush correction(s) skipped」。
   **待办**：alpha 核实验（`~/.claude/plans/lr-brush-kernel-*.md`）落地后才谈渲染；
-  `Mask/Image` 需自有分割器；brush 的 dab 坐标不参与 `coord_era` 迁移（与位图同列，
-  `recipe_has_raster_masks` 一起报「转不了」）；`crs:MaskSyncID` 单次存活已接受。
+  `Mask/Image` 需自有分割器；~~brush 的 dab 坐标不参与 `coord_era` 迁移（与位图同列，
+  `recipe_has_raster_masks` 一起报「转不了」）~~ →**R29 C1 已改**：dab 流数值重写、
+  笔刷离开「转不了」那一列，只剩 `Bitmap`；`crs:MaskSyncID` 单次存活已接受。
 
 - **台账勘误 + 登记转正（2026-08-19，R27 Batch-1a，~~未发版~~ →已随 v0.33.0 发布）** —— 不是一次发布，
   是一次**审计留痕**：R27 立案时对全部文档做了穷尽扫描（`A-leftover-ledger.md`

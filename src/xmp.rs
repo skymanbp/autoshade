@@ -1325,11 +1325,18 @@ crs:MaskSubType=\"{subtype}\"\n\
 /// the reader refuses anything else rather than storing it.
 ///
 /// The numbers go out through plain `Display`, NOT through `local_fmt` or
-/// `lr_num`. They were carried into the recipe from this same sidecar and
-/// never computed on, and `f32`'s `Display` prints the shortest decimal that
-/// round-trips — so `crs:Radius="0.582157"` comes back as `0.582157`, exactly
-/// the string the file used. A rounding formatter would republish a value the
-/// photographer never chose.
+/// `lr_num`. `f32`'s `Display` prints the shortest decimal that round-trips —
+/// so `crs:Radius="0.582157"` comes back as `0.582157`, exactly the string the
+/// file used, and `crs:Flow="1"` stays `1` rather than becoming `1.000000`. A
+/// rounding formatter would republish a value the photographer never chose.
+///
+/// That rests on the numbers not being computed on, which R29 C1 narrowed:
+/// a TURN rescales `Radius` and rewrites the dab stream
+/// (`render::orient_recipe_coords`). The rewrite quantises back onto
+/// Lightroom's own six-decimal grid, so a portrait capture's round trip still
+/// lands on the file's digits (`a_portrait_captures_brush_turns_on_the_way_in_
+/// and_comes_home_on_the_way_out`); what it does NOT promise any more is
+/// byte-identity for a frame whose aspect does not close that grid.
 ///
 /// `sync_seed` is hashed into fresh `crs:MaskSyncID`s by the writer's own
 /// [`guid`] rule, like every other component this module emits. The IDs the
@@ -3039,7 +3046,8 @@ fn in_source_frame<'a>(
     frame: Option<FrameAspect>,
 ) -> std::borrow::Cow<'a, EditRecipe> {
     use rawler::Orientation as O;
-    let turn = frame.map(|f| f.turn()).unwrap_or(O::Normal);
+    let Some(f) = frame else { return std::borrow::Cow::Borrowed(r) };
+    let turn = f.turn();
     if matches!(turn, O::Normal | O::Unknown) {
         return std::borrow::Cow::Borrowed(r);
     }
@@ -3050,8 +3058,18 @@ fn in_source_frame<'a>(
         O::Rotate270 => O::Rotate90,
         other => other,
     };
+    // The recipe's coordinates are in the DISPLAY frame here — this is the
+    // inverse projection — so the aspect a brush rewrite rescales out of is the
+    // displayed rectangle, `FrameAspect`'s own `displayed()` (R29 C1,
+    // `render::CoordFrame`). Passing the SOURCE aspect would rescale every
+    // radius by `H/W` where `W/H` was owed, i.e. by the square of the error.
+    let d = f.displayed();
     let mut owned = r.clone();
-    crate::render::orient_recipe_coords(&mut owned, back);
+    crate::render::orient_recipe_coords(
+        &mut owned,
+        back,
+        crate::render::CoordFrame::new(d.w, d.h),
+    );
     std::borrow::Cow::Owned(owned)
 }
 
@@ -7044,8 +7062,17 @@ pub fn xmp_to_recipe_clamped(xmp: &str) -> (EditRecipe, crate::recipe::ClampSumm
     // A landscape document (`tiff:Orientation` absent or 1) turns nothing, so
     // this is inert for every frame the twelve-export experiment and the 16
     // reference sidecars contain.
-    if let Some(turn) = frame.map(|f| f.turn()) {
-        crate::render::orient_recipe_coords(&mut r, turn);
+    //
+    // The frame handed along is the SOURCE rectangle, because that is the one
+    // these coordinates are still in (R29 C1, `render::CoordFrame`): a brush's
+    // radii are in width units, so the rewrite has to divide by the width the
+    // document declares, not by the one the display frame will have.
+    if let Some(f) = frame {
+        crate::render::orient_recipe_coords(
+            &mut r,
+            f.turn(),
+            crate::render::CoordFrame::new(f.w, f.h),
+        );
     }
     // Independent scalar controls saturate at the recipe contract and are
     // named by `unparsable_crs_numbers` when that changes a foreign value.
@@ -9980,6 +10007,79 @@ mod tests {
         }
     }
 
+    /// R29 C1, the sidecar boundary — the brush twin of the radial test above.
+    ///
+    /// A portrait capture's `crs:Dabs` are fractions of the UN-ROTATED SENSOR
+    /// array, exactly like its `crs:Top/Left`, so the reader has to turn them
+    /// into the display frame and the writer has to turn them back. Until this
+    /// batch neither happened: the stream was carried verbatim, which made the
+    /// round trip byte-exact and the RENDER wrong by a quarter turn — invisible
+    /// while the brush drew nothing (R27 Batch-4) and visible the moment it did
+    /// (R29 Batch-6b).
+    ///
+    /// The rewrite is not free, and this test is where the cost is legible: the
+    /// stream that comes back out was COMPUTED, not copied. It survives here
+    /// because Lightroom writes six decimals and this writer re-emits six
+    /// (`render::LR_DAB_DECIMALS`), so on the pure rotations the decimal grid
+    /// is closed under the turn — `1 − 0.800000` is `0.200000` both ways, and
+    /// `0.582157 × 1.5 ÷ 1.5` lands back on `0.582157`. It is arithmetic that
+    /// happens to be exact, not a carry, and a frame whose aspect is not 3:2
+    /// would come home within a millionth instead of on it.
+    ///
+    /// MUTATIONS THIS CATCHES: drop the frame argument at either boundary (the
+    /// import leaves the dabs sensor-frame, so the export turns them once and
+    /// they leave the file rotated); hand `in_source_frame` the SOURCE aspect
+    /// instead of `displayed()` (the radius comes back 1.31, i.e. 1.5² × the
+    /// error).
+    #[test]
+    fn a_portrait_captures_brush_turns_on_the_way_in_and_comes_home_on_the_way_out() {
+        // sensor 9504 × 6336, tiff:Orientation="8" = Rotate270 → display
+        // 6336 × 9504. `lr_paint` pins crs:Radius="0.582157" (the F2 specimen).
+        let paint = lr_paint(
+            "FA7459A9F5626F4881D7B730C3093F95",
+            "1",
+            "0",
+            "false",
+            &["r 0.200000", "d 0.100000 0.800000"],
+        );
+        let group = format!(
+            "<rdf:li>\n\
+             <rdf:Description crs:What=\"Mask/Aggregate\" crs:MaskActive=\"true\"\n\
+             crs:MaskName=\"Brush 1\" crs:MaskBlendMode=\"0\" crs:MaskInverted=\"false\"\n\
+             crs:MaskSyncID=\"0000000000000000000000000000000D\" crs:MaskValue=\"1\">\n\
+             <crs:Masks>\n<rdf:Seq>\n{paint}</rdf:Seq>\n</crs:Masks>\n\
+             </rdf:Description>\n</rdf:li>\n"
+        );
+        let doc = in_frame(&lr_doc(&lr_correction("Mask 7", "", &group)), 9504, 6336)
+            .replace("tiff:ImageWidth", "tiff:Orientation=\"8\"\n   tiff:ImageWidth");
+        let r = xmp_to_recipe(&doc);
+        let stroke = |r: &EditRecipe| {
+            let g = &r.masks[0].mask;
+            let MaskGeometry::Brush { strokes, .. } = g else { panic!("a brush, got {g:?}") };
+            (strokes[0].dabs.clone(), strokes[0].radius)
+        };
+        // IN: Rotate270 maps (u,v) -> (v, 1−u), and the source aspect 1.5
+        // rescales every width-unit radius.
+        let (dabs, radius) = stroke(&r);
+        assert_eq!(dabs, "r 0.300000\nd 0.800000 0.900000", "the stream must reach the display frame");
+        assert!((radius - 0.873236).abs() < 1e-6, "crs:Radius became {radius}, not 0.873236");
+
+        // OUT: the inverse, against the DISPLAYED aspect — the file's own
+        // digits come back.
+        let out = recipe_to_xmp_in_frame(
+            &r,
+            FrameAspect::from_size_turned(9504.0, 6336.0, rawler::Orientation::Rotate270),
+        )
+        .0;
+        for want in [
+            "<rdf:li>r 0.200000</rdf:li>",
+            "<rdf:li>d 0.100000 0.800000</rdf:li>",
+            "crs:Radius=\"0.582157\"",
+        ] {
+            assert!(out.contains(want), "{want} did not survive the portrait round trip: {out}");
+        }
+    }
+
     /// R27 A8, and it closes `C-rotation-skeleton.md`'s round-trip hole: a
     /// document THIS writer produces now declares the frame its coordinates
     /// are measured against, so re-importing one recovers the rotated radial
@@ -11528,8 +11628,10 @@ mod tests {
     /// coordinates the sidecar stored, verbatim, so `lr_to_engine` and
     /// `engine_to_lr` stay exact inverses of one another and a republished
     /// sidecar is byte-faithful to what Lightroom wrote — brush dab streams
-    /// included, which is the payload with the least tolerance for a rewrite
-    /// (`BrushStroke::dabs` is carried as a STRING for exactly that reason).
+    /// included, which is the payload with the least tolerance for a rewrite.
+    /// The frame here is LANDSCAPE, which is what keeps that claim whole after
+    /// R29 C1: a turn does rewrite the dab stream now, and the only thing that
+    /// must never reach this boundary is the WARP.
     ///
     /// The document here carries a radial, a gradient and a two-stroke brush
     /// group, and is exported twice: once from a recipe with no warp and once

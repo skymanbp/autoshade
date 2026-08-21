@@ -4405,10 +4405,25 @@ const BRUSH_RASTER_MIN_EDGE: u32 = 32;
 /// **Sized against a measurement, not a guess.** The reference library's
 /// largest real stroke — 645 dabs at r = 0.05 — rasterises for a 9504 × 6336
 /// frame in **445 ms in a DEBUG build** on this machine (2048 × 1365 raster,
-/// 2.13e7 evaluations, so ~21 ns each wall-clock across the row-parallel loop;
-/// a release build is several times quicker again, and it is not measured
-/// here). Straight-line proportionality puts a group that spends the whole
-/// budget at ~0.5 s debug, once per (group, frame size) and then memoised.
+/// 2.13e7 evaluations, so ~21 ns each wall-clock across the row-parallel loop).
+/// Straight-line proportionality puts a group that spends the whole budget at
+/// ~0.5 s debug, once per (group, frame size) and then memoised.
+///
+/// **RELEASE, now measured — and the guess it replaces was wrong (R29 C3/C4).**
+/// This line used to end "a release build is several times quicker again, and
+/// it is not measured here". It is **~1.3×, not several times**: a synthetic
+/// stroke of the same shape (645 dabs, r = 0.05, the same 0.2 r densification,
+/// reproducing the documented 2.1e7 evaluations and the same 2048 × 1365
+/// raster) rasterises in **416 ms release** (5 builds, 388–426 ms) against
+/// **528 ms debug** (5 builds, 504–619 ms) in the SAME harness on the same
+/// machine — each build a fresh dab stream, since `brush_raster` memoises on
+/// (content, frame) and a repeat of one geometry would time the cache instead.
+/// So the budget's headroom is the DEBUG figure's, and sizing this constant
+/// against a hoped-for optimiser win would have been sizing it against nothing.
+/// `-O` buys little here because the row loop is a bounds test and a multiply
+/// over an 11 MB `prod` buffer spread across every core: it is bandwidth-bound,
+/// not instruction-bound, which is also why the ratio is stated rather than
+/// extrapolated to other machines.
 ///
 /// The `BRUSH_MAX_DABS` × `BRUSH_RASTER_MIN_EDGE` corner — the only way past
 /// this number, and reachable only from a hand-written `recipe.json` — bounds
@@ -6548,6 +6563,158 @@ fn orientation_mirrors(o: Orientation) -> bool {
     )
 }
 
+/// The frame a recipe's coordinates are CURRENTLY measured against, reduced to
+/// the one number a turn needs from it: `W/H`.
+///
+/// Every other geometry in a recipe is normalised TWICE — `x` against the width
+/// and `y` against the height — so turning the unit square carries it with no
+/// knowledge of the frame's shape at all ([`orient_point`] is aspect-free by
+/// construction). A BRUSH is the exception: `crs:Radius` and the dab stream's
+/// `r` token are in WIDTH units while a dab is a circle in PIXELS
+/// (`rasterise_brush_group`'s `aspect`), so a quarter turn — which exchanges
+/// `W` and `H` — has to rescale every radius by `W/H` or the strokes come back
+/// elliptical. That missing input is what R29 Batch-6b had to register and what
+/// this type supplies.
+///
+/// **Which frame.** The one the coordinates are in BEFORE the turn, always:
+/// the SENSOR rectangle for the `coord_era` migration and for an XMP import
+/// (era-0 numbers and `crs:` numbers are both source-frame), the CURRENT
+/// display rectangle for a photographer's rotate and for the export projection
+/// back into the source frame.
+///
+/// `None` from [`new`](Self::new) for anything that is not a positive, finite
+/// rectangle: a zero dimension makes the rescale singular, and guessing at one
+/// would move a mask by an unbounded factor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoordFrame {
+    /// `W/H` of the frame the coordinates are in before the turn.
+    aspect: f32,
+}
+
+impl CoordFrame {
+    /// The frame of a `w × h` pixel rectangle. `f64` in, because every caller
+    /// has pixel counts (`decode::source_frame`, `xmp::FrameAspect`) and
+    /// narrowing them at the boundary is what loses a 61 MP dimension's last
+    /// digits before the division rather than after.
+    pub fn new(w: f64, h: f64) -> Option<Self> {
+        (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0)
+            .then(|| CoordFrame { aspect: (w / h) as f32 })
+            .filter(|f| f.aspect.is_finite() && f.aspect > 0.0)
+    }
+
+    /// What a brush radius must be multiplied by so its dab stays the SAME
+    /// circle in pixels after the turn.
+    ///
+    /// A dab's pixel radius is `r · W`. The turned frame's width is `H` for the
+    /// four transposing states and `W` for the other four, so `r' = r · W / W'`
+    /// is `W/H` and `1` respectively. Nothing else in the stroke is spatial —
+    /// `f` (flow) and `h` (hardness) are deposit laws, and `MaskValue` is a
+    /// density.
+    fn brush_radius_scale(self, o: Orientation) -> f32 {
+        if crate::decode::orientation_transposes(o) { self.aspect } else { 1.0 }
+    }
+}
+
+/// Lightroom's own precision for a brush number: six decimal places, FIXED.
+///
+/// Measured on the user's library rather than assumed — `DSC08731.xmp` writes
+/// `r 0.218584`, `d 0.067120 0.096097` and `crs:Radius="0.216487"`, trailing
+/// zeros included, and every token in the 22,966-token census has that shape.
+/// Re-emitting a TURNED stream in the same form is what keeps the rewrite
+/// invisible in the file, and on the pure rotations it is also what makes the
+/// rewrite invertible in DECIMAL: `1 − 0.096097` is `0.903903` to six places
+/// and back again, so a portrait capture's import → export round trip hands
+/// Lightroom its own digits instead of an f32's shortest form.
+const LR_DAB_DECIMALS: usize = 6;
+
+/// One brush number as the sidecar spells it, or `None` for a value that has
+/// overflowed out of the grammar (`xmp::dab_token_is_known` refuses a
+/// non-finite token, so writing one would make the stream un-importable).
+fn lr_dab_str(v: f32) -> Option<String> {
+    v.is_finite().then(|| format!("{v:.prec$}", prec = LR_DAB_DECIMALS))
+}
+
+/// The same six-place grid applied to a stored `f32` — `BrushStroke::radius`,
+/// which is a FIELD and not text, so it is quantised rather than formatted.
+///
+/// One rule for both halves of a stroke: the attribute and the `r` tokens are
+/// two spellings of the same quantity, and letting them drift apart by the
+/// width of a formatter would make a re-imported sidecar disagree with the
+/// `recipe.json` it came from. Falls back to the un-quantised value when the
+/// scaling by `1e6` overflows, which only a hand-written recipe can reach.
+fn lr_dab_round(v: f32) -> f32 {
+    let q = (v * 1e6).round() / 1e6;
+    if q.is_finite() { q } else { v }
+}
+
+/// One `crs:Dabs` token rewritten into the turned frame — or `None` when it is
+/// not one of the two SPATIAL forms, in which case the caller carries the token
+/// through unchanged.
+///
+/// `d <x> <y>` moves through [`orient_point`] like every other coordinate in
+/// this file. `r <f>` is rescaled ONLY when the turn exchanges the axes, so a
+/// half turn or a mirror leaves every radius token byte-identical. `f` and `h`
+/// are never spatial and never touched.
+///
+/// A malformed token is `None` and therefore VERBATIM, matching `brush_dabs`'
+/// own rule: the XMP boundary already refuses anything outside the grammar, and
+/// a hand-edited `recipe.json` must not have its stream silently shortened by a
+/// migration. An overflowed result is `None` for the same reason.
+fn turned_dab_token(token: &str, o: Orientation, radius_scale: f32) -> Option<String> {
+    let mut it = token.split_whitespace();
+    match it.next()? {
+        "d" => {
+            let (x, y) = (brush_token_num(&mut it)?, brush_token_num(&mut it)?);
+            if it.next().is_some() {
+                return None;
+            }
+            let (x, y) = orient_point(o, x, y);
+            Some(format!("d {} {}", lr_dab_str(x)?, lr_dab_str(y)?))
+        }
+        "r" if radius_scale != 1.0 => {
+            let v = brush_token_num(&mut it)?;
+            if it.next().is_some() {
+                return None;
+            }
+            Some(format!("r {}", lr_dab_str(v * radius_scale)?))
+        }
+        _ => None,
+    }
+}
+
+/// Turn a brush's strokes: every dab coordinate through [`orient_point`], every
+/// radius through [`CoordFrame::brush_radius_scale`].
+///
+/// **The stream is REBUILT, not edited.** `split('\n')` is the exact inverse of
+/// the join `xmp::parse_dabs` performs (a token carrying a newline is refused
+/// there), so an EMPTY stream comes back empty, a stream of nothing but `f`/`h`
+/// state comes back byte for byte, and the token count cannot change.
+fn turn_brush_strokes(
+    strokes: &mut [crate::recipe::BrushStroke],
+    o: Orientation,
+    frame: CoordFrame,
+) {
+    let scale = frame.brush_radius_scale(o);
+    for s in strokes.iter_mut() {
+        // The stroke ATTRIBUTE is the stream's initial state (102 real
+        // components carry no `r` token at all), so it rides the same scale.
+        if scale != 1.0 {
+            s.radius = lr_dab_round(s.radius * scale);
+        }
+        let mut out = String::with_capacity(s.dabs.len() + 16);
+        for (i, token) in s.dabs.split('\n').enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            match turned_dab_token(token, o, scale) {
+                Some(t) => out.push_str(&t),
+                None => out.push_str(token),
+            }
+        }
+        s.dabs = out;
+    }
+}
+
 /// Rewrite a recipe's stored GEOMETRY from the sensor frame into the display
 /// frame — the deterministic, bijective half of the `coord_era` 0 → 1
 /// migration (`pipeline::migrate_recipe_coord_frame` owns the gating).
@@ -6571,7 +6738,26 @@ fn orientation_mirrors(o: Orientation) -> bool {
 /// **Not migrated: `MaskGeometry::Bitmap`.** A raster mask is a FILE of
 /// pixels sampled in normalised coordinates, not a coordinate — turning it
 /// would mean rewriting an image on disk that version snapshots and other
-/// recipes may share. The caller discloses this instead of pretending.
+/// recipes may share. The caller discloses this instead of pretending. It is
+/// now the ONLY member of that disclosure ([`recipe_has_raster_masks`]).
+///
+/// **Migrated since R29 C1: `MaskGeometry::Brush`, by NUMERICALLY REWRITING its
+/// dab stream** (and an `AiMask`'s `crs:Gesture` strokes, which are the same
+/// payload under a different parent). Until this batch the stream was carried
+/// verbatim so a republished sidecar was byte-faithful to Lightroom's, and the
+/// brush rendered nothing, so an un-turned stream was invisible; R29 Batch-6b
+/// made the brush DRAW, which turned that verbatim carry into a mask left at
+/// its old coordinates while every parametric shape beside it moved. The user's
+/// ruling (2026-08-21) is that the render is what must be right: coordinates
+/// turn, radii rescale by the frame aspect, and a rotated photo's republished
+/// dab stream is no longer byte-identical to the one Lightroom wrote — it is
+/// still legal, still six decimal places, and still says the same mask about
+/// the frame the document declares. An UNROTATED photo is untouched: the
+/// identity orientations return before any of this, so their streams cannot
+/// change even by a formatter.
+///
+/// This is the one arm that needs `frame`, and the reason is a unit mismatch,
+/// not the coordinates: see [`CoordFrame`].
 ///
 /// **The straighten angle** (R27, closing the R24 registration
 /// 「`straighten≠0` 时 crop 迁移一阶近似」). `Crop` is normalised against the
@@ -6613,7 +6799,19 @@ fn orientation_mirrors(o: Orientation) -> bool {
 /// here for the same reason as `midpoint` — they are fields on a mask, and a
 /// reader auditing "did the migration cover every mask field?" must find the
 /// answer rather than a silence.
-pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
+///
+/// **`frame`** is the shape of the rectangle the coordinates are in BEFORE the
+/// turn, and only the brush arm reads it ([`CoordFrame`]). `None` means "not
+/// known here", and the honest consequence is that a brush's dabs are left
+/// where they were — every production caller supplies one, and the only one
+/// that can pass `None` (`pipeline::rotate_recipe`, which reads the photo's
+/// header lazily) does so exactly when the recipe holds no brush stroke at all
+/// ([`recipe_has_brush_strokes`]).
+pub fn orient_recipe_coords(
+    r: &mut EditRecipe,
+    o: Orientation,
+    frame: Option<CoordFrame>,
+) -> bool {
     if matches!(o, Orientation::Normal | Orientation::Unknown) {
         return false;
     }
@@ -6651,31 +6849,16 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
         }
         // Raster masks carry no coordinates — see the doc comment.
         MaskGeometry::Bitmap { .. } => {}
-        // A brush group DOES carry coordinates — thousands of them, inside
-        // `crs:Dabs` — and they are deliberately NOT turned. The stream is
-        // carried VERBATIM so a republished sidecar is byte-faithful to what
-        // Lightroom wrote. So the brush shares the raster's honest status here:
-        // `recipe_has_raster_masks` counts it, and the migration's disclosure
-        // says the mask could not be turned.
-        //
-        // ⚠ R29 Batch-6b REGISTRATION, stated because the cost of this line
-        // just went up and nothing else says so. Until that batch the brush
-        // rendered NOTHING, so an un-turned dab stream was invisible; now that
-        // it renders, a rotate leaves the strokes at their old coordinates
-        // while every parametric shape beside them moves. The disclosure still
-        // fires (`recipe_has_raster_masks`), and it is still true, but it now
-        // stands in for a mask drawn in the wrong PLACE rather than one not
-        // drawn at all.
-        //
-        // Not fixed here, and the reason is a missing input, not a missing
-        // will: `crs:Radius` is in WIDTH units and a dab is a circle in PIXELS,
-        // so a quarter turn has to rescale every radius by W/H — and this
-        // function is handed an `Orientation` and nothing else. `orient_point`
-        // is aspect-free by construction; a correct dab migration is not. That
-        // makes it a change with its own decision (turn the stream and lose the
-        // verbatim round trip, or carry the frame's aspect in here), which is
-        // adjudicated separately rather than smuggled into the wiring batch.
-        MaskGeometry::Brush { .. } => {}
+        // A brush group carries thousands of coordinates inside `crs:Dabs`,
+        // and since R29 C1 they TURN — numerically, token by token. The
+        // registration this arm used to hold ("un-turned, because the function
+        // is handed an `Orientation` and nothing else") is closed by `frame`;
+        // the doc comment above carries the ruling and the cost.
+        MaskGeometry::Brush { strokes, .. } => {
+            if let Some(f) = frame {
+                turn_brush_strokes(strokes, o, f);
+            }
+        }
         // An AI mask DOES carry a coordinate — the reference point is the one
         // spatial fact the sidecar holds — so it turns like any other. Its
         // cached alpha does not: that raster was segmented in the OLD frame, so
@@ -6684,9 +6867,19 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
         // point (`segment::resolve_ai_masks`), which is why this geometry is
         // not a member of `recipe_has_raster_masks` — nothing here fails to be
         // turned, and claiming it did would be the wrong disclosure.
-        MaskGeometry::AiMask { ref_x, ref_y, raster, .. } => {
+        //
+        // The `gesture` strokes are `BrushStroke`s under a different parent and
+        // ride the SAME rewrite (R29 C1). They are carried, not rendered, but
+        // they are written back into the sidecar, so leaving them in the old
+        // frame would hand Lightroom a refinement stroke beside a reference
+        // point that had moved — the same defect as the brush arm's, one
+        // component along.
+        MaskGeometry::AiMask { ref_x, ref_y, raster, gesture, .. } => {
             (*ref_x, *ref_y) = orient_point(o, *ref_x, *ref_y);
             *raster = None;
+            if let Some(f) = frame {
+                turn_brush_strokes(gesture, o, f);
+            }
         }
     };
     for m in r.masks.iter_mut() {
@@ -6725,40 +6918,60 @@ pub fn orient_recipe_coords(r: &mut EditRecipe, o: Orientation) -> bool {
 pub fn recipe_has_frame_coords(r: &EditRecipe) -> bool {
     r.crop.is_some()
         || r.masks.iter().any(|m| {
-            // Brush joins Bitmap on the NOT-turnable side: `orient_recipe_
-            // coords` leaves its dab stream alone on purpose, so counting it
-            // here would claim the migration moved something it did not.
-            // `recipe_has_raster_masks` is what speaks for both of them — and
-            // since R29 Batch-6b it speaks about a mask that is drawn, so the
-            // split matters more than it used to (that arm's registration).
-            let parametric = |g: &MaskGeometry| {
-                !matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. })
-            };
-            parametric(&m.mask)
-                || m.components.iter().any(|c| parametric(&c.geometry))
+            // Bitmap is the ONE geometry that does not move (its pixels are a
+            // file). Brush left this exclusion in R29 C1: its dab stream is
+            // rewritten numerically now, so counting it here is the true
+            // statement, not the flattering one.
+            let turnable = |g: &MaskGeometry| !matches!(g, MaskGeometry::Bitmap { .. });
+            turnable(&m.mask)
+                || m.components.iter().any(|c| turnable(&c.geometry))
                 || matches!(m.range, Some(RangeMask::Color { .. }))
         })
+}
+
+/// Does this recipe carry a brush stroke anywhere — a [`MaskGeometry::Brush`]
+/// group or an [`MaskGeometry::AiMask`]'s `crs:Gesture` refinement?
+///
+/// The predicate exists for ONE caller: `pipeline::rotate_recipe` needs the
+/// photo's frame shape ([`CoordFrame`]) only for these, and reading it costs a
+/// metadata walk of the RAW (a `RawSource` slurp, 60–120 MB for a 61 MP ARW).
+/// Asking this first is what keeps a rotate of an ordinary develop as cheap as
+/// it was — and what makes `orient_recipe_coords`' `None` arm unreachable with
+/// a brush in hand instead of merely unlikely.
+///
+/// A group with an EMPTY stroke list counts as nothing: there is no coordinate
+/// to move, so no frame is needed to move it.
+pub fn recipe_has_brush_strokes(r: &EditRecipe) -> bool {
+    let brushed = |g: &MaskGeometry| match g {
+        MaskGeometry::Brush { strokes, .. } => !strokes.is_empty(),
+        MaskGeometry::AiMask { gesture, .. } => !gesture.is_empty(),
+        _ => false,
+    };
+    r.masks
+        .iter()
+        .any(|m| brushed(&m.mask) || m.components.iter().any(|c| brushed(&c.geometry)))
 }
 
 /// Does this recipe carry a geometry the `coord_era` migration cannot turn
 /// (see [`orient_recipe_coords`])? Drives the honest half of the migration's
 /// disclosure.
 ///
-/// TWO members, not one: a raster [`MaskGeometry::Bitmap`] (the pixels are a
-/// FILE, and rewriting someone's PNG is not a coordinate migration) and a
-/// [`MaskGeometry::Brush`] group (its dabs are carried VERBATIM so the sidecar
-/// round-trips byte-faithfully, and a quarter turn would also have to rescale
-/// every `crs:Radius` by the frame aspect, which this migration is never told
-/// — see the `Brush` arm of [`orient_recipe_coords`]). The function keeps its
-/// raster NAME because
-/// that is what every call site and every disclosure string says; what it
-/// MEANS is "cannot be turned", and both members qualify for the same reason
-/// stated two different ways. Since R29 Batch-6b the brush half of that
-/// disclosure is load-bearing rather than academic: the mask it names is now
-/// DRAWN, so failing to turn it is visible.
+/// ONE member since R29 C1: a raster [`MaskGeometry::Bitmap`], whose pixels are
+/// a FILE — rewriting someone's PNG is not a coordinate migration, and version
+/// snapshots or another saved recipe may point at that same file. The NAME is
+/// exact again, which it had stopped being: R27 Batch-4 put
+/// [`MaskGeometry::Brush`] in here too (its dabs were carried verbatim for the
+/// sidecar round trip and there was no frame aspect to rescale their radii
+/// with), so the function meant "cannot be turned" while it said "raster". The
+/// brush turns now — numerically, see the `Brush` arm of
+/// [`orient_recipe_coords`] — and is counted by [`recipe_has_frame_coords`]
+/// with every other geometry that moves.
+///
+/// An [`MaskGeometry::AiMask`] has never been a member and still is not: its
+/// cached alpha is DROPPED rather than left behind, so nothing about it fails
+/// to be turned.
 pub fn recipe_has_raster_masks(r: &EditRecipe) -> bool {
-    let unturnable =
-        |g: &MaskGeometry| matches!(g, MaskGeometry::Bitmap { .. } | MaskGeometry::Brush { .. });
+    let unturnable = |g: &MaskGeometry| matches!(g, MaskGeometry::Bitmap { .. });
     r.masks
         .iter()
         .any(|m| unturnable(&m.mask) || m.components.iter().any(|c| unturnable(&c.geometry)))
@@ -11699,6 +11912,17 @@ mod tests {
         }
     }
 
+    /// The A7R IV's own frame — `DefaultCropSize = (9504, 6336)`, aspect
+    /// exactly 1.5 — as `orient_recipe_coords`' third argument.
+    ///
+    /// A round number on purpose: `1.5` and its reciprocal are exact in binary,
+    /// so a radius that survives a four-turn circle in these tests survives it
+    /// because the algebra is right, not because the aspect happened to cancel
+    /// its own rounding.
+    fn probe_frame() -> Option<CoordFrame> {
+        CoordFrame::new(9504.0, 6336.0)
+    }
+
     /// The `angle` half of the radial rule, checked against `mask_weight`
     /// itself rather than against the derivation: a turned ELLIPSE must cover
     /// exactly the turned PIXELS. This is what makes "rotate the two corners,
@@ -11731,7 +11955,7 @@ mod tests {
                 masks: vec![LocalAdjustment { mask: base.clone(), ..Default::default() }],
                 ..Default::default()
             };
-            assert!(orient_recipe_coords(&mut r, o));
+            assert!(orient_recipe_coords(&mut r, o, probe_frame()));
             let turned = &r.masks[0].mask;
             for i in 0..=20 {
                 for j in 0..=20 {
@@ -11793,12 +12017,12 @@ mod tests {
         // nothing happened.
         for o in [Orientation::Normal, Orientation::Unknown] {
             let mut r = seed();
-            assert!(!orient_recipe_coords(&mut r, o), "{o:?} must report no move");
+            assert!(!orient_recipe_coords(&mut r, o, probe_frame()), "{o:?} must report no move");
             assert_eq!(r, seed(), "{o:?} must not touch a single coordinate");
         }
         // The portrait ARW case, and back.
         let mut r = seed();
-        assert!(orient_recipe_coords(&mut r, Orientation::Rotate270));
+        assert!(orient_recipe_coords(&mut r, Orientation::Rotate270, probe_frame()));
         assert_ne!(r, seed(), "a quarter turn must actually move the geometry");
         // Hand-derived: Rotate270 maps (u,v) -> (v, 1-u), so the crop's
         // left/right come from top/bottom and its top/bottom from 1-right,
@@ -11812,7 +12036,7 @@ mod tests {
         ] {
             assert!((got - want).abs() < 1e-6, "crop {what}: {got} != {want} ({t:?})");
         }
-        assert!(orient_recipe_coords(&mut r, Orientation::Rotate90));
+        assert!(orient_recipe_coords(&mut r, Orientation::Rotate90, probe_frame()));
         let back = seed();
         let (c, c0) = (r.crop.unwrap(), back.crop.unwrap());
         assert!(
@@ -11904,7 +12128,7 @@ mod tests {
             // and the frame turned together.
             for o in [Orientation::Rotate90, Orientation::Rotate180, Orientation::Rotate270] {
                 let mut r = seed(deg);
-                assert!(orient_recipe_coords(&mut r, o));
+                assert!(orient_recipe_coords(&mut r, o, probe_frame()));
                 assert_eq!(r.straighten_deg, deg, "{o:?} must not touch the tilt");
             }
             // A reflection reverses it — and these four are involutions, so
@@ -11917,9 +12141,9 @@ mod tests {
                 Orientation::Transverse,
             ] {
                 let mut r = seed(deg);
-                assert!(orient_recipe_coords(&mut r, o));
+                assert!(orient_recipe_coords(&mut r, o, probe_frame()));
                 assert_eq!(r.straighten_deg, -deg, "{o:?} must reverse the tilt");
-                assert!(orient_recipe_coords(&mut r, o));
+                assert!(orient_recipe_coords(&mut r, o, probe_frame()));
                 assert_eq!(r.straighten_deg, deg, "{o:?} twice is the identity");
                 // …and the crop came home with it (float tolerance, not `==`:
                 // `1 − (1 − 0.1)` is 0.10000002 in f32).
@@ -11936,7 +12160,7 @@ mod tests {
         // And a photo with no tilt is untouched whatever the state.
         for o in [Orientation::Transverse, Orientation::Rotate90] {
             let mut r = seed(0.0);
-            assert!(orient_recipe_coords(&mut r, o));
+            assert!(orient_recipe_coords(&mut r, o, probe_frame()));
             assert_eq!(r.straighten_deg, 0.0);
         }
     }
@@ -11956,7 +12180,7 @@ mod tests {
         assert!(recipe_has_raster_masks(&r));
         assert!(!recipe_has_frame_coords(&r), "a raster-only recipe has no turnable coordinate");
         let before = r.clone();
-        orient_recipe_coords(&mut r, Orientation::Rotate270);
+        orient_recipe_coords(&mut r, Orientation::Rotate270, probe_frame());
         assert_eq!(r, before, "the raster path must survive byte-for-byte");
     }
 
@@ -12033,20 +12257,284 @@ mod tests {
             0.0,
             "no alpha in hand = inert, never a guess"
         );
-        // And the migration STILL treats it like a raster: the dab stream is
-        // carried verbatim for the sidecar round trip rather than rewritten
-        // dab by dab. That is now a registered cost rather than a free choice
-        // — see the `Brush` arm of `orient_recipe_coords`.
+        // And since R29 C1 the migration treats it like every other geometry:
+        // a brush group is a TURNABLE coordinate, not a raster the disclosure
+        // has to apologise for. (The algebra itself is
+        // `a_quarter_turn_rewrites_the_dab_stream_and_rescales_its_radii`.)
         use crate::recipe::LocalAdjustment;
         let mut r = EditRecipe {
             masks: vec![LocalAdjustment { mask: g, ..Default::default() }],
             ..Default::default()
         };
-        assert!(recipe_has_raster_masks(&r), "a brush group cannot be turned either");
-        assert!(!recipe_has_frame_coords(&r), "so it must not claim to have been turned");
+        assert!(!recipe_has_raster_masks(&r), "a brush group is not a raster mask FILE");
+        assert!(recipe_has_frame_coords(&r), "and its dabs ARE frame coordinates");
         let before = r.clone();
-        orient_recipe_coords(&mut r, Orientation::Rotate270);
-        assert_eq!(r, before, "the dab stream must survive byte-for-byte");
+        orient_recipe_coords(&mut r, Orientation::Rotate270, probe_frame());
+        assert_ne!(r, before, "a quarter turn must move the dab stream");
+    }
+
+    /// The dab stream of the first stroke of the first mask — the thing every
+    /// R29 C1 assertion below is about.
+    fn only_stream(r: &EditRecipe) -> &str {
+        let MaskGeometry::Brush { strokes, .. } = &r.masks[0].mask else { panic!("a brush") };
+        &strokes[0].dabs
+    }
+
+    /// …and its `crs:Radius`, the stream's initial state.
+    fn only_radius(r: &EditRecipe) -> f32 {
+        let MaskGeometry::Brush { strokes, .. } = &r.masks[0].mask else { panic!("a brush") };
+        strokes[0].radius
+    }
+
+    /// A one-mask recipe around [`probe_brush`], with `radius` on the stroke.
+    fn brushed_recipe(radius: f32, dabs: &str) -> EditRecipe {
+        use crate::recipe::LocalAdjustment;
+        EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: probe_brush(&[(1.0, radius, 1.0, 0.0, dabs)]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// R29 C1 (the 2026-08-21 ruling) — a turn REWRITES the dab stream instead
+    /// of carrying it. Three independent claims, each a different way to get it
+    /// wrong:
+    ///
+    ///  * a `d` token moves through [`orient_point`], the same function the
+    ///    crop corners and the radial box beside it use;
+    ///  * an `r` token AND `BrushStroke::radius` are rescaled by the frame
+    ///    aspect, but ONLY for the four states that exchange the axes —
+    ///    `crs:Radius` is in width units while a dab is a circle in pixels, so
+    ///    a quarter turn has to exchange the unit too, and a half turn must
+    ///    not;
+    ///  * `f` (flow) and `h` (hardness) are deposit laws, not positions, and
+    ///    are never touched by anything.
+    ///
+    /// The expected TEXT is hand-derived from `orient_point`'s own table
+    /// against the A7R IV's 3:2 frame, so this asserts the output rather than a
+    /// re-derivation of it. The six-decimal form is Lightroom's own
+    /// ([`LR_DAB_DECIMALS`]).
+    ///
+    /// MUTATIONS THIS CATCHES:
+    ///  * turning `(x, y)` by anything but `orient_point(o, …)` (e.g. the
+    ///    inverse state, or `(y, x)`) — the `Rotate90`/`Rotate270` rows;
+    ///  * dropping the radius rescale (`radius_scale` pinned at 1.0) — the
+    ///    `r 0.300000` and `0.375` asserts;
+    ///  * applying it on every state instead of the transposing four — the
+    ///    `Rotate180` row, which must keep `r 0.200000` and `0.25`;
+    ///  * rescaling `f`/`h` along with `r` — the `f 0.500000` / `h 1.000000`
+    ///    asserts.
+    #[test]
+    fn a_quarter_turn_rewrites_the_dab_stream_and_rescales_its_radii() {
+        const SEED: &str =
+            "r 0.200000\nf 0.500000\nh 1.000000\nd 0.100000 0.800000\nd 0.300000 0.400000";
+        for (o, want_stream, want_radius) in [
+            // (u,v) -> (1-v, u); the axes swap, so every radius takes W/H = 1.5.
+            (
+                Orientation::Rotate90,
+                "r 0.300000\nf 0.500000\nh 1.000000\nd 0.200000 0.100000\nd 0.600000 0.300000",
+                0.375f32,
+            ),
+            // (u,v) -> (1-u, 1-v); the frame keeps its shape, so no radius moves.
+            (
+                Orientation::Rotate180,
+                "r 0.200000\nf 0.500000\nh 1.000000\nd 0.900000 0.200000\nd 0.700000 0.600000",
+                0.25,
+            ),
+            // (u,v) -> (v, 1-u); axes swap again.
+            (
+                Orientation::Rotate270,
+                "r 0.300000\nf 0.500000\nh 1.000000\nd 0.800000 0.900000\nd 0.400000 0.700000",
+                0.375,
+            ),
+        ] {
+            let mut r = brushed_recipe(0.25, SEED);
+            assert!(orient_recipe_coords(&mut r, o, probe_frame()));
+            assert_eq!(only_stream(&r), want_stream, "{o:?}: the rewritten stream");
+            assert!(
+                (only_radius(&r) - want_radius).abs() < 1e-6,
+                "{o:?}: crs:Radius is {} , not {want_radius}",
+                only_radius(&r)
+            );
+        }
+
+        // FOUR quarter turns are the identity — and the frame handed in has to
+        // turn with them, because after the first one the photo is 6336 × 9504.
+        // The radius alternates 0.25 / 0.375 and comes home.
+        let mut r = brushed_recipe(0.25, SEED);
+        let portrait = CoordFrame::new(6336.0, 9504.0);
+        for k in 0..4 {
+            let frame = if k % 2 == 0 { probe_frame() } else { portrait };
+            assert!(orient_recipe_coords(&mut r, Orientation::Rotate90, frame));
+        }
+        assert!(
+            (only_radius(&r) - 0.25).abs() < 1e-6,
+            "a full circle moved the radius: {}",
+            only_radius(&r)
+        );
+        // Exact TEXT equality is not claimed — six decimals is a grid, and four
+        // trips over it are four roundings — so the tokens are compared as
+        // numbers. On this frame they do in fact come back byte-identical; the
+        // tolerance is what the claim is worth, not what today's build does.
+        for (got, want) in only_stream(&r).split('\n').zip(SEED.split('\n')) {
+            let nums = |t: &str| {
+                t.split_whitespace().skip(1).map(|v| v.parse::<f32>().unwrap()).collect::<Vec<_>>()
+            };
+            assert_eq!(got.split_whitespace().next(), want.split_whitespace().next());
+            for (a, b) in nums(got).into_iter().zip(nums(want)) {
+                assert!((a - b).abs() < 1e-5, "a full circle moved a token: {got} vs {want}");
+            }
+        }
+    }
+
+    /// The other side of the same ruling: a photo that is NOT turned keeps its
+    /// dab stream byte for byte — the identity orientations return before the
+    /// rewrite can reach a formatter.
+    ///
+    /// The fixture stream is deliberately NOT in Lightroom's six-decimal form
+    /// (`d 0 0`, `r .5`): if the identity arm ever went through
+    /// `turn_brush_strokes`, those would come back as `d 0.000000 0.000000` and
+    /// `r 0.500000` — legal, identical in value, and a silent rewrite of a
+    /// file the photographer never rotated.
+    ///
+    /// The second half pins the honest `None` arm: a caller that cannot supply
+    /// the frame leaves the stream alone rather than guessing an aspect, and
+    /// everything else in the recipe still moves.
+    ///
+    /// MUTATIONS THIS CATCHES: drop the `Normal | Unknown` early return;
+    /// rewrite the stream unconditionally in the `Brush` arm instead of under
+    /// `if let Some(f) = frame`.
+    #[test]
+    fn an_unturned_photo_keeps_every_dab_byte() {
+        const RAW_FORM: &str = "r .5\nd 0 0\nd 1 1";
+        for o in [Orientation::Normal, Orientation::Unknown] {
+            let mut r = brushed_recipe(0.25, RAW_FORM);
+            let before = r.clone();
+            assert!(!orient_recipe_coords(&mut r, o, probe_frame()), "{o:?} must report no move");
+            assert_eq!(r, before, "{o:?} must not touch a single dab byte");
+        }
+        // No frame in hand: the dabs stay put, and the migration says so by
+        // leaving them rather than by inventing an aspect.
+        let mut r = brushed_recipe(0.25, RAW_FORM);
+        r.crop = Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 });
+        assert!(orient_recipe_coords(&mut r, Orientation::Rotate90, None));
+        assert_eq!(only_stream(&r), RAW_FORM, "no frame, no rewrite");
+        assert!((only_radius(&r) - 0.25).abs() < 1e-9, "and no rescale either");
+        assert!(r.crop.unwrap().left != 0.1, "while the aspect-free geometry still turned");
+    }
+
+    /// SAME FRAME, checked against a parametric shape rather than against the
+    /// derivation: a brush dab and a radial centred on the same point must
+    /// still be centred on the same point after the turn.
+    ///
+    /// This is what「渲染永远正确」means operationally — the dab stream is not
+    /// merely moved, it is moved by the ONE map every other geometry in the
+    /// recipe uses, so a photographer's brush stroke and the gradient they
+    /// aligned it with do not drift apart on a rotate.
+    ///
+    /// MUTATION THIS CATCHES: turn the dabs with the INVERSE orientation (a
+    /// plausible sign slip, since `in_source_frame` really does hand this
+    /// function an inverse) — the radial still lands correctly and the dab does
+    /// not, which no test that only looks at the brush could see.
+    #[test]
+    fn a_turned_dab_lands_where_the_turned_radial_beside_it_does() {
+        use crate::recipe::LocalAdjustment;
+        let (px, py) = (0.30f32, 0.65f32);
+        // A radial whose box is centred on the dab. Half-extents differ so the
+        // centre is not recoverable by accident from a symmetric box.
+        let radial = MaskGeometry::Radial {
+            top: py - 0.05,
+            left: px - 0.12,
+            bottom: py + 0.05,
+            right: px + 0.12,
+            feather: 0.5,
+            roundness: 0.0,
+            flipped: false,
+            angle: 0.0,
+            midpoint: 50.0,
+            mask_version: 2,
+        };
+        for o in [
+            Orientation::Rotate90,
+            Orientation::Rotate180,
+            Orientation::Rotate270,
+            Orientation::Transpose,
+            Orientation::HorizontalFlip,
+        ] {
+            let mut r = EditRecipe {
+                masks: vec![
+                    LocalAdjustment {
+                        mask: probe_brush(&[(1.0, 0.1, 1.0, 0.0, &format!("d {px} {py}"))]),
+                        ..Default::default()
+                    },
+                    LocalAdjustment { mask: radial.clone(), ..Default::default() },
+                ],
+                ..Default::default()
+            };
+            assert!(orient_recipe_coords(&mut r, o, probe_frame()));
+            let MaskGeometry::Brush { strokes, .. } = &r.masks[0].mask else { panic!("a brush") };
+            let dab: Vec<f32> = strokes[0]
+                .dabs
+                .split_whitespace()
+                .skip(1)
+                .map(|v| v.parse::<f32>().unwrap())
+                .collect();
+            let MaskGeometry::Radial { top, left, bottom, right, .. } = r.masks[1].mask else {
+                panic!("a radial")
+            };
+            let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
+            assert!(
+                (dab[0] - cx).abs() < 1e-6 && (dab[1] - cy).abs() < 1e-6,
+                "{o:?}: the dab landed at ({}, {}) and the radial at ({cx}, {cy})",
+                dab[0],
+                dab[1]
+            );
+        }
+    }
+
+    /// The RENDER, which is the claim the ruling actually bought: after a
+    /// quarter turn a dab is still a CIRCLE in pixels, not an ellipse.
+    ///
+    /// Radius is the whole reason this batch needed a new input. A dab of
+    /// `r = 0.1` on a 480 × 320 frame is 48 px across both axes; turn the photo
+    /// and the frame is 320 × 480, so the SAME 48 px is `r = 0.15` in width
+    /// units. Sampling the alpha 40 px from the centre along each axis is what
+    /// separates the two readings: with the rescale both samples sit inside the
+    /// disc and agree, without it the x-extent has shrunk to 32 px and the
+    /// horizontal sample falls outside the dab entirely.
+    ///
+    /// MUTATION THIS CATCHES: pin `CoordFrame::brush_radius_scale` at 1.0. The
+    /// coordinate half of the migration stays perfect and the mask still draws
+    /// — in the wrong shape, which is exactly the failure a coordinates-only
+    /// fix would have shipped.
+    #[test]
+    fn a_turned_dab_is_still_a_circle_in_pixels() {
+        let (fw, fh) = (480u32, 320u32);
+        let mut r = brushed_recipe(0.1, "h 1.000000\nd 0.500000 0.500000");
+        let before = brush_raster(&r.masks[0].mask, fw, fh).expect("one dab");
+        let flat = |g: &MaskGeometry, ras: &image::GrayImage, w: u32, h: u32| {
+            // 40 px from the centre along each axis, in that frame's own
+            // normalised coordinates.
+            let x = mask_weight(g, 0.5 + 40.0 / w as f32, 0.5, Some(ras));
+            let y = mask_weight(g, 0.5, 0.5 + 40.0 / h as f32, Some(ras));
+            (x, y)
+        };
+        let (bx, by) = flat(&r.masks[0].mask, &before, fw, fh);
+        assert!(bx > 0.5 && (bx - by).abs() < 0.05, "premise: the dab starts round ({bx}, {by})");
+
+        assert!(orient_recipe_coords(&mut r, Orientation::Rotate90, CoordFrame::new(480.0, 320.0)));
+        let after = brush_raster(&r.masks[0].mask, fh, fw).expect("still one dab");
+        let (ax, ay) = flat(&r.masks[0].mask, &after, fh, fw);
+        assert!(
+            ax > 0.5 && (ax - ay).abs() < 0.05,
+            "the turned dab must still be round ({ax}, {ay})"
+        );
+        assert!(
+            (ax - bx).abs() < 0.05 && (ay - by).abs() < 0.05,
+            "and the same size: was ({bx}, {by}), now ({ax}, {ay})"
+        );
     }
 
     /// The WIRING, end to end: `apply_develop` really hands the brush arm a
@@ -15299,7 +15787,7 @@ mod tests {
             !recipe_has_raster_masks(&r),
             "and it is not 'unturnable' — nothing here fails to be turned"
         );
-        let turned = orient_recipe_coords(&mut r, rawler::Orientation::Rotate90);
+        let turned = orient_recipe_coords(&mut r, rawler::Orientation::Rotate90, probe_frame());
         assert!(turned, "the migration ran");
         let MaskGeometry::AiMask { ref_x, ref_y, raster, .. } = &r.masks[0].mask else {
             panic!("the geometry must survive the migration");

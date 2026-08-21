@@ -584,7 +584,7 @@ pub(crate) fn coord_migration_sentence(
         s.push_str(" · ");
         s.push_str(tr(
             lang,
-            "its painted / AI raster masks are image files, not coordinates, and could NOT be rotated — check them and re-generate if they no longer fit",
+            "its raster masks are image files, not coordinates, and could NOT be rotated — check them and re-generate if they no longer fit",
         ));
     }
     s

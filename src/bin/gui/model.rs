@@ -528,9 +528,13 @@ pub(crate) enum Msg {
     /// the worker's cancel epoch: an abandoned task's heartbeat must not
     /// overwrite the status of the task the user started after cancelling.
     Progress(u64, String),
-    /// AI segmentation finished: (mask display name, grayscale raster path)
-    /// — attached to the recipe as a `MaskGeometry::Bitmap` local mask.
-    Segmented(anyhow::Result<(String, PathBuf)>),
+    /// AI segmentation finished: (mask display name, grayscale raster path,
+    /// backend label) — attached to the recipe as a `MaskGeometry::Bitmap`
+    /// local mask. The third field is `segment::SegmentReport::backend`, the
+    /// name the sidecar printed for the model that actually answered; it is
+    /// shown and then dropped, never persisted, because it describes the RUN
+    /// and the recipe is data. Empty when the sidecar did not say.
+    Segmented(anyhow::Result<(String, PathBuf, String)>),
     /// Full-res mask refine finished — see [`MaskRefineOutcome`].
     MaskRefined(anyhow::Result<MaskRefineOutcome>),
     /// Batch render advanced: `done` of `total` photos finished (ok or err).

@@ -7175,3 +7175,101 @@
         app.rotate_photo(1, &ctx);
         assert_eq!(app.recipe.quarter_turns, before, "a refused turn changes nothing");
     }
+
+    /// R29 C3/C4 item 1 — the GUI tells the two subject backends apart, and it
+    /// does so in TWO SENTENCES, not one.
+    ///
+    /// R29 B4 pinned BiRefNet and kept U²-Net as a named fallback tier, then
+    /// registered exactly this hole: the sidecar announced the degradation on
+    /// stderr, which a `windows_subsystem = "windows"` build has no console to
+    /// receive, so both tiers produced the same "AI mask added" line. A
+    /// photographer whose machine had quietly dropped to the fallback — softer
+    /// edges, no strand structure on hair, a subject invented on a landscape
+    /// that has none — could not tell from anything on screen.
+    ///
+    /// MUTATION-LINED: dropping the backend from `Msg::Segmented`, dropping the
+    /// status suffix, or raising the same toast (or none) for both tiers fails
+    /// one of the four assertions below. The pair is deliberate — a test that
+    /// only checked the fallback would pass on a build that warned about
+    /// everything.
+    #[test]
+    fn the_two_subject_backends_land_as_two_different_sentences() {
+        use std::path::PathBuf;
+        let ctx = egui::Context::default();
+
+        // THE PINNED MODEL: named in the status, and no alarm raised.
+        let mut ok = AutoshopApp { busy: true, ..Default::default() };
+        ok.tx
+            .send(Msg::Segmented(Ok((
+                "Subject".into(),
+                PathBuf::from("mask-subject.png"),
+                "BiRefNet e2bf8e4460fc".into(),
+            ))))
+            .unwrap();
+        ok.poll_workers(&ctx);
+        assert!(
+            ok.status.contains("BiRefNet e2bf8e4460fc"),
+            "the run must name the model that drew the mask: {}",
+            ok.status
+        );
+        assert!(
+            !ok.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)),
+            "the model the user ruled for is not a warning"
+        );
+        assert_eq!(ok.recipe.masks.len(), 1, "the mask still lands");
+
+        // THE FALLBACK TIER: named in the status AND escalated to an error
+        // toast, because a status line nobody is looking at is not a
+        // disclosure. The remedy travels with it.
+        let mut degraded = AutoshopApp { busy: true, ..Default::default() };
+        degraded
+            .tx
+            .send(Msg::Segmented(Ok((
+                "Subject".into(),
+                PathBuf::from("mask-subject.png"),
+                "U^2-Net (FALLBACK - BiRefNet did not run)".into(),
+            ))))
+            .unwrap();
+        degraded.poll_workers(&ctx);
+        assert!(
+            degraded.status.contains("FALLBACK"),
+            "the degraded run must say so where the good one said its model: {}",
+            degraded.status
+        );
+        let alarm = degraded
+            .toasts
+            .iter()
+            .find(|t| matches!(t.kind, ToastKind::Error))
+            .expect("a silent degradation is the bug this closes");
+        assert!(
+            alarm.text.contains("torchvision"),
+            "the warning must carry the remedy, not just the bad news: {}",
+            alarm.text
+        );
+        assert_ne!(
+            ok.status, degraded.status,
+            "two backends, two sentences — this is the whole point"
+        );
+
+        // A sidecar too old to print the line says nothing, and the landing
+        // must not invent a model name for it.
+        let mut silent = AutoshopApp { busy: true, ..Default::default() };
+        silent
+            .tx
+            .send(Msg::Segmented(Ok((
+                "Sky".into(),
+                PathBuf::from("mask-sky.png"),
+                String::new(),
+            ))))
+            .unwrap();
+        silent.poll_workers(&ctx);
+        assert!(
+            !silent.status.contains("drawn by") && !silent.status.contains("绘制"),
+            "an empty label must add no clause at all: {}",
+            silent.status
+        );
+        assert!(
+            !silent.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)),
+            "unknown is not a fallback"
+        );
+    }
